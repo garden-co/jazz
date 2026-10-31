@@ -33,6 +33,30 @@ use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use common::{allow_all_policies, compile_schema};
 
 fn open(node: u8, author: AuthorSubject) -> Db {
+    block_on(Db::open(config(node, author))).unwrap()
+}
+
+/// A replica kept in a file, reopened as a restarted app would.
+fn open_file(path: &std::path::Path, node: u8, author: AuthorSubject) -> Db {
+    block_on(Db::open_at(
+        config(node, author),
+        path,
+        jazz::db::FileOptions::default(),
+    ))
+    .unwrap()
+}
+
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "jazz-connection-settled-{}-{name}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join("store.sqlite")
+}
+
+fn config(node: u8, author: AuthorSubject) -> DbConfig {
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -47,7 +71,7 @@ fn open(node: u8, author: AuthorSubject) -> Db {
         node: NodeUuid::from_bytes([node; 16]),
         author,
     };
-    block_on(Db::open(DbConfig::new(schema, identity))).unwrap()
+    DbConfig::new(schema, identity)
 }
 
 fn user(n: u8) -> AuthorSubject {
@@ -182,6 +206,20 @@ fn connect(server: &Db, client: &Db, identity: AuthorSubject) -> Link {
         hold,
         held,
     }
+}
+
+/// `future`, polled while the two ticks, for what waits on the server.
+fn drive<T>(server: &Db, client: &Db, future: impl std::future::Future<Output = T>) -> T {
+    let mut future = std::pin::pin!(future);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    for _ in 0..50 {
+        if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        block_on(client.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    panic!("did not complete");
 }
 
 fn pump(server: &Db, client: &Db) {
@@ -578,4 +616,126 @@ fn a_relay_passes_on_the_connection_position_with_no_results() {
     pump3(&server, &relay, &tab);
     let after = block_on(tab.capture_snapshot()).unwrap();
     assert!(after.dots.is_empty(), "the relay passed the position on");
+}
+
+/// Reopened, a replica still names its own commits accepted past what it
+/// knows by transaction: its settled-transaction records say which.
+#[test]
+fn a_restart_keeps_own_commits_accepted_past_the_known_position() {
+    let path = scratch("own");
+    let server = open(0, AuthorSubject::SYSTEM);
+    let held = {
+        let client = open_file(&path, 1, user(1));
+        let link = connect(&server, &client, user(1));
+        let _room = Room::open(&client, "a");
+        pump(&server, &client);
+        link.hold_position();
+        insert(&client, 1, "a", "mine");
+        pump(&server, &client);
+        let held = block_on(client.capture_snapshot()).unwrap();
+        assert_eq!(held.dots.len(), 1);
+        held
+    };
+    let client = open_file(&path, 1, user(1));
+    let reopened = block_on(client.capture_snapshot()).unwrap();
+    assert_eq!(reopened.global_base, held.global_base);
+    assert_eq!(reopened.dots, held.dots, "still named by transaction");
+    let _link = connect(&server, &client, user(1));
+    let _room = Room::open(&client, "a");
+    pump(&server, &client);
+    let after = block_on(client.capture_snapshot()).unwrap();
+    assert!(after.dots.is_empty(), "the connection's position covers it");
+}
+
+/// Reopened, a replica reads others' versions it holds past what it knows
+/// as of `known`, as before the restart, until its upstream settles them.
+#[test]
+fn a_restart_reads_held_versions_as_of_the_known_position() {
+    let path = scratch("foreign");
+    let server = open(0, AuthorSubject::SYSTEM);
+    {
+        let client = open_file(&path, 1, user(1));
+        let link = connect(&server, &client, user(1));
+        let mut a = Room::open(&client, "a");
+        pump(&server, &client);
+        insert(&server, 1, "a", "settled");
+        pump(&server, &client);
+        assert_eq!(a.titles(), titles(&["settled"]));
+        link.hold(|m| {
+            matches!(
+                m,
+                SyncMessage::Settled { .. } | SyncMessage::ConnectionSettled { .. }
+            )
+        });
+        insert(&server, 2, "a", "unsettled");
+        pump(&server, &client);
+        assert_eq!(local_titles(&client), titles(&["settled"]));
+    }
+    let client = open_file(&path, 1, user(1));
+    assert_eq!(
+        local_titles(&client),
+        titles(&["settled"]),
+        "the store holds the newer version, read as of known"
+    );
+    let mut a = Room::open(&client, "a");
+    let _link = connect(&server, &client, user(1));
+    pump(&server, &client);
+    assert_eq!(a.titles(), titles(&["settled", "unsettled"]));
+    assert_eq!(local_titles(&client), titles(&["settled", "unsettled"]));
+}
+
+/// A serializable transaction begun while this replica's own commit is
+/// accepted past what it knows reads that commit, and the authority
+/// validates its reads as they were read: the commit is accepted.
+#[test]
+fn a_serializable_commit_over_own_writes_accepted_past_the_position_holds() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, user(1));
+    let link = connect(&server, &client, user(1));
+    let _room = Room::open(&client, "a");
+    pump(&server, &client);
+    link.hold_position();
+    insert(&client, 1, "a", "mine");
+    pump(&server, &client);
+    assert_eq!(block_on(client.capture_snapshot()).unwrap().dots.len(), 1);
+
+    let open = OpenTransactionId::new();
+    block_on(client.begin_serializable(open)).unwrap();
+    let query = Query::from("docs").filter(eq(col("room"), lit(Value::String("a".into()))));
+    let prepared = client.prepare_query(&query).unwrap();
+    let read = drive(
+        &server,
+        &client,
+        client.tx_ref(open).all_prepared(&prepared),
+    )
+    .unwrap();
+    assert_eq!(
+        read.len(),
+        1,
+        "the transaction reads its own accepted write"
+    );
+    block_on(client.tx_ref(open).update(
+        "docs",
+        row(1),
+        doc("a", "mine, edited"),
+        Default::default(),
+    ))
+    .unwrap();
+    drive(&server, &client, client.commit_serializable_handle(open)).unwrap();
+    pump(&server, &client);
+    link.release();
+    pump(&server, &client);
+    let on_server = |db: &Db| {
+        let prepared = db.prepare_query(&Query::from("docs")).unwrap();
+        block_on(db.all(&prepared, ReadOpts::default()))
+            .unwrap()
+            .iter()
+            .map(|row| format!("{:?}", row.cell("title")))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        on_server(&server),
+        vec![format!("{:?}", Some(Value::String("mine, edited".into())))],
+        "the authority accepted it"
+    );
 }
