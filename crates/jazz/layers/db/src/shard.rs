@@ -825,6 +825,21 @@ impl ShardRole<'_> {
         Ok(())
     }
 
+    /// The time (Unix ms) the store stamped the writes it made at
+    /// `position` with (their `$createdAt`/`$updatedAt`), if its last
+    /// writes were made there.
+    pub fn stamp_of(&self, position: u64) -> Option<i64> {
+        let inner = self.db.inner.borrow();
+        (inner.last_stamp.0 == position).then_some(inner.last_stamp.1)
+    }
+
+    /// A replica applies its leader's writes at `position`: they are
+    /// stamped at `ms`, as the leader stamped them ([`Self::stamp_of`]),
+    /// not at the replica's own clock.
+    pub fn stamp(&self, position: u64, ms: i64) {
+        self.db.inner.borrow_mut().last_stamp = (position, ms);
+    }
+
     /// A replica applies a position its leader fixed or observed: nothing
     /// it numbers later lands at or below `position`. Unlike
     /// [`Self::observe`] it is not capped by the replica's clock: its
