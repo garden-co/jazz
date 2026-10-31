@@ -438,7 +438,7 @@ export default function HomePage() {
           </div>
           <Text as="p" display="block" color="secondary" className="mt-6">
             Also for Vue, Svelte, Solid, React Native, plain TypeScript and Rust.{" "}
-            <AppLink href="/docs/setup/web-client/local-first-setup">Install guides</AppLink>
+            <AppLink href="/docs/setup/web-client/local-first-client">Install guides</AppLink>
           </Text>
         </div>
       </section>

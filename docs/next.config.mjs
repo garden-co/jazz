@@ -94,7 +94,17 @@ const config = {
       },
       {
         source: "/docs/setup/web-client/local-first-install",
-        destination: "/docs/setup/web-client/local-first-setup",
+        destination: "/docs/setup/web-client/local-first-client",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/web-client/local-first-setup",
+        destination: "/docs/setup/web-client/local-first-client",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/web-client/local-first-auth",
+        destination: "/docs/setup/auth/local-first",
         permanent: false,
       },
       { source: "/docs/faq", destination: "/docs/how-jazz-works#faq", permanent: false },
@@ -115,7 +125,7 @@ const config = {
       },
       {
         source: "/docs/auth/local-first-auth",
-        destination: "/docs/setup/web-client/local-first-auth",
+        destination: "/docs/setup/auth/local-first",
         permanent: false,
       },
       { source: "/docs/auth/permissions", destination: "/docs/schemas/policies", permanent: false },
@@ -137,7 +147,7 @@ const config = {
       },
       {
         source: "/docs/getting-started/client-setup",
-        destination: "/docs/setup/web-client/local-first-setup",
+        destination: "/docs/setup/web-client/local-first-client",
         permanent: false,
       },
       {
@@ -147,7 +157,7 @@ const config = {
       },
       {
         source: "/docs/install/client",
-        destination: "/docs/setup/web-client/local-first-setup",
+        destination: "/docs/setup/web-client/local-first-client",
         permanent: false,
       },
       {
