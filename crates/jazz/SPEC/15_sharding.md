@@ -26,6 +26,8 @@ Invariant digest:
 - `INV-SHARD-20`: A shard's holds, their rows and fixed positions MUST survive a restart until their part lands or is released (§15.3).
 - `INV-SHARD-22`: A hold MUST keep its part's data until the part lands or is released, so the shard can land the part without its gateway (§15.3).
 - `INV-SHARD-23`: A cross-shard commit MUST be decided once, on its decider: committed when the decider's part lands, aborted when an abort records the part refused first. Either MUST stand as the part's recorded fate, which a resend of the part, a later hold of it and every later resolution answer, however late (§15.3).
+- `INV-SHARD-24`: A queued hold MUST be as durable as a standing one: a reopened shard MUST still hold it queued, with its part's data, in the order asked, and grant it once its rows are free (§15.3).
+- `INV-SHARD-25`: A part MUST be checked when it is held (and a queued one when it is granted), as its writer's session would commit it, with nothing written; once held, it MUST land as checked, so its fix is never refused (§15.3).
 - `INV-SHARD-21`: A reopened shard MUST wait out its clock plus `HLC_MAX_OFFSET_MS` at reopen before numbering its sessions' commits (a fixed part's and a resend's aside), so it never numbers at or below a position it served or observed before it stopped (§15.3).
 
 ## Details
@@ -126,9 +128,18 @@ the shard ownership above are outside this repository and stay exploratory
   version of its row: a session commit waits in its session's backlog, the
   shard's own local write awaits it (a staged write that cannot is refused
   as busy, to retry), and a second part's hold is queued (`Held::Queued`) and
-  granted, in the order asked, once the rows are free (`take_granted`). Two
+  granted, in the order asked, once the rows are free (`take_granted`); a
+  queued hold is durable like a standing one (`INV-SHARD-24`). Two
   cross-shard commits that queue on each other's rows on two shards wait
   until one of them gives up; the gateway's leases bound that.
+- **Checked at the hold.** A part is checked when it is held, as its
+  writer's session would commit it (`Db::check_part`: every check its
+  landing runs, then nothing of it is kept), and a queued one again when it
+  is granted, over what the part it waited for wrote (`INV-SHARD-25`). A
+  part refused there is never held, so its commit is refused before it is
+  decided. Once held, nothing else writes its rows, and the part lands as
+  checked, over the shard's own trusted link, attributed to its writer:
+  its fix is never refused.
 - **Parts and decisions.** A hold keeps its part's data (`part`,
   `INV-SHARD-22`), so a shard lands its part without its gateway once it
   learns the decision. One participant of a cross-shard commit decides it
@@ -137,8 +148,10 @@ the shard ownership above are outside this repository and stay exploratory
   decision is the part's recorded fate, kept like every fate: `resolution`
   reads it back however late it is asked, a resend of the part gets it, and
   holding the part again answers it (`Held::Decided`).
-- **Durability.** Holds, their rows and fixed positions are written to the
-  store (`_jazz_shard_holds`, `_jazz_shard_held_rows`) and reloaded on reopen
+- **Durability.** Holds, their rows and fixed positions, and queued holds
+  with theirs, are written to the store (`_jazz_shard_holds`,
+  `_jazz_shard_held_rows`, `_jazz_shard_queued`, `_jazz_shard_queued_rows`)
+  and reloaded on reopen
   (`INV-SHARD-20`); a part landing deletes them in the same savepoint, and a
   hold whose part had already landed is dropped on reload, as is the durable
   hold of a resent part that already landed. A reopened shard that ever
