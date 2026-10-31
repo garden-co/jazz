@@ -13,6 +13,7 @@
 
 use super::*;
 use crate::schema::history::{history_source_table, is_history_table};
+use std::borrow::Cow;
 
 pub(super) type Queue = Rc<RefCell<VecDeque<SubscriptionEvent>>>;
 
@@ -43,6 +44,9 @@ struct GroupKey {
     partial: String,
     /// The columns whose changes updated rows carry as splices.
     splices: Vec<String>,
+    /// The position the result reads as of: results of different upstream
+    /// reads settle apart.
+    position: String,
 }
 
 struct Member {
@@ -94,6 +98,13 @@ pub(super) struct Group {
     /// Under a branch view over a base (live or frozen), what the head
     /// rows of each branched table it reads mask (see [`ViewMask`]).
     masks: Vec<ViewMask>,
+    /// The stored tables the query reads: a cut is taken only while the
+    /// store holds others' versions of them past the result's position.
+    tables: BTreeSet<String>,
+    /// The cut the last run read through (see [`Inner::visible_read`]):
+    /// its position and the own commits past it, or `None` for the
+    /// current state.
+    applied: Option<(sync::Pos, usize)>,
 }
 
 type SortKey = Vec<(Sql, bool)>;
@@ -311,6 +322,7 @@ impl Inner {
             relations: format!("{:?}", prepared.query.array_subqueries),
             partial: format!("{:?}", compiled.partial),
             splices: read.splices.clone(),
+            position: format!("{:?}", read.position),
         };
         let now = settled.get();
         let member = |queue: &Queue| Member {
@@ -350,9 +362,16 @@ impl Inner {
             return Ok((queue, Rc::downgrade(&handle)));
         }
         // A replica missing chunks the result needs opens it once they arrive.
-        let (rows, awaiting) = match self
-            .execute(&compiled, &prepared.query.table)
-            .and_then(|rows| self.nest_relations(prepared, identity, &read, rows))
+        let visible = self.visible_read(&read, &compiled.tables);
+        let applied = cut_of(&visible);
+        let run = match &visible {
+            Cow::Borrowed(_) => self.execute(&compiled, &prepared.query.table),
+            Cow::Owned(visible) => self
+                .compile(prepared, identity, visible)
+                .and_then(|compiled| self.execute(&compiled, &prepared.query.table)),
+        };
+        let (rows, awaiting) = match run
+            .and_then(|rows| self.nest_relations(prepared, identity, &visible, rows))
         {
             Ok(rows) => (rows, false),
             Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
@@ -409,6 +428,8 @@ impl Inner {
             opened: !awaiting,
             branches,
             masks,
+            tables: compiled.tables.clone(),
+            applied,
         }));
         self.read_keys(&mut handle.borrow_mut());
         let weak = Rc::downgrade(&handle);
@@ -916,7 +937,9 @@ impl Inner {
         ));
         prepared.query.order_by.clear();
         prepared.query.limit = None;
-        let narrowed = match self.compile(&prepared, group.identity, &group.read) {
+        // Under a cut, a row changed past it still reads as it was.
+        let read = self.visible_read(&group.read, &group.tables);
+        let narrowed = match self.compile(&prepared, group.identity, &read) {
             Ok(compiled) => compiled,
             Err(error) => return Some(Err(error)),
         };
@@ -1207,9 +1230,28 @@ impl Inner {
     }
 
     /// A group's rows, with array relations nested in their cells.
-    fn group_rows(&self, group: &Group) -> Result<Vec<CurrentRow>, Error> {
-        let rows = self.run(&group.prepared, group.identity, &group.read)?;
-        self.nest_relations(&group.prepared, group.identity, &group.read, rows)
+    fn group_rows(&self, group: &mut Group) -> Result<Vec<CurrentRow>, Error> {
+        let read = self.visible_read(&group.read, &group.tables);
+        group.applied = cut_of(&read);
+        let rows = self.run(&group.prepared, group.identity, &read)?;
+        self.nest_relations(&group.prepared, group.identity, &read, rows)
+    }
+
+    /// Re-run the live results whose cut moved: their read's settle rose,
+    /// the connection's position did, or an own commit was accepted past
+    /// them.
+    pub(super) fn refresh_visibility(&mut self) -> Result<(), Error> {
+        let groups: Vec<Rc<RefCell<Group>>> = self.fan.groups.values().cloned().collect();
+        for group in groups {
+            let mut group = group.borrow_mut();
+            if group.read.position == Position::Current
+                || cut_of(&self.visible_read(&group.read, &group.tables)) == group.applied
+            {
+                continue;
+            }
+            self.refresh_group(&mut group, None);
+        }
+        Ok(())
     }
 
     fn reset_group(&self, group: &mut Group) {
@@ -1545,6 +1587,7 @@ pub(crate) fn view_masks<'t>(
         .then(|| schema.stored_table(&query.table).ok().map(str::to_owned))
         .flatten();
     let base_read = ReadSpec {
+        position: Position::Current,
         include_deleted: read.include_deleted,
         settled_only: read.settled_only,
         view: Some(View {
@@ -1940,4 +1983,12 @@ fn row_pin(policy: &PolicyExpr, session: &Session) -> Option<(String, String)> {
         PolicyExpr::And(list) => list.iter().find_map(|p| row_pin(p, session)),
         _ => None,
     }
+}
+
+/// The cut a run read through, as [`Group::applied`] keeps it.
+fn cut_of(read: &ReadSpec) -> Option<(sync::Pos, usize)> {
+    (read.position != Position::Current)
+        .then_some(read.cut.as_ref())
+        .flatten()
+        .map(|cut| (cut.seq, cut.extra.len()))
 }

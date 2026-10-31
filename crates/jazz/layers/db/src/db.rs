@@ -267,9 +267,30 @@ struct ReadSpec {
     settled_only: bool,
     view: Option<View>,
     cut: Option<Cut>,
+    /// The upstream position the read observes (see
+    /// [`Inner::visible_read`]).
+    position: Position,
     /// Columns whose changes updated rows carry as splices
     /// ([`ReadOpts::splices`]).
     splices: Vec<String>,
+}
+
+/// The upstream position a replica's read observes. Its upstream settles
+/// each read apart (SPEC 8 §8.4), so its store can hold accepted versions
+/// past the position a result is settled through; a read naming a position
+/// reads as of it while the store does, plus this replica's own writes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum Position {
+    /// The store's current state: an authority's read, a session's read
+    /// served by this store, an internal one.
+    #[default]
+    Current,
+    /// What the replica knows its upstream through (`known`): its own
+    /// one-shot reads.
+    Known,
+    /// A live result's: the upstream read (by its key) it is a result of,
+    /// as far as its own settle (or the connection's, when further).
+    Remote(String),
 }
 
 impl ReadSpec {
@@ -305,6 +326,11 @@ impl ReadSpec {
             settled_only: inner.client.is_some() && opts.tier == ReadTier::Remote,
             view,
             cut,
+            position: if inner.client.is_some() {
+                Position::Known
+            } else {
+                Position::Current
+            },
             splices: opts.splices.clone(),
         })
     }
@@ -2055,8 +2081,17 @@ impl Db {
             self.remote_shape(&prepared.query)?;
         }
         let view = opts.read_view.source.clone();
-        let remote = reach
+        let attached = reach
             .and_then(|reach| self.attach_remote(prepared, read.include_deleted, &view, reach));
+        // A live result reads as far as its own upstream read is settled.
+        let read = match &attached {
+            Some((key, _)) => ReadSpec {
+                position: Position::Remote(key.clone()),
+                ..read
+            },
+            None => read,
+        };
+        let remote = attached.map(|(_, flags)| flags);
         let settled = match (&remote, client) {
             (Some((answered, _, global)), _) => {
                 sync::SettledBy::Remote(answered.clone(), global.clone())
@@ -3534,6 +3569,10 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<(Vec<CurrentRow>, BTreeSet<String>), Error> {
         let mut compiled = self.compile(prepared, identity, read)?;
+        let visible = self.visible_read(read, &compiled.tables);
+        if let std::borrow::Cow::Owned(visible) = &visible {
+            compiled = self.compile(prepared, identity, visible)?;
+        }
         let rows = self.execute(&compiled, &prepared.query.table)?;
         // Array relations are part of a subscription's dependencies.
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
@@ -4117,6 +4156,7 @@ impl Inner {
         let table = self.schema.table(table)?;
         let own = self.own_pos(self.seq + 1);
         let cut = Cut {
+            unsettled: false,
             seq: self.own_pos(self.seq),
             own,
             extra: Vec::new(),
@@ -4284,6 +4324,7 @@ impl Inner {
         let mut evidence = EvidenceBudget::default();
         loop {
             let cut = Cut {
+                unsettled: false,
                 seq: self.own_pos(seq.saturating_sub(1)),
                 own: self.own_pos(seq),
                 extra: Vec::new(),
@@ -4431,6 +4472,7 @@ impl Inner {
                 }
             }
             let cut = Cut {
+                unsettled: false,
                 seq: self.own_pos(seq.saturating_sub(1)),
                 own: self.own_pos(seq),
                 extra: Vec::new(),
@@ -4484,6 +4526,7 @@ impl Inner {
     ) -> Result<bool, Error> {
         let before = self.own_pos(seq.saturating_sub(1));
         let cut = Cut {
+            unsettled: false,
             seq: before,
             own: before,
             extra: Vec::new(),

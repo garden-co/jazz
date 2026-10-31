@@ -1547,6 +1547,10 @@ struct LiveRead {
     answered: Rc<StdCell<bool>>,
     global: Rc<StdCell<bool>>,
     refused: Rc<RefCell<Option<Error>>>,
+    /// The highest position the upstream settled this read through: its
+    /// results read as of it (or the connection's, when that is further),
+    /// see `Inner::visible_read`. Kept across reconnects.
+    visible: Option<Pos>,
 }
 
 enum ReadLifetime {
@@ -1667,6 +1671,13 @@ pub(crate) struct Client {
     /// serializable transaction names them by tx. Two sequencers may number
     /// different commits alike, so each is its own entry.
     pub(crate) own_accepted: BTreeSet<(u64, u64)>,
+    /// Per stored table, the newest accepted position of a version the
+    /// upstream sent: a result reading no table past its position needs
+    /// no cut.
+    pub(crate) newest_foreign: HashMap<String, u64>,
+    /// A live read's position, the connection's, or an own commit past
+    /// them moved since results last ran.
+    pub(crate) visibility_moved: bool,
     answers: HashMap<u64, Option<Result<(Pos, Vec<[u8; 16]>), Error>>>,
     /// Permission preflights asked for; `None` until answered.
     advice: HashMap<u64, Option<PermissionAdvice>>,
@@ -5684,6 +5695,73 @@ impl Inner {
         }
     }
 
+    /// The read a replica runs for `read` over stored `tables`. Its
+    /// upstream settles each read apart (SPEC 8 §8.4): a live result is
+    /// settled as far as its own read's settle, and the connection as far
+    /// as `known`. While the store holds another writer's accepted versions
+    /// of those tables past that position, the read is a cut at it: its
+    /// rows are as of the position, never part of a commit the upstream has
+    /// not settled for it, plus this replica's own writes (unsettled, or
+    /// accepted past the position). Otherwise it reads the current state.
+    pub(crate) fn visible_read<'r>(
+        &self,
+        read: &'r ReadSpec,
+        tables: &BTreeSet<String>,
+    ) -> std::borrow::Cow<'r, ReadSpec> {
+        use std::borrow::Cow;
+        let Some(client) = &self.client else {
+            return Cow::Borrowed(read);
+        };
+        // A frozen read is its own cut; a branch view reads its branches
+        // current (known limit).
+        if read.position == Position::Current
+            || client.no_server()
+            || read.cut.is_some()
+            || read.view.is_some()
+        {
+            return Cow::Borrowed(read);
+        }
+        let known = Pos {
+            n: client.known_n,
+            seq: client.known,
+        };
+        let settled = match &read.position {
+            Position::Remote(key) => client
+                .live_reads
+                .get(key)
+                .and_then(|id| client.reads.get(id))
+                .and_then(|read| match &read.lifetime {
+                    ReadLifetime::Live(live) => live.visible,
+                    ReadLifetime::Once { .. } => None,
+                }),
+            _ => None,
+        };
+        let through = match settled {
+            Some(at) if at.n == known.n && at.seq > known.seq => at,
+            _ => known,
+        };
+        let past = tables.iter().any(|table| {
+            client
+                .newest_foreign
+                .get(table)
+                .is_some_and(|&newest| newest > through.seq)
+        });
+        if !past {
+            return Cow::Borrowed(read);
+        }
+        let mut cut = Cut::at(through);
+        cut.extra = client
+            .own_accepted
+            .range((through.seq + 1, 0)..)
+            .map(|&(seq, _)| Pos { n: through.n, seq })
+            .collect();
+        cut.unsettled = !read.settled_only;
+        Cow::Owned(ReadSpec {
+            cut: Some(cut),
+            ..read.clone()
+        })
+    }
+
     /// The position this store reads as complete through: the authority's
     /// seq it synced, or for a replica with no server its own newest.
     pub(crate) fn frontier(&self) -> Pos {
@@ -6194,6 +6272,8 @@ impl Client {
             known_n: 0,
             persisted_known: 0,
             own_accepted: BTreeSet::new(),
+            newest_foreign: HashMap::new(),
+            visibility_moved: false,
             answers: HashMap::new(),
             advice: HashMap::new(),
             requested: BTreeSet::new(),
@@ -6428,6 +6508,7 @@ impl Db {
             ..ReadOpts::default()
         };
         let mut read = ReadSpec::of(&opts, &self.inner.borrow())?;
+        read.position = Position::Current;
         // A frozen view is this store's own state, not the server's to judge.
         if read.frozen() {
             return Ok(());
@@ -6863,21 +6944,24 @@ impl Db {
         view: &ReadViewSourceSpec,
         reach: RemoteReach,
     ) -> Option<(
-        Rc<StdCell<bool>>,
-        Rc<RefCell<Option<Error>>>,
-        Rc<StdCell<bool>>,
+        String,
+        (
+            Rc<StdCell<bool>>,
+            Rc<RefCell<Option<Error>>>,
+            Rc<StdCell<bool>>,
+        ),
     )> {
         let mut inner = self.inner.borrow_mut();
         inner.client.as_ref()?;
         let (query, include_deleted, view) = upstream_read(&prepared.query, include_deleted, view);
-        let (_, flags) = inner.attach_upstream_read(
+        let attached = inner.attach_upstream_read(
             query.into_owned(),
             &prepared.binding,
             include_deleted,
             view,
             reach,
         );
-        Some(flags)
+        Some(attached)
     }
 
     pub(crate) fn detach_remote(
@@ -6954,6 +7038,7 @@ impl Inner {
                 answered: answered.clone(),
                 refused: refused.clone(),
                 global: global.clone(),
+                visible: None,
             }),
         );
         let client = self.client.as_mut().expect("client");
@@ -7619,6 +7704,13 @@ impl Db {
                         }))?;
                         let received = (|| {
                             for mut image in images {
+                                let at = inner.pos(&image)?;
+                                if at.accepted() {
+                                    let client = inner.client.as_mut().expect("client");
+                                    let newest =
+                                        client.newest_foreign.entry(image.table.clone()).or_default();
+                                    *newest = (*newest).max(at.seq);
+                                }
                                 let named = (image.table.clone(), image.id, image.key.clone());
                                 if !inner.receive_deltas(&mut image)? {
                                     inner.ask_whole(named, 0)?;
@@ -7743,6 +7835,11 @@ impl Db {
                                 ReadLifetime::Live(live) => {
                                     live.answered.set(true);
                                     live.global.set(global);
+                                    if live.visible.is_none_or(|v| v.n != at.n || v.seq < at.seq)
+                                    {
+                                        live.visible = Some(at);
+                                        client.visibility_moved = true;
+                                    }
                                     if resumable {
                                         read.through = Some((by, through));
                                         client.forgotten = false;
@@ -7915,6 +8012,7 @@ impl Db {
                                 && (landed.n != client.known_n || through > client.known)
                             {
                                 client.own_accepted.insert((through, tx));
+                                client.visibility_moved = true;
                             }
                         }
                         let client = inner.client.as_mut().expect("client");
@@ -8031,6 +8129,7 @@ impl Db {
                         let client = inner.client.as_mut().expect("client");
                         let known = client.known;
                         client.own_accepted = client.own_accepted.split_off(&(known + 1, 0));
+                        client.visibility_moved = true;
                     }
                     other => return Err(unsupported(format!("client received {other:?}"))),
                 }
@@ -8039,6 +8138,13 @@ impl Db {
         if rebase {
             self.rebase()?;
             self.inner.borrow_mut().reconcile_unsettled()?;
+        }
+        // Results whose position moved read as of the new one.
+        {
+            let mut inner = self.inner.borrow_mut();
+            if std::mem::take(&mut inner.client.as_mut().expect("client").visibility_moved) {
+                inner.refresh_visibility()?;
+            }
         }
         // A settled answer lists its result's rows: cached rows the
         // replica's view of that result holds and the server's lacks lost
@@ -10302,7 +10408,11 @@ impl Db {
                         },
                         ..ReadOpts::default()
                     };
-                    ReadSpec::of(&opts, &db.inner())?
+                    // A session's read is served as this store holds it.
+                    ReadSpec {
+                        position: Position::Current,
+                        ..ReadSpec::of(&opts, &db.inner())?
+                    }
                 };
                 let resume_read = viewed.clone();
                 // A relay serves what its upstream lists, settled once the
@@ -10354,7 +10464,7 @@ impl Db {
                         ..viewed
                     },
                     match relayed {
-                        Some((answered, _, global)) => {
+                        Some((_, (answered, _, global))) => {
                             SettledBy::Remote(answered.clone(), global.clone())
                         }
                         None => SettledBy::Always(authority),
@@ -10667,7 +10777,11 @@ impl Db {
                     ..ReadOpts::default()
                 };
                 let viewed = match ReadSpec::of(&opts, &inner) {
-                    Ok(viewed) => viewed,
+                    // A session's read is served as this store holds it.
+                    Ok(viewed) => ReadSpec {
+                        position: Position::Current,
+                        ..viewed
+                    },
                     Err(error) => {
                         inner.sessions[index].outbox.push(SyncMessage::Refused {
                             id,
@@ -10678,6 +10792,7 @@ impl Db {
                     }
                 };
                 let read = ReadSpec {
+                    position: Position::Current,
                     cut: viewed.cut.or(pinned.map(Cut::at)),
                     include_deleted,
                     settled_only: strict,
