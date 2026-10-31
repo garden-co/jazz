@@ -5565,6 +5565,21 @@ impl Inner {
             .map_err(storage)
     }
 
+    /// Record the cross-shard part `commit` refused, as its decider's
+    /// abort decides it: a resend of it gets this fate.
+    pub(crate) fn record_aborted(&self, commit: crate::db::shard::CommitRef) -> Result<(), Error> {
+        self.record_fate(
+            commit.node,
+            commit.tx,
+            &Err(WireError::Rejected {
+                reason: None,
+                message: "its cross-shard commit was decided aborted: retry it as a new commit"
+                    .into(),
+            }),
+        )?;
+        self.record_settled(commit.node, commit.tx, None)
+    }
+
     fn record_fate(
         &self,
         node: [u8; 16],
@@ -11897,8 +11912,10 @@ impl Db {
             let mut inner = self.inner();
             // A cross-shard part lands where all its parts do: at the
             // position its gateway fixed, under commits this shard accepted
-            // since its hold. None of those wrote its rows: they waited
-            // while the hold stood (see `serve_session`).
+            // since its hold. None of those wrote its rows: every other
+            // writer of them waited while the hold stood (sessions in
+            // `serve_session`, local writes in `Db::unheld`), so it always
+            // lands (INV-SHARD-19).
             let part = crate::db::shard::CommitRef {
                 node: id.0,
                 tx: id.1,
@@ -11906,26 +11923,6 @@ impl Db {
             let fixed = inner.shard.fixed(part);
             let seq = fixed.unwrap_or_else(|| inner.next_seq());
             let prior = inner.seq;
-            if let Some(at) = fixed {
-                for op in &ops {
-                    let Some(row) = op.row() else { continue };
-                    let newest = inner
-                        .schema
-                        .stored_table(op.table())
-                        .and_then(|table| inner.newest_seq(table, row))
-                        .map_err(|e| (e, Vec::new()))?;
-                    if newest.is_some_and(|newest| newest.seq > at) {
-                        return Err((
-                            Error::new(
-                                ErrorCode::Protocol,
-                                "a row of this cross-shard part was written above its fixed \
-                                 position, though its hold stood (INV-SHARD-19)",
-                            ),
-                            Vec::new(),
-                        ));
-                    }
-                }
-            }
             begin_savepoint(&inner.conn, "upload").map_err(|e| (e, Vec::new()))?;
             let mark = inner.changed.borrow().len();
             // The unit's write checks run at its end, grounded (SPEC 7).

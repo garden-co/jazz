@@ -22,8 +22,10 @@ Invariant digest:
 - `INV-SHARD-16`: A shard's commit positions MUST be hybrid-clock timestamps: each above every position it handed out or observed and no earlier than its clock; a position more than `HLC_MAX_OFFSET_MS` ahead of its clock MUST be observed only up to its clock plus that offset (§15.3).
 - `INV-SHARD-17`: While a hold stands, the position a shard serves as settled MUST stay below its lowest hold (§15.3).
 - `INV-SHARD-18`: A fixed cross-shard part MUST land at its fixed position, which is at or above its hold (§15.3).
-- `INV-SHARD-19`: While a part's hold stands, a session commit writing one of the part's rows MUST wait until the part lands or is released; a part with a row the shard wrote above its fixed position anyway MUST be refused, not landed under the newer version (§15.3).
+- `INV-SHARD-19`: While a part's hold stands, every other writer of one of the part's rows MUST wait until the part lands or is released: a session commit in its backlog, the store's own local write (refused as busy only where it cannot wait), and another part's hold (queued, granted in the order asked once the rows are free). A fixed part MUST NOT be refused for a newer version of its row (§15.3).
 - `INV-SHARD-20`: A shard's holds, their rows and fixed positions MUST survive a restart until their part lands or is released (§15.3).
+- `INV-SHARD-22`: A hold MUST keep its part's data until the part lands or is released, so the shard can land the part without its gateway (§15.3).
+- `INV-SHARD-23`: A cross-shard commit MUST be decided once, on its decider: committed when the decider's part lands, aborted when an abort records the part refused first. Either MUST stand as the part's recorded fate, which a resend of the part, a later hold of it and every later resolution answer, however late (§15.3).
 - `INV-SHARD-21`: A reopened shard MUST wait out its clock plus `HLC_MAX_OFFSET_MS` at reopen before numbering its sessions' commits (a fixed part's and a resend's aside), so it never numbers at or below a position it served or observed before it stopped (§15.3).
 
 ## Details
@@ -116,16 +118,25 @@ the shard ownership above are outside this repository and stay exploratory
   serves its sessions as settled) stays below `lowest_hold` (`INV-SHARD-17`),
   so no session is told it is settled past a position a part may still take.
   `release` drops a refused commit's hold. Holding a part again returns its
-  standing hold, a part is fixed only once it is held, and a resent part that
-  already landed holds nothing.
-- **Blocking.** A hold names the rows its part writes (`HeldRow`). A
-  session commit writing one of them waits in its session's backlog until
-  the part lands or is released (`INV-SHARD-19`), so the part never lands
-  under a newer version of its row. A second part holding one of those rows
-  is refused (to retry once the first lands): two cross-shard commits holding
-  each other's rows on two shards would otherwise wait on each other. The
-  shard's own local writes do not wait; a part with a row the shard wrote
-  above its fixed position is refused instead of landing under it.
+  standing hold, a part is fixed only once it is held, and a part whose fate
+  is recorded holds nothing (it answers its decision).
+- **Blocking.** A hold names the rows its part writes (`HeldRow`). Every
+  other writer of one of them waits until the part lands or is released
+  (`INV-SHARD-19`), so a fixed part always lands and never under a newer
+  version of its row: a session commit waits in its session's backlog, the
+  shard's own local write awaits it (a staged write that cannot is refused
+  as busy, to retry), and a second part's hold is queued (`Held::Queued`) and
+  granted, in the order asked, once the rows are free (`take_granted`). Two
+  cross-shard commits that queue on each other's rows on two shards wait
+  until one of them gives up; the gateway's leases bound that.
+- **Parts and decisions.** A hold keeps its part's data (`part`,
+  `INV-SHARD-22`), so a shard lands its part without its gateway once it
+  learns the decision. One participant of a cross-shard commit decides it
+  (`INV-SHARD-23`): the commit is committed when the decider's own part lands,
+  and aborted when `abort` records the part refused there first. The
+  decision is the part's recorded fate, kept like every fate: `resolution`
+  reads it back however late it is asked, a resend of the part gets it, and
+  holding the part again answers it (`Held::Decided`).
 - **Durability.** Holds, their rows and fixed positions are written to the
   store (`_jazz_shard_holds`, `_jazz_shard_held_rows`) and reloaded on reopen
   (`INV-SHARD-20`); a part landing deletes them in the same savepoint, and a
@@ -140,10 +151,11 @@ the shard ownership above are outside this repository and stay exploratory
   rather than from the bound, so its positions stay no further ahead of its
   peers' clocks than its own clock is, and a peer fixes a part at them. A
   write that does not wait (the shard's own) numbers past the bound.
-- **Known limit.** A hold whose cross-shard commit is never decided (its
-  gateway stopped before the commit point and the writer never resends)
-  stands until released, blocking its rows and what the shard serves as
-  settled. Holds need a lease.
+- **Leases.** When a hold's part never gets its decision (its gateway
+  stopped and the writer never resends), its host asks the decider:
+  committed, the part lands at the decided position; nothing decided yet,
+  the decider aborts it and the hold is released. The leases and the
+  protocol that carries these questions live with the gateway.
 
 ## Open Questions
 
