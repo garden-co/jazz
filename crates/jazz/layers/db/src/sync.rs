@@ -11215,7 +11215,15 @@ impl Db {
                             };
                             let vouched = vouched(policy, who, acting);
                             self.with_claims(vouched, || {
-                                db.authorize_commit(who, policy, kind, ops, (node, tx), possession)
+                                db.authorize_commit(
+                                    who,
+                                    policy,
+                                    kind,
+                                    ops,
+                                    (node, tx),
+                                    possession,
+                                    false,
+                                )
                             })
                         }) {
                         // The accepted commit recorded its fate atomically.
@@ -11636,6 +11644,51 @@ impl Db {
         Ok(roots)
     }
 
+    /// Checks the cross-shard part `(node, tx)`, writing `ops`, as its
+    /// writer's session `identity` (with `claims`, acting as `acting`)
+    /// would commit it here now, without writing anything: every check
+    /// its landing would run (SPEC 15 §15.3). A shard checks a part when
+    /// it holds it; since every other writer of its rows waits while the
+    /// hold stands, the part then lands as checked.
+    pub fn check_part(
+        &self,
+        identity: AuthorSubject,
+        claims: Option<BTreeMap<String, Value>>,
+        acting: Acting,
+        (node, tx): ([u8; 16], u64),
+        ops: Vec<WireOp>,
+    ) -> Result<(), Error> {
+        if !self.inner.borrow().holds_names(&ops) {
+            return Err(schema_version_not_deployed());
+        }
+        let policy = Some(identity);
+        let who = commit_who(policy, &acting)?;
+        let db = self.stored_db();
+        let (ops, mut roots) = db.resolve_deltas(policy, ops)?;
+        roots.extend(db.proof_roots(policy, &ops)?);
+        let possession = crate::large::Possession {
+            author: receipt_author(&identity),
+            checked: true,
+            roots,
+            settle: Default::default(),
+        };
+        self.with_claims(claims.map(|claims| (identity, claims)), || {
+            db.authorize_commit(
+                who,
+                policy,
+                WireKind::Mergeable,
+                ops,
+                (node, tx),
+                possession,
+                true,
+            )
+        })
+        .map(drop)
+        .map_err(|(error, _)| error)
+    }
+
+    /// Applies an uploaded commit, or with `trial` only checks it: it
+    /// applies and every check runs, then nothing of it is kept.
     #[allow(clippy::too_many_arguments)]
     fn authorize_commit(
         &self,
@@ -11645,6 +11698,7 @@ impl Db {
         ops: Vec<WireOp>,
         id: ([u8; 16], u64),
         possession: crate::large::Possession,
+        trial: bool,
     ) -> Result<(Vec<RowKey>, Vec<Echoable>), (Error, Vec<RowKey>)> {
         // Each base by the op it travels on; the ops apply without them.
         let bases: Vec<(usize, WireBase)> = ops
@@ -11888,6 +11942,12 @@ impl Db {
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
                 let rows = mentioned(&inner);
                 return Err((error, rows));
+            }
+            if trial {
+                inner.as_sent.borrow_mut().clear();
+                inner.changed.borrow_mut().truncate(mark);
+                end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
+                return Ok((Vec::new(), Vec::new()));
             }
             let recorded = inner
                 .record_fate(id.0, id.1, &Ok(()))

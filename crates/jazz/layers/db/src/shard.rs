@@ -164,11 +164,14 @@ pub(crate) struct ShardState {
 const SHARD_OBSERVED: &str = "shard_observed";
 
 /// The durable record of holds: one row per held part, with its data and
-/// its fixed position once fixed, and one per row it writes. Created by the first
-/// hold, so an unsharded store's file never holds them.
+/// its fixed position once fixed, and one per row it writes; and of queued
+/// holds, in the order asked, with their data and rows. Created by the
+/// first hold, so an unsharded store's file never holds them.
 const HOLDS_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_shard_holds (at INTEGER PRIMARY KEY, node BLOB NOT NULL, tx INTEGER NOT NULL, fixed INTEGER, part BLOB NOT NULL, UNIQUE (node, tx));\
-    CREATE TABLE IF NOT EXISTS _jazz_shard_held_rows (node BLOB NOT NULL, tx INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL, PRIMARY KEY (tbl, id));";
+    CREATE TABLE IF NOT EXISTS _jazz_shard_held_rows (node BLOB NOT NULL, tx INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL, PRIMARY KEY (tbl, id));\
+    CREATE TABLE IF NOT EXISTS _jazz_shard_queued (asked INTEGER PRIMARY KEY, node BLOB NOT NULL, tx INTEGER NOT NULL, part BLOB NOT NULL, UNIQUE (node, tx));\
+    CREATE TABLE IF NOT EXISTS _jazz_shard_queued_rows (node BLOB NOT NULL, tx INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL);";
 
 impl ShardState {
     pub(crate) fn new(clock: Option<Box<dyn Fn() -> u64>>) -> Self {
@@ -362,6 +365,97 @@ impl Inner {
                 self.shard.rows.insert(row, commit);
             }
         }
+        // Queued holds wait on, in the order they were asked; one whose
+        // commit was decided meanwhile is dropped.
+        self.conn.execute_batch(HOLDS_DDL).map_err(storage)?;
+        let queued: Vec<(CommitRef, Vec<u8>)> = {
+            let mut statement = self
+                .conn
+                .prepare("SELECT node, tx, part FROM _jazz_shard_queued ORDER BY asked")
+                .map_err(storage)?;
+            statement
+                .query_map([], |r| {
+                    let node: Vec<u8> = r.get(0)?;
+                    Ok((
+                        CommitRef {
+                            node: node.try_into().unwrap_or([0; 16]),
+                            tx: r.get::<_, i64>(1)? as u64,
+                        },
+                        r.get(2)?,
+                    ))
+                })
+                .map_err(storage)?
+                .collect::<Result<_, _>>()
+                .map_err(storage)?
+        };
+        for (commit, part) in queued {
+            if self.shard.held(commit).is_some() || self.resolution(commit)?.is_some() {
+                self.forget_queued(commit)?;
+                continue;
+            }
+            let rows: Vec<HeldRow> = {
+                let mut statement = self
+                    .conn
+                    .prepare(
+                        "SELECT tbl, id FROM _jazz_shard_queued_rows WHERE node = ?1 AND tx = ?2",
+                    )
+                    .map_err(storage)?;
+                statement
+                    .query_map(
+                        rusqlite::params![commit.node.to_vec(), commit.tx as i64],
+                        |r| {
+                            let id: Vec<u8> = r.get(1)?;
+                            Ok(HeldRow {
+                                table: r.get(0)?,
+                                row: id.try_into().unwrap_or([0; 16]),
+                            })
+                        },
+                    )
+                    .map_err(storage)?
+                    .collect::<Result<_, _>>()
+                    .map_err(storage)?
+            };
+            self.shard.queued.push((commit, rows, part));
+        }
+        Ok(())
+    }
+
+    /// Queue a hold for `commit`, durably: it is granted in the order
+    /// asked, after a restart too.
+    fn queue(&mut self, commit: CommitRef, rows: &[HeldRow], part: &[u8]) -> Result<(), Error> {
+        self.conn.execute_batch(HOLDS_DDL).map_err(storage)?;
+        let node = commit.node.to_vec();
+        self.exec(
+            "INSERT INTO _jazz_shard_queued (node, tx, part) VALUES (?1, ?2, ?3)",
+            rusqlite::params![node, commit.tx as i64, part],
+        )
+        .map_err(storage)?;
+        for row in rows {
+            self.exec(
+                "INSERT INTO _jazz_shard_queued_rows (node, tx, tbl, id) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![node, commit.tx as i64, row.table, row.row.to_vec()],
+            )
+            .map_err(storage)?;
+        }
+        self.shard
+            .queued
+            .push((commit, rows.to_vec(), part.to_vec()));
+        Ok(())
+    }
+
+    /// Drop the durable record of `commit`'s queued hold, if any.
+    fn forget_queued(&self, commit: CommitRef) -> Result<(), Error> {
+        let params = rusqlite::params![commit.node.to_vec(), commit.tx as i64];
+        self.exec(
+            "DELETE FROM _jazz_shard_queued WHERE node = ?1 AND tx = ?2",
+            params,
+        )
+        .map_err(storage)?;
+        self.exec(
+            "DELETE FROM _jazz_shard_queued_rows WHERE node = ?1 AND tx = ?2",
+            params,
+        )
+        .map_err(storage)?;
         Ok(())
     }
 
@@ -466,7 +560,7 @@ impl Inner {
             params,
         )
         .map_err(storage)?;
-        Ok(())
+        self.forget_queued(commit)
     }
 }
 
@@ -570,11 +664,13 @@ impl ShardRole<'_> {
             return Ok(Held::Decided(resolution));
         }
         if inner.shard.blocks(commit, rows) {
-            if !inner.shard.queued.iter().any(|(queued, ..)| *queued == commit) {
-                inner
-                    .shard
-                    .queued
-                    .push((commit, rows.to_vec(), part.to_vec()));
+            if !inner
+                .shard
+                .queued
+                .iter()
+                .any(|(queued, ..)| *queued == commit)
+            {
+                inner.queue(commit, rows, part)?;
             }
             return Ok(Held::Queued);
         }
@@ -602,6 +698,7 @@ impl ShardRole<'_> {
                 inner.shard.queued.push((commit, rows, part));
                 continue;
             }
+            inner.forget_queued(commit)?;
             granted.push((commit, inner.hold_now(commit, &rows, &part)?));
         }
         Ok(granted)
@@ -692,10 +789,16 @@ impl ShardRole<'_> {
     }
 
     /// Drop the part `commit`'s hold without it landing: its cross-shard
-    /// commit was refused. Releasing a part not held does nothing.
+    /// commit was refused. A queued hold is dropped too. Releasing a part
+    /// neither held nor queued does nothing.
     pub fn release(&self, commit: CommitRef) -> Result<(), Error> {
         let mut inner = self.db.inner.borrow_mut();
-        if inner.shard.held(commit).is_none() {
+        let queued = inner
+            .shard
+            .queued
+            .iter()
+            .any(|(queued, ..)| *queued == commit);
+        if inner.shard.held(commit).is_none() && !queued {
             return Ok(());
         }
         inner.forget_hold(commit)?;

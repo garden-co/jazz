@@ -22,6 +22,7 @@ use jazz::records::Value;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 use common::{allow_all_policies, compile_schema};
+use jazz::db::{Acting, WireOp};
 
 const NOW: u64 = 1_790_000_000_000;
 
@@ -32,6 +33,13 @@ fn config(node: u8) -> DbConfig {
                 TableSchemaBuilder::new("docs")
                     .column("title", ColumnType::Text)
                     .policies(allow_all_policies()),
+            )
+            // Writable by anyone, readable by no session: an update of a
+            // note needs read permission on it, so a session's is refused.
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("title", ColumnType::Text)
+                    .policies(common::allow_all_writes()),
             )
             .build(),
     );
@@ -555,4 +563,123 @@ fn a_decider_decides_a_cross_shard_commit_once() {
         db.shard().hold(part, &[], b"").unwrap(),
         Held::Decided(Resolution::Committed(held))
     );
+}
+
+/// Queued holds are durable: a shard reopened while a hold waits behind
+/// another part's still has it queued, with its part, and grants it once
+/// the rows are free.
+#[test]
+fn queued_holds_survive_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shard.sqlite");
+    let now = Rc::new(Cell::new(NOW));
+    let db = shard_at(&path, &now);
+    let row = RowUuid::from_bytes([7; 16]);
+    let first = CommitRef {
+        node: [9; 16],
+        tx: 1,
+    };
+    let second = CommitRef {
+        node: [9; 16],
+        tx: 2,
+    };
+    held_at(&db, first, &[doc_row(row)]);
+    assert_eq!(
+        db.shard()
+            .hold(second, &[doc_row(row)], b"the second part")
+            .unwrap(),
+        Held::Queued
+    );
+    drop(db);
+
+    let db = shard_at(&path, &now);
+    assert_eq!(
+        db.shard()
+            .hold(second, &[doc_row(row)], b"the second part")
+            .unwrap(),
+        Held::Queued,
+        "still queued, not held twice"
+    );
+    now.set(NOW + HLC_MAX_OFFSET_MS + 1);
+    assert!(db.shard().take_granted().unwrap().is_empty(), "not yet");
+    db.shard().release(first).unwrap();
+    let granted = db.shard().take_granted().unwrap();
+    assert_eq!(granted.len(), 1);
+    assert_eq!(granted[0].0, second, "the queued hold is granted");
+    assert_eq!(
+        db.shard().part(second).unwrap().as_deref(),
+        Some(&b"the second part"[..]),
+        "with its part"
+    );
+    db.shard().release(second).unwrap();
+    drop(db);
+    let db = shard_at(&path, &now);
+    assert!(db.shard().holds().is_empty());
+    assert!(
+        db.shard().take_granted().unwrap().is_empty(),
+        "nothing queued"
+    );
+}
+
+/// The ops of the writer's last uploaded commit.
+fn uploaded_ops(sent_up: &Log) -> Vec<WireOp> {
+    sent_up
+        .borrow()
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            SyncMessage::Commit { ops, .. } => Some(ops.clone()),
+            _ => None,
+        })
+        .expect("the writer uploaded its commit")
+}
+
+/// A shard checks a cross-shard part when it holds it, as its writer's
+/// session would commit it, and writes nothing: a part its session may
+/// write passes, one it may not is refused (and its hold is never taken,
+/// so no fix of it can be refused later).
+#[test]
+fn a_part_is_checked_as_its_session_without_writing() {
+    let (db, _now) = shard(1);
+    let (writer, _upstream, sent_up, _sent_down) = writer_of(&db);
+    let session = AuthorSubject::for_test_bytes([5; 16]);
+    let part = upload(&writer, &sent_up, None);
+    db.check_part(
+        session,
+        None,
+        Acting::Own,
+        (part.node, part.tx),
+        uploaded_ops(&sent_up),
+    )
+    .expect("a doc anyone may write");
+    assert!(titles(&db).is_empty(), "the check wrote nothing");
+    assert_eq!(db.shard().resolution(part).unwrap(), None, "nor a fate");
+    pump(&db, &writer);
+    assert_eq!(titles(&db), vec!["theirs"], "the part itself lands after");
+
+    // A note, then its update: the update needs read permission on it.
+    let note = RowUuid::from_bytes([8; 16]);
+    block_on(writer.insert(
+        "notes",
+        BTreeMap::from([("title".to_owned(), Value::String("a note".to_owned()))]),
+        InsertOptions {
+            row_id: Some(note),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump(&db, &writer);
+    block_on(writer.update(
+        "notes",
+        note,
+        BTreeMap::from([("title".to_owned(), Value::String("changed".to_owned()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(writer.tick()).unwrap();
+    let update = uploaded_ops(&sent_up);
+    let error = db
+        .check_part(session, None, Acting::Own, ([6; 16], 1), update)
+        .expect_err("a session may not update a note it cannot read");
+    assert!(error.to_string().contains("read"), "{error}");
 }
