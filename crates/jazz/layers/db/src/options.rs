@@ -29,10 +29,10 @@ pub struct DbConfig {
     /// Where settled large-value leaf bytes live. `None` keeps them in the
     /// SQLite file ([`crate::chunk_store`]).
     pub chunk_store: Option<std::sync::Arc<dyn crate::chunk_store::ChunkStore>>,
-    /// The wall clock (Unix ms) a shard draws commit positions from, as
+    /// The wall clock (Unix ms) the store draws commit positions from, as
     /// hybrid-clock timestamps ([`crate::db::shard`]), so the positions of
-    /// every shard compare by time. `None`, an unsharded store, counts
-    /// positions up by one and takes no shard role.
+    /// every store compare by time. `None` reads the system clock
+    /// ([`crate::db::shard::wall_clock_ms`]).
     pub clock: Option<Box<dyn Fn() -> u64>>,
     /// The app's earlier schema versions and the lenses between them, as
     /// it ships them. A store that has not admitted `schema` admits the
@@ -88,9 +88,8 @@ impl DbConfig {
         self
     }
 
-    /// Take the shard role, drawing commit positions from `clock` (Unix
-    /// ms): [`crate::db::shard::wall_clock_ms`] in production, a
-    /// simulation's virtual time or a skewed clock in a test.
+    /// Draw commit positions from `clock` (Unix ms) instead of the system
+    /// clock: a simulation's virtual time, or a skewed clock in a test.
     pub fn with_clock(mut self, clock: impl Fn() -> u64 + 'static) -> Self {
         self.clock = Some(Box::new(clock));
         self

@@ -10,7 +10,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
-use jazz::db::shard::{CommitRef, HLC_COUNTER_BITS, HLC_MAX_OFFSET_MS, HeldRow, hlc, hlc_ms};
+use jazz::db::shard::{
+    CommitRef, HLC_COUNTER_BITS, HLC_MAX_OFFSET_MS, HeldRow, hlc, hlc_ms, wall_clock_ms,
+};
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, Outcome, SyncMessage, Transport, TransportError,
     Upstream, block_on,
@@ -99,24 +101,37 @@ fn newest(db: &Db) -> u64 {
 }
 
 #[test]
-fn an_unsharded_store_takes_no_shard_role() {
+fn every_authority_takes_the_shard_role() {
     let db = block_on(Db::open(config(1))).unwrap();
+    assert!(
+        db.shard().is_shard(),
+        "an unsharded server is a shard of one"
+    );
+    let before = hlc(wall_clock_ms());
+    insert(&db, "one");
+    assert!(
+        newest(&db) >= before,
+        "a store opened without a clock draws positions from the system clock"
+    );
+}
+
+#[test]
+fn a_replica_of_an_upstream_takes_no_shard_role() {
+    let (db, _now) = shard(1);
+    let (writer, _upstream, _, _) = writer_of(&db);
     let part = CommitRef {
         node: [9; 16],
         tx: 1,
     };
-    assert!(!db.shard().is_shard());
+    assert!(!writer.shard().is_shard());
     for error in [
-        db.shard().observe(5).unwrap_err(),
-        db.shard().hold(part, &[]).unwrap_err(),
-        db.shard().fix(part, 5).unwrap_err(),
+        writer.shard().observe(5).unwrap_err(),
+        writer.shard().hold(part, &[]).unwrap_err(),
+        writer.shard().fix(part, 5).unwrap_err(),
     ] {
         assert!(error.to_string().contains("not supported"), "{error}");
     }
-    insert(&db, "one");
-    insert(&db, "two");
-    assert_eq!(db.shard().served_through(), 2, "positions count up by one");
-    assert_eq!(db.shard().lowest_hold(), None);
+    assert_eq!(writer.shard().lowest_hold(), None);
 }
 
 #[test]

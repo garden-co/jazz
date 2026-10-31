@@ -1388,7 +1388,11 @@ impl Db {
                     .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
                 seq: 0,
                 me: 0,
-                shard: shard::ShardState::new(config.clock),
+                shard: shard::ShardState::new(
+                    config
+                        .clock
+                        .unwrap_or_else(|| Box::new(shard::wall_clock_ms)),
+                ),
                 claims: HashMap::new(),
                 fan: fanout::Fanout::default(),
                 changed: RefCell::new(Vec::new()),

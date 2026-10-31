@@ -3,8 +3,10 @@
 //! wire of its own: the gateway↔shard protocol that drives it lives with
 //! the gateway.
 //!
-//! A shard draws commit positions from a hybrid clock ([`hlc`]), so the
-//! positions of every shard compare by time. The gateway closes a quiet
+//! Every authority is a shard: an unsharded server is the one shard of its
+//! deployment, running the same code. A shard draws commit positions from
+//! a hybrid clock ([`hlc`]), so the positions of every shard compare by
+//! time. The gateway closes a quiet
 //! shard at a position by having it [`ShardRole::observe`] that position,
 //! and lands each part of a cross-shard commit at the one position all its
 //! parts share: it [`ShardRole::hold`]s a position on every shard the
@@ -20,9 +22,9 @@
 //! its part writes waits (another writer's), or is refused (another
 //! cross-shard part's hold, which could otherwise wait on it in turn).
 //!
-//! A store opened without [`crate::options::DbConfig::with_clock`] takes
-//! none of this: unsharded, it counts positions up by one and holds
-//! nothing, so every call below except `served_through` is refused.
+//! Only a replica of an upstream takes no shard role: its upstream numbers
+//! what it commits, so every call below except `served_through` is
+//! refused there.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -106,11 +108,9 @@ impl HeldRow {
 
 /// A store's shard state: its clock, and the positions it holds for
 /// cross-shard parts still to land.
-#[derive(Default)]
 pub(crate) struct ShardState {
-    /// The wall clock (Unix ms) positions are drawn from; `None` (an
-    /// unsharded store) counts them up by one.
-    pub(crate) clock: Option<Box<dyn Fn() -> u64>>,
+    /// The wall clock (Unix ms) positions are drawn from.
+    pub(crate) clock: Box<dyn Fn() -> u64>,
     /// Held position → the part it is held for.
     holds: BTreeMap<u64, CommitRef>,
     /// Parts to land at a fixed position when they arrive.
@@ -131,16 +131,20 @@ const SHARD_OBSERVED: &str = "shard_observed";
 
 /// The durable record of holds: one row per held part, with its fixed
 /// position once fixed, and one per row it writes. Created by the first
-/// hold, so an unsharded store's file never holds them.
+/// hold, so the file of a store that never held a part has none.
 const HOLDS_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_shard_holds (at INTEGER PRIMARY KEY, node BLOB NOT NULL, tx INTEGER NOT NULL, fixed INTEGER, UNIQUE (node, tx));\
     CREATE TABLE IF NOT EXISTS _jazz_shard_held_rows (node BLOB NOT NULL, tx INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL, PRIMARY KEY (tbl, id));";
 
 impl ShardState {
-    pub(crate) fn new(clock: Option<Box<dyn Fn() -> u64>>) -> Self {
+    pub(crate) fn new(clock: Box<dyn Fn() -> u64>) -> Self {
         Self {
             clock,
-            ..Self::default()
+            holds: BTreeMap::new(),
+            fixed: HashMap::new(),
+            rows: HashMap::new(),
+            resumes_after: None,
+            observed: false,
         }
     }
 
@@ -183,19 +187,14 @@ impl Inner {
     /// offset bound it waits out after a reopen, for a write that does not
     /// wait).
     pub(crate) fn next_seq(&self) -> u64 {
-        match &self.shard.clock {
-            Some(clock) => {
-                let floor = self.waits_out().map_or(0, |after| hlc(after) + 1);
-                (self.seq + 1).max(hlc(clock())).max(floor)
-            }
-            None => self.seq + 1,
-        }
+        let floor = self.waits_out().map_or(0, |after| hlc(after) + 1);
+        (self.seq + 1).max(hlc((self.shard.clock)())).max(floor)
     }
 
     /// While a reopened shard waits out its offset bound: the clock reading
     /// (ms) it waits to pass.
     pub(crate) fn waits_out(&self) -> Option<u64> {
-        let clock = self.shard.clock.as_ref()?;
+        let clock = &self.shard.clock;
         self.shard.resumes_after.filter(|&after| clock() <= after)
     }
 
@@ -221,9 +220,7 @@ impl Inner {
     /// at once) keeps its positions no further ahead of its peers' clocks
     /// than its own clock is. A hold whose part already landed is dropped.
     pub(crate) fn load_shard(&mut self) -> Result<(), Error> {
-        let Some(clock) = &self.shard.clock else {
-            return Ok(());
-        };
+        let clock = &self.shard.clock;
         // A reopened shard that observed positions past what it numbered
         // may have served them, up to its clock plus the offset bound,
         // before it stopped; it waits that bound out. (What it numbered or
@@ -327,9 +324,6 @@ impl Inner {
     /// Drop the durable record of `commit`'s hold. Run inside the savepoint
     /// that lands its part, so the two go together.
     pub(crate) fn forget_hold(&self, commit: CommitRef) -> Result<(), Error> {
-        if self.shard.clock.is_none() {
-            return Ok(());
-        }
         let kept: bool = self
             .conn
             .query_row(
@@ -358,13 +352,6 @@ impl Inner {
 
 use rusqlite::OptionalExtension;
 
-fn unsharded() -> Error {
-    Error::new(
-        ErrorCode::Protocol,
-        "not supported: this store takes no shard role (open it with DbConfig::with_clock)",
-    )
-}
-
 /// The shard role of a store (see the module docs), from [`Db::shard`].
 pub struct ShardRole<'a> {
     db: &'a Db,
@@ -379,18 +366,14 @@ impl Db {
 }
 
 impl ShardRole<'_> {
-    /// Whether the store draws positions from a hybrid clock, and so takes
-    /// the shard role.
+    /// Whether the store takes the shard role: it is the last word on what
+    /// it commits (an authority, not a replica of an upstream).
     pub fn is_shard(&self) -> bool {
-        self.db.inner.borrow().shard.clock.is_some()
+        self.db.inner.borrow().client.is_none()
     }
 
-    /// The store must be a shard: clocked, and the last word on what it
-    /// commits (an authority, not a replica of an upstream).
+    /// The store must be a shard (see [`Self::is_shard`]).
     fn require(&self, inner: &Inner) -> Result<(), Error> {
-        if inner.shard.clock.is_none() {
-            return Err(unsharded());
-        }
         if inner.client.is_some() {
             return Err(Error::new(
                 ErrorCode::Protocol,
@@ -410,10 +393,7 @@ impl ShardRole<'_> {
     pub fn observe(&self, position: u64) -> Result<u64, Error> {
         let mut inner = self.db.inner.borrow_mut();
         self.require(&inner)?;
-        let observed = match &inner.shard.clock {
-            Some(clock) => position.min(hlc(clock().saturating_add(HLC_MAX_OFFSET_MS))),
-            None => position,
-        };
+        let observed = position.min(hlc((inner.shard.clock)().saturating_add(HLC_MAX_OFFSET_MS)));
         observe(&mut inner, observed)?;
         Ok(observed)
     }
@@ -529,9 +509,8 @@ impl ShardRole<'_> {
 /// or below it. One further ahead of the clock than [`HLC_MAX_OFFSET_MS`]
 /// is refused, unless the store already numbered or held past it.
 fn observe(inner: &mut Inner, position: u64) -> Result<(), Error> {
-    if let Some(clock) = &inner.shard.clock
-        && position > inner.seq
-        && position > hlc(clock().saturating_add(HLC_MAX_OFFSET_MS))
+    if position > inner.seq
+        && position > hlc((inner.shard.clock)().saturating_add(HLC_MAX_OFFSET_MS))
     {
         return Err(Error::new(
             ErrorCode::Protocol,
@@ -540,7 +519,7 @@ fn observe(inner: &mut Inner, position: u64) -> Result<(), Error> {
             ),
         ));
     }
-    if position > inner.seq && !inner.shard.observed && inner.shard.clock.is_some() {
+    if position > inner.seq && !inner.shard.observed {
         inner.persist_meta(SHARD_OBSERVED, 1)?;
         inner.shard.observed = true;
     }

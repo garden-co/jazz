@@ -990,8 +990,12 @@ fn a_resent_commit_ships_its_rows_though_superseded() {
 fn a_whole_ask_names_only_versions_the_sessions_own_commits_produced() {
     // Version 1 of the row is user 7's and secret; version 2 is user 2's.
     // User 2 asking for an earlier version by its seq gets the row as it is now,
-    // not the version it could not read.
-    let server = block_on(Db::open_history_complete(config(0, AuthorSubject::SYSTEM))).unwrap();
+    // not the version it could not read. A clock stopped at the hybrid-clock
+    // epoch numbers 1, 2, 3, so the reader can name every earlier seq.
+    let server = block_on(Db::open_history_complete(
+        config(0, AuthorSubject::SYSTEM).with_clock(|| jazz::db::shard::HLC_EPOCH_MS),
+    ))
+    .unwrap();
     let owner = |n: u8| Value::String(user(n).principal_parts().1);
     let mut secret = cells(&[("title", "T"), ("body", "SECRET")]);
     secret.insert("owner".to_owned(), owner(7));
