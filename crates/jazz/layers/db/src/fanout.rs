@@ -361,8 +361,10 @@ impl Inner {
             self.fan.stats.shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
         }
-        // A replica missing chunks the result needs opens it once they arrive.
-        let visible = self.visible_read(&read, &compiled.tables);
+        // A replica missing chunks the result needs opens it once they
+        // arrive. Its cut is decided over its relations' tables too.
+        let tables = self.with_relation_tables(prepared, &compiled.tables)?;
+        let visible = self.visible_read(&read, &tables);
         let applied = cut_of(&visible);
         let run = match &visible {
             Cow::Borrowed(_) => self.execute(&compiled, &prepared.query.table),
@@ -427,7 +429,7 @@ impl Inner {
             opened: !awaiting,
             branches,
             masks,
-            tables: compiled.tables.clone(),
+            tables,
             applied,
         }));
         self.read_keys(&mut handle.borrow_mut());
@@ -936,8 +938,13 @@ impl Inner {
         ));
         prepared.query.order_by.clear();
         prepared.query.limit = None;
-        // Under a cut, a row changed past it still reads as it was.
+        // Under a cut, a row changed past it still reads as it was. The
+        // other rows were read through the cut the last run applied: under
+        // another, only a full run (which records it) keeps them one state.
         let read = self.visible_read(&group.read, &group.tables);
+        if cut_of(&read) != group.applied {
+            return None;
+        }
         let narrowed = match self.compile(&prepared, group.identity, &read) {
             Ok(compiled) => compiled,
             Err(error) => return Some(Err(error)),

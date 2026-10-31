@@ -5734,6 +5734,7 @@ impl Inner {
                     ReadLifetime::Live(live) => live.visible,
                     ReadLifetime::Once { .. } => None,
                 }),
+            Position::At(at) => Some(*at),
             _ => None,
         };
         let through = match settled {
@@ -12099,6 +12100,7 @@ impl Db {
         // snapshot read is wholly this store's.
         let frozen = matches!(opts.read_view.source, ReadViewSourceSpec::Snapshot { .. });
         let non_durable = self.inner().non_durable;
+        let mut fetched = None;
         if self.is_client()
             && let Some(reach) = remote_reach(&opts, non_durable, frozen)
             && let Some(deadline) = remote_deadline(&opts, non_durable, true)
@@ -12106,17 +12108,18 @@ impl Db {
             self.remote_shape(&prepared.query)?;
             // A Remote read waits for the server while offline.
             let strict = opts.tier == ReadTier::Remote;
-            self.fetch(
-                &prepared,
-                None,
-                opts.read_view.include_deleted,
-                reach,
-                deadline,
-                coverage,
-                strict,
-                &opts.read_view.source,
-            )
-            .await?;
+            fetched = self
+                .fetch(
+                    &prepared,
+                    None,
+                    opts.read_view.include_deleted,
+                    reach,
+                    deadline,
+                    coverage,
+                    strict,
+                    &opts.read_view.source,
+                )
+                .await?;
         }
         let opts = ReadOpts {
             first_load: FirstLoad::Deliver,
@@ -12128,7 +12131,13 @@ impl Db {
         poll_fn(|_| {
             let read = {
                 let inner = self.inner();
-                ReadSpec::of(&opts, &inner).and_then(|spec| {
+                ReadSpec::of(&opts, &inner).and_then(|mut spec| {
+                    // It reads as far as the answer it fetched settled.
+                    if let Some(at) = fetched
+                        && spec.position == Position::Known
+                    {
+                        spec.position = Position::At(at);
+                    }
                     let roots = inner.run(&prepared, identity, &spec)?;
                     inner.nest_relations(&prepared, identity, &spec, roots)
                 })

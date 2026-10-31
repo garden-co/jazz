@@ -17,7 +17,9 @@ use crate::common;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::pin::pin;
 use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, SubscriptionEvent,
@@ -26,7 +28,7 @@ use jazz::db::{
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::model::transaction::OpenTransactionId;
 use jazz::protocol::{ReadViewSourceSpec, ReadViewSpec};
-use jazz::query::{Query, col, eq, lit};
+use jazz::query::{ArraySubquery, Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
@@ -39,6 +41,12 @@ fn open(node: u8, author: AuthorSubject) -> Db {
                 TableSchemaBuilder::new("docs")
                     .column("room", ColumnType::Text)
                     .column("title", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("comments")
+                    .column("doc", ColumnType::Uuid)
+                    .column("body", ColumnType::Text)
                     .policies(allow_all_policies()),
             )
             .build(),
@@ -457,4 +465,153 @@ fn own_writes_show_through_a_lagging_position() {
     link.release();
     pump(&server, &client);
     assert_eq!(a.titles(), titles(&["mine", "theirs"]));
+}
+
+/// A row that arrives before its read's settle and the connection's
+/// position, which follow in a later drain (one server tick can reach the
+/// client across several), is hidden until they arrive, then shown.
+#[test]
+fn a_row_shown_once_its_settle_arrives_in_a_later_drain() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, user(1));
+    let link = connect(&server, &client, user(1));
+    let mut a = Room::open(&client, "a");
+    let read_a = link.next_read(|| pump(&server, &client));
+    assert_eq!(a.titles(), titles(&[]));
+    link.hold(move |m| match m {
+        SyncMessage::Settled { id, .. } => *id == read_a,
+        SyncMessage::ConnectionSettled { .. } => true,
+        _ => false,
+    });
+    insert(&server, 1, "a", "theirs");
+    pump(&server, &client);
+    assert_eq!(a.titles(), titles(&[]), "its settle has not arrived");
+    link.release();
+    pump(&server, &client);
+    assert_eq!(a.titles(), titles(&["theirs"]), "the live result shows it");
+}
+
+/// Drive `future` while ticking both stores.
+fn drive<T>(server: &Db, client: &Db, future: impl Future<Output = T>) -> T {
+    let mut future = pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+    for _ in 0..100 {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        block_on(client.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    panic!("did not complete");
+}
+
+/// A one-shot read its upstream answered shows what it fetched, though
+/// the connection's position has not reached it yet.
+#[test]
+fn a_one_shot_read_shows_the_rows_it_fetched() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, user(1));
+    let link = connect(&server, &client, user(1));
+    pump(&server, &client);
+    link.hold_position();
+    insert(&server, 1, "a", "theirs");
+    let query = postcard::to_allocvec(&Query::from("docs")).unwrap();
+    let opts = ReadOpts {
+        tier: ReadTier::Remote,
+        ..ReadOpts::default()
+    };
+    let read = client.all_serialized_query(&query, opts, None, None, None);
+    let rows = match drive(&server, &client, read).unwrap() {
+        jazz::db::SerializedReadResult::Rows(rows) => rows,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(rows.len(), 1, "the fetched row shows");
+    assert_eq!(
+        local_titles(&client),
+        titles(&[]),
+        "a local read reads as of the connection's position"
+    );
+    link.release();
+    pump(&server, &client);
+    assert_eq!(local_titles(&client), titles(&["theirs"]));
+}
+
+/// A live result's array relations read as of the same position as its
+/// rows: a related row past its read's settle shows once the settle does.
+#[test]
+fn related_rows_read_as_of_the_results_settle() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, user(1));
+    let link = connect(&server, &client, user(1));
+    let query =
+        Query::from("docs").array_subquery(ArraySubquery::new("comments", "comments", "doc", "id"));
+    let prepared = client.prepare_query(&query).unwrap();
+    let mut stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let read = link.next_read(|| pump(&server, &client));
+    insert(&server, 1, "a", "doc");
+    pump(&server, &client);
+    let mut comments = BTreeMap::new();
+    let mut count = |stream: &mut SubscriptionStream| {
+        while let Some(event) = stream.try_next_event() {
+            if let SubscriptionEvent::Delta { added, updated, .. } = event {
+                for row in added.into_iter().chain(updated) {
+                    let Some(Value::Array(list)) = row.row.cell("comments") else {
+                        panic!("a comments array");
+                    };
+                    comments.insert(row.row.row_uuid(), list.len());
+                }
+            }
+        }
+        comments.get(&row(1)).copied()
+    };
+    assert_eq!(count(&mut stream), Some(0));
+
+    link.hold(move |m| match m {
+        SyncMessage::Settled { id, .. } => *id == read,
+        SyncMessage::ConnectionSettled { .. } => true,
+        _ => false,
+    });
+    block_on(server.insert(
+        "comments",
+        BTreeMap::from([
+            ("doc".to_owned(), Value::Uuid(row(1).0)),
+            ("body".to_owned(), Value::String("first".into())),
+        ]),
+        InsertOptions::default(),
+    ))
+    .unwrap();
+    pump(&server, &client);
+    // A one-shot read's relations read as of its position too.
+    let local = ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let bytes = postcard::to_allocvec(&query).unwrap();
+    let nested = |opts: ReadOpts| match block_on(
+        client.all_serialized_query(&bytes, opts, None, None, None),
+    )
+    .unwrap()
+    {
+        jazz::db::SerializedReadResult::Relation(snapshot) => snapshot.rows,
+        jazz::db::SerializedReadResult::Rows(rows) => rows,
+    };
+    let docs = nested(local.clone());
+    assert_eq!(
+        docs[0].cell("comments"),
+        Some(Value::Array(Vec::new())),
+        "a one-shot read leaves the comment out until the position reaches it"
+    );
+    assert_eq!(
+        count(&mut stream),
+        Some(0),
+        "the comment arrived past the result's settle"
+    );
+    link.release();
+    pump(&server, &client);
+    assert_eq!(count(&mut stream), Some(1));
+    let docs = nested(local);
+    assert!(
+        matches!(docs[0].cell("comments"), Some(Value::Array(list)) if list.len() == 1),
+        "then it shows"
+    );
 }
