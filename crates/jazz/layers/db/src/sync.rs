@@ -5688,7 +5688,7 @@ impl Inner {
             return false;
         };
         session.connection_settled.is_some_and(|sent| sent != at)
-            || session.settles.values().any(|settle| {
+            || self.relays_upstream() && session.settles.values().any(|settle| {
                 settle
                     .sent
                     .is_some_and(|sent| sent < client.settled_through(&settle.key))
@@ -9917,8 +9917,9 @@ impl Db {
                 if answered {
                     // A relayed result is settled as far as its upstream
                     // read is, which may pass the connection's position.
+                    let relaying = inner.relays_upstream();
                     let through = match inner.sessions[index].settles.get(&id) {
-                        Some(settle) => {
+                        Some(settle) if relaying => {
                             let at = inner
                                 .client
                                 .as_ref()
@@ -9930,6 +9931,18 @@ impl Db {
                             settle.sent = Some(at);
                             settle.global = global;
                             at
+                        }
+                        // Served here with no server: once relaying
+                        // again, its upstream read's settles reach the
+                        // session as they move.
+                        Some(_) => {
+                            let settle = inner.sessions[index]
+                                .settles
+                                .get_mut(&id)
+                                .expect("just read");
+                            settle.sent.get_or_insert(0);
+                            settle.global = global;
+                            through
                         }
                         None => through,
                     };
@@ -10060,8 +10073,9 @@ impl Db {
             // A relayed result whose upstream read settled further, with no
             // change to its rows here, is told so: its rows may have arrived
             // through another read, held back until this one settled them.
+            let relaying = inner.relays_upstream();
             let state = &mut *inner;
-            if let Some(client) = state.client.as_ref() {
+            if let Some(client) = state.client.as_ref().filter(|_| relaying) {
                 for (&id, settle) in state.sessions[index].settles.iter_mut() {
                     let at = client.settled_through(&settle.key);
                     if settle.sent.is_some_and(|sent| sent < at) {
@@ -10563,12 +10577,12 @@ impl Db {
                                 (*view).clone(),
                             );
                             inner.sessions[index].relayed.insert(id, read);
-                            // Only a read relayed upstream settles as far as
-                            // its upstream read: one this store serves itself
-                            // (no server, or its link down) settles here.
-                            if let Some((key, _)) = relayed
-                                && inner.relays_upstream()
-                            {
+                            // A read with an upstream read settles as far as
+                            // that read (never short of the connection's
+                            // position) while this store relays: with no
+                            // server it serves the read itself and settles it
+                            // here, and once one is back, as far again.
+                            if let Some((key, _)) = attached.as_ref() {
                                 inner.sessions[index].settles.insert(
                                     id,
                                     RelayedSettle {
