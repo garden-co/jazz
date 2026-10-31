@@ -1,24 +1,32 @@
 //! What a replica knows of its upstream moves by `ConnectionSettled`
 //! alone (SPEC 8 §8.4): a read's `Settled` speaks for that read and a
 //! commit's `Fate` for that commit. Every upstream sends the connection's
-//! position after a tick's settles and fates, so an unsharded server's
-//! clients run the code a sharded gateway's do. Until it arrives, the
-//! replica's own commits accepted past what it knows are named by
+//! position after a tick's rows, settles and fates, so an unsharded
+//! server's clients run the code a sharded gateway's do. Until it arrives,
+//! the replica's own commits accepted past what it knows are named by
 //! transaction.
+//!
+//! Each live result reads as of its own read's settle (or the connection's
+//! position, when further), and a one-shot read as of the connection's:
+//! while the store holds others' accepted versions past it, never part of
+//! a commit its upstream has not settled for it, always with this
+//! replica's own writes. Here an interposer holds messages back the way a
+//! sharded gateway does when one read's shards are behind another's.
 
 use crate::common;
 
-use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, VecDeque};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, SyncMessage, Transport, TransportError,
-    Upstream, block_on,
+    Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, SubscriptionEvent,
+    SubscriptionStream, SyncMessage, Transport, TransportError, Upstream, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::model::transaction::OpenTransactionId;
 use jazz::protocol::{ReadViewSourceSpec, ReadViewSpec};
-use jazz::query::Query;
+use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
@@ -29,6 +37,7 @@ fn open(node: u8, author: AuthorSubject) -> Db {
         &SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new("docs")
+                    .column("room", ColumnType::Text)
                     .column("title", ColumnType::Text)
                     .policies(allow_all_policies()),
             )
@@ -45,24 +54,38 @@ fn user(n: u8) -> AuthorSubject {
     AuthorSubject::for_test_bytes([n; 16])
 }
 
-fn title(title: &str) -> BTreeMap<String, Value> {
-    BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))])
+fn row(n: u8) -> RowUuid {
+    RowUuid::from_bytes([n; 16])
 }
 
-/// The server side of a link: logs what it sends down and, while `hold`
-/// is set, keeps the connection's position back from the client.
+fn doc(room: &str, title: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("room".to_owned(), Value::String(room.to_owned())),
+        ("title".to_owned(), Value::String(title.to_owned())),
+    ])
+}
+
+type Hold = Rc<RefCell<Option<Box<dyn Fn(&SyncMessage) -> bool>>>>;
+
+/// The server side of a link: logs what it sends down and holds back
+/// what `hold` matches.
 struct Down {
     to_client: Rc<RefCell<VecDeque<SyncMessage>>>,
     from_client: Rc<RefCell<VecDeque<SyncMessage>>>,
     log: Rc<RefCell<Vec<SyncMessage>>>,
-    hold: Rc<Cell<bool>>,
+    hold: Hold,
     held: Rc<RefCell<Vec<SyncMessage>>>,
 }
 
 impl Transport for Down {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         self.log.borrow_mut().push(message.clone());
-        if self.hold.get() && matches!(message, SyncMessage::ConnectionSettled { .. }) {
+        if self
+            .hold
+            .borrow()
+            .as_ref()
+            .is_some_and(|hold| hold(&message))
+        {
             self.held.borrow_mut().push(message);
         } else {
             self.to_client.borrow_mut().push_back(message);
@@ -95,16 +118,38 @@ struct Link {
     _upstream: Upstream,
     to_client: Rc<RefCell<VecDeque<SyncMessage>>>,
     log: Rc<RefCell<Vec<SyncMessage>>>,
-    hold: Rc<Cell<bool>>,
+    hold: Hold,
     held: Rc<RefCell<Vec<SyncMessage>>>,
 }
 
 impl Link {
-    /// Let the held connection positions through.
+    fn hold(&self, hold: impl Fn(&SyncMessage) -> bool + 'static) {
+        *self.hold.borrow_mut() = Some(Box::new(hold));
+    }
+
+    /// Hold the connection's position back.
+    fn hold_position(&self) {
+        self.hold(|m| matches!(m, SyncMessage::ConnectionSettled { .. }));
+    }
+
+    /// Let everything held through, in order.
     fn release(&self) {
-        self.hold.set(false);
+        *self.hold.borrow_mut() = None;
         let held = std::mem::take(&mut *self.held.borrow_mut());
         self.to_client.borrow_mut().extend(held);
+    }
+
+    /// The upstream read id of the next read the client settles.
+    fn next_read(&self, settle: impl FnOnce()) -> u64 {
+        let from = self.log.borrow().len();
+        settle();
+        self.log.borrow()[from..]
+            .iter()
+            .find_map(|m| match m {
+                SyncMessage::Settled { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("the read settled")
     }
 }
 
@@ -112,7 +157,7 @@ fn connect(server: &Db, client: &Db, identity: AuthorSubject) -> Link {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
     let log = Rc::new(RefCell::new(Vec::new()));
-    let hold = Rc::new(Cell::new(false));
+    let hold: Hold = Rc::new(RefCell::new(None));
     let held = Rc::new(RefCell::new(Vec::new()));
     let upstream = block_on(client.connect_upstream(Box::new(Up {
         to_server: up.clone(),
@@ -147,24 +192,103 @@ fn pump(server: &Db, client: &Db) {
     block_on(client.tick()).unwrap();
 }
 
-/// A live read of `docs`, settled.
-fn settled_read(server: &Db, client: &Db) -> jazz::db::SubscriptionStream {
-    let prepared = client.prepare_query(&Query::from("docs")).unwrap();
-    let live = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
-    pump(server, client);
-    live
-}
-
-fn insert(db: &Db, n: u8, text: &str) {
+fn insert(db: &Db, n: u8, room: &str, title: &str) {
     block_on(db.insert(
         "docs",
-        title(text),
+        doc(room, title),
         InsertOptions {
-            row_id: Some(RowUuid::from_bytes([n; 16])),
+            row_id: Some(row(n)),
             ..Default::default()
         },
     ))
     .unwrap();
+}
+
+/// One commit writing a doc in each of two rooms, as a cross-shard one
+/// would.
+fn insert_both(db: &Db, a: (u8, &str), b: (u8, &str)) {
+    let tx = OpenTransactionId::new();
+    block_on(db.begin_mergeable(tx)).unwrap();
+    for (n, room, title) in [(a.0, "a", a.1), (b.0, "b", b.1)] {
+        block_on(db.tx_ref(tx).insert(
+            "docs",
+            doc(room, title),
+            InsertOptions {
+                row_id: Some(row(n)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    block_on(db.commit_mergeable_handle(tx)).unwrap();
+}
+
+/// A live result of one room's docs, as the titles it shows.
+struct Room {
+    stream: SubscriptionStream,
+    rows: BTreeMap<RowUuid, String>,
+}
+
+impl Room {
+    fn open(client: &Db, room: &str) -> Self {
+        let query = Query::from("docs").filter(eq(col("room"), lit(Value::String(room.into()))));
+        let prepared = client.prepare_query(&query).unwrap();
+        let stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+        Self {
+            stream,
+            rows: BTreeMap::new(),
+        }
+    }
+
+    fn titles(&mut self) -> BTreeSet<String> {
+        while let Some(event) = self.stream.try_next_event() {
+            let SubscriptionEvent::Delta {
+                reset,
+                added,
+                updated,
+                removed,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            if reset {
+                self.rows.clear();
+            }
+            for gone in removed {
+                self.rows.remove(&gone.row_uuid);
+            }
+            for row in added.into_iter().chain(updated) {
+                let title = match row.row.cell("title") {
+                    Some(Value::String(title)) => title,
+                    other => panic!("title {other:?}"),
+                };
+                self.rows.insert(row.row.row_uuid(), title);
+            }
+        }
+        self.rows.values().cloned().collect()
+    }
+}
+
+fn titles(list: &[&str]) -> BTreeSet<String> {
+    list.iter().map(|t| (*t).to_owned()).collect()
+}
+
+/// Every doc's title, read once as the replica's own store holds them.
+fn local_titles(client: &Db) -> BTreeSet<String> {
+    let prepared = client.prepare_query(&Query::from("docs")).unwrap();
+    let opts = ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    };
+    block_on(client.all(&prepared, opts))
+        .unwrap()
+        .iter()
+        .map(|row| match row.cell("title") {
+            Some(Value::String(title)) => title,
+            other => panic!("title {other:?}"),
+        })
+        .collect()
 }
 
 #[test]
@@ -172,10 +296,12 @@ fn an_unsharded_server_sends_the_connection_position_after_its_settles() {
     let server = open(0, AuthorSubject::SYSTEM);
     let client = open(1, user(1));
     let link = connect(&server, &client, user(1));
-    let _live = settled_read(&server, &client);
-    insert(&server, 1, "from the server");
+    let mut room = Room::open(&client, "a");
+    pump(&server, &client);
+    insert(&server, 1, "a", "from the server");
     link.log.borrow_mut().clear();
     pump(&server, &client);
+    assert_eq!(room.titles(), titles(&["from the server"]));
     let log = link.log.borrow();
     let settled = log
         .iter()
@@ -188,7 +314,7 @@ fn an_unsharded_server_sends_the_connection_position_after_its_settles() {
         unreachable!();
     };
     assert_eq!(through, read, "unsharded, both name the server's seq");
-    // A tick with nothing to settle sends nothing.
+    // A tick with nothing to deliver sends nothing.
     drop(log);
     link.log.borrow_mut().clear();
     pump(&server, &client);
@@ -200,10 +326,11 @@ fn a_settle_alone_leaves_what_the_replica_knows() {
     let server = open(0, AuthorSubject::SYSTEM);
     let client = open(1, user(1));
     let link = connect(&server, &client, user(1));
-    let _live = settled_read(&server, &client);
+    let _room = Room::open(&client, "a");
+    pump(&server, &client);
     let before = block_on(client.capture_snapshot()).unwrap();
-    link.hold.set(true);
-    insert(&server, 1, "from the server");
+    link.hold_position();
+    insert(&server, 1, "a", "from the server");
     pump(&server, &client);
     let held = block_on(client.capture_snapshot()).unwrap();
     assert_eq!(
@@ -221,9 +348,10 @@ fn own_commits_accepted_past_the_known_position_are_named_by_transaction() {
     let server = open(0, AuthorSubject::SYSTEM);
     let client = open(1, user(1));
     let link = connect(&server, &client, user(1));
-    let _live = settled_read(&server, &client);
-    link.hold.set(true);
-    insert(&client, 1, "mine");
+    let _room = Room::open(&client, "a");
+    pump(&server, &client);
+    link.hold_position();
+    insert(&client, 1, "a", "mine");
     pump(&server, &client);
     let held = block_on(client.capture_snapshot()).unwrap();
     assert_eq!(
@@ -251,4 +379,82 @@ fn own_commits_accepted_past_the_known_position_are_named_by_transaction() {
     let after = block_on(client.capture_snapshot()).unwrap();
     assert!(after.dots.is_empty(), "the connection's position covers it");
     assert!(after.global_base > held.global_base);
+}
+
+/// Room b's read is settled past a commit to both rooms; room a's is not,
+/// nor is the connection. Each shows the commit only once its own read is
+/// settled through it: never half of it.
+#[test]
+fn each_live_result_reads_as_of_its_own_settle() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, user(1));
+    let link = connect(&server, &client, user(1));
+    let mut a = Room::open(&client, "a");
+    let read_a = link.next_read(|| pump(&server, &client));
+    let mut b = Room::open(&client, "b");
+    pump(&server, &client);
+    insert(&server, 1, "a", "a before");
+    pump(&server, &client);
+    assert_eq!(a.titles(), titles(&["a before"]));
+
+    link.hold(move |m| match m {
+        SyncMessage::Settled { id, .. } => *id == read_a,
+        SyncMessage::ConnectionSettled { .. } => true,
+        _ => false,
+    });
+    insert_both(&server, (2, "a both"), (3, "b both"));
+    pump(&server, &client);
+    assert_eq!(
+        b.titles(),
+        titles(&["b both"]),
+        "b's read is settled past it"
+    );
+    assert_eq!(
+        a.titles(),
+        titles(&["a before"]),
+        "a's read is not: its rows arrived, but show as of its settle"
+    );
+    assert_eq!(
+        local_titles(&client),
+        titles(&["a before"]),
+        "a one-shot read reads as of the connection's position"
+    );
+
+    link.release();
+    pump(&server, &client);
+    assert_eq!(a.titles(), titles(&["a before", "a both"]));
+    assert_eq!(
+        local_titles(&client),
+        titles(&["a before", "a both", "b both"])
+    );
+}
+
+/// A result reading as of an earlier position still shows this replica's
+/// own writes: pending, then accepted past the position.
+#[test]
+fn own_writes_show_through_a_lagging_position() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, user(1));
+    let link = connect(&server, &client, user(1));
+    let mut a = Room::open(&client, "a");
+    let read_a = link.next_read(|| pump(&server, &client));
+    link.hold(move |m| match m {
+        SyncMessage::Settled { id, .. } => *id == read_a,
+        SyncMessage::ConnectionSettled { .. } => true,
+        _ => false,
+    });
+    // Others' versions past the position put the result through a cut.
+    insert(&server, 1, "a", "theirs");
+    pump(&server, &client);
+    assert_eq!(a.titles(), titles(&[]));
+
+    insert(&client, 2, "a", "mine");
+    assert_eq!(a.titles(), titles(&["mine"]), "pending");
+    pump(&server, &client);
+    assert_eq!(a.titles(), titles(&["mine"]), "accepted past the position");
+    assert_eq!(local_titles(&client), titles(&["mine"]));
+
+    link.release();
+    pump(&server, &client);
+    assert_eq!(a.titles(), titles(&["mine", "theirs"]));
 }

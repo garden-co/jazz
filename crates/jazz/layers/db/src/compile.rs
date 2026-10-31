@@ -237,6 +237,10 @@ pub struct Cut {
     pub seq: Pos,
     pub own: Pos,
     pub extra: Vec<Pos>,
+    /// Every unsettled version is in the cut too: a live query reading as
+    /// of its subscription's settled position still shows this replica's
+    /// own pending writes, which no server position covers.
+    pub unsettled: bool,
     /// A write check's evidence (SPEC 7, WITH CHECK): which of the
     /// versions at `own` are overlaid. `None` overlays them all.
     pub overlay: Option<Overlay>,
@@ -267,7 +271,10 @@ impl Cut {
 
     /// Whether a version at `at` is in the cut.
     pub fn sees(&self, at: Pos) -> bool {
-        at <= self.seq || at == self.own || self.extra.contains(&at)
+        at <= self.seq
+            || at == self.own
+            || self.extra.contains(&at)
+            || (self.unsettled && !at.accepted())
     }
 }
 
@@ -438,7 +445,7 @@ impl<'a> Ctx<'a> {
                 format!("({c_own} AND (c._st & {STATE_DELETED}) = 0)"),
             ),
         };
-        let (visible, h_visible, newer) = if extra.is_empty() {
+        let (mut visible, h_visible, mut newer) = if extra.is_empty() {
             (
                 format!("(_n, _seq) <= {seq} OR {overlaid_here}"),
                 format!("(h2._n, h2._seq) <= {seq}"),
@@ -454,6 +461,13 @@ impl<'a> Ctx<'a> {
                 ),
             )
         };
+        // An unsettled current version is newer than every accepted one:
+        // it shows as it is, and only accepted rows past the cut fall back
+        // to their history.
+        if cut.unsettled {
+            visible.push_str(" OR _n <> 0");
+            newer.push_str(" AND c._n = 0");
+        }
         let history = quote(&format!("{}__h", table.stored));
         // Both arms must let SQLite search by a correlated predicate (a
         // policy EXISTS's `m.band = a.band`), or every read through a cut

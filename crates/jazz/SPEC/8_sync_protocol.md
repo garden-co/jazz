@@ -462,6 +462,19 @@ seq as the tick's settles), after a tick's `Settled` and `Fate` messages
 whenever it moved, so a session that hears a settle or a fate hears it too,
 and an idle session hears nothing.
 
+A replica reads by these positions. A live result reads as of its upstream
+read's settle (or `known`, when that is further), a one-shot read as of
+`known`, while the store holds another writer's accepted versions of the
+tables it reads past that position. The read is then a cut at the position,
+which history makes exact (each row as its newest version at or before it),
+plus this replica's own writes, unsettled or accepted past it. Otherwise it
+reads the current state, as it always does against an unsharded authority,
+whose settles and connection position move together. So a result never shows
+part of a commit its read is not settled through, two results over different
+upstream reads may show one commit at different moments, and a writer always
+sees its own writes. Known limits: a branch view's read and a session's read a
+relay serves read the current state.
+
 A replica treats a read as settled only once its connected upstream confirmed
 it with `Settled`; while the upstream is unanswered, offline or failing the
 read stays unsettled, and a node with no upstream settles locally
