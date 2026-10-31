@@ -6221,7 +6221,53 @@ impl Inner {
             let image = self.upstream_baseline(&table, row, &key)?;
             client.baselines.insert((table, row, key), image);
         }
+        self.restore_positions(&mut client)?;
         self.client = Some(client);
+        Ok(())
+    }
+
+    /// What reads by position need of a reopened store (SPEC 8 §8.4): the
+    /// newest accepted version each table holds, and this replica's own
+    /// commits accepted past what it knows of its upstream, from its
+    /// settled-transaction records. Rows the store kept from before are
+    /// then read as of `known` until the upstream settles them again.
+    fn restore_positions(&self, client: &mut Client) -> Result<(), Error> {
+        // A store that wrote before it became a replica holds its own
+        // versions at the authority's numbering, and never syncs them.
+        let tables = if client.stranded {
+            Vec::new()
+        } else {
+            self.physical.tables.keys().collect()
+        };
+        for table in tables {
+            let newest: Option<i64> = self
+                .conn
+                .cached_row(
+                    &format!("SELECT MAX(_seq) FROM {} WHERE _n = 0", quote(table)),
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(storage)?;
+            if let Some(newest) = newest {
+                client.newest_foreign.insert(table.clone(), newest as u64);
+            }
+        }
+        let node = self.node_code(*self.identity.node.as_bytes())?;
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT seq, tx FROM _jazz_transactions \
+                 WHERE n = ?1 AND sn = 0 AND seq > ?2",
+            )
+            .map_err(storage)?;
+        let own = statement
+            .query_map([node, client.known as i64], |r| {
+                Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+            })
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        client.own_accepted.extend(own);
         Ok(())
     }
 }
@@ -8377,7 +8423,30 @@ impl Db {
         let replayed = pending.into_iter().try_for_each(|(tx, ops)| {
             begin_savepoint(&inner.conn, "replay")?;
             inner.merging = true;
-            let replayed = ops.iter().try_for_each(|op| inner.apply(op, tx).map(drop));
+            let replayed = ops.iter().try_for_each(|op| match inner.apply(op, tx) {
+                // A part of a cross-shard commit that landed before its fate
+                // (another shard answered first) already holds its row. The
+                // writer's version overlays that baseline as it overlays any
+                // other, until the fate: the whole commit still shows as its
+                // writer's. A conflicting insert by someone else is refused
+                // upstream, and the fate drops the whole commit.
+                Err(error) if error.reason == Some(Reason::RowAlreadyExists) => {
+                    let StagedOp::Insert(table, _, opts) = op else {
+                        return Err(error);
+                    };
+                    let landed = baseline.iter().find_map(|((t, row, key), image)| {
+                        let image = image.as_ref()?;
+                        (t == table && Some(*row) == opts.row_id).then_some((row, key, image))
+                    });
+                    let Some((row, key, image)) = landed else {
+                        return Err(error);
+                    };
+                    let at = inner.pos(image)?;
+                    inner.drop_row(table, *row, key, at)?;
+                    inner.apply(op, tx).map(drop)
+                }
+                other => other.map(drop),
+            });
             inner.merging = false;
             end_savepoint(&inner.conn, "replay", replayed.is_ok())
         });
