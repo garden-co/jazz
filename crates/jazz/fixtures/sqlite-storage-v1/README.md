@@ -12,9 +12,9 @@ pending uploads moved from one encoded message to a row per op, and
 watermarks became per-sequencer rows).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `1e1731ef32ba93f6c2a1d18918a0cbf129d7394c61abd90b9a585af23c5222f9`.
+  the SQLite file `9346f1a3180641fd75b85650c839a6e753df6582c9377a832698b49b41406f7a`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `df49e79d97b65c175574d29b1b97059e2fc38b3e439160a42e06ec131205adf3`.
+  `babdf7132d38762cf172f20640f8f3699bf58bd847acacd3b55bf6d2c4776423`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -27,7 +27,7 @@ nodes and write times:
   on a branch;
 - a client text edit to `documents.body` (text-merging) that the server
   merged with its own concurrent edit, so its history keeps the client's
-  write as sent (`_st` bit 2, at `_seq` = minus the commit's seq);
+  write as sent (`_st` bit 2, at `_t` = minus the commit's position);
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
   rejected (so `_jazz_transactions` keeps a rejected fate with its reason name),
@@ -109,3 +109,13 @@ Giving a replicated insert the backwards defaults of the columns its writer's
 lineage dropped, and a replicated upsert the cells it writes only if it
 creates its row (`created`), changed the encoded pending ops, which
 regenerated it the same way.
+
+Replacing the `(_n, _seq)` pair with one scalar position `_t` (below 2^53),
+banded locally into accepted versions (the authority's seq), an upstream's
+unsettled versions held by a relay, and the store's own pending versions,
+regenerated it the same way. Every row and history table has `_t` in place
+of `_n` and `_seq` (history keyed by `(id, _b, _t)`, index `__by_t`),
+`_jazz_transactions` is `(n, tx, t, result)` (index
+`_jazz_transactions_by_t`), `_jazz_lv_via` has `t` in place of `node`/`seq`,
+`_jazz_watermarks` is one `through` per key, and the sequencer tables are
+gone.

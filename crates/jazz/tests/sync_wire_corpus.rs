@@ -740,6 +740,14 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     tab.set_remote_link_hint(RemoteLinkHint::Live);
     connect(&tab, &wendy, user(1), &recorded);
     let tab_notes = tab.prepare_query(&Query::from("notes")).unwrap();
+    // Read (once, fresh): the tab's first read has no checkpoint to resume.
+    let open_tx = OpenTransactionId::new();
+    block_on(tab.begin_serializable(open_tx)).unwrap();
+    let _ = drive(
+        &[&tab, &wendy, &tab],
+        tab.tx_ref(open_tx).all_prepared(&tab_notes),
+    );
+    tab.abandon_transaction_handle(open_tx).unwrap();
     let _tab_stream = block_on(tab.subscribe(&tab_notes, ReadOpts::default())).unwrap();
     pump(&[&tab, &wendy, &tab]);
     block_on(wendy.insert("notes", note(1, vec![10]), InsertOptions::default())).unwrap();
