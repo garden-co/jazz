@@ -5,39 +5,52 @@ description: A relational database with live queries, permissions and built-in c
 
 Jazz is a relational database with live queries, permissions and built-in collaboration. Run it yourself right next to your app on Vercel, Cloudflare or your own servers. Use it from your backend, web and native clients, with local-first sync where you need offline.
 
-<Callout type="info">
-  Preview: this overview is being reworked for the server-first docs. The snippet below is still the
-  client-side one; it will become schema + one policy + a user-scoped backend route + a client
-  subscribing to the same query.
-</Callout>
-
-```ts
+```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
 
-// Define your schema
-const schema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-    },
-    {},
-  ),
-};
-const app = s.defineApp(schema);
+export const app = s.defineApp({
+  todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+});
 
-// Write — instant, works offline
-db.insert(app.todos, { title: "Ship it", done: false });
+// Each user sees and edits only the todos they created
+export const permissions = s.definePermissions(app, ({ policy }) => {
+  policy.todos.managedByCreator();
+});
+```
 
-// Read — reactive, stays up to date across devices
+```ts title="server.ts"
+import { Hono } from "hono";
+import { createJazzSession } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+
+const session = await createJazzSession({
+  appId: process.env.JAZZ_APP_ID!,
+  serverUrl: process.env.JAZZ_SERVER_URL!,
+  app,
+  permissions,
+  initial: { backendSecret: process.env.JAZZ_BACKEND_SECRET! },
+});
+const { client } = session.getSnapshot();
+
+// Runs as the signed-in user, with their permissions applied
+new Hono().post("/todos", async (c) => {
+  const db = await client!.forRequest(c.req.raw);
+  const { value: todo } = db.insert(app.todos, { title: (await c.req.json()).title, done: false });
+  return c.json(todo);
+});
+```
+
+```ts title="client.ts"
+import { createDb } from "jazz-tools/thin";
+import { app } from "./schema";
+
+const db = createDb({ appId, serverUrl, account });
+
+// Live query: updates as soon as the server (or anyone else) changes a todo
 db.subscribe(app.todos.where({ done: false }), (todos) => {
   console.log(todos);
 });
 ```
-
-Jazz works with React, Vue, Svelte, Solid, Expo/React Native, plain TypeScript, and Rust.
-
-(Looking for [classic Jazz docs?](https://classic.jazz.tools/docs))
 
 ## Start here
 
