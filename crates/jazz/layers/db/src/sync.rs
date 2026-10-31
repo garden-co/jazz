@@ -9294,10 +9294,10 @@ impl Db {
             // its offset bound; what the session sent after it waits
             // behind it (SPEC 15).
             if let SyncMessage::Commit { id, ops, .. } = &message
-                && self.inner.borrow().commit_waits(
-                    crate::db::shard::CommitRef::from(id),
-                    ops,
-                )?
+                && self
+                    .inner
+                    .borrow()
+                    .commit_waits(crate::db::shard::CommitRef::from(id), ops)?
             {
                 self.note_held(&mut barrier, &message);
                 held.push_back(message);
