@@ -1,31 +1,44 @@
 ---
-title: Run Locally
-description: "Get a Jazz app and a local sync server running in five minutes."
+title: Quickstart
+description: "Let your coding agent set up Jazz in your app: the brief it follows, the choices it asks you about, and how it checks it's done."
 ---
 
-## Scaffold a new Jazz app
+<Callout type="info">
+  Preview: this page is a sketch. `npm create jazz` will print the same brief, so you and your agent
+  start from one text.
+</Callout>
 
-```bash title="Terminal"
-pnpm create jazz
+## Start with your agent
+
+Paste this into your coding agent, or run `npm create jazz` and it prints the same brief:
+
+```md title="Agent brief (sketch)"
+Set up Jazz in this project. Follow https://jazz.tools/docs/setup and these steps:
+
+1. Install `jazz-tools` and the Jazz agent skill.
+2. Ask me the questions below. Read the linked docs before deciding, and suggest an answer.
+3. Write `schema.ts` and the permission policies, then the backend routes, then the client.
+4. Done when the local dev server runs, one query round-trips from backend and client, and the permission tests pass.
 ```
 
-Pick a framework, hosting mode, and auth style when prompted. The scaffolder installs dependencies and — if you chose hosted — provisions an app on Jazz Cloud with env vars filled in for you.
+## The questions your agent should ask
 
-## What you get
+- **Where does Jazz run?** Vercel, Cloudflare, your own server, or Jazz Cloud. See [Deployment](/docs/setup/deployment).
+- **Which backend?** Hono, Next.js route handlers, Express, or none yet. See [Backend](/docs/setup/backend/install).
+- **Which client?** Thin client (small, online-only) or local-first (offline, instant UI). React or vanilla. See [Web client](/docs/setup/web-client/thin-client).
+- **Who are your users?** Which auth provider, or anonymous to start. See [Auth](/docs/setup/auth/authentication).
+- **What's your data?** First tables and who can read and write them. See [Schemas](/docs/schemas/defining-tables) and [Policies](/docs/schemas/policies).
 
-- `schema.ts` — the source of truth for your data. Tables, types, and queries all flow from here. See [Schemas](/docs/schemas/defining-tables).
-- `permissions.ts` — row-level access, pre-wired. See [Permissions](/docs/schemas/policies).
-- A Jazz provider and a todo UI you can reshape into your own app.
+## How your agent knows it's done
 
-## Next steps
+- A local Jazz server runs and the app connects
+- A backend route reads and writes through the user-scoped client
+- The frontend shows a live query that updates when the backend writes
+- Permission tests cover the policies it wrote (see [Testing](/docs/tooling/testing))
 
-- **Model your own data** — edit `schema.ts`, then use `db.insert` and `db.subscribe` from your components. See [Writing Data](/docs/writing/writing-data) and [Queries](/docs/reading/queries).
-- **Add auth** — see [Authentication](/docs/setup/auth/authentication) to go beyond an anonymous identity.
-- **Install into an existing app** — see [Install → Client](/docs/setup/web-client/local-first-install) or [Install → TypeScript Server](/docs/setup/backend/install).
+## Run a local server yourself
 
-## Run a local server
-
-You can also run the sync server yourself, with no account anywhere:
+You can also run the sync server directly, with no account anywhere:
 
 <include cwd lang="bash" meta='title="Terminal"'>
   ../examples/docs/todo-server-rs/docs/self-host-cli.sh#setup-self-host-cli
@@ -35,5 +48,6 @@ See [Your Own Server](/docs/setup/deployment/own-server) for every option.
 
 ## Coming next
 
-- One path that starts with a backend, not a client
-- `--in-memory` vs a data dir
+- Final brief text, shared between this page and `npm create jazz`
+- The Jazz agent skill: what it installs and how agents find it
+- Continuous "agent as adopter" tests that run this page end to end on each platform
