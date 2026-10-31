@@ -291,6 +291,10 @@ enum Position {
     /// What the replica knows its upstream through (`known`): its own
     /// one-shot reads.
     Known,
+    /// A one-shot read its upstream answered: as far as that answer's
+    /// settle (or the connection's, when further), so the rows it fetched
+    /// show even before the connection's position reaches them.
+    At(sync::Pos),
     /// A live result's: the upstream read (by its key) it is a result of,
     /// as far as its own settle (or the connection's, when further).
     Remote(String),
@@ -3576,13 +3580,25 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<(Vec<CurrentRow>, BTreeSet<String>), Error> {
         let mut compiled = self.compile(prepared, identity, read)?;
-        let visible = self.visible_read(read, &compiled.tables);
+        // Array relations are part of a subscription's dependencies, and
+        // of the tables its cut is decided over.
+        let tables = self.with_relation_tables(prepared, &compiled.tables)?;
+        let visible = self.visible_read(read, &tables);
         if let std::borrow::Cow::Owned(visible) = &visible {
             compiled = self.compile(prepared, identity, visible)?;
         }
         let rows = self.execute(&compiled, &prepared.query.table)?;
-        // Array relations are part of a subscription's dependencies.
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        Ok((rows, tables))
+    }
+
+    /// `tables` (a compiled root's) and the stored tables of `prepared`'s
+    /// array relations, nested ones too: what a read's cut is decided
+    /// over, so its relations read as of the same position as its roots.
+    pub(crate) fn with_relation_tables(
+        &self,
+        prepared: &PreparedQuery,
+        tables: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, Error> {
         fn arrays(
             schema: &Schema,
             out: &mut BTreeSet<String>,
@@ -3594,12 +3610,10 @@ impl Inner {
             }
             Ok(())
         }
-        arrays(
-            schema,
-            &mut compiled.tables,
-            &prepared.query.array_subqueries,
-        )?;
-        Ok((rows, compiled.tables))
+        let mut out = tables.clone();
+        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        arrays(schema, &mut out, &prepared.query.array_subqueries)?;
+        Ok(out)
     }
 
     fn execute(&self, compiled: &Compiled, table: &str) -> Result<Vec<CurrentRow>, Error> {
@@ -3779,6 +3793,17 @@ impl Inner {
         if prepared.query.array_subqueries.is_empty() {
             return Ok(roots);
         }
+        // Related rows read as of the cut the roots were read through (the
+        // same decision, over the same tables; a cut read is its own).
+        let visible;
+        let read = if read.position != Position::Current && read.cut.is_none() {
+            let compiled = self.compile(prepared, identity, read)?;
+            let tables = self.with_relation_tables(prepared, &compiled.tables)?;
+            visible = self.visible_read(read, &tables).into_owned();
+            &visible
+        } else {
+            read
+        };
         roots
             .into_iter()
             .map(|row| {

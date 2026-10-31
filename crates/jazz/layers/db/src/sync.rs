@@ -1678,11 +1678,12 @@ pub(crate) struct Client {
     pub(crate) known_n: i64,
     /// The `known` cut last written to `_jazz_meta`.
     persisted_known: u64,
-    /// This replica's own commits accepted past `known`, as (seq, tx):
-    /// what it knows does not hold them yet, so a snapshot or a
+    /// This replica's own commits accepted past `known`, as (sequencer,
+    /// seq, tx): what it knows does not hold them yet, so a snapshot or a
     /// serializable transaction names them by tx. Two sequencers may number
-    /// different commits alike, so each is its own entry.
-    pub(crate) own_accepted: BTreeSet<(u64, u64)>,
+    /// different commits alike, so each is its own entry, and a connection
+    /// position covers only its own sequencer's entries.
+    pub(crate) own_accepted: BTreeSet<(i64, u64, u64)>,
     /// Per stored table, the newest accepted position of a version the
     /// upstream sent: a result reading no table past its position needs
     /// no cut.
@@ -5700,11 +5701,12 @@ impl Inner {
             return false;
         };
         session.connection_settled.is_some_and(|sent| sent != at)
-            || session.settles.values().any(|settle| {
-                settle
-                    .sent
-                    .is_some_and(|sent| sent < client.settled_through(&settle.key))
-            })
+            || self.relays_upstream()
+                && session.settles.values().any(|settle| {
+                    settle
+                        .sent
+                        .is_some_and(|sent| sent < client.settled_through(&settle.key))
+                })
     }
 
     /// The seq this store tells its sessions it is complete through. A
@@ -5776,6 +5778,7 @@ impl Inner {
                 n: known.n,
                 seq: client.settled_through(key),
             },
+            Position::At(at) if at.n == known.n && at.seq > known.seq => *at,
             _ => known,
         };
         let past = tables.iter().any(|table| {
@@ -5790,8 +5793,9 @@ impl Inner {
         let mut cut = Cut::at(through);
         cut.extra = client
             .own_accepted
-            .range((through.seq + 1, 0)..)
-            .map(|&(seq, _)| Pos { n: through.n, seq })
+            .iter()
+            .filter(|&&(n, seq, _)| n != through.n || seq > through.seq)
+            .map(|&(n, seq, _)| Pos { n, seq })
             .collect();
         cut.unsettled = !read.settled_only;
         Cow::Owned(ReadSpec {
@@ -6071,7 +6075,7 @@ impl Inner {
                 .pending
                 .iter()
                 .map(|p| p.tx)
-                .chain(client.own_accepted.iter().map(|&(_, tx)| tx))
+                .chain(client.own_accepted.iter().map(|&(_, _, tx)| tx))
                 .collect()
         })
     }
@@ -6237,7 +6241,52 @@ impl Inner {
             let image = self.upstream_baseline(&table, row, &key)?;
             client.baselines.insert((table, row, key), image);
         }
+        self.restore_positions(&mut client)?;
         self.client = Some(client);
+        Ok(())
+    }
+
+    /// What reads by position need of a reopened store (SPEC 8 §8.4): the
+    /// newest accepted version each table holds, and this replica's own
+    /// commits accepted past what it knows of its upstream, from its
+    /// settled-transaction records. Rows the store kept from before are
+    /// then read as of `known` until the upstream settles them again.
+    fn restore_positions(&self, client: &mut Client) -> Result<(), Error> {
+        // A store that wrote before it became a replica holds its own
+        // versions at the authority's numbering, and never syncs them:
+        // nothing it holds is past a position it reads as of.
+        if client.stranded {
+            return Ok(());
+        }
+        for table in self.physical.tables.keys() {
+            let newest: Option<i64> = self
+                .conn
+                .cached_row(
+                    &format!("SELECT MAX(_seq) FROM {} WHERE _n = 0", quote(table)),
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(storage)?;
+            if let Some(newest) = newest {
+                client.newest_foreign.insert(table.clone(), newest as u64);
+            }
+        }
+        let node = self.node_code(*self.identity.node.as_bytes())?;
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT seq, tx FROM _jazz_transactions \
+                 WHERE n = ?1 AND sn = 0 AND seq > ?2",
+            )
+            .map_err(storage)?;
+        let own = statement
+            .query_map([node, client.known as i64], |r| {
+                Ok((0, r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+            })
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        client.own_accepted.extend(own);
         Ok(())
     }
 }
@@ -7351,7 +7400,7 @@ impl Db {
                 .iter()
                 .map(|p| p.tx)
                 .filter(|tx| captured.contains(tx))
-                .chain(client.own_accepted.iter().map(|&(_, tx)| tx))
+                .chain(client.own_accepted.iter().map(|&(_, _, tx)| tx))
                 .map(|tx| TxId {
                     time: TxTime(tx),
                     node,
@@ -8068,7 +8117,7 @@ impl Db {
                                 && (global || by.is_some())
                                 && (landed.n != client.known_n || through > client.known)
                             {
-                                client.own_accepted.insert((through, tx));
+                                client.own_accepted.insert((landed.n, through, tx));
                                 client.visibility_moved = true;
                             }
                         }
@@ -8183,8 +8232,10 @@ impl Db {
                         let (by, through) = required_position(&through, "a connection settlement")?;
                         inner.learn_known(through, by)?;
                         let client = inner.client.as_mut().expect("client");
-                        let known = client.known;
-                        client.own_accepted = client.own_accepted.split_off(&(known + 1, 0));
+                        let (known_n, known) = (client.known_n, client.known);
+                        client
+                            .own_accepted
+                            .retain(|&(n, seq, _)| n != known_n || seq > known);
                         client.visibility_moved = true;
                     }
                     other => return Err(unsupported(format!("client received {other:?}"))),
@@ -8393,7 +8444,32 @@ impl Db {
         let replayed = pending.into_iter().try_for_each(|(tx, ops)| {
             begin_savepoint(&inner.conn, "replay")?;
             inner.merging = true;
-            let replayed = ops.iter().try_for_each(|op| inner.apply(op, tx).map(drop));
+            let replayed = ops.iter().try_for_each(|op| match inner.apply(op, tx) {
+                // A part of a cross-shard commit that landed before its fate
+                // (another shard answered first) already holds its row. The
+                // writer's version overlays that baseline as it overlays any
+                // other, until the fate: the whole commit still shows as its
+                // writer's. Another writer's version of the same row id lands
+                // here the same way and is overlaid alike: the conflicting
+                // insert is refused upstream, and the fate drops the whole
+                // commit, which uncovers theirs.
+                Err(error) if error.reason == Some(Reason::RowAlreadyExists) => {
+                    let StagedOp::Insert(table, _, opts) = op else {
+                        return Err(error);
+                    };
+                    let landed = baseline.iter().find_map(|((t, row, key), image)| {
+                        let image = image.as_ref()?;
+                        (t == table && Some(*row) == opts.row_id).then_some((row, key, image))
+                    });
+                    let Some((row, key, image)) = landed else {
+                        return Err(error);
+                    };
+                    let at = inner.pos(image)?;
+                    inner.drop_row(table, *row, key, at)?;
+                    inner.apply(op, tx).map(drop)
+                }
+                other => other.map(drop),
+            });
             inner.merging = false;
             end_savepoint(&inner.conn, "replay", replayed.is_ok())
         });
@@ -9947,8 +10023,9 @@ impl Db {
                 if answered {
                     // A relayed result is settled as far as its upstream
                     // read is, which may pass the connection's position.
+                    let relaying = inner.relays_upstream();
                     let through = match inner.sessions[index].settles.get(&id) {
-                        Some(settle) => {
+                        Some(settle) if relaying => {
                             let at = inner
                                 .client
                                 .as_ref()
@@ -9960,6 +10037,18 @@ impl Db {
                             settle.sent = Some(at);
                             settle.global = global;
                             at
+                        }
+                        // Served here with no server: once relaying
+                        // again, its upstream read's settles reach the
+                        // session as they move.
+                        Some(_) => {
+                            let settle = inner.sessions[index]
+                                .settles
+                                .get_mut(&id)
+                                .expect("just read");
+                            settle.sent.get_or_insert(0);
+                            settle.global = global;
+                            through
                         }
                         None => through,
                     };
@@ -10090,8 +10179,9 @@ impl Db {
             // A relayed result whose upstream read settled further, with no
             // change to its rows here, is told so: its rows may have arrived
             // through another read, held back until this one settled them.
+            let relaying = inner.relays_upstream();
             let state = &mut *inner;
-            if let Some(client) = state.client.as_ref() {
+            if let Some(client) = state.client.as_ref().filter(|_| relaying) {
                 for (&id, settle) in state.sessions[index].settles.iter_mut() {
                     let at = client.settled_through(&settle.key);
                     if settle.sent.is_some_and(|sent| sent < at) {
@@ -10593,7 +10683,12 @@ impl Db {
                                 (*view).clone(),
                             );
                             inner.sessions[index].relayed.insert(id, read);
-                            if let Some((key, _)) = &attached {
+                            // A read with an upstream read settles as far as
+                            // that read (never short of the connection's
+                            // position) while this store relays: with no
+                            // server it serves the read itself and settles it
+                            // here, and once one is back, as far again.
+                            if let Some((key, _)) = attached.as_ref() {
                                 inner.sessions[index].settles.insert(
                                     id,
                                     RelayedSettle {
@@ -12271,6 +12366,7 @@ impl Db {
         // snapshot read is wholly this store's.
         let frozen = matches!(opts.read_view.source, ReadViewSourceSpec::Snapshot { .. });
         let non_durable = self.inner().non_durable;
+        let mut fetched = None;
         if self.is_client()
             && let Some(reach) = remote_reach(&opts, non_durable, frozen)
             && let Some(deadline) = remote_deadline(&opts, non_durable, true)
@@ -12278,17 +12374,18 @@ impl Db {
             self.remote_shape(&prepared.query)?;
             // A Remote read waits for the server while offline.
             let strict = opts.tier == ReadTier::Remote;
-            self.fetch(
-                &prepared,
-                None,
-                opts.read_view.include_deleted,
-                reach,
-                deadline,
-                coverage,
-                strict,
-                &opts.read_view.source,
-            )
-            .await?;
+            fetched = self
+                .fetch(
+                    &prepared,
+                    None,
+                    opts.read_view.include_deleted,
+                    reach,
+                    deadline,
+                    coverage,
+                    strict,
+                    &opts.read_view.source,
+                )
+                .await?;
         }
         let opts = ReadOpts {
             first_load: FirstLoad::Deliver,
@@ -12300,7 +12397,13 @@ impl Db {
         poll_fn(|_| {
             let read = {
                 let inner = self.inner();
-                ReadSpec::of(&opts, &inner).and_then(|spec| {
+                ReadSpec::of(&opts, &inner).and_then(|mut spec| {
+                    // It reads as far as the answer it fetched settled.
+                    if let Some(at) = fetched
+                        && spec.position == Position::Known
+                    {
+                        spec.position = Position::At(at);
+                    }
                     let roots = inner.run(&prepared, identity, &spec)?;
                     inner.nest_relations(&prepared, identity, &spec, roots)
                 })

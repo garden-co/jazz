@@ -577,7 +577,14 @@ fn run(config: &Config, mode: Mode, emit: bool) -> Run {
                 if dashboard.rows.contains_key(order) {
                     break;
                 }
-                assert!(bench.sim.step(), "the order must reach the dashboard");
+                // The last tick can deliver it with nothing left in flight.
+                if !bench.sim.step() {
+                    dashboard.poll();
+                    assert!(
+                        dashboard.rows.contains_key(order),
+                        "the order must reach the dashboard"
+                    );
+                }
             }
         }
         latency.record(bench.sim.now_ms() - at);
