@@ -5760,6 +5760,7 @@ impl Inner {
                 n: known.n,
                 seq: client.settled_through(key),
             },
+            Position::At(at) if at.n == known.n && at.seq > known.seq => *at,
             _ => known,
         };
         let past = tables.iter().any(|table| {
@@ -10562,7 +10563,12 @@ impl Db {
                                 (*view).clone(),
                             );
                             inner.sessions[index].relayed.insert(id, read);
-                            if let Some((key, _)) = &attached {
+                            // Only a read relayed upstream settles as far as
+                            // its upstream read: one this store serves itself
+                            // (no server, or its link down) settles here.
+                            if let Some((key, _)) = relayed
+                                && inner.relays_upstream()
+                            {
                                 inner.sessions[index].settles.insert(
                                     id,
                                     RelayedSettle {
@@ -12192,6 +12198,7 @@ impl Db {
         // snapshot read is wholly this store's.
         let frozen = matches!(opts.read_view.source, ReadViewSourceSpec::Snapshot { .. });
         let non_durable = self.inner().non_durable;
+        let mut fetched = None;
         if self.is_client()
             && let Some(reach) = remote_reach(&opts, non_durable, frozen)
             && let Some(deadline) = remote_deadline(&opts, non_durable, true)
@@ -12199,17 +12206,18 @@ impl Db {
             self.remote_shape(&prepared.query)?;
             // A Remote read waits for the server while offline.
             let strict = opts.tier == ReadTier::Remote;
-            self.fetch(
-                &prepared,
-                None,
-                opts.read_view.include_deleted,
-                reach,
-                deadline,
-                coverage,
-                strict,
-                &opts.read_view.source,
-            )
-            .await?;
+            fetched = self
+                .fetch(
+                    &prepared,
+                    None,
+                    opts.read_view.include_deleted,
+                    reach,
+                    deadline,
+                    coverage,
+                    strict,
+                    &opts.read_view.source,
+                )
+                .await?;
         }
         let opts = ReadOpts {
             first_load: FirstLoad::Deliver,
@@ -12221,7 +12229,13 @@ impl Db {
         poll_fn(|_| {
             let read = {
                 let inner = self.inner();
-                ReadSpec::of(&opts, &inner).and_then(|spec| {
+                ReadSpec::of(&opts, &inner).and_then(|mut spec| {
+                    // It reads as far as the answer it fetched settled.
+                    if let Some(at) = fetched
+                        && spec.position == Position::Known
+                    {
+                        spec.position = Position::At(at);
+                    }
                     let roots = inner.run(&prepared, identity, &spec)?;
                     inner.nest_relations(&prepared, identity, &spec, roots)
                 })
