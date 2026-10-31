@@ -1,5 +1,5 @@
 //! The shard role: what a sharded deployment's gateway needs of a jazz
-//! store serving one shard (SPEC 15 §15.6). It is an engine API, with no
+//! store serving one shard (SPEC 15 §15.3). It is an engine API, with no
 //! wire of its own: the gateway↔shard protocol that drives it lives with
 //! the gateway.
 //!
@@ -46,9 +46,13 @@ pub const HLC_COUNTER_BITS: u32 = 11;
 /// further is a peer whose clock (or claim) cannot be trusted.
 pub const HLC_MAX_OFFSET_MS: u64 = 500;
 
-/// The first position at wall-clock time `ms` (Unix ms).
+/// The latest ms an [`hlc`] position can name: positions stay under 2^53.
+const HLC_MAX_MS: u64 = (1 << (53 - HLC_COUNTER_BITS)) - 1;
+
+/// The first position at wall-clock time `ms` (Unix ms). A reading past
+/// what positions can name is taken as the last ms they can.
 pub fn hlc(ms: u64) -> u64 {
-    ms.saturating_sub(HLC_EPOCH_MS) << HLC_COUNTER_BITS
+    ms.saturating_sub(HLC_EPOCH_MS).min(HLC_MAX_MS) << HLC_COUNTER_BITS
 }
 
 /// The wall-clock ms (Unix) a position was handed out at, or, for a node
@@ -198,12 +202,13 @@ impl Inner {
         self.shard.resumes_after.filter(|&after| clock() <= after)
     }
 
-    /// Whether the session commit `by` writing `rows` waits: another part
-    /// holds one of them, or the shard is waiting out its offset bound
+    /// Whether the session commit `by` writing `ops` waits: another part
+    /// holds one of the rows they write, or the shard is waiting out its offset bound
     /// after a reopen and `by` is neither a part fixed at a position nor a
     /// resend of a commit that landed.
-    pub(crate) fn commit_waits(&self, by: CommitRef, rows: &[HeldRow]) -> Result<bool, Error> {
-        if self.shard.blocks(by, rows) {
+    pub(crate) fn commit_waits(&self, by: CommitRef, ops: &[super::WireOp]) -> Result<bool, Error> {
+        // Most stores hold nothing: they skip naming the rows.
+        if !self.shard.rows.is_empty() && self.shard.blocks(by, &HeldRow::of(ops)) {
             return Ok(true);
         }
         if self.waits_out().is_none() || self.shard.fixed(by).is_some() {
@@ -324,6 +329,11 @@ impl Inner {
     /// Drop the durable record of `commit`'s hold. Run inside the savepoint
     /// that lands its part, so the two go together.
     pub(crate) fn forget_hold(&self, commit: CommitRef) -> Result<(), Error> {
+        // Every durable hold is loaded on reopen, so a store holding
+        // nothing in memory has none on disk either.
+        if self.shard.holds.is_empty() && self.shard.fixed.is_empty() {
+            return Ok(());
+        }
         let kept: bool = self
             .conn
             .query_row(
@@ -496,6 +506,7 @@ impl ShardRole<'_> {
     /// commit was refused. Releasing a part not held does nothing.
     pub fn release(&self, commit: CommitRef) -> Result<(), Error> {
         let mut inner = self.db.inner.borrow_mut();
+        self.require(&inner)?;
         if inner.shard.held(commit).is_none() {
             return Ok(());
         }

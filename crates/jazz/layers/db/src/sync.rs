@@ -9296,7 +9296,7 @@ impl Db {
             if let SyncMessage::Commit { id, ops, .. } = &message
                 && self.inner.borrow().commit_waits(
                     crate::db::shard::CommitRef::from(id),
-                    &crate::db::shard::HeldRow::of(ops),
+                    ops,
                 )?
             {
                 self.note_held(&mut barrier, &message);

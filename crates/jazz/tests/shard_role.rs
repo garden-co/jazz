@@ -11,7 +11,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::shard::{
-    CommitRef, HLC_COUNTER_BITS, HLC_MAX_OFFSET_MS, HeldRow, hlc, hlc_ms, wall_clock_ms,
+    CommitRef, HLC_COUNTER_BITS, HLC_EPOCH_MS, HLC_MAX_OFFSET_MS, HeldRow, hlc, hlc_ms,
+    wall_clock_ms,
 };
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, Outcome, SyncMessage, Transport, TransportError,
@@ -112,6 +113,37 @@ fn every_authority_takes_the_shard_role() {
     assert!(
         newest(&db) >= before,
         "a store opened without a clock draws positions from the system clock"
+    );
+}
+
+/// A store whose positions counted up by one (stopped at the epoch, as
+/// one written before positions were clock times) continues above them on
+/// the clock once reopened.
+#[test]
+fn a_store_numbered_by_one_continues_on_the_clock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.db");
+    let counted = Rc::new(Cell::new(HLC_EPOCH_MS));
+    {
+        let db = shard_at(&path, &counted);
+        insert(&db, "one");
+        insert(&db, "two");
+        assert_eq!(newest(&db), 2, "a stopped clock counts up by one");
+    }
+    let now = Rc::new(Cell::new(NOW));
+    let db = shard_at(&path, &now);
+    insert(&db, "three");
+    assert_eq!(
+        newest(&db),
+        hlc(NOW),
+        "the reopened store numbers on its clock"
+    );
+    now.set(HLC_EPOCH_MS);
+    insert(&db, "four");
+    assert_eq!(
+        newest(&db),
+        hlc(NOW) + 1,
+        "and never below what it numbered"
     );
 }
 

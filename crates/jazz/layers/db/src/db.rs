@@ -2394,7 +2394,7 @@ impl Db {
                     let wrote = handle.seq == inner.own_pos(seq);
                     if wrote {
                         if standalone {
-                            inner.seq = seq;
+                            inner.seq = inner.seq.max(seq);
                         } else if let Some((_, tables)) = &mut inner.tx {
                             tables.insert(table.to_owned());
                         }
@@ -2465,7 +2465,9 @@ impl Db {
             match &result {
                 Ok(_) => {
                     if !tables.is_empty() {
-                        inner.seq = seq;
+                        // A hold or observe while the tx was open may have
+                        // moved seq past the one it drew.
+                        inner.seq = inner.seq.max(seq);
                     }
                     Some((seq, tables))
                 }
@@ -7480,7 +7482,7 @@ impl Db {
             end_savepoint(&inner.conn, "commit_batch", true)?;
             let prior = inner.seq;
             if !ops.is_empty() || kind.validates_reads() {
-                inner.seq = seq;
+                inner.seq = inner.seq.max(seq);
             }
             (seq, prior, mark)
         };
