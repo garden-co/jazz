@@ -458,9 +458,9 @@ fate does. A replica's own commits accepted past `known` are named by
 transaction in the snapshot references it captures and the serializable
 transactions it begins, until a `ConnectionSettled` covers them. Every
 upstream sends it, an unsharded authority included (there it names the same
-seq as the tick's settles), after a tick's `Settled` and `Fate` messages
-whenever it moved, so a session that hears a settle or a fate hears it too,
-and an idle session hears nothing.
+seq as the tick's settles), after a tick's `Rows`, `AccessLost`, `Settled`
+and `Fate` messages whenever it moved, so a session that hears of a version,
+a settle or a fate hears it too, and an idle session hears nothing.
 
 A replica treats a read as settled only once its connected upstream confirmed
 it with `Settled`; while the upstream is unanswered, offline or failing the

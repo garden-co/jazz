@@ -1262,7 +1262,7 @@ pub enum SyncMessage {
     /// own [`SyncMessage::Settled`] may name a later position (a sharded
     /// gateway settles each read as far as the shards it reads), so this,
     /// not a read's settle or a commit's fate, moves what the replica
-    /// knows. Sent after a tick's settles and fates whenever it moved.
+    /// knows. Sent after a tick's rows, settles and fates whenever it moved.
     ConnectionSettled {
         through: Positions,
     },
@@ -9977,16 +9977,20 @@ impl Db {
             out.extend(evictions);
             out.extend(std::mem::take(&mut session.outbox));
             out.extend(settled);
-            // The connection's position follows the tick's settles and
-            // fates, when it moved: a read's settle no longer moves what the
-            // replica knows, so a session that hears one hears this too.
-            let settles = out.iter().any(|message| {
+            // The connection's position follows the tick's rows, settles
+            // and fates, when it moved: a read's settle no longer moves what
+            // the replica knows, and rows shipped past that position would
+            // otherwise wait for a later tick's to show.
+            let delivers = out.iter().any(|message| {
                 matches!(
                     message,
-                    SyncMessage::Settled { .. } | SyncMessage::Fate { .. }
+                    SyncMessage::Rows { .. }
+                        | SyncMessage::AccessLost { .. }
+                        | SyncMessage::Settled { .. }
+                        | SyncMessage::Fate { .. }
                 )
             });
-            if settles && session.connection_settled != Some((by, through)) {
+            if delivers && session.connection_settled != Some((by, through)) {
                 session.connection_settled = Some((by, through));
                 out.push(SyncMessage::ConnectionSettled {
                     through: positions(by, through),
