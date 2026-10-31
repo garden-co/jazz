@@ -1,4 +1,4 @@
 {
-  "title": "Web Client",
+  "title": "Browser",
   "pages": ["thin-client", "local-first-install", "local-first-setup", "local-first-auth"]
 }
