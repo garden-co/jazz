@@ -7707,8 +7707,10 @@ impl Db {
                                 let at = inner.pos(&image)?;
                                 if at.accepted() {
                                     let client = inner.client.as_mut().expect("client");
-                                    let newest =
-                                        client.newest_foreign.entry(image.table.clone()).or_default();
+                                    let newest = client
+                                        .newest_foreign
+                                        .entry(image.table.clone())
+                                        .or_default();
                                     *newest = (*newest).max(at.seq);
                                 }
                                 let named = (image.table.clone(), image.id, image.key.clone());
@@ -7835,8 +7837,7 @@ impl Db {
                                 ReadLifetime::Live(live) => {
                                     live.answered.set(true);
                                     live.global.set(global);
-                                    if live.visible.is_none_or(|v| v.n != at.n || v.seq < at.seq)
-                                    {
+                                    if live.visible.is_none_or(|v| v.n != at.n || v.seq < at.seq) {
                                         live.visible = Some(at);
                                         client.visibility_moved = true;
                                     }
