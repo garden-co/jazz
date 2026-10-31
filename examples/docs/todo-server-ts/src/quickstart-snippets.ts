@@ -1,17 +1,17 @@
 // #region quickstart-server-setup-ts
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
-import { createJazzSession } from "jazz-tools/backend";
+import { createJazzBackend } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
-const session = await createJazzSession({
+const client = await createJazzBackend({
   appId: process.env.JAZZ_APP_ID ?? "todo-server-ts",
   app: schemaApp,
   permissions,
   driver: { type: "persistent", dataPath: "./data/jazz.db" },
   serverUrl: process.env.JAZZ_SERVER_URL!,
-  initial: { backendSecret: process.env.JAZZ_BACKEND_SECRET! },
+  backendSecret: process.env.JAZZ_BACKEND_SECRET!,
   jwksUrl: process.env.JAZZ_JWKS_URL,
   jwtPublicKey: process.env.JAZZ_JWT_PUBLIC_KEY,
   allowLocalFirstAuth:
@@ -22,11 +22,6 @@ const session = await createJazzSession({
         ),
 });
 
-const snapshot = session.getSnapshot();
-if (snapshot.status !== "ready" || !snapshot.client) {
-  throw snapshot.error ?? new Error("Backend session is not ready");
-}
-const client = snapshot.client;
 const api = new Hono();
 // #endregion quickstart-server-setup-ts
 

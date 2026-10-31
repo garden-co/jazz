@@ -10,11 +10,11 @@ import { createRequire as createRequireFromModule } from "node:module";
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
 const nodeRequire = createRequire(import.meta.url);
-const { createJazzSession } = nodeRequire(
+const { createJazzBackend } = nodeRequire(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
-type AuthSession = Awaited<ReturnType<typeof createJazzSession>>;
+type AuthSession = Awaited<ReturnType<typeof createJazzBackend>>;
 
 declare global {
   var __bandChatAuthSession: Promise<AuthSession> | undefined;
@@ -25,23 +25,17 @@ export async function authJazzClient(): Promise<JazzClient> {
   // Throws (fails closed) when the app, sync server or backend secret is unset.
   const { backendSecret } = assertConfiguration();
   const { appId, serverUrl } = jazzServer();
-  const pending = (globalThis.__bandChatAuthSession ??= createJazzSession({
+  const pending = (globalThis.__bandChatAuthSession ??= createJazzBackend({
     app,
     permissions,
     appId,
     driver: { type: "memory" },
     serverUrl,
-    initial: { backendSecret },
+    backendSecret,
     env: JAZZ_ENV,
   }));
   try {
-    const session = await pending;
-    const snapshot = session.getSnapshot();
-    if (snapshot.status !== "ready" || !snapshot.client) {
-      await session.close();
-      throw snapshot.error ?? new Error("Backend session is not ready");
-    }
-    return snapshot.client;
+    return await pending;
   } catch (error) {
     // A failed admission/open must not poison all later requests.
     if (globalThis.__bandChatAuthSession === pending) {

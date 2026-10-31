@@ -1,5 +1,8 @@
 export {
+  createJazzBackend,
   createJazzSession,
+  type JazzBackend,
+  type JazzBackendConfig,
   type JazzSessionConfig,
   type JazzClient,
 } from "./create-jazz-session.js";

@@ -1,16 +1,16 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createJazzSession } from "jazz-tools/backend";
+import { createJazzBackend, createJazzSession, type JazzBackend } from "jazz-tools/backend";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import permissions from "../permissions";
 import { app } from "../schema";
 
 describe("Better Auth storage boundary", () => {
   let server: LocalJazzServerHandle | undefined;
-  let session: Awaited<ReturnType<typeof createJazzSession>> | undefined;
+  let backend: JazzBackend | undefined;
   let ordinarySession: Awaited<ReturnType<typeof createJazzSession>> | undefined;
 
   afterEach(async () => {
-    await session?.close();
+    await backend?.close();
     await ordinarySession?.close();
     await server?.stop();
   });
@@ -25,19 +25,18 @@ describe("Better Auth storage boundary", () => {
       permissions,
     });
 
-    const openSession = () =>
-      createJazzSession({
+    const openBackend = () =>
+      createJazzBackend({
         appId: server!.appId,
         app,
         permissions,
         driver: { type: "memory" },
         serverUrl: server!.url,
-        initial: { backendSecret: server!.backendSecret },
+        backendSecret: server!.backendSecret,
         env: "test",
       });
 
-    session = await openSession();
-    const backend = session.getSnapshot().client!;
+    backend = await openBackend();
     const stored = await backend.db
       .insert(app.better_auth_user, {
         name: "Persisted auth user",
@@ -71,14 +70,14 @@ describe("Better Auth storage boundary", () => {
         .wait({ tier: "global" }),
     ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
 
-    await session.close();
-    session = await openSession();
+    await backend.close();
+    backend = await openBackend();
     await expect
       .poll(
         async () =>
-          (
-            await session!.getSnapshot().client!.db.all(app.better_auth_user, { tier: "remote" })
-          ).find((row) => row.id === stored.id),
+          (await backend!.db.all(app.better_auth_user, { tier: "remote" })).find(
+            (row) => row.id === stored.id,
+          ),
         { timeout: 10_000 },
       )
       .toEqual(expect.objectContaining({ email: "persisted@example.test" }));

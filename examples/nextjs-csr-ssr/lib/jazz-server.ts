@@ -2,18 +2,18 @@ import "server-only";
 
 import { app as schemaApp } from "../schema";
 import permissions from "../permissions";
-import type { JazzSessionConfig, Db } from "jazz-tools/backend";
+import type { JazzBackendConfig, Db } from "jazz-tools/backend";
 
 // This is a workaround to resolve correctly NAPI modules in the monorepo
-// Real-world apps should just `import { createJazzSession } from "jazz-tools/backend"`
+// Real-world apps should just `import { createJazzBackend } from "jazz-tools/backend"`
 import { createRequire as createRequireFromModule } from "node:module";
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
 const nodeRequire = createRequire(import.meta.url);
 
-type BackendState = Awaited<ReturnType<typeof import("jazz-tools/backend").createJazzSession>>;
+type BackendState = Awaited<ReturnType<typeof import("jazz-tools/backend").createJazzBackend>>;
 type BackendModule = {
-  createJazzSession: (config: JazzSessionConfig) => Promise<BackendState>;
+  createJazzBackend: (config: JazzBackendConfig) => Promise<BackendState>;
 };
 type GlobalBackendState = typeof globalThis & {
   __jazzNextCsrSsrBackend?: Promise<BackendState>;
@@ -43,25 +43,19 @@ function readBackendConfig(): {
 export async function getBackendDb(): Promise<Db> {
   if (!globalState.__jazzNextCsrSsrBackend) {
     const config = readBackendConfig();
-    const { createJazzSession } = nodeRequire("jazz-tools/backend") as BackendModule;
-    globalState.__jazzNextCsrSsrBackend = createJazzSession({
+    const { createJazzBackend } = nodeRequire("jazz-tools/backend") as BackendModule;
+    globalState.__jazzNextCsrSsrBackend = createJazzBackend({
       appId: config.appId,
       app: schemaApp,
       permissions,
       driver: { type: "memory" },
       serverUrl: config.serverUrl,
-      initial: { backendSecret: config.backendSecret },
+      backendSecret: config.backendSecret,
     });
   }
   const pending = globalState.__jazzNextCsrSsrBackend;
   try {
-    const session = await pending;
-    const snapshot = session.getSnapshot();
-    if (snapshot.status !== "ready" || !snapshot.client) {
-      await session.close();
-      throw snapshot.error ?? new Error("Backend session is not ready");
-    }
-    return snapshot.client.db;
+    return (await pending).db;
   } catch (error) {
     if (globalState.__jazzNextCsrSsrBackend === pending) {
       globalState.__jazzNextCsrSsrBackend = undefined;
