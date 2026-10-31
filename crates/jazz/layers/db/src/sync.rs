@@ -6232,7 +6232,14 @@ impl Inner {
     /// settled-transaction records. Rows the store kept from before are
     /// then read as of `known` until the upstream settles them again.
     fn restore_positions(&self, client: &mut Client) -> Result<(), Error> {
-        for table in self.physical.tables.keys() {
+        // A store that wrote before it became a replica holds its own
+        // versions at the authority's numbering, and never syncs them.
+        let tables = if client.stranded {
+            Vec::new()
+        } else {
+            self.physical.tables.keys().collect()
+        };
+        for table in tables {
             let newest: Option<i64> = self
                 .conn
                 .cached_row(
