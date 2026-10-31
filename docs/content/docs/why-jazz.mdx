@@ -20,18 +20,71 @@ Think of Jazz as a modern Supabase that you host yourself, right next to your ap
 
 ## Compared to
 
-Rough plan: each comparison answers the questions developers actually ask (lock-in, SQL access, migrations, scaling, cost, offline), carries a "last checked" date and only makes claims we can link to.
+Rough plan: each comparison answers the questions developers actually ask (lock-in, SQL access, migrations, scaling, cost, offline), carries a "last checked" date and only makes claims we can link to. The bullets below are what we'd emphasize; claims about other products still need checking and links.
 
-- Supabase
-- Postgres
-- Plain SQLite
-- Plain Durable Objects
-- Convex
-- Zero
-- Neon (sync)
-- TanStack DB
+### Supabase
 
-## For decision-makers
+- Same promise of a database, auth hooks, permissions and a client SDK in one, but you run Jazz next to your app instead of a hosted platform or a multi-service self-host stack
+- Live queries return updated results, not a stream of row changes you re-apply yourself
+- Policies are typed TypeScript next to the schema instead of SQL row-level security
+- Built-in collaboration: history, branches, mergeable text, edit metadata
+- Optional local-first clients for offline and instant UI
+- Scales from zero to shards without picking an instance size
+- Where Supabase is stronger: full Postgres and its extension ecosystem, a mature hosted dashboard
+
+### Postgres
+
+- Jazz is relational too, but adds live queries, permissions and sync on top, so there's no API layer to write
+- No connection pooling or long-lived server to size and keep warm
+- Schema migrations are typed and generated, not hand-written SQL
+- Where Postgres is stronger: decades of tooling, arbitrary SQL, analytics workloads, extensions
+
+### Plain SQLite
+
+- Jazz runs on SQLite underneath, so you keep its speed and simple storage
+- Adds what you'd otherwise build yourself: sync between clients and server, permissions, live queries, conflict handling
+- Same schema runs on the server, in the browser and on mobile
+- Where plain SQLite is stronger: zero dependencies, full control, no sync model to learn
+
+### Plain Durable Objects
+
+- Jazz on Cloudflare uses DOs, but you work with tables and queries instead of hand-rolled per-object state and storage
+- Sharding across objects is handled for you, including cross-shard transactions
+- Permissions and live queries come built in rather than as custom code in every DO
+- Same app also runs on Vercel or your own servers, so there's no lock-in to one platform
+- Where plain DOs are stronger: full control over the actor model, no abstraction overhead
+
+### Convex
+
+- Both give reactive queries and a typed schema; Jazz is self-hosted on your own cloud and is MIT when unsharded
+- Jazz queries are declarative relational queries, not server functions you write and deploy
+- Declarative permission policies instead of checks written inside each function
+- Local-first clients with offline writes
+- Where Convex is stronger: a polished hosted product, server functions co-located with data
+
+### Zero
+
+- Both sync query results to clients; Jazz is the database itself, not a sync layer in front of Postgres
+- Permissions apply to backend, thin-client and local-first access alike
+- Collaboration features (history, branches, mergeable text) are built in
+- Thin client option when you don't want a client-side cache at all
+- Where Zero is stronger: keeps your existing Postgres as the source of truth
+
+### Neon (sync)
+
+- Neon is serverless Postgres; Jazz is a serverless relational database with sync, permissions and live queries built in
+- No separate sync product or replication setup to wire up
+- Runs on your own Vercel, Cloudflare or servers rather than a hosted database service
+- Where Neon is stronger: real Postgres, branching for dev databases, a managed service
+
+### TanStack DB
+
+- TanStack DB is a client-side reactive store over your own APIs; Jazz also provides the server, storage and permissions
+- No API layer to write to feed the client collections
+- Same live queries on the backend and frontend
+- Where TanStack DB is stronger: plugs into an existing backend with no new database
+
+## For engineering leaders
 
 - Custom code as a liability: less backend code to own
 - Fewer systems and moving parts
