@@ -64,11 +64,23 @@ const SOCIAL = [
   { label: "Jazz on X", href: "https://x.com/jazz_tools", icon: siX.path },
 ];
 
-const LINKS = [
+const START_LINKS = [
   { label: "Examples & Benches", href: "/examples" },
-  { label: "Blog", href: "/blog" },
   { label: "Docs", href: "/docs" },
 ];
+const END_LINKS = [{ label: "Blog", href: "/blog" }];
+
+function NavLink({ label, href, pathname }: { label: string; href: string; pathname: string }) {
+  return (
+    <TopNavItem
+      label={label}
+      href={href}
+      // Labels stay on one line; the bar collapses search instead.
+      className="whitespace-nowrap"
+      isSelected={pathname === href || pathname.startsWith(`${href}/`)}
+    />
+  );
+}
 
 /** The jazz.tools header shared by the homepage, blog and docs. */
 export function SiteTopNav() {
@@ -95,24 +107,11 @@ export function SiteTopNav() {
         }
         startContent={
           <>
-            {LINKS.map((link) => (
-              <TopNavItem
-                key={link.href}
-                label={link.label}
-                href={link.href}
-                // Labels stay on one line; the bar collapses search instead.
-                className="whitespace-nowrap"
-                isSelected={pathname === link.href || pathname.startsWith(`${link.href}/`)}
-              />
+            {START_LINKS.map((link) => (
+              <NavLink key={link.href} {...link} pathname={pathname} />
             ))}
-          </>
-        }
-        endContent={
-          <HStack gap={1} vAlign="center" className="site-nav-end">
-            {/* The search field sits at the end, not centred: centred, it
-              collided with the nav links on laptop widths. Below 1120px the
-              links and the field no longer fit side by side, so search
-              collapses to an icon. */}
+            {/* Below 1120px the links and the field no longer fit side by
+              side, so search collapses to an icon. */}
             <span className="site-search-field contents max-[1120px]:hidden">
               <SearchField onOpen={openSearch} />
             </span>
@@ -124,6 +123,13 @@ export function SiteTopNav() {
             <span className="contents max-[899px]:hidden">
               <ThemeSwitch />
             </span>
+          </>
+        }
+        endContent={
+          <HStack gap={1} vAlign="center" className="site-nav-end">
+            {END_LINKS.map((link) => (
+              <NavLink key={link.href} {...link} pathname={pathname} />
+            ))}
             {/* Below the drawer breakpoint the bar keeps only search and
               the drawer toggle; the social links would push the toggle off screen. */}
             <span className="contents max-md:hidden">
