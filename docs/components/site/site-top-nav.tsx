@@ -66,7 +66,7 @@ const SOCIAL = [
 
 const START_LINKS = [
   { label: "Examples & Benches", href: "/examples" },
-  { label: "Docs", href: "/docs" },
+  { label: "Documentation", href: "/docs" },
 ];
 const END_LINKS = [{ label: "Blog", href: "/blog" }];
 
