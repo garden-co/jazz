@@ -4,7 +4,6 @@
     "where-operators",
     "durability-tiers",
     "framework-patterns",
-    "upgrading-from-alpha-55",
     "examples",
     "internals",
     "local-first-auth-internals"
