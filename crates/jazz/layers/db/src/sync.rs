@@ -1262,7 +1262,7 @@ pub enum SyncMessage {
     /// own [`SyncMessage::Settled`] may name a later position (a sharded
     /// gateway settles each read as far as the shards it reads), so this,
     /// not a read's settle or a commit's fate, moves what the replica
-    /// knows. Sent after a tick's settles and fates whenever it moved.
+    /// knows. Sent after a tick's rows, settles and fates whenever it moved.
     ConnectionSettled {
         through: Positions,
     },
