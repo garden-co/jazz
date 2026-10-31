@@ -135,6 +135,8 @@ mod serializable_sync;
 mod session_policy_values;
 #[path = "../session_write_checks.rs"]
 mod session_write_checks;
+#[path = "../shard_role.rs"]
+mod shard_role;
 #[path = "../slow_queries.rs"]
 mod slow_queries;
 #[path = "../snapshots.rs"]
