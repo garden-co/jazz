@@ -16,7 +16,7 @@ import { SearchField, SearchIconButton, SiteSearch } from "./site-search";
 
 function BrandIcon({ path }: { path: string }) {
   return (
-    <svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+    <svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
       <path d={path} />
     </svg>
   );
@@ -37,7 +37,9 @@ function ThemeSwitch() {
   return (
     <SegmentedControl
       label="Colour theme"
-      size="lg"
+      size="md"
+      // Subtle next to the social links: no filled track behind the options.
+      style={{ backgroundColor: "transparent" }}
       value={mounted ? (theme ?? "system") : "system"}
       onChange={setTheme}
     >
@@ -110,23 +112,22 @@ export function SiteTopNav() {
             {START_LINKS.map((link) => (
               <NavLink key={link.href} {...link} pathname={pathname} />
             ))}
-            {/* Below 1120px the links and the field no longer fit side by
-              side, so search collapses to an icon. */}
-            <span className="site-search-field contents max-[1120px]:hidden">
+          </>
+        }
+        centerContent={
+          <>
+            {/* Below 1280px the centred field would collide with the links,
+              so search collapses to an icon. */}
+            <span className="site-search-field contents max-[1279px]:hidden">
               <SearchField onOpen={openSearch} />
             </span>
-            <span className="contents min-[1120px]:hidden">
+            <span className="contents min-[1280px]:hidden">
               <SearchIconButton onOpen={openSearch} />
-            </span>
-            {/* Below 900px the switch would crowd the bar; the chosen theme
-              still applies. */}
-            <span className="contents max-[899px]:hidden">
-              <ThemeSwitch />
             </span>
           </>
         }
         endContent={
-          <HStack gap={1} vAlign="center" className="site-nav-end">
+          <HStack gap={2} vAlign="center" className="site-nav-end">
             {END_LINKS.map((link) => (
               <NavLink key={link.href} {...link} pathname={pathname} />
             ))}
@@ -141,11 +142,16 @@ export function SiteTopNav() {
                   target="_blank"
                   rel="noreferrer noopener"
                   variant="ghost"
-                  size="sm"
+                  size="md"
                   isIconOnly
                   icon={<BrandIcon path={link.icon} />}
                 />
               ))}
+            </span>
+            {/* Below 900px the switch would crowd the bar; the chosen theme
+              still applies. */}
+            <span className="contents max-[899px]:hidden">
+              <ThemeSwitch />
             </span>
           </HStack>
         }
