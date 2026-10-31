@@ -16,8 +16,8 @@ const app = s.defineApp(
   },
   { migrations: "none" },
 );
-const permissions = s.definePermissions(app, ({ policy, isCreator }) => {
-  policy.diaries.allowRead.where(isCreator);
+const permissions = s.definePermissions(app, ({ policy, session }) => {
+  policy.diaries.allowRead.where({ $createdBy: session.user });
   policy.diaries.allowInsert.always();
   policy.posts.allowRead.always();
   policy.posts.allowInsert.always();
