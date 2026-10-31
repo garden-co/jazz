@@ -70,7 +70,7 @@ An external provider can issue an ordinary JWT with `iss` and `sub`. It does not
 
 Call `await jazz.linkJWT({ getToken })`; Jazz performs graceful shutdown, linking, and client replacement. The external identity must be fresh in this application's registry. Linking requires a connection to the core and keeps the existing account ID, so account-based ownership remains valid. Earlier rows retain the exact identity that authored them.
 
-The core never moves an already assigned identity to another account. If the provider identity already has an account, the app must choose whether to log into that account or migrate data explicitly. See [Authentication](/docs/setup/auth/authentication) for registration versus login, and [Lifecycle](/docs/setup/auth/lifecycle) for failure and logout handling.
+The core never moves an already assigned identity to another account. If the provider identity already has an account, the app must choose whether to log into that account or migrate data explicitly. See [Other / Custom](/docs/setup/auth/custom) for registration versus login, and [Lifecycle](/docs/setup/auth/lifecycle) for failure and logout handling.
 
 ## Permissions by auth mode
 

@@ -1,6 +1,6 @@
 ---
-title: Authentication
-description: "Create accounts, authenticate identities, and link ordinary provider JWTs."
+title: Other / Custom
+description: "The general auth bindings for any JWT provider: accounts and identities, login and linking, ownership, and backend request contexts."
 reviewedAt: "f14d92bf11"
 ---
 
@@ -21,6 +21,31 @@ const jazz = await createJazzSession({
 The session restores a usable saved account or creates a local-first account when none exists. It owns graceful context replacement for subsequent auth commands. Local-first creation works offline once runtime assets are available.
 
 Contexts accept an opaque `AccountHandle`, rather than raw JWTs or signing secrets. A handle fixes both the account and acting identity. The server still verifies credentials independently; copying an account ID into a JWT or object grants no access.
+
+## How it works
+
+<Sequence
+  description="An external JWT provider connecting to a Jazz server."
+  participants={[
+    { id: "browser", label: "Browser" },
+    { id: "auth", label: "Auth provider" },
+    { id: "jazz", label: "Jazz server", createAtStep: 2 },
+  ]}
+  steps={[
+    { kind: "message", from: "browser", to: "auth", text: "Sign in" },
+    { kind: "message", from: "auth", to: "browser", text: "JWT token", line: "dashed" },
+    { kind: "message", from: "browser", to: "jazz", text: "Register or log in with JWT" },
+    { kind: "message", from: "jazz", to: "auth", text: "Fetch JWKS" },
+    { kind: "message", from: "auth", to: "jazz", text: "Public keys", line: "dashed" },
+    { kind: "message", from: "jazz", to: "jazz", text: "Verify JWT and resolve account" },
+    { kind: "message", from: "jazz", to: "browser", text: "Account handle ready", line: "dashed" },
+  ]}
+/>
+
+1. The user signs in with your auth provider and gets a JWT.
+2. The shared provider connection calls `loginOrRegisterJWT({ getToken })`.
+3. The Jazz server validates the JWT signature against the provider's JWKS endpoint.
+4. Core atomically resolves the exact `(iss, sub)` assignment or creates its account when fresh. The Jazz session opens the account's client. `session.user` contains the account ID and exact acting identity; provider claims remain under `session.claims`. Revoked assignments remain rejected; login-or-register never reassigns an identity.
 
 ## External authentication
 
@@ -122,6 +147,16 @@ Managed `auth` does this for you. In development builds, Jazz warns in the conso
 
 The core orders a two-party protocol: the admitted identity authorizes an expiring nonce committed to the fresh identity, and the fresh identity authenticates acceptance. Both requests use ordinary bearer credentials. The core checks that the approver is still active and allowed to manage identities when acceptance happens.
 
+## Using JWT claims in permissions
+
+Your auth provider's JWT may include custom claims (roles, organisation IDs, etc.). Access them in permissions via `session.where(...)`.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
+</include>
+
+See [Permissions](/docs/schemas/policies) for the full claims API.
+
 ## Ownership and provenance
 
 Public sessions and author columns expose the same structured value:
@@ -144,3 +179,19 @@ Create a Node owner with `await createJazzSession({ appId, app, permissions, dri
 `await client.forRequest(request)` verifies the original bearer and resolves its active account through the core before opening an immutable requester scope. Configure JWT verification for external providers. By default, external identities must already be registered; local-first proofs can establish their deterministic founding account. Auth-required server routes can opt into `client.forRequest(request, { account: "login-or-register" })` to atomically create a fresh external assignment after verifying the bearer. The option applies only to that immutable request scope; it never changes the backend account or accepts revoked identities. Keep the default strict mode on hybrid routes where a fresh identity must be linked first.
 
 `await client.forAccount(account)` accepts an opaque admitted user handle and re-verifies its credential. Neither method switches the shared owner. Raw session objects cannot select an arbitrary principal or account. `await client.withAttribution(account)` retains backend permissions while recording verified user authorship.
+
+## Provider JWKS endpoints
+
+Any provider that issues JWTs and exposes a JWKS endpoint will work. The key pattern is always the same: get a JWT from your provider, pass it to Jazz.
+
+| Provider    | JWKS endpoint                                                                               | `sub` claim format |
+| ----------- | ------------------------------------------------------------------------------------------- | ------------------ |
+| Better Auth | `<baseURL>/api/auth/jwks`                                                                   | User ID            |
+| WorkOS      | `https://api.workos.com/sso/jwks/<clientId>`                                                | `user_<id>`        |
+| Clerk       | `https://<app>.clerk.accounts.dev/.well-known/jwks.json`                                    | `user_<id>`        |
+| Auth0       | `https://<tenant>.auth0.com/.well-known/jwks.json`                                          | `auth0\|<id>`      |
+| Firebase    | `https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com` | Firebase UID       |
+
+Jazz records the exact JWT `iss` and `sub` pair as the acting identity. Providers keep their existing subjects. Use `linkJWT` to associate a fresh identity with an existing account; use application rows for profile data.
+
+Full working examples: [Better Auth chat](https://github.com/garden-co/jazz2/tree/main/examples/auth-betterauth-chat), [WorkOS chat](https://github.com/garden-co/jazz2/tree/main/examples/auth-workos-chat).

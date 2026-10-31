@@ -10,7 +10,7 @@ description: "A backend that acts with backend authority, using the backend secr
 
 ## Backend context setup
 
-A TypeScript backend creates one `createJazzSession` owner from `jazz-tools/backend`, with `appId`, `app`, `permissions`, `driver`, and `serverUrl` configured once. Select backend authority with `initial: { backendSecret }` or later with `await session.becomeBackend({ backendSecret })`. For authentication and account linking, see [Authentication](/docs/setup/auth/authentication).
+A TypeScript backend creates one `createJazzSession` owner from `jazz-tools/backend`, with `appId`, `app`, `permissions`, `driver`, and `serverUrl` configured once. Select backend authority with `initial: { backendSecret }` or later with `await session.becomeBackend({ backendSecret })`. For authentication and account linking, see [Other / Custom](/docs/setup/auth/custom).
 
 Backend admission requires a reachable Jazz server: the Node host sends `POST /apps/{app}/backend/admit` with `X-Jazz-Backend-Secret`, and proceeds only after that server validates it. Core validates the credential and owns account registration and linking. This also applies to a memory driver; backend initialization is not an offline privilege grant. Browser and React Native hosts reject backend selection.
 

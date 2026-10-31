@@ -240,7 +240,7 @@ const features: {
     ),
     links: [
       { label: "Server setup", href: "/docs/setup/backend/trusted" },
-      { label: "Auth providers", href: "/docs/recipes/auth/auth-provider-integration" },
+      { label: "Auth providers", href: "/docs/setup/auth/custom" },
       { label: "Permissions", href: "/docs/schemas/policies" },
       { label: "How sync works", href: "/docs/how-jazz-works" },
     ],

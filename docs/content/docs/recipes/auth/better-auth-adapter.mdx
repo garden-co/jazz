@@ -189,7 +189,7 @@ export async function messages(request: Request) {
 The core atomically resolves an active assignment or creates one for a fresh
 identity. Invalid and revoked credentials are rejected. Use the default strict
 request mode for a hybrid app where signup must link the fresh provider identity
-to an existing guest account first. See [Authentication](/docs/setup/auth/authentication).
+to an existing guest account first. See [Other / Custom](/docs/setup/auth/custom).
 
 Browser clients with an automatic connection can instead send a JWT from
 `/api/auth/token` as a bearer. Data routes then use the default strict scope:

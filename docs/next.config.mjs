@@ -107,6 +107,16 @@ const config = {
         destination: "/docs/setup/auth/local-first",
         permanent: false,
       },
+      {
+        source: "/docs/setup/auth/authentication",
+        destination: "/docs/setup/auth/custom",
+        permanent: false,
+      },
+      {
+        source: "/docs/recipes/auth/auth-provider-integration",
+        destination: "/docs/setup/auth/custom",
+        permanent: false,
+      },
       { source: "/docs/faq", destination: "/docs/how-jazz-works#faq", permanent: false },
       {
         source: "/docs/setup/deployment/jazz-cloud",
@@ -115,7 +125,7 @@ const config = {
       },
       {
         source: "/docs/auth/authentication",
-        destination: "/docs/setup/auth/authentication",
+        destination: "/docs/setup/auth/custom",
         permanent: false,
       },
       {

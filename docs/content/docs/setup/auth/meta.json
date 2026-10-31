@@ -1,4 +1,4 @@
 {
   "title": "Auth",
-  "pages": ["authentication", "local-first", "sessions", "lifecycle"]
+  "pages": ["better-auth", "workos", "custom", "local-first", "sessions", "lifecycle"]
 }
