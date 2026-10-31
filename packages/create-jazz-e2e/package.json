@@ -2,7 +2,7 @@
   "name": "create-jazz-e2e",
   "version": "0.0.0",
   "private": true,
-  "description": "End-to-end harness that scaffolds each create-jazz starter, builds it against the local workspace, and runs its Playwright suite against the production build.",
+  "description": "End-to-end harness that scaffolds each starter, builds it against the local workspace, and runs its Playwright suite against the production build.",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -13,7 +13,6 @@
     "e2e:cancel-reopen-subscription": "tsx src/cli.ts ts-betterauth --cancel-reopen-subscription-probe"
   },
   "dependencies": {
-    "create-jazz": "workspace:*",
     "jazz-tools": "workspace:*"
   },
   "devDependencies": {

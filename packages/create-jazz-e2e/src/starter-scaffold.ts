@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { randomBytes } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 
 export type PackageManifest = {
@@ -9,8 +10,6 @@ export type PackageManifest = {
   [key: string]: unknown;
 };
 
-export type ResolveProgressCallback = (resolved: number, total: number) => void;
-
 type WorkspaceConfig = {
   catalogs?: Record<string, Record<string, string>>;
 };
@@ -18,7 +17,6 @@ type WorkspaceConfig = {
 type FetchPackageVersion = (packageName: string) => Promise<string>;
 
 const WORKSPACE_SUBDIRS = ["packages", "crates"] as const;
-const FETCH_TIMEOUT_MS = 8_000;
 
 // --------------------------------------------------------------------------
 // Pure resolver
@@ -63,8 +61,6 @@ async function applyResolvedManifest(
   manifest: PackageManifest,
   workspaceConfig: WorkspaceConfig,
   fetchPackageVersion: FetchPackageVersion,
-  onProgress?: ResolveProgressCallback,
-  previewPackages?: Record<string, string>,
 ): Promise<PackageManifest> {
   const deps = manifest.dependencies ?? {};
   const devDeps = manifest.devDependencies ?? {};
@@ -75,11 +71,6 @@ async function applyResolvedManifest(
       const suffix = value.slice("workspace:".length);
       if (!["*", "^", "~"].includes(suffix) && !isVersionPin(suffix))
         throw badWorkspaceForm(name, value);
-      if (previewPackages) {
-        if (!Object.hasOwn(previewPackages, name))
-          throw new Error(`Package "${name}" was not published in this preview`);
-        continue;
-      }
       if (suffix === "*" || suffix === "^" || suffix === "~") {
         toFetch.add(name);
       } else if (!isVersionPin(suffix)) {
@@ -88,20 +79,15 @@ async function applyResolvedManifest(
     }
   }
 
-  const total = toFetch.size;
-  let resolvedCount = 0;
   const fetchedVersions = new Map<string, string>();
   await Promise.all(
     [...toFetch].map(async (name) => {
       const version = await fetchPackageVersion(name);
       fetchedVersions.set(name, version);
-      onProgress?.(++resolvedCount, total);
     }),
   );
 
   function resolveEntry(depName: string, value: string): string {
-    if (previewPackages && Object.hasOwn(previewPackages, depName))
-      return previewPackages[depName]!;
     if (value.startsWith("workspace:")) {
       const suffix = value.slice("workspace:".length);
       if (isVersionPin(suffix)) return suffix;
@@ -198,91 +184,13 @@ function buildWorkspaceConfig(parsed: WorkspaceYamlShape): WorkspaceConfig {
 }
 
 // --------------------------------------------------------------------------
-// Remote fetcher (GitHub raw)
+// Local fetcher
 // --------------------------------------------------------------------------
 
-async function fetchWithTimeout(url: string): Promise<Response> {
-  try {
-    return await globalThis.fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-  } catch (err) {
-    if (err instanceof Error && err.name === "TimeoutError") {
-      throw new Error(`Request to ${url} timed out after ${FETCH_TIMEOUT_MS}ms`);
-    }
-    throw err;
-  }
-}
-
-/** Fetch with a single retry on transient failure. 404s are not retried. */
-async function fetchOnce(url: string): Promise<Response> {
-  try {
-    return await fetchWithTimeout(url);
-  } catch {
-    return await fetchWithTimeout(url);
-  }
-}
-
-export async function resolveRemoteDeps(
-  manifest: PackageManifest,
-  repoConfig: { repo: string; ref: string },
-  onProgress?: ResolveProgressCallback,
-  previewPackages?: Record<string, string>,
-): Promise<PackageManifest> {
-  const rawBase = `https://raw.githubusercontent.com/${repoConfig.repo}/${repoConfig.ref}`;
-  const workspaceUrl = `${rawBase}/pnpm-workspace.yaml`;
-
-  const wsRes = await fetchOnce(workspaceUrl);
-  if (!wsRes.ok) throw new Error(`Failed to fetch pnpm-workspace.yaml: ${wsRes.status}`);
-  const parsed = parseWorkspaceYaml(await wsRes.text(), workspaceUrl);
-  const workspaceConfig = buildWorkspaceConfig(parsed);
-
-  // Inspect both workspace locations together, but prefer packages/ over crates/
-  // regardless of which response settles first.
-  const fetchPackageVersion: FetchPackageVersion = async (name) => {
-    const results = await Promise.allSettled(
-      WORKSPACE_SUBDIRS.map((subdir) => fetchOnce(`${rawBase}/${subdir}/${name}/package.json`)),
-    );
-
-    for (const result of results) {
-      if (result.status !== "fulfilled" || !result.value.ok) continue;
-      const pkg = (await result.value.json()) as { version?: unknown };
-      if (typeof pkg.version !== "string" || !pkg.version) {
-        throw new Error(`Package "${name}" has no version field in upstream package.json`);
-      }
-      return pkg.version;
-    }
-
-    const failure = results.find(
-      (result) =>
-        result.status === "rejected" ||
-        (result.status === "fulfilled" && result.value.status !== 404),
-    );
-    if (failure?.status === "rejected") throw failure.reason;
-    if (failure?.status === "fulfilled") {
-      throw new Error(
-        `GitHub returned ${failure.value.status} when looking up "${name}" in upstream repo`,
-      );
-    }
-    throw new Error(`Package "${name}" not found in upstream repo`);
-  };
-
-  return applyResolvedManifest(
-    manifest,
-    workspaceConfig,
-    fetchPackageVersion,
-    onProgress,
-    previewPackages,
-  );
-}
-
-// --------------------------------------------------------------------------
-// Local fetcher (dev-mode via JAZZ_STARTER_PATH)
-// --------------------------------------------------------------------------
-
+/** Rewrite a starter manifest's workspace: and catalog: ranges to the versions in this repo. */
 export async function resolveLocalDeps(
   manifest: PackageManifest,
   repoRoot: string,
-  onProgress?: ResolveProgressCallback,
-  previewPackages?: Record<string, string>,
 ): Promise<PackageManifest> {
   const wsPath = path.join(repoRoot, "pnpm-workspace.yaml");
   const wsYaml = fs.readFileSync(wsPath, "utf-8");
@@ -300,11 +208,48 @@ export async function resolveLocalDeps(
     throw new Error(`Package "${name}" not found in any workspace subdir`);
   };
 
-  return applyResolvedManifest(
-    manifest,
-    workspaceConfig,
-    fetchPackageVersion,
-    onProgress,
-    previewPackages,
+  return applyResolvedManifest(manifest, workspaceConfig, fetchPackageVersion);
+}
+
+// --------------------------------------------------------------------------
+// Scaffold
+// --------------------------------------------------------------------------
+
+const SCAFFOLD_COPY_SKIP = new Set(["node_modules", ".next", ".jazz", ".turbo", ".env", ".git"]);
+
+/**
+ * Copy `starters/<starter>` into `targetDir` the way a user would receive it:
+ * concrete dependency versions, the app's own package name, and a generated
+ * BETTER_AUTH_SECRET for starters that use Better Auth. Install is left to the
+ * caller, which pins workspace tarballs first.
+ */
+export async function scaffoldStarter(opts: {
+  repoRoot: string;
+  starter: string;
+  appName: string;
+  targetDir: string;
+}): Promise<void> {
+  const starterDir = path.join(opts.repoRoot, "starters", opts.starter);
+  if (!fs.existsSync(starterDir)) throw new Error(`Unknown starter "${opts.starter}"`);
+  if (fs.existsSync(opts.targetDir)) {
+    throw new Error(`Target directory "${opts.targetDir}" already exists`);
+  }
+  await fs.promises.cp(starterDir, opts.targetDir, {
+    recursive: true,
+    filter: (src) => !SCAFFOLD_COPY_SKIP.has(path.basename(src)),
+  });
+
+  const pkgJsonPath = path.join(opts.targetDir, "package.json");
+  const rawManifest = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8")) as PackageManifest;
+  const resolved = await resolveLocalDeps(rawManifest, opts.repoRoot);
+  fs.writeFileSync(
+    pkgJsonPath,
+    JSON.stringify({ ...resolved, name: opts.appName }, null, 2) + "\n",
+    "utf-8",
   );
+
+  if (opts.starter.endsWith("-betterauth") || opts.starter.endsWith("-hybrid")) {
+    const secret = randomBytes(32).toString("base64url");
+    fs.writeFileSync(path.join(opts.targetDir, ".env"), `BETTER_AUTH_SECRET=${secret}\n`, "utf-8");
+  }
 }

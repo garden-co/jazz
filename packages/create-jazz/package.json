@@ -1,7 +1,7 @@
 {
   "name": "create-jazz",
   "version": "2.0.0-alpha.59",
-  "description": "Scaffold a new Jazz app from a starter template.",
+  "description": "Print the Jazz agent brief: setup instructions for your coding agent.",
   "license": "MIT",
   "bin": {
     "create-jazz": "bin/create-jazz.js"
@@ -9,8 +9,6 @@
   "files": [
     "bin/**",
     "dist/**",
-    "jazz-source-snapshot.json",
-    "skills/**",
     "README.md"
   ],
   "type": "module",
@@ -27,18 +25,12 @@
     "check": "tsc --noEmit",
     "test": "pnpm check && vitest run"
   },
-  "dependencies": {
-    "@clack/prompts": "^0.10.0",
-    "picocolors": "^1.1.1",
-    "tiged": "^2.12.7",
-    "yaml": "^2.7.0"
-  },
   "devDependencies": {
     "@types/node": "catalog:default",
     "tsup": "^8.5.0",
-    "tsx": "^4.21.0",
     "typescript": "catalog:default",
-    "vitest": "catalog:default"
+    "vitest": "catalog:default",
+    "yaml": "^2.7.0"
   },
   "engines": {
     "node": ">=22.12"

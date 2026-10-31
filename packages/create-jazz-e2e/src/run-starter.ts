@@ -14,6 +14,7 @@ import { startTransportFaultProxy } from "./transport-fault-proxy.js";
 
 import { getStarterConfig, type StarterName } from "./starters.js";
 import { renderScaffoldedPnpmConfig } from "./pnpm-config.js";
+import { scaffoldStarter } from "./starter-scaffold.js";
 
 export { renderScaffoldedPnpmConfig } from "./pnpm-config.js";
 
@@ -87,9 +88,8 @@ async function runChild(
      * If provided, this is the COMPLETE environment for the child — runChild
      * does not merge in `process.env`. Callers that want to inherit the parent
      * env should spread it themselves (`{ ...process.env, EXTRA: "..." }`).
-     * This is so callers can `delete` keys (e.g. `npm_config_user_agent` to
-     * stop create-jazz auto-detecting a package manager) without runChild
-     * re-introducing them via the spread.
+     * This is so callers can `delete` keys without runChild re-introducing
+     * them via the spread.
      */
     env?: NodeJS.ProcessEnv;
     verbose?: boolean;
@@ -541,30 +541,14 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
         : packWorkspaceTarballs(opts.repoRoot, tarballDir, verbose),
     );
 
-    await recordPhase("scaffold", async () => {
-      const cliEntry = path.join(opts.repoRoot, "packages/create-jazz/src/index.ts");
-      const tsxBin = path.join(opts.repoRoot, "packages/create-jazz/node_modules/.bin/tsx");
-      const starterPath = path.join(opts.repoRoot, "starters", opts.starter);
-      const env: NodeJS.ProcessEnv = {
-        ...process.env,
-        JAZZ_STARTER_PATH: starterPath,
-        GIT_AUTHOR_NAME: "create-jazz-e2e",
-        GIT_AUTHOR_EMAIL: "tests@create-jazz.invalid",
-        GIT_COMMITTER_NAME: "create-jazz-e2e",
-        GIT_COMMITTER_EMAIL: "tests@create-jazz.invalid",
-      };
-      // create-jazz auto-installs if it can detect a package manager via
-      // `npm_config_user_agent`. We unset it so the CLI exits after scaffolding;
-      // we run pnpm install ourselves below, after writing the workspace
-      // overrides. Otherwise the install runs first and resolves against npm.
-      delete env.npm_config_user_agent;
-
-      await runChild(
-        tsxBin,
-        [cliEntry, APP_NAME, "--starter", opts.starter, "--hosting", "selfhosted", "--no-git"],
-        { cwd: workDir, env, verbose, description: `create-jazz ${opts.starter}` },
-      );
-    });
+    await recordPhase("scaffold", () =>
+      scaffoldStarter({
+        repoRoot: opts.repoRoot,
+        starter: opts.starter,
+        appName: APP_NAME,
+        targetDir: appDir,
+      }),
+    );
 
     if (opts.cancelReopenSubscriptionProbe) {
       if (opts.starter !== "ts-betterauth") {

@@ -1,8 +1,12 @@
 # create-jazz-e2e
 
-End-to-end harness that builds each `create-jazz` starter the way a real user
-would receive it, then runs the starter's Playwright suite against the
-production build.
+End-to-end harness that builds each starter in `starters/` the way a user would
+receive it, then runs the starter's Playwright suite against the production
+build.
+
+`npm create jazz` no longer scaffolds starters (it prints the agent brief), so
+this harness copies them itself. It stays the release gate until the
+agent-as-adopter suite replaces it, and then it is deleted with `starters/`.
 
 This catches a class of bugs that the per-starter Playwright suites miss —
 they run against `pnpm dev`, where the Vite/Turbopack pipelines mask build-time
@@ -15,9 +19,9 @@ For each starter, the harness:
 
 1. **Packs** the workspace packages a starter can transitively pull in
    (`jazz-tools`, `jazz-napi`, `jazz-wasm`) into `.tgz` tarballs.
-2. **Scaffolds** via the `create-jazz` CLI itself, with `JAZZ_STARTER_PATH`
-   pointing at the local starter dir and `--hosting selfhosted` so it never
-   reaches Jazz Cloud.
+2. **Scaffolds** by copying the starter dir, resolving its `workspace:` and
+   `catalog:` ranges to this repo's versions, and writing a
+   `BETTER_AUTH_SECRET` for Better Auth starters (`src/starter-scaffold.ts`).
 3. **Pins** the tarballs into the scaffolded `package.json` via
    `pnpm.overrides`. This lets `pnpm install` work even when the alpha versions
    the workspace bumps to aren't yet on npm (the normal case during a release PR).
