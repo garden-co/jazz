@@ -18,7 +18,7 @@ Invariant digest:
 - `INV-SHARD-12`: A multi-shard subscription result MUST NOT be marked complete unless completeness evidence has been obtained for every shard contributing to the result.
 - `INV-SHARD-13`: Cross-shard permission closures MUST be obtained through shard-core subscriptions or an explicitly equivalent mechanism before a shard-core assigns a fate that depends on remote-shard policy data.
 - `INV-SHARD-14`: Rebalancing MUST NOT flip partition ownership in the catalogue until the destination shard-core has the partition history needed to serve that ownership and the protocol has defined treatment of in-flight fates/subscriptions.
-- `INV-SHARD-15`: A store opened without a clock MUST take no shard role: its positions count up by one, and observing, holding and fixing positions MUST be refused as not supported (§15.3).
+- `INV-SHARD-15`: Every authority MUST take the shard role and number positions from a hybrid clock (the system clock unless one is given); only a replica of an upstream takes none, and there observing, holding and fixing positions MUST be refused as not supported (§15.3).
 - `INV-SHARD-16`: A shard's commit positions MUST be hybrid-clock timestamps: each above every position it handed out or observed and no earlier than its clock; a position more than `HLC_MAX_OFFSET_MS` ahead of its clock MUST be observed only up to its clock plus that offset (§15.3).
 - `INV-SHARD-17`: While a hold stands, the position a shard serves as settled MUST stay below its lowest hold (§15.3).
 - `INV-SHARD-18`: A fixed cross-shard part MUST land at its fixed position, which is at or above its hold (§15.3).
@@ -92,13 +92,15 @@ visibility design (SPEC 8 §8.4): the gateway, its protocol to the shards and
 the shard ownership above are outside this repository and stay exploratory
 (`INV-SHARD-1`).
 
-- **Clock.** A store opened with `DbConfig::with_clock` takes the shard role.
-  Its commit positions are hybrid-clock timestamps: the wall clock's ms since
+- **Clock.** Every authority takes the shard role: an unsharded server is the
+  one shard of its deployment, running the same code. Its commit positions are hybrid-clock timestamps: the wall clock's ms since
   `HLC_EPOCH_MS` above `HLC_COUNTER_BITS` bits of counter, so they fit a JS
   number and the positions of every shard compare by time. Each position is
   above every one the store handed out or observed, and no earlier than its
-  clock (`INV-SHARD-16`). A store opened without a clock counts positions up
-  by one and refuses every shard call below (`INV-SHARD-15`).
+  clock (`INV-SHARD-16`). The clock is the system clock unless
+  `DbConfig::with_clock` gives another (a simulation's virtual time, a skewed
+  clock in a test). A replica of an upstream takes no shard role and refuses
+  every shard call below (`INV-SHARD-15`).
 - **Observe.** `observe(position)` closes the store at `position`: nothing it
   commits later lands at or below it. A gateway closes a quiet shard so its
   settles reach a position another shard named. A position more than
