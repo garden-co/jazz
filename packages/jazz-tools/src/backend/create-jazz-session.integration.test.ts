@@ -7,7 +7,7 @@ import { schema as s } from "../index.js";
 import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import type { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
-import { createJazzSession } from "./index.js";
+import { createJazzBackend, createJazzSession } from "./index.js";
 
 const app = s.defineApp(
   {
@@ -104,6 +104,59 @@ describe("Node shared backend session", () => {
           permissions,
           driver: { type: "memory" },
           initial: { backendSecret: "incorrect-service-secret" },
+        }),
+      ).rejects.toThrow("Backend admission failed (401)");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("createJazzBackend returns a ready backend client and closes it", async () => {
+    const appId = randomUUID();
+    const server = await startLocalJazzServer({ appId });
+    const jazz = await createJazzBackend({
+      appId,
+      serverUrl: server.url,
+      app,
+      permissions,
+      driver: { type: "memory" },
+      backendSecret: server.backendSecret,
+    });
+    try {
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret: server.adminSecret,
+        schema: resolveSchemaSource(app),
+        permissions,
+      });
+      const row = await jazz.db
+        .insert(app.posts, { text: "from backend" })
+        .wait({ tier: "global" });
+      expect(await jazz.db.one(app.posts.where({ id: row.id }))).toMatchObject({
+        text: "from backend",
+      });
+      await jazz.close();
+      expect(() => jazz.flush()).toThrow("Backend client is closed");
+      await jazz.close();
+    } finally {
+      await jazz.close();
+      await server.stop();
+    }
+  });
+
+  it("createJazzBackend rejects invalid service admission", async () => {
+    const appId = randomUUID();
+    const server = await startLocalJazzServer({ appId, backendSecret: "expected-service-secret" });
+    try {
+      await expect(
+        createJazzBackend({
+          appId,
+          serverUrl: server.url,
+          app,
+          permissions,
+          driver: { type: "memory" },
+          backendSecret: "incorrect-service-secret",
         }),
       ).rejects.toThrow("Backend admission failed (401)");
     } finally {

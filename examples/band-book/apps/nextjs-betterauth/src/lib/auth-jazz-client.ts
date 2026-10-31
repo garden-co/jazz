@@ -7,11 +7,11 @@ import { serverSecret } from "./server-secret";
 
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-const { createJazzSession } = createRequire(import.meta.url)(
+const { createJazzBackend } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
-type AuthSession = Awaited<ReturnType<typeof createJazzSession>>;
+type AuthSession = Awaited<ReturnType<typeof createJazzBackend>>;
 
 declare global {
   var __bandBookAuthSession: Promise<AuthSession> | undefined;
@@ -19,25 +19,17 @@ declare global {
 
 /** Share one session owner across concurrent auth/bootstrap calls and Next reloads. */
 export async function authJazzClient(): Promise<JazzClient> {
-  const pending = (globalThis.__bandBookAuthSession ??= createJazzSession({
+  const pending = (globalThis.__bandBookAuthSession ??= createJazzBackend({
     app,
     permissions,
     appId: jazzAppId,
     driver: { type: "memory" },
     serverUrl: jazzServerUrl,
-    initial: {
-      backendSecret: serverSecret("BACKEND_SECRET", "band-book-development-backend-secret"),
-    },
+    backendSecret: serverSecret("BACKEND_SECRET", "band-book-development-backend-secret"),
     env: jazzEnv,
   }));
   try {
-    const session = await pending;
-    const snapshot = session.getSnapshot();
-    if (snapshot.status !== "ready" || !snapshot.client) {
-      await session.close();
-      throw snapshot.error ?? new Error("Backend session is not ready");
-    }
-    return snapshot.client;
+    return await pending;
   } catch (error) {
     // A failed admission/open must not poison all later requests.
     if (globalThis.__bandBookAuthSession === pending) {

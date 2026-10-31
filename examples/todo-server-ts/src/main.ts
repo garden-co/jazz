@@ -8,7 +8,7 @@ import express, { Request, Response, NextFunction } from "express";
 import type { Application } from "express";
 import type { Server } from "node:http";
 import { join } from "node:path";
-import { createJazzSession, type Db } from "jazz-tools/backend";
+import { createJazzBackend, type Db } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 // ============================================================================
@@ -98,13 +98,13 @@ export async function createServer(
     throw new Error("JAZZ_SERVER_URL and JAZZ_BACKEND_SECRET are required");
   }
 
-  const session = await createJazzSession({
+  const client = await createJazzBackend({
     appId,
     app: schemaApp,
     permissions,
     driver,
     serverUrl,
-    initial: { backendSecret },
+    backendSecret,
     env: "dev",
     jwksUrl: options.jwksUrl ?? process.env.JAZZ_JWKS_URL,
     jwtPublicKey: process.env.JAZZ_JWT_PUBLIC_KEY,
@@ -113,11 +113,6 @@ export async function createServer(
   });
   // Preserve the programmatic administrative handle for embedding and tests.
   // Network routes below exclusively use request-scoped databases.
-  const snapshot = session.getSnapshot();
-  if (snapshot.status !== "ready" || !snapshot.client) {
-    throw snapshot.error ?? new Error("Backend session is not ready");
-  }
-  const client = snapshot.client;
   const db = client.db;
 
   const app = express();
@@ -349,7 +344,7 @@ export async function createServer(
 
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = async () => {
-    shutdownPromise ??= session.close();
+    shutdownPromise ??= client.close();
     await shutdownPromise;
   };
 

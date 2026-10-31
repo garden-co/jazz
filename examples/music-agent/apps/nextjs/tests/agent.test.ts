@@ -18,31 +18,29 @@ beforeAll(async () => {
   process.env.SCRIPTED_AGENT_TOKEN_DELAY_MS = "0";
 });
 afterAll(async () => {
-  await secondSession?.close();
+  await secondBackendClient?.close();
   await server?.stop();
 });
 
 // A second server process: its own backend client, which sees the first
 // one's writes only through the Jazz server.
 let second: Db | undefined;
-let secondSession: { close(): Promise<void> } | undefined;
+let secondBackendClient: { close(): Promise<void> } | undefined;
 async function secondBackend(): Promise<Db> {
   if (second) return second;
-  const { createJazzSession } = await import("jazz-tools/backend");
+  const { createJazzBackend } = await import("jazz-tools/backend");
   const { jazzEnv } = await import("../src/lib/jazz-env");
-  const session = await createJazzSession({
+  const backend = await createJazzBackend({
     app,
     permissions,
     appId: server.appId,
     driver: { type: "memory" },
     serverUrl: server.url,
-    initial: { backendSecret: server.backendSecret },
+    backendSecret: server.backendSecret,
     env: jazzEnv,
   });
-  secondSession = session;
-  const client = session.getSnapshot().client;
-  if (!client) throw new Error("second backend session is not ready");
-  second = client.db;
+  secondBackendClient = backend;
+  second = backend.db;
   return second;
 }
 

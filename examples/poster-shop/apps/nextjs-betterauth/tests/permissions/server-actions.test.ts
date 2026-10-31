@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools";
-import { createJazzSession, type JazzClient } from "jazz-tools/backend";
+import { createJazzBackend, type JazzBackend } from "jazz-tools/backend";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import permissions from "../../permissions.js";
@@ -10,7 +10,7 @@ import { redeemInvite } from "../../src/lib/join.js";
 // The server actions run against a real local Jazz server with backend
 // authority, exactly as the API routes run them.
 let server: LocalJazzServerHandle;
-let session: Awaited<ReturnType<typeof createJazzSession>>;
+let backend: JazzBackend | undefined;
 let db: Db;
 
 beforeAll(async () => {
@@ -24,23 +24,20 @@ beforeAll(async () => {
     schema: app,
     permissions,
   });
-  session = await createJazzSession({
+  backend = await createJazzBackend({
     app,
     permissions,
     appId: server.appId,
     driver: { type: "memory" },
     serverUrl: server.url,
-    initial: { backendSecret },
+    backendSecret,
     env: "test",
   });
-  const snapshot = session.getSnapshot();
-  if (snapshot.status !== "ready" || !snapshot.client)
-    throw snapshot.error ?? new Error("not ready");
-  db = (snapshot.client as JazzClient).db;
+  db = backend.db;
 }, 120_000);
 
 afterAll(async () => {
-  await session?.close();
+  await backend?.close();
   await server?.stop();
 });
 

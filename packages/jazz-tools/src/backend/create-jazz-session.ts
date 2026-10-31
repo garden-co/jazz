@@ -346,3 +346,29 @@ export async function createJazzSession(
     },
   });
 }
+
+export type JazzBackendConfig = Omit<JazzSessionConfig, "initial"> & BackendAuth;
+
+/** A ready backend client. Call `close()` to shut it down. */
+export interface JazzBackend extends JazzClient {
+  close(): Promise<void>;
+}
+
+/**
+ * Admit this process with its backend secret and return the ready backend
+ * client. Rejects when admission or opening fails, so callers never inspect
+ * session state. Use {@link createJazzSession} for code that switches accounts.
+ */
+export async function createJazzBackend(config: JazzBackendConfig): Promise<JazzBackend> {
+  const { backendSecret, ...rest } = config;
+  if (!backendSecret) throw new Error("createJazzBackend requires backendSecret");
+  if (Object.hasOwn(config, "initial"))
+    throw new Error("createJazzBackend always opens the backend account; omit initial");
+  const session = await createJazzSession({ ...rest, initial: { backendSecret } });
+  const { status, client, error } = session.getSnapshot();
+  if (status !== "ready" || !client) {
+    await session.close();
+    throw error ?? new Error("Jazz backend is not ready");
+  }
+  return Object.assign(client, { close: () => session.close() });
+}

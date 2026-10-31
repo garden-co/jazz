@@ -7,7 +7,7 @@ import {
   TEST_PORT,
 } from "../tests/browser/test-constants.js";
 import { app, permissions } from "../tests/browser/schema.ts";
-import { createJazzSession } from "jazz-tools/backend";
+import { createJazzBackend, type JazzBackend } from "jazz-tools/backend";
 
 const SEED_BATCH_SIZE = 50;
 
@@ -22,7 +22,7 @@ export default async function runServer({
     backendSecret: "test",
   });
 
-  let session: Awaited<ReturnType<typeof createJazzSession>> | undefined;
+  let backend: JazzBackend | undefined;
   try {
     await deploy({
       serverUrl: serverHandle.url,
@@ -32,20 +32,16 @@ export default async function runServer({
       permissions: serverPermissions,
     });
 
-    session = await createJazzSession({
+    backend = await createJazzBackend({
       appId: serverHandle.appId,
       app: app,
       permissions: serverPermissions,
       driver: { type: "memory" },
       serverUrl: serverHandle.url,
-      initial: { backendSecret: serverHandle.backendSecret },
+      backendSecret: serverHandle.backendSecret,
     });
 
-    const snapshot = session.getSnapshot();
-    if (snapshot.status !== "ready" || !snapshot.client) {
-      throw snapshot.error ?? new Error("Backend session is not ready");
-    }
-    const sessionedClient = snapshot.client.db;
+    const sessionedClient = backend.db;
 
     const seedTitles = buildSeedTodoTitles(SEEDED_TODO_COUNT);
     for (let offset = 0; offset < seedTitles.length; offset += SEED_BATCH_SIZE) {
@@ -63,12 +59,12 @@ export default async function runServer({
       );
     }
 
-    await session.close();
+    await backend.close();
     return {
       serverHandle,
     };
   } catch (error) {
-    await Promise.all([session?.close(), serverHandle.stop()]).catch((cleanupError) => {
+    await Promise.all([backend?.close(), serverHandle.stop()]).catch((cleanupError) => {
       console.error("Inspector seed cleanup after setup failure failed", cleanupError);
     });
     throw error;

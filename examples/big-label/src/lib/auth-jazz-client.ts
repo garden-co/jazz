@@ -9,13 +9,13 @@ import { serverSecret } from "./server-secret";
 // asset into a route chunk.
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-const { createJazzSession } = createRequire(import.meta.url)(
+const { createJazzBackend } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
 const appOrigin = () => process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000";
 
-type AuthSession = Awaited<ReturnType<typeof createJazzSession>>;
+type AuthSession = Awaited<ReturnType<typeof createJazzBackend>>;
 
 declare global {
   var __bigLabelAuthSession: Promise<AuthSession> | undefined;
@@ -23,7 +23,7 @@ declare global {
 
 /** Share one session owner across concurrent auth/bootstrap calls and Next reloads. */
 export async function authJazzClient(): Promise<JazzClient> {
-  const pending = (globalThis.__bigLabelAuthSession ??= createJazzSession({
+  const pending = (globalThis.__bigLabelAuthSession ??= createJazzBackend({
     app,
     permissions,
     appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
@@ -34,17 +34,11 @@ export async function authJazzClient(): Promise<JazzClient> {
     jwksUrl: `${appOrigin()}/api/auth/jwks`,
     jwtIssuer: appOrigin(),
     jwtAudience: appOrigin(),
-    initial: { backendSecret: serverSecret("BACKEND_SECRET", "big-label-dev-backend") },
+    backendSecret: serverSecret("BACKEND_SECRET", "big-label-dev-backend"),
     env: process.env.NODE_ENV === "production" ? "prod" : "dev",
   }));
   try {
-    const session = await pending;
-    const snapshot = session.getSnapshot();
-    if (snapshot.status !== "ready" || !snapshot.client) {
-      await session.close();
-      throw snapshot.error ?? new Error("Backend session is not ready");
-    }
-    return snapshot.client;
+    return await pending;
   } catch (error) {
     // A failed admission/open must not poison all later requests.
     if (globalThis.__bigLabelAuthSession === pending) {

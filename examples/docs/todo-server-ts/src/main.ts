@@ -10,7 +10,7 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { createJazzSession, type BackendJwtPublicKey, type Db } from "jazz-tools/backend";
+import { createJazzBackend, type BackendJwtPublicKey, type Db } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
@@ -92,23 +92,18 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   }
 
   // #region context-setup-ts-backend
-  const session = await createJazzSession({
+  const client = await createJazzBackend({
     appId,
     app: schemaApp,
     permissions,
     driver: { type: "persistent", dataPath: dbPath },
     serverUrl,
-    initial: { backendSecret },
+    backendSecret,
     jwksUrl,
     jwtPublicKey,
     allowLocalFirstAuth,
     env: "dev",
   });
-  const snapshot = session.getSnapshot();
-  if (snapshot.status !== "ready" || !snapshot.client) {
-    throw snapshot.error ?? new Error("Backend session is not ready");
-  }
-  const client = snapshot.client;
   const db = client.db;
   // #endregion context-setup-ts-backend
 
@@ -304,7 +299,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     app,
     db,
     shutdown: async () => {
-      await session.close();
+      await client.close();
     },
     flush: () => {
       client.flush();

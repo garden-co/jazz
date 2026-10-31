@@ -4,7 +4,7 @@ Node + Express REST API backed by Jazz as the database. No frontend — pure ser
 
 ## What it demonstrates
 
-- Using Jazz as a server-side backend via `jazz-tools/backend` and `createJazzSession` — no browser, no WASM.
+- Using Jazz as a server-side backend via `jazz-tools/backend` and `createJazzBackend` — no browser, no WASM.
 - Authenticated CRUD over `/todos` (`GET`, `POST`, `PUT /:id`, `DELETE /:id`) with row-level permissions enforced server-side.
 - Request authentication through `client.forRequest(req)`. Every `/todos` request sends `Authorization: Bearer <token>`; Jazz verifies the token and derives the session owner.
 - Server-Sent Events (`/todos/live`) pushing only the authenticated caller's live snapshot on every mutation.

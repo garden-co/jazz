@@ -7,11 +7,11 @@ import { jazzEnv } from "./jazz-env";
 
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-const { createJazzSession } = createRequire(import.meta.url)(
+const { createJazzBackend } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
-type BackendSession = Awaited<ReturnType<typeof createJazzSession>>;
+type BackendSession = Awaited<ReturnType<typeof createJazzBackend>>;
 
 declare global {
   var __jamazonBackendSession: Promise<BackendSession> | undefined;
@@ -23,23 +23,17 @@ declare global {
  * One session is shared across concurrent requests and Next reloads.
  */
 export async function backendJazzClient(): Promise<JazzClient> {
-  const pending = (globalThis.__jamazonBackendSession ??= createJazzSession({
+  const pending = (globalThis.__jamazonBackendSession ??= createJazzBackend({
     app,
     permissions,
     appId: jazzAppId,
     driver: { type: "memory" },
     serverUrl: jazzServerUrl,
-    initial: { backendSecret: serverSecret("BACKEND_SECRET") },
+    backendSecret: serverSecret("BACKEND_SECRET"),
     env: jazzEnv,
   }));
   try {
-    const session = await pending;
-    const snapshot = session.getSnapshot();
-    if (snapshot.status !== "ready" || !snapshot.client) {
-      await session.close();
-      throw snapshot.error ?? new Error("Backend session is not ready");
-    }
-    return snapshot.client;
+    return await pending;
   } catch (error) {
     // A failed open must not poison later requests.
     if (globalThis.__jamazonBackendSession === pending) {

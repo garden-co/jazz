@@ -8,11 +8,11 @@ import { serverConfig } from "./config";
 // Load the native backend at runtime rather than through the Next bundler.
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-const { createJazzSession } = createRequire(import.meta.url)(
+const { createJazzBackend } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
-type BackendSession = Awaited<ReturnType<typeof createJazzSession>>;
+type BackendSession = Awaited<ReturnType<typeof createJazzBackend>>;
 
 declare global {
   var __jamazonBackend: Promise<BackendSession> | undefined;
@@ -25,26 +25,18 @@ declare global {
  * hot reloads.
  */
 export async function backend(): Promise<JazzClient> {
-  const pending = (globalThis.__jamazonBackend ??= createJazzSession({
+  const pending = (globalThis.__jamazonBackend ??= createJazzBackend({
     app,
     permissions,
     appId: serverConfig.appId,
     driver: { type: "memory" },
     serverUrl: serverConfig.serverUrl,
-    initial: {
-      backendSecret: serverConfig.backendSecret,
-    },
+    backendSecret: serverConfig.backendSecret,
     env: jazzEnv,
     jwtAudience: serverConfig.origin,
   }));
   try {
-    const session = await pending;
-    const snapshot = session.getSnapshot();
-    if (snapshot.status !== "ready" || !snapshot.client) {
-      await session.close();
-      throw snapshot.error ?? new Error("Backend session is not ready");
-    }
-    return snapshot.client;
+    return await pending;
   } catch (error) {
     // A failed admission must not poison later requests.
     if (globalThis.__jamazonBackend === pending) globalThis.__jamazonBackend = undefined;
