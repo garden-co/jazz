@@ -153,6 +153,8 @@ mod structured_result_tree;
 mod sync_access_loss;
 #[path = "../sync_aggregates.rs"]
 mod sync_aggregates;
+#[path = "../sync_connection_settled.rs"]
+mod sync_connection_settled;
 #[path = "../sync_differential.rs"]
 mod sync_differential;
 #[path = "../sync_echo.rs"]
