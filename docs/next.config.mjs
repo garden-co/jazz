@@ -92,6 +92,11 @@ const config = {
         destination: "/docs/setup/backend",
         permanent: false,
       },
+      {
+        source: "/docs/setup/web-client/local-first-install",
+        destination: "/docs/setup/web-client/local-first-setup",
+        permanent: false,
+      },
       { source: "/docs/faq", destination: "/docs/how-jazz-works#faq", permanent: false },
       {
         source: "/docs/setup/deployment/jazz-cloud",
@@ -142,7 +147,7 @@ const config = {
       },
       {
         source: "/docs/install/client",
-        destination: "/docs/setup/web-client/local-first-install",
+        destination: "/docs/setup/web-client/local-first-setup",
         permanent: false,
       },
       {
