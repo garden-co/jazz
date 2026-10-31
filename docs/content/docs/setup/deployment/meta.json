@@ -1,4 +1,4 @@
 {
   "title": "Deployment",
-  "pages": ["vercel", "cloudflare", "own-server", "jazz-cloud"]
+  "pages": ["vercel", "cloudflare", "own-server"]
 }

@@ -83,6 +83,11 @@ const config = {
     return [
       { source: "/perf-timeline", destination: "/examples", permanent: false },
       {
+        source: "/docs/setup/deployment/jazz-cloud",
+        destination: "/docs/setup/deployment",
+        permanent: false,
+      },
+      {
         source: "/docs/auth/authentication",
         destination: "/docs/setup/auth/authentication",
         permanent: false,

@@ -105,11 +105,6 @@ export function SiteTopNav() {
                 isSelected={pathname === link.href || pathname.startsWith(`${link.href}/`)}
               />
             ))}
-            <TopNavItem
-              label="Dashboard"
-              href="https://v2.dashboard.jazz.tools"
-              className="whitespace-nowrap"
-            />
           </>
         }
         endContent={
