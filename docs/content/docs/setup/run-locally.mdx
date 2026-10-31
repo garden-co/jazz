@@ -3,38 +3,34 @@ title: Quickstart
 description: "Let your coding agent set up Jazz in your app: the brief it follows, the choices it asks you about, and how it checks it's done."
 ---
 
-<Callout type="info">
-  Preview: this page is a sketch. `npm create jazz` will print the same brief, so you and your agent
-  start from one text.
-</Callout>
-
 ## Start with your agent
 
-Paste this into your coding agent, or run `npm create jazz` and it prints the same brief:
+Paste this into your coding agent, or tell it to run `npm create jazz` and follow the output. Both
+give it the same brief, which always lives at
+[jazz.tools/agent-brief.md](https://jazz.tools/agent-brief.md).
 
-```md title="Agent brief (sketch)"
-Set up Jazz in this project. Follow https://jazz.tools/docs/setup and these steps:
+<include cwd lang="md" meta='title="Agent brief"'>
+  public/agent-brief.md
+</include>
 
-1. Install `jazz-tools` and the Jazz agent skill.
-2. Ask me the questions below. Read the linked docs before deciding, and suggest an answer.
-3. Write `schema.ts` and the permission policies, then the backend routes, then the client.
-4. Done when the local dev server runs, one query round-trips from backend and client, and the permission tests pass.
-```
+## The questions your agent will ask
 
-## The questions your agent should ask
+Each one has a default, so "you pick" is a fine answer.
 
-- **Where does Jazz run?** Vercel, Cloudflare, or your own server. See [Deployment](/docs/setup/deployment).
-- **Which backend?** Hono, Next.js route handlers, Express, or none yet. See [Backend](/docs/setup/backend/install).
-- **Which client?** Thin client (small, online-only) or local-first (offline, instant UI). React or vanilla. See [Web client](/docs/setup/web-client/thin-client).
-- **Who are your users?** Which auth provider, or anonymous to start. See [Auth](/docs/setup/auth/authentication).
-- **What's your data?** First tables and who can read and write them. See [Schemas](/docs/schemas/defining-tables) and [Policies](/docs/schemas/policies).
+- **Where will Jazz run?** Your own server, Vercel, or Cloudflare. Default: your own server, locally for now. See [Deployment](/docs/setup/deployment).
+- **Which backend?** Hono, Next.js route handlers, Express, or none yet. See [Backend](/docs/setup/backend).
+- **Which client?** Thin client (default) or local-first; React, Svelte, Vue, vanilla or React Native. See [Browser](/docs/setup/web-client).
+- **Who are the users, and what is the data?** Anonymous or an auth provider, plus the first tables and who may read or write each. See [Auth](/docs/setup/auth) and [Schemas](/docs/schemas).
 
 ## How your agent knows it's done
 
-- A local Jazz server runs and the app connects
-- A backend route reads and writes through the user-scoped client
-- The frontend shows a live query that updates when the backend writes
-- Permission tests cover the policies it wrote (see [Testing](/docs/tooling/testing))
+There's no check command. Your agent shows you each of these working:
+
+- The dev setup starts with one command
+- A backend route writes a row that a live query in the UI shows without a reload
+- A second user can't read rows the policies say are private, and the permission tests pass (see [Testing](/docs/tooling/testing))
+
+It finishes with the commands to run, what it chose and why, and any docs that were wrong or missing, with their URLs.
 
 ## Run a local server yourself
 
@@ -46,8 +42,8 @@ You can also run the sync server directly, with no account anywhere:
 
 See [Your Own Server](/docs/setup/deployment/own-server) for every option.
 
-## Coming next
+## How we test this page
 
-- Final brief text, shared between this page and `npm create jazz`
-- The Jazz agent skill: what it installs and how agents find it
-- Continuous "agent as adopter" tests that run this page end to end on each platform
+An "agent as adopter" suite runs this brief end to end: a coding agent in a clean sandbox, a
+simulated user answering its questions, and a separate LLM judge checking the done list. For now we
+run it by hand as a release gate.

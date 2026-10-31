@@ -82,6 +82,11 @@ const config = {
     // working. Temporary until the new structure settles.
     return [
       { source: "/perf-timeline", destination: "/examples", permanent: false },
+      {
+        source: "/docs/tooling/agent-skills",
+        destination: "/docs/setup/run-locally",
+        permanent: false,
+      },
       { source: "/docs/faq", destination: "/docs/how-jazz-works#faq", permanent: false },
       {
         source: "/docs/setup/deployment/jazz-cloud",
@@ -144,7 +149,7 @@ const config = {
       { source: "/docs/recipes/testing", destination: "/docs/tooling/testing", permanent: false },
       {
         source: "/docs/reference/agent-skills",
-        destination: "/docs/tooling/agent-skills",
+        destination: "/docs/setup/run-locally",
         permanent: false,
       },
       {

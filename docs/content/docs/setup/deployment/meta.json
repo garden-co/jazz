@@ -1,5 +1,5 @@
 {
   "title": "Deployment",
   "defaultOpen": true,
-  "pages": ["vercel", "cloudflare", "own-server"]
+  "pages": ["own-server", "vercel", "cloudflare"]
 }
