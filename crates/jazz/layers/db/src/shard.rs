@@ -171,12 +171,19 @@ impl ShardRole<'_> {
     /// Close the store at `position` (a hybrid-clock receive): nothing it
     /// commits later lands at or below it, so once
     /// [`Self::served_through`] reaches it the store has settled all it
-    /// will ever number up to it. Refused when `position` is further ahead
-    /// of the store's clock than [`HLC_MAX_OFFSET_MS`].
-    pub fn observe(&self, position: u64) -> Result<(), Error> {
+    /// will ever number up to it. A `position` further ahead of the
+    /// store's clock than [`HLC_MAX_OFFSET_MS`] is observed only as far as
+    /// that: returns the position observed, which the caller observes again
+    /// once the clock has caught up.
+    pub fn observe(&self, position: u64) -> Result<u64, Error> {
         let mut inner = self.db.inner.borrow_mut();
         self.require(&inner)?;
-        observe(&mut inner, position)
+        let observed = match &inner.shard.clock {
+            Some(clock) => position.min(hlc(clock().saturating_add(HLC_MAX_OFFSET_MS))),
+            None => position,
+        };
+        observe(&mut inner, observed)?;
+        Ok(observed)
     }
 
     /// The position the store serves its sessions as settled: its newest,

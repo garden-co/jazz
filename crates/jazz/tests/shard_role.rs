@@ -110,19 +110,31 @@ fn a_shard_draws_positions_from_its_clock() {
 fn observing_a_position_closes_the_shard_there() {
     let (db, _now) = shard(1);
     let at = hlc(NOW + 100);
-    db.shard().observe(at).unwrap();
+    assert_eq!(db.shard().observe(at).unwrap(), at);
     assert_eq!(db.shard().served_through(), at, "settled through it");
     insert(&db, "after");
     assert_eq!(newest(&db), at + 1, "nothing lands at or below it");
-    let error = db
-        .shard()
-        .observe(hlc(NOW + HLC_MAX_OFFSET_MS + 1))
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("ahead of this store's clock"),
-        "{error}"
+}
+
+/// A position further ahead of the clock than the offset bound is
+/// observed only as far as the bound; observed again once the clock has
+/// caught up, it closes the shard there.
+#[test]
+fn a_far_ahead_position_is_observed_up_to_the_offset_bound() {
+    let (db, now) = shard(1);
+    let bound = hlc(NOW + HLC_MAX_OFFSET_MS);
+    let far = hlc(NOW + HLC_MAX_OFFSET_MS + 1_000);
+    assert_eq!(db.shard().observe(far).unwrap(), bound);
+    assert_eq!(db.shard().served_through(), bound);
+    insert(&db, "after");
+    assert_eq!(
+        newest(&db),
+        bound + 1,
+        "nothing lands at or below the bound"
     );
-    db.shard().observe(hlc(NOW + HLC_MAX_OFFSET_MS)).unwrap();
+    now.set(NOW + 1_000);
+    assert_eq!(db.shard().observe(far).unwrap(), far);
+    assert_eq!(db.shard().served_through(), far);
 }
 
 #[test]

@@ -19,7 +19,7 @@ Invariant digest:
 - `INV-SHARD-13`: Cross-shard permission closures MUST be obtained through shard-core subscriptions or an explicitly equivalent mechanism before a shard-core assigns a fate that depends on remote-shard policy data.
 - `INV-SHARD-14`: Rebalancing MUST NOT flip partition ownership in the catalogue until the destination shard-core has the partition history needed to serve that ownership and the protocol has defined treatment of in-flight fates/subscriptions.
 - `INV-SHARD-15`: A store opened without a clock MUST take no shard role: its positions count up by one, and observing, holding and fixing positions MUST be refused as not supported (§15.3).
-- `INV-SHARD-16`: A shard's commit positions MUST be hybrid-clock timestamps: each above every position it handed out or observed and no earlier than its clock; a position observed more than `HLC_MAX_OFFSET_MS` ahead of its clock MUST be refused (§15.3).
+- `INV-SHARD-16`: A shard's commit positions MUST be hybrid-clock timestamps: each above every position it handed out or observed and no earlier than its clock; a position more than `HLC_MAX_OFFSET_MS` ahead of its clock MUST be observed only up to its clock plus that offset (§15.3).
 - `INV-SHARD-17`: While a hold stands, the position a shard serves as settled MUST stay below its lowest hold (§15.3).
 - `INV-SHARD-18`: A fixed cross-shard part MUST land at its fixed position, which is at or above its hold; a part with a row written above that position MUST be refused, not landed under the newer version (§15.3).
 
@@ -99,8 +99,11 @@ the shard ownership above are outside this repository and stay exploratory
 - **Observe.** `observe(position)` closes the store at `position`: nothing it
   commits later lands at or below it. A gateway closes a quiet shard so its
   settles reach a position another shard named. A position more than
-  `HLC_MAX_OFFSET_MS` ahead of the store's clock is refused: that peer's clock
-  (or claim) cannot be trusted.
+  `HLC_MAX_OFFSET_MS` ahead of the store's clock is observed only up to the
+  clock plus that offset, since that peer's clock (or claim) cannot be
+  trusted further; `observe` returns the position it observed, and the caller
+  observes the rest once the store's clock has caught up. A `fix` above that
+  bound is refused.
 - **Hold, fix, release.** A cross-shard commit lands at one position on every
   shard it writes. The gateway `hold`s a position for the part on each shard
   (`CommitRef`, the writer's node and transaction number), then `fix`es each
