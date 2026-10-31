@@ -5389,7 +5389,7 @@ impl Inner {
         }
     }
 
-    fn applied_fate(
+    pub(crate) fn applied_fate(
         &self,
         node: [u8; 16],
         tx: u64,
@@ -9213,13 +9213,15 @@ impl Db {
                     .remove(id);
             }
             // A commit writing a row a cross-shard part holds waits until
-            // the part lands (or its hold is released), and what the
-            // session sent after it waits behind it (SPEC 15).
+            // the part lands (or its hold is released), as does every
+            // commit but a fixed part's while a reopened shard waits out
+            // its offset bound; what the session sent after it waits
+            // behind it (SPEC 15).
             if let SyncMessage::Commit { id, ops, .. } = &message
-                && self.inner.borrow().shard.blocks(
+                && self.inner.borrow().commit_waits(
                     crate::db::shard::CommitRef::from(id),
                     &crate::db::shard::HeldRow::of(ops),
-                )
+                )?
             {
                 self.note_held(&mut barrier, &message);
                 held.push_back(message);
@@ -11144,10 +11146,10 @@ impl Db {
                 // A cross-shard part that already landed holds nothing (its
                 // gateway may hold it again for the resend).
                 if resent {
-                    self.inner
-                        .borrow_mut()
-                        .shard
-                        .landed(crate::db::shard::CommitRef { node, tx });
+                    let part = crate::db::shard::CommitRef { node, tx };
+                    let mut inner = self.inner.borrow_mut();
+                    inner.forget_hold(part)?;
+                    inner.shard.landed(part);
                 }
                 // A commit written under a version this server has not
                 // deployed is refused at once, loudly: the app that wrote

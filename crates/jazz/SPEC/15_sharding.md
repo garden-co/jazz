@@ -24,7 +24,7 @@ Invariant digest:
 - `INV-SHARD-18`: A fixed cross-shard part MUST land at its fixed position, which is at or above its hold (§15.3).
 - `INV-SHARD-19`: While a part's hold stands, a session commit writing one of the part's rows MUST wait until the part lands or is released; a part with a row the shard wrote above its fixed position anyway MUST be refused, not landed under the newer version (§15.3).
 - `INV-SHARD-20`: A shard's holds, their rows and fixed positions MUST survive a restart until their part lands or is released (§15.3).
-- `INV-SHARD-21`: A reopened shard MUST number above its clock plus `HLC_MAX_OFFSET_MS` at reopen, so it never numbers at or below a position it served or observed before it stopped (§15.3).
+- `INV-SHARD-21`: A reopened shard MUST wait out its clock plus `HLC_MAX_OFFSET_MS` at reopen before numbering its sessions' commits (a fixed part's and a resend's aside), so it never numbers at or below a position it served or observed before it stopped (§15.3).
 
 ## Details
 
@@ -129,9 +129,17 @@ the shard ownership above are outside this repository and stay exploratory
 - **Durability.** Holds, their rows and fixed positions are written to the
   store (`_jazz_shard_holds`, `_jazz_shard_held_rows`) and reloaded on reopen
   (`INV-SHARD-20`); a part landing deletes them in the same savepoint, and a
-  hold whose part had already landed is dropped on reload. A reopened shard
-  may have served positions up to its clock plus `HLC_MAX_OFFSET_MS` before it
-  stopped, so it numbers past that bound (`INV-SHARD-21`).
+  hold whose part had already landed is dropped on reload, as is the durable
+  hold of a resent part that already landed. A reopened shard that ever
+  observed a position past what it numbered (it records that it did, once)
+  may have served positions up to its clock plus `HLC_MAX_OFFSET_MS` before
+  it stopped, so it waits that bound out (`waits_out`, `INV-SHARD-21`): until
+  its clock passes it, its sessions' commits wait in their backlogs (a fixed
+  part's lands, at its position, and a resend gets its recorded fate), and
+  its host answers holds only after. It then numbers from its clock again
+  rather than from the bound, so its positions stay no further ahead of its
+  peers' clocks than its own clock is, and a peer fixes a part at them. A
+  write that does not wait (the shard's own) numbers past the bound.
 - **Known limit.** A hold whose cross-shard commit is never decided (its
   gateway stopped before the commit point and the writer never resends)
   stands until released, blocking its rows and what the shard serves as

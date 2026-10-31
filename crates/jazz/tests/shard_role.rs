@@ -433,20 +433,45 @@ fn holds_and_fixes_survive_a_reopen() {
     assert_eq!(db.shard().lowest_hold(), None, "and its hold went with it");
 }
 
-/// A reopened shard keeps no record of the positions it observed, so it
-/// numbers no earlier than its offset bound past its clock: above any
-/// position it may have closed at before.
+/// A reopened shard keeps no record of the positions it observed past what
+/// it numbered, so once it observed one it waits out its offset bound past
+/// its clock before numbering: a session's
+/// commit waits until its clock passes the bound, then lands above any
+/// position the shard may have closed at before, at its clock (not ahead
+/// of it, where its peers would refuse to fix a part).
 #[test]
-fn a_reopened_shard_numbers_past_its_offset_bound() {
+fn a_reopened_shard_waits_out_its_offset_bound() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("shard.sqlite");
     let now = Rc::new(Cell::new(NOW));
     let db = shard_at(&path, &now);
+    insert(&db, "before");
+    drop(db);
+    let db = shard_at(&path, &now);
+    assert_eq!(
+        db.shard().waits_out(),
+        None,
+        "a shard that observed nothing past what it numbered waits nothing out"
+    );
     let closed = db.shard().observe(hlc(NOW + 400)).unwrap();
     assert_eq!(db.shard().served_through(), closed);
     drop(db);
     let db = shard_at(&path, &now);
-    insert(&db, "after");
+    assert_eq!(db.shard().waits_out(), Some(NOW + HLC_MAX_OFFSET_MS));
+    let (writer, _upstream, sent_up, sent_down) = writer_on(&db, 2);
+    upload(&writer, &sent_up, None);
+    pump(&db, &writer);
+    assert_eq!(titles(&db), vec!["before"], "the commit waits");
+    now.set(NOW + HLC_MAX_OFFSET_MS + 1);
+    pump(&db, &writer);
+    assert_eq!(db.shard().waits_out(), None);
+    let Outcome::Accepted { at, .. } = fate(&sent_down) else {
+        panic!("refused");
+    };
+    assert_eq!(
+        at,
+        vec![(None, hlc(NOW + HLC_MAX_OFFSET_MS + 1))],
+        "at its clock"
+    );
     assert!(newest(&db) > closed, "nothing lands at or below the close");
-    assert!(newest(&db) > hlc(NOW + HLC_MAX_OFFSET_MS));
 }

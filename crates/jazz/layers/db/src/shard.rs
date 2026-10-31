@@ -13,9 +13,10 @@
 //! store serves as settled ([`ShardRole::served_through`]) stays below it.
 //!
 //! Holds and fixed positions are durable: they persist with the store and
-//! stand again when it reopens, and a reopened shard numbers no earlier
-//! than [`HLC_MAX_OFFSET_MS`] past its clock, above anything it may have
-//! observed before. While a hold stands, a commit writing one of the rows
+//! stand again when it reopens, and a reopened shard waits out
+//! [`HLC_MAX_OFFSET_MS`] past its clock before numbering its sessions'
+//! commits ([`ShardRole::waits_out`]), so it numbers above anything it may
+//! have observed before. While a hold stands, a commit writing one of the rows
 //! its part writes waits (another writer's), or is refused (another
 //! cross-shard part's hold, which could otherwise wait on it in turn).
 //!
@@ -116,14 +117,21 @@ pub(crate) struct ShardState {
     fixed: HashMap<CommitRef, u64>,
     /// The rows each held part writes, and who holds each row.
     rows: HashMap<HeldRow, CommitRef>,
+    /// On a reopened shard, the clock reading (ms) it waits out before
+    /// numbering: its clock at reopen plus the offset bound.
+    resumes_after: Option<u64>,
+    /// Whether [`SHARD_OBSERVED`] is set.
+    observed: bool,
 }
+
+/// The `_jazz_meta` key a clocked store sets the first time it observes a
+/// position past what it numbered: from then on, it may have served a
+/// position it keeps no record of.
+const SHARD_OBSERVED: &str = "shard_observed";
 
 /// The durable record of holds: one row per held part, with its fixed
 /// position once fixed, and one per row it writes. Created by the first
 /// hold, so an unsharded store's file never holds them.
-/// The `_jazz_meta` key a clocked store sets on its first open.
-const SHARD_OPENED: &str = "shard_opened";
-
 const HOLDS_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_shard_holds (at INTEGER PRIMARY KEY, node BLOB NOT NULL, tx INTEGER NOT NULL, fixed INTEGER, UNIQUE (node, tx));\
     CREATE TABLE IF NOT EXISTS _jazz_shard_held_rows (node BLOB NOT NULL, tx INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL, PRIMARY KEY (tbl, id));";
@@ -171,30 +179,58 @@ impl ShardState {
 
 impl Inner {
     /// The position the next commit lands at: above every position handed
-    /// out or observed, and on a shard no earlier than its clock.
+    /// out or observed, and on a shard no earlier than its clock (past the
+    /// offset bound it waits out after a reopen, for a write that does not
+    /// wait).
     pub(crate) fn next_seq(&self) -> u64 {
         match &self.shard.clock {
-            Some(clock) => (self.seq + 1).max(hlc(clock())),
+            Some(clock) => {
+                let floor = self.waits_out().map_or(0, |after| hlc(after) + 1);
+                (self.seq + 1).max(hlc(clock())).max(floor)
+            }
             None => self.seq + 1,
         }
     }
 
-    /// A shard reopens: the holds it kept stand again, and it numbers no
-    /// earlier than its offset bound past its clock. What it observed
+    /// While a reopened shard waits out its offset bound: the clock reading
+    /// (ms) it waits to pass.
+    pub(crate) fn waits_out(&self) -> Option<u64> {
+        let clock = self.shard.clock.as_ref()?;
+        self.shard.resumes_after.filter(|&after| clock() <= after)
+    }
+
+    /// Whether the session commit `by` writing `rows` waits: another part
+    /// holds one of them, or the shard is waiting out its offset bound
+    /// after a reopen and `by` is neither a part fixed at a position nor a
+    /// resend of a commit that landed.
+    pub(crate) fn commit_waits(&self, by: CommitRef, rows: &[HeldRow]) -> Result<bool, Error> {
+        if self.shard.blocks(by, rows) {
+            return Ok(true);
+        }
+        if self.waits_out().is_none() || self.shard.fixed(by).is_some() {
+            return Ok(false);
+        }
+        Ok(self.applied_fate(by.node, by.tx)?.is_none())
+    }
+
+    /// A shard reopens: the holds it kept stand again, and it waits out its
+    /// offset bound past its clock before numbering. What it observed
     /// before is not kept, but none of it was further ahead than that, so
     /// nothing it numbers from now lands at or below a position it closed
-    /// at. A hold whose part already landed is dropped.
+    /// at. Numbering from its clock afterwards (rather than from the bound
+    /// at once) keeps its positions no further ahead of its peers' clocks
+    /// than its own clock is. A hold whose part already landed is dropped.
     pub(crate) fn load_shard(&mut self) -> Result<(), Error> {
         let Some(clock) = &self.shard.clock else {
             return Ok(());
         };
-        // A reopened shard may have served positions up to its clock plus
-        // the offset bound before it stopped; it numbers past them.
-        let bound = hlc(clock().saturating_add(HLC_MAX_OFFSET_MS));
-        if self.meta(SHARD_OPENED)?.is_some() {
-            self.seq = self.seq.max(bound);
-        } else {
-            self.persist_meta(SHARD_OPENED, 1)?;
+        // A reopened shard that observed positions past what it numbered
+        // may have served them, up to its clock plus the offset bound,
+        // before it stopped; it waits that bound out. (What it numbered or
+        // held, it reloads.)
+        if self.meta(SHARD_OBSERVED)?.is_some() {
+            self.shard.observed = true;
+            self.shard.resumes_after = Some(clock().saturating_add(HLC_MAX_OFFSET_MS));
         }
         let kept: bool = self
             .conn
@@ -388,6 +424,13 @@ impl ShardRole<'_> {
         self.db.inner.borrow().served_through()
     }
 
+    /// While a reopened shard waits out its offset bound, the clock reading
+    /// (ms) it waits to pass: until then its sessions' commits wait (but a
+    /// fixed part's), and a caller holds nothing yet.
+    pub fn waits_out(&self) -> Option<u64> {
+        self.db.inner.borrow().waits_out()
+    }
+
     /// The lowest position held for a part still to land, if any.
     pub fn lowest_hold(&self) -> Option<u64> {
         self.db.inner.borrow().shard.lowest_hold()
@@ -496,6 +539,10 @@ fn observe(inner: &mut Inner, position: u64) -> Result<(), Error> {
                 "position {position} is more than {HLC_MAX_OFFSET_MS} ms ahead of this store's clock"
             ),
         ));
+    }
+    if position > inner.seq && !inner.shard.observed && inner.shard.clock.is_some() {
+        inner.persist_meta(SHARD_OBSERVED, 1)?;
+        inner.shard.observed = true;
     }
     inner.seq = inner.seq.max(position);
     Ok(())
