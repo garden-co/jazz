@@ -10,7 +10,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
-use jazz::db::shard::{CommitRef, HLC_COUNTER_BITS, HLC_MAX_OFFSET_MS, HeldRow, hlc, hlc_ms};
+use jazz::db::shard::{
+    CommitRef, HLC_COUNTER_BITS, HLC_MAX_OFFSET_MS, Held, HeldRow, Resolution, hlc, hlc_ms,
+};
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, Outcome, SyncMessage, Transport, TransportError,
     Upstream, block_on,
@@ -20,6 +22,7 @@ use jazz::records::Value;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 use common::{allow_all_policies, compile_schema};
+use jazz::db::{Acting, WireOp};
 
 const NOW: u64 = 1_790_000_000_000;
 
@@ -30,6 +33,13 @@ fn config(node: u8) -> DbConfig {
                 TableSchemaBuilder::new("docs")
                     .column("title", ColumnType::Text)
                     .policies(allow_all_policies()),
+            )
+            // Writable by anyone, readable by no session: an update of a
+            // note needs read permission on it, so a session's is refused.
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("title", ColumnType::Text)
+                    .policies(common::allow_all_writes()),
             )
             .build(),
     );
@@ -59,6 +69,19 @@ fn shard_at(path: &std::path::Path, now: &Rc<Cell<u64>>) -> Db {
         jazz::db::FileOptions::default(),
     ))
     .unwrap()
+}
+
+/// Holds `part` (writing `rows`), which must be held at once: its position.
+fn held_at(db: &Db, part: CommitRef, rows: &[HeldRow]) -> u64 {
+    match db.shard().hold(part, rows, b"the part").unwrap() {
+        Held::At(at) => at,
+        other => panic!("not held: {other:?}"),
+    }
+}
+
+/// Polls `future` once, with a waker that does nothing.
+fn poll_once<F: std::future::Future>(future: std::pin::Pin<&mut F>) -> std::task::Poll<F::Output> {
+    future.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
 }
 
 fn doc_row(row: RowUuid) -> HeldRow {
@@ -108,7 +131,7 @@ fn an_unsharded_store_takes_no_shard_role() {
     assert!(!db.shard().is_shard());
     for error in [
         db.shard().observe(5).unwrap_err(),
-        db.shard().hold(part, &[]).unwrap_err(),
+        db.shard().hold(part, &[], b"").unwrap_err(),
         db.shard().fix(part, 5).unwrap_err(),
     ] {
         assert!(error.to_string().contains("not supported"), "{error}");
@@ -178,8 +201,8 @@ fn a_hold_keeps_what_is_served_as_settled_below_it() {
         node: [9; 16],
         tx: 1,
     };
-    let held = db.shard().hold(part, &[]).unwrap();
-    assert_eq!(db.shard().hold(part, &[]).unwrap(), held, "held once");
+    let held = held_at(&db, part, &[]);
+    assert_eq!(held_at(&db, part, &[]), held, "held once");
     assert_eq!(db.shard().lowest_hold(), Some(held));
     insert(&db, "meanwhile");
     assert_eq!(
@@ -310,7 +333,7 @@ fn a_fixed_part_lands_at_its_fixed_position() {
     let (db, _now) = shard(1);
     let (writer, _upstream, sent_up, sent_down) = writer_of(&db);
     let part = upload(&writer, &sent_up, None);
-    let held = db.shard().hold(part, &[]).unwrap();
+    let held = held_at(&db, part, &[]);
     insert(&db, "the shard's own");
     let own = held + 1;
     assert_eq!(db.shard().served_through(), held - 1);
@@ -326,38 +349,45 @@ fn a_fixed_part_lands_at_its_fixed_position() {
     assert_eq!(at, vec![(None, held)], "at its fixed position");
 }
 
-/// The shard's own write (no session's commit, which would wait) to a row
-/// past a part's hold cannot take the part under it: the part is refused,
-/// said so, instead of landing below a newer version of its row.
+/// The shard's own local write to a row a part holds waits until the part
+/// lands, then lands above it: the part is never refused for a newer
+/// version of its row (INV-SHARD-19).
 #[test]
-fn a_part_whose_row_the_shard_wrote_past_its_hold_is_refused() {
+fn a_local_write_of_a_held_row_waits_for_the_part() {
     let (db, _now) = shard(1);
     let (writer, _upstream, sent_up, sent_down) = writer_of(&db);
     let row = RowUuid::from_bytes([7; 16]);
     let part = upload(&writer, &sent_up, Some(row));
-    let held = db.shard().hold(part, &[doc_row(row)]).unwrap();
-    block_on(db.insert(
+    let held = held_at(&db, part, &[doc_row(row)]);
+    let mine = db.upsert(
         "docs",
+        row,
         BTreeMap::from([("title".to_owned(), Value::String("mine".to_owned()))]),
-        InsertOptions {
-            row_id: Some(row),
-            ..Default::default()
-        },
-    ))
-    .unwrap();
+        Default::default(),
+    );
+    let mut mine = std::pin::pin!(mine);
+    assert!(
+        poll_once(mine.as_mut()).is_pending(),
+        "the local write waits"
+    );
     db.shard().fix(part, held).unwrap();
     pump(&db, &writer);
-    let Outcome::Refused { error, .. } = fate(&sent_down) else {
-        panic!("accepted below a newer version of its row");
+    let Outcome::Accepted { at, .. } = fate(&sent_down) else {
+        panic!("the part was refused");
     };
-    assert!(format!("{error:?}").contains("INV-SHARD-19"), "{error:?}");
-    db.shard().release(part).unwrap();
-    assert_eq!(db.shard().lowest_hold(), None);
+    assert_eq!(at, vec![(None, held)], "at its fixed position");
+    let std::task::Poll::Ready(written) = poll_once(mine.as_mut()) else {
+        panic!("the local write still waits once the part landed");
+    };
+    written.unwrap();
+    assert_eq!(titles(&db), vec!["mine"]);
+    assert!(newest(&db) > held, "above the part");
 }
 
 /// Another session's commit to a row a part holds waits while the hold
 /// stands, with what that session sent after it, and lands above it once
-/// the hold goes. Another part's hold of the row is refused.
+/// the hold goes. Another part's hold of the row is queued, and granted
+/// once the first part's hold goes.
 #[test]
 fn a_hold_makes_other_writers_of_its_rows_wait() {
     let (db, _now) = shard(1);
@@ -366,18 +396,20 @@ fn a_hold_makes_other_writers_of_its_rows_wait() {
         node: [9; 16],
         tx: 1,
     };
-    let held = db.shard().hold(part, &[doc_row(row)]).unwrap();
-    let error = db
-        .shard()
-        .hold(
-            CommitRef {
-                node: [9; 16],
-                tx: 2,
-            },
-            &[doc_row(row)],
-        )
-        .unwrap_err();
-    assert!(error.to_string().contains("held by another"), "{error}");
+    let held = held_at(&db, part, &[doc_row(row)]);
+    let second = CommitRef {
+        node: [9; 16],
+        tx: 2,
+    };
+    assert_eq!(
+        db.shard().hold(second, &[doc_row(row)], b"").unwrap(),
+        Held::Queued
+    );
+    assert_eq!(
+        db.shard().hold(second, &[doc_row(row)], b"").unwrap(),
+        Held::Queued
+    );
+    assert!(db.shard().take_granted().unwrap().is_empty(), "not yet");
     let (writer, _upstream, sent_up, sent_down) = writer_of(&db);
     upload(&writer, &sent_up, Some(row));
     upload(&writer, &sent_up, None);
@@ -391,6 +423,14 @@ fn a_hold_makes_other_writers_of_its_rows_wait() {
     );
     assert!(titles(&db).is_empty());
     db.shard().release(part).unwrap();
+    let granted = db.shard().take_granted().unwrap();
+    assert_eq!(granted.len(), 1);
+    assert_eq!(granted[0].0, second, "the queued hold is granted");
+    assert!(granted[0].1 > held);
+    // The session's commit now waits on the second part.
+    pump(&db, &writer);
+    assert!(titles(&db).is_empty(), "still held, by the second part");
+    db.shard().release(second).unwrap();
     pump(&db, &writer);
     assert_eq!(titles(&db), vec!["theirs", "theirs"]);
     let Outcome::Accepted { at, .. } = fate(&sent_down) else {
@@ -413,13 +453,19 @@ fn holds_and_fixes_survive_a_reopen() {
     let (upstream, sent_up, _) = connect(&writer, &db);
     // The writer's commit is in flight when the shard goes down.
     let part = upload(&writer, &sent_up, Some(row));
-    let held = db.shard().hold(part, &[doc_row(row)]).unwrap();
+    let held = held_at(&db, part, &[doc_row(row)]);
     db.shard().fix(part, held).unwrap();
     drop(upstream);
     drop(db);
 
     let db = shard_at(&path, &now);
     assert_eq!(db.shard().lowest_hold(), Some(held), "the hold stands");
+    assert_eq!(
+        db.shard().part(part).unwrap().as_deref(),
+        Some(&b"the part"[..]),
+        "with its part's data"
+    );
+    assert_eq!(db.shard().holds(), vec![(part, held, Some(held))]);
     assert_eq!(db.shard().served_through(), held - 1);
     let (_upstream, _, sent_down) = connect(&writer, &db);
     pump(&db, &writer);
@@ -474,4 +520,166 @@ fn a_reopened_shard_waits_out_its_offset_bound() {
         "at its clock"
     );
     assert!(newest(&db) > closed, "nothing lands at or below the close");
+}
+
+/// A cross-shard commit is decided once on its decider: aborted when the
+/// abort comes first (the part's resend is then refused, and a hold of it
+/// answers the decision), committed when the part landed first (an abort
+/// then answers that).
+#[test]
+fn a_decider_decides_a_cross_shard_commit_once() {
+    let (db, _now) = shard(1);
+    let (writer, _upstream, sent_up, sent_down) = writer_of(&db);
+    let part = upload(&writer, &sent_up, None);
+    held_at(&db, part, &[]);
+    assert_eq!(db.shard().resolution(part).unwrap(), None);
+    assert_eq!(db.shard().abort(part).unwrap(), Resolution::Aborted);
+    assert_eq!(db.shard().lowest_hold(), None, "the hold went");
+    assert_eq!(db.shard().abort(part).unwrap(), Resolution::Aborted);
+    pump(&db, &writer);
+    let Outcome::Refused { .. } = fate(&sent_down) else {
+        panic!("the part landed after its commit was aborted");
+    };
+    assert!(titles(&db).is_empty());
+    assert_eq!(
+        db.shard().hold(part, &[], b"").unwrap(),
+        Held::Decided(Resolution::Aborted)
+    );
+
+    let (writer, _upstream, sent_up, sent_down) = writer_on(&db, 3);
+    let part = upload(&writer, &sent_up, None);
+    let held = held_at(&db, part, &[]);
+    db.shard().fix(part, held).unwrap();
+    pump(&db, &writer);
+    let Outcome::Accepted { .. } = fate(&sent_down) else {
+        panic!("refused");
+    };
+    assert_eq!(db.shard().abort(part).unwrap(), Resolution::Committed(held));
+    assert_eq!(
+        db.shard().resolution(part).unwrap(),
+        Some(Resolution::Committed(held))
+    );
+    assert_eq!(
+        db.shard().hold(part, &[], b"").unwrap(),
+        Held::Decided(Resolution::Committed(held))
+    );
+}
+
+/// Queued holds are durable: a shard reopened while a hold waits behind
+/// another part's still has it queued, with its part, and grants it once
+/// the rows are free.
+#[test]
+fn queued_holds_survive_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shard.sqlite");
+    let now = Rc::new(Cell::new(NOW));
+    let db = shard_at(&path, &now);
+    let row = RowUuid::from_bytes([7; 16]);
+    let first = CommitRef {
+        node: [9; 16],
+        tx: 1,
+    };
+    let second = CommitRef {
+        node: [9; 16],
+        tx: 2,
+    };
+    held_at(&db, first, &[doc_row(row)]);
+    assert_eq!(
+        db.shard()
+            .hold(second, &[doc_row(row)], b"the second part")
+            .unwrap(),
+        Held::Queued
+    );
+    drop(db);
+
+    let db = shard_at(&path, &now);
+    assert_eq!(
+        db.shard()
+            .hold(second, &[doc_row(row)], b"the second part")
+            .unwrap(),
+        Held::Queued,
+        "still queued, not held twice"
+    );
+    now.set(NOW + HLC_MAX_OFFSET_MS + 1);
+    assert!(db.shard().take_granted().unwrap().is_empty(), "not yet");
+    db.shard().release(first).unwrap();
+    let granted = db.shard().take_granted().unwrap();
+    assert_eq!(granted.len(), 1);
+    assert_eq!(granted[0].0, second, "the queued hold is granted");
+    assert_eq!(
+        db.shard().part(second).unwrap().as_deref(),
+        Some(&b"the second part"[..]),
+        "with its part"
+    );
+    db.shard().release(second).unwrap();
+    drop(db);
+    let db = shard_at(&path, &now);
+    assert!(db.shard().holds().is_empty());
+    assert!(
+        db.shard().take_granted().unwrap().is_empty(),
+        "nothing queued"
+    );
+}
+
+/// The ops of the writer's last uploaded commit.
+fn uploaded_ops(sent_up: &Log) -> Vec<WireOp> {
+    sent_up
+        .borrow()
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            SyncMessage::Commit { ops, .. } => Some(ops.clone()),
+            _ => None,
+        })
+        .expect("the writer uploaded its commit")
+}
+
+/// A shard checks a cross-shard part when it holds it, as its writer's
+/// session would commit it, and writes nothing: a part its session may
+/// write passes, one it may not is refused (and its hold is never taken,
+/// so no fix of it can be refused later).
+#[test]
+fn a_part_is_checked_as_its_session_without_writing() {
+    let (db, _now) = shard(1);
+    let (writer, _upstream, sent_up, _sent_down) = writer_of(&db);
+    let session = AuthorSubject::for_test_bytes([5; 16]);
+    let part = upload(&writer, &sent_up, None);
+    db.check_part(
+        session,
+        None,
+        Acting::Own,
+        (part.node, part.tx),
+        uploaded_ops(&sent_up),
+    )
+    .expect("a doc anyone may write");
+    assert!(titles(&db).is_empty(), "the check wrote nothing");
+    assert_eq!(db.shard().resolution(part).unwrap(), None, "nor a fate");
+    pump(&db, &writer);
+    assert_eq!(titles(&db), vec!["theirs"], "the part itself lands after");
+
+    // A note, then its update: the update needs read permission on it.
+    let note = RowUuid::from_bytes([8; 16]);
+    block_on(writer.insert(
+        "notes",
+        BTreeMap::from([("title".to_owned(), Value::String("a note".to_owned()))]),
+        InsertOptions {
+            row_id: Some(note),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump(&db, &writer);
+    block_on(writer.update(
+        "notes",
+        note,
+        BTreeMap::from([("title".to_owned(), Value::String("changed".to_owned()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(writer.tick()).unwrap();
+    let update = uploaded_ops(&sent_up);
+    let error = db
+        .check_part(session, None, Acting::Own, ([6; 16], 1), update)
+        .expect_err("a session may not update a note it cannot read");
+    assert!(error.to_string().contains("read"), "{error}");
 }
