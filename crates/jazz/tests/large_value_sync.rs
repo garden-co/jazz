@@ -505,8 +505,10 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
         pull("docs", 1, seq, doc, vec![unknown]),
     ];
     // Through the draft's own row, at any version: she may read none.
+    // Positions are clock times, so the reader guesses those near the doc's.
     pulls.extend(
-        (0..seq.seq + 4).map(|seq| pull("drafts", 2, jazz::db::Pos::at(seq), draft, vec![draft])),
+        (seq.seq.saturating_sub(8)..seq.seq + 4)
+            .map(|seq| pull("drafts", 2, jazz::db::Pos::at(seq), draft, vec![draft])),
     );
     up.borrow_mut()
         .push_back(SyncMessage::ChunkRequests { pulls });
@@ -2218,7 +2220,11 @@ fn a_relay_forwards_no_pull_its_tab_may_not_make() {
         span: Some((0, LARGE as u64)),
     };
     let mut pulls = vec![pull("docs", 1, seq, draft)];
-    pulls.extend((0..seq.seq + 4).map(|seq| pull("drafts", 2, jazz::db::Pos::at(seq), draft)));
+    // Positions are clock times, so the tab guesses those near the doc's.
+    pulls.extend(
+        (seq.seq.saturating_sub(8)..seq.seq + 4)
+            .map(|seq| pull("drafts", 2, jazz::db::Pos::at(seq), draft)),
+    );
     up.borrow_mut()
         .push_back(SyncMessage::ChunkRequests { pulls });
     for _ in 0..4 {

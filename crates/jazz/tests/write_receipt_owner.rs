@@ -31,7 +31,9 @@ fn identity(node: u8) -> DbIdentity {
 
 fn open(node: u8, path: Option<&Path>) -> Binding {
     let identity = identity(node);
-    let config = DbConfig::new(schema(), identity);
+    // A clock stopped at the hybrid-clock epoch numbers 1, 2, 3, so two
+    // stores' first writes share a seq.
+    let config = DbConfig::new(schema(), identity).with_clock(|| jazz::db::shard::HLC_EPOCH_MS);
     let db = match path {
         Some(path) => block_on(Db::open_at(config, path, Default::default())),
         None => block_on(Db::open(config)),

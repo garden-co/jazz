@@ -84,7 +84,7 @@ fn now_ms() -> i64 {
 /// The kind of a version's position (SPEC 4): its [`Pos::n`]. Every
 /// accepted version is [`ACCEPTED`], at the authority's position. Every
 /// unsettled one is [`PENDING`], at its writer's commit HLC (see
-/// [`crate::db::HLC_EPOCH_MS`]), so it is the same in every store that
+/// [`crate::db::shard::HLC_EPOCH_MS`]), so it is the same in every store that
 /// holds it, after every accepted one. Two writers' pending versions can
 /// share a position: they order by writer node, then tx (see [`Order`]).
 pub const ACCEPTED: i64 = 0;
@@ -991,6 +991,18 @@ pub enum WireWrite {
 }
 
 impl WireWrite {
+    /// The row the write names.
+    pub fn row(&self) -> [u8; 16] {
+        match self {
+            WireWrite::Insert { row, .. }
+            | WireWrite::Update { row, .. }
+            | WireWrite::Upsert { row, .. }
+            | WireWrite::Delete { row, .. }
+            | WireWrite::Restore { row, .. }
+            | WireWrite::Move { row, .. } => *row,
+        }
+    }
+
     /// The stored table the write names.
     pub fn table(&self) -> &str {
         match self {
@@ -5555,7 +5567,7 @@ impl Inner {
         }
     }
 
-    fn applied_fate(
+    pub(crate) fn applied_fate(
         &self,
         node: [u8; 16],
         tx: u64,
@@ -5833,10 +5845,14 @@ impl Inner {
     /// without one (it numbers no accepted positions: its own writes and
     /// its sessions' stay pending until a server accepts them), so a
     /// session's snapshot is one the authority validates against as it is.
-    fn served_through(&self) -> u64 {
+    pub(crate) fn served_through(&self) -> u64 {
         match &self.client {
             Some(client) => client.known,
-            None => self.seq,
+            // A shard's held position may still take a cross-shard part.
+            None => match self.shard.lowest_hold() {
+                Some(held) => self.seq.min(held - 1),
+                None => self.seq,
+            },
         }
     }
 
@@ -9492,6 +9508,21 @@ impl Db {
                     .1
                     .remove(id);
             }
+            // A commit writing a row a cross-shard part holds waits until
+            // the part lands (or its hold is released), as does every
+            // commit but a fixed part's while a reopened shard waits out
+            // its offset bound; what the session sent after it waits
+            // behind it (SPEC 15).
+            if let SyncMessage::Commit { id, ops, .. } = &message
+                && self
+                    .inner
+                    .borrow()
+                    .commit_waits(crate::db::shard::CommitRef::from(id), ops)?
+            {
+                self.note_held(&mut barrier, &message);
+                held.push_back(message);
+                continue;
+            }
             if let SyncMessage::PushChunks { nodes } = &message {
                 let bytes: usize = nodes.iter().map(|node| node.bytes.len()).sum();
                 let mut inner = self.inner.borrow_mut();
@@ -11421,6 +11452,14 @@ impl Db {
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
                 let resent = known.is_some();
+                // A cross-shard part that already landed holds nothing (its
+                // gateway may hold it again for the resend).
+                if resent {
+                    let part = crate::db::shard::CommitRef { node, tx };
+                    let mut inner = self.inner.borrow_mut();
+                    inner.forget_hold(part)?;
+                    inner.shard.landed(part);
+                }
                 // A commit written under a version this server has not
                 // deployed is refused at once, loudly: the app that wrote
                 // it was released ahead of its schema (INV-SYNC-52).
@@ -12082,9 +12121,39 @@ impl Db {
             previous
         };
         let merged: HashSet<RowKey>;
-        let (seq, mark) = {
+        let (seq, mark, prior) = {
             let mut inner = self.inner();
-            let seq = inner.seq + 1;
+            // A cross-shard part lands where all its parts do: at the
+            // position its gateway fixed, under commits this shard accepted
+            // since its hold. None of those wrote its rows: they waited
+            // while the hold stood (see `serve_session`).
+            let part = crate::db::shard::CommitRef {
+                node: id.0,
+                tx: id.1,
+            };
+            let fixed = inner.shard.fixed(part);
+            let seq = fixed.unwrap_or_else(|| inner.next_seq());
+            let prior = inner.seq;
+            if let Some(at) = fixed {
+                for op in &ops {
+                    let Some(row) = op.row() else { continue };
+                    let newest = inner
+                        .schema
+                        .stored_table(op.table())
+                        .and_then(|table| inner.newest_seq(table, row))
+                        .map_err(|e| (e, Vec::new()))?;
+                    if newest.is_some_and(|newest| newest.seq > at) {
+                        return Err((
+                            Error::new(
+                                ErrorCode::Protocol,
+                                "a row of this cross-shard part was written above its fixed \
+                                 position, though its hold stood (INV-SHARD-19)",
+                            ),
+                            Vec::new(),
+                        ));
+                    }
+                }
+            }
             // A relay keeps the session's commit clock: the versions it
             // stores for the session are at the session's pending position,
             // written by the session (SPEC 8 §8.13).
@@ -12135,8 +12204,14 @@ impl Db {
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
                 return Err((error, Vec::new()));
             }
-            inner.seq = seq;
-            (seq, mark)
+            // Its hold goes with it: the record of both commits together.
+            if let Err(error) = inner.forget_hold(part) {
+                inner.changed.borrow_mut().truncate(mark);
+                end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
+                return Err((error, Vec::new()));
+            }
+            inner.seq = inner.seq.max(seq);
+            (seq, mark, prior)
         };
         // The relay's own upload record and the rows the sender hears about
         // are read before the commit is released, so a storage error
@@ -12170,6 +12245,10 @@ impl Db {
         match finished {
             Ok(rows) => {
                 end_savepoint(&inner.conn, "upload", true).map_err(|e| (e, Vec::new()))?;
+                inner.shard.landed(crate::db::shard::CommitRef {
+                    node: id.0,
+                    tx: id.1,
+                });
                 let on = if relay {
                     landed
                 } else {
@@ -12190,7 +12269,7 @@ impl Db {
                 inner.as_sent.borrow_mut().clear();
                 inner.changed.borrow_mut().truncate(mark);
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
-                inner.seq = seq - 1;
+                inner.seq = prior;
                 Err((error, Vec::new()))
             }
         }

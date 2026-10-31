@@ -41,6 +41,9 @@ pub use large_ops::{
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
+
+#[path = "shard.rs"]
+pub mod shard;
 pub use crate::names::LensEffects;
 pub use crate::options::REMOTE_LINK_ATTEMPT_WINDOW;
 use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
@@ -561,6 +564,8 @@ struct Inner {
     /// The kind of this store's own versions: [`sync::PENDING`] on a
     /// replica, [`sync::ACCEPTED`] (0) until it becomes one.
     pub(crate) me: i64,
+    /// Its clock and holds as a shard ([`shard`]); inert unsharded.
+    pub(crate) shard: shard::ShardState,
     pub(crate) claims: HashMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Live subscription groups and their invalidation index.
     fan: fanout::Fanout,
@@ -1116,23 +1121,9 @@ pub const AUTHORIZATION_DENIED: &str = Reason::AuthorizationDenied.as_str();
 /// timestamp may be (SPEC 3, INV-TX-7).
 pub const SKEW_TOLERANCE_MS: i64 = 30_000;
 
-/// Where commit HLCs count from (Unix ms, 2025-01-01).
-pub const HLC_EPOCH_MS: i64 = 1_735_689_600_000;
-
-/// The bits of a commit HLC below its milliseconds: a counter, for commits
-/// within one millisecond. The authority's positions (`jazz::db::shard`)
-/// share this encoding.
-pub const HLC_COUNTER_BITS: u32 = 11;
-
-/// How far past its own wall clock a store counts an HLC it received (see
-/// [`Inner::observe_hlc`]).
-pub const HLC_SKEW_MS: i64 = 500;
-
-/// The commit HLC at wall-clock `ms`, its counter 0: milliseconds since
-/// [`HLC_EPOCH_MS`], shifted past the counter. Under 2^52 for 69 years.
-pub fn hlc(ms: i64) -> u64 {
-    (ms.saturating_sub(HLC_EPOCH_MS).max(0) as u64) << HLC_COUNTER_BITS
-}
+/// How far past its own clock a store counts an HLC it received (see
+/// [`Inner::observe_hlc`]): the shard offset bound.
+pub const HLC_SKEW_MS: u64 = shard::HLC_MAX_OFFSET_MS;
 
 /// The text leading the message of a write the authority refuses for a
 /// timestamp too far ahead (its reason is
@@ -1424,6 +1415,11 @@ impl Db {
                     .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
                 seq: 0,
                 me: 0,
+                shard: shard::ShardState::new(
+                    config
+                        .clock
+                        .unwrap_or_else(|| Box::new(shard::wall_clock_ms)),
+                ),
                 claims: HashMap::new(),
                 fan: fanout::Fanout::default(),
                 changed: RefCell::new(Vec::new()),
@@ -1459,6 +1455,7 @@ impl Db {
             }
             inner.seq = seq;
             inner.load_client()?;
+            inner.load_shard()?;
         }
         Ok(db)
     }
@@ -2423,7 +2420,7 @@ impl Db {
             let mut inner = self.inner();
             let (seq, standalone) = match &inner.tx {
                 Some((seq, _)) => (*seq, false),
-                None => (inner.seq + 1, true),
+                None => (inner.next_seq(), true),
             };
             begin_savepoint(&inner.conn, "w")?;
             let mark = inner.changed.borrow().len();
@@ -2433,7 +2430,7 @@ impl Db {
                     let wrote = handle.seq == inner.own_pos(seq);
                     if wrote {
                         if standalone {
-                            inner.seq = seq;
+                            inner.seq = inner.seq.max(seq);
                         } else if let Some((_, tables)) = &mut inner.tx {
                             tables.insert(table.to_owned());
                         }
@@ -2486,7 +2483,7 @@ impl Db {
             }
             begin_savepoint(&inner.conn, "tx")?;
             inner.changed.borrow_mut().clear();
-            let seq = inner.seq + 1;
+            let seq = inner.next_seq();
             inner.tx = Some((seq, BTreeSet::new()));
         }
         let mut tx = MergeableTx { db: self, identity };
@@ -2504,7 +2501,9 @@ impl Db {
             match &result {
                 Ok(_) => {
                     if !tables.is_empty() {
-                        inner.seq = seq;
+                        // A hold or observe while the tx was open may have
+                        // moved seq past the one it drew.
+                        inner.seq = inner.seq.max(seq);
                     }
                     Some((seq, tables))
                 }
@@ -7111,6 +7110,13 @@ impl Inner {
         })
     }
 
+    /// The clock commit HLCs read (Unix ms): this store's configured clock
+    /// (`DbConfig::with_clock`), or the one a test set.
+    fn hlc_clock_ms(&self) -> u64 {
+        self.clock_for_test
+            .map_or_else(|| (self.shard.clock)(), |ms| ms.max(0) as u64)
+    }
+
     /// The next commit HLC: after every one this store gave or saw, and
     /// not before its wall clock.
     pub(crate) fn next_hlc(&mut self) -> u64 {
@@ -7121,7 +7127,7 @@ impl Inner {
 
     /// The HLC a commit begun now would take ([`Inner::next_hlc`]).
     pub(crate) fn peek_hlc(&self) -> u64 {
-        self.hlc_last.saturating_add(1).max(hlc(self.now_ms()))
+        self.hlc_last.saturating_add(1).max(shard::hlc(self.hlc_clock_ms()))
     }
 
     /// Hold this store's HLC past one it received (a position or a commit
@@ -7130,7 +7136,7 @@ impl Inner {
     /// store's wall clock: a writer's clock far ahead cannot carry this
     /// store's commits with it.
     pub(crate) fn observe_hlc(&mut self, seen: u64) {
-        let ceiling = hlc(self.now_ms().saturating_add(HLC_SKEW_MS));
+        let ceiling = shard::hlc(self.hlc_clock_ms().saturating_add(HLC_SKEW_MS));
         self.hlc_last = self.hlc_last.max(seen.min(ceiling));
     }
 
@@ -7583,7 +7589,7 @@ impl Db {
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();
-            let seq = inner.seq + 1;
+            let seq = inner.next_seq();
             begin_savepoint(&inner.conn, "commit_batch")?;
             let mark = inner.changed.borrow().len();
             inner.defer_checks();
@@ -7599,7 +7605,7 @@ impl Db {
             end_savepoint(&inner.conn, "commit_batch", true)?;
             let prior = inner.seq;
             if !ops.is_empty() || kind.validates_reads() {
-                inner.seq = seq;
+                inner.seq = inner.seq.max(seq);
             }
             (seq, prior, mark)
         };
