@@ -123,7 +123,10 @@ authority seq (`since` and `at` optional), as is `ConnectionSettled`'s
 server never does (§8.13). A row image's `at` is a banded `_t`: accepted, or
 the sender's own pending band, which the receiver holds in its
 upstream-pending band. A receiver refuses an image in the upstream-pending
-band, and any band above own-pending, as malformed.
+band, and any band above own-pending, as malformed. It refuses as malformed,
+too, an authority seq past the band (2^51 or more) where it names an
+accepted version: a `since`, a serializable snapshot, a delta's or an access
+proof's version, and a `BuiltOn::Seq`.
 
 Messages, with their postcard variant tags:
 
@@ -835,8 +838,24 @@ session's store (`INV-SYNC-50`). Each such image carries its commit's order
 sessions' it carries) in that order, so a commit written earlier but
 delivered later goes under the later one. A session replays its own pending
 commits over the relay's version of a row only when they order after it,
-and holds its clock past every order it is shipped, so a write it makes
-afterwards orders last. A session names a
+each branch of the row on its own, and holds its ordering clock past every
+order it is shipped, so a write it makes afterwards orders last. A relay
+holds its own ordering clock past every session commit it relays, so a
+write it makes afterwards orders after those too. A store bounds every
+commit clock it orders by, its own and those it is sent, to its wall clock
+plus the authority's skew tolerance (`SKEW_TOLERANCE_MS`, INV-TX-7): a write
+time far ahead cannot carry a version past every later write. The ordering
+clock is not the provenance clock: a clock seen from another writer moves
+no `$createdAt` or `$updatedAt` this store stamps. A relay uploads its
+pending commits in the order it got them, which the authority's order then
+follows; where that differs from the commits' clock order, a row's settled
+version can differ from the one it showed unsettled (it flips to the
+authority's), which is expected. On a new link a session drops the relay
+versions it shows (from its upstream-pending band) back to the newest
+accepted version it holds: the link may be to another relay, or to its
+relay wiped, and the one it reaches ships its unsettled versions again as
+it answers the session's reads. A baseline under the session's own pending
+writes stays until they settle. A session names a
 relay's unsettled version it built on by the relay's commit
 (`BuiltOn::Upstream`). A relay stores a session's commit as its own pending
 commit, answers `Stored`, and relays the authority's `Fate` (§8.3). A relay

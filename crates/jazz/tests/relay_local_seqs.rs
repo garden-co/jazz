@@ -30,6 +30,9 @@ use crate::common::{allow_all_policies, compile_schema, read_and_allow_all_write
 
 const WORKER: u8 = 0xa0;
 
+/// A wall clock tests run stores at (Unix ms), instead of sleeping.
+const CLOCK: i64 = 1_800_000_000_000;
+
 fn schema() -> JazzSchema {
     compile_schema(
         &SchemaBuilder::new()
@@ -728,6 +731,7 @@ fn a_serverless_workers_tab_commits_stay_pending_until_a_server_is_added() {
 #[test]
 fn tabs_converge_on_the_later_write_whatever_order_their_worker_gets_them() {
     let worker = open(WORKER, author(WORKER));
+    worker.set_clock_for_test(Some(CLOCK));
     worker.set_remote_link_hint(RemoteLinkHint::NoServer);
     let attach_tab = |node: u8| {
         let tab = open(node, author(WORKER));
@@ -770,8 +774,9 @@ fn tabs_converge_on_the_later_write_whatever_order_their_worker_gets_them() {
     };
     assert_eq!(shown(&late), ["before"]);
 
+    early.set_clock_for_test(Some(CLOCK));
     block_on(early.update("notes", row, body("early"), Default::default())).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(2));
+    late.set_clock_for_test(Some(CLOCK + 10));
     block_on(late.update("notes", row, body("late"), Default::default())).unwrap();
     // The later write reaches the worker first.
     for db in [&late, &worker, &late] {
@@ -859,4 +864,512 @@ fn a_refused_write_a_tab_only_read_once_leaves_that_tab_too() {
         "the tab that read it once dropped it"
     );
     assert!(one_shot_bodies(&net, net.tab(0)).is_empty());
+}
+
+/// A tab holds its worker's unsettled versions only while that worker is
+/// its upstream: connected to another worker (a new identity) or to its
+/// worker wiped, it drops them, and shows only what the new upstream
+/// ships.
+#[test]
+fn a_tab_drops_its_old_workers_unsettled_versions_when_its_upstream_changes() {
+    for (same_node, same_store) in [(false, false), (true, false), (true, true)] {
+        let worker = open(WORKER, author(WORKER));
+        worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+        let attach = |worker: &Db, tab: &Db| {
+            let (client_side, server_side) = duplex();
+            let up = block_on(tab.connect_upstream(client_side));
+            worker
+                .accept_subscriber(server_side, author(WORKER))
+                .unwrap();
+            up
+        };
+        let new_tab = |node: u8| {
+            let tab = open(node, author(WORKER));
+            tab.set_non_durable_client();
+            tab.set_remote_link_hint(RemoteLinkHint::Live);
+            tab
+        };
+        let writer = new_tab(WORKER + 1);
+        let reader = new_tab(WORKER + 2);
+        let _w = attach(&worker, &writer);
+        let up = attach(&worker, &reader);
+        let notes = reader.prepare_query(&Query::from("notes")).unwrap();
+        let _watch = block_on(reader.subscribe(&notes, ReadOpts::default())).unwrap();
+        let pump = |dbs: &[&Db]| {
+            for _ in 0..6 {
+                for db in dbs {
+                    block_on(db.tick()).unwrap();
+                }
+            }
+        };
+        block_on(writer.insert("notes", body("old worker's"), Default::default())).unwrap();
+        pump(&[&writer, &worker, &reader]);
+        let shown = |db: &Db| -> Vec<String> {
+            block_on(db.all(&notes, ReadOpts::default()))
+                .unwrap()
+                .iter()
+                .filter_map(|row| match row.cells().find(|(name, _)| *name == "body") {
+                    Some((_, Some(Value::String(text)))) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(shown(&reader), ["old worker's"]);
+
+        assert!(reader.detach_connection(&up));
+        if same_store {
+            // The same worker again: it ships its unsettled version anew.
+            let _up = attach(&worker, &reader);
+            pump(&[&worker, &reader]);
+            assert_eq!(shown(&reader), ["old worker's"], "reconnected");
+            continue;
+        }
+        let fresh = open(
+            if same_node { WORKER } else { WORKER + 0x10 },
+            author(WORKER),
+        );
+        fresh.set_remote_link_hint(RemoteLinkHint::NoServer);
+        block_on(fresh.insert("notes", body("new worker's"), Default::default())).unwrap();
+        let _up = attach(&fresh, &reader);
+        pump(&[&fresh, &reader]);
+        assert_eq!(
+            shown(&reader),
+            ["new worker's"],
+            "the old worker's unsettled version is gone (same node: {same_node})"
+        );
+    }
+}
+
+/// A worker with no server (its clock at `CLOCK`) and tabs of these
+/// nodes, each watching `query` so its replica holds the rows.
+fn serverless(
+    schema: fn() -> JazzSchema,
+    nodes: &[u8],
+    query: &Query,
+) -> (Db, Vec<Db>, Vec<jazz::db::SubscriptionStream>) {
+    let worker = open_in(schema(), WORKER, author(WORKER));
+    worker.set_clock_for_test(Some(CLOCK));
+    worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    let mut tabs = Vec::new();
+    let mut watches = Vec::new();
+    for &node in nodes {
+        let tab = open_in(schema(), node, author(WORKER));
+        tab.set_clock_for_test(Some(CLOCK));
+        tab.set_non_durable_client();
+        tab.set_remote_link_hint(RemoteLinkHint::Live);
+        let (client_side, server_side) = duplex();
+        block_on(tab.connect_upstream(client_side));
+        worker
+            .accept_subscriber(server_side, author(WORKER))
+            .unwrap();
+        let prepared = tab.prepare_query(query).unwrap();
+        watches.push(block_on(tab.subscribe(&prepared, ReadOpts::default())).unwrap());
+        tabs.push(tab);
+    }
+    (worker, tabs, watches)
+}
+
+fn pump_all(dbs: &[&Db]) {
+    for _ in 0..6 {
+        for db in dbs {
+            block_on(db.tick()).unwrap();
+        }
+    }
+}
+
+fn note_bodies(db: &Db) -> Vec<String> {
+    let prepared = db.prepare_query(&Query::from("notes")).unwrap();
+    let mut bodies: Vec<String> = block_on(db.all(&prepared, ReadOpts::default()))
+        .unwrap()
+        .iter()
+        .filter_map(|row| match row.cell("body") {
+            Some(Value::String(text)) => Some(text),
+            _ => None,
+        })
+        .collect();
+    bodies.sort();
+    bodies
+}
+
+fn provenance(db: &Db, row: RowUuid) -> (u64, u64) {
+    let select = db
+        .prepare_query(&Query::from("notes").select(["body", "$createdAt", "$updatedAt"]))
+        .unwrap();
+    let rows = block_on(db.all(&select, ReadOpts::default())).unwrap();
+    let row = rows
+        .iter()
+        .find(|r| r.row_uuid() == row)
+        .expect("the row is held");
+    let ms = |column| match row.cell(column) {
+        Some(Value::U64(ms)) => ms,
+        Some(Value::Nullable(Some(value))) => match *value {
+            Value::U64(ms) => ms,
+            other => panic!("{column}: {other:?}"),
+        },
+        other => panic!("{column}: {other:?}"),
+    };
+    (ms("$createdAt"), ms("$updatedAt"))
+}
+
+/// A write timestamped far ahead (a day, or past any i64) orders among
+/// unsettled versions no further ahead than the authority's skew bound,
+/// and moves no other tab's own provenance stamps: a sibling's later
+/// write still orders after it, at its own clock.
+#[test]
+fn a_far_future_write_time_neither_stamps_nor_outorders_a_sibling_tabs_later_write() {
+    for far in [CLOCK as u64 + 24 * 60 * 60 * 1000, u64::MAX] {
+        let notes = Query::from("notes");
+        let (worker, tabs, _watches) = serverless(schema, &[WORKER + 1, WORKER + 2], &notes);
+        let (ahead, sibling) = (&tabs[0], &tabs[1]);
+        let all = [ahead, sibling, &worker];
+        let row = block_on(ahead.insert("notes", body("before"), Default::default()))
+            .unwrap()
+            .row_uuid();
+        pump_all(&all);
+        block_on(ahead.update(
+            "notes",
+            row,
+            body("ahead"),
+            jazz::db::UpdateOptions {
+                updated_at_ms: Some(far),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        pump_all(&all);
+        assert_eq!(note_bodies(sibling), ["ahead"], "far: {far}");
+
+        for db in all {
+            db.set_clock_for_test(Some(CLOCK + 1_000));
+        }
+        let fresh = block_on(sibling.insert("notes", body("fresh"), Default::default()))
+            .unwrap()
+            .row_uuid();
+        assert_eq!(
+            provenance(sibling, fresh),
+            (CLOCK as u64 + 1_000, CLOCK as u64 + 1_000),
+            "the sibling stamps at its own clock (far: {far})"
+        );
+        block_on(sibling.update("notes", row, body("later"), Default::default())).unwrap();
+        pump_all(&all);
+        for db in all {
+            assert_eq!(note_bodies(db), ["fresh", "later"], "far: {far}");
+        }
+        let fresh_at_worker = provenance(&worker, fresh);
+        assert!(
+            fresh_at_worker.0 < CLOCK as u64 + 30_000,
+            "the worker stamps at its own clock: {fresh_at_worker:?} (far: {far})"
+        );
+    }
+}
+
+/// A worker's own write made after it relayed a tab's commit orders
+/// after that commit, though the tab's clock runs ahead of the worker's.
+#[test]
+fn a_workers_write_after_a_tabs_relayed_commit_orders_after_it() {
+    let notes = Query::from("notes");
+    let (worker, tabs, _watches) = serverless(schema, &[WORKER + 1], &notes);
+    let tab = &tabs[0];
+    tab.set_clock_for_test(Some(CLOCK + 5_000));
+    let row = block_on(tab.insert("notes", body("tab"), Default::default()))
+        .unwrap()
+        .row_uuid();
+    pump_all(&[tab, &worker]);
+    worker.set_clock_for_test(Some(CLOCK + 10));
+    block_on(worker.update("notes", row, body("worker"), Default::default())).unwrap();
+    pump_all(&[tab, &worker]);
+    assert_eq!(note_bodies(&worker), ["worker"]);
+    assert_eq!(note_bodies(tab), ["worker"]);
+}
+
+/// A write's explicit time is its commit's clock: a tab's backfill
+/// timestamped after another tab's write orders after it, whichever the
+/// worker gets first.
+#[test]
+fn an_explicit_write_time_is_its_commits_clock() {
+    for backfill_first in [false, true] {
+        let notes = Query::from("notes");
+        let (worker, tabs, _watches) = serverless(schema, &[WORKER + 1, WORKER + 2], &notes);
+        let (backfill, plain) = (&tabs[0], &tabs[1]);
+        let row = block_on(plain.insert("notes", body("before"), Default::default()))
+            .unwrap()
+            .row_uuid();
+        pump_all(&[backfill, plain, &worker]);
+        plain.set_clock_for_test(Some(CLOCK + 10));
+        block_on(plain.update("notes", row, body("plain"), Default::default())).unwrap();
+        block_on(backfill.update(
+            "notes",
+            row,
+            body("backfill"),
+            jazz::db::UpdateOptions {
+                updated_at_ms: Some(CLOCK as u64 + 20),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        let first = if backfill_first { backfill } else { plain };
+        for db in [first, &worker, first] {
+            block_on(db.tick()).unwrap();
+        }
+        pump_all(&[backfill, plain, &worker]);
+        for db in [&worker, backfill, plain] {
+            assert_eq!(
+                note_bodies(db),
+                ["backfill"],
+                "backfill first: {backfill_first}"
+            );
+        }
+    }
+}
+
+/// Two tabs' writes at the same clock order by their writers' nodes:
+/// every store shows the greater node's.
+#[test]
+fn equal_clocks_order_by_the_writers_node() {
+    for greater_first in [false, true] {
+        let notes = Query::from("notes");
+        let (worker, tabs, _watches) = serverless(schema, &[WORKER + 1, WORKER + 2], &notes);
+        let (lesser, greater) = (&tabs[0], &tabs[1]);
+        let row = block_on(lesser.insert("notes", body("before"), Default::default()))
+            .unwrap()
+            .row_uuid();
+        pump_all(&[lesser, greater, &worker]);
+        block_on(lesser.update("notes", row, body("lesser"), Default::default())).unwrap();
+        block_on(greater.update("notes", row, body("greater"), Default::default())).unwrap();
+        let first = if greater_first { greater } else { lesser };
+        for db in [first, &worker, first] {
+            block_on(db.tick()).unwrap();
+        }
+        pump_all(&[lesser, greater, &worker]);
+        for db in [&worker, lesser, greater] {
+            assert_eq!(
+                note_bodies(db),
+                ["greater"],
+                "greater first: {greater_first}"
+            );
+        }
+    }
+}
+
+/// A worker keeps its pending commits' order across a restart: a tab's
+/// write delivered after the restart but made earlier goes under the one
+/// it holds.
+#[test]
+fn a_workers_pending_commits_keep_their_order_across_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("worker.sqlite");
+    let open_worker = || {
+        let worker = block_on(Db::open_at(
+            DbConfig::new(
+                schema(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([WORKER; 16]),
+                    author: author(WORKER),
+                },
+            ),
+            &path,
+            jazz::db::FileOptions::default(),
+        ))
+        .unwrap();
+        worker.set_clock_for_test(Some(CLOCK));
+        worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+        worker
+    };
+    let attach = |worker: &Db, node: u8, clock: i64| {
+        let tab = open(node, author(WORKER));
+        tab.set_clock_for_test(Some(clock));
+        tab.set_non_durable_client();
+        tab.set_remote_link_hint(RemoteLinkHint::Live);
+        let (client_side, server_side) = duplex();
+        block_on(tab.connect_upstream(client_side));
+        worker
+            .accept_subscriber(server_side, author(WORKER))
+            .unwrap();
+        let prepared = tab.prepare_query(&Query::from("notes")).unwrap();
+        let watch = block_on(tab.subscribe(&prepared, ReadOpts::default())).unwrap();
+        (tab, watch)
+    };
+    let worker = open_worker();
+    let row = block_on(worker.insert("notes", body("worker"), Default::default()))
+        .unwrap()
+        .row_uuid();
+    let (early, _early_watch) = attach(&worker, WORKER + 1, CLOCK + 5);
+    let (late, _late_watch) = attach(&worker, WORKER + 2, CLOCK + 10);
+    pump_all(&[&early, &late, &worker]);
+    // The earlier write stays with its tab; the later one reaches the
+    // worker, which then restarts.
+    block_on(early.update("notes", row, body("early"), Default::default())).unwrap();
+    block_on(late.update("notes", row, body("late"), Default::default())).unwrap();
+    pump_all(&[&late, &worker]);
+    assert_eq!(note_bodies(&worker), ["late"]);
+    drop((late, _late_watch));
+    block_on(worker.close()).unwrap();
+
+    let worker = open_worker();
+    let (client_side, server_side) = duplex();
+    block_on(early.connect_upstream(client_side));
+    worker
+        .accept_subscriber(server_side, author(WORKER))
+        .unwrap();
+    pump_all(&[&early, &worker]);
+    assert_eq!(worker.pending_upload_count(), 3, "every commit is held");
+    assert_eq!(note_bodies(&worker), ["late"], "the held commit is later");
+    assert_eq!(note_bodies(&early), ["late"]);
+}
+
+/// Unsettled versions order by clock only until the authority's order
+/// arrives: the authority accepts in upload order, and every store then
+/// shows the version it accepted last, even where that flips a row
+/// (SPEC 8 §8.13).
+#[test]
+fn a_row_shows_the_authoritys_order_once_its_versions_settle() {
+    let notes = Query::from("notes");
+    let (worker, tabs, _watches) = serverless(schema, &[WORKER + 1, WORKER + 2], &notes);
+    let (early, late) = (&tabs[0], &tabs[1]);
+    let row = block_on(early.insert("notes", body("before"), Default::default()))
+        .unwrap()
+        .row_uuid();
+    pump_all(&[early, late, &worker]);
+    let early_tx = block_on(early.update("notes", row, body("early"), Default::default()))
+        .unwrap()
+        .mergeable_tx_id();
+    late.set_clock_for_test(Some(CLOCK + 10));
+    let late_tx = block_on(late.update("notes", row, body("late"), Default::default()))
+        .unwrap()
+        .mergeable_tx_id();
+    // The later write reaches the worker first, so it uploads first.
+    for db in [late, &worker, late] {
+        block_on(db.tick()).unwrap();
+    }
+    pump_all(&[early, late, &worker]);
+    for db in [&worker, early, late] {
+        assert_eq!(note_bodies(db), ["late"], "by clock while unsettled");
+    }
+
+    let core = open_in(schema(), 0xc0, AuthorSubject::SYSTEM);
+    let (client_side, server_side) = duplex();
+    let _up = block_on(worker.connect_upstream(client_side));
+    core.accept_subscriber(server_side, author(WORKER)).unwrap();
+    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    let all = [early, late, &worker, &core];
+    for (db, tx) in [(early, early_tx), (late, late_tx)] {
+        let mut wait = std::pin::pin!(db.wait_for_transaction(tx, DurabilityTier::Global));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut settled = false;
+        for _ in 0..20 {
+            if let std::task::Poll::Ready(fate) = wait.as_mut().poll(&mut context) {
+                fate.expect("the write settles");
+                settled = true;
+                break;
+            }
+            pump_all(&all);
+        }
+        assert!(settled, "tx {tx} settles");
+    }
+    pump_all(&all);
+    for db in all {
+        assert_eq!(note_bodies(db), ["early"], "the authority accepted it last");
+    }
+}
+
+/// Todos branched by `branch_id`.
+fn branched_schema() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("title", ColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+fn branch(byte: u8) -> jazz::protocol::BranchSelector {
+    jazz::protocol::BranchSelector::new([(
+        "branch_id",
+        Value::Uuid(uuid::Uuid::from_bytes([byte; 16])),
+    )])
+}
+
+/// An upstream's later unsettled version of a row on one branch leaves a
+/// tab's own pending write of that row on another branch showing: each
+/// branch orders on its own.
+#[test]
+fn an_upstreams_later_version_on_one_branch_leaves_a_tabs_write_on_another() {
+    let (k1, k2) = (branch(1), branch(2));
+    let row = RowUuid::from_bytes([0x66; 16]);
+    let view =
+        |on: &jazz::protocol::BranchSelector| ReadOpts::default().branch_view(on.clone(), None);
+    let todos = Query::from("todos");
+    let worker = open_in(branched_schema(), WORKER, author(WORKER));
+    worker.set_clock_for_test(Some(CLOCK));
+    worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    let mut tabs = Vec::new();
+    let mut watches = Vec::new();
+    for node in [WORKER + 1, WORKER + 2] {
+        let tab = open_in(branched_schema(), node, author(WORKER));
+        tab.set_clock_for_test(Some(CLOCK));
+        tab.set_non_durable_client();
+        tab.set_remote_link_hint(RemoteLinkHint::Live);
+        let (client_side, server_side) = duplex();
+        block_on(tab.connect_upstream(client_side));
+        worker
+            .accept_subscriber(server_side, author(WORKER))
+            .unwrap();
+        let prepared = tab.prepare_query(&todos).unwrap();
+        for on in [&k1, &k2] {
+            watches.push(block_on(tab.subscribe(&prepared, view(on))).unwrap());
+        }
+        tabs.push(tab);
+    }
+    let (writer, other) = (&tabs[0], &tabs[1]);
+    let all = [writer, other, &worker];
+    let title = |text: &str| BTreeMap::from([("title".to_owned(), Value::String(text.to_owned()))]);
+    for (on, text) in [(&k1, "writer's on 1"), (&k2, "writer's on 2")] {
+        block_on(writer.insert(
+            "todos",
+            title(text),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(on.clone()),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    pump_all(&all);
+    other.set_clock_for_test(Some(CLOCK + 10));
+    block_on(other.update(
+        "todos",
+        row,
+        title("other's on 1"),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: k1.clone(),
+                base: None,
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump_all(&all);
+    let titles = |db: &Db, on| -> Vec<String> {
+        let prepared = db.prepare_query(&todos).unwrap();
+        block_on(db.all(&prepared, view(on)))
+            .unwrap()
+            .iter()
+            .filter_map(|row| match row.cell("title") {
+                Some(Value::String(title)) => Some(title),
+                _ => None,
+            })
+            .collect()
+    };
+    for db in all {
+        assert_eq!(titles(db, &k1), ["other's on 1"], "the later write on 1");
+        assert_eq!(titles(db, &k2), ["writer's on 2"], "the only write on 2");
+    }
+    drop(watches);
 }

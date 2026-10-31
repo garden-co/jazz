@@ -191,6 +191,30 @@ impl Pos {
     }
 }
 
+/// An authority seq a peer sent (a version, a snapshot, a checkpoint):
+/// refused past [`MAX_SEQ`], as a position in no band is, so it never
+/// reaches [`Pos::at`] to be masked into another seq.
+pub(crate) fn accepted_seq<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u64, D::Error> {
+    let seq = u64::deserialize(deserializer)?;
+    if seq > MAX_SEQ {
+        return Err(serde::de::Error::custom("an accepted seq past its band"));
+    }
+    Ok(seq)
+}
+
+/// [`accepted_seq`], when the peer may send none.
+pub(crate) fn accepted_seq_opt<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    let seq = Option::<u64>::deserialize(deserializer)?;
+    if seq.is_some_and(|seq| seq > MAX_SEQ) {
+        return Err(serde::de::Error::custom("an accepted seq past its band"));
+    }
+    Ok(seq)
+}
+
 /// `_t` of the first version in band `n`: `_t < band_start(n)` is every
 /// version in an earlier band.
 pub(crate) const fn band_start(n: i64) -> i64 {
@@ -735,6 +759,7 @@ pub struct WireBase {
 pub struct AccessProof {
     /// The row's branch key (empty unbranched).
     pub key: Vec<u8>,
+    #[serde(deserialize_with = "accepted_seq")]
     pub seq: u64,
 }
 
@@ -742,7 +767,7 @@ pub struct AccessProof {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuiltOn {
     /// An accepted version, by its upstream seq.
-    Seq(u64),
+    Seq(#[serde(deserialize_with = "accepted_seq")] u64),
     /// The sender's own unsettled commit `back` txs before this one: the
     /// writer saw that commit as it sent it, and what that was built on.
     Own { back: u64 },
@@ -987,6 +1012,7 @@ pub enum WireKind {
     /// `snapshot`: the authority seq it read at, as the sender's server
     /// served it when it pinned it.
     Serializable {
+        #[serde(deserialize_with = "accepted_seq")]
         snapshot: u64,
         reads: Vec<WireRead>,
         own: Vec<u64>,
@@ -1132,6 +1158,7 @@ pub enum SyncMessage {
         /// snapshot. Part of the read's identity (`INV-BVIEW-12`).
         view: Box<ReadViewSourceSpec>,
         /// Last complete checkpoint for this read, independent of its lifetime.
+        #[serde(deserialize_with = "accepted_seq_opt")]
         since: Option<u64>,
         span: ReadSpan,
     },
@@ -1680,6 +1707,10 @@ pub struct Upstream(u64);
 
 pub(crate) struct Client {
     transport: Option<Box<dyn Transport>>,
+    /// A new link came up: the versions the last upstream held unsettled
+    /// are dropped before anything it sends applies (see
+    /// [`Inner::forget_upstream_band`]).
+    forget_upstream: bool,
     pub(crate) hint: Rc<StdCell<Link>>,
     next_id: u64,
     /// All active reads, keyed by their wire request id.
@@ -4374,6 +4405,10 @@ impl Inner {
                 }
                 let floor = if relay_newer { at } else { Pos::UNSETTLED };
                 self.drop_row(&image.table, row, &image.key, floor)?;
+                // An accepted version that replaces a relay's unsettled one
+                // may be one this replica already held as history (the one
+                // the relay's was over): it is current now, not both.
+                self.forget_history_version(&image.table, row, &image.key, at)?;
                 self.put_image(image, false)?;
             }
             // An older version: history reads of the row change.
@@ -4384,6 +4419,25 @@ impl Inner {
                     .push((image.table.clone(), row, image.key.clone()));
             }
         }
+        Ok(())
+    }
+
+    /// Remove version `at` of a row from history, as it becomes current.
+    fn forget_history_version(
+        &self,
+        table: &str,
+        row: RowUuid,
+        key: &[u8],
+        at: Pos,
+    ) -> Result<(), Error> {
+        self.exec(
+            &format!(
+                "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _t = ?3",
+                quote(&format!("{table}__h"))
+            ),
+            rusqlite::params![row.0.as_bytes().to_vec(), key, at.t()],
+        )
+        .map_err(storage)?;
         Ok(())
     }
 
@@ -6134,6 +6188,9 @@ impl Inner {
             });
             client.unsent.push(commit);
         }
+        // Its own later commits order after every pending one, as they did
+        // before it restarted.
+        let floor = client.pending.iter().map(|p| p.clock).max();
         let keys: BTreeSet<RowKey> = client
             .pending
             .iter()
@@ -6145,6 +6202,9 @@ impl Inner {
         }
         self.restore_positions(&mut client)?;
         self.client = Some(client);
+        if let Some(floor) = floor {
+            self.observe_clock(floor);
+        }
         Ok(())
     }
 
@@ -6259,6 +6319,7 @@ impl Client {
             connection: 0,
             sent: Vec::new(),
             transport: None,
+            forget_upstream: false,
             hint: Rc::new(StdCell::new(Link {
                 hint: RemoteLinkHint::NoServer,
                 since: Instant::now(),
@@ -6345,6 +6406,7 @@ impl Db {
             client.clear_once_requests();
         }
         client.transport = Some(transport);
+        client.forget_upstream = true;
         let mut link = client.hint.get();
         link.detached = false;
         if !link.reported {
@@ -7644,6 +7706,10 @@ impl Db {
             let Some(client) = inner.client.as_mut() else {
                 return Ok(());
             };
+            if std::mem::take(&mut client.forget_upstream) {
+                inner.forget_upstream_band()?;
+            }
+            let client = inner.client.as_mut().expect("client");
             let mut inbound = Vec::new();
             let mut failed = false;
             if let Some(transport) = client.transport.as_mut() {
@@ -8316,19 +8382,18 @@ impl Db {
         // `Order` (SPEC 8 §8.13): the pending commits replay in it, and one
         // replays on a row only over an upstream's unsettled version that
         // orders before it. Later, that version is the one the row shows.
-        let mut pending: Vec<(Order, u64, Vec<StagedOp>)> = client
+        let mut pending: Vec<(Order, u64, Vec<StagedOp>, Vec<RowKey>)> = client
             .pending
             .iter()
-            .map(|p| (p.order(), p.tx, p.ops.clone()))
+            .map(|p| (p.order(), p.tx, p.ops.clone(), p.rows.clone()))
             .collect();
-        pending.sort_by_key(|(order, _, _)| *order);
-        let mut outranked: HashMap<(String, RowUuid), Order> = HashMap::new();
-        for ((table, row, _), image) in &baseline {
-            if let Some(written) = image.as_ref().and_then(|image| image.written) {
-                let entry = outranked.entry((table.clone(), *row)).or_insert(written);
-                *entry = (*entry).max(written);
-            }
-        }
+        pending.sort_by_key(|(order, ..)| *order);
+        // Each branch of a row an upstream's unsettled version is on, at
+        // that version's order: a branch is ordered on its own.
+        let outranked: HashMap<&RowKey, Order> = baseline
+            .iter()
+            .filter_map(|(key, image)| Some((key, image.as_ref()?.written?)))
+            .collect();
         let keep: BTreeSet<(String, RowUuid, Vec<u8>)> = client
             .pending
             .iter()
@@ -8350,46 +8415,70 @@ impl Db {
         // that view, and nothing is renamed across an upgrade.
         let view = inner.stored_view();
         let active = std::mem::replace(&mut inner.schema, view);
-        let replayed = pending.into_iter().try_for_each(|(order, tx, ops)| {
+        let replayed = pending.into_iter().try_for_each(|(order, tx, ops, rows)| {
             begin_savepoint(&inner.conn, "replay")?;
             inner.merging = true;
+            // The branches this commit wrote that an upstream's later
+            // version holds: there, that version shows.
+            let under: Vec<&RowKey> = rows
+                .iter()
+                .filter(|key| outranked.get(key).is_some_and(|&later| later >= order))
+                .collect();
+            // An op is left out where every branch it wrote is held so; one
+            // that also wrote a branch that is not applies, and the held
+            // branches are put back after the commit replays.
             let shown = |op: &StagedOp| {
                 op.row().is_none_or(|row| {
-                    outranked
-                        .get(&(op.table().to_owned(), row))
-                        .is_none_or(|&later| later < order)
+                    let table = op.table();
+                    let mut wrote = rows
+                        .iter()
+                        .filter(|(t, r, _)| t == table && *r == row)
+                        .peekable();
+                    wrote.peek().is_none() || wrote.any(|key| !under.contains(&key))
                 })
             };
-            let replayed =
-                ops.iter()
-                    .filter(|op| shown(op))
-                    .try_for_each(|op| match inner.apply(op, tx) {
-                        // A part of a cross-shard commit that landed before its fate
-                        // (another shard answered first) already holds its row. The
-                        // writer's version overlays that baseline as it overlays any
-                        // other, until the fate: the whole commit still shows as its
-                        // writer's. Another writer's version of the same row id lands
-                        // here the same way and is overlaid alike: the conflicting
-                        // insert is refused upstream, and the fate drops the whole
-                        // commit, which uncovers theirs.
-                        Err(error) if error.reason == Some(Reason::RowAlreadyExists) => {
-                            let StagedOp::Insert(table, _, opts) = op else {
-                                return Err(error);
-                            };
-                            let landed = baseline.iter().find_map(|((t, row, key), image)| {
-                                let image = image.as_ref()?;
-                                (t == table && Some(*row) == opts.row_id)
-                                    .then_some((row, key, image))
-                            });
-                            let Some((row, key, image)) = landed else {
-                                return Err(error);
-                            };
-                            let at = image.at;
-                            inner.drop_row(table, *row, key, at)?;
-                            inner.apply(op, tx).map(drop)
+            let replayed = ops
+                .iter()
+                .filter(|op| shown(op))
+                .try_for_each(|op| match inner.apply(op, tx) {
+                    // A part of a cross-shard commit that landed before its fate
+                    // (another shard answered first) already holds its row. The
+                    // writer's version overlays that baseline as it overlays any
+                    // other, until the fate: the whole commit still shows as its
+                    // writer's. Another writer's version of the same row id lands
+                    // here the same way and is overlaid alike: the conflicting
+                    // insert is refused upstream, and the fate drops the whole
+                    // commit, which uncovers theirs.
+                    Err(error) if error.reason == Some(Reason::RowAlreadyExists) => {
+                        let StagedOp::Insert(table, _, opts) = op else {
+                            return Err(error);
+                        };
+                        let landed = baseline.iter().find_map(|((t, row, key), image)| {
+                            let image = image.as_ref()?;
+                            (t == table && Some(*row) == opts.row_id).then_some((row, key, image))
+                        });
+                        let Some((row, key, image)) = landed else {
+                            return Err(error);
+                        };
+                        let at = image.at;
+                        inner.drop_row(table, *row, key, at)?;
+                        inner.apply(op, tx).map(drop)
+                    }
+                    other => other.map(drop),
+                })
+                .and_then(|()| {
+                    for key @ (table, row, branch) in &under {
+                        let Some(Some(image)) = baseline.get(*key) else {
+                            continue;
+                        };
+                        if inner.current_image(table, *row, branch)?.map(|i| i.at) != Some(image.at)
+                        {
+                            inner.drop_row(table, *row, branch, image.at)?;
+                            inner.put_image(image, false)?;
                         }
-                        other => other.map(drop),
-                    });
+                    }
+                    Ok(())
+                });
             inner.merging = false;
             end_savepoint(&inner.conn, "replay", replayed.is_ok())
         });
@@ -8934,6 +9023,38 @@ impl Inner {
         }
     }
 
+    /// Drop the versions this replica shows from its [`UPSTREAM`] band: a
+    /// new link may be to another upstream (another identity, or its relay
+    /// wiped), whose unsettled versions are numbered afresh, and the one it
+    /// reaches ships its own again as it answers the reads. Each such row
+    /// goes back to the newest accepted version this replica holds. One
+    /// under this replica's own pending writes keeps its baseline: those
+    /// writes show over it until they settle, and replay over it till then.
+    fn forget_upstream_band(&mut self) -> Result<(), Error> {
+        let (from, to) = (band_start(UPSTREAM), band_start(OWN));
+        let tables: Vec<String> = self.physical.tables.keys().cloned().collect();
+        for table in &tables {
+            let held = self.images_where(table, false, "_t >= ?1 AND _t < ?2", &[&from, &to])?;
+            for image in held {
+                let row = RowUuid::from_bytes(image.id);
+                let under = self
+                    .images_where(
+                        table,
+                        true,
+                        "id = ?1 AND _b = ?2 AND _t >= 0 AND _t < ?3 ORDER BY _t DESC LIMIT 1",
+                        &[&image.id.to_vec(), &image.key, &from],
+                    )?
+                    .pop();
+                self.drop_row(table, row, &image.key, Pos::UNSETTLED)?;
+                if let Some(under) = under {
+                    self.forget_history_version(table, row, &image.key, under.at)?;
+                    self.put_image(&under, false)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn receive_image(&mut self, mut image: Image) -> Result<bool, Error> {
         // An upstream ships accepted versions and its own unsettled ones,
         // which this replica holds in its upstream band; never one it holds
@@ -8946,8 +9067,10 @@ impl Inner {
         image.at = image.at.from_upstream();
         if image.at.accepted() {
             image.written = None;
-        } else if let Some((clock, _, _)) = image.written {
+        } else if let Some((clock, node, tx)) = image.written {
             // A write made after this one was seen orders after it.
+            let clock = self.bound_clock(clock);
+            image.written = Some((clock, node, tx));
             self.observe_clock(clock);
         }
         let at = image.at;
@@ -11875,6 +11998,14 @@ impl Db {
         // The authority keeps what each version was built on (INV-HIST-21);
         // a relay passes the bases on instead.
         let finished = if relay {
+            // The session's clock, bounded as any foreign one is; a write
+            // this store makes after it orders after it (SPEC 8 §8.13).
+            let clock = {
+                let mut inner = self.inner();
+                let clock = inner.bound_clock(clock);
+                inner.observe_clock(clock);
+                clock
+            };
             self.record_stored_upload(
                 ops.clone(),
                 seq,
@@ -12394,7 +12525,9 @@ mod tests {
     #[test]
     fn a_current_pending_header_round_trips() {
         let header = SyncMessage::Commit {
-            clock: 0,
+            // A clock that is not the default, so a header that lost it
+            // would not round-trip.
+            clock: 1_800_000_000_000,
             id: tx_id([7; 16], 1),
             kind: WireKind::Mergeable,
             ops: Vec::new(),
@@ -12473,6 +12606,48 @@ mod tests {
             postcard::from_bytes::<Pos>(&past).is_err(),
             "no band past OWN"
         );
+    }
+
+    /// An authority seq a peer sends, where it names an accepted version,
+    /// is refused past the accepted band instead of being masked into
+    /// another seq.
+    #[test]
+    fn a_peers_accepted_seq_past_the_band_is_refused_on_decode() {
+        fn decodes<T: Serialize + for<'de> Deserialize<'de>>(value: &T) -> bool {
+            postcard::from_bytes::<T>(&postcard::to_allocvec(value).unwrap()).is_ok()
+        }
+        let read = |since| SyncMessage::Read {
+            id: 1,
+            query: Box::new(crate::query::Query::from("notes")),
+            binding: BTreeMap::new(),
+            include_deleted: false,
+            tier: ReadTier::Remote,
+            wait: None,
+            view: Box::new(ReadViewSourceSpec::Current),
+            since: Some(since),
+            span: ReadSpan::Live,
+        };
+        let serializable = |snapshot| WireKind::Serializable {
+            snapshot,
+            reads: Vec::new(),
+            own: Vec::new(),
+        };
+        let proof = |seq| AccessProof {
+            key: Vec::new(),
+            seq,
+        };
+        let delta = |seq| WireDelta {
+            seq,
+            base: 0,
+            edits: Vec::new(),
+        };
+        for (seq, ok) in [(MAX_SEQ, true), (MAX_SEQ + 1, false), (u64::MAX, false)] {
+            assert_eq!(decodes(&read(seq)), ok, "since {seq}");
+            assert_eq!(decodes(&serializable(seq)), ok, "snapshot {seq}");
+            assert_eq!(decodes(&proof(seq)), ok, "access proof {seq}");
+            assert_eq!(decodes(&delta(seq)), ok, "delta {seq}");
+            assert_eq!(decodes(&BuiltOn::Seq(seq)), ok, "built on {seq}");
+        }
     }
 
     #[test]

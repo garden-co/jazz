@@ -1312,3 +1312,51 @@ fn a_serverless_workers_own_blind_delete_over_an_update_it_never_synced_is_refus
     common::assert_serialization_conflict(&fate.unwrap_err());
     assert_eq!(core_seats(&net).len(), 1, "the authority kept the update");
 }
+
+/// A tab's serializable read of a row its worker holds another tab's
+/// unsettled version of reads the snapshot (the accepted version), not that
+/// version. Both commits upload once the worker is back: the other tab's
+/// lands first, and the read it outdated conflicts.
+#[test]
+fn a_tabs_serializable_read_of_another_tabs_version_pending_at_its_worker_reads_its_snapshot() {
+    let mut net = Net::new(2);
+    let seat = net.seed_seats(1)[0];
+    let _watches = [net.watch_seats(net.tab(0)), net.watch_seats(net.tab(1))];
+    net.worker_offline();
+    let pending = block_on(
+        net.tab(0)
+            .update("seats", seat, holder("alice"), Default::default()),
+    )
+    .unwrap()
+    .mergeable_tx_id();
+    for _ in 0..4 {
+        net.pump();
+    }
+    let tab = net.tab(1);
+    let open = net.begin_pinned(tab);
+    let seats = tab.prepare_query(&Query::from("seats")).unwrap();
+    let read: Vec<Option<Value>> = net
+        .drive(tab.tx_ref(open).all_prepared(&seats))
+        .unwrap()
+        .iter()
+        .map(|row| row.cell("holder"))
+        .collect();
+    assert_eq!(
+        read,
+        [Some(Value::String(String::new()))],
+        "the snapshot's seat, not the pending one"
+    );
+    net.drive(
+        tab.tx_ref(open)
+            .update("seats", seat, holder("bob"), Default::default()),
+    )
+    .unwrap();
+    let committed = net.drive(tab.commit_serializable_handle(open));
+    net.worker_online();
+    net.settle(net.tab(0), pending)
+        .expect("the pending write lands");
+    assert_conflict_or_rejected(
+        committed.and_then(|receipt| net.settle(net.tab(1), receipt.0).map(drop)),
+    );
+    assert_eq!(net.holders(), ["alice"]);
+}

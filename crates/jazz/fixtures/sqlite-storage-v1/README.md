@@ -111,8 +111,9 @@ creates its row (`created`), changed the encoded pending ops, which
 regenerated it the same way.
 
 Replacing the `(_n, _seq)` pair with one scalar position `_t` (below 2^53),
-banded locally into accepted versions (the authority's seq), an upstream's
-unsettled versions held by a relay, and the store's own pending versions,
+banded locally into accepted versions (the authority's seq), a session's
+copies of its relay's unsettled versions, and the store's own pending
+versions,
 regenerated it the same way. Every row and history table has `_t` in place
 of `_n` and `_seq` (history keyed by `(id, _b, _t)`, index `__by_t`),
 `_jazz_transactions` is `(n, tx, t, result)` (index

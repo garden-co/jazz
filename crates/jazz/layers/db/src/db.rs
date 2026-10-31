@@ -533,6 +533,13 @@ struct Inner {
     /// included: its clock among unsettled versions (see
     /// [`Inner::commit_clock`]).
     commit_stamp: (u64, i64),
+    /// The latest unsettled version's clock this store has seen of another
+    /// writer (see [`Inner::observe_clock`]): its own later commits order
+    /// after it. Kept apart from `last_stamp`, so a foreign clock never
+    /// moves this store's `$createdAt`/`$updatedAt` stamps.
+    order_floor: u64,
+    /// A wall clock tests set (see `Db::set_clock_for_test`).
+    clock_for_test: Option<i64>,
     /// Interned author codes (see [`Inner::author_code`]), cached both ways.
     authors: RefCell<AuthorCodes>,
     /// By stored table and whether into its history: the columns the last
@@ -1383,6 +1390,8 @@ impl Db {
                 writer: None,
                 last_stamp: (0, 0),
                 commit_stamp: (0, 0),
+                order_floor: 0,
+                clock_for_test: None,
                 authors: RefCell::new(AuthorCodes::default()),
                 image_inserts: RefCell::default(),
                 current_batch: RefCell::default(),
@@ -1768,6 +1777,15 @@ impl Db {
                 result => return result,
             }
         }
+    }
+
+    /// Run this store's wall clock at `ms` (Unix ms) from now on, or the
+    /// real one again for `None`: what tests of time-ordered writes set
+    /// instead of sleeping.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_clock_for_test(&self, ms: Option<i64>) {
+        self.inner().clock_for_test = ms;
     }
 
     /// Make the next ticks fail with `codes`, in order, before doing any
@@ -7016,30 +7034,57 @@ impl Inner {
         self.apply_as(op, who, seq)
     }
 
+    /// Wall-clock Unix ms (or the one a test set).
+    pub(crate) fn now_ms(&self) -> i64 {
+        self.clock_for_test.unwrap_or_else(|| {
+            web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64)
+        })
+    }
+
+    /// An unsettled version's clock as this store orders it: never more
+    /// than [`SKEW_TOLERANCE_MS`] ahead of its own wall clock, the bound
+    /// the authority holds an explicit write time to (INV-TX-7). A clock
+    /// from the wire, or from an explicit time far ahead, so cannot carry
+    /// one writer's versions past every later write for good.
+    pub(crate) fn bound_clock(&self, clock: u64) -> u64 {
+        let ceiling = self.now_ms().saturating_add(SKEW_TOLERANCE_MS).max(0) as u64;
+        clock.min(ceiling)
+    }
+
     /// The clock commit `seq` orders at among unsettled versions (see
     /// [`sync::Order`]): the stamp its writes took, or for one that wrote
-    /// none the next stamp this store's clock would give.
+    /// none the next stamp this store's clock would give; past every other
+    /// writer's version it had seen, and bounded (see
+    /// [`Inner::bound_clock`]).
     pub(crate) fn commit_clock(&self, seq: u64) -> u64 {
         let (stamped, stamp) = self.commit_stamp;
         let (_, last_at) = self.last_stamp;
         let at = if seq == stamped {
             stamp
         } else {
-            let now = web_time::SystemTime::now()
-                .duration_since(web_time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as i64);
-            now.max(last_at + 1)
+            self.now_ms()
+                .max(last_at.saturating_add(1))
+                .max(self.floor_after())
         };
-        at.max(0) as u64
+        self.bound_clock(at.max(0) as u64)
     }
 
-    /// Hold this store's clock past an unsettled version's (see
-    /// [`sync::Order`]): a write made after it was seen orders after it.
+    /// The least clock a commit made now orders at: after every other
+    /// writer's version this store has seen.
+    fn floor_after(&self) -> i64 {
+        i64::try_from(self.order_floor)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1)
+    }
+
+    /// Hold this store's ordering clock past an unsettled version's (see
+    /// [`sync::Order`]): a commit made after it was seen orders after it.
+    /// Only ordering moves: provenance stamps keep this store's own clock.
     pub(crate) fn observe_clock(&mut self, clock: u64) {
-        let clock = i64::try_from(clock).unwrap_or(i64::MAX);
-        if clock > self.last_stamp.1 {
-            self.last_stamp.1 = clock;
-        }
+        let clock = self.bound_clock(clock);
+        self.order_floor = self.order_floor.max(clock);
     }
 
     /// Apply one write as `who`: policies apply for a session identity.
@@ -7048,9 +7093,7 @@ impl Inner {
             Who::Session(author) | Who::Attributed(author) => author,
             Who::Local => self.stamp_author(),
         };
-        let now = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as i64);
+        let now = self.now_ms();
         if let Some(session) = self.checked(who) {
             Self::admit_session_write(op, session, now)?;
         }
@@ -7058,15 +7101,20 @@ impl Inner {
         let at = if seq == last_seq {
             last_at
         } else {
-            now.max(last_at + 1)
+            now.max(last_at.saturating_add(1))
         };
         self.last_stamp = (seq, at);
         // An explicit timestamp (a backfill) stamps this write alone; the
         // clock's monotonic stamps go on.
         let at = op.updated_at_ms().map_or(at, |ms| ms as i64);
+        // Its commit orders at the latest stamp its writes took, and after
+        // every other writer's version seen before it began.
+        let ordered = op
+            .updated_at_ms()
+            .map_or(at, |ms| i64::try_from(ms).unwrap_or(i64::MAX));
         self.commit_stamp = match self.commit_stamp {
-            (stamped, stamp) if stamped == seq => (seq, stamp.max(at)),
-            _ => (seq, at),
+            (stamped, stamp) if stamped == seq => (seq, stamp.max(ordered)),
+            _ => (seq, ordered.max(self.floor_after())),
         };
         self.writer = Some(Stamp {
             at,
