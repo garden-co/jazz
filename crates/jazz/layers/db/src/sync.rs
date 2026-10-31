@@ -1112,7 +1112,9 @@ pub enum SyncMessage {
         rows: Vec<(String, [u8; 16], Vec<u8>, u64)>,
     },
     /// A read's result is complete through `through`, per sequencer (a
-    /// replica with no server numbers its versions at its own node).
+    /// replica with no server numbers its versions at its own node). It
+    /// speaks for this read alone: the connection's position is
+    /// [`SyncMessage::ConnectionSettled`]'s.
     /// `members`: the result's rows, in order: always for a one-shot
     /// read, and for a live one's opening and window changes when it is
     /// limited or its opening could not tell what left it; the replica
@@ -1254,6 +1256,16 @@ pub enum SyncMessage {
         admitted: bool,
         catalogue: CatalogueUpdate,
     },
+    /// Server → client: the position the whole connection is settled
+    /// through. Every read it settled is complete through `through`, and
+    /// nothing later sent for those reads lands at or below it. A read's
+    /// own [`SyncMessage::Settled`] may name a later position (a sharded
+    /// gateway settles each read as far as the shards it reads), so this,
+    /// not a read's settle or a commit's fate, moves what the replica
+    /// knows. Sent after a tick's rows, settles and fates whenever it moved.
+    ConnectionSettled {
+        through: Positions,
+    },
 }
 
 /// The catalogue entries a [`SyncMessage::Catalogue`] or
@@ -1330,6 +1342,7 @@ impl SyncMessage {
             Self::Join { .. } => "Join",
             Self::Catalogue(_) => "Catalogue",
             Self::Welcome { .. } => "Welcome",
+            Self::ConnectionSettled { .. } => "ConnectionSettled",
         }
     }
 }
@@ -1641,13 +1654,19 @@ pub(crate) struct Client {
     stored: HashSet<u64>,
     /// Transient cache reconstructed from pending row keys and history.
     baselines: HashMap<(String, RowUuid, Vec<u8>), Option<Image>>,
-    /// Highest server seq any answer was complete through.
+    /// The position the upstream last said the connection is settled
+    /// through ([`SyncMessage::ConnectionSettled`]).
     pub(crate) known: u64,
     /// The node code whose positions `known` counts: 0, the authority's,
     /// unless the upstream is a replica with no server (its own node's).
     pub(crate) known_n: i64,
     /// The `known` cut last written to `_jazz_meta`.
     persisted_known: u64,
+    /// This replica's own commits accepted past `known`, as (seq, tx):
+    /// what it knows does not hold them yet, so a snapshot or a
+    /// serializable transaction names them by tx. Two sequencers may number
+    /// different commits alike, so each is its own entry.
+    pub(crate) own_accepted: BTreeSet<(u64, u64)>,
     answers: HashMap<u64, Option<Result<(Pos, Vec<[u8; 16]>), Error>>>,
     /// Permission preflights asked for; `None` until answered.
     advice: HashMap<u64, Option<PermissionAdvice>>,
@@ -2054,6 +2073,8 @@ pub(crate) struct Session {
     /// On a relay, LocalFirst subscriptions waiting for the upstream's
     /// first answer for at most their first-load wait.
     first_load: BTreeMap<u64, FirstLoadWait>,
+    /// The last [`SyncMessage::ConnectionSettled`] position it was sent.
+    connection_settled: Option<(Option<[u8; 16]>, u64)>,
 }
 
 /// A relayed LocalFirst subscription's first-load wait: once `until`
@@ -2103,6 +2124,7 @@ impl Session {
             schema: None,
             relayed: BTreeMap::new(),
             first_load: BTreeMap::new(),
+            connection_settled: None,
         }
     }
 
@@ -5925,10 +5947,16 @@ impl Inner {
     }
 
     /// The own commits a replica's serializable transaction began over:
-    /// those still unsettled (none on the authority).
+    /// those still unsettled (none on the authority), and those accepted
+    /// past the position it knows.
     pub(crate) fn unsettled_own(&self) -> Vec<u64> {
         self.client.as_ref().map_or_else(Vec::new, |client| {
-            client.pending.iter().map(|p| p.tx).collect()
+            client
+                .pending
+                .iter()
+                .map(|p| p.tx)
+                .chain(client.own_accepted.iter().map(|&(_, tx)| tx))
+                .collect()
         })
     }
 
@@ -6165,6 +6193,7 @@ impl Client {
             known: 0,
             known_n: 0,
             persisted_known: 0,
+            own_accepted: BTreeSet::new(),
             answers: HashMap::new(),
             advice: HashMap::new(),
             requested: BTreeSet::new(),
@@ -7176,12 +7205,15 @@ impl Db {
             owner: node,
             global_base: GlobalTime(client.known),
             local_base: TxTime(0),
+            // Own commits accepted past the known position are named too.
             dots: client
                 .pending
                 .iter()
-                .filter(|p| captured.contains(&p.tx))
-                .map(|p| TxId {
-                    time: TxTime(p.tx),
+                .map(|p| p.tx)
+                .filter(|tx| captured.contains(tx))
+                .chain(client.own_accepted.iter().map(|&(_, tx)| tx))
+                .map(|tx| TxId {
+                    time: TxTime(tx),
                     node,
                 })
                 .collect(),
@@ -7690,7 +7722,11 @@ impl Db {
                         global,
                     } => {
                         let (by, through) = required_position(&through, "a settlement")?;
-                        let at = inner.learn_known(through, by)?;
+                        // A read's settle speaks for that read alone.
+                        let at = Pos {
+                            n: inner.code_of(by)?,
+                            seq: through,
+                        };
                         let client = inner.client.as_mut().expect("client");
                         let resumable = client.whole.is_empty();
                         let mut live_watermark = None;
@@ -7862,10 +7898,25 @@ impl Db {
                         let accepted = matches!(outcome, Outcome::Accepted { .. });
                         // A relay's own last word is at its own position.
                         let landed = if global || by.is_some() {
-                            inner.learn_known(through, by)?
+                            Pos {
+                                n: inner.code_of(by)?,
+                                seq: through,
+                            }
                         } else {
                             Pos::at(through)
                         };
+                        // Accepted past what this replica knows, its own
+                        // commit is named by tx until the connection's
+                        // position covers it.
+                        {
+                            let client = inner.client.as_mut().expect("client");
+                            if accepted
+                                && (global || by.is_some())
+                                && (landed.n != client.known_n || through > client.known)
+                            {
+                                client.own_accepted.insert((through, tx));
+                            }
+                        }
                         let client = inner.client.as_mut().expect("client");
                         // From the pending commit, not what was sent: a
                         // commit refused before sending was never sent.
@@ -7972,6 +8023,14 @@ impl Db {
                                 });
                             }
                         }
+                    }
+                    SyncMessage::ConnectionSettled { through } => {
+                        let (by, through) =
+                            required_position(&through, "a connection settlement")?;
+                        inner.learn_known(through, by)?;
+                        let client = inner.client.as_mut().expect("client");
+                        let known = client.known;
+                        client.own_accepted = client.own_accepted.split_off(&(known + 1, 0));
                     }
                     other => return Err(unsupported(format!("client received {other:?}"))),
                 }
@@ -9918,6 +9977,25 @@ impl Db {
             out.extend(evictions);
             out.extend(std::mem::take(&mut session.outbox));
             out.extend(settled);
+            // The connection's position follows the tick's rows, settles
+            // and fates, when it moved: a read's settle no longer moves what
+            // the replica knows, and rows shipped past that position would
+            // otherwise wait for a later tick's to show.
+            let delivers = out.iter().any(|message| {
+                matches!(
+                    message,
+                    SyncMessage::Rows { .. }
+                        | SyncMessage::AccessLost { .. }
+                        | SyncMessage::Settled { .. }
+                        | SyncMessage::Fate { .. }
+                )
+            });
+            if delivers && session.connection_settled != Some((by, through)) {
+                session.connection_settled = Some((by, through));
+                out.push(SyncMessage::ConnectionSettled {
+                    through: positions(by, through),
+                });
+            }
             // A relay's versions of the session's own commits it still
             // uploads are the session's pending writes, which it holds as
             // it wrote them: shipped at the relay's seqs, they would stand
