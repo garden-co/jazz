@@ -8423,7 +8423,30 @@ impl Db {
         let replayed = pending.into_iter().try_for_each(|(tx, ops)| {
             begin_savepoint(&inner.conn, "replay")?;
             inner.merging = true;
-            let replayed = ops.iter().try_for_each(|op| inner.apply(op, tx).map(drop));
+            let replayed = ops.iter().try_for_each(|op| match inner.apply(op, tx) {
+                // A part of a cross-shard commit that landed before its fate
+                // (another shard answered first) already holds its row. The
+                // writer's version overlays that baseline as it overlays any
+                // other, until the fate: the whole commit still shows as its
+                // writer's. A conflicting insert by someone else is refused
+                // upstream, and the fate drops the whole commit.
+                Err(error) if error.reason == Some(Reason::RowAlreadyExists) => {
+                    let StagedOp::Insert(table, _, opts) = op else {
+                        return Err(error);
+                    };
+                    let landed = baseline.iter().find_map(|((t, row, key), image)| {
+                        let image = image.as_ref()?;
+                        (t == table && Some(*row) == opts.row_id).then_some((row, key, image))
+                    });
+                    let Some((row, key, image)) = landed else {
+                        return Err(error);
+                    };
+                    let at = inner.pos(image)?;
+                    inner.drop_row(table, *row, key, at)?;
+                    inner.apply(op, tx).map(drop)
+                }
+                other => other.map(drop),
+            });
             inner.merging = false;
             end_savepoint(&inner.conn, "replay", replayed.is_ok())
         });
