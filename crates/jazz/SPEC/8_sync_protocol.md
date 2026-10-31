@@ -476,6 +476,17 @@ sees its own writes. A relay serves its sessions' results as its store holds
 them and leaves the cut to the session, which reads by the positions the relay
 passes on (§8.13). Known limit: a branch view's read reads the current state.
 
+`known` is the connection's position, not any one result's: a live result may
+read further (its own read's settle), never less far. It is persisted, and a
+reopened replica rebuilds what reading by positions needs from its store
+alone: the newest accepted version each table holds (an indexed `MAX(_seq)`),
+and its own commits accepted past `known`, from its settled-transaction
+records. Until its upstream settles again, every read of a reopened replica is
+as of `known`, its own writes included. A replica's history pruning must keep,
+for each row, its newest version at or before the lowest position a live read
+or `known` reads at; a table that keeps less (latest-only) cannot be read
+through a cut.
+
 A replica treats a read as settled only once its connected upstream confirmed
 it with `Settled`; while the upstream is unanswered, offline or failing the
 read stays unsettled, and a node with no upstream settles locally
