@@ -529,6 +529,10 @@ struct Inner {
     /// share a time, and later commits get strictly later ones, so
     /// `$createdAt` orders this node's writes even within one millisecond.
     last_stamp: (u64, i64),
+    /// The latest stamp commit `.0`'s writes took, explicit times
+    /// included: its clock among unsettled versions (see
+    /// [`Inner::commit_clock`]).
+    commit_stamp: (u64, i64),
     /// Interned author codes (see [`Inner::author_code`]), cached both ways.
     authors: RefCell<AuthorCodes>,
     /// By stored table and whether into its history: the columns the last
@@ -1378,6 +1382,7 @@ impl Db {
                 identity: config.identity,
                 writer: None,
                 last_stamp: (0, 0),
+                commit_stamp: (0, 0),
                 authors: RefCell::new(AuthorCodes::default()),
                 image_inserts: RefCell::default(),
                 current_batch: RefCell::default(),
@@ -7011,6 +7016,32 @@ impl Inner {
         self.apply_as(op, who, seq)
     }
 
+    /// The clock commit `seq` orders at among unsettled versions (see
+    /// [`sync::Order`]): the stamp its writes took, or for one that wrote
+    /// none the next stamp this store's clock would give.
+    pub(crate) fn commit_clock(&self, seq: u64) -> u64 {
+        let (stamped, stamp) = self.commit_stamp;
+        let (_, last_at) = self.last_stamp;
+        let at = if seq == stamped {
+            stamp
+        } else {
+            let now = web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64);
+            now.max(last_at + 1)
+        };
+        at.max(0) as u64
+    }
+
+    /// Hold this store's clock past an unsettled version's (see
+    /// [`sync::Order`]): a write made after it was seen orders after it.
+    pub(crate) fn observe_clock(&mut self, clock: u64) {
+        let clock = i64::try_from(clock).unwrap_or(i64::MAX);
+        if clock > self.last_stamp.1 {
+            self.last_stamp.1 = clock;
+        }
+    }
+
     /// Apply one write as `who`: policies apply for a session identity.
     fn apply_as(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
         let author = match who {
@@ -7033,6 +7064,10 @@ impl Inner {
         // An explicit timestamp (a backfill) stamps this write alone; the
         // clock's monotonic stamps go on.
         let at = op.updated_at_ms().map_or(at, |ms| ms as i64);
+        self.commit_stamp = match self.commit_stamp {
+            (stamped, stamp) if stamped == seq => (seq, stamp.max(at)),
+            _ => (seq, at),
+        };
         self.writer = Some(Stamp {
             at,
             author: self.author_code(&author_key(&author))?,

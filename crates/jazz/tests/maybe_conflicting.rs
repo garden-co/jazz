@@ -743,6 +743,7 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
     ))
     .unwrap();
     let commit = |tx: u64, target: [u8; 16], title: &str, on: BuiltOn| SyncMessage::Commit {
+        clock: 0,
         id: TxId::new(TxTime(tx), NodeUuid::from_bytes(relay_node)),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {

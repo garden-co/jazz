@@ -951,6 +951,7 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
     );
     pump(&server, &[&mallory]);
     let update = |tx: u64, body: Value, deltas: Vec<CellDelta>| SyncMessage::Commit {
+        clock: 0,
         id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {
@@ -1217,6 +1218,7 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
     // Mallory names the draft's tree (its hashes are no secret) in a doc
     // she may write and read, pushing nothing; and a tree nobody stored.
     let insert = |tx: u64, n: u8, value: &jazz::large_values::LargeValueRef| SyncMessage::Commit {
+        clock: 0,
         id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![
@@ -1328,6 +1330,7 @@ fn an_access_proof_the_writer_cannot_read_proves_nothing() {
     // Mallory writes the secret body's tree back into the row, naming the
     // private version as her proof; then a tree nobody stored.
     let update = |tx: u64, value: &jazz::large_values::LargeValueRef| SyncMessage::Commit {
+        clock: 0,
         id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {
@@ -1406,6 +1409,7 @@ fn a_push_is_never_answered() {
     };
     let hidden = prepared(8).value_ref;
     let insert = |tx: u64, n: u8| SyncMessage::Commit {
+        clock: 0,
         id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![
@@ -1505,6 +1509,7 @@ fn a_delta_that_does_not_stand_in_for_a_null_cell_is_refused() {
         },
     };
     let update = |tx: u64, body: Value, deltas: Vec<CellDelta>| SyncMessage::Commit {
+        clock: 0,
         id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {
@@ -1589,6 +1594,7 @@ fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
     // Mallory edits the doc over its first version, which the authority
     // has to merge, naming the draft's tree as her value.
     up.borrow_mut().push_back(SyncMessage::Commit {
+        clock: 0,
         id: TxId::new(TxTime(1), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {

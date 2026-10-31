@@ -11,6 +11,7 @@ const PART: u8 = 0xFF;
 const LAST_PART: u8 = 0xFE;
 fn image(actor: u8, bytes: usize) -> Image {
     Image {
+        written: None,
         table: "notes".into(),
         id: [actor; 16],
         key: vec![],

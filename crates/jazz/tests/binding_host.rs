@@ -586,6 +586,7 @@ fn a_backend_writes_as_a_local_first_account_only_once_admitted() {
 fn a_message_larger_than_one_wire_frame_travels_in_parts() {
     use jazz::db::{FrameJoiner, Image, SyncCell, SyncMessage, encode_frames};
     let image = |n: u8| Image {
+        written: None,
         table: "todos".into(),
         id: [n; 16],
         key: Vec::new(),
@@ -1238,10 +1239,11 @@ fn a_tab_subscribed_while_its_worker_is_offline_hears_the_server_once_it_is_back
 }
 
 #[test]
-fn tabs_changing_one_row_at_once_keep_their_own_pending_writes_without_a_server() {
+fn tabs_changing_one_row_at_once_converge_on_the_later_write_without_a_server() {
     // A worker with no server settles nothing: each tab's commit stays
-    // pending, so each tab reads its own write over the worker's, until a
-    // server orders them.
+    // pending, and pending versions order last-writer-wins by their
+    // commits' clocks (the writer's node breaking a tie), so the worker
+    // and both tabs show the same write until a server orders them.
     let worker = open(0xc0);
     worker.set_remote_link_hint("none").unwrap();
     let (a, a_up, a_down) = tab_over(&worker, open(0xc1));
@@ -1258,11 +1260,12 @@ fn tabs_changing_one_row_at_once_keep_their_own_pending_writes_without_a_server(
     }
     let row = *write.row_id.0.as_bytes();
 
+    // b writes after a (or in the same millisecond, from the larger node).
     a.update("notes", &row, &title("from a"), &none()).unwrap();
     b.update("notes", &row, &title("from b"), &none()).unwrap();
     pump(&links);
-    assert_eq!(titles(&worker), titles(&b), "the worker applied b's last");
-    assert_eq!(titles(&a), ["from a"]);
+    assert_eq!(titles(&worker), ["from b"]);
+    assert_eq!(titles(&a), ["from b"]);
     assert_eq!(titles(&b), ["from b"]);
 }
 

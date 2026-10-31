@@ -602,7 +602,17 @@ pub struct Image {
     /// reads list only content versions.
     pub content: bool,
     pub cells: Vec<(String, Cell)>,
+    /// An unsettled version's writer, by its commit's [`Order`]: unsettled
+    /// versions order last-writer-wins by it (SPEC 8 §8.13). `None` for an
+    /// accepted version.
+    pub written: Option<Order>,
 }
+
+/// Where an unsettled commit orders among the unsettled versions of a row:
+/// its writer's commit clock (Unix ms), then its writer's node and that
+/// node's tx, so every store orders the same commits the same way. The
+/// authority's order replaces it once the commits settle.
+pub type Order = (u64, [u8; 16], u64);
 
 /// The most image bytes one `Rows` carries: a first result of any size
 /// travels as several, each well under the logical message ceiling a
@@ -1158,6 +1168,10 @@ pub enum SyncMessage {
     /// [`Acting`]).
     Commit {
         id: TxId,
+        /// Its writer's commit clock (Unix ms): with `id`, where it orders
+        /// among unsettled versions ([`Order`]) until the authority's
+        /// order replaces it.
+        clock: u64,
         kind: WireKind,
         ops: Vec<WireOp>,
         acting: Acting,
@@ -1394,6 +1408,8 @@ impl Kind {
 struct Pending {
     /// Its local seq: where this store holds its versions.
     tx: u64,
+    /// Its writer's commit clock (see [`Order`]).
+    clock: u64,
     /// Its id upstream: this store's own, or the session's it carries.
     id: TxId,
     /// A serializable commit: its fate is reported as one (INV-TX-9),
@@ -1406,6 +1422,13 @@ struct Pending {
     /// name them as the upstream does: the commit was written under an
     /// older schema version, or the upstream's catalogue changed since.
     expected: Option<Vec<Expected>>,
+}
+
+impl Pending {
+    /// Where it orders among unsettled versions.
+    fn order(&self) -> Order {
+        (self.clock, *self.id.node.as_bytes(), self.id.time.0)
+    }
 }
 
 /// A row a pending commit wrote, as this replica holds it.
@@ -1765,6 +1788,8 @@ pub(crate) struct Client {
 /// the op each travels on.
 pub(crate) struct Relayed {
     origin: ([u8; 16], u64),
+    /// The session's commit clock (see [`Order`]).
+    clock: u64,
     bases: Vec<(usize, WireBase)>,
 }
 
@@ -3557,6 +3582,7 @@ impl Inner {
                     deleted: false,
                     content: true,
                     cells: Vec::new(),
+                    written: None,
                 };
                 for (i, name) in names.iter().enumerate() {
                     match name.as_str() {
@@ -4946,6 +4972,7 @@ impl Inner {
     fn persist_pending(&self, tx: u64, commit: &SyncMessage, rows: &[RowKey]) -> Result<(), Error> {
         let SyncMessage::Commit {
             id,
+            clock,
             kind,
             ops,
             acting,
@@ -4970,6 +4997,7 @@ impl Inner {
         };
         let header = SyncMessage::Commit {
             id: *id,
+            clock: *clock,
             kind,
             ops: Vec::new(),
             acting: acting.clone(),
@@ -6061,6 +6089,7 @@ impl Inner {
             let rows = self.pending_rows(tx)?;
             let SyncMessage::Commit {
                 id,
+                clock,
                 ops,
                 acting,
                 kind,
@@ -6068,7 +6097,7 @@ impl Inner {
             else {
                 continue;
             };
-            let id = *id;
+            let (id, clock) = (*id, *clock);
             let serializable = matches!(kind, WireKind::Serializable { .. });
             let mut ops = ops
                 .iter()
@@ -6096,6 +6125,7 @@ impl Inner {
             let expected = Some(self.expected_rows(tx, &ops, &rows, &over)?);
             client.pending.push(Pending {
                 tx,
+                clock,
                 id,
                 serializable,
                 ops,
@@ -6779,12 +6809,18 @@ impl Db {
                 ));
             }
         }
-        // A session's commit goes up under its own id.
-        let (bases, id) = match relayed {
-            Some(relayed) => (relayed.bases, tx_id(relayed.origin.0, relayed.origin.1)),
+        // A session's commit goes up under its own id, at its own clock;
+        // this store's at the stamp its writes took.
+        let (bases, id, clock) = match relayed {
+            Some(relayed) => (
+                relayed.bases,
+                tx_id(relayed.origin.0, relayed.origin.1),
+                relayed.clock,
+            ),
             None => (
                 bases,
                 tx_id(inner.client.as_ref().expect("client").node, seq),
+                inner.commit_clock(seq),
             ),
         };
         let mut wire: Result<Vec<WireOp>, Error> = ops.iter().map(to_wire).collect();
@@ -6826,6 +6862,7 @@ impl Db {
                 };
                 let commit = SyncMessage::Commit {
                     id,
+                    clock,
                     kind,
                     ops: wire,
                     acting,
@@ -6833,6 +6870,7 @@ impl Db {
                 client.unsent.push(commit.clone());
                 client.pending.push(Pending {
                     tx: seq,
+                    clock,
                     id,
                     serializable,
                     ops,
@@ -6849,11 +6887,25 @@ impl Db {
                     }
                     return Err(error);
                 }
+                // A commit that orders before one already pending on a row
+                // it wrote (a session's, written earlier and delivered
+                // later) goes under it: the pending commits replay in
+                // order.
+                let client = inner.client.as_ref().expect("client");
+                let order = (clock, *id.node.as_bytes(), id.time.0);
+                let reorder = client.pending.iter().any(|p| {
+                    p.tx != seq && p.order() > order && p.rows.iter().any(|row| rows.contains(row))
+                });
+                drop(inner);
+                if reorder {
+                    self.rebase()?;
+                }
             }
             Err(error) => {
                 client.fates.insert(seq, Err(error));
                 client.pending.push(Pending {
                     tx: seq,
+                    clock,
                     id,
                     serializable,
                     ops: Vec::new(),
@@ -8260,11 +8312,23 @@ impl Db {
             return Ok(());
         };
         let baseline = std::mem::take(&mut client.baselines);
-        let pending: Vec<(u64, Vec<StagedOp>)> = client
+        // Unsettled versions order last-writer-wins by their commits'
+        // `Order` (SPEC 8 §8.13): the pending commits replay in it, and one
+        // replays on a row only over an upstream's unsettled version that
+        // orders before it. Later, that version is the one the row shows.
+        let mut pending: Vec<(Order, u64, Vec<StagedOp>)> = client
             .pending
             .iter()
-            .map(|p| (p.tx, p.ops.clone()))
+            .map(|p| (p.order(), p.tx, p.ops.clone()))
             .collect();
+        pending.sort_by_key(|(order, _, _)| *order);
+        let mut outranked: HashMap<(String, RowUuid), Order> = HashMap::new();
+        for ((table, row, _), image) in &baseline {
+            if let Some(written) = image.as_ref().and_then(|image| image.written) {
+                let entry = outranked.entry((table.clone(), *row)).or_insert(written);
+                *entry = (*entry).max(written);
+            }
+        }
         let keep: BTreeSet<(String, RowUuid, Vec<u8>)> = client
             .pending
             .iter()
@@ -8286,33 +8350,44 @@ impl Db {
         // that view, and nothing is renamed across an upgrade.
         let view = inner.stored_view();
         let active = std::mem::replace(&mut inner.schema, view);
-        let replayed = pending.into_iter().try_for_each(|(tx, ops)| {
+        let replayed = pending.into_iter().try_for_each(|(order, tx, ops)| {
             begin_savepoint(&inner.conn, "replay")?;
             inner.merging = true;
-            let replayed = ops.iter().try_for_each(|op| match inner.apply(op, tx) {
-                // A part of a cross-shard commit that landed before its fate
-                // (another shard answered first) already holds its row. The
-                // writer's version overlays that baseline as it overlays any
-                // other, until the fate: the whole commit still shows as its
-                // writer's. A conflicting insert by someone else is refused
-                // upstream, and the fate drops the whole commit.
-                Err(error) if error.reason == Some(Reason::RowAlreadyExists) => {
-                    let StagedOp::Insert(table, _, opts) = op else {
-                        return Err(error);
-                    };
-                    let landed = baseline.iter().find_map(|((t, row, key), image)| {
-                        let image = image.as_ref()?;
-                        (t == table && Some(*row) == opts.row_id).then_some((row, key, image))
+            let shown = |op: &StagedOp| {
+                op.row().is_none_or(|row| {
+                    outranked
+                        .get(&(op.table().to_owned(), row))
+                        .is_none_or(|&later| later < order)
+                })
+            };
+            let replayed =
+                ops.iter()
+                    .filter(|op| shown(op))
+                    .try_for_each(|op| match inner.apply(op, tx) {
+                        // A part of a cross-shard commit that landed before its fate
+                        // (another shard answered first) already holds its row. The
+                        // writer's version overlays that baseline as it overlays any
+                        // other, until the fate: the whole commit still shows as its
+                        // writer's. A conflicting insert by someone else is refused
+                        // upstream, and the fate drops the whole commit.
+                        Err(error) if error.reason == Some(Reason::RowAlreadyExists) => {
+                            let StagedOp::Insert(table, _, opts) = op else {
+                                return Err(error);
+                            };
+                            let landed = baseline.iter().find_map(|((t, row, key), image)| {
+                                let image = image.as_ref()?;
+                                (t == table && Some(*row) == opts.row_id)
+                                    .then_some((row, key, image))
+                            });
+                            let Some((row, key, image)) = landed else {
+                                return Err(error);
+                            };
+                            let at = image.at;
+                            inner.drop_row(table, *row, key, at)?;
+                            inner.apply(op, tx).map(drop)
+                        }
+                        other => other.map(drop),
                     });
-                    let Some((row, key, image)) = landed else {
-                        return Err(error);
-                    };
-                    let at = image.at;
-                    inner.drop_row(table, *row, key, at)?;
-                    inner.apply(op, tx).map(drop)
-                }
-                other => other.map(drop),
-            });
             inner.merging = false;
             end_savepoint(&inner.conn, "replay", replayed.is_ok())
         });
@@ -8842,6 +8917,21 @@ impl Inner {
 
     /// Apply one server image; returns whether a rebase is needed (the row
     /// is overlaid by a pending write).
+    /// Name the writer of each of this relay's unsettled versions among
+    /// `images` by its commit's [`Order`], which a session orders it by.
+    fn mark_written(&self, images: &mut [Image]) {
+        let Some(client) = &self.client else {
+            return;
+        };
+        for image in images.iter_mut().filter(|image| image.at.n == self.me) {
+            image.written = client
+                .pending
+                .iter()
+                .find(|p| p.tx == image.at.seq)
+                .map(Pending::order);
+        }
+    }
+
     fn receive_image(&mut self, mut image: Image) -> Result<bool, Error> {
         // An upstream ships accepted versions and its own unsettled ones,
         // which this replica holds in its upstream band; never one it holds
@@ -8852,6 +8942,12 @@ impl Inner {
             ));
         }
         image.at = image.at.from_upstream();
+        if image.at.accepted() {
+            image.written = None;
+        } else if let Some((clock, _, _)) = image.written {
+            // A write made after this one was seen orders after it.
+            self.observe_clock(clock);
+        }
         let at = image.at;
         let row = RowUuid::from_bytes(image.id);
         let overlaid = (image.table.clone(), row, image.key.clone());
@@ -10153,15 +10249,42 @@ impl Db {
                             continue;
                         }
                         let id = image.id.to_vec();
-                        let base = inner
-                            .images_where(
-                                &image.table,
-                                true,
-                                "id = ?1 AND _b = ?2 AND _t >= 0 AND _t < ?3 ORDER BY _t DESC",
-                                &[&id, &image.key, &image.at.t()],
-                            )?
-                            .into_iter()
-                            .find(|base| !is_own(base));
+                        // Unsettled versions order by their commits'
+                        // `Order`, not by seq: the base is the latest other
+                        // commit's version, else the newest accepted one.
+                        let row_key = (
+                            image.table.clone(),
+                            RowUuid::from_bytes(image.id),
+                            image.key.clone(),
+                        );
+                        let other = inner.client.as_ref().and_then(|client| {
+                            client
+                                .pending
+                                .iter()
+                                .filter(|p| !own.contains(&p.tx) && p.rows.contains(&row_key))
+                                .max_by_key(|p| p.order())
+                                .map(|p| p.tx)
+                        });
+                        let base = match other {
+                            Some(tx) => inner
+                                .images_where(
+                                    &image.table,
+                                    true,
+                                    "id = ?1 AND _b = ?2 AND _t = ?3",
+                                    &[&id, &image.key, &Pos { n: me, seq: tx }.t()],
+                                )?
+                                .into_iter()
+                                .next(),
+                            None => inner
+                                .images_where(
+                                    &image.table,
+                                    true,
+                                    "id = ?1 AND _b = ?2 AND _t >= 0 AND _t < ?3 ORDER BY _t DESC",
+                                    &[&id, &image.key, &band_start(UPSTREAM)],
+                                )?
+                                .into_iter()
+                                .next(),
+                        };
                         // Read access is the base version's own: the
                         // session's pending write may be what lets it read
                         // the row now.
@@ -10195,6 +10318,11 @@ impl Db {
                     !matches!(message, SyncMessage::Rows { images, tx_ids }
                             if images.is_empty() && tx_ids.is_empty())
                 });
+            }
+            for message in &mut out {
+                if let SyncMessage::Rows { images, .. } = message {
+                    inner.mark_written(images);
+                }
             }
             // Chunked cells go as deltas over the version of their row the
             // replica holds (SPEC 19.8). Whatever ships last of a version,
@@ -10977,6 +11105,9 @@ impl Db {
                 }));
                 session.outbox.extend(lost);
                 session.outbox.extend(hidden);
+                let mut images = images;
+                inner.mark_written(&mut images);
+                let session = &mut inner.sessions[index];
                 session
                     .outbox
                     .extend(rows_messages(images, tx_ids, ROWS_MESSAGE_BYTES));
@@ -10991,6 +11122,7 @@ impl Db {
             }
             SyncMessage::Commit {
                 id,
+                clock,
                 kind,
                 ops,
                 acting,
@@ -11075,7 +11207,15 @@ impl Db {
                             };
                             let vouched = vouched(policy, who, acting);
                             self.with_claims(vouched, || {
-                                db.authorize_commit(who, policy, kind, ops, (node, tx), possession)
+                                db.authorize_commit(
+                                    who,
+                                    policy,
+                                    kind,
+                                    ops,
+                                    (node, tx),
+                                    clock,
+                                    possession,
+                                )
                             })
                         }) {
                         // The accepted commit recorded its fate atomically.
@@ -11498,6 +11638,7 @@ impl Db {
         mut kind: WireKind,
         ops: Vec<WireOp>,
         id: ([u8; 16], u64),
+        clock: u64,
         possession: crate::large::Possession,
     ) -> Result<(Vec<RowKey>, Vec<Echoable>), (Error, Vec<RowKey>)> {
         // Each base by the op it travels on; the ops apply without them.
@@ -11737,7 +11878,11 @@ impl Db {
                 ops.clone(),
                 seq,
                 upload,
-                Some(Relayed { origin: id, bases }),
+                Some(Relayed {
+                    origin: id,
+                    clock,
+                    bases,
+                }),
             )
         } else {
             Ok(())
@@ -12248,6 +12393,7 @@ mod tests {
     #[test]
     fn a_current_pending_header_round_trips() {
         let header = SyncMessage::Commit {
+            clock: 0,
             id: tx_id([7; 16], 1),
             kind: WireKind::Mergeable,
             ops: Vec::new(),
@@ -12265,6 +12411,7 @@ mod tests {
 
     fn image(id: u8, seq: u64, body: usize) -> Image {
         Image {
+            written: None,
             table: "notes".to_owned(),
             id: [id; 16],
             key: Vec::new(),

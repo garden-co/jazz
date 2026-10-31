@@ -15,9 +15,15 @@ The model is small:
   position `_t` (below 2^53), in one of three bands: accepted (`_t` is the
   server seq the version was shipped at), upstream-pending (a relay's
   unsettled versions as a session holds them) and own-pending (this store's
-  own optimistic writes, numbered from 1 above both). Cuts and history on the
-  replica are over server versions: a later band sorts after every server
-  position, so no cut at a server seq sees a pending version.
+  own optimistic writes, numbered from 1 above both). The bands name a
+  version; they do not order the pending ones. Unsettled versions of a row
+  order last-writer-wins by their commits' order: the writer's commit clock
+  (Unix ms, carried as `Commit.clock`), then the writer's node and its tx.
+  Every store orders the same unsettled commits the same way, and the
+  authority's order replaces it once they settle, so a row may change then.
+  Cuts and history on the replica are over server versions: a pending band
+  sorts after every server position, so no cut at a server seq sees a
+  pending version.
 - **Writes travel up** as one `Commit` per transaction and come back as one
   `Fate`.
 - **Reads travel up** as one `Read` per query and come back as rows plus
@@ -823,8 +829,14 @@ read's tier, asking its upstream with the same `Read` where the tier needs
 the authority's answer, and tells its sessions the authority's seq it knows
 (`served_through`), so a session's snapshot is one the authority validates as
 it is. It ships its unsettled versions in its own-pending band; a session
-holds them in its upstream-pending band, below its own writes, so the two
-never collide in the session's store (`INV-SYNC-50`). A session names a
+holds them in its upstream-pending band, so the two never collide in the
+session's store (`INV-SYNC-50`). Each such image carries its commit's order
+(`Image.written`). The relay replays its pending commits (its own and the
+sessions' it carries) in that order, so a commit written earlier but
+delivered later goes under the later one. A session replays its own pending
+commits over the relay's version of a row only when they order after it,
+and holds its clock past every order it is shipped, so a write it makes
+afterwards orders last. A session names a
 relay's unsettled version it built on by the relay's commit
 (`BuiltOn::Upstream`). A relay stores a session's commit as its own pending
 commit, answers `Stored`, and relays the authority's `Fate` (§8.3). A relay
@@ -832,9 +844,8 @@ whose host says it has no server never numbers accepted positions: its
 sessions' commits stay pending (it answers `Stored`, and the `Fate` comes
 once a server is added and decides them), a serializable commit waits for
 that server rather than being validated by the relay, and it settles its
-sessions' reads at the last authority position it holds. Until then its
-sessions do not converge on concurrent edits of a row: each holds its own
-pending write over the relay's. A relay's `ConnectionSettled` to its sessions names the position it knows its
+sessions' reads at the last authority position it holds. Its sessions still
+converge on concurrent edits of a row, by the commits' order. A relay's `ConnectionSettled` to its sessions names the position it knows its
 upstream through (`served_through`). A relayed result's `Settled` names its
 upstream read's own settle, when that is past `served_through`, so the session
 reads each result as of its own upstream read (§8.4). The relay passes each

@@ -59,8 +59,8 @@ const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
 /// change re-runs the producer and re-pins these; after that the corpus is
 /// immutable and a new storage format gets a new corpus beside it (see
 /// `fixtures/sqlite-storage-v1/README.md`).
-const SERVER_SHA256: &str = "9346f1a3180641fd75b85650c839a6e753df6582c9377a832698b49b41406f7a";
-const CLIENT_SHA256: &str = "babdf7132d38762cf172f20640f8f3699bf58bd847acacd3b55bf6d2c4776423";
+const SERVER_SHA256: &str = "eac4bfd579ab6772383075457592ac8f83f8ec49259ccaebfb18f9548c5d9f3a";
+const CLIENT_SHA256: &str = "e3ee17c364245078050ae1d7376a5bbd9411a59cb9cf1d47e1343a852e31e445";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];

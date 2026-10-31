@@ -344,6 +344,7 @@ fn a_tab_refuses_an_upstream_version_its_upstreams_upstream_numbered() {
     server_side
         .send(SyncMessage::Rows {
             images: vec![Image {
+                written: None,
                 table: "notes".to_owned(),
                 id: [7; 16],
                 key: Vec::new(),
@@ -719,6 +720,69 @@ fn a_serverless_workers_tab_commits_stay_pending_until_a_server_is_added() {
     assert_eq!(shown(&core), ["tab", "worker"]);
     assert_eq!(worker.pending_upload_count(), 0, "both commits settled");
     assert_eq!(shown(&reader), ["tab", "worker"]);
+}
+
+/// Without a server, a worker and its tabs order unsettled versions
+/// last-writer-wins by their commits' clocks, not by arrival: a tab's write
+/// made earlier but delivered later goes under the later one everywhere.
+#[test]
+fn tabs_converge_on_the_later_write_whatever_order_their_worker_gets_them() {
+    let worker = open(WORKER, author(WORKER));
+    worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    let attach_tab = |node: u8| {
+        let tab = open(node, author(WORKER));
+        tab.set_non_durable_client();
+        tab.set_remote_link_hint(RemoteLinkHint::Live);
+        let (client_side, server_side) = duplex();
+        block_on(tab.connect_upstream(client_side));
+        worker
+            .accept_subscriber(server_side, author(WORKER))
+            .unwrap();
+        tab
+    };
+    let early = attach_tab(WORKER + 1);
+    let late = attach_tab(WORKER + 2);
+    let pump = || {
+        for _ in 0..6 {
+            for db in [&early, &late, &worker] {
+                block_on(db.tick()).unwrap();
+            }
+        }
+    };
+    let notes = worker.prepare_query(&Query::from("notes")).unwrap();
+    let watches: Vec<_> = [&early, &late]
+        .map(|tab| block_on(tab.subscribe(&notes, ReadOpts::default())).unwrap())
+        .into_iter()
+        .collect();
+    let row = block_on(early.insert("notes", body("before"), Default::default()))
+        .unwrap()
+        .row_uuid();
+    pump();
+    let shown = |db: &Db| -> Vec<String> {
+        block_on(db.all(&notes, ReadOpts::default()))
+            .unwrap()
+            .iter()
+            .filter_map(|row| match row.cells().find(|(name, _)| *name == "body") {
+                Some((_, Some(Value::String(text)))) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(shown(&late), ["before"]);
+
+    block_on(early.update("notes", row, body("early"), Default::default())).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    block_on(late.update("notes", row, body("late"), Default::default())).unwrap();
+    // The later write reaches the worker first.
+    for db in [&late, &worker, &late] {
+        block_on(db.tick()).unwrap();
+    }
+    assert_eq!(shown(&worker), ["late"]);
+    pump();
+    for db in [&worker, &early, &late] {
+        assert_eq!(shown(db), ["late"], "every store shows the later write");
+    }
+    drop(watches);
 }
 
 /// Notes are readable and writable, but the authority refuses inserting

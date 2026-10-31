@@ -12,9 +12,9 @@ pending uploads moved from one encoded message to a row per op, and
 watermarks became per-sequencer rows).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `9346f1a3180641fd75b85650c839a6e753df6582c9377a832698b49b41406f7a`.
+  the SQLite file `eac4bfd579ab6772383075457592ac8f83f8ec49259ccaebfb18f9548c5d9f3a`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `babdf7132d38762cf172f20640f8f3699bf58bd847acacd3b55bf6d2c4776423`.
+  `e3ee17c364245078050ae1d7376a5bbd9411a59cb9cf1d47e1343a852e31e445`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -119,3 +119,7 @@ of `_n` and `_seq` (history keyed by `(id, _b, _t)`, index `__by_t`),
 `_jazz_transactions_by_t`), `_jazz_lv_via` has `t` in place of `node`/`seq`,
 `_jazz_watermarks` is one `through` per key, and the sequencer tables are
 gone.
+
+Ordering unsettled versions last-writer-wins by their commits' clocks gave
+each pending commit's header a `clock` (its writer's commit clock), which
+regenerated it the same way.
