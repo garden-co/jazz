@@ -19,6 +19,7 @@ function entryOf(node: Node): NavEntry | undefined {
       return {
         label: textOf(node.name),
         url: node.index?.url,
+        defaultOpen: node.defaultOpen,
         children: node.children.map(entryOf).filter((e): e is NavEntry => e != null),
       };
     default:
