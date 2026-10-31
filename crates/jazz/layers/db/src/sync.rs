@@ -1666,11 +1666,12 @@ pub(crate) struct Client {
     pub(crate) known_n: i64,
     /// The `known` cut last written to `_jazz_meta`.
     persisted_known: u64,
-    /// This replica's own commits accepted past `known`, as (seq, tx):
-    /// what it knows does not hold them yet, so a snapshot or a
+    /// This replica's own commits accepted past `known`, as (sequencer,
+    /// seq, tx): what it knows does not hold them yet, so a snapshot or a
     /// serializable transaction names them by tx. Two sequencers may number
-    /// different commits alike, so each is its own entry.
-    pub(crate) own_accepted: BTreeSet<(u64, u64)>,
+    /// different commits alike, so each is its own entry, and a connection
+    /// position covers only its own sequencer's entries.
+    pub(crate) own_accepted: BTreeSet<(i64, u64, u64)>,
     /// Per stored table, the newest accepted position of a version the
     /// upstream sent: a result reading no table past its position needs
     /// no cut.
@@ -5774,8 +5775,9 @@ impl Inner {
         let mut cut = Cut::at(through);
         cut.extra = client
             .own_accepted
-            .range((through.seq + 1, 0)..)
-            .map(|&(seq, _)| Pos { n: through.n, seq })
+            .iter()
+            .filter(|&&(n, seq, _)| n != through.n || seq > through.seq)
+            .map(|&(n, seq, _)| Pos { n, seq })
             .collect();
         cut.unsettled = !read.settled_only;
         Cow::Owned(ReadSpec {
@@ -6055,7 +6057,7 @@ impl Inner {
                 .pending
                 .iter()
                 .map(|p| p.tx)
-                .chain(client.own_accepted.iter().map(|&(_, tx)| tx))
+                .chain(client.own_accepted.iter().map(|&(_, _, tx)| tx))
                 .collect()
         })
     }
@@ -6262,7 +6264,7 @@ impl Inner {
             .map_err(storage)?;
         let own = statement
             .query_map([node, client.known as i64], |r| {
-                Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+                Ok((0, r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
             })
             .map_err(storage)?
             .collect::<Result<Vec<_>, _>>()
@@ -7381,7 +7383,7 @@ impl Db {
                 .iter()
                 .map(|p| p.tx)
                 .filter(|tx| captured.contains(tx))
-                .chain(client.own_accepted.iter().map(|&(_, tx)| tx))
+                .chain(client.own_accepted.iter().map(|&(_, _, tx)| tx))
                 .map(|tx| TxId {
                     time: TxTime(tx),
                     node,
@@ -8098,7 +8100,7 @@ impl Db {
                                 && (global || by.is_some())
                                 && (landed.n != client.known_n || through > client.known)
                             {
-                                client.own_accepted.insert((through, tx));
+                                client.own_accepted.insert((landed.n, through, tx));
                                 client.visibility_moved = true;
                             }
                         }
@@ -8213,8 +8215,10 @@ impl Db {
                         let (by, through) = required_position(&through, "a connection settlement")?;
                         inner.learn_known(through, by)?;
                         let client = inner.client.as_mut().expect("client");
-                        let known = client.known;
-                        client.own_accepted = client.own_accepted.split_off(&(known + 1, 0));
+                        let (known_n, known) = (client.known_n, client.known);
+                        client
+                            .own_accepted
+                            .retain(|&(n, seq, _)| n != known_n || seq > known);
                         client.visibility_moved = true;
                     }
                     other => return Err(unsupported(format!("client received {other:?}"))),

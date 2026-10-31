@@ -34,7 +34,7 @@ The model is small:
 Invariant digest (the registry, `crates/invariant-registry.jsonl`, is the
 source of truth and names each invariant's tests):
 
-- `INV-SYNC-5`: Applying a fate or a settled seq MUST NOT move a node's settled seq backward or lower a write's reached durability tier; a lost fate is recovered on resume rather than guessed.
+- `INV-SYNC-5`: Applying a fate, a read's `Settled` or a `ConnectionSettled` MUST NOT move backward where a commit settled, a read's settle or the connection position (`known`), nor lower a write's reached durability tier; a lost fate is recovered on resume rather than guessed.
 - `INV-SYNC-7`: Rows MUST travel as self-contained row images (table, id, branch key, seq, deleted flag, content, cells), and result membership is per row: a subscription never holds a transaction as a unit of membership.
 - `INV-SYNC-8`: A server MUST track per session which row versions the peer holds and ship each version at most once across all of that peer's subscriptions; a peer it has no record of receives every row its results need.
 - `INV-SYNC-10`: A replica MUST apply a message whole: a message larger than one wire frame travels in transport parts whose last part ends it, and nothing of it is visible before the end.
@@ -51,7 +51,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-25`: A resumed subscription MUST leave the replica with the same rows as a fresh subscription to the same query.
 - `INV-SYNC-27`: Per-session delivery state MUST live only in the serving process and be released on disconnect.
 - `INV-SYNC-28`: Results MUST travel as rows and be assembled into result trees by the receiver.
-- `INV-SYNC-30`: A replica MUST treat a subscription as settled only when its connected upstream has confirmed it with a settled seq; a node with no upstream settles locally.
+- `INV-SYNC-30`: A replica MUST treat a subscription as settled only when its connected upstream has confirmed that subscription with its own `Settled`; a node with no upstream settles locally.
 - `INV-SYNC-44`: The read protocol MUST be rows plus settlement.
 - `INV-SYNC-45`: Rows MUST be shipped raw, by the authority's stored table and column names, whatever schema version the subscriber declared; a replica mirrors its upstream's catalogue and applies the lenses locally.
 - `INV-SYNC-46`: A replica missing the chunks of a large value MUST request them and install the row only once its chunks are present; a writer pushes a value's new chunks before the commit that uses them.
@@ -299,8 +299,9 @@ read-your-writes end to end.
 `Fate { id, outcome, global }` answers a commit, by its id. The `outcome` is one of:
 
 - `Accepted { at, accepted_at, as_written }`: the commit landed at position
-  `at`, which the replica records as where it settled; applying a fate never
-  moves its settled seq backward (`INV-SYNC-5`). `accepted_at` is the time
+  `at`, which the replica records as where that commit settled; applying a
+  fate never moves it backward (`INV-SYNC-5`). A fate speaks only for its
+  commit: it never moves the connection position `known` (§8.4). `accepted_at` is the time
   (Unix ms) the authority's clock stamped the commit's writes with: the
   `$createdAt`/`$updatedAt` of every write without an explicit time. It is
   absent only on a resend's recorded fate, which names no rows.
@@ -634,7 +635,8 @@ There is no transport compression on the SQLite path.
 The version handshake is one exchange, on every link (a socket, or a worker
 and its tab). `Join { version, known }` is the first message on every
 connection: `version` is the schema version the session reads by, and `known`
-the catalogue the replica keeps (§8.10). Its queries use that version's names,
+the catalogue the replica keeps (§8.10). This `Join.known` lists schema
+versions; it is unrelated to the connection position `known` of §8.4. Its queries use that version's names,
 which the server resolves to stored names, and the server serves them in that
 version (its result order and lens). Writes, images and evictions travel by
 stored names whatever the session's version (§8.4.1), so no message switches

@@ -419,6 +419,40 @@ fn own_commits_accepted_past_the_known_position_are_named_by_transaction() {
     assert!(after.global_base > held.global_base);
 }
 
+/// A connection position from another sequencer (the upstream gained or lost
+/// a server) does not cover own commits the first one accepted: they stay
+/// named by tx until a position of their own sequencer covers them.
+#[test]
+fn a_position_of_another_sequencer_keeps_own_commits_named() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, user(1));
+    let link = connect(&server, &client, user(1));
+    let _room = Room::open(&client, "a");
+    pump(&server, &client);
+    link.hold_position();
+    insert(&client, 1, "a", "mine");
+    pump(&server, &client);
+    link.to_client
+        .borrow_mut()
+        .push_back(SyncMessage::ConnectionSettled {
+            through: vec![(Some([9; 16]), 1_000_000)],
+        });
+    pump(&server, &client);
+    let held = block_on(client.capture_snapshot()).unwrap();
+    assert_eq!(
+        held.dots.len(),
+        1,
+        "another sequencer's position covers none of it"
+    );
+    link.release();
+    pump(&server, &client);
+    let after = block_on(client.capture_snapshot()).unwrap();
+    assert!(
+        after.dots.is_empty(),
+        "its own sequencer's position covers it"
+    );
+}
+
 /// Room b's read is settled past a commit to both rooms; room a's is not,
 /// nor is the connection. Each shows the commit only once its own read is
 /// settled through it: never half of it.
