@@ -1666,11 +1666,12 @@ pub(crate) struct Client {
     pub(crate) known_n: i64,
     /// The `known` cut last written to `_jazz_meta`.
     persisted_known: u64,
-    /// This replica's own commits accepted past `known`, as (seq, tx):
-    /// what it knows does not hold them yet, so a snapshot or a
+    /// This replica's own commits accepted past `known`, as (sequencer,
+    /// seq, tx): what it knows does not hold them yet, so a snapshot or a
     /// serializable transaction names them by tx. Two sequencers may number
-    /// different commits alike, so each is its own entry.
-    pub(crate) own_accepted: BTreeSet<(u64, u64)>,
+    /// different commits alike, so each is its own entry, and a connection
+    /// position covers only its own sequencer's entries.
+    pub(crate) own_accepted: BTreeSet<(i64, u64, u64)>,
     /// Per stored table, the newest accepted position of a version the
     /// upstream sent: a result reading no table past its position needs
     /// no cut.
@@ -5776,8 +5777,9 @@ impl Inner {
         let mut cut = Cut::at(through);
         cut.extra = client
             .own_accepted
-            .range((through.seq + 1, 0)..)
-            .map(|&(seq, _)| Pos { n: through.n, seq })
+            .iter()
+            .filter(|&&(n, seq, _)| n != through.n || seq > through.seq)
+            .map(|&(n, seq, _)| Pos { n, seq })
             .collect();
         cut.unsettled = !read.settled_only;
         Cow::Owned(ReadSpec {
@@ -6057,7 +6059,7 @@ impl Inner {
                 .pending
                 .iter()
                 .map(|p| p.tx)
-                .chain(client.own_accepted.iter().map(|&(_, tx)| tx))
+                .chain(client.own_accepted.iter().map(|&(_, _, tx)| tx))
                 .collect()
         })
     }
@@ -6223,7 +6225,52 @@ impl Inner {
             let image = self.upstream_baseline(&table, row, &key)?;
             client.baselines.insert((table, row, key), image);
         }
+        self.restore_positions(&mut client)?;
         self.client = Some(client);
+        Ok(())
+    }
+
+    /// What reads by position need of a reopened store (SPEC 8 §8.4): the
+    /// newest accepted version each table holds, and this replica's own
+    /// commits accepted past what it knows of its upstream, from its
+    /// settled-transaction records. Rows the store kept from before are
+    /// then read as of `known` until the upstream settles them again.
+    fn restore_positions(&self, client: &mut Client) -> Result<(), Error> {
+        // A store that wrote before it became a replica holds its own
+        // versions at the authority's numbering, and never syncs them:
+        // nothing it holds is past a position it reads as of.
+        if client.stranded {
+            return Ok(());
+        }
+        for table in self.physical.tables.keys() {
+            let newest: Option<i64> = self
+                .conn
+                .cached_row(
+                    &format!("SELECT MAX(_seq) FROM {} WHERE _n = 0", quote(table)),
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(storage)?;
+            if let Some(newest) = newest {
+                client.newest_foreign.insert(table.clone(), newest as u64);
+            }
+        }
+        let node = self.node_code(*self.identity.node.as_bytes())?;
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT seq, tx FROM _jazz_transactions \
+                 WHERE n = ?1 AND sn = 0 AND seq > ?2",
+            )
+            .map_err(storage)?;
+        let own = statement
+            .query_map([node, client.known as i64], |r| {
+                Ok((0, r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+            })
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        client.own_accepted.extend(own);
         Ok(())
     }
 }
@@ -7337,7 +7384,7 @@ impl Db {
                 .iter()
                 .map(|p| p.tx)
                 .filter(|tx| captured.contains(tx))
-                .chain(client.own_accepted.iter().map(|&(_, tx)| tx))
+                .chain(client.own_accepted.iter().map(|&(_, _, tx)| tx))
                 .map(|tx| TxId {
                     time: TxTime(tx),
                     node,
@@ -8054,7 +8101,7 @@ impl Db {
                                 && (global || by.is_some())
                                 && (landed.n != client.known_n || through > client.known)
                             {
-                                client.own_accepted.insert((through, tx));
+                                client.own_accepted.insert((landed.n, through, tx));
                                 client.visibility_moved = true;
                             }
                         }
@@ -8169,8 +8216,10 @@ impl Db {
                         let (by, through) = required_position(&through, "a connection settlement")?;
                         inner.learn_known(through, by)?;
                         let client = inner.client.as_mut().expect("client");
-                        let known = client.known;
-                        client.own_accepted = client.own_accepted.split_off(&(known + 1, 0));
+                        let (known_n, known) = (client.known_n, client.known);
+                        client
+                            .own_accepted
+                            .retain(|&(n, seq, _)| n != known_n || seq > known);
                         client.visibility_moved = true;
                     }
                     other => return Err(unsupported(format!("client received {other:?}"))),
@@ -8379,7 +8428,30 @@ impl Db {
         let replayed = pending.into_iter().try_for_each(|(tx, ops)| {
             begin_savepoint(&inner.conn, "replay")?;
             inner.merging = true;
-            let replayed = ops.iter().try_for_each(|op| inner.apply(op, tx).map(drop));
+            let replayed = ops.iter().try_for_each(|op| match inner.apply(op, tx) {
+                // A part of a cross-shard commit that landed before its fate
+                // (another shard answered first) already holds its row. The
+                // writer's version overlays that baseline as it overlays any
+                // other, until the fate: the whole commit still shows as its
+                // writer's. A conflicting insert by someone else is refused
+                // upstream, and the fate drops the whole commit.
+                Err(error) if error.reason == Some(Reason::RowAlreadyExists) => {
+                    let StagedOp::Insert(table, _, opts) = op else {
+                        return Err(error);
+                    };
+                    let landed = baseline.iter().find_map(|((t, row, key), image)| {
+                        let image = image.as_ref()?;
+                        (t == table && Some(*row) == opts.row_id).then_some((row, key, image))
+                    });
+                    let Some((row, key, image)) = landed else {
+                        return Err(error);
+                    };
+                    let at = inner.pos(image)?;
+                    inner.drop_row(table, *row, key, at)?;
+                    inner.apply(op, tx).map(drop)
+                }
+                other => other.map(drop),
+            });
             inner.merging = false;
             end_savepoint(&inner.conn, "replay", replayed.is_ok())
         });
