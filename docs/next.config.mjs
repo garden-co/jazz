@@ -87,6 +87,11 @@ const config = {
         destination: "/docs/setup/run-locally",
         permanent: false,
       },
+      {
+        source: "/docs/setup/backend/install",
+        destination: "/docs/setup/backend",
+        permanent: false,
+      },
       { source: "/docs/faq", destination: "/docs/how-jazz-works#faq", permanent: false },
       {
         source: "/docs/setup/deployment/jazz-cloud",
@@ -142,7 +147,7 @@ const config = {
       },
       {
         source: "/docs/install/typescript-server",
-        destination: "/docs/setup/backend/install",
+        destination: "/docs/setup/backend",
         permanent: false,
       },
       { source: "/docs/quickstart", destination: "/docs/setup/run-locally", permanent: false },
