@@ -957,9 +957,100 @@ fn a_relay_with_no_server_settles_its_tabs_at_its_own_position() {
         })
         .collect();
     assert!(
-        settled.iter().all(|&seq| seq > 0),
+        !settled.is_empty() && settled.iter().all(|&seq| seq > 0),
         "settled at the relay's own position: {settled:?}"
     );
+    assert_eq!(
+        settled_by(&tab_link),
+        vec![Some([1; 16])],
+        "by the relay's node"
+    );
+}
+
+/// The nodes a session's `Settled` positions name, deduplicated.
+fn settled_by(link: &Link) -> Vec<Option<[u8; 16]>> {
+    let mut by: Vec<_> = link
+        .log
+        .borrow()
+        .iter()
+        .filter_map(|m| match m {
+            SyncMessage::Settled { through, .. } => through.first().map(|&(by, _)| by),
+            _ => None,
+        })
+        .collect();
+    by.dedup();
+    by
+}
+
+/// A relay whose host reports no server after a tab subscribed serves
+/// that read itself from then on: its settles name the relay's own
+/// position, not the authority's seq it knew.
+#[test]
+fn a_relay_that_loses_its_server_settles_earlier_reads_at_its_own_position() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let relay = open(1, user(1));
+    let tab = open(2, user(1));
+    tab.set_non_durable_client();
+    let _link = connect(&server, &relay, user(1));
+    let tab_link = connect(&relay, &tab, user(1));
+    let mut a = Room::open(&tab, "a");
+    pump3(&server, &relay, &tab);
+    relay.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    // The relay's own seq runs well past the authority's it knew.
+    for n in 10..15 {
+        insert(&relay, n, "b", "elsewhere");
+    }
+    insert(&relay, 1, "a", "the relay's");
+    tab_link.log.borrow_mut().clear();
+    pump3(&server, &relay, &tab);
+    assert_eq!(a.titles(), titles(&["the relay's"]));
+    assert_eq!(
+        settled_by(&tab_link),
+        vec![Some([1; 16])],
+        "by the relay's node"
+    );
+    let relays = match tab_link.log.borrow().iter().rev().find_map(|m| match m {
+        SyncMessage::ConnectionSettled { through } => through.first().map(|&(_, seq)| seq),
+        _ => None,
+    }) {
+        Some(seq) => seq,
+        None => panic!("no connection position"),
+    };
+    let settled: Vec<u64> = tab_link
+        .log
+        .borrow()
+        .iter()
+        .filter_map(|m| match m {
+            SyncMessage::Settled { through, .. } => through.first().map(|&(_, seq)| seq),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !settled.is_empty() && settled.iter().all(|&seq| seq == relays),
+        "every settle at the relay's own seq {relays}, not the authority's: {settled:?}"
+    );
+}
+
+/// A read a tab opened while its relay had no server settles as far as
+/// the relay's upstream read once the server is back, ahead of the
+/// connection's position.
+#[test]
+fn a_relay_back_from_no_server_forwards_its_reads_upstream_settles() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let relay = open(1, user(1));
+    let tab = open(2, user(1));
+    tab.set_non_durable_client();
+    let link = connect(&server, &relay, user(1));
+    relay.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    let _tab_link = connect(&relay, &tab, user(1));
+    let mut a = Room::open(&tab, "a");
+    pump3(&server, &relay, &tab);
+    relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    pump3(&server, &relay, &tab);
+    link.hold_position();
+    insert(&server, 1, "a", "the server's");
+    pump3(&server, &relay, &tab);
+    assert_eq!(a.titles(), titles(&["the server's"]));
 }
 
 /// Two writers insert the same explicit row id. The other's version
