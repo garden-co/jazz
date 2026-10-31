@@ -931,3 +931,9 @@ h6 {
   object-fit: contain;
   filter: grayscale(1);
 }
+
+/* Side nav links at body size; section headers keep the design system's size. */
+nav.astryx-side-nav .astryx-side-nav-item {
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-leading);
+}
