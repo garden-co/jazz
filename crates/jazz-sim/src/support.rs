@@ -106,6 +106,9 @@ pub fn config(schema: JazzSchema, node: u32, author: AuthorSubject) -> DbConfig 
             author,
         },
     )
+    // A clock stopped at the hybrid-clock epoch numbers 1, 2, 3, so a
+    // scenario runs the same every time.
+    .with_clock(|| jazz::db::shard::HLC_EPOCH_MS)
 }
 
 /// Insert a row with a known id.
