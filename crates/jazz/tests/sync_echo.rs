@@ -1025,7 +1025,7 @@ fn a_whole_ask_names_only_versions_the_sessions_own_commits_produced() {
     };
     let current = shipped(&down).expect("the row ships");
     down.borrow_mut().clear();
-    for seq in 1..current.seq {
+    for seq in 1..current.at.seq {
         up.borrow_mut().push_back(SyncMessage::ResendWhole {
             rows: vec![(current.table.clone(), current.id, current.key.clone(), seq)],
         });
@@ -1033,8 +1033,8 @@ fn a_whole_ask_names_only_versions_the_sessions_own_commits_produced() {
     block_on(server.tick()).unwrap();
     let leaked = down.borrow().iter().any(|message| {
         matches!(message, SyncMessage::Rows { images, .. }
-            if images.iter().any(|image| image.id == current.id && image.seq < current.seq))
+            if images.iter().any(|image| image.id == current.id && image.at < current.at))
     });
     assert!(!leaked, "an unreadable version shipped");
-    assert_eq!(shipped(&down).map(|image| image.seq), Some(current.seq));
+    assert_eq!(shipped(&down).map(|image| image.at), Some(current.at));
 }

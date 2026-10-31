@@ -145,6 +145,49 @@ impl Pos {
     }
 }
 
+/// On the wire a position is its `_t`, one integer, in the sender's bands:
+/// a relay ships its own unsettled versions in [`OWN`], which its tab
+/// holds in [`UPSTREAM`] (see [`Pos::from_upstream`]).
+impl Serialize for Pos {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(self.t() as u64)
+    }
+}
+
+impl<'de> Deserialize<'de> for Pos {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let t = u64::deserialize(deserializer)?;
+        let at = Pos::from_t(i64::try_from(t).map_err(serde::de::Error::custom)?);
+        if at.n > OWN {
+            return Err(serde::de::Error::custom("a position in no band"));
+        }
+        Ok(at)
+    }
+}
+
+impl Pos {
+    /// A position an upstream shipped, as this store holds it: the
+    /// upstream's own unsettled versions are in [`UPSTREAM`] here.
+    pub fn from_upstream(self) -> Self {
+        match self.n {
+            OWN => Pos {
+                n: UPSTREAM,
+                ..self
+            },
+            _ => self,
+        }
+    }
+
+    /// A position this store holds, as its upstream counts it (the
+    /// inverse of [`Pos::from_upstream`]).
+    pub fn to_upstream(self) -> Self {
+        match self.n {
+            UPSTREAM => Pos { n: OWN, ..self },
+            _ => self,
+        }
+    }
+}
+
 /// `_t` of the first version in band `n`: `_t < band_start(n)` is every
 /// version in an earlier band.
 pub(crate) const fn band_start(n: i64) -> i64 {
@@ -542,53 +585,15 @@ fn relay_older(held: Pos, image: Pos) -> bool {
     !image.accepted() && held > image
 }
 
-/// The node whose counter a position counts: `None` for the authority
-/// (later, a shard), else the node that numbered it (a relay's own order).
-pub type Sequencer = Option<[u8; 16]>;
-
-/// A position per sequencer. A watermark, cut or snapshot names one seq for
-/// each sequencer it covers (SPEC 8 §8.2), so it extends to several
-/// sequencers when sharding lands. Every one names a single sequencer today.
-pub type Positions = Vec<(Sequencer, u64)>;
-
-/// `seq` counted at `by`, as [`Positions`].
-pub fn positions(by: Sequencer, seq: u64) -> Positions {
-    vec![(by, seq)]
-}
-
-/// The one position `positions` names (`None` for none). Positions across
-/// more than one sequencer are refused: nothing reads them yet.
-pub fn single_position(positions: &[(Sequencer, u64)]) -> Result<Option<(Sequencer, u64)>, Error> {
-    match positions {
-        [] => Ok(None),
-        [one] => Ok(Some(*one)),
-        _ => Err(Error::new(
-            ErrorCode::Protocol,
-            "positions across more than one sequencer are not supported yet",
-        )),
-    }
-}
-
-/// The one position a message must name.
-pub fn required_position(
-    positions: &[(Sequencer, u64)],
-    what: &str,
-) -> Result<(Sequencer, u64), Error> {
-    single_position(positions)?
-        .ok_or_else(|| Error::new(ErrorCode::Protocol, format!("{what} names no position")))
-}
-
 /// One stored row version: the unit of replication.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Image {
     pub table: String,
     pub id: [u8; 16],
     pub key: Vec<u8>,
-    pub seq: u64,
-    /// The node whose unsettled version this is, numbered by its own
-    /// counter (a relay's, shipped to its tab); `None` for an accepted
-    /// version, numbered by the authority.
-    pub by: Option<[u8; 16]>,
+    /// The version's position: accepted, or unsettled (a relay's own,
+    /// shipped to its tab).
+    pub at: Pos,
     pub deleted: bool,
     /// Whether the version's commit wrote content (stored in `_st`): history
     /// reads list only content versions.
@@ -601,10 +606,9 @@ pub struct Image {
 /// reader joins split frames up to.
 const ROWS_MESSAGE_BYTES: usize = jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES / 4;
 
-/// Where a commit landed and who wrote it: (seq, the node whose position
-/// it is when not the authority's (as [`Image::by`]), writer node, writer
-/// tx).
-pub type TxName = (u64, Option<[u8; 16]>, [u8; 16], u64);
+/// Where a commit landed and who wrote it: (its position, as
+/// [`Image::at`], writer node, writer tx).
+pub type TxName = (Pos, [u8; 16], u64);
 
 /// `images` (and the `tx_ids` they come with) as `Rows` messages of at
 /// most `limit` ([`ROWS_MESSAGE_BYTES`]) of images each. A reader installs each
@@ -624,7 +628,7 @@ fn rows_messages(mut images: Vec<Image>, tx_ids: Vec<TxName>, limit: usize) -> V
         return vec![SyncMessage::Rows { images, tx_ids }];
     }
     let mut sized: Vec<(usize, Image)> = sizes.into_iter().zip(images.drain(..)).collect();
-    sized.sort_by_key(|(_, image)| (image.by, image.seq));
+    sized.sort_by_key(|(_, image)| image.at);
     let mut out = Vec::new();
     let mut tx_ids = Some(tx_ids);
     let mut batch: Vec<Image> = Vec::new();
@@ -632,7 +636,7 @@ fn rows_messages(mut images: Vec<Image>, tx_ids: Vec<TxName>, limit: usize) -> V
     for (n, image) in sized {
         let same_commit = batch
             .last()
-            .is_some_and(|last| (last.by, last.seq) == (image.by, image.seq));
+            .is_some_and(|last| last.at == image.at);
         if !batch.is_empty() && !same_commit && bytes.saturating_add(n) > limit {
             out.push(SyncMessage::Rows {
                 images: std::mem::take(&mut batch),
@@ -734,6 +738,9 @@ pub enum BuiltOn {
     /// An unsettled commit by its sender's (node, tx), as a relay names one
     /// of its own commits.
     Commit { node: [u8; 16], tx: u64 },
+    /// An unsettled version the receiver (a tab's relay) shipped the
+    /// sender, by the receiver's own commit `tx` that wrote it.
+    Upstream { tx: u64 },
 }
 
 /// A row of a commit the server did not ship back (see
@@ -775,7 +782,7 @@ pub enum Outcome {
     /// image at `accepted_at` where its own clock stamped it and installs
     /// it if its digest matches; otherwise it asks for the row whole.
     Accepted {
-        at: Positions,
+        at: u64,
         accepted_at: Option<u64>,
         as_written: Vec<AsWritten>,
     },
@@ -784,16 +791,16 @@ pub enum Outcome {
     /// is complete through `through` with them: a retry's snapshot reads
     /// at it, so it sees what the commit conflicted with.
     Refused {
-        through: Positions,
+        through: u64,
         error: WireError,
     },
 }
 
 impl Outcome {
     /// An accepted commit that holds no rows back.
-    fn accepted(by: Sequencer, seq: u64, accepted_at: Option<u64>) -> Self {
+    fn accepted(seq: u64, accepted_at: Option<u64>) -> Self {
         Outcome::Accepted {
-            at: positions(by, seq),
+            at: seq,
             accepted_at,
             as_written: Vec::new(),
         }
@@ -801,19 +808,16 @@ impl Outcome {
 
     /// Where the commit landed once accepted, or how far the session was
     /// complete when refused: the outcome's one position.
-    pub fn position(&self) -> Result<(Sequencer, u64), Error> {
-        let (Outcome::Accepted { at: positions, .. }
-        | Outcome::Refused {
-            through: positions, ..
-        }) = self;
-        required_position(positions, "a fate")
+    pub fn position(&self) -> u64 {
+        let (Outcome::Accepted { at, .. } | Outcome::Refused { through: at, .. }) = self;
+        *at
     }
 
     /// The seq the commit landed at, once accepted.
-    pub fn seq(&self) -> Result<Option<u64>, Error> {
+    pub fn seq(&self) -> Option<u64> {
         match self {
-            Outcome::Accepted { .. } => Ok(Some(self.position()?.1)),
-            Outcome::Refused { .. } => Ok(None),
+            Outcome::Accepted { at, .. } => Some(*at),
+            Outcome::Refused { .. } => None,
         }
     }
 
@@ -958,9 +962,11 @@ pub struct WireRead {
     pub binding: BTreeMap<String, Value>,
     /// The read listed deleted rows too (`includeDeleted`).
     pub include_deleted: bool,
-    /// Each row the read listed, at the version it read: an authority seq
-    /// (no node), or an unsettled commit by its (node, tx): the sender's
-    /// own, or its relay's that the relay shipped it.
+    /// Each row the read listed, at the version it read: a position (no
+    /// node, as [`Pos::t`]): an authority seq, or an unsettled version of
+    /// the receiver's own it shipped the sender; or an unsettled commit by
+    /// its (node, tx): the sender's own, or one a relay names for its
+    /// upstream.
     pub rows: Vec<([u8; 16], Option<[u8; 16]>, u64)>,
 }
 
@@ -970,10 +976,10 @@ pub enum WireKind {
     /// `own`: the sender's own commits (by local seq) that were unsettled
     /// when the transaction began; its snapshot includes them, and the
     /// authority resolves each to where it settled.
-    /// `snapshot`: where it read, per sequencer, as the sender's server
+    /// `snapshot`: the authority seq it read at, as the sender's server
     /// served it when it pinned it.
     Serializable {
-        snapshot: Positions,
+        snapshot: u64,
         reads: Vec<WireRead>,
         own: Vec<u64>,
     },
@@ -1016,9 +1022,9 @@ pub struct WirePull {
     pub table: String,
     pub id: [u8; 16],
     pub key: Vec<u8>,
-    pub seq: u64,
-    /// The node whose unsettled version `seq` is (as [`Image::by`]).
-    pub by: Option<[u8; 16]>,
+    /// The version's position, as the sender's upstream counts it (as
+    /// [`Image::at`]).
+    pub at: Pos,
     pub root: [u8; 32],
     pub nodes: Vec<[u8; 32]>,
     pub span: Option<(u64, u64)>,
@@ -1118,7 +1124,7 @@ pub enum SyncMessage {
         /// snapshot. Part of the read's identity (`INV-BVIEW-12`).
         view: Box<ReadViewSourceSpec>,
         /// Last complete checkpoint for this read, independent of its lifetime.
-        since: Positions,
+        since: Option<u64>,
         span: ReadSpan,
     },
     Unsubscribe {
@@ -1146,7 +1152,7 @@ pub enum SyncMessage {
     /// their upstream), not a relay's own store.
     Settled {
         id: u64,
-        through: Positions,
+        through: u64,
         members: Option<Vec<[u8; 16]>>,
         global: bool,
     },
@@ -1287,7 +1293,7 @@ pub enum SyncMessage {
     /// not a read's settle or a commit's fate, moves what the replica
     /// knows. Sent after a tick's rows, settles and fates whenever it moved.
     ConnectionSettled {
-        through: Positions,
+        through: u64,
     },
 }
 
@@ -1319,7 +1325,7 @@ pub enum ReadSpan {
     /// view frozen at a snapshot reference is resolved by the receiver (a
     /// reopened tab's capture, which its worker settled), which also sends
     /// the tx ids of the commits it names (see [`SyncMessage::Rows`]).
-    Once { at: Positions },
+    Once { at: Option<u64> },
 }
 
 /// One admitted schema version in a [`SyncMessage::Catalogue`].
@@ -1376,7 +1382,6 @@ pub(crate) enum Kind {
     Mergeable,
     Serializable {
         snapshot: u64,
-        by: Option<[u8; 16]>,
         reads: Vec<WireRead>,
         own: Vec<u64>,
     },
@@ -1588,7 +1593,7 @@ struct ActiveRead {
     include_deleted: bool,
     view: ReadViewSourceSpec,
     watermark: Option<[u8; 32]>,
-    through: Option<(Sequencer, u64)>,
+    through: Option<u64>,
     lifetime: ReadLifetime,
 }
 
@@ -1607,9 +1612,8 @@ impl ActiveRead {
         }
     }
 
-    fn since(&self) -> Positions {
+    fn since(&self) -> Option<u64> {
         self.through
-            .map_or_else(Vec::new, |(by, seq)| positions(by, seq))
     }
 }
 
@@ -1684,17 +1688,12 @@ pub(crate) struct Client {
     /// The position the upstream last said the connection is settled
     /// through ([`SyncMessage::ConnectionSettled`]).
     pub(crate) known: u64,
-    /// The node code whose positions `known` counts: 0, the authority's,
-    /// unless the upstream is a replica with no server (its own node's).
-    pub(crate) known_n: i64,
     /// The `known` cut last written to `_jazz_meta`.
     persisted_known: u64,
-    /// This replica's own commits accepted past `known`, as (sequencer,
-    /// seq, tx): what it knows does not hold them yet, so a snapshot or a
-    /// serializable transaction names them by tx. Two sequencers may number
-    /// different commits alike, so each is its own entry, and a connection
-    /// position covers only its own sequencer's entries.
-    pub(crate) own_accepted: BTreeSet<(i64, u64, u64)>,
+    /// This replica's own commits accepted past `known`, as (seq, tx):
+    /// what it knows does not hold them yet, so a snapshot or a
+    /// serializable transaction names them by tx.
+    pub(crate) own_accepted: BTreeSet<(u64, u64)>,
     /// Per stored table, the newest accepted position of a version the
     /// upstream sent: a result reading no table past its position needs
     /// no cut.
@@ -2018,11 +2017,11 @@ pub(crate) struct Session {
     /// Images to send this tick: (table, id, branch key).
     touched: BTreeSet<(String, RowUuid, Vec<u8>)>,
     /// On a relay, rows a one-shot answer shipped at one of this store's
-    /// unsettled versions (by its node and seq), which no watch keeps
+    /// unsettled versions (by its position), which no watch keeps
     /// current: each ships again once uploads settle and that version is no
     /// longer the row's, since a refused write leaves the replica holding a
     /// version no later answer replaces (SPEC 8 §8.5).
-    unsettled: BTreeMap<(String, RowUuid, Vec<u8>), ([u8; 16], u64)>,
+    unsettled: BTreeMap<(String, RowUuid, Vec<u8>), Pos>,
     /// Versions evicted as unreadable while the session still watches
     /// their id (it holds another branch's version of the row): a write
     /// that leaves one unreadable ships nothing more, so the replica learns
@@ -2109,7 +2108,7 @@ pub(crate) struct Session {
     /// first answer for at most their first-load wait.
     first_load: BTreeMap<u64, FirstLoadWait>,
     /// The last [`SyncMessage::ConnectionSettled`] position it was sent.
-    connection_settled: Option<(Option<[u8; 16]>, u64)>,
+    connection_settled: Option<u64>,
     /// On a relay, how far each relayed subscription was told it is
     /// settled: as far as its upstream read's own settle, which may pass
     /// what the relay knows of the connection.
@@ -3068,7 +3067,7 @@ impl Inner {
         let mut current = BTreeSet::new();
         for version in &versions {
             for image in &found[version] {
-                seqs.insert(image.seq);
+                seqs.insert(image.at.seq);
                 current.insert((version.0, image.key.clone()));
             }
             images.extend(found[version].iter().cloned());
@@ -3098,7 +3097,7 @@ impl Inner {
                 let keys: BTreeSet<Vec<u8>> = images
                     .iter()
                     .inspect(|image| {
-                        seqs.insert(image.seq);
+                        seqs.insert(image.at.seq);
                     })
                     .map(|image| image.key.clone())
                     .collect();
@@ -3206,8 +3205,8 @@ impl Inner {
                 .optional()
                 .map_err(storage)?;
             out.push(match recorded {
-                Some((node, tx)) => (seq, None, node.try_into().unwrap_or([0; 16]), tx),
-                None => (seq, None, *self.identity.node.as_bytes(), seq),
+                Some((node, tx)) => (Pos::at(seq), node.try_into().unwrap_or([0; 16]), tx),
+                None => (Pos::at(seq), *self.identity.node.as_bytes(), seq),
             });
         }
         Ok(out)
@@ -3287,7 +3286,7 @@ impl Inner {
         floor: Option<Floor>,
         identity: Option<AuthorSubject>,
     ) -> Result<bool, Error> {
-        let Some(floor) = floor.filter(|floor| found.seq <= floor.since) else {
+        let Some(floor) = floor.filter(|floor| found.at <= Pos::at(floor.since)) else {
             return Ok(unwatched);
         };
         if !floor.diff {
@@ -3557,23 +3556,17 @@ impl Inner {
                     table: table.to_owned(),
                     id: [0; 16],
                     key: Vec::new(),
-                    seq: 0,
-                    by: None,
+                    at: Pos::default(),
                     deleted: false,
                     content: true,
                     cells: Vec::new(),
                 };
-                let mut code = 0;
                 for (i, name) in names.iter().enumerate() {
                     match name.as_str() {
                         "rid" => {}
                         "id" => image.id = r.get::<_, Vec<u8>>(i)?.try_into().unwrap_or([0; 16]),
                         "_b" => image.key = r.get(i)?,
-                        "_t" => {
-                            let at = Pos::from_t(r.get::<_, i64>(i)?);
-                            code = at.n;
-                            image.seq = at.seq;
-                        }
+                        "_t" => image.at = Pos::from_t(r.get::<_, i64>(i)?),
                         "_st" => {
                             let state = r.get::<_, i64>(i)?;
                             image.deleted = state & STATE_DELETED != 0;
@@ -3587,17 +3580,10 @@ impl Inner {
                             .push((name.clone(), Cell::from(r.get::<_, Sql>(i)?))),
                     }
                 }
-                Ok((code, image))
-            })
-            .map_err(storage)?;
-        let images = rows.collect::<Result<Vec<_>, _>>().map_err(storage)?;
-        let mut images = images
-            .into_iter()
-            .map(|(code, mut image)| {
-                image.by = self.node_of(code)?;
                 Ok(image)
             })
-            .collect::<Result<Vec<_>, Error>>()?;
+            .map_err(storage)?;
+        let mut images = rows.collect::<Result<Vec<_>, _>>().map_err(storage)?;
         for image in &mut images {
             self.resolve_authors(image)?;
             self.portable_large(image)?;
@@ -3683,7 +3669,7 @@ impl Inner {
         let held = shipped
             .get(&(image.table.clone(), image.id, image.key.clone()))
             .copied();
-        hold_shipped(shipped, image, self.pos(image)?);
+        hold_shipped(shipped, image, image.at);
         // A delta names its base by an authority seq: a relay's unsettled
         // version travels whole to its tab.
         let Some(at) = held.filter(|held| !image.deleted && held.accepted()) else {
@@ -4153,12 +4139,7 @@ impl Inner {
             self.images_of(table, history, versions.iter().map(|(row, _)| *row))?
         };
         for image in images {
-            // A read: a node no version names yet is not interned.
-            let Some(n) = self.known_code(image.by)? else {
-                continue;
-            };
-            let at = Pos { n, seq: image.seq };
-            if let Some(images) = found.get_mut(&(RowUuid::from_bytes(image.id), at)) {
+            if let Some(images) = found.get_mut(&(RowUuid::from_bytes(image.id), image.at)) {
                 images.push(image);
             }
         }
@@ -4262,13 +4243,7 @@ impl Inner {
         let mut values = vec![
             Sql::Blob(image.id.to_vec()),
             Sql::Blob(image.key.clone()),
-            Sql::Integer(
-                Pos {
-                    n: self.code_of(image.by)?,
-                    seq: image.seq,
-                }
-                .t(),
-            ),
+            Sql::Integer(image.at.t()),
             Sql::Integer(
                 if image.deleted { STATE_DELETED } else { 0 }
                     | if image.content { 0 } else { STATE_NO_CONTENT },
@@ -4347,9 +4322,9 @@ impl Inner {
     /// (which becomes history), older lands in history (an as-of answer).
     fn merge_image(&self, image: &Image) -> Result<(), Error> {
         let row = RowUuid::from_bytes(image.id);
-        let at = self.pos(image)?;
+        let at = image.at;
         let current = match self.current_image(&image.table, row, &image.key)? {
-            Some(current) => Some((self.pos(&current)?, current)),
+            Some(current) => Some((current.at, current)),
             None => None,
         };
         match current {
@@ -4456,7 +4431,7 @@ impl Inner {
     }
 
     /// The rows of own commit `tx` the server did not ship (`as_written`): its
-    /// version at `seq` (sequenced by `by`) is the one this replica wrote, stamped at
+    /// version at authority `seq` is the one this replica wrote, stamped at
     /// `accepted_at`, so that becomes the settled image. Returns those
     /// images, the rows it cannot install so (to ask for whole), and how
     /// many of those are digest mismatches. A row is not installed if its
@@ -4469,7 +4444,6 @@ impl Inner {
         &self,
         tx: u64,
         seq: u64,
-        by: Option<[u8; 16]>,
         accepted_at: Option<u64>,
         as_written: &[AsWritten],
     ) -> Result<(Vec<Image>, Vec<WholeRow>, u64), Error> {
@@ -4523,8 +4497,7 @@ impl Inner {
             };
             match image {
                 Some(mut image) => {
-                    image.seq = seq;
-                    image.by = by;
+                    image.at = Pos::at(seq);
                     images.push(image);
                 }
                 None => whole.push((table.clone(), *row.0.as_bytes(), key.clone())),
@@ -4624,7 +4597,7 @@ impl Inner {
     ) -> Result<Option<Image>, Error> {
         let id = row.0.as_bytes().to_vec();
         if let Some(image) = self.current_image(table, row, key)?
-            && self.pos(&image)?.n < self.me
+            && image.at.n < self.me
         {
             return Ok(Some(image));
         }
@@ -4721,13 +4694,12 @@ pub(crate) const WITHHELD_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_withheld
     (tbl TEXT NOT NULL, id BLOB NOT NULL, _b BLOB NOT NULL, PRIMARY KEY (tbl, id, _b)) \
     WITHOUT ROWID";
 
-/// Per remote query, the positions its result was last settled through
-/// (see `ActiveRead::through`): one row per band, `n` as in [`Pos::n`]
-/// (0 for the authority's). Created by the first settlement, so that
-/// opening an existing store without one leaves the file byte-identical.
+/// Per remote query, the authority seq its result was last settled
+/// through (see `ActiveRead::through`). Created by the first settlement,
+/// so that opening an existing store without one leaves the file
+/// byte-identical.
 const WATERMARKS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_watermarks \
-    (key BLOB NOT NULL, n INTEGER NOT NULL, through INTEGER NOT NULL, \
-    PRIMARY KEY (key, n)) WITHOUT ROWID";
+    (key BLOB PRIMARY KEY, through INTEGER NOT NULL) WITHOUT ROWID";
 
 /// A remote query's `_jazz_watermarks` key: what it reads, and as whom.
 /// How far it reaches (tier and wait) is not part of it: every tier's
@@ -4815,8 +4787,7 @@ impl Inner {
                     table: via.table,
                     id: via.id,
                     key: via.key,
-                    seq: via.seq,
-                    by: via.by,
+                    at: via.at.to_upstream(),
                     root,
                     nodes: Vec::new(),
                     span: spans.get(&root).map(|span| (span.start, span.end)),
@@ -4956,8 +4927,7 @@ impl Inner {
             table: table.to_owned(),
             id: image.id,
             key: image.key.clone(),
-            seq: image.seq,
-            by: image.by,
+            at: image.at,
         };
         let roots = self.large_roots(&image.table, image)?;
         for root in &roots {
@@ -5040,26 +5010,19 @@ impl Inner {
     }
 
     /// Where a remote query's result was last settled through.
-    fn watermark(&self, key: &[u8; 32]) -> Result<Option<(Sequencer, u64)>, Error> {
+    fn watermark(&self, key: &[u8; 32]) -> Result<Option<u64>, Error> {
         if !self.has_table("_jazz_watermarks")? {
             return Ok(None);
         }
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT n, through FROM _jazz_watermarks WHERE key = ?1")
-            .map_err(storage)?;
-        let rows = stmt
-            .query_map([key.as_slice()], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-            })
-            .map_err(storage)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(storage)?;
-        let mut positions = Vec::with_capacity(rows.len());
-        for (n, through) in rows {
-            positions.push((self.node_of(n)?, through as u64));
-        }
-        single_position(&positions)
+        self.conn
+            .cached_row(
+                "SELECT through FROM _jazz_watermarks WHERE key = ?1",
+                [key.as_slice()],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .map(|through| through.map(|through| through as u64))
+            .map_err(storage)
     }
 
     fn active_read(
@@ -5108,15 +5071,15 @@ impl Inner {
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
         view: &ReadViewSourceSpec,
-        at: &Positions,
-    ) -> Positions {
+        at: Option<u64>,
+    ) -> Option<u64> {
         let read = self.active_read(
             query.clone(),
             binding.clone(),
             include_deleted,
             view.clone(),
             ReadLifetime::Once {
-                historical: !at.is_empty(),
+                historical: at.is_some(),
             },
         );
         let since = read.since();
@@ -5146,19 +5109,13 @@ impl Inner {
         Ok(())
     }
 
-    /// Record that a remote query's result settled through `through` at
-    /// sequencer `by`, replacing where it had settled before.
-    fn store_watermark(&self, key: &[u8; 32], by: Sequencer, through: u64) -> Result<(), Error> {
-        let n = self.code_of(by)?;
+    /// Record that a remote query's result settled through authority seq
+    /// `through`, replacing where it had settled before.
+    fn store_watermark(&self, key: &[u8; 32], through: u64) -> Result<(), Error> {
         self.exec(WATERMARKS_DDL, []).map_err(storage)?;
         self.exec(
-            "DELETE FROM _jazz_watermarks WHERE key = ?1",
-            [key.as_slice()],
-        )
-        .map_err(storage)?;
-        self.exec(
-            "INSERT INTO _jazz_watermarks (key, n, through) VALUES (?1, ?2, ?3)",
-            rusqlite::params![key.as_slice(), n, through as i64],
+            "INSERT OR REPLACE INTO _jazz_watermarks (key, through) VALUES (?1, ?2)",
+            rusqlite::params![key.as_slice(), through as i64],
         )
         .map_err(storage)?;
         Ok(())
@@ -5511,51 +5468,6 @@ impl Inner {
         Ok(seq)
     }
 
-    /// The band an image's version is at: accepted when the authority
-    /// numbered it, this store's own when it did, else its upstream relay's.
-    pub(crate) fn code_of(&self, by: Option<[u8; 16]>) -> Result<i64, Error> {
-        match by {
-            None => Ok(ACCEPTED),
-            Some(node) if node == *self.identity.node.as_bytes() && self.me != 0 => Ok(self.me),
-            Some(node) => {
-                self.upstream.set(Some(node));
-                Ok(UPSTREAM)
-            }
-        }
-    }
-
-    /// Where an image's version is.
-    pub(crate) fn pos(&self, image: &Image) -> Result<Pos, Error> {
-        Ok(Pos {
-            n: self.code_of(image.by)?,
-            seq: image.seq,
-        })
-    }
-
-    /// The node a stored version's band names (`None` for the authority):
-    /// this store's own. A relay's unsettled versions a tab holds are
-    /// never shipped on.
-    pub(crate) fn node_of(&self, code: i64) -> Result<Option<[u8; 16]>, Error> {
-        match code {
-            ACCEPTED => Ok(None),
-            OWN => Ok(Some(*self.identity.node.as_bytes())),
-            UPSTREAM => self.upstream.get().map(Some).ok_or_else(|| {
-                Error::new(ErrorCode::Storage, "an upstream version with no upstream relay")
-            }),
-            _ => Err(Error::new(ErrorCode::Storage, "a stored position in no band")),
-        }
-    }
-
-    /// [`Self::code_of`] for a position named on the wire.
-    pub(crate) fn known_code(&self, by: Option<[u8; 16]>) -> Result<Option<i64>, Error> {
-        Ok(match by {
-            Some(node) if node != *self.identity.node.as_bytes() || self.me == 0 => {
-                (self.upstream.get() == Some(node)).then_some(UPSTREAM)
-            }
-            by => Some(self.code_of(by)?),
-        })
-    }
-
     fn node_code(&self, node: [u8; 16]) -> Result<i64, Error> {
         self.exec(
             "INSERT OR IGNORE INTO _jazz_nodes (node) VALUES (?1)",
@@ -5695,7 +5607,7 @@ impl Inner {
     /// Whether a relay owes session `index` a position its upstream
     /// moved: the connection's (`at`), once the session was told one, or
     /// a settled result's upstream read's.
-    fn owes_positions(&self, index: usize, at: (Option<[u8; 16]>, u64)) -> bool {
+    fn owes_positions(&self, index: usize, at: u64) -> bool {
         let session = &self.sessions[index];
         let Some(client) = &self.client else {
             return false;
@@ -5709,34 +5621,17 @@ impl Inner {
     }
 
     /// The seq this store tells its sessions it is complete through. A
-    /// relay tells them the authority's seq it knows (its own local seqs
-    /// number nothing the authority can check), so a session's snapshot
-    /// is one the authority validates against as it is.
+    /// relay tells them the authority's seq it knows, with a server or
+    /// without one (it numbers no accepted positions: its own writes and
+    /// its sessions' stay pending until a server accepts them), so a
+    /// session's snapshot is one the authority validates against as it is.
     fn served_through(&self) -> u64 {
         match &self.client {
-            Some(client) if self.relays_upstream() => client.known,
-            _ => self.seq,
+            Some(client) => client.known,
+            None => self.seq,
         }
     }
 
-    /// The node whose positions [`Self::served_through`] counts, when not
-    /// the authority's: a replica's with no server.
-    pub(crate) fn served_by(&self) -> Option<[u8; 16]> {
-        (self.me != 0 && !self.relays_upstream()).then(|| *self.identity.node.as_bytes())
-    }
-
-    /// Position `seq` as [`Self::served_through`] counts it: the authority's,
-    /// or this replica's own when it has no server (see [`Self::served_by`]).
-    pub(crate) fn served_at(&self, seq: u64) -> Pos {
-        Pos {
-            n: if self.served_by().is_some() {
-                self.me
-            } else {
-                0
-            },
-            seq,
-        }
-    }
 
     /// The read a replica runs for `read` over stored `tables`. Its
     /// upstream settles each read apart (SPEC 8 §8.4): a live result is
@@ -5764,16 +5659,10 @@ impl Inner {
         {
             return Cow::Borrowed(read);
         }
-        let known = Pos {
-            n: client.known_n,
-            seq: client.known,
-        };
+        let known = Pos::at(client.known);
         let through = match &read.position {
-            Position::Remote(key) => Pos {
-                n: known.n,
-                seq: client.settled_through(key),
-            },
-            Position::At(at) if at.n == known.n && at.seq > known.seq => *at,
+            Position::Remote(key) => Pos::at(client.settled_through(key)),
+            Position::At(at) if at.accepted() && at.seq > known.seq => *at,
             _ => known,
         };
         let past = tables.iter().any(|table| {
@@ -5789,8 +5678,8 @@ impl Inner {
         cut.extra = client
             .own_accepted
             .iter()
-            .filter(|&&(n, seq, _)| n != through.n || seq > through.seq)
-            .map(|&(n, seq, _)| Pos { n, seq })
+            .filter(|&&(seq, _)| seq > through.seq)
+            .map(|&(seq, _)| Pos::at(seq))
             .collect();
         cut.unsettled = !read.settled_only;
         Cow::Owned(ReadSpec {
@@ -5800,36 +5689,19 @@ impl Inner {
     }
 
     /// The position this store reads as complete through: the authority's
-    /// seq it synced, or for a replica with no server its own newest.
+    /// seq it synced (a replica with no server has synced none past it).
     pub(crate) fn frontier(&self) -> Pos {
         match &self.client {
-            Some(client) if client.no_server() => Pos {
-                n: self.me,
-                seq: self.seq,
-            },
-            Some(client) => Pos {
-                n: client.known_n,
-                seq: client.known,
-            },
+            Some(client) => Pos::at(client.known),
             None => Pos::at(self.seq),
         }
     }
 
     /// Advance what this replica knows it is complete through to
-    /// `through`, counted at `by`'s node (the authority's when `None`).
-    fn learn_known(&mut self, through: u64, by: Option<[u8; 16]>) -> Result<Pos, Error> {
-        let at = Pos {
-            n: self.code_of(by)?,
-            seq: through,
-        };
+    /// authority seq `through`: it only moves forward.
+    fn learn_known(&mut self, through: u64) {
         let client = self.client.as_mut().expect("client");
-        // Another sequencer (the upstream gained or lost a server) restarts
-        // the count; the same one only moves forward.
-        if at.n != client.known_n || at.seq > client.known {
-            client.known_n = at.n;
-            client.known = at.seq;
-        }
-        Ok(at)
+        client.known = client.known.max(through);
     }
 
     /// The catalogue session `index` is owed: the admitted versions it
@@ -6031,7 +5903,6 @@ impl Inner {
     fn relayed_serializable(
         &self,
         snapshot: u64,
-        by: Option<[u8; 16]>,
         reads: Vec<WireRead>,
         own: Vec<u64>,
     ) -> Result<Kind, Error> {
@@ -6043,11 +5914,15 @@ impl Inner {
                 let rows = read
                     .rows
                     .into_iter()
-                    .map(|(row, by, seq)| match (by, pending.upload_id(seq)) {
-                        (Some(node), Some(id)) if node == me => {
-                            (row, Some(*id.node.as_bytes()), id.time.0)
+                    .map(|(row, by, t)| match by {
+                        None if Pos::from_t(t as i64).n == OWN => {
+                            let seq = Pos::from_t(t as i64).seq;
+                            match pending.upload_id(seq) {
+                                Some(id) => (row, Some(*id.node.as_bytes()), id.time.0),
+                                None => (row, Some(me), seq),
+                            }
                         }
-                        _ => (row, by, seq),
+                        _ => (row, by, t),
                     })
                     .collect();
                 WireRead { rows, ..read }
@@ -6055,10 +5930,19 @@ impl Inner {
             .collect();
         Ok(Kind::Serializable {
             snapshot,
-            by,
             reads: named,
             own,
         })
+    }
+
+    /// How a serializable read names the version `at` it read of a row
+    /// (see [`WireRead::rows`]): by position, or this replica's own
+    /// unsettled commit by its (node, tx).
+    pub(crate) fn read_version(&self, at: Pos) -> (Option<[u8; 16]>, u64) {
+        match at.n {
+            OWN => (Some(*self.identity.node.as_bytes()), at.seq),
+            _ => (None, at.to_upstream().t() as u64),
+        }
     }
 
     /// The own commits a replica's serializable transaction began over:
@@ -6070,7 +5954,7 @@ impl Inner {
                 .pending
                 .iter()
                 .map(|p| p.tx)
-                .chain(client.own_accepted.iter().map(|&(_, _, tx)| tx))
+                .chain(client.own_accepted.iter().map(|&(_, tx)| tx))
                 .collect()
         })
     }
@@ -6087,10 +5971,9 @@ impl Inner {
         }
         // A replica reads snapshots from its own store: it must already hold
         // the authority state the reference was captured at.
-        // One with no server is the last word on its store's seqs.
         let horizon = match &self.client {
-            Some(client) if !client.no_server() => client.known,
-            _ => self.seq,
+            Some(client) => client.known,
+            None => self.seq,
         };
         if snapshot.global_base.0 > horizon {
             return Err(snapshot_unavailable(
@@ -6279,7 +6162,7 @@ impl Inner {
             .map_err(storage)?;
         let own = statement
             .query_map([node, client.known as i64, band_start(UPSTREAM)], |r| {
-                Ok((0, r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+                Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
             })
             .map_err(storage)?
             .collect::<Result<Vec<_>, _>>()
@@ -6335,7 +6218,7 @@ impl Client {
                 ReadLifetime::Once { .. } => None,
             });
         match visible {
-            Some(at) if at.n == self.known_n => at.seq.max(self.known),
+            Some(at) if at.accepted() => at.seq.max(self.known),
             _ => self.known,
         }
     }
@@ -6371,7 +6254,6 @@ impl Client {
             stored: HashSet::new(),
             baselines: HashMap::new(),
             known: 0,
-            known_n: 0,
             persisted_known: 0,
             own_accepted: BTreeSet::new(),
             newest_foreign: HashMap::new(),
@@ -6539,7 +6421,7 @@ impl Db {
                 ..
             } = &mut ask
             {
-                *since = inner.register_once_read(*id, query, binding, *include_deleted, view, at);
+                *since = inner.register_once_read(*id, query, binding, *include_deleted, view, *at);
             }
             inner.client.as_mut().expect("client").outbox.push(ask);
         }
@@ -6660,7 +6542,7 @@ impl Db {
                             .baselines
                             .contains_key(&(table.clone(), row, image.key.clone()))
                     });
-                    if image.by.is_some() || image.seq > through || overlaid {
+                    if !image.at.accepted() || image.at.seq > through || overlaid {
                         continue;
                     }
                     if head.as_ref().is_none_or(|head| *head == image.key) {
@@ -6871,7 +6753,7 @@ impl Db {
             // whole.
             if let Some(image) = image
                 .as_ref()
-                .filter(|image| !image.deleted && image.by.is_none())
+                .filter(|image| !image.deleted && image.at.accepted())
             {
                 settled_images.insert(row_key.clone(), image.clone());
             }
@@ -6880,12 +6762,9 @@ impl Db {
             // A relay's unsettled version (on a tab) is the relay's commit.
             let on = match client.pending.newest(&row_key) {
                 Some(tx) => Some(BuiltOn::Own { back: seq - tx }),
-                None => image.as_ref().map(|image| match image.by {
-                    Some(node) => BuiltOn::Commit {
-                        node,
-                        tx: image.seq,
-                    },
-                    None => BuiltOn::Seq(image.seq),
+                None => image.as_ref().map(|image| match image.at.n {
+                    ACCEPTED => BuiltOn::Seq(image.at.seq),
+                    _ => BuiltOn::Upstream { tx: image.at.seq },
                 }),
             };
             if on.is_some() {
@@ -6943,11 +6822,10 @@ impl Db {
                     Kind::Mergeable => WireKind::Mergeable,
                     Kind::Serializable {
                         snapshot,
-                        by,
                         reads,
                         own,
                     } => WireKind::Serializable {
-                        snapshot: positions(by, snapshot),
+                        snapshot,
                         reads,
                         own,
                     },
@@ -7249,10 +7127,12 @@ impl Db {
             }
         }
         let at = match at {
-            Some(at) => positions(self.inner.borrow().node_of(at.n)?, at.seq),
-            None => Vec::new(),
+            Some(at) if !at.accepted() => {
+                return Err(unsupported("a remote read as of an unsettled position"));
+            }
+            at => at.map(|at| at.seq),
         };
-        let message = |id: u64, since: Positions| SyncMessage::Read {
+        let message = |id: u64, since: Option<u64>| SyncMessage::Read {
             id,
             query: Box::new(remote_query(&prepared.query).into_owned()),
             binding: prepared.binding.clone(),
@@ -7261,7 +7141,7 @@ impl Db {
             wait: reach.wait,
             view: Box::new(view.clone()),
             since,
-            span: ReadSpan::Once { at: at.clone() },
+            span: ReadSpan::Once { at },
         };
         // The request in flight, and the connection it went out on.
         let mut request = PendingFetch {
@@ -7311,7 +7191,7 @@ impl Db {
                     &prepared.binding,
                     include_deleted,
                     view,
-                    &at,
+                    at,
                 );
                 inner
                     .client
@@ -7398,7 +7278,7 @@ impl Db {
                 .iter()
                 .map(|p| p.tx)
                 .filter(|tx| captured.contains(tx))
-                .chain(client.own_accepted.iter().map(|&(_, _, tx)| tx))
+                .chain(client.own_accepted.iter().map(|&(_, tx)| tx))
                 .map(|tx| TxId {
                     time: TxTime(tx),
                     node,
@@ -7787,12 +7667,8 @@ impl Db {
                     SyncMessage::Rows { images, tx_ids } => {
                         // A history version is listed once its transaction
                         // is known.
-                        for (seq, by, node, tx) in tx_ids {
-                            let at = Pos {
-                                n: inner.code_of(by)?,
-                                seq,
-                            };
-                            inner.record_settled(node, tx, Some(at))?;
+                        for (at, node, tx) in tx_ids {
+                            inner.record_settled(node, tx, Some(at.from_upstream()))?;
                         }
                         let images: Vec<Image> = images
                             .into_iter()
@@ -7807,7 +7683,7 @@ impl Db {
                         }))?;
                         let received = (|| {
                             for mut image in images {
-                                let at = inner.pos(&image)?;
+                                let at = image.at;
                                 if at.accepted() {
                                     let client = inner.client.as_mut().expect("client");
                                     let newest = client
@@ -7918,12 +7794,8 @@ impl Db {
                         members,
                         global,
                     } => {
-                        let (by, through) = required_position(&through, "a settlement")?;
                         // A read's settle speaks for that read alone.
-                        let at = Pos {
-                            n: inner.code_of(by)?,
-                            seq: through,
-                        };
+                        let at = Pos::at(through);
                         let client = inner.client.as_mut().expect("client");
                         let resumable = client.whole.is_empty();
                         let mut live_watermark = None;
@@ -7934,7 +7806,7 @@ impl Db {
                                     once = true;
                                     (
                                         (!*historical).then(|| members.clone().unwrap_or_default()),
-                                        global && by.is_none(),
+                                        global,
                                     )
                                 }
                                 ReadLifetime::Live(live) => {
@@ -7945,7 +7817,7 @@ impl Db {
                                         client.visibility_moved = true;
                                     }
                                     if resumable {
-                                        read.through = Some((by, through));
+                                        read.through = Some(through);
                                         client.forgotten = false;
                                         live_watermark = read.watermark;
                                     }
@@ -7961,7 +7833,7 @@ impl Db {
                                     listed,
                                     through,
                                     if save_after {
-                                        read.watermark.map(|key| (key, by))
+                                        read.watermark
                                     } else {
                                         None
                                     },
@@ -7979,7 +7851,7 @@ impl Db {
                         // Live checkpoints retain their existing savepoint ordering:
                         // a subsequent membership eviction can invalidate them.
                         if let Some(watermark) = live_watermark {
-                            inner.store_watermark(&watermark, by, through)?;
+                            inner.store_watermark(&watermark, through)?;
                         }
                     }
                     SyncMessage::CheckAllowedResult { id, result } => {
@@ -8025,7 +7897,7 @@ impl Db {
                         outcome,
                         global,
                     } => {
-                        let (by, through) = outcome.position()?;
+                        let through = outcome.position();
                         let client = inner.client.as_mut().expect("client");
                         // Not a commit this store uploads: nothing to settle.
                         let Some(tx) = client.local_tx(&id) else {
@@ -8054,7 +7926,6 @@ impl Db {
                                 let (images, whole, mismatched) = inner.as_written_images(
                                     tx,
                                     through,
-                                    by,
                                     *accepted_at,
                                     as_written,
                                 )?;
@@ -8097,25 +7968,14 @@ impl Db {
                         };
                         let result = outcome.result();
                         let accepted = matches!(outcome, Outcome::Accepted { .. });
-                        // A relay's own last word is at its own position.
-                        let landed = if global || by.is_some() {
-                            Pos {
-                                n: inner.code_of(by)?,
-                                seq: through,
-                            }
-                        } else {
-                            Pos::at(through)
-                        };
+                        let landed = Pos::at(through);
                         // Accepted past what this replica knows, its own
                         // commit is named by tx until the connection's
                         // position covers it.
                         {
                             let client = inner.client.as_mut().expect("client");
-                            if accepted
-                                && (global || by.is_some())
-                                && (landed.n != client.known_n || through > client.known)
-                            {
-                                client.own_accepted.insert((landed.n, through, tx));
+                            if accepted && global && through > client.known {
+                                client.own_accepted.insert((through, tx));
                                 client.visibility_moved = true;
                             }
                         }
@@ -8205,16 +8065,14 @@ impl Db {
                                 // refusal restores the upstream versions.
                                 session.touched.extend(rows);
                                 let outcome = match &fate {
-                                    Ok(()) if accepted => {
-                                        Outcome::accepted(by, landed.seq, accepted_at)
-                                    }
+                                    Ok(()) if accepted => Outcome::accepted(landed.seq, accepted_at),
                                     Ok(()) => {
                                         return Err(unsupported(format!(
                                             "commit {tx} accepted at no seq"
                                         )));
                                     }
                                     Err(error) => Outcome::Refused {
-                                        through: positions(by, known),
+                                        through: known,
                                         error: wire_error(error),
                                     },
                                 };
@@ -8227,13 +8085,10 @@ impl Db {
                         }
                     }
                     SyncMessage::ConnectionSettled { through } => {
-                        let (by, through) = required_position(&through, "a connection settlement")?;
-                        inner.learn_known(through, by)?;
+                        inner.learn_known(through);
                         let client = inner.client.as_mut().expect("client");
-                        let (known_n, known) = (client.known_n, client.known);
-                        client
-                            .own_accepted
-                            .retain(|&(n, seq, _)| n != known_n || seq > known);
+                        let known = client.known;
+                        client.own_accepted.retain(|&(seq, _)| seq > known);
                         client.visibility_moved = true;
                     }
                     other => return Err(unsupported(format!("client received {other:?}"))),
@@ -8258,10 +8113,10 @@ impl Db {
         for (query, binding, include_deleted, view, listed, through, watermark) in answered_remotes
         {
             self.evict_unanswered(query, binding, include_deleted, &view, &listed, through)?;
-            if let Some((watermark, by)) = watermark {
+            if let Some(watermark) = watermark {
                 let mut inner = self.inner.borrow_mut();
                 if inner.client.as_ref().expect("client").whole.is_empty() {
-                    inner.store_watermark(&watermark, by, through)?;
+                    inner.store_watermark(&watermark, through)?;
                     inner.client.as_mut().expect("client").forgotten = false;
                 }
             }
@@ -8269,7 +8124,7 @@ impl Db {
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut().expect("client");
         let known = client.known;
-        if known == client.persisted_known || client.known_n != 0 {
+        if known == client.persisted_known {
             return Ok(());
         }
         client.persisted_known = known;
@@ -8338,7 +8193,7 @@ impl Db {
                         client.refused.push(SyncMessage::Fate {
                             id: *id,
                             outcome: Outcome::Refused {
-                                through: positions(None, client.known),
+                                through: client.known,
                                 error: WireError::Rejected {
                                     reason: None,
                                     message: format!(
@@ -8426,7 +8281,7 @@ impl Db {
         for ((table, row, key), image) in &baseline {
             match image {
                 Some(image) => {
-                    let at = inner.pos(image)?;
+                    let at = image.at;
                     inner.drop_row(table, *row, key, at)?;
                     inner.put_image(image, false)?;
                 }
@@ -8460,7 +8315,7 @@ impl Db {
                     let Some((row, key, image)) = landed else {
                         return Err(error);
                     };
-                    let at = inner.pos(image)?;
+                    let at = image.at;
                     inner.drop_row(table, *row, key, at)?;
                     inner.apply(op, tx).map(drop)
                 }
@@ -8535,7 +8390,8 @@ impl Inner {
             for ((table, row, key), shipped) in rows {
                 let current = self
                     .current_image(&table, row, &key)?
-                    .and_then(|image| Some((image.by?, image.seq)));
+                    .map(|image| image.at)
+                    .filter(|at| !at.accepted());
                 if current != Some(shipped) {
                     moved.push((table.clone(), row, key.clone()));
                 }
@@ -8672,7 +8528,7 @@ impl Inner {
                         span: ReadSpan::Once { at },
                         ..
                     } = &fetch.ask
-                        && at.is_empty()
+                        && at.is_none()
                     {
                         answers.push((
                             (**query).clone(),
@@ -8810,11 +8666,10 @@ impl Inner {
     /// store has not admitted, with its refusal.
     fn refuse_undeployed_commit(&mut self, index: usize, id: TxId) {
         let through = self.served_through();
-        let by = self.served_by();
         self.sessions[index].outbox.push(SyncMessage::Fate {
             id,
             outcome: Outcome::Refused {
-                through: positions(by, through),
+                through,
                 error: wire_error(&schema_version_not_deployed()),
             },
             global: true,
@@ -8890,8 +8745,7 @@ impl Inner {
     ) -> Result<Option<Image>, Error> {
         let client = self.client.as_ref().expect("client");
         if let Some(Some(image)) = client.baselines.get(&(table.to_owned(), row, key.to_vec()))
-            && image.seq == seq
-            && image.by.is_none()
+            && image.at == Pos::at(seq)
         {
             return Ok(Some(image.clone()));
         }
@@ -8945,7 +8799,7 @@ impl Inner {
                     Some((_, old)) => self.large_of(&table.stored, stored, old)?,
                     None => None,
                 };
-                let delta = old.and_then(|old| large_delta::extend(base.seq, &old, large));
+                let delta = old.and_then(|old| large_delta::extend(base.at.seq, &old, large));
                 if let Some(delta) = delta {
                     *value = Value::Nullable(None);
                     op.deltas.push(CellDelta {
@@ -8961,7 +8815,7 @@ impl Inner {
             if trees {
                 op.access_proof = Some(AccessProof {
                     key: row_key.2.clone(),
-                    seq: base.seq,
+                    seq: base.at.seq,
                 });
             }
         }
@@ -8996,15 +8850,17 @@ impl Inner {
 
     /// Apply one server image; returns whether a rebase is needed (the row
     /// is overlaid by a pending write).
-    fn receive_image(&mut self, image: Image) -> Result<bool, Error> {
+    fn receive_image(&mut self, mut image: Image) -> Result<bool, Error> {
         // An upstream ships accepted versions and its own unsettled ones,
-        // never this replica's own: those it holds as it wrote them.
-        if image.by == Some(*self.identity.node.as_bytes()) {
+        // which this replica holds in its upstream band; never one it holds
+        // from an upstream of its own (relays are not chained).
+        if image.at.n == UPSTREAM {
             return Err(unsupported(
-                "an upstream shipping a version numbered by this replica's own node",
+                "an upstream shipping a version its own upstream numbered",
             ));
         }
-        let at = self.pos(&image)?;
+        image.at = image.at.from_upstream();
+        let at = image.at;
         let row = RowUuid::from_bytes(image.id);
         let overlaid = (image.table.clone(), row, image.key.clone());
         let old = match self
@@ -9016,7 +8872,7 @@ impl Inner {
         {
             None => None,
             Some(None) => Some(None),
-            Some(Some(old)) => Some(Some(self.pos(old)?)),
+            Some(Some(old)) => Some(Some(old.at)),
         };
         if let Some(old) = old {
             let client = self.client.as_mut().expect("client");
@@ -9528,7 +9384,6 @@ impl Db {
         self.notify();
         let mut inner = self.inner.borrow_mut();
         let through = inner.served_through();
-        let by = inner.served_by();
         let relaying = inner.relays_upstream();
         let mut cache: HashMap<(String, RowUuid, Pos), Vec<Image>> = HashMap::new();
         // Rows written since the last tick, with the watch keys they match.
@@ -9643,7 +9498,7 @@ impl Db {
                 && masking.is_empty()
                 && inner.sessions[index].idle()
                 && !inner.sessions[index].catalogue_owed
-                && !(relaying && inner.owes_positions(index, (by, through)))
+                && !(relaying && inner.owes_positions(index, through))
                 && !written_keys
                     .iter()
                     .any(|(_, keys)| keys.iter().any(|k| inner.sessions[index].watch.contains(k)))
@@ -10022,7 +9877,7 @@ impl Db {
                     };
                     settled.push(SyncMessage::Settled {
                         id,
-                        through: positions(by, through),
+                        through,
                         members: window,
                         global,
                     });
@@ -10104,7 +9959,7 @@ impl Db {
             // history, while the row stays readable.
             for (table, row, key, at) in committed {
                 let superseded = match inner.current_image(&table, row, &key)? {
-                    Some(current) => inner.pos(&current)? != at,
+                    Some(current) => current.at != at,
                     None => false,
                 };
                 if superseded {
@@ -10155,7 +10010,7 @@ impl Db {
                         settle.sent = Some(at);
                         settled.push(SyncMessage::Settled {
                             id,
-                            through: positions(by, at),
+                            through: at,
                             members: None,
                             global: settle.global,
                         });
@@ -10193,8 +10048,7 @@ impl Db {
                     image.table.clone(),
                     image.id,
                     image.key.clone(),
-                    image.by,
-                    image.seq,
+                    image.at,
                 ))
             });
             // The writer's own rows, still at the version its commit
@@ -10219,8 +10073,8 @@ impl Db {
                         e.table == image.table
                             && *e.row.0.as_bytes() == image.id
                             && e.key == image.key
-                            && e.at == Pos::at(image.seq)
-                            && image.by.is_none()
+                            && e.at == image.at
+                            && image.at.accepted()
                     }) else {
                         return true;
                     };
@@ -10266,10 +10120,10 @@ impl Db {
             // to a session it has delivered to: that position arrives on
             // its own, after rows the relay may already have served.
             let forwards = relaying && session.connection_settled.is_some();
-            if (delivers || forwards) && session.connection_settled != Some((by, through)) {
-                session.connection_settled = Some((by, through));
+            if (delivers || forwards) && session.connection_settled != Some(through) {
+                session.connection_settled = Some(through);
                 out.push(SyncMessage::ConnectionSettled {
-                    through: positions(by, through),
+                    through,
                 });
             }
             // A relay's versions of the session's own commits it still
@@ -10286,9 +10140,9 @@ impl Db {
                     .collect()
             });
             if !own.is_empty() {
-                // This relay's versions of those commits, at its own node.
-                let me = *inner.identity.node.as_bytes();
-                let is_own = |image: &Image| image.by == Some(me) && own.contains(&image.seq);
+                // This relay's versions of those commits, in its own band.
+                let me = inner.me;
+                let is_own = |image: &Image| image.at.n == me && own.contains(&image.at.seq);
                 let mut shipped = HashSet::new();
                 for message in &mut out {
                     let SyncMessage::Rows { images, .. } = message else {
@@ -10308,11 +10162,7 @@ impl Db {
                                 &[
                                     &id,
                                     &image.key,
-                                    &Pos {
-                                        n: inner.me,
-                                        seq: image.seq,
-                                    }
-                                    .t(),
+                                    &image.at.t(),
                                 ],
                             )?
                             .into_iter()
@@ -10327,7 +10177,7 @@ impl Db {
                                 &base.table,
                                 row,
                                 &base.key,
-                                inner.pos(&base)?,
+                                base.at,
                                 policy,
                             )? {
                                 bases.push(base);
@@ -10340,8 +10190,7 @@ impl Db {
                             image.table == base.table
                                 && image.id == base.id
                                 && image.key == base.key
-                                && image.by == base.by
-                                && image.seq == base.seq
+                                && image.at == base.at
                         }) {
                             images.push(base);
                         }
@@ -10569,9 +10418,6 @@ impl Db {
                 since,
                 span: ReadSpan::Live,
             } => {
-                // Refused before the read is set up, so a refused read
-                // holds nothing open.
-                let since = single_position(&since)?;
                 let local = tier == ReadTier::LocalOnly;
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
                 let windowed = crate::db::is_windowed(&query);
@@ -10686,13 +10532,6 @@ impl Db {
                 inner.sessions[index]
                     .subs
                     .insert(id, (queue, group, windowed, false));
-                // A resume point at another sequencer than the one this
-                // store serves at (it gained or lost a server since) opens
-                // fresh.
-                let since = match since {
-                    Some((by, seq)) if by == inner.served_by() => Some(seq),
-                    _ => None,
-                };
                 if let Some(since) = since {
                     let claims = inner.sessions[index].claims.is_some();
                     let resume = inner.resume_from(
@@ -10720,7 +10559,7 @@ impl Db {
                 // the session could not read when it was current).
                 let mut own = Vec::with_capacity(rows.len());
                 for (.., seq) in &rows {
-                    let at = inner.served_at(*seq);
+                    let at = Pos::at(*seq);
                     own.push((*seq > 0 && inner.committed_by(at, &identity)?).then_some(at));
                 }
                 let session = &mut inner.sessions[index];
@@ -10827,18 +10666,7 @@ impl Db {
             } => {
                 // The position the read is as of, counted at this store:
                 // refused before anything is asked or served.
-                let pinned = match single_position(&at)? {
-                    Some((by, seq)) => Some(Pos {
-                        n: self.inner.borrow().known_code(by)?.ok_or_else(|| {
-                            Error::new(
-                                ErrorCode::Protocol,
-                                "a read as of a sequencer this store does not know",
-                            )
-                        })?,
-                        seq,
-                    }),
-                    None => None,
-                };
+                let pinned = at.map(Pos::at);
                 // A relay asks its upstream first for a Remote read, then
                 // serves it from its store once the answer's rows are in
                 // it; the read waits for that answer while the link is down
@@ -10876,7 +10704,7 @@ impl Db {
                         &prepared.binding,
                         include_deleted,
                         &view,
-                        &at,
+                        at,
                     );
                     let client = inner.client.as_mut().expect("client");
                     client.outbox.push(SyncMessage::Read {
@@ -10888,7 +10716,7 @@ impl Db {
                         wait: None,
                         view: view.clone(),
                         since: upstream_since,
-                        span: ReadSpan::Once { at: at.clone() },
+                        span: ReadSpan::Once { at },
                     });
                 }
                 if let Some(strict) = relay {
@@ -10903,7 +10731,7 @@ impl Db {
                         &prepared.binding,
                         include_deleted,
                         &view,
-                        &at,
+                        at,
                     );
                     let client = inner.client.as_mut().expect("client");
                     client.answers.insert(upstream, None);
@@ -10916,7 +10744,7 @@ impl Db {
                         wait: None,
                         view: view.clone(),
                         since: upstream_since,
-                        span: ReadSpan::Once { at: at.clone() },
+                        span: ReadSpan::Once { at },
                     };
                     client.outbox.push(ask.clone());
                     client.relayed_fetches.push(RelayedFetch {
@@ -10959,7 +10787,7 @@ impl Db {
                     let (node, tx) = (*dot.node.as_bytes(), dot.time.0);
                     // At the authority's position or this store's own.
                     if let Some(Some(at)) = inner.settled(node, tx)? {
-                        named.push((at.seq, inner.node_of(at.n)?, node, tx));
+                        named.push((at, node, tx));
                     }
                 }
                 let opts = ReadOpts {
@@ -10993,11 +10821,7 @@ impl Db {
                     splices: Vec::new(),
                 };
                 let support = inner.support_of(&query)?;
-                let since = match single_position(&since)? {
-                    Some((by, seq)) if by == inner.served_by() => Some(seq),
-                    _ => None,
-                };
-                let resume = if at.is_empty()
+                let resume = if at.is_none()
                     && matches!(opts.read_view.source, ReadViewSourceSpec::Current)
                 {
                     since
@@ -11148,17 +10972,13 @@ impl Db {
                 }
                 let mut tx_ids = inner.tx_ids(&seqs)?;
                 tx_ids.extend(named);
-                let through = if at.is_empty() {
-                    positions(inner.served_by(), inner.served_through())
-                } else {
-                    at
-                };
+                let through = at.unwrap_or_else(|| inner.served_through());
                 let authority = inner.client.is_none();
                 let session = &mut inner.sessions[index];
                 session.unsettled.extend(images.iter().filter_map(|image| {
                     let row = RowUuid::from_bytes(image.id);
                     let key = (image.table.clone(), row, image.key.clone());
-                    Some((key, (image.by?, image.seq)))
+                    (!image.at.accepted()).then_some((key, image.at))
                 }));
                 session.outbox.extend(lost);
                 session.outbox.extend(hidden);
@@ -11189,11 +11009,10 @@ impl Db {
                 if policy.is_some() && !self.inner.borrow().claim_node(node, &identity)? {
                     let mut inner = self.inner.borrow_mut();
                     let through = inner.served_through();
-                    let by = inner.served_by();
                     inner.sessions[index].outbox.push(SyncMessage::Fate {
                         id,
                         outcome: Outcome::Refused {
-                            through: positions(by, through),
+                            through,
                             error: WireError::Rejected {
                                 reason: None,
                                 message: "commit names a node another identity writes as"
@@ -11294,11 +11113,12 @@ impl Db {
                 // An accepted commit's fate carries the seq it landed at (a
                 // resend gets the recorded one), so the replica learns it.
                 // Where it landed: this store's own position (the
-                // authority's, or a replica's own node's), or for a resend
-                // of one a relay already settled upstream, the authority's.
-                let (landed, by) = match (&result, inner.settled(node, tx)?) {
-                    (Ok(()), Some(Some(at))) => (at, inner.node_of(at.n)?),
-                    _ => (inner.served_at(inner.served_through()), inner.served_by()),
+                // authority's, or a relay's own unsettled one), or for a
+                // resend of one a relay already settled upstream, the
+                // authority's.
+                let landed = match (&result, inner.settled(node, tx)?) {
+                    (Ok(()), Some(Some(at))) => at,
+                    _ => Pos::at(inner.served_through()),
                 };
                 let through = landed.seq;
                 // The time this store's clock stamped the commit's writes
@@ -11321,10 +11141,7 @@ impl Db {
                 // server is the last word on it.
                 let upload = result.is_ok()
                     && inner.client.as_ref().is_some_and(|client| {
-                        let link = client.hint.get();
-                        !(link.reported && link.hint == RemoteLinkHint::NoServer)
-                            && landed.n == inner.me
-                            && client.pending.iter().any(|p| p.tx == through)
+                        landed.n == inner.me && client.pending.iter().any(|p| p.tx == through)
                     });
                 if upload {
                     let client = inner.client.as_mut().expect("client");
@@ -11360,9 +11177,9 @@ impl Db {
                         }
                     }
                     let outcome = match result {
-                        Ok(()) => Outcome::accepted(by, through, accepted_at),
+                        Ok(()) => Outcome::accepted(through, accepted_at),
                         Err(error) => Outcome::Refused {
-                            through: positions(by, through),
+                            through,
                             error,
                         },
                     };
@@ -11549,9 +11366,8 @@ impl Db {
                 continue;
             }
             let row = RowUuid::from_bytes(pull.id);
-            // A node this store never interned holds no version here; a
-            // pull never interns one.
-            let at = inner.known_code(pull.by)?.map(|n| Pos { n, seq: pull.seq });
+            // Named as this store counts it: accepted, or its own.
+            let at = Some(pull.at);
             // Pulls name the version's table as it is stored, as rows do.
             let image = match (
                 inner
@@ -11724,21 +11540,17 @@ impl Db {
         // validates it; this store applies it optimistically meanwhile, as
         // any replica applies its own.
         let relay = self.is_client();
-        let forward =
-            matches!(kind, WireKind::Serializable { .. }) && self.inner.borrow().relays_upstream();
+        let forward = matches!(kind, WireKind::Serializable { .. }) && relay;
         let upload = match std::mem::replace(&mut kind, WireKind::Mergeable) {
             WireKind::Serializable {
                 snapshot,
                 reads,
                 own,
-            } if forward => {
-                let (by, snapshot) = required_position(&snapshot, "a serializable commit")
-                    .map_err(|e| (e, Vec::new()))?;
-                self.inner
-                    .borrow()
-                    .relayed_serializable(snapshot, by, reads, own)
-                    .map_err(|e| (e, Vec::new()))?
-            }
+            } if forward => self
+                .inner
+                .borrow()
+                .relayed_serializable(snapshot, reads, own)
+                .map_err(|e| (e, Vec::new()))?,
             unchanged => {
                 kind = unchanged;
                 Kind::Mergeable
@@ -11750,8 +11562,6 @@ impl Db {
             own,
         } = &kind
         {
-            let (by, snapshot) = required_position(snapshot, "a serializable commit")
-                .map_err(|e| (e, Vec::new()))?;
             let inner = self.inner();
             // The sender's own commits its snapshot included, by local seq
             // and where each settled here (earlier on this connection, so
@@ -11766,18 +11576,9 @@ impl Db {
                     settled.insert(tx, seq);
                 }
             }
-            // The session's snapshot is the position its server served it
-            // at. Positions order as main's single seq space did: the
-            // authority's before a replica's own, so a snapshot a replica
-            // numbered holds every authority version (one this store cannot
-            // name holds them all).
-            let base = Pos {
-                n: inner
-                    .known_code(by)
-                    .map_err(|e| (e, Vec::new()))?
-                    .unwrap_or(i64::MAX),
-                seq: snapshot,
-            };
+            // The session's snapshot is the authority seq its server
+            // served it at.
+            let base = Pos::at(*snapshot);
             let in_snapshot = |at: Pos| at <= base || settled.values().any(|s| *s == at);
             for op in &ops {
                 if let Some(row) = op.row()
@@ -11818,17 +11619,17 @@ impl Db {
                     .map(|(row, at)| (*row.0.as_bytes(), Some(*at)))
                     .collect();
                 // A row the sender read at an own commit is compared where
-                // that commit settled; one at this store's own position (a
-                // relay's version it shipped the sender) where it is; one a
-                // relay names by the commit that wrote it, where that
-                // settled.
-                let me = *inner.identity.node.as_bytes();
+                // that commit settled, and one a relay names by the commit
+                // that wrote it (a relay's own, or another session's it
+                // shipped the sender) where that settled.
                 let mut then: Vec<([u8; 16], Option<Pos>)> = Vec::new();
                 for &(row, by, seq) in &read.rows {
                     let at = match by {
-                        None => Some(Pos::at(seq)),
+                        // Only the authority validates: a position it
+                        // never numbered matches nothing.
+                        None => Some(Pos::from_t(i64::try_from(seq).unwrap_or(-1)))
+                            .filter(|at| at.accepted() && seq <= MAX_SEQ),
                         Some(node) if node == id.0 => settled.get(&seq).copied(),
-                        Some(node) if node == me && inner.me != 0 => Some(Pos { n: inner.me, seq }),
                         Some(node) => inner
                             .settled(node, seq)
                             .map_err(|e| (e, Vec::new()))?
@@ -11969,7 +11770,7 @@ impl Db {
                         .iter()
                         .map(|(row_key, built)| {
                             let (Built::Seq(seq) | Built::On(seq)) = *built;
-                            (row_key.clone(), inner.served_at(seq))
+                            (row_key.clone(), Pos::at(seq))
                         })
                         .collect()
                 };
@@ -12475,8 +12276,7 @@ mod tests {
             table: "notes".to_owned(),
             id: [id; 16],
             key: Vec::new(),
-            seq,
-            by: None,
+            at: Pos::at(seq),
             deleted: false,
             content: true,
             cells: vec![("body".to_owned(), Cell::Blob(vec![0; body]))],
@@ -12489,7 +12289,7 @@ mod tests {
             .map(|message| match message {
                 SyncMessage::Rows { images, .. } => images
                     .iter()
-                    .map(|image| (image.id[0], image.seq))
+                    .map(|image| (image.id[0], image.at.seq))
                     .collect(),
                 other => panic!("not Rows: {other:?}"),
             })
@@ -12504,7 +12304,7 @@ mod tests {
             image(3, 3, 100),
             image(4, 2, 100),
         ];
-        let tx_ids = vec![(1, None, [9; 16], 1)];
+        let tx_ids = vec![(Pos::at(1), [9; 16], 1)];
         let messages = rows_messages(images, tx_ids.clone(), 300);
         // seq 1 and 2 fit together; seq 3's two versions stay together.
         assert_eq!(

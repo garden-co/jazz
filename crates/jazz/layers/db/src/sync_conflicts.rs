@@ -288,6 +288,11 @@ impl Inner {
             .into_iter()
             .map(|(op, base)| {
                 let on = match base.on {
+                    BuiltOn::Upstream { tx } => BuiltOn::Commit { node: me, tx },
+                    on => on,
+                };
+                let on = match on {
+                    BuiltOn::Upstream { .. } => unreachable!("named as this relay's commit"),
                     BuiltOn::Seq(seq) => BuiltOn::Seq(seq),
                     BuiltOn::Commit { node, tx } if node == me => {
                         let (table, row) = self.based_row(ops, op)?;
@@ -397,6 +402,8 @@ impl Inner {
             let (table, row) = self.based_row(ops, *op)?;
             let on = match base.on {
                 BuiltOn::Seq(seq) => Built::Seq(seq),
+                // Only a relay holds versions it shipped a session unsettled.
+                BuiltOn::Upstream { .. } => return Err(unknown_base("an unsettled upstream version")),
                 BuiltOn::Own { back } => {
                     let tx = sender
                         .1
@@ -439,6 +446,10 @@ impl Inner {
             let (table, row) = self.based_row(ops, *op)?;
             let at = match base.on {
                 BuiltOn::Seq(seq) => Pos::at(seq),
+                BuiltOn::Upstream { tx } => Pos {
+                    n: self.me,
+                    seq: tx,
+                },
                 BuiltOn::Commit { node, tx } if node == me => Pos {
                     n: self.me,
                     seq: tx,
@@ -558,7 +569,7 @@ impl Inner {
         let writers: BTreeMap<u64, ([u8; 16], u64)> = self
             .tx_ids(&history.iter().map(|v| v.seq).collect())?
             .into_iter()
-            .map(|(seq, _, node, tx)| (seq, (node, tx)))
+            .map(|(at, node, tx)| (at.seq, (node, tx)))
             .collect();
         let writer = |seq: u64| writers.get(&seq).copied().unwrap_or(([0; 16], seq));
         let mut conflicts = Vec::with_capacity(history.len());

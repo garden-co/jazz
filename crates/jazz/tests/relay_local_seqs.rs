@@ -331,10 +331,11 @@ fn a_tabs_unsettled_insert_stays_its_own_once_its_worker_stored_it() {
 }
 
 /// An upstream ships accepted versions and its own unsettled ones; a
-/// version numbered by the tab's own node can only be a misbehaving
-/// upstream's, so the tab refuses it rather than store it.
+/// version in its upstream band (one its own upstream numbered) can only
+/// be a misbehaving upstream's, since relays are not chained, so the tab
+/// refuses it rather than store it.
 #[test]
-fn a_tab_refuses_an_upstream_version_numbered_by_its_own_node() {
+fn a_tab_refuses_an_upstream_version_its_upstreams_upstream_numbered() {
     let tab = open(WORKER + 1, author(WORKER));
     tab.set_non_durable_client();
     tab.set_remote_link_hint(RemoteLinkHint::Live);
@@ -346,8 +347,10 @@ fn a_tab_refuses_an_upstream_version_numbered_by_its_own_node() {
                 table: "notes".to_owned(),
                 id: [7; 16],
                 key: Vec::new(),
-                seq: 1,
-                by: Some([WORKER + 1; 16]),
+                at: jazz::db::Pos {
+                    n: jazz::db::UPSTREAM,
+                    seq: 1,
+                },
                 deleted: false,
                 content: true,
                 cells: Vec::new(),
@@ -363,11 +366,11 @@ fn a_tab_refuses_an_upstream_version_numbered_by_its_own_node() {
     assert!(rows.is_empty(), "nothing was stored");
 }
 
-/// A worker with no server settles a tab's commit at a seq of its own. A
-/// serializable transaction the tab began while that commit was unsettled
-/// still counts it as its own, wherever it landed.
+/// A worker with no server keeps a tab's commit pending, after a commit
+/// of its own. A serializable transaction the tab began while that commit
+/// was unsettled counts it as its own.
 #[test]
-fn a_tabs_transaction_over_its_own_commit_settled_by_a_worker_without_a_server_commits() {
+fn a_tabs_transaction_over_its_own_commit_held_by_a_worker_without_a_server_commits() {
     let worker = open(WORKER, author(WORKER));
     worker.set_remote_link_hint(RemoteLinkHint::NoServer);
     let tab = open(WORKER + 1, author(WORKER));
@@ -384,7 +387,7 @@ fn a_tabs_transaction_over_its_own_commit_settled_by_a_worker_without_a_server_c
             block_on(worker.tick()).unwrap();
         }
     };
-    // The worker's own commit first, so it settles the tab's at another seq.
+    // The worker's own commit first, so it holds the tab's at another seq.
     block_on(worker.insert("notes", body("worker"), Default::default())).unwrap();
     let row = block_on(tab.insert("notes", body("tab"), Default::default()))
         .unwrap()
@@ -395,7 +398,7 @@ fn a_tabs_transaction_over_its_own_commit_settled_by_a_worker_without_a_server_c
     let tx = tab.tx_ref(open);
     drive(&pump, tx.delete("notes", row, Default::default())).unwrap();
     drive(&pump, tab.commit_serializable_handle(open))
-        .expect("the tab's own settled insert is no conflict");
+        .expect("the tab's own pending insert is no conflict");
 }
 
 fn drive<T>(pump: &impl Fn(), future: impl std::future::Future<Output = T>) -> T {

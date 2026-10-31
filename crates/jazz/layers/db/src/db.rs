@@ -51,10 +51,10 @@ use crate::values::{
     to_sql, unsupported,
 };
 pub use sync::{
-    AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
-    FrameJoiner, Image, Outcome, Pos, ReadSpan, RejectedTransaction, RelationSnapshot,
+    ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
+    FrameJoiner, Image, OWN, Outcome, Pos, ReadSpan, RejectedTransaction, RelationSnapshot,
     RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
-    TxName, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError, WireKind, WireOp,
+    TxName, UPSTREAM, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError, WireKind, WireOp,
     WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite, WriteConflict,
     decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
 };
@@ -545,9 +545,6 @@ struct Inner {
     /// A replica's own band (of its unsettled versions, see
     /// [`sync::OWN`]); 0 until it becomes one.
     pub(crate) me: i64,
-    /// On a tab, the relay whose unsettled versions are in the upstream
-    /// band ([`sync::UPSTREAM`]), as the relay named itself.
-    pub(crate) upstream: std::cell::Cell<Option<[u8; 16]>>,
     pub(crate) claims: HashMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Live subscription groups and their invalidation index.
     fan: fanout::Fanout,
@@ -1389,7 +1386,6 @@ impl Db {
                     .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
                 seq: 0,
                 me: 0,
-                upstream: std::cell::Cell::new(None),
                 claims: HashMap::new(),
                 fan: fanout::Fanout::default(),
                 changed: RefCell::new(Vec::new()),
@@ -7199,10 +7195,7 @@ impl Db {
         let (snapshot, own) = {
             let inner = self.inner.borrow();
             let snapshot = match &inner.client {
-                Some(client) => Pos {
-                    n: client.known_n,
-                    seq: client.known,
-                },
+                Some(client) => Pos::at(client.known),
                 None => inner.frontier(),
             };
             (snapshot, inner.unsettled_own())
@@ -7365,7 +7358,7 @@ impl Db {
                     }
                 }
             }
-            let (reads, by) = {
+            let reads = {
                 let inner = self.inner();
                 let reads = reads
                     .iter()
@@ -7384,19 +7377,20 @@ impl Db {
                                 .rows
                                 .iter()
                                 .map(|(row, at)| {
-                                    Ok((*row.0.as_bytes(), inner.node_of(at.n)?, at.seq))
+                                    let (by, seq) = inner.read_version(*at);
+                                    (*row.0.as_bytes(), by, seq)
                                 })
-                                .collect::<Result<_, Error>>()?,
+                                .collect(),
                         })
                     })
                     .collect::<Result<Vec<_>, Error>>()?;
-                (reads, inner.node_of(snapshot.n)?)
+                debug_assert!(snapshot.accepted(), "a snapshot is the authority's");
+                reads
             };
             return self.commit_ops(
                 &batch,
                 sync::Kind::Serializable {
                     snapshot: snapshot.seq,
-                    by,
                     reads,
                     own: own.clone(),
                 },

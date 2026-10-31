@@ -479,18 +479,17 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
                     _ => None,
                 })?;
                 let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
-                Some((image.seq, image.key.clone(), value.root.object_hash.0))
+                Some((image.at, image.key.clone(), value.root.object_hash.0))
             }),
             _ => None,
         })
         .expect("the doc's image");
     down.borrow_mut().clear();
-    let pull = |table: &str, id: u8, seq: u64, root: [u8; 32], nodes: Vec<[u8; 32]>| WirePull {
+    let pull = |table: &str, id: u8, seq: jazz::db::Pos, root: [u8; 32], nodes: Vec<[u8; 32]>| WirePull {
         table: table.to_owned(),
         id: *row(id).0.as_bytes(),
         key: key.clone(),
-        seq,
-        by: None,
+        at: seq,
         root,
         nodes,
         span: Some((0, LARGE as u64)),
@@ -505,7 +504,7 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
         pull("docs", 1, seq, doc, vec![unknown]),
     ];
     // Through the draft's own row, at any version: she may read none.
-    pulls.extend((0..seq + 4).map(|seq| pull("drafts", 2, seq, draft, vec![draft])));
+    pulls.extend((0..seq.seq + 4).map(|seq| pull("drafts", 2, jazz::db::Pos::at(seq), draft, vec![draft])));
     up.borrow_mut()
         .push_back(SyncMessage::ChunkRequests { pulls });
     block_on(server.tick()).unwrap();
@@ -1052,7 +1051,7 @@ fn pulls_after_read_access_is_lost_are_answered_with_nothing() {
                     _ => None,
                 })?;
                 let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
-                Some((image.seq, image.key.clone(), value.root.object_hash.0))
+                Some((image.at, image.key.clone(), value.root.object_hash.0))
             }),
             _ => None,
         })
@@ -1072,8 +1071,7 @@ fn pulls_after_read_access_is_lost_are_answered_with_nothing() {
             table: "notes".to_owned(),
             id: *row(5).0.as_bytes(),
             key,
-            seq,
-            by: None,
+            at: seq,
             root,
             nodes: vec![root],
             span: Some((0, LARGE as u64)),
@@ -1130,7 +1128,7 @@ fn an_answer_to_many_pulls_is_bounded_and_the_rest_follows() {
                     _ => None,
                 })?;
                 let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
-                Some((image.seq, image.key.clone(), value.root.object_hash.0))
+                Some((image.at, image.key.clone(), value.root.object_hash.0))
             }),
             _ => None,
         })
@@ -1141,8 +1139,7 @@ fn an_answer_to_many_pulls_is_bounded_and_the_rest_follows() {
         table: "docs".to_owned(),
         id: *row(1).0.as_bytes(),
         key: key.clone(),
-        seq,
-        by: None,
+        at: seq,
         root,
         nodes: vec![root],
         span: Some((at * 4 * MB, (at + 1) * 4 * MB)),
@@ -2007,8 +2004,8 @@ fn a_snapshot_read_naming_a_held_commit_waits_for_it() {
         tier: ReadTier::Remote,
         wait: None,
         view: Box::new(ReadViewSourceSpec::Snapshot { snapshot }),
-        since: Vec::new(),
-        span: ReadSpan::Once { at: Vec::new() },
+        since: None,
+        span: ReadSpan::Once { at: None },
     });
     let reply = || {
         down.borrow().iter().find_map(|message| match message {
@@ -2196,24 +2193,23 @@ fn a_relay_forwards_no_pull_its_tab_may_not_make() {
             SyncMessage::Rows { images, .. } => images
                 .iter()
                 .find(|image| image.id == *row(1).0.as_bytes())
-                .map(|image| (image.seq, image.key.clone())),
+                .map(|image| (image.at, image.key.clone())),
             _ => None,
         })
         .expect("the doc's image");
     down.borrow_mut().clear();
     upstream.borrow_mut().clear();
-    let pull = |table: &str, id: u8, seq: u64, root: [u8; 32]| WirePull {
+    let pull = |table: &str, id: u8, seq: jazz::db::Pos, root: [u8; 32]| WirePull {
         table: table.to_owned(),
         id: *row(id).0.as_bytes(),
         key: key.clone(),
-        seq,
-        by: None,
+        at: seq,
         root,
         nodes: vec![draft],
         span: Some((0, LARGE as u64)),
     };
     let mut pulls = vec![pull("docs", 1, seq, draft)];
-    pulls.extend((0..seq + 4).map(|seq| pull("drafts", 2, seq, draft)));
+    pulls.extend((0..seq.seq + 4).map(|seq| pull("drafts", 2, jazz::db::Pos::at(seq), draft)));
     up.borrow_mut()
         .push_back(SyncMessage::ChunkRequests { pulls });
     for _ in 0..4 {

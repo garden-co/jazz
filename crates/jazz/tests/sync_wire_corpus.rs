@@ -386,7 +386,7 @@ const SHAPES: [&str; 13] = [
     "Read/live-branch-head",
     "AccessLost/hidden",
     "Commit/serializable",
-    "Commit/serializable-by",
+    "Rows/upstream-pending",
     "Read/once-resumed",
     "Read/once-historical",
 ];
@@ -397,17 +397,20 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
             since,
             span: ReadSpan::Once { at },
             ..
-        } if !since.is_empty() && at.is_empty() => Some(SHAPES[11]),
+        } if since.is_some() && at.is_none() => Some(SHAPES[11]),
         SyncMessage::Read {
             span: ReadSpan::Once { at },
             ..
-        } if !at.is_empty() => Some(SHAPES[12]),
+        } if at.is_some() => Some(SHAPES[12]),
         SyncMessage::Read {
             since,
             span: ReadSpan::Once { at },
             ..
-        } if since.is_empty() && at.is_empty() => Some(SHAPES[0]),
+        } if since.is_none() && at.is_none() => Some(SHAPES[0]),
         SyncMessage::Rows { tx_ids, .. } if !tx_ids.is_empty() => Some(SHAPES[1]),
+        SyncMessage::Rows { images, .. } if images.iter().any(|image| !image.at.accepted()) => {
+            Some(SHAPES[10])
+        }
         SyncMessage::Catalogue(catalogue)
             if !catalogue.versions.is_empty() && !catalogue.cells.is_empty() =>
         {
@@ -449,13 +452,9 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
         },
         SyncMessage::AccessLost { hidden: true, .. } => Some(SHAPES[8]),
         SyncMessage::Commit {
-            kind: WireKind::Serializable { snapshot, .. },
+            kind: WireKind::Serializable { .. },
             ..
-        } => match snapshot.as_slice() {
-            [(None, _)] => Some(SHAPES[9]),
-            [(Some(_), _)] => Some(SHAPES[10]),
-            _ => None,
-        },
+        } => Some(SHAPES[9]),
         _ => None,
     }
 }
@@ -732,8 +731,8 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     .unwrap();
     pump(&[&alice, &server, &alice]);
 
-    // Commit (serializable, at a snapshot a worker numbered): a tab of a
-    // worker with no server pins at the worker's position.
+    // Rows (a relay's unsettled version): a worker with no server keeps
+    // its own write pending, and ships it to its tab in its own band.
     let wendy = open(0x57, user(1), false);
     wendy.set_remote_link_hint(RemoteLinkHint::NoServer);
     let tab = open(0x58, user(1), false);
@@ -741,23 +740,9 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     tab.set_remote_link_hint(RemoteLinkHint::Live);
     connect(&tab, &wendy, user(1), &recorded);
     let tab_notes = tab.prepare_query(&Query::from("notes")).unwrap();
-    let open_tx = OpenTransactionId::new();
-    block_on(tab.begin_serializable(open_tx)).unwrap();
-    let _ = drive(
-        &[&tab, &wendy, &tab],
-        tab.tx_ref(open_tx).all_prepared(&tab_notes),
-    );
-    drive(
-        &[&tab, &wendy, &tab],
-        tab.tx_ref(open_tx)
-            .insert("notes", note(1, vec![10]), InsertOptions::default()),
-    )
-    .unwrap();
-    drive(
-        &[&tab, &wendy, &tab],
-        tab.commit_serializable_handle(open_tx),
-    )
-    .unwrap();
+    let _tab_stream = block_on(tab.subscribe(&tab_notes, ReadOpts::default())).unwrap();
+    pump(&[&tab, &wendy, &tab]);
+    block_on(wendy.insert("notes", note(1, vec![10]), InsertOptions::default())).unwrap();
     pump(&[&tab, &wendy, &tab]);
 
     // A history subscription ships superseded versions, with the commits
@@ -905,7 +890,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
             tier: ReadTier::LocalFirst,
             wait: None,
             view: Box::new(ReadViewSourceSpec::Current),
-            since: Vec::new(),
+            since: None,
             span: ReadSpan::Live,
         },
     ])));
