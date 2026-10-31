@@ -8025,8 +8025,7 @@ impl Db {
                         }
                     }
                     SyncMessage::ConnectionSettled { through } => {
-                        let (by, through) =
-                            required_position(&through, "a connection settlement")?;
+                        let (by, through) = required_position(&through, "a connection settlement")?;
                         inner.learn_known(through, by)?;
                         let client = inner.client.as_mut().expect("client");
                         let known = client.known;
