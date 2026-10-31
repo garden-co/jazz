@@ -12,6 +12,13 @@
 //! highest hold before the part arrives. While a hold stands, what the
 //! store serves as settled ([`ShardRole::served_through`]) stays below it.
 //!
+//! Holds and fixed positions are durable: they persist with the store and
+//! stand again when it reopens, and a reopened shard numbers no earlier
+//! than [`HLC_MAX_OFFSET_MS`] past its clock, above anything it may have
+//! observed before. While a hold stands, a commit writing one of the rows
+//! its part writes waits (another writer's), or is refused (another
+//! cross-shard part's hold, which could otherwise wait on it in turn).
+//!
 //! A store opened without [`crate::options::DbConfig::with_clock`] takes
 //! none of this: unsharded, it counts positions up by one and holds
 //! nothing, so every call below except `served_through` is refused.
@@ -20,6 +27,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::{Db, Inner};
 use crate::options::{Error, ErrorCode};
+use crate::values::storage;
 
 /// Commit positions are hybrid-clock timestamps: the wall clock in ms since
 /// [`HLC_EPOCH_MS`] above [`HLC_COUNTER_BITS`] bits of counter, so every
@@ -71,6 +79,30 @@ impl From<&crate::tx::TxId> for CommitRef {
     }
 }
 
+/// A row a cross-shard part writes, by the stored table its upload names
+/// it in (see [`HeldRow::of`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct HeldRow {
+    pub table: String,
+    pub row: [u8; 16],
+}
+
+impl HeldRow {
+    /// The rows a part's ops write, each once.
+    pub fn of(ops: &[super::WireOp]) -> Vec<HeldRow> {
+        let mut rows: Vec<HeldRow> = ops
+            .iter()
+            .map(|op| HeldRow {
+                table: op.table().to_owned(),
+                row: op.write.row(),
+            })
+            .collect();
+        rows.sort();
+        rows.dedup();
+        rows
+    }
+}
+
 /// A store's shard state: its clock, and the positions it holds for
 /// cross-shard parts still to land.
 #[derive(Default)]
@@ -82,7 +114,19 @@ pub(crate) struct ShardState {
     holds: BTreeMap<u64, CommitRef>,
     /// Parts to land at a fixed position when they arrive.
     fixed: HashMap<CommitRef, u64>,
+    /// The rows each held part writes, and who holds each row.
+    rows: HashMap<HeldRow, CommitRef>,
 }
+
+/// The durable record of holds: one row per held part, with its fixed
+/// position once fixed, and one per row it writes. Created by the first
+/// hold, so an unsharded store's file never holds them.
+/// The `_jazz_meta` key a clocked store sets on its first open.
+const SHARD_OPENED: &str = "shard_opened";
+
+const HOLDS_DDL: &str = "\
+    CREATE TABLE IF NOT EXISTS _jazz_shard_holds (at INTEGER PRIMARY KEY, node BLOB NOT NULL, tx INTEGER NOT NULL, fixed INTEGER, UNIQUE (node, tx));\
+    CREATE TABLE IF NOT EXISTS _jazz_shard_held_rows (node BLOB NOT NULL, tx INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL, PRIMARY KEY (tbl, id));";
 
 impl ShardState {
     pub(crate) fn new(clock: Option<Box<dyn Fn() -> u64>>) -> Self {
@@ -106,6 +150,16 @@ impl ShardState {
     pub(crate) fn landed(&mut self, commit: CommitRef) {
         self.holds.retain(|_, held| *held != commit);
         self.fixed.remove(&commit);
+        self.rows.retain(|_, held| *held != commit);
+    }
+
+    /// Whether a commit `by` writing `rows` waits: another part holds one
+    /// of them.
+    pub(crate) fn blocks(&self, by: CommitRef, rows: &[HeldRow]) -> bool {
+        !self.rows.is_empty()
+            && rows
+                .iter()
+                .any(|row| self.rows.get(row).is_some_and(|held| *held != by))
     }
 
     fn held(&self, commit: CommitRef) -> Option<u64> {
@@ -124,7 +178,149 @@ impl Inner {
             None => self.seq + 1,
         }
     }
+
+    /// A shard reopens: the holds it kept stand again, and it numbers no
+    /// earlier than its offset bound past its clock. What it observed
+    /// before is not kept, but none of it was further ahead than that, so
+    /// nothing it numbers from now lands at or below a position it closed
+    /// at. A hold whose part already landed is dropped.
+    pub(crate) fn load_shard(&mut self) -> Result<(), Error> {
+        let Some(clock) = &self.shard.clock else {
+            return Ok(());
+        };
+        // A reopened shard may have served positions up to its clock plus
+        // the offset bound before it stopped; it numbers past them.
+        let bound = hlc(clock().saturating_add(HLC_MAX_OFFSET_MS));
+        if self.meta(SHARD_OPENED)?.is_some() {
+            self.seq = self.seq.max(bound);
+        } else {
+            self.persist_meta(SHARD_OPENED, 1)?;
+        }
+        let kept: bool = self
+            .conn
+            .query_row(
+                "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '_jazz_shard_holds'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        if !kept {
+            return Ok(());
+        }
+        let holds: Vec<(u64, CommitRef, Option<u64>)> = {
+            let mut statement = self
+                .conn
+                .prepare("SELECT at, node, tx, fixed FROM _jazz_shard_holds")
+                .map_err(storage)?;
+            statement
+                .query_map([], |r| {
+                    let node: Vec<u8> = r.get(1)?;
+                    Ok((
+                        r.get::<_, i64>(0)? as u64,
+                        CommitRef {
+                            node: node.try_into().unwrap_or([0; 16]),
+                            tx: r.get::<_, i64>(2)? as u64,
+                        },
+                        r.get::<_, Option<i64>>(3)?.map(|at| at as u64),
+                    ))
+                })
+                .map_err(storage)?
+                .collect::<Result<_, _>>()
+                .map_err(storage)?
+        };
+        let rows: Vec<(HeldRow, CommitRef)> = {
+            let mut statement = self
+                .conn
+                .prepare("SELECT node, tx, tbl, id FROM _jazz_shard_held_rows")
+                .map_err(storage)?;
+            statement
+                .query_map([], |r| {
+                    let node: Vec<u8> = r.get(0)?;
+                    let id: Vec<u8> = r.get(3)?;
+                    Ok((
+                        HeldRow {
+                            table: r.get(2)?,
+                            row: id.try_into().unwrap_or([0; 16]),
+                        },
+                        CommitRef {
+                            node: node.try_into().unwrap_or([0; 16]),
+                            tx: r.get::<_, i64>(1)? as u64,
+                        },
+                    ))
+                })
+                .map_err(storage)?
+                .collect::<Result<_, _>>()
+                .map_err(storage)?
+        };
+        for (at, commit, fixed) in holds {
+            if self.landed_commit(commit)? {
+                self.forget_hold(commit)?;
+                continue;
+            }
+            self.shard.holds.insert(at, commit);
+            if let Some(fixed) = fixed {
+                self.shard.fixed.insert(commit, fixed);
+                self.seq = self.seq.max(fixed);
+            }
+            self.seq = self.seq.max(at);
+        }
+        for (row, commit) in rows {
+            if self.shard.held(commit).is_some() {
+                self.shard.rows.insert(row, commit);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether this store already applied the part `commit` (its fate is
+    /// recorded).
+    fn landed_commit(&self, commit: CommitRef) -> Result<bool, Error> {
+        let landed: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
+                 WHERE n.node = ?1 AND t.tx = ?2 AND t.seq IS NOT NULL",
+                rusqlite::params![commit.node.to_vec(), commit.tx as i64],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        Ok(landed.is_some())
+    }
+
+    /// Drop the durable record of `commit`'s hold. Run inside the savepoint
+    /// that lands its part, so the two go together.
+    pub(crate) fn forget_hold(&self, commit: CommitRef) -> Result<(), Error> {
+        if self.shard.clock.is_none() {
+            return Ok(());
+        }
+        let kept: bool = self
+            .conn
+            .query_row(
+                "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '_jazz_shard_holds'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        if !kept {
+            return Ok(());
+        }
+        let params = rusqlite::params![commit.node.to_vec(), commit.tx as i64];
+        self.exec(
+            "DELETE FROM _jazz_shard_holds WHERE node = ?1 AND tx = ?2",
+            params,
+        )
+        .map_err(storage)?;
+        self.exec(
+            "DELETE FROM _jazz_shard_held_rows WHERE node = ?1 AND tx = ?2",
+            params,
+        )
+        .map_err(storage)?;
+        Ok(())
+    }
 }
+
+use rusqlite::OptionalExtension;
 
 fn unsharded() -> Error {
     Error::new(
@@ -197,19 +393,49 @@ impl ShardRole<'_> {
         self.db.inner.borrow().shard.lowest_hold()
     }
 
-    /// Hold a position for the cross-shard part `commit`, which lands later
-    /// at a position at or above it ([`Self::fix`]). Until it lands (or is
-    /// [`Self::release`]d), what the store serves as settled stays below
-    /// the hold. Holding a part again returns its standing hold.
-    pub fn hold(&self, commit: CommitRef) -> Result<u64, Error> {
+    /// Hold a position for the cross-shard part `commit`, which writes
+    /// `rows` and lands later at a position at or above the hold
+    /// ([`Self::fix`]). Until it lands (or is [`Self::release`]d), what the
+    /// store serves as settled stays below the hold, and another commit
+    /// writing one of `rows` waits. Holding a part again returns its
+    /// standing hold. A row another part holds refuses the hold: two
+    /// cross-shard commits holding each other's rows on two shards would
+    /// otherwise wait on each other.
+    pub fn hold(&self, commit: CommitRef, rows: &[HeldRow]) -> Result<u64, Error> {
         let mut inner = self.db.inner.borrow_mut();
         self.require(&inner)?;
         if let Some(at) = inner.shard.held(commit) {
             return Ok(at);
         }
+        if inner.shard.blocks(commit, rows) {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "not supported yet: a row of this cross-shard part is held by another \
+                 cross-shard commit (retry once it lands)",
+            ));
+        }
         let at = inner.next_seq();
+        inner.conn.execute_batch(HOLDS_DDL).map_err(storage)?;
+        let node = commit.node.to_vec();
+        inner
+            .exec(
+                "INSERT INTO _jazz_shard_holds (at, node, tx) VALUES (?1, ?2, ?3)",
+                rusqlite::params![at as i64, node, commit.tx as i64],
+            )
+            .map_err(storage)?;
+        for row in rows {
+            inner
+                .exec(
+                    "INSERT INTO _jazz_shard_held_rows (node, tx, tbl, id) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![node, commit.tx as i64, row.table, row.row.to_vec()],
+                )
+                .map_err(storage)?;
+        }
         inner.seq = at;
         inner.shard.holds.insert(at, commit);
+        for row in rows {
+            inner.shard.rows.insert(row.clone(), commit);
+        }
         Ok(at)
     }
 
@@ -233,22 +459,35 @@ impl ShardRole<'_> {
             ));
         }
         observe(&mut inner, position)?;
+        inner
+            .exec(
+                "UPDATE _jazz_shard_holds SET fixed = ?3 WHERE node = ?1 AND tx = ?2",
+                rusqlite::params![commit.node.to_vec(), commit.tx as i64, position as i64],
+            )
+            .map_err(storage)?;
         inner.shard.fixed.insert(commit, position);
         Ok(())
     }
 
     /// Drop the part `commit`'s hold without it landing: its cross-shard
     /// commit was refused. Releasing a part not held does nothing.
-    pub fn release(&self, commit: CommitRef) {
-        self.db.inner.borrow_mut().shard.landed(commit);
+    pub fn release(&self, commit: CommitRef) -> Result<(), Error> {
+        let mut inner = self.db.inner.borrow_mut();
+        if inner.shard.held(commit).is_none() {
+            return Ok(());
+        }
+        inner.forget_hold(commit)?;
+        inner.shard.landed(commit);
+        Ok(())
     }
 }
 
 /// Note a position a peer named: nothing the store commits later lands at
 /// or below it. One further ahead of the clock than [`HLC_MAX_OFFSET_MS`]
-/// is refused.
+/// is refused, unless the store already numbered or held past it.
 fn observe(inner: &mut Inner, position: u64) -> Result<(), Error> {
     if let Some(clock) = &inner.shard.clock
+        && position > inner.seq
         && position > hlc(clock().saturating_add(HLC_MAX_OFFSET_MS))
     {
         return Err(Error::new(

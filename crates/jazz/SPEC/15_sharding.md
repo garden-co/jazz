@@ -21,7 +21,10 @@ Invariant digest:
 - `INV-SHARD-15`: A store opened without a clock MUST take no shard role: its positions count up by one, and observing, holding and fixing positions MUST be refused as not supported (§15.3).
 - `INV-SHARD-16`: A shard's commit positions MUST be hybrid-clock timestamps: each above every position it handed out or observed and no earlier than its clock; a position more than `HLC_MAX_OFFSET_MS` ahead of its clock MUST be observed only up to its clock plus that offset (§15.3).
 - `INV-SHARD-17`: While a hold stands, the position a shard serves as settled MUST stay below its lowest hold (§15.3).
-- `INV-SHARD-18`: A fixed cross-shard part MUST land at its fixed position, which is at or above its hold; a part with a row written above that position MUST be refused, not landed under the newer version (§15.3).
+- `INV-SHARD-18`: A fixed cross-shard part MUST land at its fixed position, which is at or above its hold (§15.3).
+- `INV-SHARD-19`: While a part's hold stands, a session commit writing one of the part's rows MUST wait until the part lands or is released; a part with a row the shard wrote above its fixed position anyway MUST be refused, not landed under the newer version (§15.3).
+- `INV-SHARD-20`: A shard's holds, their rows and fixed positions MUST survive a restart until their part lands or is released (§15.3).
+- `INV-SHARD-21`: A reopened shard MUST number above its clock plus `HLC_MAX_OFFSET_MS` at reopen, so it never numbers at or below a position it served or observed before it stopped (§15.3).
 
 ## Details
 
@@ -103,7 +106,7 @@ the shard ownership above are outside this repository and stay exploratory
   clock plus that offset, since that peer's clock (or claim) cannot be
   trusted further; `observe` returns the position it observed, and the caller
   observes the rest once the store's clock has caught up. A `fix` above that
-  bound is refused.
+  bound is refused, unless the store already numbered or held past it.
 - **Hold, fix, release.** A cross-shard commit lands at one position on every
   shard it writes. The gateway `hold`s a position for the part on each shard
   (`CommitRef`, the writer's node and transaction number), then `fix`es each
@@ -115,9 +118,24 @@ the shard ownership above are outside this repository and stay exploratory
   `release` drops a refused commit's hold. Holding a part again returns its
   standing hold, a part is fixed only once it is held, and a resent part that
   already landed holds nothing.
-- **Known limit.** A hold does not block other writers of the part's rows yet:
-  a part whose row the shard wrote above its fixed position is refused as not
-  supported, instead of landing below a newer version of its row.
+- **Blocking.** A hold names the rows its part writes (`HeldRow`). A
+  session commit writing one of them waits in its session's backlog until
+  the part lands or is released (`INV-SHARD-19`), so the part never lands
+  under a newer version of its row. A second part holding one of those rows
+  is refused (to retry once the first lands): two cross-shard commits holding
+  each other's rows on two shards would otherwise wait on each other. The
+  shard's own local writes do not wait; a part with a row the shard wrote
+  above its fixed position is refused instead of landing under it.
+- **Durability.** Holds, their rows and fixed positions are written to the
+  store (`_jazz_shard_holds`, `_jazz_shard_held_rows`) and reloaded on reopen
+  (`INV-SHARD-20`); a part landing deletes them in the same savepoint, and a
+  hold whose part had already landed is dropped on reload. A reopened shard
+  may have served positions up to its clock plus `HLC_MAX_OFFSET_MS` before it
+  stopped, so it numbers past that bound (`INV-SHARD-21`).
+- **Known limit.** A hold whose cross-shard commit is never decided (its
+  gateway stopped before the commit point and the writer never resends)
+  stands until released, blocking its rows and what the shard serves as
+  settled. Holds need a lease.
 
 ## Open Questions
 

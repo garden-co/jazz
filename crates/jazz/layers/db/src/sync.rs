@@ -910,6 +910,18 @@ pub enum WireWrite {
 }
 
 impl WireWrite {
+    /// The row the write names.
+    pub fn row(&self) -> [u8; 16] {
+        match self {
+            WireWrite::Insert { row, .. }
+            | WireWrite::Update { row, .. }
+            | WireWrite::Upsert { row, .. }
+            | WireWrite::Delete { row, .. }
+            | WireWrite::Restore { row, .. }
+            | WireWrite::Move { row, .. } => *row,
+        }
+    }
+
     /// The stored table the write names.
     pub fn table(&self) -> &str {
         match self {
@@ -9200,6 +9212,19 @@ impl Db {
                     .1
                     .remove(id);
             }
+            // A commit writing a row a cross-shard part holds waits until
+            // the part lands (or its hold is released), and what the
+            // session sent after it waits behind it (SPEC 15).
+            if let SyncMessage::Commit { id, ops, .. } = &message
+                && self.inner.borrow().shard.blocks(
+                    crate::db::shard::CommitRef::from(id),
+                    &crate::db::shard::HeldRow::of(ops),
+                )
+            {
+                self.note_held(&mut barrier, &message);
+                held.push_back(message);
+                continue;
+            }
             if let SyncMessage::PushChunks { nodes } = &message {
                 let bytes: usize = nodes.iter().map(|node| node.bytes.len()).sum();
                 let mut inner = self.inner.borrow_mut();
@@ -11801,7 +11826,8 @@ impl Db {
             let mut inner = self.inner();
             // A cross-shard part lands where all its parts do: at the
             // position its gateway fixed, under commits this shard accepted
-            // since its hold. None of those may have written its rows.
+            // since its hold. None of those wrote its rows: they waited
+            // while the hold stood (see `serve_session`).
             let part = crate::db::shard::CommitRef {
                 node: id.0,
                 tx: id.1,
@@ -11821,8 +11847,8 @@ impl Db {
                         return Err((
                             Error::new(
                                 ErrorCode::Protocol,
-                                "not supported yet: a row of this cross-shard part was written \
-                                 above its fixed position (a hold does not block other writers)",
+                                "a row of this cross-shard part was written above its fixed \
+                                 position, though its hold stood (INV-SHARD-19)",
                             ),
                             Vec::new(),
                         ));
@@ -11872,8 +11898,13 @@ impl Db {
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
                 return Err((error, Vec::new()));
             }
+            // Its hold goes with it: the record of both commits together.
+            if let Err(error) = inner.forget_hold(part) {
+                inner.changed.borrow_mut().truncate(mark);
+                end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
+                return Err((error, Vec::new()));
+            }
             inner.seq = inner.seq.max(seq);
-            inner.shard.landed(part);
             (seq, mark, prior)
         };
         // The relay's own upload record and the rows the sender hears about
@@ -11904,6 +11935,10 @@ impl Db {
         match finished {
             Ok(rows) => {
                 end_savepoint(&inner.conn, "upload", true).map_err(|e| (e, Vec::new()))?;
+                inner.shard.landed(crate::db::shard::CommitRef {
+                    node: id.0,
+                    tx: id.1,
+                });
                 let on = if relay {
                     landed
                 } else {

@@ -10,7 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
-use jazz::db::shard::{CommitRef, HLC_COUNTER_BITS, HLC_MAX_OFFSET_MS, hlc, hlc_ms};
+use jazz::db::shard::{CommitRef, HLC_COUNTER_BITS, HLC_MAX_OFFSET_MS, HeldRow, hlc, hlc_ms};
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, Outcome, SyncMessage, Transport, TransportError,
     Upstream, block_on,
@@ -50,6 +50,39 @@ fn shard(node: u8) -> (Db, Rc<Cell<u64>>) {
     (db, now)
 }
 
+/// A shard kept in `path`, on the clock `now`.
+fn shard_at(path: &std::path::Path, now: &Rc<Cell<u64>>) -> Db {
+    let clock = now.clone();
+    block_on(Db::open_at(
+        config(1).with_clock(move || clock.get()),
+        path,
+        jazz::db::FileOptions::default(),
+    ))
+    .unwrap()
+}
+
+fn doc_row(row: RowUuid) -> HeldRow {
+    HeldRow {
+        table: "docs".to_owned(),
+        row: *row.0.as_bytes(),
+    }
+}
+
+/// The docs a store holds, by title.
+fn titles(db: &Db) -> Vec<String> {
+    let prepared = db.prepare_query(&jazz::query::Query::from("docs")).unwrap();
+    let mut titles: Vec<String> = block_on(db.all(&prepared, Default::default()))
+        .unwrap()
+        .iter()
+        .map(|row| match row.cell("title") {
+            Some(Value::String(title)) => title,
+            other => panic!("title {other:?}"),
+        })
+        .collect();
+    titles.sort();
+    titles
+}
+
 fn insert(db: &Db, title: &str) {
     block_on(db.insert(
         "docs",
@@ -75,7 +108,7 @@ fn an_unsharded_store_takes_no_shard_role() {
     assert!(!db.shard().is_shard());
     for error in [
         db.shard().observe(5).unwrap_err(),
-        db.shard().hold(part).unwrap_err(),
+        db.shard().hold(part, &[]).unwrap_err(),
         db.shard().fix(part, 5).unwrap_err(),
     ] {
         assert!(error.to_string().contains("not supported"), "{error}");
@@ -145,8 +178,8 @@ fn a_hold_keeps_what_is_served_as_settled_below_it() {
         node: [9; 16],
         tx: 1,
     };
-    let held = db.shard().hold(part).unwrap();
-    assert_eq!(db.shard().hold(part).unwrap(), held, "held once");
+    let held = db.shard().hold(part, &[]).unwrap();
+    assert_eq!(db.shard().hold(part, &[]).unwrap(), held, "held once");
     assert_eq!(db.shard().lowest_hold(), Some(held));
     insert(&db, "meanwhile");
     assert_eq!(
@@ -164,7 +197,7 @@ fn a_hold_keeps_what_is_served_as_settled_below_it() {
         tx: 2,
     };
     assert!(db.shard().fix(other, held).is_err(), "fixed only once held");
-    db.shard().release(part);
+    db.shard().release(part).unwrap();
     assert_eq!(db.shard().lowest_hold(), None);
     assert_eq!(db.shard().served_through(), held + 1);
 }
@@ -191,7 +224,17 @@ type Log = Rc<RefCell<Vec<SyncMessage>>>;
 
 /// A writer connected to `db`, with what each side sent.
 fn writer_of(db: &Db) -> (Db, Upstream, Log, Log) {
-    let writer = block_on(Db::open(config(2))).unwrap();
+    writer_on(db, 2)
+}
+
+fn writer_on(db: &Db, node: u8) -> (Db, Upstream, Log, Log) {
+    let writer = block_on(Db::open(config(node))).unwrap();
+    let (upstream, sent_up, sent_down) = connect(&writer, db);
+    (writer, upstream, sent_up, sent_down)
+}
+
+/// `writer` connected to `db`, with what each side sent.
+fn connect(writer: &Db, db: &Db) -> (Upstream, Log, Log) {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
     let sent_up = Rc::new(RefCell::new(Vec::new()));
@@ -214,7 +257,7 @@ fn writer_of(db: &Db) -> (Db, Upstream, Log, Log) {
         block_on(writer.tick()).unwrap();
         block_on(db.tick()).unwrap();
     }
-    (writer, upstream, sent_up, sent_down)
+    (upstream, sent_up, sent_down)
 }
 
 /// The writer's next commit, uploaded but not yet arrived.
@@ -267,7 +310,7 @@ fn a_fixed_part_lands_at_its_fixed_position() {
     let (db, _now) = shard(1);
     let (writer, _upstream, sent_up, sent_down) = writer_of(&db);
     let part = upload(&writer, &sent_up, None);
-    let held = db.shard().hold(part).unwrap();
+    let held = db.shard().hold(part, &[]).unwrap();
     insert(&db, "the shard's own");
     let own = held + 1;
     assert_eq!(db.shard().served_through(), held - 1);
@@ -283,16 +326,16 @@ fn a_fixed_part_lands_at_its_fixed_position() {
     assert_eq!(at, vec![(None, held)], "at its fixed position");
 }
 
-/// A row the shard wrote past a part's hold cannot take the part under
-/// it: holds do not block other writers yet, so the part is refused, said
-/// so, instead of landing below a newer version of its row.
+/// The shard's own write (no session's commit, which would wait) to a row
+/// past a part's hold cannot take the part under it: the part is refused,
+/// said so, instead of landing below a newer version of its row.
 #[test]
-fn a_part_whose_row_was_written_past_its_hold_is_refused() {
+fn a_part_whose_row_the_shard_wrote_past_its_hold_is_refused() {
     let (db, _now) = shard(1);
     let (writer, _upstream, sent_up, sent_down) = writer_of(&db);
     let row = RowUuid::from_bytes([7; 16]);
     let part = upload(&writer, &sent_up, Some(row));
-    let held = db.shard().hold(part).unwrap();
+    let held = db.shard().hold(part, &[doc_row(row)]).unwrap();
     block_on(db.insert(
         "docs",
         BTreeMap::from([("title".to_owned(), Value::String("mine".to_owned()))]),
@@ -307,10 +350,103 @@ fn a_part_whose_row_was_written_past_its_hold_is_refused() {
     let Outcome::Refused { error, .. } = fate(&sent_down) else {
         panic!("accepted below a newer version of its row");
     };
-    assert!(
-        format!("{error:?}").contains("not supported yet"),
-        "{error:?}"
-    );
-    db.shard().release(part);
+    assert!(format!("{error:?}").contains("INV-SHARD-19"), "{error:?}");
+    db.shard().release(part).unwrap();
     assert_eq!(db.shard().lowest_hold(), None);
+}
+
+/// Another session's commit to a row a part holds waits while the hold
+/// stands, with what that session sent after it, and lands above it once
+/// the hold goes. Another part's hold of the row is refused.
+#[test]
+fn a_hold_makes_other_writers_of_its_rows_wait() {
+    let (db, _now) = shard(1);
+    let row = RowUuid::from_bytes([7; 16]);
+    let part = CommitRef {
+        node: [9; 16],
+        tx: 1,
+    };
+    let held = db.shard().hold(part, &[doc_row(row)]).unwrap();
+    let error = db
+        .shard()
+        .hold(
+            CommitRef {
+                node: [9; 16],
+                tx: 2,
+            },
+            &[doc_row(row)],
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("held by another"), "{error}");
+    let (writer, _upstream, sent_up, sent_down) = writer_of(&db);
+    upload(&writer, &sent_up, Some(row));
+    upload(&writer, &sent_up, None);
+    pump(&db, &writer);
+    assert!(
+        !sent_down
+            .borrow()
+            .iter()
+            .any(|m| matches!(m, SyncMessage::Fate { .. })),
+        "the commit, and the one after it, wait"
+    );
+    assert!(titles(&db).is_empty());
+    db.shard().release(part).unwrap();
+    pump(&db, &writer);
+    assert_eq!(titles(&db), vec!["theirs", "theirs"]);
+    let Outcome::Accepted { at, .. } = fate(&sent_down) else {
+        panic!("refused");
+    };
+    assert!(at[0].1 > held, "above the hold");
+}
+
+/// Holds and fixed positions are durable: a shard reopened between a
+/// part's fix and its arrival still holds it, and lands it at the fixed
+/// position when its writer sends it again.
+#[test]
+fn holds_and_fixes_survive_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shard.sqlite");
+    let now = Rc::new(Cell::new(NOW));
+    let db = shard_at(&path, &now);
+    let row = RowUuid::from_bytes([7; 16]);
+    let writer = block_on(Db::open(config(2))).unwrap();
+    let (upstream, sent_up, _) = connect(&writer, &db);
+    // The writer's commit is in flight when the shard goes down.
+    let part = upload(&writer, &sent_up, Some(row));
+    let held = db.shard().hold(part, &[doc_row(row)]).unwrap();
+    db.shard().fix(part, held).unwrap();
+    drop(upstream);
+    drop(db);
+
+    let db = shard_at(&path, &now);
+    assert_eq!(db.shard().lowest_hold(), Some(held), "the hold stands");
+    assert_eq!(db.shard().served_through(), held - 1);
+    let (_upstream, _, sent_down) = connect(&writer, &db);
+    pump(&db, &writer);
+    let Outcome::Accepted { at, .. } = fate(&sent_down) else {
+        panic!("refused");
+    };
+    assert_eq!(at, vec![(None, held)], "at its fixed position");
+    assert_eq!(db.shard().lowest_hold(), None, "it landed");
+    drop(db);
+    let db = shard_at(&path, &now);
+    assert_eq!(db.shard().lowest_hold(), None, "and its hold went with it");
+}
+
+/// A reopened shard keeps no record of the positions it observed, so it
+/// numbers no earlier than its offset bound past its clock: above any
+/// position it may have closed at before.
+#[test]
+fn a_reopened_shard_numbers_past_its_offset_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shard.sqlite");
+    let now = Rc::new(Cell::new(NOW));
+    let db = shard_at(&path, &now);
+    let closed = db.shard().observe(hlc(NOW + 400)).unwrap();
+    assert_eq!(db.shard().served_through(), closed);
+    drop(db);
+    let db = shard_at(&path, &now);
+    insert(&db, "after");
+    assert!(newest(&db) > closed, "nothing lands at or below the close");
+    assert!(newest(&db) > hlc(NOW + HLC_MAX_OFFSET_MS));
 }

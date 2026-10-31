@@ -1420,6 +1420,7 @@ impl Db {
             }
             inner.seq = seq;
             inner.load_client()?;
+            inner.load_shard()?;
         }
         Ok(db)
     }
