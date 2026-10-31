@@ -50,6 +50,8 @@ new Hono()
   });
 ```
 
+You can also query and write to the database right from your frontend. It is protected by the same auth as your backend, and the same permission policies apply. Pick a thin client (about 86 kB gzipped) or a full local-first client (about 1 MB gzipped, mostly the WASM engine).
+
 ```ts title="client.ts"
 import { createDb } from "jazz-tools/thin";
 import { app } from "./schema";
