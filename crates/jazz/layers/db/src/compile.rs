@@ -457,7 +457,7 @@ impl<'a> Ctx<'a> {
         // it shows as it is, and only accepted rows past the cut fall back
         // to their history.
         if cut.unsettled {
-            let unsettled = crate::db::sync::band_start(crate::db::sync::UPSTREAM);
+            let unsettled = crate::db::sync::band_start(crate::db::sync::PENDING);
             visible.push_str(&format!(" OR _t >= {unsettled}"));
             newer.push_str(&format!(" AND c._t < {unsettled}"));
         }
@@ -481,9 +481,9 @@ impl<'a> Ctx<'a> {
             "(SELECT {columns} FROM {name} WHERE {visible} \
              UNION ALL SELECT CAST(NULL AS INTEGER), {h_columns} FROM {name} AS c \
              CROSS JOIN {history} AS h ON c.id = h.id AND c._b = h._b WHERE {newer} \
-             AND h._t = (SELECT h2._t FROM {history} AS h2 \
+             AND (h._t, h._w) = (SELECT h2._t, h2._w FROM {history} AS h2 \
              WHERE h2.id = h.id AND h2._b = h._b AND (h2._st & {STATE_AS_SENT}) = 0 AND {h_visible} \
-             ORDER BY h2._t DESC LIMIT 1))"
+             ORDER BY h2._t DESC, h2._w DESC LIMIT 1))"
         )
     }
 

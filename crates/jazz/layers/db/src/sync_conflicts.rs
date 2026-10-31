@@ -287,12 +287,22 @@ impl Inner {
         bases
             .into_iter()
             .map(|(op, base)| {
+                // A version this relay shipped the session: one of the
+                // commits it carries, by the writer's id, is its own here.
                 let on = match base.on {
-                    BuiltOn::Upstream { tx } => BuiltOn::Commit { node: me, tx },
+                    BuiltOn::Commit { node, tx } if node != sender.0 && node != me => {
+                        match pending.commits.iter().find(|p| p.id == super::tx_id(node, tx)) {
+                            Some(p) => BuiltOn::Commit { node: me, tx: p.tx },
+                            None => match self.settled(node, tx)? {
+                                Some(Some(at)) if at.accepted() => BuiltOn::Seq(at.seq),
+                                Some(None) => return Err(predecessor_rejected()),
+                                _ => return Err(unknown_base("another node's commit")),
+                            },
+                        }
+                    }
                     on => on,
                 };
                 let on = match on {
-                    BuiltOn::Upstream { .. } => unreachable!("named as this relay's commit"),
                     BuiltOn::Seq(seq) => BuiltOn::Seq(seq),
                     BuiltOn::Commit { node, tx } if node == me => {
                         let (table, row) = self.based_row(ops, op)?;
@@ -402,10 +412,6 @@ impl Inner {
             let (table, row) = self.based_row(ops, *op)?;
             let on = match base.on {
                 BuiltOn::Seq(seq) => Built::Seq(seq),
-                // Only a relay holds versions it shipped a session unsettled.
-                BuiltOn::Upstream { .. } => {
-                    return Err(unknown_base("an unsettled upstream version"));
-                }
                 BuiltOn::Own { back } => {
                     let tx = sender
                         .1
@@ -443,19 +449,27 @@ impl Inner {
         bases: &[(usize, WireBase)],
     ) -> Result<HashMap<RowKey, Pos>, Error> {
         let me = *self.identity.node.as_bytes();
+        // A session commit this relay carries, by its writer's id: its
+        // local tx here.
+        let carried = |node: [u8; 16], tx: u64| {
+            self.client.as_ref().and_then(|client| {
+                client
+                    .pending
+                    .commits
+                    .iter()
+                    .find(|p| p.id == super::tx_id(node, tx))
+                    .map(|p| p.tx)
+            })
+        };
         let mut landed = HashMap::new();
         for (op, base) in bases {
             let (table, row) = self.based_row(ops, *op)?;
             let at = match base.on {
                 BuiltOn::Seq(seq) => Pos::at(seq),
-                BuiltOn::Upstream { tx } => Pos {
-                    n: self.me,
-                    seq: tx,
-                },
-                BuiltOn::Commit { node, tx } if node == me => Pos {
-                    n: self.me,
-                    seq: tx,
-                },
+                BuiltOn::Commit { node, tx } if node == me => self.own_pos(tx),
+                BuiltOn::Commit { node, tx } if node != sender.0 && carried(node, tx).is_some() => {
+                    self.own_pos(carried(node, tx).expect("carried"))
+                }
                 BuiltOn::Own { back } => {
                     let tx = sender
                         .1
@@ -489,16 +503,15 @@ impl Inner {
                 .map_or(&[][..], Vec::as_slice);
             self.exec(
                 &format!(
-                    "UPDATE {} SET _base = ?1, _cols = ?2 WHERE id = ?3 AND _b = ?4 AND _t = {} + ?5",
+                    "UPDATE {} SET _base = ?1, _cols = ?2 WHERE id = ?3 AND _b = ?4 AND _t = ?5",
                     quote(table),
-                    super::band_start(self.me)
                 ),
                 rusqlite::params![
                     built.get(row_key).map(|built| built.stored()),
                     self.authored(ops, indexes, table)?,
                     row.0.as_bytes().to_vec(),
                     key,
-                    seq as i64
+                    self.own_pos(seq).t()
                 ],
             )
             .map_err(storage)?;
@@ -537,7 +550,7 @@ impl Inner {
              AND _t < {upstream} AND (_st & {STATE_AS_SENT}) = 0 ORDER BY 1",
             quote(table),
             quote(&format!("{table}__h")),
-            upstream = super::band_start(super::UPSTREAM),
+            upstream = super::band_start(super::PENDING),
         );
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
         let versions = statement
@@ -755,6 +768,32 @@ impl Db {
     #[cfg(feature = "testing")]
     pub fn as_sent_versions_for_test(&self) -> Result<u64, Error> {
         self.inner().as_sent_versions()
+    }
+
+    /// The `(_t, _w)` of every history version of `table`'s unbranched row
+    /// `row`, in key order.
+    #[cfg(feature = "testing")]
+    pub fn history_keys_for_test(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Vec<(i64, Vec<u8>)>, Error> {
+        let inner = self.inner();
+        let schema_table = inner.schema.table(table)?;
+        let sql = format!(
+            "SELECT _t, _w FROM {} WHERE id = ?1 AND _b = ?2 ORDER BY _t, _w",
+            quote(&format!("{}__h", schema_table.stored)),
+        );
+        let mut statement = inner.conn.prepare_cached(&sql).map_err(storage)?;
+        let rows = statement
+            .query_map(
+                rusqlite::params![row.0.as_bytes().to_vec(), Vec::<u8>::new()],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+            )
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage);
+        rows
     }
 
     /// How many bytes column `column` of `table`'s unbranched row `row`

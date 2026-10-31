@@ -333,12 +333,11 @@ fn a_tabs_unsettled_insert_stays_its_own_once_its_worker_stored_it() {
     );
 }
 
-/// An upstream ships accepted versions and its own unsettled ones; a
-/// version in its upstream band (one its own upstream numbered) can only
-/// be a misbehaving upstream's, since relays are not chained, so the tab
-/// refuses it rather than store it.
+/// An unsettled version is named by its writer's commit: one an upstream
+/// ships without its writer is malformed, so the tab refuses it rather
+/// than store it.
 #[test]
-fn a_tab_refuses_an_upstream_version_its_upstreams_upstream_numbered() {
+fn a_tab_refuses_an_unsettled_version_with_no_writer() {
     let tab = open(WORKER + 1, author(WORKER));
     tab.set_non_durable_client();
     tab.set_remote_link_hint(RemoteLinkHint::Live);
@@ -351,10 +350,7 @@ fn a_tab_refuses_an_upstream_version_its_upstreams_upstream_numbered() {
                 table: "notes".to_owned(),
                 id: [7; 16],
                 key: Vec::new(),
-                at: jazz::db::Pos {
-                    n: jazz::db::UPSTREAM,
-                    seq: 1,
-                },
+                at: jazz::db::Pos::pending(1),
                 deleted: false,
                 content: true,
                 cells: Vec::new(),
@@ -1012,9 +1008,9 @@ fn provenance(db: &Db, row: RowUuid) -> (u64, u64) {
 }
 
 /// A write timestamped far ahead (a day, or past any i64) orders among
-/// unsettled versions no further ahead than the authority's skew bound,
-/// and moves no other tab's own provenance stamps: a sibling's later
-/// write still orders after it, at its own clock.
+/// unsettled versions at its commit's clock, not its time, and moves no
+/// other tab's own provenance stamps: a sibling's later write still
+/// orders after it, at its own clock.
 #[test]
 fn a_far_future_write_time_neither_stamps_nor_outorders_a_sibling_tabs_later_write() {
     for far in [CLOCK as u64 + 24 * 60 * 60 * 1000, u64::MAX] {
@@ -1082,11 +1078,11 @@ fn a_workers_write_after_a_tabs_relayed_commit_orders_after_it() {
     assert_eq!(note_bodies(tab), ["worker"]);
 }
 
-/// A write's explicit time is its commit's clock: a tab's backfill
-/// timestamped after another tab's write orders after it, whichever the
-/// worker gets first.
+/// A write's explicit time is provenance only: a tab's backfill
+/// timestamped after another tab's later write still orders by its
+/// commit's clock, under it, whichever the worker gets first.
 #[test]
-fn an_explicit_write_time_is_its_commits_clock() {
+fn an_explicit_write_time_does_not_order_its_commit() {
     for backfill_first in [false, true] {
         let notes = Query::from("notes");
         let (worker, tabs, _watches) = serverless(schema, &[WORKER + 1, WORKER + 2], &notes);
@@ -1115,7 +1111,7 @@ fn an_explicit_write_time_is_its_commits_clock() {
         for db in [&worker, backfill, plain] {
             assert_eq!(
                 note_bodies(db),
-                ["backfill"],
+                ["plain"],
                 "backfill first: {backfill_first}"
             );
         }
@@ -1147,6 +1143,55 @@ fn equal_clocks_order_by_the_writers_node() {
                 ["greater"],
                 "greater first: {greater_first}"
             );
+        }
+    }
+}
+
+/// Two writers' pending versions of one row at the same commit HLC share
+/// one `_t`: the history key's writer keeps both, ordered by (node, tx).
+#[test]
+fn equal_clock_versions_of_one_row_both_stay_in_history() {
+    for greater_first in [false, true] {
+        let notes = Query::from("notes");
+        let (worker, tabs, _watches) = serverless(schema, &[WORKER + 1, WORKER + 2], &notes);
+        let (lesser, greater) = (&tabs[0], &tabs[1]);
+        let all = [lesser, greater, &worker];
+        let row = block_on(lesser.insert("notes", body("before"), Default::default()))
+            .unwrap()
+            .row_uuid();
+        pump_all(&all);
+        block_on(lesser.update("notes", row, body("lesser"), Default::default())).unwrap();
+        block_on(greater.update("notes", row, body("greater"), Default::default())).unwrap();
+        let first = if greater_first { greater } else { lesser };
+        for db in [first, &worker, first] {
+            block_on(db.tick()).unwrap();
+        }
+        pump_all(&all);
+        // A later write moves the current version into history too.
+        worker.set_clock_for_test(Some(CLOCK + 100));
+        block_on(worker.update("notes", row, body("later"), Default::default())).unwrap();
+        pump_all(&all);
+
+        let history = worker.history_keys_for_test("notes", row).unwrap();
+        let shared: Vec<&(i64, Vec<u8>)> = history
+            .iter()
+            .filter(|(t, _)| history.iter().filter(|(u, _)| u == t).count() > 1)
+            .collect();
+        assert_eq!(shared.len(), 2, "greater first: {greater_first}: {history:?}");
+        let writers: Vec<[u8; 16]> = shared
+            .iter()
+            .map(|(_, w)| {
+                assert_eq!(w.len(), 24, "a pending version names its writer");
+                w[..16].try_into().unwrap()
+            })
+            .collect();
+        assert_eq!(
+            writers,
+            [[WORKER + 1; 16], [WORKER + 2; 16]],
+            "ordered by node (greater first: {greater_first})"
+        );
+        for db in all {
+            assert_eq!(note_bodies(db), ["later"], "greater first: {greater_first}");
         }
     }
 }

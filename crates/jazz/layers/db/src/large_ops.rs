@@ -1489,6 +1489,7 @@ impl TxRef<'_> {
         Ok(WriteHandle {
             row,
             seq: Pos::default(),
+            tx: 0,
         })
     }
 }

@@ -162,7 +162,7 @@ impl Ctx<'_> {
             format!("(v._st & {}) = 0", STATE_NO_CONTENT | STATE_AS_SENT),
             format!(
                 "v._t < {}",
-                crate::db::sync::band_start(crate::db::sync::UPSTREAM)
+                crate::db::sync::band_start(crate::db::sync::PENDING)
             ),
         ];
         if let Some(view) = &self.view

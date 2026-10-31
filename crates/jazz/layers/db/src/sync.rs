@@ -81,28 +81,27 @@ fn now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-/// The band a version's position is in (SPEC 4): its [`Pos::n`]. Every
-/// accepted version is in [`ACCEPTED`], numbered by the authority. A
-/// replica's own unsettled versions are in [`OWN`], numbered by its own
-/// commit counter, after every other version it holds. A tab also holds
-/// its relay's unsettled versions, in [`UPSTREAM`], numbered by the
-/// relay's counter: between the accepted ones and its own.
+/// The kind of a version's position (SPEC 4): its [`Pos::n`]. Every
+/// accepted version is [`ACCEPTED`], at the authority's position. Every
+/// unsettled one is [`PENDING`], at its writer's commit HLC (see
+/// [`crate::db::HLC_EPOCH_MS`]), so it is the same in every store that
+/// holds it, after every accepted one. Two writers' pending versions can
+/// share a position: they order by writer node, then tx (see [`Order`]).
 pub const ACCEPTED: i64 = 0;
-pub const UPSTREAM: i64 = 1;
-pub const OWN: i64 = 2;
+pub const PENDING: i64 = 1;
 
-/// The bits of a band's seq in a stored `_t`: `_t` is the band in the
-/// bits above and the seq below, so stored positions order as [`Pos`]es
+/// The bits of a position's seq in a stored `_t`: `_t` is the kind in the
+/// bit above and the seq below, so stored positions order as [`Pos`]es
 /// do, all under 2^53 (a JavaScript-safe integer).
-pub const SEQ_BITS: u32 = 51;
+pub const SEQ_BITS: u32 = 52;
 
-/// The largest seq a band holds.
+/// The largest seq a position holds.
 pub const MAX_SEQ: u64 = (1 << SEQ_BITS) - 1;
 
-/// A row version's position: its band (`n`, see [`ACCEPTED`]) and its seq
-/// there. Positions order by band first, so every accepted version
-/// precedes every unsettled one, and a relay's unsettled versions precede
-/// its tab's own. Stored as one `_t` ([`Pos::t`]).
+/// A row version's position: its kind (`n`, see [`ACCEPTED`]) and its seq
+/// there (the authority's position, or its writer's commit HLC). Every
+/// accepted version precedes every pending one. Stored as one `_t`
+/// ([`Pos::t`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pos {
     pub n: i64,
@@ -117,14 +116,19 @@ impl Pos {
         seq: MAX_SEQ,
     };
 
-    /// An accepted version, by its authority seq.
+    /// An accepted version, by its authority position.
     pub const fn at(seq: u64) -> Self {
         Self { n: ACCEPTED, seq }
     }
 
+    /// A pending version, by its writer's commit HLC.
+    pub const fn pending(hlc: u64) -> Self {
+        Self { n: PENDING, seq: hlc }
+    }
+
     /// Before every unsettled version, after every accepted one.
     pub const UNSETTLED: Self = Self {
-        n: UPSTREAM,
+        n: PENDING,
         seq: 0,
     };
 
@@ -135,7 +139,7 @@ impl Pos {
 
     /// The stored `_t`.
     pub fn t(self) -> i64 {
-        debug_assert!(self.seq <= MAX_SEQ, "a seq past its band: {self:?}");
+        debug_assert!(self.seq <= MAX_SEQ, "a seq past its kind: {self:?}");
         (self.n << SEQ_BITS) | (self.seq & MAX_SEQ) as i64
     }
 
@@ -148,9 +152,8 @@ impl Pos {
     }
 }
 
-/// On the wire a position is its `_t`, one integer, in the sender's bands:
-/// a relay ships its own unsettled versions in [`OWN`], which its tab
-/// holds in [`UPSTREAM`] (see [`Pos::from_upstream`]).
+/// On the wire a position is its `_t`, one integer, the same in every
+/// store.
 impl Serialize for Pos {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_u64(self.t() as u64)
@@ -161,47 +164,36 @@ impl<'de> Deserialize<'de> for Pos {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let t = u64::deserialize(deserializer)?;
         let at = Pos::from_t(i64::try_from(t).map_err(serde::de::Error::custom)?);
-        if at.n > OWN {
-            return Err(serde::de::Error::custom("a position in no band"));
+        if at.n > PENDING {
+            return Err(serde::de::Error::custom("a position of no kind"));
         }
         Ok(at)
     }
 }
 
-impl Pos {
-    /// A position an upstream shipped, as this store holds it: the
-    /// upstream's own unsettled versions are in [`UPSTREAM`] here.
-    pub fn from_upstream(self) -> Self {
-        match self.n {
-            OWN => Pos {
-                n: UPSTREAM,
-                ..self
-            },
-            _ => self,
-        }
-    }
-
-    /// A position this store holds, as its upstream counts it (the
-    /// inverse of [`Pos::from_upstream`]).
-    pub fn to_upstream(self) -> Self {
-        match self.n {
-            UPSTREAM => Pos { n: OWN, ..self },
-            _ => self,
-        }
-    }
-}
-
 /// An authority seq a peer sent (a version, a snapshot, a checkpoint):
-/// refused past [`MAX_SEQ`], as a position in no band is, so it never
+/// refused past [`MAX_SEQ`] (2^52 or more), as a position of no kind is, so it never
 /// reaches [`Pos::at`] to be masked into another seq.
 pub(crate) fn accepted_seq<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<u64, D::Error> {
     let seq = u64::deserialize(deserializer)?;
     if seq > MAX_SEQ {
-        return Err(serde::de::Error::custom("an accepted seq past its band"));
+        return Err(serde::de::Error::custom("an accepted seq past 2^52"));
     }
     Ok(seq)
+}
+
+/// A commit's HLC as a peer sends it: refused past 2^52, as a pending `_t`
+/// holds it below the pending flag.
+pub(crate) fn commit_clock<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u64, D::Error> {
+    let clock = u64::deserialize(deserializer)?;
+    if clock > MAX_SEQ {
+        return Err(serde::de::Error::custom("a commit clock past 2^52"));
+    }
+    Ok(clock)
 }
 
 /// [`accepted_seq`], when the peer may send none.
@@ -210,13 +202,13 @@ pub(crate) fn accepted_seq_opt<'de, D: serde::Deserializer<'de>>(
 ) -> Result<Option<u64>, D::Error> {
     let seq = Option::<u64>::deserialize(deserializer)?;
     if seq.is_some_and(|seq| seq > MAX_SEQ) {
-        return Err(serde::de::Error::custom("an accepted seq past its band"));
+        return Err(serde::de::Error::custom("an accepted seq past 2^52"));
     }
     Ok(seq)
 }
 
-/// `_t` of the first version in band `n`: `_t < band_start(n)` is every
-/// version in an earlier band.
+/// `_t` of the first version of kind `n`: `_t < band_start(PENDING)` is
+/// every accepted version (the settled-only cut).
 pub(crate) const fn band_start(n: i64) -> i64 {
     n << SEQ_BITS
 }
@@ -608,8 +600,24 @@ impl From<&Cell> for Sql {
 /// `held` one: a relay ships older ones in as-of answers. Cuts never read
 /// them (a snapshot naming another replica's unsettled commit is
 /// unavailable), so the replica keeps neither as history.
-fn relay_older(held: Pos, image: Pos) -> bool {
-    !image.accepted() && held > image
+fn relay_older(held: Rank, image: Rank) -> bool {
+    !image.0.accepted() && held > image
+}
+
+/// Where a version stands among a row's versions in one store: its
+/// position, then for a pending one its writer (node, tx), as two writers'
+/// pending versions can share a position.
+pub(crate) type Rank = (Pos, Option<([u8; 16], u64)>);
+
+/// An image's [`Rank`].
+pub(crate) fn rank(image: &Image) -> Rank {
+    (
+        image.at,
+        image
+            .written
+            .filter(|_| !image.at.accepted())
+            .map(|(_, node, tx)| (node, tx)),
+    )
 }
 
 /// One stored row version: the unit of replication.
@@ -633,10 +641,25 @@ pub struct Image {
 }
 
 /// Where an unsettled commit orders among the unsettled versions of a row:
-/// its writer's commit clock (Unix ms), then its writer's node and that
+/// its writer's commit HLC (its position), then its writer's node and that
 /// node's tx, so every store orders the same commits the same way. The
 /// authority's order replaces it once the commits settle.
 pub type Order = (u64, [u8; 16], u64);
+
+/// A pending version's writer as history keys it (`_w`): its node, then its
+/// tx big-endian. An accepted version's is empty.
+pub(crate) fn writer_bytes(node: [u8; 16], tx: u64) -> Vec<u8> {
+    let mut w = node.to_vec();
+    w.extend_from_slice(&tx.to_be_bytes());
+    w
+}
+
+/// The writer [`writer_bytes`] encoded.
+pub(crate) fn writer_of_bytes(w: &[u8]) -> Option<([u8; 16], u64)> {
+    let node: [u8; 16] = w.get(..16)?.try_into().ok()?;
+    let tx: [u8; 8] = w.get(16..24)?.try_into().ok()?;
+    (w.len() == 24).then_some((node, u64::from_be_bytes(tx)))
+}
 
 /// The most image bytes one `Rows` carries: a first result of any size
 /// travels as several, each well under the logical message ceiling a
@@ -771,12 +794,10 @@ pub enum BuiltOn {
     /// The sender's own unsettled commit `back` txs before this one: the
     /// writer saw that commit as it sent it, and what that was built on.
     Own { back: u64 },
-    /// An unsettled commit by its sender's (node, tx), as a relay names one
-    /// of its own commits.
+    /// An unsettled commit by its writer's (node, tx): one a relay
+    /// uploads, or one a tab's relay shipped it (the relay's own, or
+    /// another session's it carries).
     Commit { node: [u8; 16], tx: u64 },
-    /// An unsettled version the receiver (a tab's relay) shipped the
-    /// sender, by the receiver's own commit `tx` that wrote it.
-    Upstream { tx: u64 },
 }
 
 /// A row of a commit the server did not ship back (see
@@ -1195,9 +1216,10 @@ pub enum SyncMessage {
     /// [`Acting`]).
     Commit {
         id: TxId,
-        /// Its writer's commit clock (Unix ms): with `id`, where it orders
-        /// among unsettled versions ([`Order`]) until the authority's
-        /// order replaces it.
+        /// Its writer's commit HLC: with `id`, where it orders among
+        /// unsettled versions ([`Order`]) until the authority's order
+        /// replaces it. Refused past 2^52, where no pending `_t` holds it.
+        #[serde(deserialize_with = "commit_clock")]
         clock: u64,
         kind: WireKind,
         ops: Vec<WireOp>,
@@ -3197,7 +3219,7 @@ impl Inner {
                             rusqlite::params![
                                 tx as i64,
                                 node.as_bytes().to_vec(),
-                                band_start(UPSTREAM)
+                                band_start(PENDING)
                             ],
                             |r| r.get::<_, i64>(0),
                         )
@@ -3629,6 +3651,10 @@ impl Inner {
                         // The authority's record of what the version was
                         // built on; never replicated.
                         "_base" | "_cols" => {}
+                        "_w" => {
+                            image.written = writer_of_bytes(&r.get::<_, Vec<u8>>(i)?)
+                                .map(|(node, tx)| (0, node, tx));
+                        }
                         _ => image
                             .cells
                             .push((name.clone(), Cell::from(r.get::<_, Sql>(i)?))),
@@ -3639,6 +3665,17 @@ impl Inner {
             .map_err(storage)?;
         let mut images = rows.collect::<Result<Vec<_>, _>>().map_err(storage)?;
         for image in &mut images {
+            // A pending version's writer: history keeps it, and this
+            // process knows it of a current one.
+            image.written = match image.written {
+                _ if image.at.accepted() => None,
+                Some((_, node, tx)) => Some((image.at.seq, node, tx)),
+                None => {
+                    let row = RowUuid::from_bytes(image.id);
+                    writer_of_bytes(&self.current_writer(table, row, &image.key, image.at))
+                        .map(|(node, tx)| (image.at.seq, node, tx))
+                }
+            };
             self.resolve_authors(image)?;
             self.portable_large(image)?;
             self.portable_enums(image)?;
@@ -4290,9 +4327,54 @@ impl Inner {
             .pop())
     }
 
+    /// The writer (`_w`) of a row's current version at `at`: empty for an
+    /// accepted one; for a pending one, as this process put it there, else
+    /// the latest pending commit at `at` that wrote the row.
+    pub(crate) fn current_writer(&self, table: &str, row: RowUuid, key: &[u8], at: Pos) -> Vec<u8> {
+        if at.accepted() {
+            return Vec::new();
+        }
+        let row_key = (table.to_owned(), row, key.to_vec());
+        if let Some(w) = self.current_w.borrow().get(&row_key) {
+            return w.clone();
+        }
+        if let Some(client) = &self.client
+            && let Some((_, node, tx)) = client
+                .pending
+                .iter()
+                .filter(|p| p.clock == at.seq && p.rows.contains(&row_key))
+                .map(Pending::order)
+                .max()
+        {
+            return writer_bytes(node, tx);
+        }
+        self.own_seq_at(at)
+            .map_or_else(Vec::new, |seq| self.own_writer(seq))
+    }
+
+    /// Note who wrote a row's current version (see `Inner::current_w`).
+    pub(crate) fn note_current(&self, table: &str, row: RowUuid, key: &[u8], w: Option<Vec<u8>>) {
+        let row_key = (table.to_owned(), row, key.to_vec());
+        match w {
+            Some(w) if !w.is_empty() => {
+                self.current_w.borrow_mut().insert(row_key, w);
+            }
+            _ => {
+                self.current_w.borrow_mut().remove(&row_key);
+            }
+        }
+    }
+
     fn put_image(&self, image: &Image, history: bool) -> Result<(), Error> {
+        let row = RowUuid::from_bytes(image.id);
+        let w = match image.written {
+            _ if image.at.accepted() => Vec::new(),
+            Some((_, node, tx)) => writer_bytes(node, tx),
+            None => self.current_writer(&image.table, row, &image.key, image.at),
+        };
         if !history {
-            self.forget_current(&image.table, RowUuid::from_bytes(image.id), &image.key);
+            self.forget_current(&image.table, row, &image.key);
+            self.note_current(&image.table, row, &image.key, Some(w.clone()));
         }
         let mut values = vec![
             Sql::Blob(image.id.to_vec()),
@@ -4303,6 +4385,9 @@ impl Inner {
                     | if image.content { 0 } else { STATE_NO_CONTENT },
             ),
         ];
+        if history {
+            values.push(Sql::Blob(w));
+        }
         let mut columns = Vec::new();
         for (column, value) in self.stored_cells(image)? {
             columns.push(column);
@@ -4318,9 +4403,14 @@ impl Inner {
             } else {
                 image.table.clone()
             };
-            let names: Vec<String> = ["id", "_b", "_t", "_st"]
-                .into_iter()
-                .map(str::to_owned)
+            let meta: &[&str] = if history {
+                &["id", "_b", "_t", "_st", "_w"]
+            } else {
+                &["id", "_b", "_t", "_st"]
+            };
+            let names: Vec<String> = meta
+                .iter()
+                .map(|name| (*name).to_owned())
                 .chain(columns.iter().map(|column| quote(column)))
                 .collect();
             let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("?{i}")).collect();
@@ -4352,6 +4442,7 @@ impl Inner {
             self.gone.borrow_mut().push(image);
         }
         self.forget_current(table, row, key);
+        self.note_current(table, row, key, None);
         let id = row.0.as_bytes().to_vec();
         self.exec(
             &format!("DELETE FROM {} WHERE id = ?1 AND _b = ?2", quote(table)),
@@ -4363,7 +4454,12 @@ impl Inner {
                 "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND (_t >= ?3 OR (_t < 0 AND ?3 < ?4))",
                 quote(&format!("{table}__h"))
             ),
-            rusqlite::params![id, key, from.t(), band_start(self.me)],
+            rusqlite::params![
+                id,
+                key,
+                from.t(),
+                if self.me == ACCEPTED { 0 } else { band_start(PENDING) }
+            ],
         )
         .map_err(storage)?;
         self.changed
@@ -4376,9 +4472,9 @@ impl Inner {
     /// (which becomes history), older lands in history (an as-of answer).
     fn merge_image(&self, image: &Image) -> Result<(), Error> {
         let row = RowUuid::from_bytes(image.id);
-        let at = image.at;
+        let at = rank(image);
         let current = match self.current_image(&image.table, row, &image.key)? {
-            Some(current) => Some((current.at, current)),
+            Some(current) => Some((rank(&current), current)),
             None => None,
         };
         match current {
@@ -4397,13 +4493,17 @@ impl Inner {
                         .push((image.table.clone(), row, image.key.clone()));
                 }
             }
-            Some((held, current)) if held < at || !held.accepted() => {
+            Some((held, current)) if held < at || !held.0.accepted() => {
                 // A relay's newer version: its older one stays as history.
-                let relay_newer = self.non_durable && !held.accepted() && held < at;
-                if held.accepted() || relay_newer {
+                let relay_newer = self.non_durable && !held.0.accepted() && held < at;
+                if held.0.accepted() || relay_newer {
                     self.put_image(&current, true)?;
                 }
-                let floor = if relay_newer { at } else { Pos::UNSETTLED };
+                let floor = if relay_newer {
+                    Pos::from_t(at.0.t() + 1)
+                } else {
+                    Pos::UNSETTLED
+                };
                 self.drop_row(&image.table, row, &image.key, floor)?;
                 // An accepted version that replaces a relay's unsettled one
                 // may be one this replica already held as history (the one
@@ -4428,14 +4528,15 @@ impl Inner {
         table: &str,
         row: RowUuid,
         key: &[u8],
-        at: Pos,
+        at: Rank,
     ) -> Result<(), Error> {
+        let w = at.1.map_or_else(Vec::new, |(node, tx)| writer_bytes(node, tx));
         self.exec(
             &format!(
-                "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _t = ?3",
+                "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _t = ?3 AND _w = ?4",
                 quote(&format!("{table}__h"))
             ),
-            rusqlite::params![row.0.as_bytes().to_vec(), key, at.t()],
+            rusqlite::params![row.0.as_bytes().to_vec(), key, at.0.t(), w],
         )
         .map_err(storage)?;
         Ok(())
@@ -4648,7 +4749,7 @@ impl Inner {
             let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
             let keys: Vec<Vec<u8>> = statement
                 .query_map(
-                    rusqlite::params![row.0.as_bytes().to_vec(), Pos { n: self.me, seq }.t()],
+                    rusqlite::params![row.0.as_bytes().to_vec(), self.own_pos(seq).t()],
                     |r| r.get(0),
                 )
                 .map_err(storage)?
@@ -4673,7 +4774,7 @@ impl Inner {
     ) -> Result<Option<Image>, Error> {
         let id = row.0.as_bytes().to_vec();
         if let Some(image) = self.current_image(table, row, key)?
-            && image.at.n < self.me
+            && !self.own_version(&image)
         {
             return Ok(Some(image));
         }
@@ -4681,10 +4782,23 @@ impl Inner {
             .images_where(
                 table,
                 true,
-                "id = ?1 AND _b = ?2 AND _t >= 0 AND _t < ?3 ORDER BY _t DESC LIMIT 1",
-                &[&id, &key, &band_start(self.me)],
+                "id = ?1 AND _b = ?2 AND _t >= 0 ORDER BY _t DESC, _w DESC",
+                &[&id, &key],
             )?
-            .pop())
+            .into_iter()
+            .find(|image| !self.own_version(image)))
+    }
+
+    /// Whether `image` is a version of one of this store's own unsettled
+    /// commits (on a relay, or of a session commit it carries).
+    pub(crate) fn own_version(&self, image: &Image) -> bool {
+        let Some((hlc, node, tx)) = image.written.filter(|_| !image.at.accepted()) else {
+            return false;
+        };
+        self.own_order.values().any(|order| *order == (hlc, node, tx))
+            || self.client.as_ref().is_some_and(|client| {
+                client.pending.iter().any(|p| p.order() == (hlc, node, tx))
+            })
     }
 }
 
@@ -4863,7 +4977,7 @@ impl Inner {
                     table: via.table,
                     id: via.id,
                     key: via.key,
-                    at: via.at.to_upstream(),
+                    at: via.at,
                     root,
                     nodes: Vec::new(),
                     span: spans.get(&root).map(|span| (span.start, span.end)),
@@ -5517,33 +5631,50 @@ impl Inner {
         }
     }
 
-    /// The band this store numbers its own versions in as a replica
-    /// ([`OWN`]); its node is interned for the commits it records.
+    /// The kind of this store's own versions as a replica ([`PENDING`]);
+    /// its node is interned for the commits it records.
     pub(crate) fn own_code(&self) -> Result<i64, Error> {
         self.node_code(*self.identity.node.as_bytes())?;
-        Ok(OWN)
+        Ok(PENDING)
     }
 
-    /// The newest seq this replica's node numbered a version of its own at.
-    fn own_high_water(&self) -> Result<u64, Error> {
-        let mut seq = 0u64;
+    /// What a reopened replica resumes from: the newest tx its node wrote a
+    /// version kept in history at, and the newest commit HLC of any pending
+    /// version it holds.
+    fn own_high_water(&self) -> Result<(u64, u64), Error> {
+        let me = self.identity.node.as_bytes().to_vec();
+        let (mut tx, mut hlc) = (0u64, 0u64);
         for table in self.physical.tables.keys() {
-            for name in [table.clone(), format!("{table}__h")] {
+            let history = format!("{table}__h");
+            let newest: Option<Vec<u8>> = self
+                .conn
+                .cached_row(
+                    &format!(
+                        "SELECT MAX(_w) FROM {} WHERE length(_w) = 24 AND substr(_w, 1, 16) = ?1",
+                        quote(&history)
+                    ),
+                    [&me],
+                    |r| r.get(0),
+                )
+                .map_err(storage)?;
+            if let Some((_, written)) = newest.as_deref().and_then(writer_of_bytes) {
+                tx = tx.max(written);
+            }
+            for name in [table.clone(), history] {
                 let max: Option<i64> = self
                     .conn
                     .cached_row(
-                        &format!(
-                            "SELECT MAX(_t) - ?1 FROM {} WHERE _t >= ?1 AND _t < ?2",
-                            quote(&name)
-                        ),
-                        [band_start(self.me), band_start(self.me + 1)],
+                        &format!("SELECT MAX(_t) FROM {} WHERE _t >= ?1", quote(&name)),
+                        [band_start(PENDING)],
                         |r| r.get(0),
                     )
                     .map_err(storage)?;
-                seq = seq.max(max.unwrap_or(0) as u64);
+                if let Some(max) = max {
+                    hlc = hlc.max(Pos::from_t(max).seq);
+                }
             }
         }
-        Ok(seq)
+        Ok((tx, hlc))
     }
 
     fn node_code(&self, node: [u8; 16]) -> Result<i64, Error> {
@@ -5663,10 +5794,7 @@ impl Inner {
             match self.settled(me, tx)? {
                 Some(Some(at)) => cut.extra.push(at),
                 Some(None) => {}
-                None => cut.extra.push(Pos {
-                    n: self.me,
-                    seq: tx,
-                }),
+                None => cut.extra.push(self.own_pos(tx)),
             }
         }
         Ok(cut)
@@ -5990,15 +6118,15 @@ impl Inner {
                 let rows = read
                     .rows
                     .into_iter()
-                    .map(|(row, by, t)| match by {
-                        None if Pos::from_t(t as i64).n == OWN => {
-                            let seq = Pos::from_t(t as i64).seq;
-                            match pending.upload_id(seq) {
+                    .map(|(row, by, t)| {
+                        let at = Pos::from_t(t as i64);
+                        match (by, self.own_seq_at(at)) {
+                            (None, Some(seq)) if !at.accepted() => match pending.upload_id(seq) {
                                 Some(id) => (row, Some(*id.node.as_bytes()), id.time.0),
                                 None => (row, Some(me), seq),
-                            }
+                            },
+                            _ => (row, by, t),
                         }
-                        _ => (row, by, t),
                     })
                     .collect();
                 WireRead { rows, ..read }
@@ -6015,9 +6143,9 @@ impl Inner {
     /// (see [`WireRead::rows`]): by position, or this replica's own
     /// unsettled commit by its (node, tx).
     pub(crate) fn read_version(&self, at: Pos) -> (Option<[u8; 16]>, u64) {
-        match at.n {
-            OWN => (Some(*self.identity.node.as_bytes()), at.seq),
-            _ => (None, at.to_upstream().t() as u64),
+        match self.own_seq_at(at) {
+            Some(tx) => (Some(*self.identity.node.as_bytes()), tx),
+            None => (None, at.t() as u64),
         }
     }
 
@@ -6074,10 +6202,7 @@ impl Inner {
                 && let Some(client) = &self.client
             {
                 if client.pending.iter().any(|p| p.tx == tx) {
-                    cut.extra.push(Pos {
-                        n: self.me,
-                        seq: tx,
-                    });
+                    cut.extra.push(self.own_pos(tx));
                     continue;
                 }
                 if client.fates.get(&tx).is_some_and(Result::is_err) {
@@ -6104,7 +6229,10 @@ impl Inner {
         // authority dedupes away.
         let me = *self.identity.node.as_bytes();
         self.me = self.own_code()?;
-        self.seq = self.own_high_water()?;
+        let (tx, hlc) = self.own_high_water()?;
+        self.seq = tx;
+        // Its later commits order after every pending version it holds.
+        self.hlc_last = self.hlc_last.max(hlc);
         let settled: Option<i64> = self
             .conn
             .cached_row(
@@ -6186,6 +6314,8 @@ impl Inner {
                 rows,
                 expected,
             });
+            self.own_order
+                .insert(tx, (clock, *id.node.as_bytes(), id.time.0));
             client.unsent.push(commit);
         }
         // Its own later commits order after every pending one, as they did
@@ -6203,7 +6333,7 @@ impl Inner {
         self.restore_positions(&mut client)?;
         self.client = Some(client);
         if let Some(floor) = floor {
-            self.observe_clock(floor);
+            self.hlc_last = self.hlc_last.max(floor);
         }
         Ok(())
     }
@@ -6228,7 +6358,7 @@ impl Inner {
                         "SELECT MAX(_t) FROM {} WHERE _t >= 0 AND _t < ?1",
                         quote(table)
                     ),
-                    [band_start(UPSTREAM)],
+                    [band_start(PENDING)],
                     |r| r.get(0),
                 )
                 .map_err(storage)?;
@@ -6245,7 +6375,7 @@ impl Inner {
             )
             .map_err(storage)?;
         let own = statement
-            .query_map([node, client.known as i64, band_start(UPSTREAM)], |r| {
+            .query_map([node, client.known as i64, band_start(PENDING)], |r| {
                 Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
             })
             .map_err(storage)?
@@ -6845,12 +6975,13 @@ impl Db {
             }
             // This replica sends the commit: its predecessor goes by how
             // far back it is.
-            // A relay's unsettled version (on a tab) is the relay's commit.
+            // A relay's unsettled version (on a tab) is its writer's commit.
             let on = match client.pending.newest(&row_key) {
                 Some(tx) => Some(BuiltOn::Own { back: seq - tx }),
-                None => image.as_ref().map(|image| match image.at.n {
-                    ACCEPTED => BuiltOn::Seq(image.at.seq),
-                    _ => BuiltOn::Upstream { tx: image.at.seq },
+                None => image.as_ref().and_then(|image| match image.written {
+                    _ if image.at.accepted() => Some(BuiltOn::Seq(image.at.seq)),
+                    Some((_, node, tx)) => Some(BuiltOn::Commit { node, tx }),
+                    None => None,
                 }),
             };
             if on.is_some() {
@@ -6882,7 +7013,7 @@ impl Db {
             None => (
                 bases,
                 tx_id(inner.client.as_ref().expect("client").node, seq),
-                inner.commit_clock(seq),
+                inner.commit_hlc(seq),
             ),
         };
         let mut wire: Result<Vec<WireOp>, Error> = ops.iter().map(to_wire).collect();
@@ -7780,7 +7911,7 @@ impl Db {
                         // A history version is listed once its transaction
                         // is known.
                         for (at, node, tx) in tx_ids {
-                            inner.record_settled(node, tx, Some(at.from_upstream()))?;
+                            inner.record_settled(node, tx, Some(at))?;
                         }
                         let images: Vec<Image> = images
                             .into_iter()
@@ -9014,28 +9145,41 @@ impl Inner {
         let Some(client) = &self.client else {
             return;
         };
-        for image in images.iter_mut().filter(|image| image.at.n == self.me) {
+        for image in images
+            .iter_mut()
+            .filter(|image| !image.at.accepted() && image.written.is_none())
+        {
+            let row_key = (image.table.clone(), RowUuid::from_bytes(image.id), image.key.clone());
             image.written = client
                 .pending
                 .iter()
-                .find(|p| p.tx == image.at.seq)
-                .map(Pending::order);
+                .filter(|p| p.clock == image.at.seq && p.rows.contains(&row_key))
+                .map(Pending::order)
+                .max();
         }
     }
 
-    /// Drop the versions this replica shows from its [`UPSTREAM`] band: a
+    /// Drop the pending versions this replica shows of other writers: a
     /// new link may be to another upstream (another identity, or its relay
-    /// wiped), whose unsettled versions are numbered afresh, and the one it
-    /// reaches ships its own again as it answers the reads. Each such row
+    /// wiped), which may not hold them, and the one it reaches ships its
+    /// own again as it answers the reads. Each such row
     /// goes back to the newest accepted version this replica holds. One
     /// under this replica's own pending writes keeps its baseline: those
     /// writes show over it until they settle, and replay over it till then.
     fn forget_upstream_band(&mut self) -> Result<(), Error> {
-        let (from, to) = (band_start(UPSTREAM), band_start(OWN));
+        let from = band_start(PENDING);
         let tables: Vec<String> = self.physical.tables.keys().cloned().collect();
         for table in &tables {
-            let held = self.images_where(table, false, "_t >= ?1 AND _t < ?2", &[&from, &to])?;
+            let held = self.images_where(table, false, "_t >= ?1", &[&from])?;
             for image in held {
+                let row_key = (table.clone(), RowUuid::from_bytes(image.id), image.key.clone());
+                let overlaid = self
+                    .client
+                    .as_ref()
+                    .is_some_and(|client| client.baselines.contains_key(&row_key));
+                if overlaid || self.own_version(&image) {
+                    continue;
+                }
                 let row = RowUuid::from_bytes(image.id);
                 let under = self
                     .images_where(
@@ -9047,7 +9191,7 @@ impl Inner {
                     .pop();
                 self.drop_row(table, row, &image.key, Pos::UNSETTLED)?;
                 if let Some(under) = under {
-                    self.forget_history_version(table, row, &image.key, under.at)?;
+                    self.forget_history_version(table, row, &image.key, rank(&under))?;
                     self.put_image(&under, false)?;
                 }
             }
@@ -9056,24 +9200,19 @@ impl Inner {
     }
 
     fn receive_image(&mut self, mut image: Image) -> Result<bool, Error> {
-        // An upstream ships accepted versions and its own unsettled ones,
-        // which this replica holds in its upstream band; never one it holds
-        // from an upstream of its own (relays are not chained).
-        if image.at.n == UPSTREAM {
-            return Err(unsupported(
-                "an upstream shipping a version its own upstream numbered",
-            ));
-        }
-        image.at = image.at.from_upstream();
+        // An upstream ships accepted versions and unsettled ones, each at
+        // its writer's commit HLC and named by its writer.
         if image.at.accepted() {
             image.written = None;
-        } else if let Some((clock, node, tx)) = image.written {
+        } else {
+            let Some((_, node, tx)) = image.written else {
+                return Err(unsupported("an unsettled version with no writer"));
+            };
+            image.written = Some((image.at.seq, node, tx));
             // A write made after this one was seen orders after it.
-            let clock = self.bound_clock(clock);
-            image.written = Some((clock, node, tx));
-            self.observe_clock(clock);
+            self.observe_hlc(image.at.seq);
         }
-        let at = image.at;
+        let at = rank(&image);
         let row = RowUuid::from_bytes(image.id);
         let overlaid = (image.table.clone(), row, image.key.clone());
         let old = match self
@@ -9085,13 +9224,13 @@ impl Inner {
         {
             None => None,
             Some(None) => Some(None),
-            Some(Some(old)) => Some(Some(old.at)),
+            Some(Some(old)) => Some(Some(rank(old))),
         };
         if let Some(old) = old {
             let client = self.client.as_mut().expect("client");
             let baseline = client.baselines.get_mut(&overlaid).expect("baseline");
             match old {
-                Some(held) if held >= at && held.accepted() => {
+                Some(held) if held >= at && held.0.accepted() => {
                     self.put_image(&image, true)?;
                     return Ok(false);
                 }
@@ -9106,9 +9245,9 @@ impl Inner {
                 // unsettled version gives way to a settled one, as the
                 // relay's store moved on from it.
                 Some(held) => {
-                    let relay_newer = !held.accepted() && held < at;
+                    let relay_newer = !held.0.accepted() && held < at;
                     let older = baseline.replace(image).expect("held baseline");
-                    if held.accepted() || self.non_durable && relay_newer {
+                    if held.0.accepted() || self.non_durable && relay_newer {
                         self.put_image(&older, true)?;
                     }
                 }
@@ -9257,7 +9396,7 @@ impl Db {
                 ..Default::default()
             },
         ))?;
-        Ok(handle.seq.seq)
+        Ok(handle.tx)
     }
 
     /// Sessions the server ended since the last call, with why: for what
@@ -10405,7 +10544,7 @@ impl Db {
                                     &image.table,
                                     true,
                                     "id = ?1 AND _b = ?2 AND _t >= 0 AND _t < ?3 ORDER BY _t DESC",
-                                    &[&id, &image.key, &band_start(UPSTREAM)],
+                                    &[&id, &image.key, &band_start(PENDING)],
                                 )?
                                 .into_iter()
                                 .next(),
@@ -11946,6 +12085,13 @@ impl Db {
         let (seq, mark) = {
             let mut inner = self.inner();
             let seq = inner.seq + 1;
+            // A relay keeps the session's commit clock: the versions it
+            // stores for the session are at the session's pending position,
+            // written by the session (SPEC 8 §8.13).
+            if relay {
+                inner.observe_hlc(clock);
+                inner.own_order.insert(seq, (clock, id.0, id.1));
+            }
             begin_savepoint(&inner.conn, "upload").map_err(|e| (e, Vec::new()))?;
             let mark = inner.changed.borrow().len();
             // The unit's write checks run at its end, grounded (SPEC 7).
@@ -11998,14 +12144,6 @@ impl Db {
         // The authority keeps what each version was built on (INV-HIST-21);
         // a relay passes the bases on instead.
         let finished = if relay {
-            // The session's clock, bounded as any foreign one is; a write
-            // this store makes after it orders after it (SPEC 8 §8.13).
-            let clock = {
-                let mut inner = self.inner();
-                let clock = inner.bound_clock(clock);
-                inner.observe_clock(clock);
-                clock
-            };
             self.record_stored_upload(
                 ops.clone(),
                 seq,
@@ -12419,8 +12557,7 @@ impl Db {
     /// Mark this store as a non-durable foreground over a durable relay:
     /// its own store starts empty each time, so a subscription's opening,
     /// whatever its tier, waits for the upstream's answer (the relay's
-    /// stored view, or its upstream's once that answers). Its own versions
-    /// are in the [`OWN`] band, after its relay's.
+    /// stored view, or its upstream's once that answers).
     pub fn set_non_durable_client(&self) {
         let mut inner = self.inner.borrow_mut();
         debug_assert!(
@@ -12575,19 +12712,9 @@ mod tests {
             Pos::at(0),
             Pos::at(1),
             Pos::at(MAX_SEQ),
-            Pos {
-                n: UPSTREAM,
-                seq: 0,
-            },
-            Pos {
-                n: UPSTREAM,
-                seq: 7,
-            },
-            Pos { n: OWN, seq: 1 },
-            Pos {
-                n: OWN,
-                seq: MAX_SEQ,
-            },
+            Pos::pending(0),
+            Pos::pending(7),
+            Pos::pending(MAX_SEQ),
         ];
         for pair in positions.windows(2) {
             assert!(pair[0] < pair[1] && pair[0].t() < pair[1].t(), "{pair:?}");
@@ -12601,10 +12728,13 @@ mod tests {
         }
         // An accepted position is its seq, as every scalar wire position is.
         assert_eq!(Pos::at(42).t(), 42);
-        let past = postcard::to_allocvec(&(3u64 << SEQ_BITS)).unwrap();
+        // A pending position is the pending flag over its writer's clock.
+        assert_eq!(Pos::pending(42).t(), (1 << SEQ_BITS) | 42);
+        assert!(Pos::pending(0) > Pos::at(MAX_SEQ));
+        let past = postcard::to_allocvec(&(2u64 << SEQ_BITS)).unwrap();
         assert!(
             postcard::from_bytes::<Pos>(&past).is_err(),
-            "no band past OWN"
+            "no kind past pending"
         );
     }
 
@@ -12648,21 +12778,6 @@ mod tests {
             assert_eq!(decodes(&delta(seq)), ok, "delta {seq}");
             assert_eq!(decodes(&BuiltOn::Seq(seq)), ok, "built on {seq}");
         }
-    }
-
-    #[test]
-    fn an_upstreams_own_versions_are_held_in_the_upstream_band() {
-        let shipped = Pos { n: OWN, seq: 3 };
-        assert_eq!(
-            shipped.from_upstream(),
-            Pos {
-                n: UPSTREAM,
-                seq: 3
-            }
-        );
-        assert_eq!(shipped.from_upstream().to_upstream(), shipped);
-        assert_eq!(Pos::at(3).from_upstream(), Pos::at(3));
-        assert_eq!(Pos::at(3).to_upstream(), Pos::at(3));
     }
 
     #[test]

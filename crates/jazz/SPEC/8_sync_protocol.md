@@ -12,18 +12,21 @@ The model is small:
   holding complete history. Every accepted commit gets the next server seq.
 - A **replica** is a database whose store is a partial copy of server versions
   plus its own optimistic writes. Every stored version sits at one scalar
-  position `_t` (below 2^53), in one of three bands: accepted (`_t` is the
-  server seq the version was shipped at), upstream-pending (a relay's
-  unsettled versions as a session holds them) and own-pending (this store's
-  own optimistic writes, numbered from 1 above both). The bands name a
-  version; they do not order the pending ones. Unsettled versions of a row
-  order last-writer-wins by their commits' order: the writer's commit clock
-  (Unix ms, carried as `Commit.clock`), then the writer's node and its tx.
-  Every store orders the same unsettled commits the same way, and the
-  authority's order replaces it once they settle, so a row may change then.
-  Cuts and history on the replica are over server versions: a pending band
-  sorts after every server position, so no cut at a server seq sees a
-  pending version.
+  position `_t` (below 2^53), of one of two kinds: accepted (`_t` is the
+  authority position the version was shipped at, below 2^52) or pending
+  (`_t` is `1<<52 | ` its writer's commit HLC). The commit HLC is a
+  hybrid clock: milliseconds since `HLC_EPOCH_MS` (2025-01-01) above
+  `HLC_COUNTER_BITS` bits of counter, each commit's past its writer's last
+  and every one it has seen, carried as `Commit.clock`. The
+  same `_t`, wherever the version is stored. Unsettled versions of a row
+  order last-writer-wins by `_t`, then the writer's node and its tx: two
+  writers' versions at one `_t` are told apart by their writer (`_w` in
+  history, §4). Every store orders the same unsettled commits the same
+  way, and the authority's order replaces it once they settle, so a row
+  may change then. A write's explicit time (`updated_at_ms`) is provenance
+  only and does not order it. Cuts and history on the replica are over
+  server versions: `_t < 1<<52` is every accepted version, so no cut at a
+  server seq sees a pending version.
 - **Writes travel up** as one `Commit` per transaction and come back as one
   `Fate`.
 - **Reads travel up** as one `Read` per query and come back as rows plus
@@ -120,13 +123,13 @@ Positions travel as scalars: a `through`, a `since`, a serializable
 snapshot, a one-shot read's `at` and an accepted fate's `at` are each one
 authority seq (`since` and `at` optional), as is `ConnectionSettled`'s
 `through`. Only the authority numbers accepted positions; a relay with no
-server never does (§8.13). A row image's `at` is a banded `_t`: accepted, or
-the sender's own pending band, which the receiver holds in its
-upstream-pending band. A receiver refuses an image in the upstream-pending
-band, and any band above own-pending, as malformed. It refuses as malformed,
-too, an authority seq past the band (2^51 or more) where it names an
-accepted version: a `since`, a serializable snapshot, a delta's or an access
-proof's version, and a `BuiltOn::Seq`.
+server never does (§8.13). A row image's `at` is its `_t`, which the
+receiver stores as is: accepted, or pending at its writer's commit HLC,
+when the image names that writer (`Image.written`). A receiver refuses as
+malformed a pending image with no writer, a `_t` of neither kind, a
+`Commit.clock` of 2^52 or more, and an authority seq of 2^52 or more where
+it names an accepted version: a `since`, a serializable snapshot, a
+delta's or an access proof's version, and a `BuiltOn::Seq`.
 
 Messages, with their postcard variant tags:
 
@@ -831,33 +834,33 @@ for its sessions (tabs). It serves a session's reads from its store per the
 read's tier, asking its upstream with the same `Read` where the tier needs
 the authority's answer, and tells its sessions the authority's seq it knows
 (`served_through`), so a session's snapshot is one the authority validates as
-it is. It ships its unsettled versions in its own-pending band; a session
-holds them in its upstream-pending band, so the two never collide in the
-session's store (`INV-SYNC-50`). Each such image carries its commit's order
-(`Image.written`). The relay replays its pending commits (its own and the
+it is. It ships its unsettled versions at their pending `_t`, each with its
+writer (`Image.written`), and a session stores them there: a relay keeps
+a session's commit clock, so a version is at the same `_t` in every store,
+and versions at one `_t` are told apart by writer (`INV-SYNC-50`). The relay replays its pending commits (its own and the
 sessions' it carries) in that order, so a commit written earlier but
 delivered later goes under the later one. A session replays its own pending
 commits over the relay's version of a row only when they order after it,
 each branch of the row on its own, and holds its ordering clock past every
 order it is shipped, so a write it makes afterwards orders last. A relay
-holds its own ordering clock past every session commit it relays, so a
-write it makes afterwards orders after those too. A store bounds every
-commit clock it orders by, its own and those it is sent, to its wall clock
-plus the authority's skew tolerance (`SKEW_TOLERANCE_MS`, INV-TX-7): a write
-time far ahead cannot carry a version past every later write. The ordering
-clock is not the provenance clock: a clock seen from another writer moves
-no `$createdAt` or `$updatedAt` this store stamps. A relay uploads its
+holds its own commit HLC past every session commit it relays, so a write it
+makes afterwards orders after those too. A store counts a received HLC no
+further ahead than its own wall clock plus 500 ms (`HLC_SKEW_MS`, the
+shard offset bound), so a far-ahead peer cannot carry its next writes past
+every later write. The commit HLC is not the provenance clock: a clock seen
+from another writer moves no `$createdAt` or `$updatedAt` this store
+stamps. A relay uploads its
 pending commits in the order it got them, which the authority's order then
 follows; where that differs from the commits' clock order, a row's settled
 version can differ from the one it showed unsettled (it flips to the
 authority's), which is expected. On a new link a session drops the relay
-versions it shows (from its upstream-pending band) back to the newest
+versions it shows (pending versions other writers wrote) back to the newest
 accepted version it holds: the link may be to another relay, or to its
 relay wiped, and the one it reaches ships its unsettled versions again as
 it answers the session's reads. A baseline under the session's own pending
 writes stays until they settle. A session names a
-relay's unsettled version it built on by the relay's commit
-(`BuiltOn::Upstream`). A relay stores a session's commit as its own pending
+relay's unsettled version it built on by the commit that wrote it
+(`BuiltOn::Commit { node, tx }`). A relay stores a session's commit as its own pending
 commit, answers `Stored`, and relays the authority's `Fate` (§8.3). A relay
 whose host says it has no server never numbers accepted positions: its
 sessions' commits stay pending (it answers `Stored`, and the `Fate` comes

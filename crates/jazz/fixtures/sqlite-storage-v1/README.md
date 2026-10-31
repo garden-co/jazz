@@ -124,3 +124,11 @@ gone.
 Ordering unsettled versions last-writer-wins by their commits' clocks gave
 each pending commit's header a `clock` (its writer's commit clock), which
 regenerated it the same way.
+
+Giving `_t` two kinds, accepted (the authority's position, below 2^52) and
+pending (`1<<52 |` the writer's commit HLC, the same in every store), in
+place of the three local bands, regenerated it the same way. History is
+keyed by `(id, _b, _t, _w)`: `_w` is a pending version's writer (its
+16-byte node and 8-byte big-endian tx), so two writers' versions at one
+`_t` both stay, and `X''` for an accepted version. A pending commit's
+`clock` is its commit HLC.

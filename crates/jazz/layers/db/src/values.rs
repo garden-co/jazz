@@ -1617,7 +1617,10 @@ impl Table {
         // `_b` is the canonical branch key ('' for unbranched tables).
         // Rows are unique per (id, branch); branch views select by `_b`
         // first, so every index leads with it. A version is at `_t`: its
-        // position, band and seq (see [`crate::sync::Pos::t`]), under 2^53.
+        // position, kind and seq (see [`crate::sync::Pos::t`]), under 2^53.
+        // In history a pending version also keeps its writer, `_w` (node,
+        // then tx big-endian; empty for an accepted one): two writers'
+        // pending versions of a row can share a `_t`.
         // `_st` is the version's state
         // bits ([`STATE_NO_CONTENT`], [`STATE_DELETED`], and in history
         // [`STATE_AS_SENT`]): 0 for a live version whose commit wrote
@@ -1631,8 +1634,8 @@ impl Table {
              UNIQUE (id, _b));\n\
              CREATE INDEX {} ON {name}(_t);\n\
              CREATE TABLE {history} (id BLOB NOT NULL, _b BLOB NOT NULL, \
-             _t INTEGER NOT NULL, _st INTEGER NOT NULL, \
-             _base INTEGER, _cols BLOB{columns}, PRIMARY KEY (id, _b, _t)) WITHOUT ROWID;\n",
+             _t INTEGER NOT NULL, _w BLOB NOT NULL DEFAULT X'', _st INTEGER NOT NULL, \
+             _base INTEGER, _cols BLOB{columns}, PRIMARY KEY (id, _b, _t, _w)) WITHOUT ROWID;\n",
             quote(&format!("{}__by_t", table.stored)),
         ));
         for index in &table.indexes {

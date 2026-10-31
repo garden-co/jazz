@@ -518,8 +518,9 @@ On SQLite a commit carries, beside its operations, the base of each row it
 writes over an image its writer held (`WireBase`: the row, by the index of
 the commit's first op that writes it and its branch key, and the version it
 was built on as `BuiltOn`). A non-durable session (a worker's tab) may hold
-its relay's unsettled version of a row (stored in its upstream-pending
-band) and send it as `Upstream { tx }`, the relay's commit that wrote it. A
+its relay's unsettled version of a row (stored at its writer's pending
+`_t`) and send it as `Commit { node, tx }`, the commit that wrote it (the
+relay's own, or another session's it carries). A
 relay forwards a session's commit under the
 session's own id, and renames every base into names its upstream knows
 before it does: an upstream seq, the session's `Own` predecessor and the
