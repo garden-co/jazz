@@ -1238,8 +1238,10 @@ fn a_tab_subscribed_while_its_worker_is_offline_hears_the_server_once_it_is_back
 }
 
 #[test]
-fn tabs_changing_one_row_at_once_settle_on_their_workers_winner() {
-    // A worker with no server: it settles its tabs' commits itself.
+fn tabs_changing_one_row_at_once_keep_their_own_pending_writes_without_a_server() {
+    // A worker with no server settles nothing: each tab's commit stays
+    // pending, so each tab reads its own write over the worker's, until a
+    // server orders them.
     let worker = open(0xc0);
     worker.set_remote_link_hint("none").unwrap();
     let (a, a_up, a_down) = tab_over(&worker, open(0xc1));
@@ -1259,9 +1261,9 @@ fn tabs_changing_one_row_at_once_settle_on_their_workers_winner() {
     a.update("notes", &row, &title("from a"), &none()).unwrap();
     b.update("notes", &row, &title("from b"), &none()).unwrap();
     pump(&links);
-    let winner = titles(&worker);
-    assert_eq!(titles(&a), winner);
-    assert_eq!(titles(&b), winner);
+    assert_eq!(titles(&worker), titles(&b), "the worker applied b's last");
+    assert_eq!(titles(&a), ["from a"]);
+    assert_eq!(titles(&b), ["from b"]);
 }
 
 #[test]

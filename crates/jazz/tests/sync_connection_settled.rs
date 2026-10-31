@@ -928,6 +928,67 @@ fn a_relay_with_no_server_settles_its_tabs_at_the_authority_position_it_holds() 
     );
 }
 
+/// A relay whose host reports no server after a tab subscribed serves
+/// that read itself from then on: its settles stay at the authority's seq
+/// it knew, however many writes of its own it holds pending.
+#[test]
+fn a_relay_that_loses_its_server_settles_earlier_reads_at_the_authority_position() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let relay = open(1, user(1));
+    let tab = open(2, user(1));
+    tab.set_non_durable_client();
+    let _link = connect(&server, &relay, user(1));
+    let tab_link = connect(&relay, &tab, user(1));
+    let mut a = Room::open(&tab, "a");
+    insert(&server, 20, "c", "the server's");
+    pump3(&server, &relay, &tab);
+    relay.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    let known = server.seq_high_water();
+    // The relay's own writes, pending: they number no accepted position.
+    for n in 10..15 {
+        insert(&relay, n, "b", "elsewhere");
+    }
+    insert(&relay, 1, "a", "the relay's");
+    tab_link.log.borrow_mut().clear();
+    pump3(&server, &relay, &tab);
+    assert_eq!(a.titles(), titles(&["the relay's"]));
+    let settled: Vec<u64> = tab_link
+        .log
+        .borrow()
+        .iter()
+        .filter_map(|m| match m {
+            SyncMessage::Settled { through, .. } => Some(*through),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !settled.is_empty() && settled.iter().all(|&seq| seq <= known),
+        "every settle at most the authority's seq {known}: {settled:?}"
+    );
+}
+
+/// A read a tab opened while its relay had no server settles as far as
+/// the relay's upstream read once the server is back, ahead of the
+/// connection's position.
+#[test]
+fn a_relay_back_from_no_server_forwards_its_reads_upstream_settles() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let relay = open(1, user(1));
+    let tab = open(2, user(1));
+    tab.set_non_durable_client();
+    let link = connect(&server, &relay, user(1));
+    relay.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    let _tab_link = connect(&relay, &tab, user(1));
+    let mut a = Room::open(&tab, "a");
+    pump3(&server, &relay, &tab);
+    relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    pump3(&server, &relay, &tab);
+    link.hold_position();
+    insert(&server, 1, "a", "the server's");
+    pump3(&server, &relay, &tab);
+    assert_eq!(a.titles(), titles(&["the server's"]));
+}
+
 /// Two writers insert the same explicit row id. The other's version
 /// reaches this replica before its own commit's fate: its pending insert
 /// still overlays it, and the refusing fate then drops it whole.

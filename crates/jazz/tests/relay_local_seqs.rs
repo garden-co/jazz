@@ -1,8 +1,8 @@
 //! A worker and its tabs each number their own unsettled versions, from 1.
 //! A tab's replica holds the worker's unsettled versions (other tabs'
-//! writes the worker has not settled yet) next to its own; each is keyed
-//! by the node that numbered it, so the two numberings never collide in a
-//! tab's history.
+//! writes the worker has not settled yet) next to its own, in a band of
+//! their own (between the accepted versions and the tab's), so the two
+//! numberings never collide in a tab's history.
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -635,6 +635,84 @@ fn a_closed_tabs_pending_commit_uploads_after_its_worker_restarts() {
         ]
     );
     assert_eq!(worker.pending_upload_count(), 0, "both commits settled");
+}
+
+/// A worker with no server numbers no accepted positions: its tabs'
+/// commits, and its own, stay pending (stored, never `Global`), its other
+/// tab sees them as the worker's unsettled versions, and once a server is
+/// added they upload and settle at the authority's seqs.
+#[test]
+fn a_serverless_workers_tab_commits_stay_pending_until_a_server_is_added() {
+    let worker = open(WORKER, author(WORKER));
+    worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    let attach_tab = |node: u8| {
+        let tab = open(node, author(WORKER));
+        tab.set_non_durable_client();
+        tab.set_remote_link_hint(RemoteLinkHint::Live);
+        let (client_side, server_side) = duplex();
+        block_on(tab.connect_upstream(client_side));
+        worker
+            .accept_subscriber(server_side, author(WORKER))
+            .unwrap();
+        tab
+    };
+    let writer = attach_tab(WORKER + 1);
+    let reader = attach_tab(WORKER + 2);
+    let core = open_in(schema(), 0xc0, AuthorSubject::SYSTEM);
+    let pump = || {
+        for _ in 0..6 {
+            for db in [&writer, &reader, &worker, &core] {
+                block_on(db.tick()).unwrap();
+            }
+        }
+    };
+    let notes = reader.prepare_query(&Query::from("notes")).unwrap();
+    let _watch = block_on(reader.subscribe(&notes, ReadOpts::default())).unwrap();
+    let tab_tx = block_on(writer.insert("notes", body("tab"), Default::default()))
+        .unwrap()
+        .mergeable_tx_id();
+    let own_tx = block_on(worker.insert("notes", body("worker"), Default::default()))
+        .unwrap()
+        .mergeable_tx_id();
+    pump();
+    assert_eq!(worker.pending_upload_count(), 2, "both commits pending");
+    let shown = |db: &Db| {
+        let mut bodies: Vec<String> = block_on(db.all(&notes, ReadOpts::default()))
+            .unwrap()
+            .iter()
+            .filter_map(|row| match row.cells().find(|(name, _)| *name == "body") {
+                Some((_, Some(Value::String(text)))) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        bodies.sort();
+        bodies
+    };
+    assert_eq!(shown(&reader), ["tab", "worker"], "the other tab sees both");
+    let global = |db: &Db, tx: u64| {
+        let mut wait = std::pin::pin!(db.wait_for_transaction(tx, DurabilityTier::Global));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        for _ in 0..20 {
+            if let std::task::Poll::Ready(fate) = wait.as_mut().poll(&mut context) {
+                return Some(fate);
+            }
+            pump();
+        }
+        None
+    };
+    assert!(global(&writer, tab_tx).is_none(), "no authority, no Global");
+    assert!(global(&worker, own_tx).is_none(), "no authority, no Global");
+    assert!(shown(&core).is_empty(), "nothing reached a server");
+
+    let (client_side, server_side) = duplex();
+    let _up = block_on(worker.connect_upstream(client_side));
+    core.accept_subscriber(server_side, author(WORKER)).unwrap();
+    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    assert!(matches!(global(&writer, tab_tx), Some(Ok(_))), "the tab's lands");
+    assert!(matches!(global(&worker, own_tx), Some(Ok(_))), "the worker's lands");
+    assert_eq!(shown(&core), ["tab", "worker"]);
+    assert_eq!(worker.pending_upload_count(), 0, "both commits settled");
+    assert_eq!(shown(&reader), ["tab", "worker"]);
 }
 
 /// Notes are readable and writable, but the authority refuses inserting

@@ -5594,9 +5594,10 @@ impl Inner {
         Ok(cut)
     }
 
-    /// Whether this store answers to an upstream it relays for: a replica,
-    /// unless its host says it has no server (then it is the last word on
-    /// what its sessions commit).
+    /// Whether this store relays its sessions' reads to an upstream: a
+    /// replica, unless its host says it has no server (then it serves them
+    /// itself, settled at the authority seq it knows; its sessions' commits
+    /// stay pending all the same).
     fn relays_upstream(&self) -> bool {
         self.client.as_ref().is_some_and(|client| {
             let link = client.hint.get();
@@ -5613,11 +5614,12 @@ impl Inner {
             return false;
         };
         session.connection_settled.is_some_and(|sent| sent != at)
-            || session.settles.values().any(|settle| {
-                settle
-                    .sent
-                    .is_some_and(|sent| sent < client.settled_through(&settle.key))
-            })
+            || self.relays_upstream()
+                && session.settles.values().any(|settle| {
+                    settle
+                        .sent
+                        .is_some_and(|sent| sent < client.settled_through(&settle.key))
+                })
     }
 
     /// The seq this store tells its sessions it is complete through. A
@@ -9859,8 +9861,9 @@ impl Db {
                 if answered {
                     // A relayed result is settled as far as its upstream
                     // read is, which may pass the connection's position.
+                    let relaying = inner.relays_upstream();
                     let through = match inner.sessions[index].settles.get(&id) {
-                        Some(settle) => {
+                        Some(settle) if relaying => {
                             let at = inner
                                 .client
                                 .as_ref()
@@ -9872,6 +9875,18 @@ impl Db {
                             settle.sent = Some(at);
                             settle.global = global;
                             at
+                        }
+                        // Served here with no server: once relaying
+                        // again, its upstream read's settles reach the
+                        // session as they move.
+                        Some(_) => {
+                            let settle = inner.sessions[index]
+                                .settles
+                                .get_mut(&id)
+                                .expect("just read");
+                            settle.sent.get_or_insert(0);
+                            settle.global = global;
+                            through
                         }
                         None => through,
                     };
@@ -10002,8 +10017,9 @@ impl Db {
             // A relayed result whose upstream read settled further, with no
             // change to its rows here, is told so: its rows may have arrived
             // through another read, held back until this one settled them.
+            let relaying = inner.relays_upstream();
             let state = &mut *inner;
-            if let Some(client) = state.client.as_ref() {
+            if let Some(client) = state.client.as_ref().filter(|_| relaying) {
                 for (&id, settle) in state.sessions[index].settles.iter_mut() {
                     let at = client.settled_through(&settle.key);
                     if settle.sent.is_some_and(|sent| sent < at) {
@@ -10503,12 +10519,12 @@ impl Db {
                                 (*view).clone(),
                             );
                             inner.sessions[index].relayed.insert(id, read);
-                            // Only a read relayed upstream settles as far as
-                            // its upstream read: one this store serves itself
-                            // (no server, or its link down) settles here.
-                            if let Some((key, _)) = relayed
-                                && inner.relays_upstream()
-                            {
+                            // A read with an upstream read settles as far as
+                            // that read (never short of the connection's
+                            // position) while this store relays: with no
+                            // server it serves the read itself and settles it
+                            // here, and once one is back, as far again.
+                            if let Some((key, _)) = attached.as_ref() {
                                 inner.sessions[index].settles.insert(
                                     id,
                                     RelayedSettle {
@@ -12294,6 +12310,42 @@ mod tests {
                 other => panic!("not Rows: {other:?}"),
             })
             .collect()
+    }
+
+    #[test]
+    fn a_position_is_one_order_preserving_integer_on_disk_and_on_the_wire() {
+        let positions = [
+            Pos::at(0),
+            Pos::at(1),
+            Pos::at(MAX_SEQ),
+            Pos { n: UPSTREAM, seq: 0 },
+            Pos { n: UPSTREAM, seq: 7 },
+            Pos { n: OWN, seq: 1 },
+            Pos { n: OWN, seq: MAX_SEQ },
+        ];
+        for pair in positions.windows(2) {
+            assert!(pair[0] < pair[1] && pair[0].t() < pair[1].t(), "{pair:?}");
+        }
+        for at in positions {
+            assert!(at.t() >= 0 && at.t() < 1 << 53, "{at:?} is JavaScript-safe");
+            assert_eq!(Pos::from_t(at.t()), at);
+            let bytes = postcard::to_allocvec(&at).unwrap();
+            assert_eq!(bytes, postcard::to_allocvec(&(at.t() as u64)).unwrap());
+            assert_eq!(postcard::from_bytes::<Pos>(&bytes).unwrap(), at);
+        }
+        // An accepted position is its seq, as every scalar wire position is.
+        assert_eq!(Pos::at(42).t(), 42);
+        let past = postcard::to_allocvec(&(3u64 << SEQ_BITS)).unwrap();
+        assert!(postcard::from_bytes::<Pos>(&past).is_err(), "no band past OWN");
+    }
+
+    #[test]
+    fn an_upstreams_own_versions_are_held_in_the_upstream_band() {
+        let shipped = Pos { n: OWN, seq: 3 };
+        assert_eq!(shipped.from_upstream(), Pos { n: UPSTREAM, seq: 3 });
+        assert_eq!(shipped.from_upstream().to_upstream(), shipped);
+        assert_eq!(Pos::at(3).from_upstream(), Pos::at(3));
+        assert_eq!(Pos::at(3).to_upstream(), Pos::at(3));
     }
 
     #[test]
