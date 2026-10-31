@@ -572,16 +572,19 @@ fn run(config: &Config, mode: Mode, emit: bool) -> Run {
         if let (Some(dashboard), Some(Op::NewOrder { order, .. })) =
             (&mut dashboard, schedule.last())
         {
-            // The last step's tick may be the one that delivers it, so the
-            // dashboard is polled once more after the network goes idle.
-            let mut idle = false;
             loop {
                 dashboard.poll();
                 if dashboard.rows.contains_key(order) {
                     break;
                 }
-                assert!(!idle, "the order must reach the dashboard");
-                idle = !bench.sim.step();
+                // The last tick can deliver it with nothing left in flight.
+                if !bench.sim.step() {
+                    dashboard.poll();
+                    assert!(
+                        dashboard.rows.contains_key(order),
+                        "the order must reach the dashboard"
+                    );
+                }
             }
         }
         latency.record(bench.sim.now_ms() - at);

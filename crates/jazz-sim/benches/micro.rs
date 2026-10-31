@@ -312,8 +312,12 @@ fn commit_unit(config: &Config) -> Latencies {
         let before = watcher.rows.len();
         // Step until the subscriber changes, then check it changed by the
         // whole unit at once.
+        // The last tick can deliver it with nothing left in flight.
         while !watcher.poll() {
-            assert!(sim.step(), "the unit must reach the subscriber");
+            if !sim.step() {
+                assert!(watcher.poll(), "the unit must reach the subscriber");
+                break;
+            }
         }
         latencies.record_duration_us(start.elapsed());
         assert_eq!(
