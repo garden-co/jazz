@@ -306,28 +306,3 @@ either the Wasm or broker-worker build changes (for example, your deployment's a
 version). Jazz adds that value to both asset URLs, so a rolling deployment cannot reuse a
 long-lived SharedWorker with bytes fetched from an older build at the same URL. Your asset host
 must serve these URLs with query strings intact.
-
-### Edge-style Wasm setup
-
-Some runtimes (like Cloudflare Workers) don't load Jazz the same way a browser does. In those cases, provide the Wasm module or bytes directly.
-
-<include cwd lang="ts" meta='title="worker.ts"'>
-  ../examples/cloudflare-worker-runtime-ts/src/docs-snippets.ts#edge-wasm-module
-</include>
-
-If your platform hands you raw bytes instead of a compiled module, use `runtimeSources.wasmSource`:
-
-```ts title="worker.ts"
-import { createDb, type AccountHandle } from "jazz-tools";
-
-// The request's account manager prepared this handle before context creation.
-export function openRequestDb(account: AccountHandle, wasmBytes: Uint8Array) {
-  return createDb({
-    appId: "my-app",
-    account,
-    runtimeSources: { wasmSource: wasmBytes },
-  });
-}
-```
-
-See the [Cloudflare Wrangler example](https://github.com/garden-co/jazz/tree/main/examples/cloudflare-worker-runtime-ts) for a complete `workerd` setup.
