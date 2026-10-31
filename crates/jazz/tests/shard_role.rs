@@ -683,3 +683,53 @@ fn a_part_is_checked_as_its_session_without_writing() {
         .expect_err("a session may not update a note it cannot read");
     assert!(error.to_string().contains("read"), "{error}");
 }
+
+/// A replica applies its leader's log at the leader's positions: a local
+/// write, a hold and a fixed position land where the leader numbered them,
+/// however far its own clock is off, and an observed position is followed
+/// past the replica's offset bound. Taking over, it waits until its clock
+/// passes the highest position it applied plus the offset bound.
+#[test]
+fn a_replica_numbers_at_its_leaders_positions_and_waits_out_the_bound_to_lead() {
+    let (leader, leader_now) = shard(1);
+    let (replica, replica_now) = shard(2);
+    replica_now.set(NOW - 2_000);
+    leader_now.set(NOW + 50);
+    insert(&leader, "one");
+    let one = newest(&leader);
+    replica.shard().number_at(one).unwrap();
+    insert(&replica, "one");
+    assert_eq!(newest(&replica), one, "at the leader's position");
+    assert!(
+        replica.shard().number_at(one).is_err(),
+        "never at or below what it numbered"
+    );
+    let part = CommitRef {
+        node: [7; 16],
+        tx: 3,
+    };
+    let rows = [doc_row(RowUuid::from_bytes([5; 16]))];
+    let hold = held_at(&leader, part, &rows);
+    replica.shard().number_at(hold).unwrap();
+    assert_eq!(held_at(&replica, part, &rows), hold);
+    let fixed = hold + 10;
+    leader.shard().fix(part, fixed).unwrap();
+    replica.shard().follow(fixed).unwrap();
+    replica.shard().fix(part, fixed).unwrap();
+    assert_eq!(replica.shard().holds(), leader.shard().holds());
+    let far = hlc(NOW + 400);
+    assert_eq!(leader.shard().observe(far).unwrap(), far);
+    replica.shard().follow(far).unwrap();
+    assert_eq!(replica.shard().numbered(), leader.shard().numbered());
+    replica.shard().release(part).unwrap();
+    replica.shard().lead().unwrap();
+    assert_eq!(
+        replica.shard().waits_out(),
+        Some(hlc_ms(far) + HLC_MAX_OFFSET_MS),
+        "the highest position it applied, plus the bound"
+    );
+    replica_now.set(hlc_ms(far) + HLC_MAX_OFFSET_MS + 1);
+    assert_eq!(replica.shard().waits_out(), None);
+    insert(&replica, "two");
+    assert_eq!(newest(&replica), hlc(replica_now.get()), "at its own clock");
+}
