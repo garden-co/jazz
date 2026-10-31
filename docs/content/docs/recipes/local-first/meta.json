@@ -1,4 +1,4 @@
 {
   "title": "Local-first",
-  "pages": ["index", "local-first-data-model"]
+  "pages": ["index", "local-first-data-model", "how-sync-works"]
 }

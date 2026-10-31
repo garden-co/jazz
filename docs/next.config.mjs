@@ -106,7 +106,7 @@ const config = {
       },
       {
         source: "/docs/concepts/how-sync-works",
-        destination: "/docs/how-jazz-works",
+        destination: "/docs/recipes/local-first/how-sync-works",
         permanent: false,
       },
       {
