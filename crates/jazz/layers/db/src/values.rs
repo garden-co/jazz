@@ -995,7 +995,7 @@ pub(crate) const STATE_NO_CONTENT: i64 = 1;
 pub(crate) const STATE_DELETED: i64 = 2;
 /// `_st` bit: the version is an authority text merge's write as its writer
 /// sent it, superseded by the merged version at the same seq (SPEC 4
-/// §4.3). Kept only in `__h`, at `_seq` = minus the commit's seq, as the
+/// §4.3). Kept only in `__h`, at `_t` = minus the version's own, as the
 /// base of its writer's next chained write; never read as a version, so
 /// every read of `__h` that is not by exact seq requires this bit clear.
 pub(crate) const STATE_AS_SENT: i64 = 4;
@@ -1616,9 +1616,9 @@ impl Table {
         let history = quote(&format!("{}__h", table.stored));
         // `_b` is the canonical branch key ('' for unbranched tables).
         // Rows are unique per (id, branch); branch views select by `_b`
-        // first, so every index leads with it. A version is at (`_n`,
-        // `_seq`): the code of the sequencer that numbered it (0 for the
-        // authority, see [`crate::db::RELAY`]) and its seq there. `_st` is the version's state
+        // first, so every index leads with it. A version is at `_t`: its
+        // position, band and seq (see [`crate::sync::Pos::t`]), under 2^53.
+        // `_st` is the version's state
         // bits ([`STATE_NO_CONTENT`], [`STATE_DELETED`], and in history
         // [`STATE_AS_SENT`]): 0 for a live version whose commit wrote
         // content. `_base` and `_cols` are what the authority keeps of the
@@ -1626,14 +1626,14 @@ impl Table {
         // columns it authored (SPEC 4 §4.6); NULL everywhere else.
         sql.push_str(&format!(
             "CREATE TABLE {name} (rid INTEGER PRIMARY KEY, id BLOB NOT NULL, \
-             _b BLOB NOT NULL DEFAULT X'', _n INTEGER NOT NULL DEFAULT 0, _seq INTEGER NOT NULL, \
+             _b BLOB NOT NULL DEFAULT X'', _t INTEGER NOT NULL, \
              _st INTEGER NOT NULL DEFAULT 0, _base INTEGER, _cols BLOB{columns}, \
              UNIQUE (id, _b));\n\
-             CREATE INDEX {} ON {name}(_n, _seq);\n\
+             CREATE INDEX {} ON {name}(_t);\n\
              CREATE TABLE {history} (id BLOB NOT NULL, _b BLOB NOT NULL, \
-             _n INTEGER NOT NULL DEFAULT 0, _seq INTEGER NOT NULL, _st INTEGER NOT NULL, \
-             _base INTEGER, _cols BLOB{columns}, PRIMARY KEY (id, _b, _n, _seq)) WITHOUT ROWID;\n",
-            quote(&format!("{}__by_seq", table.stored)),
+             _t INTEGER NOT NULL, _st INTEGER NOT NULL, \
+             _base INTEGER, _cols BLOB{columns}, PRIMARY KEY (id, _b, _t)) WITHOUT ROWID;\n",
+            quote(&format!("{}__by_t", table.stored)),
         ));
         for index in &table.indexes {
             sql.push_str(&table.index_ddl(index));

@@ -4,15 +4,14 @@
 //! client is a `Db` whose store is a partial replica of server versions
 //! plus its own optimistic writes.
 //!
-//! * A row version is at a [`Pos`]: the sequencer that numbered it (`_n`)
-//!   and its seq there (`_seq`). The authority's versions are at `_n` = 0,
+//! * A row version is at a [`Pos`], stored as one scalar `_t`: its band
+//!   and its seq there. The authority's versions are in the accepted band,
 //!   so history and as-of cuts on the client are over server versions. A
-//!   replica's optimistic writes are at its own node's code, numbered by
-//!   its own counter from 1, and order after every server version, so every
-//!   cut at a server seq leaves them out. A non-durable client (a worker's
-//!   tab) also holds its worker's unsettled versions, at the worker's code:
-//!   a node code's role bits ([`RELAY`], [`LEAF`]) order the worker's
-//!   before the tab's own.
+//!   replica's optimistic writes are in its own band, numbered by its own
+//!   counter from 1, and order after every server version, so every cut at
+//!   a server seq leaves them out. A non-durable client (a worker's tab)
+//!   also holds its worker's unsettled versions, in the upstream band
+//!   between the two.
 //! * A row touched by a pending (unsettled) local transaction keeps its
 //!   upstream baseline in history, below this replica's local sequence range.
 //!   A transient cache selects that image during a tick; a rebase restores it
@@ -82,24 +81,28 @@ fn now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-/// The role bits of a node code (`_n`, SPEC 4): a code is its role ORed
-/// with the node's row in `_jazz_nodes`. Code 0 is the authority, the
-/// sequencer of every accepted version. A durable replica (a relay, such
-/// as a browser's worker) numbers its own versions at a `RELAY` code; a
-/// non-durable one (a worker's tab) at a `LEAF` code, so on a tab its
-/// relay's unsettled versions order before its own.
-pub const RELAY: i64 = 1 << 48;
-pub const LEAF: i64 = 2 << 48;
+/// The band a version's position is in (SPEC 4): its [`Pos::n`]. Every
+/// accepted version is in [`ACCEPTED`], numbered by the authority. A
+/// replica's own unsettled versions are in [`OWN`], numbered by its own
+/// commit counter, after every other version it holds. A tab also holds
+/// its relay's unsettled versions, in [`UPSTREAM`], numbered by the
+/// relay's counter: between the accepted ones and its own.
+pub const ACCEPTED: i64 = 0;
+pub const UPSTREAM: i64 = 1;
+pub const OWN: i64 = 2;
 
-/// The node row a code names, without its role bits.
-pub(crate) fn node_index(code: i64) -> i64 {
-    code & (RELAY - 1)
-}
+/// The bits of a band's seq in a stored `_t`: `_t` is the band in the
+/// bits above and the seq below, so stored positions order as [`Pos`]es
+/// do, all under 2^53 (a JavaScript-safe integer).
+pub const SEQ_BITS: u32 = 51;
 
-/// A row version's position: the sequencer that numbered it (`_n`, 0 for
-/// the authority) and its seq there. Positions order by sequencer first,
-/// so every accepted version precedes every unsettled one, and a relay's
-/// unsettled versions precede its tab's own.
+/// The largest seq a band holds.
+pub const MAX_SEQ: u64 = (1 << SEQ_BITS) - 1;
+
+/// A row version's position: its band (`n`, see [`ACCEPTED`]) and its seq
+/// there. Positions order by band first, so every accepted version
+/// precedes every unsettled one, and a relay's unsettled versions precede
+/// its tab's own. Stored as one `_t` ([`Pos::t`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pos {
     pub n: i64,
@@ -110,22 +113,42 @@ impl Pos {
     /// Every accepted version: the cut of a read that leaves out unsettled
     /// ones.
     pub const SETTLED: Self = Self {
-        n: 0,
-        seq: i64::MAX as u64,
+        n: ACCEPTED,
+        seq: MAX_SEQ,
     };
 
     /// An accepted version, by its authority seq.
     pub const fn at(seq: u64) -> Self {
-        Self { n: 0, seq }
+        Self { n: ACCEPTED, seq }
     }
 
     /// Before every unsettled version, after every accepted one.
-    pub const UNSETTLED: Self = Self { n: 1, seq: 0 };
+    pub const UNSETTLED: Self = Self { n: UPSTREAM, seq: 0 };
 
     /// Whether the authority numbered the version.
     pub fn accepted(self) -> bool {
-        self.n == 0
+        self.n == ACCEPTED
     }
+
+    /// The stored `_t`.
+    pub fn t(self) -> i64 {
+        debug_assert!(self.seq <= MAX_SEQ, "a seq past its band: {self:?}");
+        (self.n << SEQ_BITS) | (self.seq & MAX_SEQ) as i64
+    }
+
+    /// The position a stored `_t` is at.
+    pub fn from_t(t: i64) -> Self {
+        Self {
+            n: t >> SEQ_BITS,
+            seq: (t as u64) & MAX_SEQ,
+        }
+    }
+}
+
+/// `_t` of the first version in band `n`: `_t < band_start(n)` is every
+/// version in an earlier band.
+pub(crate) const fn band_start(n: i64) -> i64 {
+    n << SEQ_BITS
 }
 
 /// Transaction `seq@node`: the node that wrote it and that node's
@@ -2796,10 +2819,10 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
     })
 }
 
-/// The image filter for one row version. `+_seq` keeps the planner on
-/// the row-id index: after a bulk commit every row shares one `_seq`, and
-/// the `_seq` index would scan them all for each lookup.
-const ID_AT: &str = "id = ?1 AND +_n = ?2 AND +_seq = ?3";
+/// The image filter for one row version. `+_t` keeps the planner on the
+/// row-id index: after a bulk commit every row shares one `_t`, and the
+/// `_t` index would scan them all for each lookup.
+const ID_AT: &str = "id = ?1 AND +_t = ?2";
 
 // ---- stored images ----------------------------------------------------------
 
@@ -3113,13 +3136,17 @@ impl Inner {
             let recorded = self
                 .conn
                 .prepare_cached(
-                    "SELECT t.seq FROM _jazz_transactions AS t JOIN _jazz_nodes AS n \
-                     ON n.n = t.n WHERE t.tx = ?1 AND n.node = ?2 AND t.sn = 0 AND t.seq IS NOT NULL",
+                    "SELECT t.t FROM _jazz_transactions AS t JOIN _jazz_nodes AS n \
+                     ON n.n = t.n WHERE t.tx = ?1 AND n.node = ?2 AND t.t < ?3",
                 )
                 .and_then(|mut statement| {
                     statement
                         .query_row(
-                            rusqlite::params![tx as i64, node.as_bytes().to_vec()],
+                            rusqlite::params![
+                                tx as i64,
+                                node.as_bytes().to_vec(),
+                                band_start(UPSTREAM)
+                            ],
                             |r| r.get::<_, i64>(0),
                         )
                         .optional()
@@ -3167,7 +3194,7 @@ impl Inner {
             .conn
             .prepare_cached(
                 "SELECT n.node, t.tx FROM _jazz_transactions AS t JOIN _jazz_nodes AS n \
-                 ON n.n = t.n WHERE t.sn = 0 AND t.seq = ?1",
+                 ON n.n = t.n WHERE t.t = ?1",
             )
             .map_err(storage)?;
         let mut out = Vec::with_capacity(seqs.len());
@@ -3542,8 +3569,11 @@ impl Inner {
                         "rid" => {}
                         "id" => image.id = r.get::<_, Vec<u8>>(i)?.try_into().unwrap_or([0; 16]),
                         "_b" => image.key = r.get(i)?,
-                        "_n" => code = r.get::<_, i64>(i)?,
-                        "_seq" => image.seq = r.get::<_, i64>(i)? as u64,
+                        "_t" => {
+                            let at = Pos::from_t(r.get::<_, i64>(i)?);
+                            code = at.n;
+                            image.seq = at.seq;
+                        }
                         "_st" => {
                             let state = r.get::<_, i64>(i)?;
                             image.deleted = state & STATE_DELETED != 0;
@@ -3693,14 +3723,13 @@ impl Inner {
         at: Pos,
     ) -> Result<Option<Image>, Error> {
         let id = row.0.as_bytes().to_vec();
-        let seq = at.seq as i64;
         for history in [false, true] {
             let found = self
                 .images_where(
                     table,
                     history,
-                    "id = ?1 AND _b = ?2 AND _n = ?3 AND _seq = ?4",
-                    &[&id, &key, &at.n, &seq],
+                    "id = ?1 AND _b = ?2 AND _t = ?3",
+                    &[&id, &key, &at.t()],
                 )?
                 .pop();
             if found.is_some() {
@@ -4060,16 +4089,11 @@ impl Inner {
                     let placeholders: Vec<String> = (1..=size).map(|i| format!("?{i}")).collect();
                     format!("id IN ({})", placeholders.join(", "))
                 }
-                (3, _) => {
+                (2, _) => {
                     let terms: Vec<String> = (0..size)
                         .map(|i| {
-                            let at = 3 * i;
-                            format!(
-                                "(id = ?{} AND +_n = ?{} AND +_seq = ?{})",
-                                at + 1,
-                                at + 2,
-                                at + 3
-                            )
+                            let at = 2 * i;
+                            format!("(id = ?{} AND +_t = ?{})", at + 1, at + 2)
                         })
                         .collect();
                     terms.join(" OR ")
@@ -4122,8 +4146,7 @@ impl Inner {
             self.images_matching(table, history, versions.iter().copied(), |(row, at)| {
                 vec![
                     SqlValue::Blob(row.0.as_bytes().to_vec()),
-                    SqlValue::Integer(at.n),
-                    SqlValue::Integer(at.seq as i64),
+                    SqlValue::Integer(at.t()),
                 ]
             })?
         } else {
@@ -4239,8 +4262,13 @@ impl Inner {
         let mut values = vec![
             Sql::Blob(image.id.to_vec()),
             Sql::Blob(image.key.clone()),
-            Sql::Integer(self.code_of(image.by)?),
-            Sql::Integer(image.seq as i64),
+            Sql::Integer(
+                Pos {
+                    n: self.code_of(image.by)?,
+                    seq: image.seq,
+                }
+                .t(),
+            ),
             Sql::Integer(
                 if image.deleted { STATE_DELETED } else { 0 }
                     | if image.content { 0 } else { STATE_NO_CONTENT },
@@ -4261,7 +4289,7 @@ impl Inner {
             } else {
                 image.table.clone()
             };
-            let names: Vec<String> = ["id", "_b", "_n", "_seq", "_st"]
+            let names: Vec<String> = ["id", "_b", "_t", "_st"]
                 .into_iter()
                 .map(str::to_owned)
                 .chain(columns.iter().map(|column| quote(column)))
@@ -4303,10 +4331,10 @@ impl Inner {
         .map_err(storage)?;
         self.exec(
             &format!(
-                "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND (_n, _seq) >= (?3, ?4)",
+                "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND (_t >= ?3 OR (_t < 0 AND ?3 < ?4))",
                 quote(&format!("{table}__h"))
             ),
-            rusqlite::params![id, key, from.n, from.seq as i64],
+            rusqlite::params![id, key, from.t(), band_start(self.me)],
         )
         .map_err(storage)?;
         self.changed
@@ -4544,7 +4572,7 @@ impl Inner {
             let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
             let keys: Vec<Vec<u8>> = statement
                 .query_map(
-                    rusqlite::params![row.0.as_bytes().to_vec(), at.n, at.seq as i64],
+                    rusqlite::params![row.0.as_bytes().to_vec(), at.t()],
                     |r| r.get(0),
                 )
                 .map_err(storage)?
@@ -4571,7 +4599,7 @@ impl Inner {
             let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
             let keys: Vec<Vec<u8>> = statement
                 .query_map(
-                    rusqlite::params![row.0.as_bytes().to_vec(), self.me, seq as i64],
+                    rusqlite::params![row.0.as_bytes().to_vec(), Pos { n: self.me, seq }.t()],
                     |r| r.get(0),
                 )
                 .map_err(storage)?
@@ -4604,8 +4632,8 @@ impl Inner {
             .images_where(
                 table,
                 true,
-                "id = ?1 AND _b = ?2 AND _n < ?3 ORDER BY _n DESC, _seq DESC LIMIT 1",
-                &[&id, &key, &self.me],
+                "id = ?1 AND _b = ?2 AND _t >= 0 AND _t < ?3 ORDER BY _t DESC LIMIT 1",
+                &[&id, &key, &band_start(self.me)],
             )?
             .pop())
     }
@@ -4634,9 +4662,9 @@ impl Inner {
 /// A commit is named by its writer's (node, tx). `_jazz_nodes` interns each
 /// node as a small code `n` (and records which identity owns it, see
 /// `claim_node`), and `_jazz_transactions` keeps one row per commit this
-/// store knows of under that code: (`sn`, `seq`) the position it landed
-/// at (`seq` NULL once rejected): an authority seq (`sn` 0), or a relay's
-/// own commit carrying it (`sn` the relay's own code); and `result` the
+/// store knows of under that code: `t` the position it landed at (a
+/// [`Pos::t`], NULL once rejected): an accepted one, or a relay's own
+/// commit carrying it (in its own band); and `result` the
 /// fate this store recorded for it as a server (NULL when it only learned
 /// where the commit landed).
 pub(crate) const SYNC_DDL: &str = "\
@@ -4649,8 +4677,8 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_authors (n INTEGER PRIMARY KEY, account BLOB NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, UNIQUE (account, issuer, subject));\
     CREATE TABLE IF NOT EXISTS _jazz_nodes (n INTEGER PRIMARY KEY, node BLOB NOT NULL UNIQUE, author INTEGER);\
-    CREATE TABLE IF NOT EXISTS _jazz_transactions (n INTEGER NOT NULL, tx INTEGER NOT NULL, sn INTEGER NOT NULL DEFAULT 0, seq INTEGER, result BLOB, PRIMARY KEY (n, tx)) WITHOUT ROWID;\
-    CREATE INDEX IF NOT EXISTS _jazz_transactions_by_seq ON _jazz_transactions (sn, seq);";
+    CREATE TABLE IF NOT EXISTS _jazz_transactions (n INTEGER NOT NULL, tx INTEGER NOT NULL, t INTEGER, result BLOB, PRIMARY KEY (n, tx)) WITHOUT ROWID;\
+    CREATE INDEX IF NOT EXISTS _jazz_transactions_by_t ON _jazz_transactions (t);";
 
 /// The retry store for refused commits, with each one's ops in
 /// `_jazz_rejected_ops`. It is created by the first refusal it keeps, not
@@ -4694,8 +4722,8 @@ pub(crate) const WITHHELD_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_withheld
     WITHOUT ROWID";
 
 /// Per remote query, the positions its result was last settled through
-/// (see `ActiveRead::through`): one row per sequencer, `n` its code as in
-/// `_n` (0 for the authority). Created by the first settlement, so that
+/// (see `ActiveRead::through`): one row per band, `n` as in [`Pos::n`]
+/// (0 for the authority's). Created by the first settlement, so that
 /// opening an existing store without one leaves the file byte-identical.
 const WATERMARKS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_watermarks \
     (key BLOB NOT NULL, n INTEGER NOT NULL, through INTEGER NOT NULL, \
@@ -5444,8 +5472,8 @@ impl Inner {
         let author = self.author_code(&author_key(identity))?;
         match self.conn.cached_row(
             "SELECT n.author FROM _jazz_transactions AS t JOIN _jazz_nodes AS n \
-             ON n.n = t.n WHERE t.sn = ?1 AND t.seq = ?2",
-            [at.n, at.seq as i64],
+             ON n.n = t.n WHERE t.t = ?1",
+            [at.t()],
             |r| r.get::<_, Option<i64>>(0),
         ) {
             Ok(owner) => Ok(owner == Some(author)),
@@ -5454,12 +5482,11 @@ impl Inner {
         }
     }
 
-    /// `node`'s code in `_jazz_nodes`, interning it on first use.
-    /// This store's own node code as a replica: a relay's, or a
-    /// non-durable client's (see [`RELAY`]).
+    /// The band this store numbers its own versions in as a replica
+    /// ([`OWN`]); its node is interned for the commits it records.
     pub(crate) fn own_code(&self) -> Result<i64, Error> {
-        let role = if self.non_durable { LEAF } else { RELAY };
-        Ok(role | self.node_code(*self.identity.node.as_bytes())?)
+        self.node_code(*self.identity.node.as_bytes())?;
+        Ok(OWN)
     }
 
     /// The newest seq this replica's node numbered a version of its own at.
@@ -5470,8 +5497,11 @@ impl Inner {
                 let max: Option<i64> = self
                     .conn
                     .cached_row(
-                        &format!("SELECT MAX(_seq) FROM {} WHERE _n = ?1", quote(&name)),
-                        [self.me],
+                        &format!(
+                            "SELECT MAX(_t) - ?1 FROM {} WHERE _t >= ?1 AND _t < ?2",
+                            quote(&name)
+                        ),
+                        [band_start(self.me), band_start(self.me + 1)],
                         |r| r.get(0),
                     )
                     .map_err(storage)?;
@@ -5481,13 +5511,16 @@ impl Inner {
         Ok(seq)
     }
 
-    /// The code an image's version is at (`_n`): 0 for an accepted
-    /// version, else the code of the node that numbered it.
+    /// The band an image's version is at: accepted when the authority
+    /// numbered it, this store's own when it did, else its upstream relay's.
     pub(crate) fn code_of(&self, by: Option<[u8; 16]>) -> Result<i64, Error> {
         match by {
-            None => Ok(0),
+            None => Ok(ACCEPTED),
             Some(node) if node == *self.identity.node.as_bytes() && self.me != 0 => Ok(self.me),
-            Some(node) => Ok(RELAY | self.node_code(node)?),
+            Some(node) => {
+                self.upstream.set(Some(node));
+                Ok(UPSTREAM)
+            }
         }
     }
 
@@ -5499,44 +5532,28 @@ impl Inner {
         })
     }
 
-    /// The node a stored version's code names (`None` for the authority).
+    /// The node a stored version's band names (`None` for the authority):
+    /// this store's own. A relay's unsettled versions a tab holds are
+    /// never shipped on.
     pub(crate) fn node_of(&self, code: i64) -> Result<Option<[u8; 16]>, Error> {
-        if code == 0 {
-            return Ok(None);
+        match code {
+            ACCEPTED => Ok(None),
+            OWN => Ok(Some(*self.identity.node.as_bytes())),
+            UPSTREAM => self.upstream.get().map(Some).ok_or_else(|| {
+                Error::new(ErrorCode::Storage, "an upstream version with no upstream relay")
+            }),
+            _ => Err(Error::new(ErrorCode::Storage, "a stored position in no band")),
         }
-        let node: Vec<u8> = self
-            .conn
-            .cached_row(
-                "SELECT node FROM _jazz_nodes WHERE n = ?1",
-                [node_index(code)],
-                |r| r.get(0),
-            )
-            .map_err(storage)?;
-        Ok(Some(node.try_into().map_err(|_| {
-            Error::new(ErrorCode::Storage, "a stored node id is not 16 bytes")
-        })?))
     }
 
-    /// [`Self::code_of`] without interning: `None` for a node this store
-    /// does not know.
+    /// [`Self::code_of`] for a position named on the wire.
     pub(crate) fn known_code(&self, by: Option<[u8; 16]>) -> Result<Option<i64>, Error> {
-        let node = match by {
-            None => return Ok(Some(0)),
-            Some(node) if node == *self.identity.node.as_bytes() && self.me != 0 => {
-                return Ok(Some(self.me));
+        Ok(match by {
+            Some(node) if node != *self.identity.node.as_bytes() || self.me == 0 => {
+                (self.upstream.get() == Some(node)).then_some(UPSTREAM)
             }
-            Some(node) => node,
-        };
-        let code: Option<i64> = self
-            .conn
-            .cached_row(
-                "SELECT n FROM _jazz_nodes WHERE node = ?1",
-                [node.to_vec()],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(storage)?;
-        Ok(code.map(|code| RELAY | code))
+            by => Some(self.code_of(by)?),
+        })
     }
 
     fn node_code(&self, node: [u8; 16]) -> Result<i64, Error> {
@@ -5578,14 +5595,9 @@ impl Inner {
     fn record_settled(&self, node: [u8; 16], tx: u64, at: Option<Pos>) -> Result<(), Error> {
         let code = self.node_code(node)?;
         self.exec(
-            "INSERT INTO _jazz_transactions (n, tx, sn, seq) VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT (n, tx) DO UPDATE SET sn = excluded.sn, seq = excluded.seq",
-            rusqlite::params![
-                code,
-                tx as i64,
-                at.map_or(0, |at| at.n),
-                at.map(|at| at.seq as i64)
-            ],
+            "INSERT INTO _jazz_transactions (n, tx, t) VALUES (?1, ?2, ?3) \
+             ON CONFLICT (n, tx) DO UPDATE SET t = excluded.t",
+            rusqlite::params![code, tx as i64, at.map(Pos::t)],
         )
         .map_err(storage)?;
         Ok(())
@@ -5598,11 +5610,11 @@ impl Inner {
             .conn
             .prepare_cached(
                 "SELECT n.node, t.tx FROM _jazz_transactions AS t JOIN _jazz_nodes AS n \
-                 ON n.n = t.n WHERE t.sn = ?1 AND t.seq = ?2",
+                 ON n.n = t.n WHERE t.t = ?1",
             )
             .map_err(storage)?;
         let rows = statement
-            .query_map(rusqlite::params![self.me, seq as i64], |r| {
+            .query_map([Pos { n: self.me, seq }.t()], |r| {
                 Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?))
             })
             .map_err(storage)?;
@@ -5626,12 +5638,12 @@ impl Inner {
     /// same transaction, so an accepted commit's row always has one.
     fn settled(&self, node: [u8; 16], tx: u64) -> Result<Option<Option<Pos>>, Error> {
         match self.conn.cached_row(
-            "SELECT t.sn, t.seq FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
+            "SELECT t.t FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
              WHERE n.node = ?1 AND t.tx = ?2",
             rusqlite::params![node.to_vec(), tx as i64],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?)),
+            |r| r.get::<_, Option<i64>>(0),
         ) {
-            Ok((n, seq)) => Ok(Some(seq.map(|seq| Pos { n, seq: seq as u64 }))),
+            Ok(t) => Ok(Some(t.map(Pos::from_t))),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(error) => Err(storage(error)),
         }
@@ -5978,7 +5990,7 @@ impl Inner {
                 .conn
                 .cached_row(
                     &format!(
-                        "SELECT 1 FROM {} WHERE (_n, _seq) > (0, ?1) LIMIT 1",
+                        "SELECT 1 FROM {} WHERE _t > ?1 LIMIT 1",
                         quote(table)
                     ),
                     [since as i64],
@@ -6245,8 +6257,11 @@ impl Inner {
             let newest: Option<i64> = self
                 .conn
                 .cached_row(
-                    &format!("SELECT MAX(_seq) FROM {} WHERE _n = 0", quote(table)),
-                    [],
+                    &format!(
+                        "SELECT MAX(_t) FROM {} WHERE _t >= 0 AND _t < ?1",
+                        quote(table)
+                    ),
+                    [band_start(UPSTREAM)],
                     |r| r.get(0),
                 )
                 .map_err(storage)?;
@@ -6258,12 +6273,12 @@ impl Inner {
         let mut statement = self
             .conn
             .prepare_cached(
-                "SELECT seq, tx FROM _jazz_transactions \
-                 WHERE n = ?1 AND sn = 0 AND seq > ?2",
+                "SELECT t, tx FROM _jazz_transactions \
+                 WHERE n = ?1 AND t > ?2 AND t < ?3",
             )
             .map_err(storage)?;
         let own = statement
-            .query_map([node, client.known as i64], |r| {
+            .query_map([node, client.known as i64, band_start(UPSTREAM)], |r| {
                 Ok((0, r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
             })
             .map_err(storage)?
@@ -10100,8 +10115,8 @@ impl Db {
                     images.extend(inner.images_where(
                         &table,
                         true,
-                        "id = ?1 AND _b = ?2 AND _n = ?3 AND _seq = ?4",
-                        &[&id, &key, &at.n, &(at.seq as i64)],
+                        "id = ?1 AND _b = ?2 AND _t = ?3",
+                        &[&id, &key, &at.t()],
                     )?);
                 }
             }
@@ -10289,9 +10304,16 @@ impl Db {
                             .images_where(
                                 &image.table,
                                 true,
-                                "id = ?1 AND _b = ?2 AND (_n, _seq) < (?3, ?4) \
-                                 ORDER BY _n DESC, _seq DESC",
-                                &[&id, &image.key, &inner.me, &(image.seq as i64)],
+                                "id = ?1 AND _b = ?2 AND _t >= 0 AND _t < ?3 ORDER BY _t DESC",
+                                &[
+                                    &id,
+                                    &image.key,
+                                    &Pos {
+                                        n: inner.me,
+                                        seq: image.seq,
+                                    }
+                                    .t(),
+                                ],
                             )?
                             .into_iter()
                             .find(|base| !is_own(base));
@@ -12328,7 +12350,7 @@ impl Db {
     /// its own store starts empty each time, so a subscription's opening,
     /// whatever its tier, waits for the upstream's answer (the relay's
     /// stored view, or its upstream's once that answers). Its own versions
-    /// are at a [`LEAF`] code, after its relay's.
+    /// are in the [`OWN`] band, after its relay's.
     pub fn set_non_durable_client(&self) {
         let mut inner = self.inner.borrow_mut();
         debug_assert!(

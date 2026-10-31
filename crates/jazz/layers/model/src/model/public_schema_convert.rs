@@ -35,11 +35,10 @@ const PUBLIC_AUTH_MODE_SESSION_PATHS: &[&str] = &["authMode", "auth_mode"];
 const RESERVED_AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
 
 /// The columns every stored row table keeps beside the app's: its row key,
-/// branch, position (sequencer node code and seq), state bits (deleted, no
+/// branch, position (`_t`: band and seq), state bits (deleted, no
 /// content), and what the authority keeps of an accepted upload (SPEC 4
 /// §4.6). An app column cannot take their names.
-pub const RESERVED_ROW_COLUMNS: [&str; 8] =
-    ["id", "rid", "_b", "_n", "_seq", "_st", "_base", "_cols"];
+pub const RESERVED_ROW_COLUMNS: [&str; 7] = ["id", "rid", "_b", "_t", "_st", "_base", "_cols"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Error produced while compiling a developer-authored schema for the runtime.

@@ -476,9 +476,9 @@ impl Inner {
                 .map_or(&[][..], Vec::as_slice);
             self.exec(
                 &format!(
-                    "UPDATE {} SET _base = ?1, _cols = ?2 WHERE id = ?3 AND _b = ?4 AND _n = {} AND _seq = ?5",
+                    "UPDATE {} SET _base = ?1, _cols = ?2 WHERE id = ?3 AND _b = ?4 AND _t = {} + ?5",
                     quote(table),
-                    self.me
+                    super::band_start(self.me)
                 ),
                 rusqlite::params![
                     built.get(row_key).map(|built| built.stored()),
@@ -499,16 +499,13 @@ impl Inner {
         table: &str,
         row: RowUuid,
     ) -> Result<Vec<(Vec<u8>, Pos)>, Error> {
-        let sql = format!("SELECT _b, _n, _seq FROM {} WHERE id = ?1", quote(table));
+        let sql = format!("SELECT _b, _t FROM {} WHERE id = ?1", quote(table));
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
         let versions = statement
             .query_map([row.0.as_bytes().to_vec()], |r| {
                 Ok((
                     r.get::<_, Vec<u8>>(0)?,
-                    Pos {
-                        n: r.get(1)?,
-                        seq: r.get::<_, i64>(2)? as u64,
-                    },
+                    Pos::from_t(r.get(1)?),
                 ))
             })
             .map_err(storage)?
@@ -525,11 +522,12 @@ impl Inner {
         key: &[u8],
     ) -> Result<Vec<Version>, Error> {
         let sql = format!(
-            "SELECT _seq, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 AND _n = 0 \
-             UNION ALL SELECT _seq, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 AND _n = 0 \
-             AND (_st & {STATE_AS_SENT}) = 0 ORDER BY 1",
+            "SELECT _t, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 AND _t >= 0 AND _t < {upstream} \
+             UNION ALL SELECT _t, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 AND _t >= 0 \
+             AND _t < {upstream} AND (_st & {STATE_AS_SENT}) = 0 ORDER BY 1",
             quote(table),
-            quote(&format!("{table}__h"))
+            quote(&format!("{table}__h")),
+            upstream = super::band_start(super::UPSTREAM),
         );
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
         let versions = statement
@@ -658,7 +656,7 @@ impl Inner {
         let id = row.0.as_bytes().to_vec();
         if let Some(on) = sent {
             let sql = format!(
-                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _n = 0 AND _seq = ?3",
+                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _t = ?3",
                 quote(column),
                 quote(&format!("{table}__h")),
             );
@@ -674,8 +672,8 @@ impl Inner {
             }
         }
         let sql = format!(
-            "SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _n = 0 AND _seq = ?3 \
-             UNION ALL SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _n = 0 AND _seq = ?3",
+            "SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _t = ?3 \
+             UNION ALL SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _t = ?3",
             quote(table),
             quote(&format!("{table}__h")),
             column = quote(column),

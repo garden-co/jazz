@@ -52,7 +52,7 @@ use crate::values::{
 };
 pub use sync::{
     AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
-    FrameJoiner, Image, LEAF, Outcome, Pos, RELAY, ReadSpan, RejectedTransaction, RelationSnapshot,
+    FrameJoiner, Image, Outcome, Pos, ReadSpan, RejectedTransaction, RelationSnapshot,
     RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
     TxName, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError, WireKind, WireOp,
     WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite, WriteConflict,
@@ -542,9 +542,12 @@ struct Inner {
     /// The newest commit seq handed out: the authority's seq, or on a
     /// replica its own node's counter.
     seq: u64,
-    /// A replica's own node code (`_n` of its unsettled versions, see
-    /// [`sync::RELAY`]); 0 until it becomes one.
+    /// A replica's own band (of its unsettled versions, see
+    /// [`sync::OWN`]); 0 until it becomes one.
     pub(crate) me: i64,
+    /// On a tab, the relay whose unsettled versions are in the upstream
+    /// band ([`sync::UPSTREAM`]), as the relay named itself.
+    pub(crate) upstream: std::cell::Cell<Option<[u8; 16]>>,
     pub(crate) claims: HashMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Live subscription groups and their invalidation index.
     fan: fanout::Fanout,
@@ -1318,8 +1321,11 @@ impl Db {
             for name in [table.clone(), format!("{table}__h")] {
                 let max: Option<i64> = conn
                     .cached_row(
-                        &format!("SELECT MAX(_seq) FROM {} WHERE _n = 0", quote(&name)),
-                        [],
+                        &format!(
+                            "SELECT MAX(_t) FROM {} WHERE _t >= 0 AND _t < ?1",
+                            quote(&name)
+                        ),
+                        [sync::band_start(sync::UPSTREAM)],
                         |r| r.get(0),
                     )
                     .map_err(storage)?;
@@ -1330,8 +1336,8 @@ impl Db {
         // dedupe entry records it.
         let settled: Option<i64> = conn
             .cached_row(
-                "SELECT MAX(seq) FROM _jazz_transactions WHERE sn = 0",
-                [],
+                "SELECT MAX(t) FROM _jazz_transactions WHERE t < ?1",
+                [sync::band_start(sync::UPSTREAM)],
                 |r| r.get(0),
             )
             .map_err(storage)?;
@@ -1383,6 +1389,7 @@ impl Db {
                     .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
                 seq: 0,
                 me: 0,
+                upstream: std::cell::Cell::new(None),
                 claims: HashMap::new(),
                 fan: fanout::Fanout::default(),
                 changed: RefCell::new(Vec::new()),
@@ -3680,9 +3687,8 @@ impl Inner {
             } else {
                 row.get(0).map_err(storage)?
             };
-            let n: i64 = row.get(1).map_err(storage)?;
-            let seq: i64 = row.get(2).map_err(storage)?;
-            let state: i64 = row.get(3).map_err(storage)?;
+            let at = Pos::from_t(row.get(1).map_err(storage)?);
+            let state: i64 = row.get(2).map_err(storage)?;
             // A flat join: the root's version, then each joined row and
             // its version.
             let flat = compiled.joined > 0;
@@ -3698,23 +3704,23 @@ impl Inner {
                 )))
             };
             let root_version = if compiled.versioned {
-                version(4)?
+                version(3)?
             } else {
                 None
             };
             let joined = (0..compiled.joined)
                 .map(|i| {
-                    let id: Vec<u8> = row.get(5 + 2 * i).map_err(storage)?;
+                    let id: Vec<u8> = row.get(4 + 2 * i).map_err(storage)?;
                     Ok(crate::values::JoinedRow {
                         row: uuid::Uuid::from_slice(&id)
                             .map(RowUuid)
                             .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?,
-                        version: version(6 + 2 * i)?,
+                        version: version(5 + 2 * i)?,
                     })
                 })
                 .collect::<Result<Arc<[_]>, Error>>()?;
             let union_arm = if compiled.union {
-                let label: String = row.get(4).map_err(storage)?;
+                let label: String = row.get(3).map_err(storage)?;
                 Some(match arms.iter().find(|arm| ***arm == *label) {
                     Some(arm) => arm.clone(),
                     None => {
@@ -3727,9 +3733,9 @@ impl Inner {
                 None
             };
             let first = if flat {
-                5 + 2 * compiled.joined
+                4 + 2 * compiled.joined
             } else {
-                4 + usize::from(compiled.versioned) + usize::from(compiled.union)
+                3 + usize::from(compiled.versioned) + usize::from(compiled.union)
             };
             let cells = compiled
                 .projection
@@ -3756,7 +3762,7 @@ impl Inner {
                     uuid::Uuid::from_slice(&id)
                         .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?,
                 ),
-                seq: Pos { n, seq: seq as u64 },
+                seq: at,
                 deleted: state & STATE_DELETED != 0,
                 cells: Arc::new(cells),
                 types: types.clone(),
@@ -3903,7 +3909,7 @@ impl Inner {
         key: &[u8],
     ) -> Result<Option<(Pos, bool)>, Error> {
         let sql = format!(
-            "SELECT _n, _seq, (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT _t, (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2",
             quote(table)
         );
         match self.conn.cached_row(
@@ -3911,11 +3917,8 @@ impl Inner {
             rusqlite::params![row.0.as_bytes().to_vec(), key],
             |r| {
                 Ok((
-                    Pos {
-                        n: r.get(0)?,
-                        seq: r.get::<_, i64>(1)? as u64,
-                    },
-                    r.get::<_, i64>(2)? != 0,
+                    Pos::from_t(r.get(0)?),
+                    r.get::<_, i64>(1)? != 0,
                 ))
             },
         ) {
@@ -3948,19 +3951,14 @@ impl Inner {
         };
         let sql = format!(
             "SELECT (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2 \
-             AND _n = ?3 AND _seq = ?4",
+             AND _t = ?3",
             quote(&format!("{table}__h"))
         );
         let deleted: i64 = self
             .conn
             .cached_row(
                 &sql,
-                rusqlite::params![
-                    row.0.as_bytes().to_vec(),
-                    key,
-                    version.n,
-                    version.seq as i64
-                ],
+                rusqlite::params![row.0.as_bytes().to_vec(), key, version.t()],
                 |r| r.get(0),
             )
             .map_err(storage)?;
@@ -3981,14 +3979,14 @@ impl Inner {
             let positions = cut
                 .extra
                 .iter()
-                .map(|at| format!("({}, {})", at.n, at.seq))
+                .map(|at| at.t().to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!(" OR (_n, _seq) IN (VALUES {positions})")
+            format!(" OR _t IN ({positions})")
         };
         let sql = format!(
-            "SELECT _n, _seq FROM {} WHERE id = ?1 AND _b = ?2 AND (_st & {STATE_AS_SENT}) = 0 \
-             AND ((_n, _seq) <= (?3, ?4){extra}) ORDER BY _n DESC, _seq DESC LIMIT 1",
+            "SELECT _t FROM {} WHERE id = ?1 AND _b = ?2 AND (_st & {STATE_AS_SENT}) = 0 \
+             AND (_t <= ?3{extra}) ORDER BY _t DESC LIMIT 1",
             quote(&format!("{table}__h"))
         );
         self.conn
@@ -3997,15 +3995,9 @@ impl Inner {
                 rusqlite::params![
                     row.0.as_bytes().to_vec(),
                     key,
-                    cut.seq.n,
-                    cut.seq.seq as i64
+                    cut.seq.t()
                 ],
-                |r| {
-                    Ok(Pos {
-                        n: r.get(0)?,
-                        seq: r.get::<_, i64>(1)? as u64,
-                    })
-                },
+                |r| Ok(Pos::from_t(r.get(0)?)),
             )
             .optional()
             .map_err(storage)
@@ -5262,7 +5254,7 @@ impl Inner {
 
     /// Keep, for each row version the upload at `seq` wrote whose text
     /// merge changed a value, that version as its writer sent it (SPEC 4
-    /// §4.3): in `__h` at `_seq` = `-seq` with [`STATE_AS_SENT`] set, its
+    /// §4.3): in `__h` at `_t` = minus its own `_t` with [`STATE_AS_SENT`] set, its
     /// merged columns holding their values as sent and every other cell
     /// the version's. A later write chained on it merges over these values
     /// ([`Inner::merge_base`]); no read takes it for a version.
@@ -5288,9 +5280,9 @@ impl Inner {
             }
             self.exec(
                 &format!(
-                    "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _seq < 0 \
+                    "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _t < 0 \
                      AND (_st & {STATE_AS_SENT}) <> 0 AND EXISTS (SELECT 1 FROM _jazz_transactions AS s \
-                     JOIN _jazz_nodes AS n ON n.n = s.n WHERE s.sn = _n AND s.seq = -_seq AND n.node = ?3)",
+                     JOIN _jazz_nodes AS n ON n.n = s.n WHERE s.t = -_t AND n.node = ?3)",
                     quote(&format!("{stored}__h"))
                 ),
                 rusqlite::params![row.0.as_bytes().to_vec(), key, node.to_vec()],
@@ -5327,12 +5319,12 @@ impl Inner {
                 })
                 .collect();
             let sql = format!(
-                "INSERT INTO {} (id, _b, _n, _seq, _st, _base, _cols{columns}) \
-                 SELECT id, _b, _n, -_seq, _st | {STATE_AS_SENT}, NULL, NULL{cells} FROM {} \
-                 WHERE id = ?1 AND _b = ?2 AND _n = {} AND _seq = ?3",
+                "INSERT INTO {} (id, _b, _t, _st, _base, _cols{columns}) \
+                 SELECT id, _b, -_t, _st | {STATE_AS_SENT}, NULL, NULL{cells} FROM {} \
+                 WHERE id = ?1 AND _b = ?2 AND _t = {} + ?3",
                 quote(&format!("{stored}__h")),
                 quote(&stored),
-                self.me
+                sync::band_start(self.me)
             );
             self.exec(&sql, params_from_iter(values.iter()))
                 .map_err(storage)?;
@@ -5385,12 +5377,12 @@ impl Inner {
     fn snapshot(&self, table: &Table, row: RowUuid, key: &[u8], seq: u64) -> Result<(), Error> {
         let columns = self.columns_list(table);
         let sql = format!(
-            "INSERT INTO {} (id, _b, _n, _seq, _st, _base, _cols{columns}) \
-             SELECT id, _b, _n, _seq, _st, _base, _cols{columns} FROM {} \
-             WHERE id = ?1 AND _b = ?2 AND NOT (_n = {} AND _seq = ?3)",
+            "INSERT INTO {} (id, _b, _t, _st, _base, _cols{columns}) \
+             SELECT id, _b, _t, _st, _base, _cols{columns} FROM {} \
+             WHERE id = ?1 AND _b = ?2 AND _t <> {} + ?3",
             quote(&format!("{}__h", table.stored)),
             quote(&table.stored),
-            self.me
+            sync::band_start(self.me)
         );
         // An image written earlier in the same commit is not superseded
         // history: history holds committed images only.
@@ -5425,10 +5417,9 @@ impl Inner {
                     .version_at(&table.stored, row, from, cut)?
                     .map(|version| {
                         format!(
-                            "(SELECT * FROM {} WHERE _n = {} AND _seq = {})",
+                            "(SELECT * FROM {} WHERE _t = {})",
                             quote(&format!("{}__h", table.stored)),
-                            version.n,
-                            version.seq
+                            version.t()
                         )
                     }),
             },
@@ -5441,11 +5432,11 @@ impl Inner {
         };
         // The copy keeps the base's deletion and authored no content.
         let sql = format!(
-            "INSERT INTO {name} (id, _b, _n, _seq, _st{columns}) \
-             SELECT id, ?1, {me}, ?2, _st | {STATE_NO_CONTENT}{columns} \
+            "INSERT INTO {name} (id, _b, _t, _st{columns}) \
+             SELECT id, ?1, {own} + ?2, _st | {STATE_NO_CONTENT}{columns} \
              FROM {source} WHERE id = ?3 AND _b = ?4",
             name = quote(&table.stored),
-            me = self.me
+            own = sync::band_start(self.me)
         );
         self.exec(&sql, rusqlite::params![to, seq as i64, id, from])
             .map_err(storage)?;
@@ -5467,11 +5458,11 @@ impl Inner {
         deleted: Option<bool>,
         content: bool,
     ) -> Result<(), Error> {
-        // Right-hand sides read the row before this update: `_seq` is still
+        // Right-hand sides read the row before this update: `_t` is still
         // the previous version's.
         // What a new version was built on is the authority's to write
         // (SPEC 4 §4.6).
-        let mut values = vec![Sql::Integer(seq as i64)];
+        let mut values = vec![Sql::Integer(Pos { n: self.me, seq }.t())];
         let deletion = match deleted {
             Some(deleted) => {
                 values.push(Sql::Integer(if deleted { STATE_DELETED } else { 0 }));
@@ -5482,12 +5473,11 @@ impl Inner {
         // The no-content bit stays set only while no write of the commit
         // authored content.
         let no_content = if content { 0 } else { STATE_NO_CONTENT };
-        let me = self.me;
         let mut sets = vec![
-            format!("_n = {me}, _seq = ?1"),
+            "_t = ?1".to_owned(),
             "_base = NULL, _cols = NULL".to_owned(),
             format!(
-                "_st = (CASE WHEN _n = {me} AND _seq = ?1 THEN _st & {no_content} ELSE {no_content} END) \
+                "_st = (CASE WHEN _t = ?1 THEN _st & {no_content} ELSE {no_content} END) \
                  | {deletion}"
             ),
         ];
@@ -5594,14 +5584,12 @@ impl Inner {
         let mut names = vec![
             "id".to_owned(),
             "_b".to_owned(),
-            "_n".to_owned(),
-            "_seq".to_owned(),
+            "_t".to_owned(),
         ];
         let mut values = vec![
             Sql::Blob(row.0.as_bytes().to_vec()),
             Sql::Blob(key.clone()),
-            Sql::Integer(self.me),
-            Sql::Integer(seq as i64),
+            Sql::Integer(Pos { n: self.me, seq }.t()),
         ];
         for column in &table.columns {
             let given = match (cells.get(&column.name), &column.default) {
@@ -7164,8 +7152,9 @@ impl Inner {
     /// On a replica, the newest version of `row` the authority settled.
     fn settled_seq(&self, table: &str, row: RowUuid) -> Result<Option<u64>, Error> {
         let sql = format!(
-            "SELECT MAX(_seq) FROM {} WHERE id = ?1 AND _n = 0",
-            quote(table)
+            "SELECT MAX(_t) FROM {} WHERE id = ?1 AND _t >= 0 AND _t < {}",
+            quote(table),
+            sync::band_start(sync::UPSTREAM)
         );
         self.conn
             .cached_row(&sql, [row.0.as_bytes().to_vec()], |r| {
@@ -7179,15 +7168,12 @@ impl Inner {
     /// any branch.
     pub(crate) fn newest_seq(&self, table: &str, row: RowUuid) -> Result<Option<Pos>, Error> {
         let sql = format!(
-            "SELECT _n, _seq FROM {} WHERE id = ?1 ORDER BY _n DESC, _seq DESC LIMIT 1",
+            "SELECT _t FROM {} WHERE id = ?1 ORDER BY _t DESC LIMIT 1",
             quote(table)
         );
         self.conn
             .cached_row(&sql, [row.0.as_bytes().to_vec()], |r| {
-                Ok(Pos {
-                    n: r.get(0)?,
-                    seq: r.get::<_, i64>(1)? as u64,
-                })
+                Ok(Pos::from_t(r.get(0)?))
             })
             .optional()
             .map_err(storage)

@@ -208,7 +208,7 @@ impl Inner {
             .prepare_cached(&compiled.sql)
             .and_then(|mut statement| {
                 statement
-                    .query_row(params_from_iter(compiled.params.iter()), |r| r.get(4))
+                    .query_row(params_from_iter(compiled.params.iter()), |r| r.get(3))
                     .optional()
             })
             .map_err(storage)?;
@@ -321,7 +321,7 @@ impl Inner {
     fn version_cell(&self, t: &Table, row: RowUuid, stored: &str, at: Pos) -> Result<Sql, Error> {
         for table in [t.stored.clone(), format!("{}__h", t.stored)] {
             let sql = format!(
-                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _n = ?3 AND _seq = ?4",
+                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _t = ?3",
                 quote(stored),
                 quote(&table)
             );
@@ -332,8 +332,7 @@ impl Inner {
                     rusqlite::params![
                         row.0.as_bytes().to_vec(),
                         Vec::<u8>::new(),
-                        at.n,
-                        at.seq as i64
+                        at.t()
                     ],
                     |r| r.get(0),
                 )
