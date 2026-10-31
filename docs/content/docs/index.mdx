@@ -22,6 +22,8 @@ export const permissions = s.definePermissions(app, ({ policy, session }) => {
 });
 ```
 
+Use the type-safe client in your backend.
+
 ```ts title="server.ts"
 import { Hono } from "hono";
 import { createJazzSession } from "jazz-tools/backend";
@@ -36,12 +38,16 @@ const session = await createJazzSession({
 });
 const { client } = session.getSnapshot();
 
-// Runs as the signed-in user, with their permissions applied
-new Hono().post("/todos", async (c) => {
-  const db = await client!.forRequest(c.req.raw);
-  const { value: todo } = db.insert(app.todos, { title: (await c.req.json()).title, done: false });
-  return c.json(todo);
-});
+new Hono()
+  // Runs as the signed-in user: the query only returns their own todos
+  .get("/todos", async (c) => {
+    const db = await client!.forRequest(c.req.raw);
+    return c.json(await db.all(app.todos.where({ done: false })));
+  })
+  // Runs with backend authority and sees every todo (check admin access in your app first)
+  .get("/admin/todos", async (c) => {
+    return c.json(await client!.db.all(app.todos));
+  });
 ```
 
 ```ts title="client.ts"
