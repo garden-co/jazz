@@ -176,7 +176,7 @@ const features: {
       </>
     ),
     links: [
-      { label: "How sync works", href: "/docs/concepts/how-sync-works" },
+      { label: "How sync works", href: "/docs/how-jazz-works" },
       { label: "Durability tiers", href: "/docs/reference/durability-tiers" },
     ],
     diagram: <ConsistencyDiagram />,
@@ -242,7 +242,7 @@ const features: {
       { label: "Server setup", href: "/docs/setup/backend/trusted" },
       { label: "Auth providers", href: "/docs/recipes/auth/auth-provider-integration" },
       { label: "Permissions", href: "/docs/schemas/policies" },
-      { label: "How sync works", href: "/docs/concepts/how-sync-works" },
+      { label: "How sync works", href: "/docs/how-jazz-works" },
     ],
     diagram: <BackendDiagram />,
     caption: "What moves out of your code into Jazz",

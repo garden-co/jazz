@@ -1,0 +1,35 @@
+---
+title: Why Jazz
+description: "Why use a higher-level database, how Jazz compares, and what it changes for a team."
+---
+
+<Callout type="info">
+  Preview: this page is a rough outline for the server-first docs restructure. The bullets below are
+  what it will cover.
+</Callout>
+
+## For developers
+
+- Why use a higher-abstraction-level DB at all? Live queries, permissions and merges instead of an API layer you write and maintain
+- Serverless DBs and the tradeoff of early sharding
+- Unsharded Jazz is MIT and free; when you'd need sharding and what it costs
+- Server-first by default, local-first as an optimization where it pays off
+
+## Compared to
+
+- Postgres
+- Plain SQLite
+- Plain Durable Objects
+- Convex
+- Zero
+- Neon (sync)
+- TanStack DB
+- Each comparison carries a "last checked" date and only claims we can link to
+
+## For decision-makers
+
+- Custom code as a liability: less backend code to own
+- Fewer systems and moving parts
+- Runs in your own cloud: Vercel, Cloudflare, AWS, bare metal
+- What you operate yourself on each platform, plus a cost calculator
+- Licensing: MIT for unsharded Jazz, a license for sharded Jazz

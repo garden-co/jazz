@@ -1,8 +1,20 @@
 ---
-title: How Sync Works
-description: An overview of how Jazz syncs data between clients, covering query subscriptions, infrastructure tiers, offline behavior, and eventual consistency.
-reviewedAt: "b29b48d1a"
+title: How Jazz Works
+description: "The mental model: an authoritative server, live queries, and optional local replicas."
 ---
+
+<Callout type="info">
+  Preview: the outline below is still to be written; the sections after it are the old How Sync
+  Works page.
+</Callout>
+
+## In short
+
+- The server is the authority: it stores data, checks policies and confirms writes
+- Backends and clients subscribe to queries and get live updates
+- Writes merge by default; serializable transactions when you need them
+- A local replica in the client is an optional optimization (see [Local-first as a client optimization](/docs/recipes/local-first))
+- More detail: [How Sync Works](/docs/how-jazz-works)
 
 Traditional apps send queries to a remote server, which queries a database and returns data.
 

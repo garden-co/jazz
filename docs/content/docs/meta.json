@@ -2,8 +2,8 @@
   "title": "Jazz 2",
   "pages": [
     "index",
-    "evaluating",
-    "concepts",
+    "why-jazz",
+    "how-jazz-works",
     "---Setup---",
     "setup/run-locally",
     "setup/deployment",

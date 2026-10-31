@@ -56,8 +56,8 @@ db.subscribe(app.todos.where({ done: false }), (todos) => {
 
 <Cards>
   <Card title="Run locally" href="/docs/setup/run-locally" />
-  <Card title="Why Jazz" href="/docs/evaluating/why-jazz" />
-  <Card title="How Jazz works" href="/docs/concepts/how-jazz-works" />
+  <Card title="Why Jazz" href="/docs/why-jazz" />
+  <Card title="How Jazz works" href="/docs/how-jazz-works" />
 </Cards>
 
 ## What you'll learn, in order
@@ -69,8 +69,26 @@ db.subscribe(app.todos.where({ done: false }), (todos) => {
 - [Operating Jazz](/docs/operating/monitoring)&hairsp;—&hairsp;backups, upgrades, monitoring and scaling
 - [Tooling](/docs/tooling/cli-and-mcp)&hairsp;—&hairsp;CLI, MCP, inspector, agent skills and testing
 
-## Coming next on this page
+## What people build with Jazz
 
-- Usage scenarios, each linking to its path through the docs
-- An overview of recipes
-- Links to [examples](/docs/reference/examples), [Discord](https://discord.gg/RN9UKh52be) and [GitHub](https://github.com/garden-co/jazz) for help
+<Callout type="info">
+  Preview: rough sketches of each scenario; each will link to a short path through the docs.
+</Callout>
+
+- **A backend with live data.** Your API or server components read and write through Jazz instead of an ORM, with permissions checked per user and live queries pushed to the browser. Path: [Run locally](/docs/setup/run-locally) → [User-scoped backend](/docs/setup/backend/user-scoped) → [Policies](/docs/schemas/policies) → [Thin client](/docs/setup/web-client/thin-client).
+- **A collaborative app.** Shared lists, boards or documents that several people edit at once, with mergeable text and edit history. Path: [Mergeable text](/docs/writing/text) → [Shared access](/docs/recipes/access-control/shared-access) → [Edit metadata](/docs/reading/metadata).
+- **An app that works offline.** Field tools, note-taking or mobile apps that keep working without a connection. Path: start thin, then [go local-first](/docs/recipes/local-first) on the screens that need it, or use the [React Native client](/docs/setup/react-native).
+- **Agents and automations.** Background jobs and AI agents that read and write the same data as your users, attributed and permission-checked. Path: [Trusted backend](/docs/setup/backend/trusted) → [Sessions](/docs/setup/auth/sessions) → [CLI & MCP](/docs/tooling/cli-and-mcp).
+- **Drafts and review flows.** Edit a copy, compare it with the original, merge it back. Path: [Drafts & branches](/docs/recipes/drafts-and-branches).
+
+## Recipes
+
+- **Access control:** [user-owned data](/docs/recipes/access-control/user-owned-data), [shared access](/docs/recipes/access-control/shared-access), [invite links](/docs/recipes/access-control/invite-links), [group permissions](/docs/recipes/access-control/group-permissions)
+- **Auth providers:** [any JWT provider](/docs/recipes/auth/auth-provider-integration), [Better Auth](/docs/recipes/auth/better-auth-adapter)
+- **Data patterns:** [collaborative lists](/docs/recipes/data-patterns/real-time-collaborative-list), [collaborative text](/docs/recipes/data-patterns/collaborative-text-editing), [nested data](/docs/recipes/data-patterns/nested-data)
+- **Architecture:** [local-first as a client optimization](/docs/recipes/local-first), [drafts & branches](/docs/recipes/drafts-and-branches), [Effect](/docs/recipes/effect)
+
+## Examples and help
+
+- [Example apps](/docs/reference/examples), from a todo list to a multi-user music sequencer
+- Ask on [Discord](https://discord.gg/RN9UKh52be) or open an issue on [GitHub](https://github.com/garden-co/jazz)

@@ -105,6 +105,11 @@ const config = {
         permanent: false,
       },
       {
+        source: "/docs/concepts/how-sync-works",
+        destination: "/docs/how-jazz-works",
+        permanent: false,
+      },
+      {
         source: "/docs/concepts/local-first-data-model",
         destination: "/docs/recipes/local-first/local-first-data-model",
         permanent: false,

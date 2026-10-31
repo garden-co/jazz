@@ -8,7 +8,7 @@ Jazz embeds a database on each device and syncs to the server in the background.
 
 ## How Jazz stores data
 
-As covered in [How Sync Works](/docs/concepts/how-sync-works), traditional apps wait on a network
+As covered in [How Sync Works](/docs/how-jazz-works), traditional apps wait on a network
 round-trip for every read and write. Jazz eliminates that entirely by embedding a subset of the
 database on your users' devices.
 
@@ -109,7 +109,7 @@ enough row history to converge deterministically after peers reconnect.
 ## Conflict resolution
 
 When concurrent writes touch the same field of the same row, Core resolves the visible result
-[field by field against what each writer saw](/docs/concepts/how-sync-works#consistency-model): a
+[field by field against what each writer saw](/docs/how-jazz-works#consistency-model): a
 write replaces the values its writer had seen, and when two writers changed the same field from the
 same starting point, the [edit Core receives first wins](/docs/recipes/local-first/local-first-data-model#concurrent-edits).
 
@@ -119,7 +119,7 @@ combine concurrent edits to the same field: a counter adds them up, and a
 [text merge column](/docs/schemas/column-types#mergeable-text-columns) keeps both people's edits to
 different parts of the text. Only Core merges text; where both replaced the same words, the edit
 Core receives later wins that part
-([details](/docs/concepts/how-sync-works#text-merges)). Even row versions that lose out in the current visible result remain in row history, so
+([details](/docs/how-jazz-works#text-merges)). Even row versions that lose out in the current visible result remain in row history, so
 no local-first reconciliation information is discarded.
 
 <Callout type="warn" title="Beware of unexpected results">
