@@ -299,11 +299,17 @@ fn one_keystroke_sends_only_fate_and_settled() {
                 ..
             } if as_written.len() == 1 => "fate+as_written",
             SyncMessage::Settled { .. } => "settled",
+            SyncMessage::ConnectionSettled { .. } => "connection",
             _ => "other",
         })
         .collect();
     assert_eq!(kinds[0], "fate+as_written", "{kinds:?}");
-    assert!(kinds[1..].iter().all(|k| *k == "settled"), "{kinds:?}");
+    // Then the reads' settles, and the connection's position after them.
+    assert_eq!(kinds.last(), Some(&"connection"), "{kinds:?}");
+    assert!(
+        kinds[1..kinds.len() - 1].iter().all(|k| *k == "settled"),
+        "{kinds:?}"
+    );
     let typed = snapshot(&client);
     assert_eq!(typed, snapshot(&server), "the replica holds the version");
     assert_ne!(typed, created);
