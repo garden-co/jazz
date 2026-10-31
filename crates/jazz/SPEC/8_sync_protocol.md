@@ -472,8 +472,9 @@ reads the current state, as it always does against an unsharded authority,
 whose settles and connection position move together. So a result never shows
 part of a commit its read is not settled through, two results over different
 upstream reads may show one commit at different moments, and a writer always
-sees its own writes. Known limits: a branch view's read and a session's read a
-relay serves read the current state.
+sees its own writes. A relay serves its sessions' results as its store holds
+them and leaves the cut to the session, which reads by the positions the relay
+passes on (§8.13). Known limit: a branch view's read reads the current state.
 
 A replica treats a read as settled only once its connected upstream confirmed
 it with `Settled`; while the upstream is unanswered, offline or failing the
@@ -820,7 +821,13 @@ whose host says it has no server is its sessions' last word: its `Fate`,
 `Settled` and `ConnectionSettled` positions name its own node as their
 sequencer, since they count its positions rather than the authority's. A
 relay's `ConnectionSettled` to its sessions names the position it knows its
-upstream through (`served_through`).
+upstream through (`served_through`). A relayed result's `Settled` names its
+upstream read's own settle, when that is past `served_through`, so the session
+reads each result as of its own upstream read (§8.4). The relay passes each
+move on: a later settle of the upstream read, with no change to the result's
+rows here (they may have arrived through another read), goes out as a
+`Settled` without members, and a move of `served_through` as a
+`ConnectionSettled` to every session it has sent one before.
 
 ## Open Questions
 
