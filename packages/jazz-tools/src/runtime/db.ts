@@ -3412,7 +3412,11 @@ export class Db {
     // A newly attached browser-worker follower learns the namespace-wide
     // connection state during its init handshake. The core read gate needs
     // that state before it decides whether the first load may wait.
-    const mayWaitForServer = (options?.firstLoadRemoteWaitMs ?? 0) > 0;
+    const mayWaitForServer =
+      resolveEffectiveQueryExecutionOptions(this.config, {
+        tier: options?.tier,
+        firstLoadRemoteWaitMs: options?.firstLoadRemoteWaitMs,
+      }).firstLoadRemoteWaitMs !== undefined;
     const initialOfflineState = mayWaitForServer
       ? this.connection.initialExplicitOfflineState()
       : null;
