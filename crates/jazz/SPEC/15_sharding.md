@@ -18,6 +18,10 @@ Invariant digest:
 - `INV-SHARD-12`: A multi-shard subscription result MUST NOT be marked complete unless completeness evidence has been obtained for every shard contributing to the result.
 - `INV-SHARD-13`: Cross-shard permission closures MUST be obtained through shard-core subscriptions or an explicitly equivalent mechanism before a shard-core assigns a fate that depends on remote-shard policy data.
 - `INV-SHARD-14`: Rebalancing MUST NOT flip partition ownership in the catalogue until the destination shard-core has the partition history needed to serve that ownership and the protocol has defined treatment of in-flight fates/subscriptions.
+- `INV-SHARD-15`: A store opened without a clock MUST take no shard role: its positions count up by one, and observing, holding and fixing positions MUST be refused as not supported (§15.3).
+- `INV-SHARD-16`: A shard's commit positions MUST be hybrid-clock timestamps: each above every position it handed out or observed and no earlier than its clock; a position observed more than `HLC_MAX_OFFSET_MS` ahead of its clock MUST be refused (§15.3).
+- `INV-SHARD-17`: While a hold stands, the position a shard serves as settled MUST stay below its lowest hold (§15.3).
+- `INV-SHARD-18`: A fixed cross-shard part MUST land at its fixed position, which is at or above its hold; a part with a row written above that position MUST be refused, not landed under the newer version (§15.3).
 
 ## Details
 
@@ -75,6 +79,42 @@ shared coordination surface small:
 The former sharding sketch's rendezvous/top-2 replication and two-level
 subscription ideas are treated as candidate mechanisms for the same open design.
 They do not supersede the authority and completeness questions below.
+
+### 15.3 The shard role (engine API)
+
+The jazz engine offers the calls a sharded deployment's gateway makes of the
+store serving one shard, as an API with no wire of its own
+(`jazz::db::shard`, `Db::shard()`). It is the engine side of the per-query
+visibility design (SPEC 8 §8.4): the gateway, its protocol to the shards and
+the shard ownership above are outside this repository and stay exploratory
+(`INV-SHARD-1`).
+
+- **Clock.** A store opened with `DbConfig::with_clock` takes the shard role.
+  Its commit positions are hybrid-clock timestamps: the wall clock's ms since
+  `HLC_EPOCH_MS` above `HLC_COUNTER_BITS` bits of counter, so they fit a JS
+  number and the positions of every shard compare by time. Each position is
+  above every one the store handed out or observed, and no earlier than its
+  clock (`INV-SHARD-16`). A store opened without a clock counts positions up
+  by one and refuses every shard call below (`INV-SHARD-15`).
+- **Observe.** `observe(position)` closes the store at `position`: nothing it
+  commits later lands at or below it. A gateway closes a quiet shard so its
+  settles reach a position another shard named. A position more than
+  `HLC_MAX_OFFSET_MS` ahead of the store's clock is refused: that peer's clock
+  (or claim) cannot be trusted.
+- **Hold, fix, release.** A cross-shard commit lands at one position on every
+  shard it writes. The gateway `hold`s a position for the part on each shard
+  (`CommitRef`, the writer's node and transaction number), then `fix`es each
+  part at the highest hold before the part arrives. The part then lands at
+  its fixed position, under commits the shard accepted since its hold
+  (`INV-SHARD-18`). While a hold stands, `served_through` (what the store
+  serves its sessions as settled) stays below `lowest_hold` (`INV-SHARD-17`),
+  so no session is told it is settled past a position a part may still take.
+  `release` drops a refused commit's hold. Holding a part again returns its
+  standing hold, a part is fixed only once it is held, and a resent part that
+  already landed holds nothing.
+- **Known limit.** A hold does not block other writers of the part's rows yet:
+  a part whose row the shard wrote above its fixed position is refused as not
+  supported, instead of landing below a newer version of its row.
 
 ## Open Questions
 

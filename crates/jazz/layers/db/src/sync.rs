@@ -5699,10 +5699,14 @@ impl Inner {
     /// relay tells them the authority's seq it knows (its own local seqs
     /// number nothing the authority can check), so a session's snapshot
     /// is one the authority validates against as it is.
-    fn served_through(&self) -> u64 {
+    pub(crate) fn served_through(&self) -> u64 {
         match &self.client {
             Some(client) if self.relays_upstream() => client.known,
-            _ => self.seq,
+            // A shard's held position may still take a cross-shard part.
+            _ => match self.shard.lowest_hold() {
+                Some(held) => self.seq.min(held - 1),
+                None => self.seq,
+            },
         }
     }
 
@@ -11112,6 +11116,14 @@ impl Db {
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
                 let resent = known.is_some();
+                // A cross-shard part that already landed holds nothing (its
+                // gateway may hold it again for the resend).
+                if resent {
+                    self.inner
+                        .borrow_mut()
+                        .shard
+                        .landed(crate::db::shard::CommitRef { node, tx });
+                }
                 // A commit written under a version this server has not
                 // deployed is refused at once, loudly: the app that wrote
                 // it was released ahead of its schema (INV-SYNC-52).
@@ -11785,9 +11797,38 @@ impl Db {
             previous
         };
         let merged: HashSet<RowKey>;
-        let (seq, mark) = {
+        let (seq, mark, prior) = {
             let mut inner = self.inner();
-            let seq = inner.seq + 1;
+            // A cross-shard part lands where all its parts do: at the
+            // position its gateway fixed, under commits this shard accepted
+            // since its hold. None of those may have written its rows.
+            let part = crate::db::shard::CommitRef {
+                node: id.0,
+                tx: id.1,
+            };
+            let fixed = inner.shard.fixed(part);
+            let seq = fixed.unwrap_or_else(|| inner.next_seq());
+            let prior = inner.seq;
+            if let Some(at) = fixed {
+                for op in &ops {
+                    let Some(row) = op.row() else { continue };
+                    let newest = inner
+                        .schema
+                        .stored_table(op.table())
+                        .and_then(|table| inner.newest_seq(table, row))
+                        .map_err(|e| (e, Vec::new()))?;
+                    if newest.is_some_and(|newest| newest.seq > at) {
+                        return Err((
+                            Error::new(
+                                ErrorCode::Protocol,
+                                "not supported yet: a row of this cross-shard part was written \
+                                 above its fixed position (a hold does not block other writers)",
+                            ),
+                            Vec::new(),
+                        ));
+                    }
+                }
+            }
             begin_savepoint(&inner.conn, "upload").map_err(|e| (e, Vec::new()))?;
             let mark = inner.changed.borrow().len();
             // The unit's write checks run at its end, grounded (SPEC 7).
@@ -11831,8 +11872,9 @@ impl Db {
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
                 return Err((error, Vec::new()));
             }
-            inner.seq = seq;
-            (seq, mark)
+            inner.seq = inner.seq.max(seq);
+            inner.shard.landed(part);
+            (seq, mark, prior)
         };
         // The relay's own upload record and the rows the sender hears about
         // are read before the commit is released, so a storage error
@@ -11882,7 +11924,7 @@ impl Db {
                 inner.as_sent.borrow_mut().clear();
                 inner.changed.borrow_mut().truncate(mark);
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
-                inner.seq = seq - 1;
+                inner.seq = prior;
                 Err((error, Vec::new()))
             }
         }
