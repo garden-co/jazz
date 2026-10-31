@@ -8,9 +8,10 @@ description: "The mental model: SQLite underneath, what Jazz adds on top, and ho
   moved to [How Sync Works](/docs/recipes/local-first/how-sync-works).
 </Callout>
 
-## SQLite underneath
+## SQLite and S3 underneath
 
 - Each Jazz server stores its data in plain SQLite: tables, rows, indexes
+- Large values (files, blobs, streams) live in S3-compatible object storage
 - Works on local disk, in Vercel sandboxes and on Cloudflare Durable Objects (Turso is not supported yet)
 - Why SQLite: fast, embeddable, simple to back up and inspect
 
@@ -21,7 +22,8 @@ description: "The mental model: SQLite underneath, what Jazz adds on top, and ho
 - Live queries: results stay up to date as rows change
 - Edit metadata (`$createdBy`, `$updatedAt`, …) and row history
 - Merging writes by default, serializable transactions when you need them
-- Drafts and branches, mergeable text, files and streams
+- Drafts and branches, mergeable text
+- Mutable blobs and streams on S3: edit, append to and stream large values like any other column, with the same permissions, live updates and history as rows
 
 ## How a backend talks to Jazz
 
