@@ -163,10 +163,15 @@ pub(super) async fn link_for_admin(
     jazz::ids::AuthorSubject::authenticated(&request.to.issuer, &request.to.subject)
         .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_external_identity"))?;
     let registry = owner(&state)?;
-    registry
-        .login_or_register(request.from.clone())
-        .await
-        .map_err(failure)?;
+    // A local-first guest is founded from its own key proof, never registered
+    // here; it must already have its account. Any other `from` is an app
+    // identity the backend vouches for, registered on first use.
+    if request.from.issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER {
+        registry.login(request.from.clone()).await
+    } else {
+        registry.login_or_register(request.from.clone()).await
+    }
+    .map_err(failure)?;
     let now = state.auth_config.clock.now_seconds();
     let expires_at = now
         .checked_add(300)

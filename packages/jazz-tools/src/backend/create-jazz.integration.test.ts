@@ -142,6 +142,27 @@ describe("createJazz", () => {
       forged.addEventListener("close", (event) => resolve(event.code)),
     );
     expect(closed).toBe(1008);
+    // Browser worker transports send `jwt_token: null` next to the session the
+    // backend vouches for: that is no token, and the socket is admitted.
+    const fromWorker = new NodeWebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
+      headers: { "x-test-user": "alice" },
+    } as never);
+    fromWorker.addEventListener("open", () =>
+      fromWorker.send(
+        JSON.stringify({
+          peer_identity: "worker",
+          jwt_token: null,
+          backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
+          auth: { jwt_token: null, backend_session: { user_id: "alice" } },
+        }),
+      ),
+    );
+    const answered = await new Promise<string>((resolve) => {
+      fromWorker.addEventListener("message", () => resolve("message"));
+      fromWorker.addEventListener("close", (event) => resolve(`closed ${event.code}`));
+    });
+    fromWorker.close();
+    expect(answered).toBe("message");
     const row = await alice.db
       .insert(app.todos, { title: "from alice", owner: alice.session!.user!.account })
       .wait({ tier: "global" });
@@ -184,6 +205,67 @@ describe("createJazz", () => {
     const seen = await alice.db.all(app.todos.where({ id: row.id }));
     expect(seen.map((todo) => todo.title)).toEqual(["made as a guest"]);
   }, 60_000);
+
+  it.each([
+    ["memory", "sockets"],
+    ["sqlite", "the HTTP stream"],
+  ] as const)(
+    "keeps a local-first guest's account when it signs up (%s store, %s)",
+    async (kind, transport) => {
+      const appId = randomUUID();
+      const dir = await mkdtemp(join(tmpdir(), "jazz-link-"));
+      cleanups.push(() => rm(dir, { recursive: true, force: true }));
+      const store = kind === "memory" ? memory() : sqlite({ path: dir });
+      const jazz = await createJazz({ appId, app, permissions, store, authenticate });
+      cleanups.push(() => jazz.close());
+      const origin = await serve(jazz, { sockets: transport === "sockets" });
+      if (transport !== "sockets") {
+        // A page on this origin: the client treats /jazz as same-origin.
+        const previous = (globalThis as { location?: unknown }).location;
+        (globalThis as { location?: unknown }).location = {
+          host: new URL(origin).host,
+          href: `${origin}/`,
+        };
+        cleanups.push(async () => {
+          (globalThis as { location?: unknown }).location = previous;
+        });
+      }
+
+      const session = await createJazzSession({
+        appId,
+        app,
+        permissions,
+        serverUrl: `${origin}/jazz`,
+        driver: { type: "memory" },
+        initial: "local-first",
+      });
+      cleanups.push(() => session.close());
+      const guest = session.getSnapshot().client!;
+      const account = guest.session!.user!.account;
+      const row = await guest.db
+        .insert(app.todos, { title: "made as a guest", owner: account })
+        .wait({ tier: "global" });
+
+      // The app's sign-up created "alice"; the backend now names her.
+      signInAs(origin, "alice");
+      await session.linkWithBackend();
+      const alice = session.getSnapshot().client!;
+      expect(alice.session!.user!.account).toBe(account);
+      expect(alice.session!.user!.identity).toEqual({
+        issuer: `jazz:app:${appId}`,
+        subject: "alice",
+      });
+      const seen = await alice.db.all(app.todos.where({ id: row.id }));
+      expect(seen.map((todo) => todo.title)).toEqual(["made as a guest"]);
+      // The linked account syncs as the signed-in user.
+      const after = await alice.db
+        .insert(app.todos, { title: "made after signing up", owner: account })
+        .wait({ tier: "global" });
+      const stored = await jazz.db.all(app.todos.where({ id: after.id }));
+      expect(stored.map((todo) => todo.title)).toEqual(["made after signing up"]);
+    },
+    60_000,
+  );
 
   it("syncs over the HTTP stream when the host can't upgrade sockets", async () => {
     const appId = randomUUID();
