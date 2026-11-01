@@ -95,6 +95,25 @@ exact-result assertions, and assigned organization groups as a function of
 table size. These corrections deliberately establish a **new baseline**;
 do not compare its old milliseconds directly with revision 1.
 
+## Contention (`benches/contention.rs`, nightly)
+
+Two bands share one durable server. A member of band B opens their newest
+pages (`band_book_open_my_pages_*`) or checks one off
+(`band_book_check_off_page_*`, timed until the server acknowledges it). Each
+runs idle and `during_workspace_open`, while a member of band A reopens its
+5,000-page workspace on two devices back to back. Opening a workspace loads
+the app's sidebar: every page, oldest first, with no page bound, under the
+own-pages OR workspace-member policy. All clients are ordinary JWT users over
+WebSockets, each on its own thread. The fixture is in
+[src/contention.rs](src/contention.rs); the server and client threads come from
+`jazz_testkit::contention`.
+
+The difference between the two arms is how long one large read holds up
+another tenant's cheap request. On a 4-core development VM on 2026-10-28, each
+workspace open took about 255 ms, and both requests went from about 2 to 3 ms
+idle to about 250 ms during the opens. With a 20,000-page workspace on four
+devices, they took about 3.2 s.
+
 ## Run
 
 ```sh
@@ -102,6 +121,8 @@ cargo test -p jazz-example-band-book-benchmark --test pages
 cargo check -p jazz-example-band-book-benchmark --all-targets
 cargo bench --profile perf -p jazz-example-band-book-benchmark --features jazz-benchmark-guard/mimalloc --bench walltime
 cargo bench --profile perf -p jazz-example-band-book-benchmark --features jazz-benchmark-guard/mimalloc --bench nightly
+cargo test -p jazz-example-band-book-benchmark --test contention
+cargo bench --profile perf -p jazz-example-band-book-benchmark --features jazz-benchmark-guard/mimalloc --bench contention
 cargo run --profile perf -p jazz-example-band-book-benchmark --features jazz-benchmark-guard/mimalloc --bin band-book-policy-read-receipt -- 10000
 cargo run --profile perf -p jazz-example-band-book-benchmark --features jazz-benchmark-guard/mimalloc --bin band-book-policy-read-receipt -- 100000 OwnerOrOrg single
 cargo run --profile perf -p jazz-example-band-book-benchmark --features jazz-benchmark-guard/mimalloc --bin band-book-policy-read-receipt -- 100000 OwnerOrOrg composite 1000

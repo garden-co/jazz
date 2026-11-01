@@ -63,3 +63,45 @@ export const bandBookBenchmarks: BenchmarkMetadata[] = [
     source,
   },
 ];
+
+// Contention: another band opening its big workspace on the same server.
+const contention = "examples/band-book/benchmarks/benches/contention.rs";
+for (const [request, title, unit, timed] of [
+  [
+    "open_my_pages",
+    "open my pages",
+    "page lists/s",
+    "One remote read of your newest 50 pages, from request to verified rows",
+  ],
+  [
+    "check_off_page",
+    "check off a page",
+    "check-offs/s",
+    "One page update, from the call until the server acknowledges it (GlobalServer)",
+  ],
+] as const) {
+  for (const [arm, during] of [
+    ["idle", "with the server otherwise idle"],
+    ["during_workspace_open", "while another band's member opens their big workspace"],
+  ] as const) {
+    bandBookBenchmarks.push({
+      name: `band_book_${request}_${arm}`,
+      title: `BandBook contention · ${title}, ${arm === "idle" ? "idle" : "during a workspace open"}`,
+      description: `A member of one band requests over a WebSocket to one durable server ${during}. Opening the workspace loads its sidebar: every page, oldest first, unbounded, under the owner OR workspace-member policy; two devices reopen it back to back. Compare with the other arm: the difference is how long one large read holds up another tenant's cheap request.`,
+      fixture:
+        "One durable SQLite server: band A's workspace has 5,000 pages, band B's 200, interleaved in one table.",
+      storage: "Durable SQLite server over WebSockets; each client has its own thread",
+      includes: [timed],
+      excludes: [
+        "Seeding, server start, client sign-in and warm-up",
+        "The browsing clients' work, except as it delays the server",
+      ],
+      work: {
+        count: 1,
+        unit,
+        explanation: "One request per iteration; workspace opens are not counted.",
+      },
+      source: contention,
+    });
+  }
+}
