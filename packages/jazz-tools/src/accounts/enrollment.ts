@@ -10,7 +10,6 @@ import { isReservedJazzIssuer, parseJwtPayload } from "../runtime/client-session
 import { isPortableAuthorComponent } from "../runtime/author-id.js";
 import {
   AccountManager,
-  AccountOperationSuperseded,
   type AccountHandle,
   type AccountIdentity,
   type AccountSelectionDurability,

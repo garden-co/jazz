@@ -50,7 +50,7 @@ it("uses real Better Auth atom hydration under StrictMode and releases only the 
   const auth = createAuthClient({
     baseURL: "http://localhost:3000",
     fetchOptions: {
-      customFetchImpl: async (request) =>
+      customFetchImpl: async () =>
         new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json" } }),
     },
   });
