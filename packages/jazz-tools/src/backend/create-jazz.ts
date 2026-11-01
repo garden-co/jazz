@@ -12,6 +12,7 @@ import type { Duplex } from "node:stream";
 import { SignJWT } from "jose";
 import { JazzCore, type JazzCoreSocket, type JazzCoreSocketEvent } from "jazz-napi";
 import { registerInProcessTransport } from "../runtime/in-process-transport.js";
+import { accountAppId } from "../accounts/local-first.js";
 import type {
   BrowserWebSocket,
   WebSocketConstructor,
@@ -113,6 +114,14 @@ export interface Jazz {
   readonly db: Db;
   /** The database as the request's user, judged by your permissions. */
   forRequest(request: Request): Promise<Db>;
+  /**
+   * Make `to` another identity of the account `from` already uses: after
+   * this, `authenticate` returning `to` opens that same account and its data.
+   * Call it once your own auth has verified both, as when an anonymous or
+   * local-first user signs up, or a user adds a second sign-in method. `to`
+   * must not have its own account yet. Returns the account id.
+   */
+  linkIdentity(link: { from: string; to: string }): Promise<{ account: string }>;
   /** Close every session, the backend database and the core. */
   close(): Promise<void>;
 }
@@ -462,6 +471,40 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     return { bytes: new TextEncoder().encode(JSON.stringify(rewritten)), expiresAt };
   }
 
+  /** One account request to the core, made as `userId`. */
+  async function accountRequest(
+    userId: string,
+    operation: string,
+    body?: unknown,
+  ): Promise<Record<string, unknown>> {
+    const { token } = await mintToken({ userId });
+    const response = await core.handle(
+      "POST",
+      `/apps/${encodeURIComponent(accountAppId(options.appId))}/accounts/${operation}`,
+      [
+        ["authorization", `Bearer ${token}`],
+        ["content-type", "application/json"],
+      ],
+      Buffer.from(body === undefined ? "" : JSON.stringify(body)),
+    );
+    const text = Buffer.from(response.body).toString("utf8");
+    if (response.status !== 200) {
+      throw new Error(`Jazz account ${operation} failed (${response.status}): ${text}`);
+    }
+    return JSON.parse(text) as Record<string, unknown>;
+  }
+
+  async function linkIdentity(link: { from: string; to: string }): Promise<{ account: string }> {
+    if (link.from === link.to) throw new Error("linkIdentity: from and to are the same identity");
+    // `from` gets its account first if it never signed in.
+    await accountRequest(link.from, "login-or-register");
+    const intent = await accountRequest(link.from, "links/request", {
+      identity: { issuer, subject: link.to },
+    });
+    const linked = await accountRequest(link.to, "links/accept", { nonce: intent.nonce });
+    return { account: String(linked.account) };
+  }
+
   /**
    * The account sign-in a browser makes with only the app's cookie: the
    * backend's `authenticate` names the user, and the core resolves (or
@@ -726,6 +769,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     get db() {
       return backend.db;
     },
+    linkIdentity,
     async forRequest(request) {
       const user = await authenticate(request);
       if (!user) throw new Error("forRequest: the request has no signed-in user");

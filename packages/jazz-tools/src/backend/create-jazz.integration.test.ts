@@ -156,6 +156,29 @@ describe("createJazz", () => {
     expect(requestPaths.some((path) => path.includes("/stream"))).toBe(false);
   }, 60_000);
 
+  it("links a second identity to the same account", async () => {
+    const appId = randomUUID();
+    const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+
+    const guest = await userSession(appId, origin, "guest-device-key");
+    const account = guest.session!.user!.account;
+    const row = await guest.db
+      .insert(app.todos, { title: "made as a guest", owner: account })
+      .wait({ tier: "global" });
+
+    // The app's sign-up verified both identities, then links them.
+    await expect(jazz.linkIdentity({ from: "guest-device-key", to: "alice" })).resolves.toEqual({
+      account,
+    });
+
+    const alice = await userSession(appId, origin, "alice");
+    expect(alice.session!.user!.account).toBe(account);
+    const seen = await alice.db.all(app.todos.where({ id: row.id }));
+    expect(seen.map((todo) => todo.title)).toEqual(["made as a guest"]);
+  }, 60_000);
+
   it("syncs over the HTTP stream when the host can't upgrade sockets", async () => {
     const appId = randomUUID();
     const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });
