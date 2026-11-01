@@ -9,18 +9,31 @@ import { Heading, Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { useAll } from "jazz-tools/react";
 import { useState } from "react";
-import { app } from "@/schema";
+import { app, type Category, type Product, type Stock } from "@/schema";
+import {
+  snapshotProducts,
+  UNTIL_SERVER_ANSWERS,
+  useCatalogueSnapshot,
+  type CatalogueSnapshot,
+} from "@/src/catalogue/snapshot";
 import { ProductCard } from "./ProductCard";
 import { Page } from "./Page";
 
 /**
  * The product grid. Search is a live Jazz query: every keystroke narrows the
  * subscription, and it runs against the local copy of the catalogue, so it
- * also works offline.
+ * also works offline. Until each live query has delivered (a first visit
+ * syncs the catalogue), the grid shows the server's snapshot instead of a
+ * skeleton; after that, the live result alone (see UNTIL_SERVER_ANSWERS).
  */
 export function Catalogue({ categorySlug }: { categorySlug?: string }) {
+  const snapshot = useCatalogueSnapshot();
   const [search, setSearch] = useState("");
-  const { data: categories } = useAll(app.categories.orderBy("position", "asc"));
+  const { data: liveCategories } = useAll(
+    app.categories.orderBy("position", "asc"),
+    UNTIL_SERVER_ANSWERS,
+  );
+  const categories = liveCategories ?? snapshot?.categories;
   const category = categorySlug ? categories?.find((c) => c.slug === categorySlug) : undefined;
   const term = search.trim().toLowerCase();
 
@@ -28,13 +41,77 @@ export function Catalogue({ categorySlug }: { categorySlug?: string }) {
   if (category) query = query.where({ categoryId: category.id });
   if (term) query = query.where({ searchText: { contains: term } });
   const waitingForCategory = categorySlug !== undefined && !category;
-  const { data: products } = useAll(waitingForCategory ? undefined : query);
+  const { data: liveProducts } = useAll(
+    waitingForCategory ? undefined : query,
+    UNTIL_SERVER_ANSWERS,
+  );
+  const products =
+    liveProducts ??
+    (snapshot && !waitingForCategory
+      ? snapshotProducts(snapshot, { categoryId: category?.id, term })
+      : undefined);
   // Stock for the products on screen only, not the whole table.
   const shownIds = products?.map((product) => product.id) ?? [];
-  const { data: stock = [] } = useAll(
+  const { data: liveStock } = useAll(
     shownIds.length ? app.stock.where({ productId: { in: shownIds } }) : undefined,
+    UNTIL_SERVER_ANSWERS,
   );
+  const stock = liveStock ?? snapshot?.stock ?? [];
 
+  return (
+    <CatalogueView
+      categorySlug={categorySlug}
+      category={category}
+      products={products}
+      stock={stock}
+      search={search}
+      onSearch={setSearch}
+    />
+  );
+}
+
+/**
+ * The server-rendered catalogue, shown while the shopper's Jazz client opens.
+ * Search waits for the live catalogue, so nothing typed is lost.
+ */
+export function SnapshotCatalogue({
+  snapshot,
+  categorySlug,
+}: {
+  snapshot: CatalogueSnapshot;
+  categorySlug?: string;
+}) {
+  const category = categorySlug
+    ? snapshot.categories.find((c) => c.slug === categorySlug)
+    : undefined;
+  return (
+    <CatalogueView
+      categorySlug={categorySlug}
+      category={category}
+      products={snapshotProducts(snapshot, { categoryId: category?.id })}
+      stock={snapshot.stock}
+      search=""
+    />
+  );
+}
+
+function CatalogueView({
+  categorySlug,
+  category,
+  products,
+  stock,
+  search,
+  onSearch,
+}: {
+  categorySlug?: string;
+  category?: Category;
+  products?: Product[];
+  stock: Stock[];
+  search: string;
+  /** Without it the search box is shown disabled. */
+  onSearch?: (search: string) => void;
+}) {
+  const term = search.trim();
   const title = category?.name ?? (categorySlug ? "" : "All products");
   return (
     <Page>
@@ -51,7 +128,8 @@ export function Catalogue({ categorySlug }: { categorySlug?: string }) {
           isLabelHidden
           placeholder={category ? `Search ${category.name.toLowerCase()}` : "Search the store"}
           value={search}
-          onChange={setSearch}
+          onChange={onSearch ?? (() => {})}
+          isDisabled={!onSearch}
           startIcon={<Icon icon="search" size="sm" />}
           hasClear
           size="lg"
@@ -64,7 +142,7 @@ export function Catalogue({ categorySlug }: { categorySlug?: string }) {
           </Grid>
         ) : products.length === 0 ? (
           <EmptyState
-            title={term ? `Nothing matches "${search.trim()}"` : "No products yet"}
+            title={term ? `Nothing matches "${term}"` : "No products yet"}
             description={
               term
                 ? "Try a shorter word, or search all products."
