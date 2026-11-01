@@ -1,0 +1,96 @@
+---
+title: Backend
+description: "Run Jazz in your backend: one session per process, backend authority for system work, and user-scoped queries for requests."
+---
+
+<Callout type="info">
+  Stub for discussion. It replaces the TypeScript Server tutorial and will absorb Trusted Backend
+  and User-Scoped Backend. Every section gets the same three tabs.
+</Callout>
+
+## Context setup
+
+- One `createJazzSession` per server process, created at startup and shared by all requests
+- Configured once: `appId`, `serverUrl`, your `app` schema and `permissions`, and the backend secret
+- Optional: `jwksUrl` or `jwtPublicKey` for your auth provider's tokens (see [Auth](/docs/setup/auth))
+- Where the secret and server URL come from in each environment (env vars, Vercel, Cloudflare)
+
+<Tabs groupId="backend-framework" items={["Next.js", "Vite", "Effect"]} persist updateAnchor>
+  <Tab value="Next.js">
+    ```ts title="lib/jazz.ts"
+    import { createJazzSession } from "jazz-tools/backend";
+    import { app, permissions } from "@/schema";
+
+    // Module scope: one session per server process, reused across route handlers
+    export const session = await createJazzSession({
+      appId: process.env.JAZZ_APP_ID!,
+      serverUrl: process.env.JAZZ_SERVER_URL!,
+      app,
+      permissions,
+      initial: { backendSecret: process.env.JAZZ_BACKEND_SECRET! },
+    });
+    ```
+
+  </Tab>
+  <Tab value="Vite">
+    TODO: a Vite app with its API server (Hono) next to it, sharing `schema.ts`.
+
+    <include cwd lang="ts" meta='title="server/index.ts"'>
+      ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-setup-ts
+    </include>
+
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="src/server.ts"'>
+      ../examples/docs/todo-effect/src/server.ts#quickstart-server-setup-effect
+    </include>
+  </Tab>
+</Tabs>
+
+## Trusted backend use
+
+- `client.db` acts with backend authority: it sees and writes everything, so check access in your own code first
+- For system work: jobs, webhooks, migrations, admin routes
+- `withAttribution(account)` keeps backend authority but records the user as the author
+- Short example per tab: an admin route and a webhook that writes a row
+
+## User-scoped use
+
+- `await client.forRequest(req)` verifies the caller's token and returns a database with that user's policies and authorship
+- The default for anything a user triggers: route handlers, server actions, server components
+- Concurrent requests stay isolated; never switch the shared session to a user
+- Short example per tab: a GET route with a query and a POST route that writes
+
+## Edge-style Wasm setup
+
+Some runtimes (like Cloudflare Workers) don't load Jazz the same way a browser does. In those cases, provide the Wasm module or bytes directly.
+
+<include cwd lang="ts" meta='title="worker.ts"'>
+  ../examples/cloudflare-worker-runtime-ts/src/docs-snippets.ts#edge-wasm-module
+</include>
+
+If your platform hands you raw bytes instead of a compiled module, use `runtimeSources.wasmSource`:
+
+```ts title="worker.ts"
+import { createDb, type AccountHandle } from "jazz-tools";
+
+// The request's account manager prepared this handle before context creation.
+export function openRequestDb(account: AccountHandle, wasmBytes: Uint8Array) {
+  return createDb({
+    appId: "my-app",
+    account,
+    runtimeSources: { wasmSource: wasmBytes },
+  });
+}
+```
+
+See the [Cloudflare Wrangler example](https://github.com/garden-co/jazz/tree/main/examples/cloudflare-worker-runtime-ts) for a complete `workerd` setup.
+
+## How it fits with the rest
+
+- **Auth:** which tokens `forRequest` accepts and how to link accounts. See [Auth](/docs/setup/auth).
+- **Permissions:** user-scoped queries run your [policies](/docs/schemas/policies); backend authority skips them.
+- **Reads and writes:** the same query and write API as clients. See [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data), including when a write counts as durable.
+- **Clients:** browsers and apps can talk to the same Jazz server directly, under the same policies. See [Browser](/docs/setup/web-client).
+- **Deployment:** where the backend and the Jazz server run. See [Deployment](/docs/setup/deployment).
+- **Testing:** permission tests against a local server. See [Testing](/docs/tooling/testing).

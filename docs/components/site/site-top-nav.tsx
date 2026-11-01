@@ -16,7 +16,7 @@ import { SearchField, SearchIconButton, SiteSearch } from "./site-search";
 
 function BrandIcon({ path }: { path: string }) {
   return (
-    <svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+    <svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
       <path d={path} />
     </svg>
   );
@@ -37,7 +37,9 @@ function ThemeSwitch() {
   return (
     <SegmentedControl
       label="Colour theme"
-      size="lg"
+      size="md"
+      // Subtle next to the social links: no filled track behind the options.
+      style={{ backgroundColor: "transparent" }}
       value={mounted ? (theme ?? "system") : "system"}
       onChange={setTheme}
     >
@@ -64,11 +66,23 @@ const SOCIAL = [
   { label: "Jazz on X", href: "https://x.com/jazz_tools", icon: siX.path },
 ];
 
-const LINKS = [
+const START_LINKS = [
   { label: "Examples & Benches", href: "/examples" },
-  { label: "Blog", href: "/blog" },
-  { label: "Docs", href: "/docs" },
+  { label: "Documentation", href: "/docs" },
 ];
+const END_LINKS = [{ label: "Blog", href: "/blog" }];
+
+function NavLink({ label, href, pathname }: { label: string; href: string; pathname: string }) {
+  return (
+    <TopNavItem
+      label={label}
+      href={href}
+      // Labels stay on one line; the bar collapses search instead.
+      className="whitespace-nowrap"
+      isSelected={pathname === href || pathname.startsWith(`${href}/`)}
+    />
+  );
+}
 
 /** The jazz.tools header shared by the homepage, blog and docs. */
 export function SiteTopNav() {
@@ -95,40 +109,28 @@ export function SiteTopNav() {
         }
         startContent={
           <>
-            {LINKS.map((link) => (
-              <TopNavItem
-                key={link.href}
-                label={link.label}
-                href={link.href}
-                // Labels stay on one line; the bar collapses search instead.
-                className="whitespace-nowrap"
-                isSelected={pathname === link.href || pathname.startsWith(`${link.href}/`)}
-              />
+            {START_LINKS.map((link) => (
+              <NavLink key={link.href} {...link} pathname={pathname} />
             ))}
-            <TopNavItem
-              label="Dashboard"
-              href="https://v2.dashboard.jazz.tools"
-              className="whitespace-nowrap"
-            />
+          </>
+        }
+        centerContent={
+          <>
+            {/* Below 1280px the centred field would collide with the links,
+              so search collapses to an icon. */}
+            <span className="site-search-field contents max-[1279px]:hidden">
+              <SearchField onOpen={openSearch} />
+            </span>
+            <span className="contents min-[1280px]:hidden">
+              <SearchIconButton onOpen={openSearch} />
+            </span>
           </>
         }
         endContent={
-          <HStack gap={1} vAlign="center" className="site-nav-end">
-            {/* The search field sits at the end, not centred: centred, it
-              collided with the nav links on laptop widths. Below 1120px the
-              links and the field no longer fit side by side, so search
-              collapses to an icon. */}
-            <span className="site-search-field contents max-[1120px]:hidden">
-              <SearchField onOpen={openSearch} />
-            </span>
-            <span className="contents min-[1120px]:hidden">
-              <SearchIconButton onOpen={openSearch} />
-            </span>
-            {/* Below 900px the switch would crowd the bar; the chosen theme
-              still applies. */}
-            <span className="contents max-[899px]:hidden">
-              <ThemeSwitch />
-            </span>
+          <HStack gap={2} vAlign="center" className="site-nav-end">
+            {END_LINKS.map((link) => (
+              <NavLink key={link.href} {...link} pathname={pathname} />
+            ))}
             {/* Below the drawer breakpoint the bar keeps only search and
               the drawer toggle; the social links would push the toggle off screen. */}
             <span className="contents max-md:hidden">
@@ -140,11 +142,16 @@ export function SiteTopNav() {
                   target="_blank"
                   rel="noreferrer noopener"
                   variant="ghost"
-                  size="sm"
+                  size="md"
                   isIconOnly
                   icon={<BrandIcon path={link.icon} />}
                 />
               ))}
+            </span>
+            {/* Below 900px the switch would crowd the bar; the chosen theme
+              still applies. */}
+            <span className="contents max-[899px]:hidden">
+              <ThemeSwitch />
             </span>
           </HStack>
         }

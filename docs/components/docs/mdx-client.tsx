@@ -116,7 +116,7 @@ function accordionIds(children: ReactNode): string[] {
 }
 
 /** MDX `<Accordions>` as an Astryx `CollapsibleGroup`. An item whose `id` is
-    the URL hash opens, so `/docs/faq#reset-browser-storage` lands on it open. */
+    the URL hash opens, so `/docs/how-jazz-works#reset-browser-storage` lands on it open. */
 export function Accordions({
   type = "single",
   children,

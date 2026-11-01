@@ -1,4 +1,11 @@
 {
   "title": "Reading Data",
-  "pages": ["queries", "filters-and-sorting", "includes-and-relations", "history"]
+  "pages": [
+    "queries",
+    "filters-and-sorting",
+    "includes-and-relations",
+    "metadata",
+    "loading-tiers",
+    "history"
+  ]
 }

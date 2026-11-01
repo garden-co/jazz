@@ -1,0 +1,51 @@
+---
+title: Thin Client
+description: "A small browser client that talks to your server, with no local database."
+---
+
+<Callout type="info">
+  Preview: this page is a rough outline for the server-first docs restructure. The thin client is
+  still being built; this page describes it once it ships. It follows the same structure as the
+  [Local-First Client](/docs/setup/web-client/local-first-client), with less to set up.
+</Callout>
+
+The default web client: about 86 KB gzipped, no Wasm, no local storage. The server runs every query under the signed-in session's policies and sends finished rows; writes commit on the server.
+
+## Dev plugins
+
+- The same bundler plugins as the [local-first client](/docs/setup/web-client/local-first-client#dev-plugins): they start a local Jazz server, auto-push `schema.ts` and `permissions.ts`, and inject the app ID and server URL as env vars
+
+## Wasm loading
+
+- Nothing to set up: the thin client has no Wasm and no workers
+
+## Configure one session
+
+- Import from `jazz-tools/thin`
+- `createAccountManager({ appId, serverUrl })`&hairsp;—&hairsp;the same account API as `jazz-tools`
+- `createDb({ appId, serverUrl, account })`&hairsp;—&hairsp;returns the normal `Db`; queries, `subscribe`, insert/update/upsert/delete and the framework hooks all work
+- User auth: see [Auth](/docs/setup/auth)
+- Tabs per framework, as on the local-first page
+
+## Client config options
+
+- `serverUrl` points at a Jazz server's native endpoint (see [Deployment](/docs/setup/deployment))
+- No `driver` option: there is no local storage
+
+## What runs on the server
+
+- Transactions (mergeable and serializable), branch and snapshot views (`db.captureSnapshot`, branch/base options), large-value streaming (`insertStreaming` / `upsertStreaming`)
+
+## Limitations
+
+Each is an explicit "not supported" error:
+
+- no offline use; writes are not optimistic: they show after one round trip, and `wait()` resolves when the server answered
+- no attributed writes
+- no streaming inside a transaction
+- no admin secret in the browser
+- not yet: serving thin clients from your own Node backend
+
+## Upgrading to local-first
+
+- `upgradeToLocalFirst(thinDb, () => import("jazz-tools").then((jazz) => jazz.createDb(config)))` loads every subscribed query into a local-first `Db` for the same account, lets the thin `Db` finish its writes, and hands back the new `Db` to swap in. See [Local-First Client](/docs/setup/web-client/local-first-client).

@@ -1,0 +1,48 @@
+---
+title: Your Own Server
+description: "Run the Jazz sync server on your own machine, VM or container."
+---
+
+<include cwd lang="bash" meta='title="Terminal"'>
+  ../examples/docs/todo-server-rs/docs/self-host-cli.sh#setup-self-host-cli
+</include>
+
+`jazz-tools@alpha server <APP_ID>` currently supports:
+
+| Option                                  | Purpose                                                                                                                                         | Environment variable          | Default                   |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------- |
+| `<APP_ID>` (positional)                 | App namespace identifier (required)                                                                                                             | -                             | -                         |
+| `-p, --port <PORT>`                     | Listen port                                                                                                                                     | -                             | `1625`                    |
+| `-d, --data-dir <DATA_DIR>`             | Persistent storage directory                                                                                                                    | -                             | `./data`                  |
+| `--in-memory`                           | Use in-memory storage instead of files; data is lost when the process exits                                                                     | -                             | off                       |
+| `--jwks-url <JWKS_URL>`                 | JWKS endpoint for external JWT validation                                                                                                       | `JAZZ_JWKS_URL`               | unset                     |
+| `--jwt-public-key <JWT_PUBLIC_KEY>`     | Single JWK JSON object or PEM public key for external JWT validation. Accepts inline contents or a path to a key file.                          | `JAZZ_JWT_PUBLIC_KEY`         | unset                     |
+| `--auth-cookie-name <AUTH_COOKIE_NAME>` | Cookie name to read for browser authentication during WebSocket upgrades                                                                        | `JAZZ_AUTH_COOKIE_NAME`       | unset                     |
+| `--allow-local-first-auth`              | Allow local-first auth (`Authorization: Bearer <self-signed Jazz JWT>`)                                                                         | `JAZZ_ALLOW_LOCAL_FIRST_AUTH` | see `NODE_ENV` note below |
+| `--backend-secret <BACKEND_SECRET>`     | Enable backend session impersonation                                                                                                            | `JAZZ_BACKEND_SECRET`         | unset                     |
+| `--admin-secret <ADMIN_SECRET>`         | Required for `deploy` and schema catalogue reads. In development mode, structural schema auto-sync works without it.                            | `JAZZ_ADMIN_SECRET`           | unset                     |
+| `--shutdown-timeout-secs <SECONDS>`     | Graceful shutdown network-drain timeout in seconds                                                                                              | `JAZZ_SHUTDOWN_TIMEOUT_SECS`  | `30`                      |
+| `--diagnostics-listen <ADDR>`           | Address of a listener serving `/debug/pprof/heap`, e.g. `0.0.0.0:6060`. Non-loopback addresses require `--diagnostics-token`.                   | `JAZZ_DIAGNOSTICS_LISTEN`     | unset                     |
+| `--diagnostics-token <TOKEN>`           | Bearer token the diagnostics listener requires (`Authorization: Bearer <TOKEN>`); a read-only scrape credential separate from the admin secret. | `JAZZ_DIAGNOSTICS_TOKEN`      | unset                     |
+
+Local-first auth is disabled by default when `NODE_ENV` is `production` (case-insensitive) and enabled otherwise, including when `NODE_ENV` is unset. Enable it in production with `--allow-local-first-auth` or `JAZZ_ALLOW_LOCAL_FIRST_AUTH=true`. External JWT auth requires either `--jwks-url` or `--jwt-public-key`, but not both.
+The server runs Core directly. It owns the account registry, permission checks,
+and durable write confirmation. Browser workers and native local relays remain
+client-side persistence components.
+
+Cookie-based WebSocket auth is enabled with `--auth-cookie-name` or `JAZZ_AUTH_COOKIE_NAME`. When no
+explicit auth credential is supplied, the sync server reads that named cookie and validates the JWT
+it contains. If your app uses a separate application session cookie, resolve it in your own app server
+and obtain an admitted account handle from its JWT. Pass that handle to `await client.forAccount(account)`;
+`forRequest` accepts bearer headers and does not parse application session cookies.
+
+If you prefer to start the database server programmatically, you can use `startLocalJazzServer` from `jazz-tools/dev`.
+It expects similar arguments as the CLI.
+
+See [Monitoring](/docs/operating/monitoring) for heap profiling and diagnostics.
+
+## Coming next
+
+- Docker image and systemd recipes
+- TLS, reverse proxies, data dir on durable disks
+- Backups and upgrades (see [Operating Jazz](/docs/operating/backups-and-upgrades))
