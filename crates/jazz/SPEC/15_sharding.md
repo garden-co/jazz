@@ -71,6 +71,10 @@ shared coordination surface small:
   Exact multi-shard snapshots carry per-shard `(logical shard, GlobalTime)`
   frontiers, while a future wall-time query may apply one requested physical
   time to every participating shard.
+  Today a position is one scalar on disk (`_t`) and on the wire (SPEC 8):
+  only the one authority numbers accepted positions, and nothing names a
+  sequencer. Per-shard positions will need a wire and storage change of
+  their own rather than fitting into today's encoding.
 - **Cross-shard via subscriptions.** Shard-core ↔ shard-core subscriptions carry
   permission closures and query assembly. Routing a client query to all of its
   owning shard-cores remains part of the future design.
