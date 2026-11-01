@@ -10,8 +10,6 @@ const bandChatPermissions = definePermissions(
       policy.roomMembers.exists.where({ roomId: room.id, memberAuthor: me });
     const isMemberOf = (roomId: RowRefValue) =>
       policy.roomMembers.exists.where({ roomId, memberAuthor: me });
-    // Admission is explicit about the creator rather than inheriting "may
-    // update the room": members may also bump the room's last activity.
     const isCreatorOf = (roomId: RowRefValue) =>
       policy.rooms.exists.where({ id: roomId, "$createdBy.account": me });
     const canMutateReaction = (reaction: RowContext<Reaction>) =>
@@ -40,18 +38,11 @@ const bandChatPermissions = definePermissions(
     // membership row is visible; every other identity must already be a member.
     policy.rooms.allowRead.where((room) => anyOf([{ "$createdBy.account": me }, isMember(room)]));
     policy.rooms.allowInsert.always();
-    // The creator may rename the room. Any member may record new activity, but
-    // an `exists` check against the stored row keeps the name unchanged.
-    // `lastActivityAt` itself is not bounded: a member may write any time,
-    // including a future one (documented in the README).
+    // Only the creator may rename the room. Members never write to it: the
+    // room list orders and marks rooms by their newest message.
     policy.rooms.allowUpdate
-      .whereOld((room) => anyOf([{ "$createdBy.account": me }, isMember(room)]))
-      .whereNew((room) =>
-        anyOf([
-          { "$createdBy.account": me },
-          allOf([isMember(room), policy.rooms.exists.where({ id: room.id, name: room.name })]),
-        ]),
-      );
+      .whereOld({ "$createdBy.account": me })
+      .whereNew({ "$createdBy.account": me });
     policy.rooms.allowDelete.where({ "$createdBy.account": me });
 
     policy.roomMembers.allowRead.where(allowedTo.read("room"));
@@ -104,7 +95,8 @@ const bandChatPermissions = definePermissions(
       anyOf([{ requester: me }, isCreatorOf(request.roomId)]),
     );
 
-    policy.readMarkers.allowRead.where({ reader: me });
+    // Co-members see each other's markers: the check marks under a message.
+    policy.readMarkers.allowRead.where((marker) => isMemberOf(marker.roomId));
     policy.readMarkers.allowInsert.where((marker) =>
       allOf([{ reader: me }, isMemberOf(marker.roomId)]),
     );
@@ -112,6 +104,23 @@ const bandChatPermissions = definePermissions(
       .whereOld({ reader: me })
       .whereNew((marker) => allOf([{ reader: me }, isMemberOf(marker.roomId)]));
     policy.readMarkers.allowDelete.where({ reader: me });
+
+    // The read journal is append-only. Each entry names the reader's own
+    // membership in the room, so "Read by" can list members with the date
+    // their marker first reached a message.
+    policy.readProgress.allowRead.where((progress) => isMemberOf(progress.roomId));
+    policy.readProgress.allowInsert.where((progress) =>
+      allOf([
+        { reader: me },
+        policy.roomMembers.exists.where({
+          id: progress.memberId,
+          roomId: progress.roomId,
+          memberAuthor: me,
+        }),
+      ]),
+    );
+    policy.readProgress.allowUpdate.never();
+    policy.readProgress.allowDelete.where({ reader: me });
 
     policy.messages.allowRead.where((message) => isMemberOf(message.roomId));
     policy.messages.allowInsert.where((message) =>

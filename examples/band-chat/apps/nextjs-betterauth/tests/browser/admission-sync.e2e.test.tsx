@@ -32,7 +32,8 @@ interface Live<T> {
  * a streamed attachment. The guest's dashboard has its room list and
  * memberships subscribed when it asks to join; the creator admits it
  * (membership insert + request delete in one transaction); the guest opens the
- * room; then both sides post, each post also bumping the room's activity.
+ * room; then both sides post, and the guest's room list follows the room's
+ * newest message.
  */
 describe("BandChat admission with open subscriptions", () => {
   it("keeps room history and the room list live for an admitted guest", async () => {
@@ -70,7 +71,16 @@ describe("BandChat admission with open subscriptions", () => {
     await attachment.wait({ tier: "global" });
 
     // What the guest's dashboard has open before it asks to join.
-    const guestRooms = live(guest.db, app.rooms.select("*", "$createdBy", "$createdAt"));
+    // BandChat's room list: every room with its newest message.
+    const guestRooms = live<{ id: string; messagesViaRoom: { text: string }[] }>(
+      guest.db,
+      app.rooms.select("*", "$createdBy", "$createdAt").include({
+        messagesViaRoom: app.messages
+          .select("senderId", "text", "$createdAt")
+          .orderBy("$createdAt", "desc")
+          .limit(1),
+      }),
+    );
     const guestMemberships = live(guest.db, app.roomMembers.where({ memberAuthor: guest.author }));
 
     const request = await guest.db
@@ -131,9 +141,11 @@ describe("BandChat admission with open subscriptions", () => {
       guestHistory,
     );
     await until(
-      async () => guestRooms.rows.find((row) => row.id === room.id)?.lastActivityAt != null,
+      async () =>
+        guestRooms.rows.find((row) => row.id === room.id)?.messagesViaRoom[0]?.text ===
+        "In. I'll bring the spare snare too.",
       15_000,
-      "guest's room list follows the room's activity",
+      "guest's room list shows the reply as the room's newest message",
       guestRooms,
       guestMemberships,
       guestHistory,
@@ -174,13 +186,11 @@ function texts(history: Live<{ text: string }>) {
   return history.rows.map((message) => message.text);
 }
 
-/** Composer's send: the message and the room's activity commit together. */
+/** Composer's send: only the message; the room list reads it as the newest. */
 async function post(member: Member, roomId: string, text: string) {
-  const posting = await member.db.transaction((tx) => {
-    tx.insert(app.messages, { roomId, senderId: member.profileId, text });
-    tx.update(app.rooms, roomId, { lastActivityAt: new Date() });
-  });
-  await posting.wait({ tier: "global" });
+  await member.db
+    .insert(app.messages, { roomId, senderId: member.profileId, text })
+    .wait({ tier: "global" });
 }
 
 function live<T extends { id: string }>(db: Db, query: Parameters<Db["subscribe"]>[0]): Live<T> {
