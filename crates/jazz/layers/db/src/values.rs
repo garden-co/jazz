@@ -1618,9 +1618,9 @@ impl Table {
         // Rows are unique per (id, branch); branch views select by `_b`
         // first, so every index leads with it. A version is at `_t`: its
         // position, kind and seq (see [`crate::sync::Pos::t`]), under 2^53.
-        // In history a pending version also keeps its writer, `_w` (node,
-        // then tx big-endian; empty for an accepted one): two writers'
-        // pending versions of a row can share a `_t`.
+        // A pending version also keeps its writer, `_w` (node, then tx
+        // big-endian; empty for an accepted one), current or in history:
+        // two writers' pending versions of a row can share a `_t`.
         // `_st` is the version's state
         // bits ([`STATE_NO_CONTENT`], [`STATE_DELETED`], and in history
         // [`STATE_AS_SENT`]): 0 for a live version whose commit wrote
@@ -1629,7 +1629,7 @@ impl Table {
         // columns it authored (SPEC 4 §4.6); NULL everywhere else.
         sql.push_str(&format!(
             "CREATE TABLE {name} (rid INTEGER PRIMARY KEY, id BLOB NOT NULL, \
-             _b BLOB NOT NULL DEFAULT X'', _t INTEGER NOT NULL, \
+             _b BLOB NOT NULL DEFAULT X'', _t INTEGER NOT NULL, _w BLOB NOT NULL DEFAULT X'', \
              _st INTEGER NOT NULL DEFAULT 0, _base INTEGER, _cols BLOB{columns}, \
              UNIQUE (id, _b));\n\
              CREATE INDEX {} ON {name}(_t);\n\
@@ -1833,6 +1833,9 @@ pub struct CurrentRow {
     pub(crate) id: RowUuid,
     /// Where the row's version is.
     pub(crate) seq: crate::db::Pos,
+    /// The version's writer as history keys it (`_w`), when the read
+    /// carried it: empty for an accepted version.
+    pub(crate) writer: Option<Arc<[u8]>>,
     pub(crate) deleted: bool,
     /// Projected cells in projection order. `None` is an unwritten cell.
     pub(crate) cells: Arc<Vec<(String, Option<Value>)>>,

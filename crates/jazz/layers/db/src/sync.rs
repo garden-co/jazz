@@ -6,11 +6,16 @@
 //!
 //! * A row version is at a [`Pos`], stored as one scalar `_t`: accepted
 //!   at the authority's position (below 2^52), or pending at `1<<52 |` its
-//!   writer's commit HLC, the same in every store that holds it. History
-//!   and as-of cuts on the client are over server versions: every pending
-//!   version orders after every accepted one, so every cut at a server seq
-//!   leaves them out. Two writers' pending versions can share a position;
-//!   history tells them apart by writer (`_w`).
+//!   commit's HLC as the store holding it took it. A relay bounds a
+//!   writer's clock at ingest (`bounded_hlc`: no more than 500 ms past its
+//!   own), so a commit from a writer whose clock runs further ahead is at
+//!   another position there than in the writer's store; every store knows
+//!   its own versions by writer (node, tx). History and as-of cuts on the
+//!   client are over server versions: every pending version orders after
+//!   every accepted one, so every cut at a server seq leaves them out. Two
+//!   writers' pending versions can share a position, and commits whose
+//!   clocks reach `MAX_SEQ` all do; the current and history tables tell
+//!   them apart by writer (`_w`).
 //! * A row touched by a pending (unsettled) local transaction keeps its
 //!   upstream baseline in history, below this replica's local sequence range.
 //!   A transient cache selects that image during a tick; a rebase restores it
@@ -82,10 +87,11 @@ fn now_ms() -> i64 {
 
 /// The kind of a version's position (SPEC 4): its [`Pos::n`]. Every
 /// accepted version is [`ACCEPTED`], at the authority's position. Every
-/// unsettled one is [`PENDING`], at its writer's commit HLC (see
-/// [`crate::db::shard::HLC_EPOCH_MS`]), so it is the same in every store that
-/// holds it, after every accepted one. Two writers' pending versions can
-/// share a position: they order by writer node, then tx (see [`Order`]).
+/// unsettled one is [`PENDING`], at its commit's HLC (see
+/// [`crate::db::shard::HLC_EPOCH_MS`]) as this store took it, bounded at
+/// ingest, after every accepted one. Two writers' pending versions can
+/// share a position (every commit whose clock reaches [`MAX_SEQ`] does):
+/// they order by writer node, then tx (see [`Order`]).
 pub const ACCEPTED: i64 = 0;
 pub const PENDING: i64 = 1;
 
@@ -3683,16 +3689,10 @@ impl Inner {
             .map_err(storage)?;
         let mut images = rows.collect::<Result<Vec<_>, _>>().map_err(storage)?;
         for image in &mut images {
-            // A pending version's writer: history keeps it, and this
-            // process knows it of a current one.
+            // A pending version's writer, as its row keeps it (`_w`).
             image.written = match image.written {
                 _ if image.at.accepted() => None,
-                Some((_, node, tx)) => Some((image.at.seq, node, tx)),
-                None => {
-                    let row = RowUuid::from_bytes(image.id);
-                    writer_of_bytes(&self.current_writer(table, row, &image.key, image.at))
-                        .map(|(node, tx)| (image.at.seq, node, tx))
-                }
+                written => written.map(|(_, node, tx)| (image.at.seq, node, tx)),
             };
             self.resolve_authors(image)?;
             self.portable_large(image)?;
@@ -3843,16 +3843,21 @@ impl Inner {
         if found.is_some() {
             return Ok(found);
         }
-        let w = writer.map_or_else(Vec::new, |(node, tx)| writer_bytes(node, tx));
-        let filter = if writer.is_some() {
-            "id = ?1 AND _b = ?2 AND _t = ?3 AND _w = ?4"
-        } else {
-            "id = ?1 AND _b = ?2 AND _t = ?3 AND ?4 IS NOT NULL ORDER BY _w DESC"
+        let images = match writer {
+            Some((node, tx)) => self.images_where(
+                table,
+                true,
+                "id = ?1 AND _b = ?2 AND _t = ?3 AND _w = ?4",
+                &[&id, &key, &at.0.t(), &writer_bytes(node, tx)],
+            )?,
+            None => self.images_where(
+                table,
+                true,
+                "id = ?1 AND _b = ?2 AND _t = ?3 ORDER BY _w DESC",
+                &[&id, &key, &at.0.t()],
+            )?,
         };
-        Ok(self
-            .images_where(table, true, filter, &[&id, &key, &at.0.t(), &w])?
-            .into_iter()
-            .next())
+        Ok(images.into_iter().next())
     }
 
     /// The chunked value a cell of stored `table`'s `column` holds, as an
@@ -4367,52 +4372,24 @@ impl Inner {
     }
 
     /// The writer (`_w`) of a row's current version at `at`: empty for an
-    /// accepted one; for a pending one, as this process put it there, else
-    /// the latest pending commit at `at` that wrote the row.
+    /// accepted one, or when the row's current version is not at `at`.
     pub(crate) fn current_writer(&self, table: &str, row: RowUuid, key: &[u8], at: Pos) -> Vec<u8> {
         if at.accepted() {
             return Vec::new();
         }
-        let row_key = (table.to_owned(), row, key.to_vec());
-        // A note made by a write a savepoint later rolled back names
-        // another position: it is not this version's.
-        if let Some((noted, w)) = self.current_w.borrow().get(&row_key)
-            && *noted == at
-        {
-            return w.clone();
-        }
-        if let Some(client) = &self.client
-            && let Some((_, node, tx)) = client
-                .pending
-                .iter()
-                .filter(|p| p.clock == at.seq && p.rows.contains(&row_key))
-                .map(Pending::order)
-                .max()
-        {
-            return writer_bytes(node, tx);
-        }
-        self.own_seq_at((at, None))
-            .map_or_else(Vec::new, |seq| self.own_writer(seq))
-    }
-
-    /// Note who wrote a row's current version (see `Inner::current_w`).
-    pub(crate) fn note_current(
-        &self,
-        table: &str,
-        row: RowUuid,
-        key: &[u8],
-        at: Pos,
-        w: Option<Vec<u8>>,
-    ) {
-        let row_key = (table.to_owned(), row, key.to_vec());
-        match w {
-            Some(w) if !w.is_empty() => {
-                self.current_w.borrow_mut().insert(row_key, (at, w));
-            }
-            _ => {
-                self.current_w.borrow_mut().remove(&row_key);
-            }
-        }
+        self.conn
+            .cached_row(
+                &format!(
+                    "SELECT _w FROM {} WHERE id = ?1 AND _b = ?2 AND _t = ?3",
+                    quote(table)
+                ),
+                rusqlite::params![row.0.as_bytes().to_vec(), key, at.t()],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .unwrap_or_default()
     }
 
     fn put_image(&self, image: &Image, history: bool) -> Result<(), Error> {
@@ -4424,7 +4401,6 @@ impl Inner {
         };
         if !history {
             self.forget_current(&image.table, row, &image.key);
-            self.note_current(&image.table, row, &image.key, image.at, Some(w.clone()));
         }
         let mut values = vec![
             Sql::Blob(image.id.to_vec()),
@@ -4435,9 +4411,7 @@ impl Inner {
                     | if image.content { 0 } else { STATE_NO_CONTENT },
             ),
         ];
-        if history {
-            values.push(Sql::Blob(w));
-        }
+        values.push(Sql::Blob(w));
         let mut columns = Vec::new();
         for (column, value) in self.stored_cells(image)? {
             columns.push(column);
@@ -4453,11 +4427,7 @@ impl Inner {
             } else {
                 image.table.clone()
             };
-            let meta: &[&str] = if history {
-                &["id", "_b", "_t", "_st", "_w"]
-            } else {
-                &["id", "_b", "_t", "_st"]
-            };
+            let meta = ["id", "_b", "_t", "_st", "_w"];
             let names: Vec<String> = meta
                 .iter()
                 .map(|name| (*name).to_owned())
@@ -4492,7 +4462,6 @@ impl Inner {
             self.gone.borrow_mut().push(image);
         }
         self.forget_current(table, row, key);
-        self.note_current(table, row, key, Pos::default(), None);
         let id = row.0.as_bytes().to_vec();
         self.exec(
             &format!("DELETE FROM {} WHERE id = ?1 AND _b = ?2", quote(table)),
@@ -4844,18 +4813,22 @@ impl Inner {
     }
 
     /// Whether `image` is a version of one of this store's own unsettled
-    /// commits (on a relay, or of a session commit it carries).
+    /// commits (on a relay, or of a session commit it carries), by its
+    /// writer (node, tx): a relay may hold a commit at a bounded clock, so
+    /// its echo of the commit can be at another position than the writer's.
     pub(crate) fn own_version(&self, image: &Image) -> bool {
-        let Some((hlc, node, tx)) = image.written.filter(|_| !image.at.accepted()) else {
+        let Some((_, node, tx)) = image.written.filter(|_| !image.at.accepted()) else {
             return false;
         };
         self.own_order
             .values()
-            .any(|order| *order == (hlc, node, tx))
-            || self
-                .client
-                .as_ref()
-                .is_some_and(|client| client.pending.iter().any(|p| p.order() == (hlc, node, tx)))
+            .any(|&(_, n, t)| (n, t) == (node, tx))
+            || self.client.as_ref().is_some_and(|client| {
+                client.pending.iter().any(|p| {
+                    let (_, n, t) = p.order();
+                    (n, t) == (node, tx)
+                })
+            })
     }
 }
 
@@ -9193,24 +9166,17 @@ impl Inner {
     /// Name the writer of each of this relay's unsettled versions among
     /// `images` by its commit's [`Order`], which a session orders it by.
     fn mark_written(&self, images: &mut [Image]) {
-        let Some(client) = &self.client else {
+        if self.client.is_none() {
             return;
-        };
+        }
         for image in images
             .iter_mut()
             .filter(|image| !image.at.accepted() && image.written.is_none())
         {
-            let row_key = (
-                image.table.clone(),
-                RowUuid::from_bytes(image.id),
-                image.key.clone(),
-            );
-            image.written = client
-                .pending
-                .iter()
-                .filter(|p| p.clock == image.at.seq && p.rows.contains(&row_key))
-                .map(Pending::order)
-                .max();
+            let row = RowUuid::from_bytes(image.id);
+            image.written =
+                writer_of_bytes(&self.current_writer(&image.table, row, &image.key, image.at))
+                    .map(|(node, tx)| (image.at.seq, node, tx));
         }
     }
 
@@ -12489,7 +12455,7 @@ fn readable_version(
     };
     let schema = inner.owner.clone();
     let table = owned_table(&schema, table)?;
-    inner.check_version(table, row, key, at, author, Operation::Select)
+    inner.check_version(table, row, key, (at, None), author, Operation::Select)
 }
 
 /// Whether `identity` may read the version of `row` at `seq` and, still,

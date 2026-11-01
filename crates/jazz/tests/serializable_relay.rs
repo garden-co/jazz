@@ -1421,3 +1421,66 @@ fn a_snapshot_over_an_own_commit_leaves_out_another_tabs_version_at_its_position
     );
     assert_eq!(net.holders(), ["alice", "carol"]);
 }
+
+/// Two tabs write the same row in the same millisecond, so their versions
+/// share a position, and the later writer's shows. A serializable read on
+/// the earlier tab sees its own version from history and names that
+/// version, by its writer, in its read set: the later tab's write lands
+/// over it before the commit, so the commit conflicts.
+#[test]
+fn a_serializable_read_of_an_own_version_under_another_tabs_at_its_position_names_its_own() {
+    const CLOCK: i64 = 1_800_000_000_000;
+    let mut net = Net::new(2);
+    let seats = net.seed_seats(2);
+    let _watches = [net.watch_seats(net.tab(0)), net.watch_seats(net.tab(1))];
+    net.worker_offline();
+    for db in [net.tab(0), net.tab(1), &net.worker] {
+        db.set_clock_for_test(Some(CLOCK));
+    }
+    let own = block_on(
+        net.tab(0)
+            .update("seats", seats[0], holder("alice"), Default::default()),
+    )
+    .unwrap();
+    let later = block_on(
+        net.tab(1)
+            .update("seats", seats[0], holder("carol"), Default::default()),
+    )
+    .unwrap();
+    assert_eq!(own.version(), later.version(), "one position");
+    for _ in 0..4 {
+        net.pump();
+    }
+    let tab = net.tab(0);
+    let query = tab.prepare_query(&Query::from("seats")).unwrap();
+    let live = block_on(tab.all(&query, ReadOpts::default())).unwrap();
+    let live = live.iter().find(|row| row.row_uuid() == seats[0]).unwrap();
+    assert_eq!(
+        live.cell("holder"),
+        Some(Value::String("carol".to_owned())),
+        "the later tab's version shows over the own one"
+    );
+    let open = net.begin_pinned(tab);
+    let read = net.drive(tab.tx_ref(open).all_prepared(&query)).unwrap();
+    let read = read.iter().find(|row| row.row_uuid() == seats[0]).unwrap();
+    assert_eq!(
+        read.cell("holder"),
+        Some(Value::String("alice".to_owned())),
+        "the snapshot reads the own version"
+    );
+    net.drive(
+        tab.tx_ref(open)
+            .update("seats", seats[1], holder("bob"), Default::default()),
+    )
+    .unwrap();
+    let committed = net.drive(tab.commit_serializable_handle(open));
+    net.worker_online();
+    net.settle(net.tab(0), own.mergeable_tx_id())
+        .expect("the own write lands");
+    net.settle(net.tab(1), later.mergeable_tx_id())
+        .expect("the later tab's write lands");
+    assert_conflict_or_rejected(
+        committed.and_then(|receipt| net.settle(net.tab(0), receipt.0).map(drop)),
+    );
+    assert_eq!(net.holders(), ["carol"]);
+}

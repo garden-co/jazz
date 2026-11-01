@@ -312,6 +312,9 @@ pub struct Compiled {
     pub versioned: bool,
     /// Rows are union rows: column 3 is the arm's label.
     pub union: bool,
+    /// Each row carries its version's writer (`_w`) after its projected
+    /// cells: two writers' pending versions of a row can share a position.
+    pub writer: bool,
     /// The part each projected column is read in, if only a part
     /// (SPEC 19.12); empty when none is.
     pub partial: Vec<Option<crate::query::Part>>,
@@ -387,27 +390,16 @@ impl<'a> Ctx<'a> {
         };
         let seq = self.bind(Sql::Integer(cut.seq.t()));
         let history = quote(&format!("{}__h", table.stored));
-        // A named version: in the current table at its position, unless its
-        // writer's version there was superseded (by another writer's at
-        // that position, then it is in history); in history by position and
-        // writer.
+        // A named version: at its position, and for a pending one by its
+        // writer too (`_w`), in the current table or in history.
         let mut named = |version: &Rank, current: &str| -> (String, String) {
             let t = self.bind(Sql::Integer(version.0.t()));
             match version.1.filter(|_| !version.0.accepted()) {
                 None => (format!("{current}_t = {t}"), format!("h2._t = {t}")),
                 Some((node, tx)) => {
                     let w = self.bind(Sql::Blob(crate::db::sync::writer_bytes(node, tx)));
-                    let outer = if current.is_empty() {
-                        format!("{name}.")
-                    } else {
-                        current.to_owned()
-                    };
                     (
-                        format!(
-                            "({current}_t = {t} AND NOT EXISTS (SELECT 1 FROM {history} AS hw \
-                             WHERE hw.id = {outer}id AND hw._b = {outer}_b AND hw._t = {t} \
-                             AND hw._w = {w}))"
-                        ),
+                        format!("({current}_t = {t} AND {current}_w = {w})"),
                         format!("(h2._t = {t} AND h2._w = {w})"),
                     )
                 }
@@ -528,7 +520,7 @@ impl<'a> Ctx<'a> {
     pub(crate) fn source(&mut self, table: &Table) -> Result<String, Error> {
         // Explicit columns: a schema view reads its own columns of the
         // physical (unioned) table.
-        let mut columns = "rid, id, _b, _t, _st".to_owned();
+        let mut columns = "rid, id, _b, _t, _w, _st".to_owned();
         for column in table.stored() {
             columns.push_str(&format!(", {}", quote(&column.stored)));
         }
@@ -548,7 +540,7 @@ impl<'a> Ctx<'a> {
                 // branch columns are the head's, so predicates, policies and
                 // projections see one effective branch.
                 let head_cells = table.selector_cells(&view.head)?;
-                let mut inherited = format!("m.rid, m.id, {head}, m._t, m._st");
+                let mut inherited = format!("m.rid, m.id, {head}, m._t, m._w, m._st");
                 for column in table.stored() {
                     match head_cells.get(&column.name) {
                         Some(value) => {
@@ -794,6 +786,7 @@ impl<'a> Ctx<'a> {
             joined: 0,
             versioned: false,
             union: false,
+            writer: false,
         })
     }
 
@@ -870,8 +863,8 @@ impl<'a> Ctx<'a> {
         let source = self.source(table)?;
         let statement = |order: &str| {
             format!(
-                "SELECT {alias}.id, {alias}._t, {alias}._st{columns} FROM {source} AS {alias} \
-                 WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
+                "SELECT {alias}.id, {alias}._t, {alias}._st{columns}, {alias}._w FROM {source} \
+                 AS {alias} WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
                 and(&wheres),
             )
         };
@@ -884,6 +877,7 @@ impl<'a> Ctx<'a> {
             joined: 0,
             versioned: false,
             union: false,
+            writer: true,
             partial: Vec::new(),
         })
     }
@@ -1042,6 +1036,7 @@ impl<'a> Ctx<'a> {
             joined: 0,
             versioned: false,
             union: true,
+            writer: false,
             partial: Vec::new(),
         })
     }
@@ -1297,6 +1292,7 @@ impl<'a> Ctx<'a> {
             joined: sources.len() - 1,
             versioned: true,
             union: false,
+            writer: false,
         })
     }
 
@@ -1459,8 +1455,8 @@ impl<'a> Ctx<'a> {
         };
         let statement = |order: &str| {
             format!(
-                "SELECT {alias}.id, {alias}._t, {alias}._st{columns} FROM {source} AS {alias} \
-                 WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
+                "SELECT {alias}.id, {alias}._t, {alias}._st{columns}, {alias}._w FROM {source} \
+                 AS {alias} WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
                 and(&wheres),
             )
         };
@@ -1474,6 +1470,7 @@ impl<'a> Ctx<'a> {
             joined: 0,
             versioned: false,
             union: false,
+            writer: true,
             partial: Vec::new(),
         };
         if !array.partial.is_empty() {

@@ -12,9 +12,9 @@ pending uploads moved from one encoded message to a row per op, and
 watermarks became per-sequencer rows).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `a7c6d03d30b668d27f46c39851b8c6ab9f7aae84b528e763e8cd0be00705f792`.
+  the SQLite file `5c478e21f7447123bc3c4cf486bc49c6977117683e7084103860d69c847c2f4a`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `a4f0b758f35e39b73db64105e1766b3d369a5fdc9ef9983160baa6d2d2a960de`.
+  `cc0a6e7e98a0efe8189138f40e17fe48cb7bb503472c4f47abd0bc3e2c4e5a26`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -116,13 +116,13 @@ regenerated it the same way.
 
 Replacing the `(_n, _seq)` pair with one scalar position `_t` (below
 2^53) regenerated it the same way. `_t` has two kinds: accepted (the
-authority's position, below 2^52) and pending (`1<<52 |` the writer's
-commit HLC, the same in every store). Every row and history table has `_t`
-in place of `_n` and `_seq`, with index `__by_t`. History is keyed by
-`(id, _b, _t, _w)`: `_w` is a pending version's writer (its 16-byte node
-and 8-byte big-endian tx), so two writers' versions at one `_t` both stay,
-and `X''` for an accepted version. `_jazz_transactions` is
-`(n, tx, t, result)` (index `_jazz_transactions_by_t`), `_jazz_lv_via` has
-`t` in place of `node`/`seq`, `_jazz_watermarks` is one `through` per key,
-the sequencer tables are gone, and a pending commit's `clock` is its
-commit HLC.
+authority's position, below 2^52) and pending (`1<<52 |` the commit's HLC
+as this store took it; a relay bounds a writer's clock to its own plus
+500 ms). Every row and history table has `_t` in place of `_n` and `_seq`,
+with index `__by_t`, and `_w`: a pending version's writer (its 16-byte node
+and 8-byte big-endian tx), `X''` for an accepted version. History is keyed
+by `(id, _b, _t, _w)`, so two writers' versions at one `_t` both stay.
+`_jazz_transactions` is `(n, tx, t, result)` (index
+`_jazz_transactions_by_t`), `_jazz_lv_via` has `t` in place of
+`node`/`seq`, `_jazz_watermarks` is one `through` per key, the sequencer
+tables are gone, and a pending commit's `clock` is its commit HLC.

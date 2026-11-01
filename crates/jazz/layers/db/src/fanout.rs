@@ -1343,8 +1343,15 @@ impl Inner {
             let Some(before) = prior.get(&out.row.id) else {
                 continue;
             };
-            let from = before.seq;
-            if from == out.row.seq {
+            // Two writers' pending versions can share a position.
+            let rank = |row: &CurrentRow| {
+                (
+                    row.seq,
+                    row.writer.as_deref().and_then(sync::writer_of_bytes),
+                )
+            };
+            let (from, to) = (rank(before), rank(&out.row));
+            if from == to {
                 continue;
             }
             for column in &group.key.splices {
@@ -1371,7 +1378,7 @@ impl Inner {
                     &group.prepared.query.table,
                     out.row.id,
                     column,
-                    (from, out.row.seq),
+                    (from, to),
                     group.identity,
                 ) {
                     out.splices.push((column.clone(), splices));

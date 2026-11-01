@@ -125,6 +125,7 @@ impl Ctx<'_> {
             joined: 0,
             versioned: true,
             union: false,
+            writer: false,
             partial: Vec::new(),
         })
     }
