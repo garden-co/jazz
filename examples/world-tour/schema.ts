@@ -58,7 +58,9 @@ const schema = {
       venueId: s.uuid(),
       date: s.timestamp(),
       status: s.enum("confirmed", "tentative", "cancelled"),
-      publicDescription: s.string(),
+      // Markdown. Bandmates editing the description at the same time keep
+      // both edits: the server merges them instead of the last save winning.
+      publicDescription: s.string().merge("markdown"),
     },
     {
       band: s.rel("bands", "bandId"),
@@ -72,7 +74,8 @@ const schema = {
     {
       stopId: s.uuid(),
       bandId: s.uuid(),
-      body: s.string(),
+      // Markdown, merged like the public description.
+      body: s.string().merge("markdown"),
     },
     { stop: s.rel("stops", "stopId"), band: s.rel("bands", "bandId") },
   ),
