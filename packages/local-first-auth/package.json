@@ -1,0 +1,55 @@
+{
+  "name": "@garden-co/local-first-auth",
+  "version": "2.0.0-alpha.59",
+  "description": "Local-first auth: a device-held secret that signs short-lived tokens any backend can verify. Works offline, no auth server.",
+  "license": "MIT",
+  "files": [
+    "dist/**",
+    "README.md"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "default": "./dist/browser.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
+    },
+    "./recovery-phrase": {
+      "types": "./dist/recovery-phrase.d.ts",
+      "default": "./dist/recovery-phrase.js"
+    },
+    "./passkey": {
+      "types": "./dist/passkey.d.ts",
+      "default": "./dist/passkey.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "alpha"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc",
+    "check": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@noble/curves": "2.0.1",
+    "@noble/hashes": "2.0.1",
+    "@scure/bip39": "^2.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:default",
+    "typescript": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}

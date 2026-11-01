@@ -1,0 +1,31 @@
+{
+  "audience": "6b0c3f8e-2d9a-4f61-9a57-1c2e3d4f5a6b",
+  "cases": [
+    {
+      "founderAccountV1": "709df402-3648-507d-a725-3fb5b06d7ab8",
+      "secret": "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "subject": "412a3d72-132d-5e55-bad2-d3bad0eb5ea5",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJ1cm46amF6ejpsb2NhbC1maXJzdCIsInN1YiI6IjQxMmEzZDcyLTEzMmQtNWU1NS1iYWQyLWQzYmFkMGViNWVhNSIsImF1ZCI6IjZiMGMzZjhlLTJkOWEtNGY2MS05YTU3LTFjMmUzZDRmNWE2YiIsImphenpfcHViX2tleSI6Ii1mVXl5RHVEd2hTNTZJOW1feFdRWl9ZOUk3dEFXNHlDdmxUZEtnYTRCdFEiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMzYwMH0.D3kSYYU02yq1J2kBvpFXEKjRYy3WwTDlTZo6g4OURQ5nhYiLYri8hV1mHfqKPttbDn6VSFWFt_VZs9pQmxaoBA"
+    },
+    {
+      "founderAccountV1": "6b2c95ee-eea1-59cc-9bcf-1e984d73f5c6",
+      "secret": "jazz-auth-v1:__________________________________________8",
+      "subject": "cccecc7d-4bba-52dd-98f9-c339b13d1e5e",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJ1cm46amF6ejpsb2NhbC1maXJzdCIsInN1YiI6ImNjY2VjYzdkLTRiYmEtNTJkZC05OGY5LWMzMzliMTNkMWU1ZSIsImF1ZCI6IjZiMGMzZjhlLTJkOWEtNGY2MS05YTU3LTFjMmUzZDRmNWE2YiIsImphenpfcHViX2tleSI6InVBYUNyZ2Qyazk2R2ZUa0xSMkl4blJQcnZRQ25rcVgwcXR3Ylg1Rng2Sk0iLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMzYwMH0.nNEDIpIJUgV2Ws0MA0K2uewUGHF2NnWXZ9VASyb5kp-CQbZLlEgN9bl6krlgG_EHIXq00vMBgzea0HZe9cZRAg"
+    },
+    {
+      "founderAccountV1": "d31c2893-e3f2-5285-9034-66bb6757657c",
+      "secret": "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "subject": "fa65957a-8b63-53c8-8187-fb1568365fa1",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJ1cm46amF6ejpsb2NhbC1maXJzdCIsInN1YiI6ImZhNjU5NTdhLThiNjMtNTNjOC04MTg3LWZiMTU2ODM2NWZhMSIsImF1ZCI6IjZiMGMzZjhlLTJkOWEtNGY2MS05YTU3LTFjMmUzZDRmNWE2YiIsImphenpfcHViX2tleSI6Il96Mlh2N2lTSjdLdVEybHlsZ01mNWp2UHVXS1BGOThWNE9LQUV3SVVVZGsiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMzYwMH0.eG7RH9_8AVcGBlemSSmszlRKsvm4r0X1Q-0IlY8W95B4GTylCY2WFxhl0xLI_fzLTIHlfi0YOSl36LtYxWRlBA"
+    },
+    {
+      "founderAccountV1": "73bcafd1-7832-503e-b310-f417556b1b3c",
+      "secret": "jazz-auth-v1:CzBVep_E6Q4zWH2ix-wRNluApcrvFDleg6jN8hc8YYY",
+      "subject": "116c83a5-068d-554e-94bc-8cba6733c0d3",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJ1cm46amF6ejpsb2NhbC1maXJzdCIsInN1YiI6IjExNmM4M2E1LTA2OGQtNTU0ZS05NGJjLThjYmE2NzMzYzBkMyIsImF1ZCI6IjZiMGMzZjhlLTJkOWEtNGY2MS05YTU3LTFjMmUzZDRmNWE2YiIsImphenpfcHViX2tleSI6ImdWTDBJc01QT0Q5YkpqcE1HREsxbnlJRGVWejdlMzctTDZQektrRjBfX00iLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMzYwMH0.Dqu1fe0thPXwnYjQQ7cS66WOFE6vockqXUt_CLAf9Nc_6g6Ycuz-Pf30pZ0y7blpaBf6rnG8OEB1DTp8sf8ADw"
+    }
+  ],
+  "now": 1800000000,
+  "ttlSeconds": 3600
+}
