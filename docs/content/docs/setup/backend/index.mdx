@@ -33,8 +33,9 @@ export const jazz = await createJazz({
   `memory()` is for tests and throwaway previews. See [Deployment](/docs/setup/deployment) for
   Vercel and Cloudflare.
 - `authenticate(request)` reads your own session (a cookie, a header) and returns
-  `{ userId, claims? }`, or `null` when signed out. Jazz turns that into a short-lived credential for
-  the browser at `/jazz/session`. No JWKS, issuer or audience to configure.
+  `{ userId, claims? }`, or `null` when signed out. It is the only place that decides who a user
+  is: sign-ins, sync connections and `forRequest` all ask it. No JWKS, issuer or audience to
+  configure, and no Jazz token in the browser.
 - Admin and backend routes never leave the process: from outside, only sync and sign-in are
   reachable under `/jazz`.
 
@@ -84,18 +85,21 @@ export const jazz = await createJazz({
 
 ## Connect the browser
 
-The browser talks to the same origin, so `serverUrl` is a path and your app's cookie is the only
-credential it needs:
+The browser talks to the same origin, so `serverUrl` is a path, and your app's own session cookie is
+all it needs. It never holds a Jazz credential:
 
 ```ts title="src/jazz.ts"
-import { createJazzSession, backendToken } from "jazz-tools/client";
+import { createJazzSession } from "jazz-tools/client";
 
 export const session = await createJazzSession({ appId: "my-app", serverUrl: "/jazz" });
-await session.loginOrRegisterJWT({ getToken: backendToken() });
+await session.loginWithBackend();
 ```
 
-`backendToken()` asks `/jazz/session` for a credential. Call it again after your own sign-in
-changes; on sign-out, call `session.logout()`.
+`loginWithBackend()` asks your backend who is signed in. `authenticate` answers, and the client gets
+the account, identity and claims (`session.user`, `session.claims`) as plain data. Every sync
+connection asks `authenticate` again, so a sign-out or changed claims apply on the next reconnect.
+Call `loginWithBackend()` again after your own sign-in changes; on sign-out, call
+`session.logout()`.
 
 ## Trusted backend use
 

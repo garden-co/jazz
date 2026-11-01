@@ -21,6 +21,7 @@ const permissions = s.definePermissions(app, ({ policy, session }) => {
   policy.todos.allowDelete.never();
 });
 
+const NodeWebSocket = globalThis.WebSocket;
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
   while (cleanups.length) await cleanups.pop()!().catch(() => undefined);
@@ -55,7 +56,31 @@ async function serve(jazz: Jazz, options: { sockets: boolean }): Promise<string>
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
+/**
+ * Act as a browser signed in to the app as `userId`: every request and
+ * socket to the app's origin carries its session, as a cookie would.
+ */
+function signInAs(origin: string, userId: string) {
+  const realFetch = globalThis.fetch;
+  const RealWebSocket = globalThis.WebSocket;
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(input, init);
+    if (new URL(request.url).origin === origin) request.headers.set("x-test-user", userId);
+    return realFetch(request);
+  }) as typeof fetch;
+  globalThis.WebSocket = class extends RealWebSocket {
+    constructor(url: string | URL) {
+      super(url, { headers: { "x-test-user": userId } } as never);
+    }
+  } as typeof WebSocket;
+  cleanups.push(async () => {
+    globalThis.fetch = realFetch;
+    globalThis.WebSocket = RealWebSocket;
+  });
+}
+
 async function userSession(appId: string, origin: string, userId: string) {
+  signInAs(origin, userId);
   const session = await createJazzSession({
     appId,
     app,
@@ -64,16 +89,10 @@ async function userSession(appId: string, origin: string, userId: string) {
     driver: { type: "memory" },
   });
   cleanups.push(() => session.close());
-  await session.loginOrRegisterJWT({
-    getToken: async () => {
-      const response = await fetch(`${origin}/jazz/session`, {
-        headers: { "x-test-user": userId },
-      });
-      expect(response.status).toBe(200);
-      return ((await response.json()) as { token: string }).token;
-    },
-  });
-  return session.getSnapshot().client!;
+  await session.loginWithBackend();
+  const { client, status, error } = session.getSnapshot();
+  if (status !== "ready") throw error ?? new Error(status);
+  return client!;
 }
 
 describe("createJazz", () => {
@@ -83,8 +102,11 @@ describe("createJazz", () => {
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: true });
 
-    // Signed out: no credential.
-    expect((await fetch(`${origin}/jazz/session`)).status).toBe(401);
+    // Signed out: the backend names no user.
+    const signedOut = await fetch(`${origin}/jazz/apps/${appId}/accounts/backend-sign-in`, {
+      method: "POST",
+    });
+    expect(signedOut.status).toBe(401);
     // Admin and backend routes never leave the process.
     for (const route of ["admin/deploy", "backend/admit", "admin/permissions"]) {
       const response = await fetch(`${origin}/jazz/apps/${appId}/${route}`, {
@@ -97,6 +119,28 @@ describe("createJazz", () => {
     expect(await (await fetch(`${origin}/other`)).text()).toBe("app route");
 
     const alice = await userSession(appId, origin, "alice");
+    // The client holds no Jazz credential: its identity comes from the backend.
+    expect(alice.session?.user?.identity).toEqual({
+      issuer: `jazz:app:${appId}`,
+      subject: "alice",
+    });
+
+    // A socket that claims to be alice while the backend says bob is refused.
+    const forged = new NodeWebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
+      headers: { "x-test-user": "bob" },
+    } as never);
+    forged.addEventListener("open", () =>
+      forged.send(
+        JSON.stringify({
+          peer_identity: "forged",
+          backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
+        }),
+      ),
+    );
+    const closed = await new Promise<number>((resolve) =>
+      forged.addEventListener("close", (event) => resolve(event.code)),
+    );
+    expect(closed).toBe(1008);
     const row = await alice.db
       .insert(app.todos, { title: "from alice", owner: alice.session!.user!.account })
       .wait({ tier: "global" });

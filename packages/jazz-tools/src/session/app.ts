@@ -154,6 +154,7 @@ export function createJazzAppOwner<Config, Client>(
     "createLocalFirst",
     "restoreLocalFirst",
     "becomeBackend",
+    "loginWithBackend",
     "registerJWT",
     "loginJWT",
     "loginOrRegisterJWT",

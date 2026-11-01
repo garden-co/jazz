@@ -6,4 +6,3 @@ export {
   type AuthProviderSnapshot,
 } from "./auth-provider.js";
 export { connectBetterAuth, type BetterAuthClient } from "./better-auth.js";
-export { backendToken } from "./backend-token.js";

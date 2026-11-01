@@ -41,6 +41,34 @@ export async function requestAccountRegistry(
   }, new AccountAuthError("account_request_timeout"));
 }
 
+/**
+ * Ask the app's own backend (`createJazz`) who is signed in. Same-origin with
+ * the app's cookies: the backend's `authenticate` decides, and the answer
+ * carries the account, identity and claims but no credential.
+ */
+export async function requestBackendSignIn(
+  registry: string,
+  fetcher: typeof fetch = fetchFor(registry),
+): Promise<unknown> {
+  return withAuthRequestDeadline(async (signal) => {
+    const response = await fetcher(`${registry}/backend-sign-in`, {
+      signal,
+      method: "POST",
+      credentials: "same-origin",
+      redirect: "error",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!response.ok) {
+      const code = await response.text();
+      throw new AccountAuthError(
+        /^[a-z_]{1,80}$/.test(code) ? code : "account_request_failed",
+        response.status,
+      );
+    }
+    return response.json();
+  }, new AccountAuthError("account_request_timeout"));
+}
+
 export function readAccountAssignment(value: unknown, expected: AccountIdentity): string {
   if (!value || typeof value !== "object") throw new AccountAuthError("invalid_account_response");
   const result = value as { account?: unknown; identity?: AccountIdentity };

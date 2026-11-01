@@ -373,8 +373,127 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     return (await options.authenticate(request)) ?? null;
   }
 
+  /**
+   * A browser's sync session. The browser presents no credential: its first
+   * message (the auth prelude) names the account it means to act as, and the
+   * backend's own `authenticate` decides whether this request is that user.
+   * The core then admits it as for any provider credential. The session ends
+   * when that admission expires, and the client reconnects and is asked again.
+   */
+  interface ClientSession {
+    send(data: Uint8Array): boolean;
+    close(): void;
+  }
+
+  function openClientSession(
+    request: Request,
+    onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
+  ): ClientSession {
+    const socket = core.openSocket(headerPairs(request.headers), onEvent);
+    let ended = false;
+    let expiry: ReturnType<typeof setTimeout> | undefined;
+    const end = () => {
+      if (ended) return;
+      ended = true;
+      if (expiry) clearTimeout(expiry);
+      socket.close();
+    };
+    const admit = async (prelude: Uint8Array): Promise<boolean> => {
+      const rewritten = await admitPrelude(request, prelude);
+      if (!rewritten || ended) {
+        onEvent(null, { kind: "close", code: 1008, reason: "not signed in" });
+        end();
+        return false;
+      }
+      if (rewritten.expiresAt) {
+        expiry = setTimeout(end, Math.max(1000, rewritten.expiresAt * 1000 - Date.now()));
+        (expiry as unknown as { unref?: () => void }).unref?.();
+      }
+      return socket.send(rewritten.bytes);
+    };
+    // Messages after the prelude wait for its admission, in order.
+    let chain: Promise<boolean> | undefined;
+    return {
+      send(data) {
+        if (ended) return false;
+        chain = chain
+          ? chain.then((ok) => ok && !ended && socket.send(data))
+          : admit(data).catch(() => {
+              end();
+              return false;
+            });
+        return true;
+      },
+      close: end,
+    };
+  }
+
+  /**
+   * Replace a browser prelude's stated session with a credential the core
+   * verifies, minted for the user `authenticate` finds on this request.
+   * Preludes carrying their own credential pass through untouched.
+   */
+  async function admitPrelude(
+    request: Request,
+    prelude: Uint8Array,
+  ): Promise<{ bytes: Uint8Array; expiresAt?: number } | null> {
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(prelude)) as Record<string, unknown>;
+    } catch {
+      return { bytes: prelude };
+    }
+    const stated = parsed.backend_session as { user_id?: unknown } | undefined;
+    if (!stated || typeof stated !== "object" || parsed.backend_secret || parsed.jwt_token) {
+      return { bytes: prelude };
+    }
+    const user = await authenticate(request);
+    if (!user || user.userId !== stated.user_id) return null;
+    const { token, expiresAt } = await mintToken(user);
+    const strip = (auth: Record<string, unknown>) => {
+      const { backend_session: _stated, ...rest } = auth;
+      return { ...rest, jwt_token: token };
+    };
+    const inner =
+      parsed.auth && typeof parsed.auth === "object"
+        ? strip(parsed.auth as Record<string, unknown>)
+        : undefined;
+    const rewritten = { ...strip(parsed), ...(inner ? { auth: inner } : {}) };
+    return { bytes: new TextEncoder().encode(JSON.stringify(rewritten)), expiresAt };
+  }
+
+  /**
+   * The account sign-in a browser makes with only the app's cookie: the
+   * backend's `authenticate` names the user, and the core resolves (or
+   * creates) their account as it would for that user's own credential.
+   */
+  async function backendSignIn(request: Request, path: string): Promise<Response> {
+    if (request.method !== "POST") return new Response(null, { status: 405 });
+    const user = await authenticate(request);
+    if (!user) return new Response("signed_out", { status: 401 });
+    const { token, expiresAt } = await mintToken(user);
+    const response = await core.handle(
+      "POST",
+      path.replace(/\/backend-sign-in$/, "/login-or-register"),
+      [
+        ["authorization", `Bearer ${token}`],
+        ["content-type", "application/json"],
+      ],
+      Buffer.alloc(0),
+    );
+    if (response.status !== 200) return coreResponse(response);
+    const assignment = JSON.parse(Buffer.from(response.body).toString("utf8")) as Record<
+      string,
+      unknown
+    >;
+    return Response.json(
+      { ...assignment, claims: user.claims ?? {}, expiresAt },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
   // HTTP stream sessions, by id.
-  const streams = new Map<string, JazzCoreSocket>();
+  const streams = new Map<string, ClientSession>();
 
   function openStream(request: Request): Response {
     const id = randomUUID();
@@ -400,9 +519,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         end(1001, "client went away");
       },
     });
-    let socket: JazzCoreSocket;
+    let socket: ClientSession;
     try {
-      socket = core.openSocket(headerPairs(request.headers), (error, event) => {
+      socket = openClientSession(request, (error, event) => {
         if (error) return end(1011, error.message);
         if (event.kind === "message" && event.data) {
           if (!closed) controller.enqueue(encodeStreamRecord(STREAM_RECORD_MESSAGE, event.data));
@@ -444,9 +563,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
 
   function acceptSocket(request: Request, ws: WsLikeSocket): void {
-    let socket: JazzCoreSocket;
+    let socket: ClientSession;
     try {
-      socket = core.openSocket(headerPairs(request.headers), (error, event) => {
+      socket = openClientSession(request, (error, event) => {
         if (error) return ws.close(1011, error.message);
         if (event.kind === "message" && event.data) ws.send(event.data);
         else if (event.kind === "close") ws.close(event.code ?? 1000, event.reason ?? "");
@@ -473,15 +592,8 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   async function handle(request: Request): Promise<Response> {
     const path = innerPath(request);
     if (path === null) return new Response("Not found", { status: 404 });
-    if (path === "/session") {
-      if (request.method !== "GET") return new Response(null, { status: 405 });
-      const user = await authenticate(request);
-      if (!user) return Response.json({ error: "signed_out" }, { status: 401 });
-      const { token, expiresAt } = await mintToken(user);
-      return Response.json(
-        { token, userId: user.userId, expiresAt },
-        { headers: { "Cache-Control": "no-store" } },
-      );
+    if (/^\/apps\/[^/]+\/accounts\/backend-sign-in$/.test(path)) {
+      return backendSignIn(request, path);
     }
     const stream = /^\/apps\/[^/]+\/stream(?:\/([^/]+))?$/.exec(path);
     if (stream) {
