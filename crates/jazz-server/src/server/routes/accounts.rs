@@ -119,6 +119,83 @@ pub(super) async fn resolve_for_admin(
     Ok(response(request.identity, assignment))
 }
 
+/// The app's backend vouches for this identity (`createJazz` in front of a
+/// remote core): its own auth verified the user, so the core resolves the
+/// assignment or creates the account, as `login-or-register` would for that
+/// user's own credential.
+pub(super) async fn login_or_register_for_admin(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<RequestLink>,
+) -> Result<Json<AccountResponse>, Failure> {
+    crate::middleware::auth::validate_admin_secret(
+        super::http::admin_secret_header(&headers),
+        &state.auth_config,
+    )?;
+    jazz::ids::AuthorSubject::authenticated(&request.identity.issuer, &request.identity.subject)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_external_identity"))?;
+    let assignment = owner(&state)?
+        .login_or_register(request.identity.clone())
+        .await
+        .map_err(failure)?;
+    Ok(response(request.identity, assignment))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AdminLink {
+    from: Principal,
+    to: Principal,
+}
+
+/// The app's backend vouches for both identities: link `to` to the account
+/// `from` uses, in the same request-and-accept steps the two users' own
+/// credentials would take.
+pub(super) async fn link_for_admin(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<AdminLink>,
+) -> Result<Json<AccountResponse>, Failure> {
+    crate::middleware::auth::validate_admin_secret(
+        super::http::admin_secret_header(&headers),
+        &state.auth_config,
+    )?;
+    jazz::ids::AuthorSubject::authenticated(&request.to.issuer, &request.to.subject)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_external_identity"))?;
+    let registry = owner(&state)?;
+    registry
+        .login_or_register(request.from.clone())
+        .await
+        .map_err(failure)?;
+    let now = state.auth_config.clock.now_seconds();
+    let expires_at = now
+        .checked_add(300)
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "invalid_clock"))?;
+    let nonce = Uuid::new_v4();
+    registry
+        .execute(AccountCommand::RequestLink {
+            approver: request.from,
+            candidate: request.to.clone(),
+            nonce,
+            now,
+            expires_at,
+        })
+        .await
+        .map_err(failure)?;
+    let result = registry
+        .execute(AccountCommand::AcceptLink {
+            candidate: request.to.clone(),
+            nonce,
+            now,
+        })
+        .await
+        .map_err(failure)?;
+    let AccountCommandResult::Assignment(assignment) = result else {
+        unreachable!("accept result")
+    };
+    Ok(response(request.to, assignment))
+}
+
 /// Authentication denial and temporary registry availability are different wire outcomes.
 #[derive(Debug)]
 pub(super) enum AdmissionError {
@@ -437,6 +514,55 @@ mod tests {
                 .unwrap();
             assert_eq!(denied.status(), StatusCode::FORBIDDEN);
         }
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn admin_vouched_login_or_register_and_link_share_one_account() {
+        let core = JazzServer::start().await.expect("start test server");
+        let client = reqwest::Client::new();
+        let admin = format!("{}/apps/{}/admin/accounts", core.base_url(), core.app_id());
+        let identity =
+            |subject: &str| serde_json::json!({ "issuer": "jazz:app:test", "subject": subject });
+        let denied = client
+            .post(format!("{admin}/login-or-register"))
+            .json(&serde_json::json!({ "identity": identity("guest") }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let guest = client
+            .post(format!("{admin}/login-or-register"))
+            .header("x-jazz-admin-secret", core.admin_secret())
+            .json(&serde_json::json!({ "identity": identity("guest") }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(guest.status(), StatusCode::OK);
+        let guest = guest.json::<AccountResponse>().await.unwrap().account;
+        let linked = client
+            .post(format!("{admin}/link"))
+            .header("x-jazz-admin-secret", core.admin_secret())
+            .json(&serde_json::json!({ "from": identity("guest"), "to": identity("alice") }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(linked.status(), StatusCode::OK);
+        assert_eq!(
+            linked.json::<AccountResponse>().await.unwrap().account,
+            guest
+        );
+        let alice = client
+            .post(format!("{admin}/login-or-register"))
+            .header("x-jazz-admin-secret", core.admin_secret())
+            .json(&serde_json::json!({ "identity": identity("alice") }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            alice.json::<AccountResponse>().await.unwrap().account,
+            guest
+        );
         core.shutdown().await;
     }
 
