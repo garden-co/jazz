@@ -1,36 +1,19 @@
 import { betterAuth } from "better-auth";
 import { nextCookies } from "better-auth/next-js";
-import { bearer, jwt } from "better-auth/plugins";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { app } from "../../schema";
-import { authJazzClient } from "./auth-jazz-client";
+import { readConfig } from "./config.mjs";
+import { jazz } from "./jazz.server";
 
-const origin = process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000";
-const secret = process.env.BETTER_AUTH_SECRET;
-
-if (process.env.NODE_ENV === "production" && !secret) {
-  throw new Error("BETTER_AUTH_SECRET must be set in production");
-}
+const config = readConfig();
 
 export const auth = betterAuth({
-  baseURL: origin,
-  trustedOrigins: [origin],
-  secret: secret || "record-player-development-secret",
-  database: jazzAdapter({ db: async () => (await authJazzClient()).db, schema: app.wasmSchema }),
+  baseURL: config.origin,
+  trustedOrigins: [config.origin],
+  secret: config.betterAuthSecret,
+  // Better Auth's tables live in RecordPlayer's own Jazz, through the
+  // backend's database; their client policies deny everything.
+  database: jazzAdapter({ db: async () => (await jazz()).db, schema: app.wasmSchema }),
   emailAndPassword: { enabled: true, autoSignIn: true, minPasswordLength: 8 },
-  plugins: [
-    bearer(),
-    jwt({
-      jwks: { keyPairConfig: { alg: "ES256" } },
-      jwt: {
-        // The Jazz server accepts a token only when both match its
-        // jwtIssuer and jwtAudience (next.config.ts).
-        issuer: origin,
-        audience: origin,
-        expirationTime: "15m",
-        getSubject: ({ user }: { user: { id: string } }) => user.id,
-      },
-    }),
-    nextCookies(),
-  ],
+  plugins: [nextCookies()],
 });
