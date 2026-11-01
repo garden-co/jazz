@@ -1,0 +1,18 @@
+# Built inside an alpha.59 checkout by ../prepare.sh, as a member of that
+# checkout's workspace, so it links exactly the Jazz the tenants run.
+[package]
+name = "migrate-alpha59-export"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "a59-export"
+path = "src/main.rs"
+
+[dependencies]
+jazz = { workspace = true, features = ["runtime"] }
+jazz-server = { path = "../../../crates/jazz-server" }
+jazz-storage-rocksdb.workspace = true
+migrate-alpha59-dump = { path = "../dump" }
+serde_json = "1.0"

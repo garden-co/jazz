@@ -1,0 +1,13 @@
+[package]
+name = "migrate-alpha59-dump"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "The neutral dump format between the alpha.59 exporter and the SQLite importer."
+
+[dependencies]
+serde_json = "1.0"
+blake3 = "1.8"
+ciborium = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"

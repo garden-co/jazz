@@ -37,7 +37,13 @@ members = [
   "examples/jamazon-warehouse/benchmarks",
   "examples/wequencer/benchmarks",
 ]
-exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs", "vendor/ruzstd"]
+exclude = [
+  "examples/todo-server-rs",
+  "examples/docs/todo-server-rs",
+  "vendor/ruzstd",
+  # One-time alpha.59 -> SQLite store migration; its own workspaces, never shipped.
+  "dev/migrate-alpha59",
+]
 
 [workspace.dependencies]
 jazz = { path = "crates/jazz", default-features = false }
