@@ -14,19 +14,19 @@ export async function createLocalFirstSession() {
 }
 // #endregion auth-localfirst-ts
 
-// #region auth-jwt-ts
-export async function createJwtSession(getToken: () => Promise<string>) {
-  const session = await createJazzSession({ appId: "my-app", serverUrl: "https://core.example" });
+// #region auth-backend-ts
+export async function createBackendSession() {
+  // Jazz runs in your backend under /jazz; your session cookie is the only credential.
+  const session = await createJazzSession({ appId: "my-app", serverUrl: "/jazz" });
   try {
-    // Existing identity: login. A signup flow explicitly calls registerJWT instead.
-    await session.loginJWT({ getToken });
+    await session.loginWithBackend();
     return session;
   } catch (error) {
     await session.close().catch(() => {});
     throw error;
   }
 }
-// #endregion auth-jwt-ts
+// #endregion auth-backend-ts
 
 // #region auth-localfirst-ts-backup
 export function getRecoveryPhrase(account: AccountHandle): string {
