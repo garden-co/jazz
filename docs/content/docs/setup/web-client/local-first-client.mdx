@@ -261,13 +261,13 @@ A Jazz session owns account selection and its current client. Give it the app co
   </Tab>
 </Tabs>
 
-The browser account store retains the local signing root and selection. Provider JWTs are refreshed through `getToken` and are never persisted in this store.
+The browser account store retains the local signing root and selection.
 
 ## Client config options
 
 <CreateJazzClientReference />
 
-Provide external credentials to `accounts.registerJWT`, `accounts.loginJWT`, or `accounts.linkJWT` through `getToken`. Contexts receive only the resulting handle; raw JWTs, cookie-session mirrors, and signing roots are not public context configuration.
+To sign in a user of your own auth, call `accounts.loginWithBackend()` (or `linkWithBackend()` to upgrade a local-first account); your backend's `authenticate` decides who that is. Contexts receive only the resulting handle; signing roots are not public context configuration.
 
 ### Storage driver
 

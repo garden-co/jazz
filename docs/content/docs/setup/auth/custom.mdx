@@ -1,166 +1,126 @@
 ---
 title: Other / Custom
-description: "The general auth bindings for any JWT provider: accounts and identities, login and linking, ownership, and backend request contexts."
+description: "Any auth library works the same way: your backend's authenticate names the user, the browser signs in through your backend, and a guest keeps its data on sign-up."
 reviewedAt: "f14d92bf11"
 ---
 
-A Jazz context always belongs to an account and acts as one exact identity. An identity is the pair of JWT claims `iss` (issuer) and `sub` (subject). An account is a stable ID that can admit several identities.
+Jazz doesn't talk to your auth provider. Your backend does, and tells Jazz who each request's user
+is. Whatever you use (Clerk, Auth0, Supabase Auth, Firebase, Lucia, your own sessions), the shape is
+the same: a function that reads your session and returns a user id.
 
-Create one session, then sign the user in with a token from your provider:
+```ts title="jazz.server.ts"
+import { createJazz, remote } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+import { getUser } from "./your-auth";
 
-```ts
-import { createJazzSession } from "jazz-tools/client";
-
-const jazz = await createJazzSession({
+export const jazz = await createJazz({
   appId: "my-app",
-  serverUrl: "https://core.example",
+  app,
+  permissions,
+  store: remote({
+    url: process.env.JAZZ_SERVER_URL!,
+    adminSecret: process.env.JAZZ_ADMIN_SECRET!,
+    backendSecret: process.env.JAZZ_BACKEND_SECRET!,
+  }),
+  authenticate: async (request) => {
+    const user = await getUser(request); // your cookie, or a bearer token you verify
+    return user ? { userId: user.id, claims: { role: user.role } } : null;
+  },
 });
-
-const getToken = () => getTokenFromYourProvider();
-
-// Sign in or sign up in one step (the usual choice):
-await jazz.loginOrRegisterJWT({ getToken });
-
-// ...or, alternatively, the strict variants:
-// await jazz.loginJWT({ getToken });    // sign in: the identity must already have an account
-// await jazz.registerJWT({ getToken }); // sign up: the identity must be new
-
-const { client } = jazz.getSnapshot(); // ready: use client.db
-
-// Later, on sign-out:
-await jazz.logout();
 ```
 
-The session restores a saved signed-in account on startup, or starts signed out. It owns graceful context replacement for every auth command.
-
-Contexts accept an opaque `AccountHandle`, rather than raw JWTs or signing secrets. A handle fixes both the account and acting identity. The server still verifies credentials independently; copying an account ID into a JWT or object grants no access.
+Mount it under `/jazz` (see [Backend](/docs/setup/backend#mount-it)). The browser talks only to your
+backend; the core behind `remote()` trusts your backend to say who the user is, and never sees your
+users' credentials.
 
 ## How it works
 
 <Sequence
-  description="An external JWT provider connecting to a Jazz server."
+  description="A browser signing in to Jazz through the app's backend."
   participants={[
     { id: "browser", label: "Browser" },
-    { id: "auth", label: "Auth provider" },
-    { id: "jazz", label: "Jazz server", createAtStep: 2 },
+    { id: "backend", label: "Your backend" },
+    { id: "jazz", label: "Jazz core", createAtStep: 2 },
   ]}
   steps={[
-    { kind: "message", from: "browser", to: "auth", text: "Sign in" },
-    { kind: "message", from: "auth", to: "browser", text: "JWT token", line: "dashed" },
-    { kind: "message", from: "browser", to: "jazz", text: "Register or log in with JWT" },
-    { kind: "message", from: "jazz", to: "auth", text: "Fetch JWKS" },
-    { kind: "message", from: "auth", to: "jazz", text: "Public keys", line: "dashed" },
-    { kind: "message", from: "jazz", to: "jazz", text: "Verify JWT and resolve account" },
-    { kind: "message", from: "jazz", to: "browser", text: "Account handle ready", line: "dashed" },
+    { kind: "message", from: "browser", to: "backend", text: "Sign in (your auth library)" },
+    { kind: "message", from: "backend", to: "browser", text: "Session cookie", line: "dashed" },
+    { kind: "message", from: "browser", to: "backend", text: "POST /jazz/.../backend-sign-in" },
+    { kind: "message", from: "backend", to: "backend", text: "authenticate(request)" },
+    { kind: "message", from: "backend", to: "jazz", text: "Log in or register this user" },
+    {
+      kind: "message",
+      from: "jazz",
+      to: "browser",
+      text: "Account, identity, claims",
+      line: "dashed",
+    },
   ]}
 />
 
-1. The user signs in with your auth provider and gets a JWT.
-2. The shared provider connection calls `loginOrRegisterJWT({ getToken })`.
-3. The Jazz server validates the JWT signature against the provider's JWKS endpoint.
-4. Core atomically resolves the exact `(iss, sub)` assignment or creates its account when fresh. The Jazz session opens the account's client. `session.user` contains the account ID and exact acting identity; provider claims remain under `session.claims`. Revoked assignments remain rejected; login-or-register never reassigns an identity.
+1. The user signs in with your auth library, which sets its own session cookie.
+2. The client calls `loginWithBackend()`. Your backend runs `authenticate` and returns the user id.
+3. Jazz gives that user an account the first time, and the same account every time after. The
+   identity is `{ issuer: "jazz:app:<appId>", subject: userId }`.
+4. Every sync connection asks `authenticate` again, so a sign-out or changed claims apply on the
+   next reconnect.
 
-## External authentication
+## In the client
 
-Configure the Jazz core with your provider's signing keys, issuer, and audience. The provider can issue ordinary JWTs; it does not need to put a Jazz account ID or linking assertion in their claims.
+With React, pass `backendAuth` to `JazzProvider`:
 
-Choose the operation that matches the user's intent:
+```tsx
+import { JazzProvider, backendAuth } from "jazz-tools/react";
 
-| Operation                       | Result                                                                                        |
-| ------------------------------- | --------------------------------------------------------------------------------------------- |
-| `jazz.loginOrRegisterJWT(auth)` | Atomically select an active assignment or create the account for a fresh identity.            |
-| `jazz.registerJWT(auth)`        | Create an account for a fresh external identity.                                              |
-| `jazz.loginJWT(auth)`           | Select an existing, active account assignment.                                                |
-| `jazz.linkJWT(auth)`            | Attach a fresh external identity to the currently selected account and select its new handle. |
-| `jazz.getSnapshot().account`    | Read the locally selected handle, or `undefined`.                                             |
-| `jazz.logout()`                 | Clear selection and invalidate this manager's issued credentials.                             |
+<JazzProvider
+  appId="my-app"
+  serverUrl="/jazz"
+  auth={backendAuth({ key: user?.id ?? null, isPending, logout: () => signOut() })}
+  signedOut={<SignIn />}
+>
+  <App />
+</JazzProvider>;
+```
 
-Registration, login, and linking require a connection to the core. For ordinary provider signup, sign-in, and restoration, use `loginOrRegisterJWT`. The core performs one ordered decision: return the existing active assignment or create it when unassigned. Revoked identities remain rejected and assignments are never moved. Strict `loginJWT` and `registerJWT` remain available when the application needs those specific operations. An enrollment rejection preserves the previous selection. If enrollment succeeds but local persistence or client startup fails, the new selection remains; use `jazz.retry()` to retry that local work.
+`key` is whatever identifies the signed-in user on the client, or `null`; when it changes, Jazz
+signs in again through your backend. `logout` signs out of your auth; your source must then report
+`key: null`. For Better Auth, `betterAuth(authClient)` does all of this for you.
+
+Without React, own the session yourself:
 
 ```ts
-await jazz.loginOrRegisterJWT({
-  getToken: async () => {
-    const token = await getTokenFromYourProvider();
-    return token;
-  },
-});
-const { client } = jazz.getSnapshot();
+import { createJazzSession } from "jazz-tools/client";
+
+const jazz = await createJazzSession({ appId: "my-app", serverUrl: "/jazz" });
+await jazz.loginWithBackend(); // after your own sign-in
+// ...
+await jazz.logout(); // before your own sign-out
 ```
 
-`auth` can also be a JWT string. Use a `getToken` callback for renewable credentials. The shared account context refreshes them across all framework bindings; there is no provider-level `onJWTExpired` callback. Every refreshed token must have the same exact issuer and subject. A callback that does not settle within 30 seconds fails that attempt; its eventual result cannot replace a later credential.
+Svelte, Solid, Vue and React Native expose the same actions through their bindings.
 
-## Automatic provider connections
+## Guests who sign up
 
-For auth-required React apps, let `JazzProvider` own the session and its provider connection:
+An app can start every visitor as a [local-first](/docs/setup/auth/local-first) guest
+(`initial: "local-first"`). When the guest signs up, call `linkWithBackend()` instead of
+`loginWithBackend()`:
 
-```tsx
-import { betterAuth } from "jazz-tools/client";
-import { JazzProvider, useJazzAuth } from "jazz-tools/react";
-
-function Root() {
-  return (
-    <JazzProvider
-      appId={APP_ID}
-      serverUrl={SERVER_URL}
-      auth={betterAuth(authClient)}
-      signedOut={<SignIn />}
-    >
-      <App />
-    </JazzProvider>
-  );
-}
-
-function SignOut() {
-  const auth = useJazzAuth();
-  return <button onClick={() => void auth.logout()}>Sign out</button>;
-}
+```ts
+await yourAuth.signUp(email, password); // sets your session cookie
+await jazz.linkWithBackend();
 ```
 
-Forms only call Better Auth's `signUp` and `signIn`. Jazz follows provider hydration and session changes, atomically logs in or registers, and renders the application only when its client is ready. The provider supplies loading and retryable error UI; `signedOut` supplies your sign-in screen. Logout flushes Jazz before revoking the provider session. Failures remain in the lifecycle state and its error UI.
+The guest proves itself with its own local-first key; your backend checks that the user
+`authenticate` names has no Jazz account yet and links the two. From then on, signing in as that
+user opens the guest's account and everything it wrote. An identity belongs to one account only,
+so linking a user who already has an account fails: Jazz doesn't merge accounts.
 
-`useJazzAuth()` exposes the shared lifecycle and its `logout()` and `retry()` actions. React Native and Expo use their corresponding Jazz imports and native fallback controls. Svelte, Solid and Vue use the same underlying lifecycle through their framework bindings.
+To link from your own backend code instead (a second sign-in method, an anonymous id your app
+issued), call `jazz.linkIdentity({ from, to })`.
 
-For WorkOS or another JWT provider, use `jwtAuth({ key, isPending, getToken, logout })`. The key identifies the provider session or exact issuer/subject, never the rotating JWT string. The logout callback signs out of the provider or clears the application's token source; the source must then report `key: null`. Jazz waits for that acknowledgement before rendering signed-out content.
+## Using claims in permissions
 
-Vanilla applications can own the same observable lifecycle with `createJazzApp({ appId, serverUrl, auth: betterAuth(authClient) })`, subscribe to its snapshot and call `dispose()` on teardown. Existing low-level `createJazzSession`, `connectBetterAuth` and `connectAuthProvider` remain available for custom ownership.
-
-## Linking identities
-
-An exact identity can belong to only one account, permanently. Revocation prevents its use but does not free it for reassignment. Linking therefore accepts only a fresh identity. If the identity already belongs to a different account, the app must decide how to migrate data; Jazz does not merge accounts.
-
-### Logging in again after a reload
-
-In a browser, Jazz reopens the last signed-in account at once after a reload, before your provider answers. That account has no credential yet: it reads and writes local data, but nothing syncs until the app logs in again. Its identity already matches the signed-in user, so don't use the identity to decide whether to log in. Check `needsLogin` instead. It is `true` while the open account is waiting for a credential, and it turns `false` once `loginJWT` or `loginOrRegisterJWT` re-admits it. Logging in again as the same identity keeps the open client and its data, and writes made in the meantime then sync.
-
-```tsx
-function Restore() {
-  const { needsLogin, sessionActions } = useJazzAuth();
-  const { data: providerSession } = authClient.useSession();
-  const userId = providerSession?.user.id;
-  // Keyed on the user, not the provider session object: providers refetch it
-  // (on window focus, for example), and a second call while a login is in
-  // flight rejects as already pending.
-  useEffect(() => {
-    if (!userId || !needsLogin) return;
-    sessionActions.loginOrRegisterJWT({ getToken }).catch(() => {
-      // The failure is reported in useJazzAuth().error; retry() repeats it.
-    });
-  }, [userId]);
-  return null;
-}
-```
-
-`needsLogin` is already settled when `useJazzAuth()` first renders the app, so keying the effect on the user id is enough.
-
-Managed `auth` does this for you. In development builds, Jazz warns in the console when an app without managed `auth` keeps writing to an account whose `needsLogin` is still `true` and starts no login within a few seconds.
-
-`jazz.linkJWT(auth)` handles graceful shutdown, linking outside contexts, and opening the replacement client. See [Lifecycle](/docs/setup/auth/lifecycle) for the complete handoff and failure path.
-
-The core orders a two-party protocol: the admitted identity authorizes an expiring nonce committed to the fresh identity, and the fresh identity authenticates acceptance. Both requests use ordinary bearer credentials. The core checks that the approver is still active and allowed to manage identities when acceptance happens.
-
-## Using JWT claims in permissions
-
-Your auth provider's JWT may include custom claims (roles, organisation IDs, etc.). Access them in permissions via `session.where(...)`.
+`claims` from `authenticate` are available to your policies under `session.claims`.
 
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
@@ -175,34 +135,17 @@ Public sessions and author columns expose the same structured value:
 ```ts
 {
   account: "00000000-0000-4000-8000-000000000001",
-  identity: { issuer: "https://issuer.example", subject: "alice" },
+  identity: { issuer: "jazz:app:my-app", subject: "alice" },
 }
 ```
 
-Compare `.account` for account-owned data. Comparing the whole structure also compares issuer and subject. Two linked identities share account ownership while retaining distinct authorship.
-
-Provider claims remain under `session.claims`. They cannot override `session.user.account` or the acting identity. See [Sessions](/docs/setup/auth/sessions) and [Permissions](/docs/schemas/policies).
+Compare `.account` for account-owned data. Two linked identities (a guest and the user it became)
+share account ownership while keeping distinct authorship.
 
 ## Backend request contexts
 
-Create a Node owner with `await createJazzSession({ appId, app, permissions, driver, serverUrl, initial: { backendSecret } })` from `jazz-tools/backend`. Backend admission requires a live core check; the secret is private, ephemeral handle material. The ready snapshot's `client.db` performs backend work.
+`await jazz.forRequest(request)` runs your `authenticate` and returns a database with that user's
+policies and authorship; `jazz.db` acts with backend authority. See
+[Backend](/docs/setup/backend#user-scoped-use).
 
-`await client.forRequest(request)` verifies the original bearer and resolves its active account through the core before opening an immutable requester scope. Configure JWT verification for external providers. By default, external identities must already be registered. Auth-required server routes can opt into `client.forRequest(request, { account: "login-or-register" })` to atomically create a fresh external assignment after verifying the bearer. The option applies only to that immutable request scope; it never changes the backend account or accepts revoked identities.
-
-`await client.forAccount(account)` accepts an opaque admitted user handle and re-verifies its credential. Neither method switches the shared owner. Raw session objects cannot select an arbitrary principal or account. `await client.withAttribution(account)` retains backend permissions while recording verified user authorship.
-
-## Provider JWKS endpoints
-
-Any provider that issues JWTs and exposes a JWKS endpoint will work. The key pattern is always the same: get a JWT from your provider, pass it to Jazz.
-
-| Provider    | JWKS endpoint                                                                               | `sub` claim format |
-| ----------- | ------------------------------------------------------------------------------------------- | ------------------ |
-| Better Auth | `<baseURL>/api/auth/jwks`                                                                   | User ID            |
-| WorkOS      | `https://api.workos.com/sso/jwks/<clientId>`                                                | `user_<id>`        |
-| Clerk       | `https://<app>.clerk.accounts.dev/.well-known/jwks.json`                                    | `user_<id>`        |
-| Auth0       | `https://<tenant>.auth0.com/.well-known/jwks.json`                                          | `auth0\|<id>`      |
-| Firebase    | `https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com` | Firebase UID       |
-
-Jazz records the exact JWT `iss` and `sub` pair as the acting identity. Providers keep their existing subjects. Use `linkJWT` to associate a fresh identity with an existing account; use application rows for profile data.
-
-Full working examples: [Better Auth chat](https://github.com/garden-co/jazz2/tree/main/examples/auth-betterauth-chat), [WorkOS chat](https://github.com/garden-co/jazz2/tree/main/examples/auth-workos-chat).
+Full working examples: [Better Auth chat](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat), [simple auth chat](https://github.com/garden-co/jazz/tree/main/examples/auth-simple-chat), [WorkOS chat](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat).
