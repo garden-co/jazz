@@ -14,6 +14,8 @@ mod catalogue;
 mod catalogue_storage;
 #[cfg(test)]
 mod data_dir_corpus;
+#[cfg(feature = "embedded-server")]
+mod embedded;
 pub use crate::runtime::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
 pub(crate) mod deployment;
 mod permissions_validation;
@@ -26,6 +28,10 @@ mod testing;
 pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
 pub(crate) use catalogue::{ActiveSchemaSummary, ServerCatalogue, StoredCatalogue};
 pub(crate) use catalogue_storage::CatalogueStorage;
+#[cfg(feature = "embedded-server")]
+pub use embedded::{
+    EmbeddedOutgoing, EmbeddedServer, EmbeddedSocketPeer, EmbeddedSocketSender, OpenSocketRefused,
+};
 pub use shutdown::{ShutdownController, ShutdownPhase, WebSocketEntryRefused};
 #[cfg(feature = "embedded-server")]
 pub use testing::{
