@@ -345,7 +345,14 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     await core.close();
     throw error;
   }
-  const backend = session.getSnapshot().client!;
+  const opened = session.getSnapshot();
+  if (opened.status !== "ready" || !opened.client) {
+    await session.close();
+    unregister();
+    await core.close();
+    throw opened.error ?? new Error(`Jazz backend session did not open (${opened.status})`);
+  }
+  const backend = opened.client;
 
   async function mintToken(user: JazzUser): Promise<{ token: string; expiresAt: number }> {
     const ttl = options.sessionTtlSeconds ?? 3600;
