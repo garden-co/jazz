@@ -1,4 +1,3 @@
-import { verifyLocalFirstIdentityProof as verifyNativeLocalFirstIdentityProof } from "jazz-napi";
 import { withAuthRequestDeadline } from "../runtime/auth-request-deadline.js";
 import {
   AccountAuthError,
@@ -25,6 +24,7 @@ import {
 } from "../runtime/client-session.js";
 import type { Session } from "../runtime/context.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
+import { verifyLocalFirstToken } from "../runtime/local-first-token.js";
 import type { BackendJwtPublicKey } from "./create-jazz-context.js";
 import { isRecord, toError } from "../runtime/util.js";
 import { resolveAllowLocalFirstAuth } from "./local-first-auth.js";
@@ -572,13 +572,11 @@ function ensureJwtDomain(payload: JwtPayload, config: BackendRequestAuthConfig):
 }
 
 async function verifyLocalFirstIdentityProof(token: string, appId: string): Promise<string> {
-  const { verifyLocalFirstIdentityProof: verifyToken } = await import("jazz-napi");
-  const result = verifyToken(token, appId);
-  if (!result.ok) {
+  try {
+    return verifyLocalFirstToken(token, appId);
+  } catch {
     throw new RequestAuthenticationError("Invalid local-first identity proof");
   }
-
-  return result.id;
 }
 
 async function verifyExternalJwt(
@@ -634,7 +632,7 @@ function localFirstSessionFromVerifiedProof(payload: JwtPayload, verifiedUserId:
 /**
  * Build the session `resolveRequestSession` produces for a local-first bearer
  * token, for trusted in-process harnesses that cannot await registry
- * admission (the policy test app). It always uses the native verifier.
+ * admission (the policy test app).
  *
  * The account is the registry's deterministic founding account for the
  * verified subject, and native admission re-verifies the token against that
@@ -645,11 +643,14 @@ function localFirstSessionFromVerifiedProof(payload: JwtPayload, verifiedUserId:
  */
 export function localFirstSessionFromToken(token: string, appId: string): Session {
   const payload = requireJwtPayload(token);
-  const verified = verifyNativeLocalFirstIdentityProof(token, appId);
-  if (payload.iss !== LOCAL_FIRST_JWT_ISSUER || !verified.ok || !verified.id) {
+  let subject: string;
+  try {
+    if (payload.iss !== LOCAL_FIRST_JWT_ISSUER) throw new Error("not local-first");
+    subject = verifyLocalFirstToken(token, appId);
+  } catch {
     throw new Error("Invalid local-first identity proof");
   }
-  const session = localFirstSessionFromVerifiedProof(payload, verified.id);
+  const session = localFirstSessionFromVerifiedProof(payload, subject);
   session.account_id = localFirstAccountId(appId, session.user_id);
   localFirstProofs.set(session, { token, appId });
   return session;
