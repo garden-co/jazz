@@ -38,7 +38,7 @@ export function parseSecret(secret: string): Uint8Array {
   }
   let bytes: Uint8Array;
   try {
-    bytes = base64urlDecode(payload);
+    bytes = base64urlDecode(payload, true);
   } catch {
     throw new SecretFormatError("A local-first secret is not valid base64url");
   }
@@ -59,7 +59,7 @@ export function generateSecret(): string {
  * The storage key Jazz used up to alpha.59 for a secret scoped to
  * `{ appId, profile }`. Only needed to migrate an existing secret to a new key.
  */
-export function legacyJazzStorageKey(appId: string, profile: string | null = null): string {
+export function legacyJazzStorageKey(appId: string | null, profile: string | null = null): string {
   // Member order is part of the old format.
   const scope = JSON.stringify({ appId, profile });
   return `jazz-auth-store-v1-${base64urlEncode(sha256(utf8(scope)))}`;

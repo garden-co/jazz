@@ -78,6 +78,15 @@ describe("verifyToken", () => {
 });
 
 describe("secrets", () => {
+  it("rejects padded and non-canonical secrets", () => {
+    expect(() => parseSecret("jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")).toThrow(
+      /43 unpadded/,
+    );
+    // Same bytes as ...AAA, but with a non-zero unused trailing bit.
+    expect(() => parseSecret("jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB")).toThrow(
+      /canonical/,
+    );
+  });
   it("round-trips generated secrets", () => {
     const secret = generateSecret();
     expect(secret).toMatch(/^jazz-auth-v1:[A-Za-z0-9_-]{43}$/);
