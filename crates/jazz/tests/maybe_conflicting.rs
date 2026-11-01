@@ -1157,10 +1157,12 @@ fn a_resent_write_keeps_the_base_it_was_accepted_with() {
 #[test]
 fn an_app_column_cannot_take_a_stored_row_columns_name() {
     for column in [
+        "rid",
         "_base",
         "_touched",
         "_state",
         "_branch",
+        "_clock",
         "_writer",
         "_partition",
     ] {
