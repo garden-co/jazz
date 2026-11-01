@@ -266,7 +266,7 @@ pub enum SubscriptionEvent {
 struct ReadSpec {
     include_deleted: bool,
     /// A replica's `ReadTier::Remote` read: its pending local versions
-    /// (at `_t >= 1<<52`) are left out, and a row they changed
+    /// (at `_clock >= 1<<52`) are left out, and a row they changed
     /// reads as its settled version, as the server lists it. Unlike a
     /// [`ReadSpec::cut`] it stays live.
     settled_only: bool,
@@ -541,7 +541,7 @@ struct Inner {
     /// The order of each of this store's own commits it knows unsettled
     /// (on a relay, of each session commit it carries too), by local seq:
     /// its HLC is where the commit's versions are ([`Pos::pending`]), its
-    /// writer (node, tx) what history keeps them under (`_w`).
+    /// writer (node, tx) what history keeps them under (`_writer`).
     pub(crate) own_order: HashMap<u64, sync::Order>,
     /// A wall clock tests set (see `Db::set_clock_for_test`).
     clock_for_test: Option<i64>,
@@ -1341,7 +1341,7 @@ impl Db {
                 let max: Option<i64> = conn
                     .cached_row(
                         &format!(
-                            "SELECT MAX(_t) FROM {} WHERE _t >= 0 AND _t < ?1",
+                            "SELECT MAX(_clock) FROM {} WHERE _clock >= 0 AND _clock < ?1",
                             quote(&name)
                         ),
                         [sync::band_start(sync::PENDING)],
@@ -2243,7 +2243,7 @@ impl Db {
         };
         let sql = format!(
             "SELECT \"$createdAt\", \"$createdBy\", COALESCE(\"$updatedAt\", \"$createdAt\"), \
-             COALESCE(\"$updatedBy\", \"$createdBy\") FROM {} WHERE id = ?1 ORDER BY _b LIMIT 1",
+             COALESCE(\"$updatedBy\", \"$createdBy\") FROM {} WHERE id = ?1 ORDER BY _branch LIMIT 1",
             quote(&table.stored)
         );
         let stamps: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> = inner
@@ -4019,7 +4019,7 @@ impl Inner {
         key: &[u8],
     ) -> Result<Option<(Pos, bool)>, Error> {
         let sql = format!(
-            "SELECT _t, (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT _clock, (_state & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _branch = ?2",
             quote(table)
         );
         match self.conn.cached_row(
@@ -4055,8 +4055,8 @@ impl Inner {
             return Ok(None);
         };
         let sql = format!(
-            "SELECT (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2 \
-             AND _t = ?3 AND _w = ?4",
+            "SELECT (_state & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _branch = ?2 \
+             AND _clock = ?3 AND _writer = ?4",
             quote(&format!("{table}__h"))
         );
         let deleted: i64 = self
@@ -4089,7 +4089,7 @@ impl Inner {
     }
 
     /// The newest superseded version of a row that `cut` sees: its
-    /// position and writer (`_w`).
+    /// position and writer (`_writer`).
     fn version_at(
         &self,
         table: &str,
@@ -4103,9 +4103,9 @@ impl Inner {
             .extra
             .iter()
             .map(|(at, writer)| match writer.filter(|_| !at.accepted()) {
-                None => format!(" OR _t = {}", at.t()),
+                None => format!(" OR _clock = {}", at.t()),
                 Some((node, tx)) => format!(
-                    " OR (_t = {} AND _w = X'{}')",
+                    " OR (_clock = {} AND _writer = X'{}')",
                     at.t(),
                     sync::writer_bytes(node, tx)
                         .iter()
@@ -4115,8 +4115,8 @@ impl Inner {
             })
             .collect();
         let sql = format!(
-            "SELECT _t, _w FROM {} WHERE id = ?1 AND _b = ?2 AND (_st & {STATE_AS_SENT}) = 0 \
-             AND (_t <= ?3{extra}) ORDER BY _t DESC, _w DESC LIMIT 1",
+            "SELECT _clock, _writer FROM {} WHERE id = ?1 AND _branch = ?2 AND (_state & {STATE_AS_SENT}) = 0 \
+             AND (_clock <= ?3{extra}) ORDER BY _clock DESC, _writer DESC LIMIT 1",
             quote(&format!("{table}__h"))
         );
         self.conn
@@ -4143,7 +4143,7 @@ impl Inner {
         match target {
             Target::Root if table.branch_by.is_empty() => at(Vec::new(), BTreeMap::new()),
             Target::Root => {
-                let sql = format!("SELECT _b FROM {} WHERE id = ?1", quote(&table.stored));
+                let sql = format!("SELECT _branch FROM {} WHERE id = ?1", quote(&table.stored));
                 let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
                 let keys: Vec<Vec<u8>> = statement
                     .query_map([row.0.as_bytes().to_vec()], |r| r.get(0))
@@ -4278,7 +4278,7 @@ impl Inner {
         params.push(Sql::Blob(row.0.as_bytes().to_vec()));
         params.push(Sql::Blob(key.to_vec()));
         let sql = format!(
-            "SELECT COALESCE({condition}, 0) FROM {} AS a WHERE a.id = ?{} AND a._b = ?{}",
+            "SELECT COALESCE({condition}, 0) FROM {} AS a WHERE a.id = ?{} AND a._branch = ?{}",
             quote(&table.stored),
             params.len() - 1,
             params.len()
@@ -4342,7 +4342,7 @@ impl Inner {
         params.push(Sql::Blob(row.0.as_bytes().to_vec()));
         params.push(Sql::Blob(key.to_vec()));
         let sql = format!(
-            "SELECT COALESCE({condition}, 0) FROM {source} AS a WHERE a.id = ?{} AND a._b = ?{}",
+            "SELECT COALESCE({condition}, 0) FROM {source} AS a WHERE a.id = ?{} AND a._branch = ?{}",
             params.len() - 1,
             params.len()
         );
@@ -4694,7 +4694,7 @@ impl Inner {
     /// Whether `row`'s current version on branch `key` is a tombstone.
     fn is_deleted_version(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
         let sql = format!(
-            "SELECT (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT (_state & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _branch = ?2",
             quote(&table.stored)
         );
         let deleted: Option<i64> = self
@@ -5124,7 +5124,7 @@ impl Inner {
             return Ok(None);
         };
         let sql = format!(
-            "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2",
             quote(&column.stored),
             quote(&table.stored)
         );
@@ -5317,7 +5317,7 @@ impl Inner {
     /// [`Self::text_merged`]'s merge, with the write's value bound as its
     /// cell: `None` when there is nothing to merge or the merge leaves the
     /// value as sent. The fast path reads no value: whether to merge is
-    /// decided first, from the row's `_base` and `_cols` alone. The write's
+    /// decided first, from the row's `_base` and `_touched` alone. The write's
     /// value is bound before it is read, so a descriptor naming chunks its
     /// writer does not possess is refused (SPEC 19.4), merged or not.
     #[allow(clippy::too_many_arguments)]
@@ -5390,7 +5390,7 @@ impl Inner {
 
     /// Keep, for each row version the upload at `seq` wrote whose text
     /// merge changed a value, that version as its writer sent it (SPEC 4
-    /// §4.3): in `__h` at `_t` = minus its own `_t` with [`STATE_AS_SENT`] set, its
+    /// §4.3): in `__h` at `_clock` = minus its own `_clock` with [`STATE_AS_SENT`] set, its
     /// merged columns holding their values as sent and every other cell
     /// the version's. A later write chained on it merges over these values
     /// ([`Inner::merge_base`]); no read takes it for a version.
@@ -5416,9 +5416,9 @@ impl Inner {
             }
             self.exec(
                 &format!(
-                    "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _t < 0 \
-                     AND (_st & {STATE_AS_SENT}) <> 0 AND EXISTS (SELECT 1 FROM _jazz_transactions AS s \
-                     JOIN _jazz_nodes AS n ON n.n = s.n WHERE s.t = -_t AND n.node = ?3)",
+                    "DELETE FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock < 0 \
+                     AND (_state & {STATE_AS_SENT}) <> 0 AND EXISTS (SELECT 1 FROM _jazz_transactions AS s \
+                     JOIN _jazz_nodes AS n ON n.n = s.n WHERE s.t = -_clock AND n.node = ?3)",
                     quote(&format!("{stored}__h"))
                 ),
                 rusqlite::params![row.0.as_bytes().to_vec(), key, node.to_vec()],
@@ -5455,9 +5455,9 @@ impl Inner {
                 })
                 .collect();
             let sql = format!(
-                "INSERT INTO {} (id, _b, _t, _w, _st, _base, _cols{columns}) \
-                 SELECT id, _b, -_t, _w, _st | {STATE_AS_SENT}, NULL, NULL{cells} FROM {} \
-                 WHERE id = ?1 AND _b = ?2 AND _t = ?3",
+                "INSERT INTO {} (id, _branch, _clock, _writer, _state, _base, _touched{columns}) \
+                 SELECT id, _branch, -_clock, _writer, _state | {STATE_AS_SENT}, NULL, NULL{cells} FROM {} \
+                 WHERE id = ?1 AND _branch = ?2 AND _clock = ?3",
                 quote(&format!("{stored}__h")),
                 quote(&stored),
             );
@@ -5476,7 +5476,7 @@ impl Inner {
                 .conn
                 .cached_row(
                     &format!(
-                        "SELECT count(*) FROM {} WHERE (_st & {STATE_AS_SENT}) <> 0",
+                        "SELECT count(*) FROM {} WHERE (_state & {STATE_AS_SENT}) <> 0",
                         quote(&format!("{stored}__h"))
                     ),
                     [],
@@ -5515,7 +5515,7 @@ impl Inner {
             .conn
             .cached_row(
                 &format!(
-                    "SELECT _t, _w FROM {} WHERE id = ?1 AND _b = ?2",
+                    "SELECT _clock, _writer FROM {} WHERE id = ?1 AND _branch = ?2",
                     quote(&table.stored)
                 ),
                 rusqlite::params![id, key],
@@ -5533,9 +5533,9 @@ impl Inner {
         }
         let columns = self.columns_list(table);
         let sql = format!(
-            "INSERT INTO {} (id, _b, _t, _w, _st, _base, _cols{columns}) \
-             SELECT id, _b, _t, _w, _st, _base, _cols{columns} FROM {} \
-             WHERE id = ?1 AND _b = ?2",
+            "INSERT INTO {} (id, _branch, _clock, _writer, _state, _base, _touched{columns}) \
+             SELECT id, _branch, _clock, _writer, _state, _base, _touched{columns} FROM {} \
+             WHERE id = ?1 AND _branch = ?2",
             quote(&format!("{}__h", table.stored)),
             quote(&table.stored),
         );
@@ -5571,8 +5571,8 @@ impl Inner {
                     .version_at(&table.stored, row, from, cut)?
                     .map(|(version, w)| {
                         format!(
-                            "(SELECT * FROM {} WHERE _t = {} AND _w = X'{}' AND id = ?3 \
-                             AND _b = ?4)",
+                            "(SELECT * FROM {} WHERE _clock = {} AND _writer = X'{}' AND id = ?3 \
+                             AND _branch = ?4)",
                             quote(&format!("{}__h", table.stored)),
                             version.t(),
                             w.iter().map(|b| format!("{b:02x}")).collect::<String>()
@@ -5588,9 +5588,9 @@ impl Inner {
         };
         // The copy keeps the base's deletion and authored no content.
         let sql = format!(
-            "INSERT INTO {name} (id, _b, _t, _w, _st{columns}) \
-             SELECT id, ?1, ?2, ?5, _st | {STATE_NO_CONTENT}{columns} \
-             FROM {source} WHERE id = ?3 AND _b = ?4",
+            "INSERT INTO {name} (id, _branch, _clock, _writer, _state{columns}) \
+             SELECT id, ?1, ?2, ?5, _state | {STATE_NO_CONTENT}{columns} \
+             FROM {source} WHERE id = ?3 AND _branch = ?4",
             name = quote(&table.stored),
         );
         let w = self.own_writer_at(seq);
@@ -5617,7 +5617,7 @@ impl Inner {
         deleted: Option<bool>,
         content: bool,
     ) -> Result<(), Error> {
-        // Right-hand sides read the row before this update: `_t` is still
+        // Right-hand sides read the row before this update: `_clock` is still
         // the previous version's.
         // What a new version was built on is the authority's to write
         // (SPEC 4 §4.6).
@@ -5627,18 +5627,18 @@ impl Inner {
                 values.push(Sql::Integer(if deleted { STATE_DELETED } else { 0 }));
                 format!("?{}", values.len())
             }
-            None => format!("(_st & {STATE_DELETED})"),
+            None => format!("(_state & {STATE_DELETED})"),
         };
         // The no-content bit stays set only while no write of the commit
         // authored content.
         let no_content = if content { 0 } else { STATE_NO_CONTENT };
         values.push(Sql::Blob(self.own_writer_at(seq)));
         let mut sets = vec![
-            "_t = ?1".to_owned(),
-            format!("_w = ?{}", values.len()),
-            "_base = NULL, _cols = NULL".to_owned(),
+            "_clock = ?1".to_owned(),
+            format!("_writer = ?{}", values.len()),
+            "_base = NULL, _touched = NULL".to_owned(),
             format!(
-                "_st = (CASE WHEN _t = ?1 THEN _st & {no_content} ELSE {no_content} END) \
+                "_state = (CASE WHEN _clock = ?1 THEN _state & {no_content} ELSE {no_content} END) \
                  | {deletion}"
             ),
         ];
@@ -5661,7 +5661,7 @@ impl Inner {
         values.push(Sql::Blob(row.0.as_bytes().to_vec()));
         values.push(Sql::Blob(key.to_vec()));
         let sql = format!(
-            "UPDATE {} SET {} WHERE id = ?{} AND _b = ?{}",
+            "UPDATE {} SET {} WHERE id = ?{} AND _branch = ?{}",
             quote(&table.stored),
             sets.join(", "),
             values.len() - 1,
@@ -5753,9 +5753,9 @@ impl Inner {
         };
         let mut names = vec![
             "id".to_owned(),
-            "_b".to_owned(),
-            "_t".to_owned(),
-            "_w".to_owned(),
+            "_branch".to_owned(),
+            "_clock".to_owned(),
+            "_writer".to_owned(),
         ];
         let mut values = vec![
             Sql::Blob(row.0.as_bytes().to_vec()),
@@ -6581,7 +6581,7 @@ impl Inner {
                 continue;
             }
             let sql = format!(
-                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND (_st & {STATE_DELETED}) = 0",
+                "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2 AND (_state & {STATE_DELETED}) = 0",
                 quote(&column.stored),
                 quote(&t.stored)
             );
@@ -7246,7 +7246,7 @@ impl Inner {
 
     /// The HLC a commit begun now would take ([`Inner::next_hlc`]).
     pub(crate) fn peek_hlc(&self) -> u64 {
-        // Past the last a pending `_t` holds, commits share it and order by
+        // Past the last a pending `_clock` holds, commits share it and order by
         // writer and tx.
         self.hlc_last
             .saturating_add(1)
@@ -7256,7 +7256,7 @@ impl Inner {
 
     /// `seen` as this store counts an HLC it was sent: no further ahead
     /// than [`HLC_SKEW_MS`] past its own clock, and never past the last a
-    /// pending `_t` holds.
+    /// pending `_clock` holds.
     pub(crate) fn bounded_hlc(&self, seen: u64) -> u64 {
         let ceiling = shard::hlc(self.hlc_clock_ms().saturating_add(HLC_SKEW_MS));
         seen.min(ceiling).min(sync::MAX_SEQ)
@@ -7288,7 +7288,7 @@ impl Inner {
             .map_or_else(|| self.peek_hlc(), |order| order.0)
     }
 
-    /// Commit `seq`'s writer, as history keeps it (`_w`).
+    /// Commit `seq`'s writer, as history keeps it (`_writer`).
     pub(crate) fn own_writer(&self, seq: u64) -> Vec<u8> {
         match self.own_order.get(&seq) {
             Some(&(_, node, tx)) => sync::writer_bytes(node, tx),
@@ -7437,7 +7437,7 @@ impl Inner {
     /// On a replica, the newest version of `row` the authority settled.
     fn settled_seq(&self, table: &str, row: RowUuid) -> Result<Option<u64>, Error> {
         let sql = format!(
-            "SELECT MAX(_t) FROM {} WHERE id = ?1 AND _t >= 0 AND _t < {}",
+            "SELECT MAX(_clock) FROM {} WHERE id = ?1 AND _clock >= 0 AND _clock < {}",
             quote(table),
             sync::band_start(sync::PENDING)
         );
@@ -7456,7 +7456,7 @@ impl Inner {
         row: RowUuid,
     ) -> Result<Option<sync::Rank>, Error> {
         let sql = format!(
-            "SELECT _t, _b FROM {} WHERE id = ?1 ORDER BY _t DESC LIMIT 1",
+            "SELECT _clock, _branch FROM {} WHERE id = ?1 ORDER BY _clock DESC LIMIT 1",
             quote(table)
         );
         let newest: Option<(i64, Vec<u8>)> = self
@@ -7475,7 +7475,7 @@ impl Inner {
     /// any branch.
     pub(crate) fn newest_seq(&self, table: &str, row: RowUuid) -> Result<Option<Pos>, Error> {
         let sql = format!(
-            "SELECT _t FROM {} WHERE id = ?1 ORDER BY _t DESC LIMIT 1",
+            "SELECT _clock FROM {} WHERE id = ?1 ORDER BY _clock DESC LIMIT 1",
             quote(table)
         );
         self.conn

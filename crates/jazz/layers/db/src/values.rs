@@ -977,7 +977,7 @@ pub(crate) const PROVENANCE: [&str; 12] = [
 /// The current deletion of a row, readable with `includeDeleted`: the
 /// deleting version's update stamp, NULL for live and restored rows. Never
 /// stored: a deleted row is its current version with [`STATE_DELETED`] set
-/// in `_st`, and that version's update stamp is the deletion's.
+/// in `_state`, and that version's update stamp is the deletion's.
 pub(crate) const DELETION: [&str; 6] = [
     "$deletedAt",
     "$deletedBy",
@@ -987,15 +987,15 @@ pub(crate) const DELETION: [&str; 6] = [
     "$deletedBy.identity.subject",
 ];
 
-/// `_st` bit: the version's commit wrote no content, only a delete, a
+/// `_state` bit: the version's commit wrote no content, only a delete, a
 /// restore or a move. Clear on an ordinary write, so a live content
 /// version stores 0. History reads list versions with it clear.
 pub(crate) const STATE_NO_CONTENT: i64 = 1;
-/// `_st` bit: the version is a tombstone. Live versions are `_st < 2`.
+/// `_state` bit: the version is a tombstone. Live versions are `_state < 2`.
 pub(crate) const STATE_DELETED: i64 = 2;
-/// `_st` bit: the version is an authority text merge's write as its writer
+/// `_state` bit: the version is an authority text merge's write as its writer
 /// sent it, superseded by the merged version at the same seq (SPEC 4
-/// §4.3). Kept only in `__h`, at `_t` = minus the version's own, as the
+/// §4.3). Kept only in `__h`, at `_clock` = minus the version's own, as the
 /// base of its writer's next chained write; never read as a version, so
 /// every read of `__h` that is not by exact seq requires this bit clear.
 pub(crate) const STATE_AS_SENT: i64 = 4;
@@ -1585,7 +1585,7 @@ impl Table {
         let lead = if table.branch_by.is_empty() {
             ""
         } else {
-            "_b, "
+            "_branch, "
         };
         let index = table.stored_index(index);
         let keys: Vec<String> = index
@@ -1614,29 +1614,29 @@ impl Table {
             .collect();
         let name = quote(&table.stored);
         let history = quote(&format!("{}__h", table.stored));
-        // `_b` is the canonical branch key ('' for unbranched tables).
-        // Rows are unique per (id, branch); branch views select by `_b`
-        // first, so every index leads with it. A version is at `_t`: its
+        // `_branch` is the canonical branch key ('' for unbranched tables).
+        // Rows are unique per (id, branch); branch views select by `_branch`
+        // first, so every index leads with it. A version is at `_clock`: its
         // position, kind and seq (see [`crate::sync::Pos::t`]), under 2^53.
-        // A pending version also keeps its writer, `_w` (node, then tx
+        // A pending version also keeps its writer, `_writer` (node, then tx
         // big-endian; empty for an accepted one), current or in history:
-        // two writers' pending versions of a row can share a `_t`.
-        // `_st` is the version's state
+        // two writers' pending versions of a row can share a `_clock`.
+        // `_state` is the version's state
         // bits ([`STATE_NO_CONTENT`], [`STATE_DELETED`], and in history
         // [`STATE_AS_SENT`]): 0 for a live version whose commit wrote
-        // content. `_base` and `_cols` are what the authority keeps of the
+        // content. `_base` and `_touched` are what the authority keeps of the
         // version an accepted upload wrote: what it was built on and the
         // columns it authored (SPEC 4 §4.6); NULL everywhere else.
         sql.push_str(&format!(
             "CREATE TABLE {name} (rid INTEGER PRIMARY KEY, id BLOB NOT NULL, \
-             _b BLOB NOT NULL DEFAULT X'', _t INTEGER NOT NULL, _w BLOB NOT NULL DEFAULT X'', \
-             _st INTEGER NOT NULL DEFAULT 0, _base INTEGER, _cols BLOB{columns}, \
-             UNIQUE (id, _b));\n\
-             CREATE INDEX {} ON {name}(_t);\n\
-             CREATE TABLE {history} (id BLOB NOT NULL, _b BLOB NOT NULL, \
-             _t INTEGER NOT NULL, _w BLOB NOT NULL DEFAULT X'', _st INTEGER NOT NULL, \
-             _base INTEGER, _cols BLOB{columns}, PRIMARY KEY (id, _b, _t, _w)) WITHOUT ROWID;\n",
-            quote(&format!("{}__by_t", table.stored)),
+             _branch BLOB NOT NULL DEFAULT X'', _clock INTEGER NOT NULL, _writer BLOB NOT NULL DEFAULT X'', \
+             _state INTEGER NOT NULL DEFAULT 0, _base INTEGER, _touched BLOB{columns}, \
+             UNIQUE (id, _branch));\n\
+             CREATE INDEX {} ON {name}(_clock);\n\
+             CREATE TABLE {history} (id BLOB NOT NULL, _branch BLOB NOT NULL, \
+             _clock INTEGER NOT NULL, _writer BLOB NOT NULL DEFAULT X'', _state INTEGER NOT NULL, \
+             _base INTEGER, _touched BLOB{columns}, PRIMARY KEY (id, _branch, _clock, _writer)) WITHOUT ROWID;\n",
+            quote(&format!("{}__by_clock", table.stored)),
         ));
         for index in &table.indexes {
             sql.push_str(&table.index_ddl(index));
@@ -1833,7 +1833,7 @@ pub struct CurrentRow {
     pub(crate) id: RowUuid,
     /// Where the row's version is.
     pub(crate) seq: crate::db::Pos,
-    /// The version's writer as history keys it (`_w`), when the read
+    /// The version's writer as history keys it (`_writer`), when the read
     /// carried it: empty for an accepted version.
     pub(crate) writer: Option<Arc<[u8]>>,
     pub(crate) deleted: bool,
@@ -1932,7 +1932,7 @@ impl CurrentRow {
         self.deleted
     }
 
-    /// Where this row version is: its banded position `_t`.
+    /// Where this row version is: its banded position `_clock`.
     pub fn seq(&self) -> crate::db::Pos {
         self.seq
     }
