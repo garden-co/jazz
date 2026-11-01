@@ -1,1 +1,5 @@
-{ "title": "Deployment", "defaultOpen": true, "pages": ["jazz-cloud", "own-server"] }
+{
+  "title": "Deployment",
+  "defaultOpen": true,
+  "pages": ["vercel", "cloudflare", "own-server", "jazz-cloud"]
+}

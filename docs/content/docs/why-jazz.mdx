@@ -10,9 +10,9 @@ description: "Why use a higher-level database, how Jazz compares, and what it ch
 
 ## For developers
 
-Think of Jazz as a modern Supabase that sits right next to your app. You get a relational database, auth integration, permissions and a typed client for backend and frontend, with no API layer of your own to write and maintain. Then it goes further:
+Think of Jazz as a modern Supabase that you host yourself, right next to your app. You get a relational database, auth integration, permissions and a typed client for backend and frontend, with no API layer of your own to write and maintain. Then it goes further:
 
-- **Your backend in front.** Jazz runs inside your backend, which handles auth and talks to Jazz Cloud or your own Jazz server. Browsers never hold a Jazz credential. Unsharded Jazz is MIT and free.
+- **Yours to run.** Deploy it on Vercel, Cloudflare or your own servers instead of a separate hosted service. It scales from zero for small apps up to many shards for big ones. Unsharded Jazz is MIT and free.
 - **Live queries, not change feeds.** Every query can be a subscription. The server keeps results up to date as rows change, including rows that start or stop matching.
 - **Permissions as code.** Policies live next to your schema in TypeScript and apply the same way to backend, thin-client and local-first reads and writes. They're verbose, but agents are good at writing and checking them.
 - **Built-in collaboration.** Edit metadata (`$createdBy`, `$updatedAt`, …), history, drafts and branches, mergeable text, and files and streams, without bolting on extra services.
@@ -48,14 +48,15 @@ Rough plan: each comparison answers the questions developers actually ask (lock-
 
 ### Plain Durable Objects
 
-- Jazz shards across DO-sized units, but you work with tables and queries instead of hand-rolled per-object state and storage
+- Jazz on Cloudflare uses DOs, but you work with tables and queries instead of hand-rolled per-object state and storage
 - Sharding across objects is handled for you, including cross-shard transactions
 - Permissions and live queries come built in rather than as custom code in every DO
+- Same app also runs on Vercel or your own servers, so there's no lock-in to one platform
 - Where plain DOs are stronger: full control over the actor model, no abstraction overhead
 
 ### Convex
 
-- Both give reactive queries and a typed schema; Jazz runs inside your own backend and is MIT when unsharded
+- Both give reactive queries and a typed schema; Jazz is self-hosted on your own cloud and is MIT when unsharded
 - Jazz queries are declarative relational queries, not server functions you write and deploy
 - Declarative permission policies instead of checks written inside each function
   - When a rule is too complex for a policy, write it as ordinary code in a backend route that uses the backend client, and close that data off to clients entirely
@@ -74,6 +75,7 @@ Rough plan: each comparison answers the questions developers actually ask (lock-
 
 - Neon is serverless Postgres; Jazz is a serverless relational database with sync, permissions and live queries built in
 - No separate sync product or replication setup to wire up
+- Runs on your own Vercel, Cloudflare or servers rather than a hosted database service
 - Where Neon is stronger: real Postgres, branching for dev databases, a managed service
 
 ### TanStack DB
@@ -87,5 +89,6 @@ Rough plan: each comparison answers the questions developers actually ask (lock-
 
 - Custom code as a liability: less backend code to own
 - Fewer systems and moving parts
-- Your backend owns auth; Jazz Cloud or your own Jazz server stores and syncs
+- Runs in your own cloud: Vercel, Cloudflare, AWS, bare metal
+- What you operate yourself on each platform, plus a cost calculator
 - Licensing: MIT for unsharded Jazz, a license for sharded Jazz

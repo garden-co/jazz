@@ -8,7 +8,7 @@ Set up Jazz (https://jazz.tools) in this project. You do the work; ask me only t
    (append .md for Markdown). The installed jazz-tools types win over the docs."
    Follow that yourself from now on.
 3. Ask me these in one message, each with your suggested answer and the docs link:
-   - Where will Jazz run? Jazz Cloud or your own server. Default: own server locally
+   - Where will Jazz run? Own server, Vercel, or Cloudflare. Default: own server locally
      for now. https://jazz.tools/docs/setup/deployment
    - Which backend? Hono, Next.js route handlers, Express, or none yet.
      https://jazz.tools/docs/setup/backend
