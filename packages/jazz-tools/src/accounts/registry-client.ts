@@ -1,3 +1,4 @@
+import { fetchFor } from "../runtime/in-process-transport.js";
 import { withAuthRequestDeadline } from "../runtime/auth-request-deadline.js";
 import type { AccountIdentity } from "./state.js";
 
@@ -18,7 +19,7 @@ export async function requestAccountRegistry(
   path: string,
   token: string,
   body?: unknown,
-  fetcher: typeof fetch = globalThis.fetch,
+  fetcher: typeof fetch = fetchFor(registry),
 ): Promise<unknown> {
   return withAuthRequestDeadline(async (signal) => {
     const response = await fetcher(`${registry}/${path}`, {

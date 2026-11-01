@@ -1,3 +1,4 @@
+import { fetchFor } from "../runtime/in-process-transport.js";
 import { appScopedUrl } from "../runtime/url.js";
 
 export type GraphPresence = "local" | "server" | "both";
@@ -60,10 +61,10 @@ export interface MigrationGraphOptions {
 }
 
 export async function fetchMigrationGraph(options: MigrationGraphOptions): Promise<MigrationGraph> {
-  const response = await fetch(
-    appScopedUrl(options.serverUrl, options.appId, "admin/migrations/graph"),
-    { headers: { "X-Jazz-Admin-Secret": options.adminSecret } },
-  );
+  const url = appScopedUrl(options.serverUrl, options.appId, "admin/migrations/graph");
+  const response = await fetchFor(url)(url, {
+    headers: { "X-Jazz-Admin-Secret": options.adminSecret },
+  });
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
     throw new Error(

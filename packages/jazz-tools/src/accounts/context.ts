@@ -1,4 +1,5 @@
 import { PlatformURL } from "../runtime/platform-url.js";
+import { resolveServerUrl } from "../runtime/url.js";
 import { admitAccountConfig } from "./config-capability.js";
 import type { AccountHandle } from "./state.js";
 import {
@@ -38,7 +39,7 @@ export type AccountDbConfig = Omit<
 
 /** One canonical application endpoint for enrollment and context scope validation. */
 export function accountRegistryUrl(serverUrl: string, appId: string): string {
-  const url = new PlatformURL(serverUrl);
+  const url = new PlatformURL(resolveServerUrl(serverUrl));
   if (url.protocol === "ws:") url.protocol = "http:";
   if (url.protocol === "wss:") url.protocol = "https:";
   if (url.protocol !== "http:" && url.protocol !== "https:")

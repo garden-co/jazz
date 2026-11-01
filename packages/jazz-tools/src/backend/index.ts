@@ -27,3 +27,13 @@ export {
   SnapshotRefFormatError,
   UnsupportedSnapshotError,
 } from "../runtime/snapshot-ref.js";
+export {
+  createJazz,
+  memory,
+  sqlite,
+  type CreateJazzOptions,
+  type Jazz,
+  type JazzStore,
+  type JazzUser,
+  type WsLikeSocket,
+} from "./create-jazz.js";
