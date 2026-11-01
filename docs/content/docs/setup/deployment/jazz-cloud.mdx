@@ -1,0 +1,21 @@
+---
+title: Jazz Cloud
+description: "Store and sync your app's data on the hosted Jazz Cloud, with your own backend in front for auth."
+---
+
+Jazz Cloud stores and syncs your app's data. Your own backend sits in front of it: browsers talk only to your backend, which signs users in with your auth and connects to Jazz Cloud. Jazz Cloud does no user auth of its own.
+
+## Get an app ID
+
+Your app ID namespaces your data for storage and sync. Click below to generate one on Jazz Cloud. You also get the secrets your backend needs. Generated apps are unclaimed until you claim them in the dashboard, and unclaimed apps are deleted after 14 days.
+
+<GenerateAppId />
+
+## Connect your backend
+
+Your backend connects to Jazz Cloud with the `remote()` store, using the app's admin and backend secrets. See [Backend](/docs/setup/backend) for the setup in Next.js, Vite and Effect.
+
+## Coming next
+
+- Limits and pricing
+- Moving an app off Jazz Cloud onto your own deployment
