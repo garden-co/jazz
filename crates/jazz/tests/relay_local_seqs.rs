@@ -1272,6 +1272,77 @@ fn a_workers_pending_commits_keep_their_order_across_a_restart() {
     assert_eq!(note_bodies(&early), ["late"]);
 }
 
+/// A tab whose clock runs a day ahead orders its commit no further ahead
+/// than the worker counts a received clock: the worker stores and relays
+/// it there, so its own later write, after a restart too, orders after it.
+#[test]
+fn a_tab_clock_far_ahead_orders_no_further_than_the_bound_across_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("worker.sqlite");
+    let open_worker = |clock: i64| {
+        let worker = block_on(Db::open_at(
+            DbConfig::new(
+                schema(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([WORKER; 16]),
+                    author: author(WORKER),
+                },
+            ),
+            &path,
+            jazz::db::FileOptions::default(),
+        ))
+        .unwrap();
+        worker.set_clock_for_test(Some(clock));
+        worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+        worker
+    };
+    let worker = open_worker(CLOCK);
+    let row = block_on(worker.insert("notes", body("worker"), Default::default()))
+        .unwrap()
+        .row_uuid();
+    let tab = open(WORKER + 1, author(WORKER));
+    tab.set_clock_for_test(Some(CLOCK + 24 * 60 * 60 * 1000));
+    tab.set_non_durable_client();
+    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let (client_side, server_side) = duplex();
+    block_on(tab.connect_upstream(client_side));
+    worker
+        .accept_subscriber(server_side, author(WORKER))
+        .unwrap();
+    let prepared = tab.prepare_query(&Query::from("notes")).unwrap();
+    let _watch = block_on(tab.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump_all(&[&tab, &worker]);
+    block_on(tab.update("notes", row, body("ahead"), Default::default())).unwrap();
+    pump_all(&[&tab, &worker]);
+    assert_eq!(note_bodies(&worker), ["ahead"]);
+    drop((tab, _watch));
+    block_on(worker.close()).unwrap();
+
+    let worker = open_worker(CLOCK + 1_000);
+    block_on(worker.update("notes", row, body("after"), Default::default())).unwrap();
+    assert_eq!(
+        note_bodies(&worker),
+        ["after"],
+        "the later write orders last"
+    );
+}
+
+/// A store whose commit HLC reached the last a pending `_t` holds keeps
+/// committing there (its commits order by writer and tx), and its
+/// worker still takes them.
+#[test]
+fn a_commit_hlc_at_the_last_pending_position_still_syncs() {
+    let notes = Query::from("notes");
+    let (worker, tabs, _watches) = serverless(schema, &[WORKER + 1], &notes);
+    let tab = &tabs[0];
+    tab.set_hlc_for_test(jazz::db::MAX_SEQ);
+    block_on(tab.insert("notes", body("one"), Default::default())).unwrap();
+    block_on(tab.insert("notes", body("two"), Default::default())).unwrap();
+    pump_all(&[tab, &worker]);
+    assert_eq!(note_bodies(&worker), ["one", "two"]);
+    assert_eq!(note_bodies(tab), ["one", "two"]);
+}
+
 /// Unsettled versions order by clock only until the authority's order
 /// arrives: the authority accepts in upload order, and every store then
 /// shows the version it accepted last, even where that flips a row

@@ -55,11 +55,11 @@ use crate::values::{
 };
 pub use sync::{
     ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
-    FrameJoiner, Image, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction, RelationSnapshot,
-    RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
-    TxName, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError, WireKind, WireOp,
-    WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite, WriteConflict,
-    decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
+    FrameJoiner, Image, MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction,
+    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
+    TransportError, TxName, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError,
+    WireKind, WireOp, WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite,
+    WriteConflict, decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -266,7 +266,7 @@ pub enum SubscriptionEvent {
 struct ReadSpec {
     include_deleted: bool,
     /// A replica's `ReadTier::Remote` read: its pending local versions
-    /// (in its own-pending band) are left out, and a row they changed
+    /// (at `_t >= 1<<52`) are left out, and a row they changed
     /// reads as its settled version, as the server lists it. Unlike a
     /// [`ReadSpec::cut`] it stays live.
     settled_only: bool,
@@ -545,7 +545,7 @@ struct Inner {
     pub(crate) own_order: HashMap<u64, sync::Order>,
     /// The writer (`_w`) of each current pending version this process put
     /// there, by row: a row's current version keeps no writer of its own.
-    pub(crate) current_w: RefCell<HashMap<(String, RowUuid, Vec<u8>), Vec<u8>>>,
+    pub(crate) current_w: RefCell<HashMap<(String, RowUuid, Vec<u8>), (Pos, Vec<u8>)>>,
     /// A wall clock tests set (see `Db::set_clock_for_test`).
     clock_for_test: Option<i64>,
     /// Interned author codes (see [`Inner::author_code`]), cached both ways.
@@ -1812,6 +1812,13 @@ impl Db {
     /// Make the next ticks fail with `codes`, in order, before doing any
     /// work: a tick driver's failure handling is exercised without
     /// breaking the store.
+    /// Set this store's last commit HLC, as if it had handed out `hlc`.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_hlc_for_test(&self, hlc: u64) {
+        self.inner().hlc_last = hlc;
+    }
+
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn fail_next_ticks_for_test(&self, codes: impl IntoIterator<Item = ErrorCode>) {
@@ -3868,7 +3875,7 @@ impl Inner {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
-    ) -> Result<Vec<(RowUuid, Pos)>, Error> {
+    ) -> Result<Vec<(RowUuid, sync::Rank)>, Error> {
         let roots = self.run(prepared, identity, read)?;
         let mut out = versions(&roots);
         if !prepared.query.array_subqueries.is_empty() {
@@ -3884,7 +3891,34 @@ impl Inner {
                 child_versions(&node, &mut out);
             }
         }
-        Ok(out)
+        out.into_iter()
+            .map(|(table, row, at)| Ok((row, self.read_rank(&table, row, at)?)))
+            .collect()
+    }
+
+    /// A version a read returned, with its writer when pending: two
+    /// writers' versions of a row can share a position.
+    fn read_rank(&self, table: &str, row: RowUuid, at: Pos) -> Result<sync::Rank, Error> {
+        if at.accepted() {
+            return Ok((at, None));
+        }
+        let stored = self.schema.stored_table(table).unwrap_or(table).to_owned();
+        let key: Option<Vec<u8>> = self
+            .conn
+            .cached_row(
+                &format!(
+                    "SELECT _b FROM {} WHERE id = ?1 AND _t = ?2 LIMIT 1",
+                    quote(&stored)
+                ),
+                rusqlite::params![row.0.as_bytes().to_vec(), at.t()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        Ok(match key {
+            Some(key) => self.current_rank(&stored, row, &key, at),
+            None => (at, None),
+        })
     }
 
     /// A row with its array relations, read as the row was: through the
@@ -3939,13 +3973,26 @@ impl Inner {
     // ---- write primitives ---------------------------------------------
 
     /// Where this store's own commit `seq` writes its versions: the
-    /// authority's seq, or in its own-pending band on a replica.
+    /// authority's seq, or pending at the commit's HLC on a replica.
     pub(crate) fn own_pos(&self, seq: u64) -> Pos {
         if self.me == sync::ACCEPTED {
             Pos::at(seq)
         } else {
             Pos::pending(self.commit_hlc(seq))
         }
+    }
+
+    /// Own commit `seq`'s version: its position and, pending, its writer.
+    pub(crate) fn own_rank(&self, seq: u64) -> sync::Rank {
+        let at = self.own_pos(seq);
+        if at.accepted() {
+            return (at, None);
+        }
+        let writer = match self.own_order.get(&seq) {
+            Some(&(_, node, tx)) => (node, tx),
+            None => (*self.identity.node.as_bytes(), seq),
+        };
+        (at, Some(writer))
     }
 
     fn existing(
@@ -3983,58 +4030,83 @@ impl Inner {
             return Ok(current);
         };
         if let Some((seq, _)) = current
-            && cut.sees(seq)
+            && cut.sees(self.current_rank(table, row, key, seq))
         {
             return Ok(current);
         }
-        let Some(version) = self.version_at(table, row, key, cut)? else {
+        let Some((version, w)) = self.version_at(table, row, key, cut)? else {
             return Ok(None);
         };
         let sql = format!(
             "SELECT (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2 \
-             AND _t = ?3",
+             AND _t = ?3 AND _w = ?4",
             quote(&format!("{table}__h"))
         );
         let deleted: i64 = self
             .conn
             .cached_row(
                 &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), key, version.t()],
+                rusqlite::params![row.0.as_bytes().to_vec(), key, version.t(), w],
                 |r| r.get(0),
             )
             .map_err(storage)?;
         Ok(Some((version, deleted != 0)))
     }
 
-    /// The newest superseded version of a row that `cut` sees.
+    /// A row's current version at `at` as a cut names it: with its writer,
+    /// when pending.
+    pub(crate) fn current_rank(
+        &self,
+        table: &str,
+        row: RowUuid,
+        key: &[u8],
+        at: Pos,
+    ) -> sync::Rank {
+        if at.accepted() {
+            return (at, None);
+        }
+        (
+            at,
+            sync::writer_of_bytes(&self.current_writer(table, row, key, at)),
+        )
+    }
+
+    /// The newest superseded version of a row that `cut` sees: its
+    /// position and writer (`_w`).
     fn version_at(
         &self,
         table: &str,
         row: RowUuid,
         key: &[u8],
         cut: &Cut,
-    ) -> Result<Option<Pos>, Error> {
-        let extra = if cut.extra.is_empty() {
-            String::new()
-        } else {
-            let positions = cut
-                .extra
-                .iter()
-                .map(|at| at.t().to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(" OR _t IN ({positions})")
-        };
+    ) -> Result<Option<(Pos, Vec<u8>)>, Error> {
+        // Positions are integers and writers fixed-width bytes, so the
+        // named versions are inlined.
+        let extra: String = cut
+            .extra
+            .iter()
+            .map(|(at, writer)| match writer.filter(|_| !at.accepted()) {
+                None => format!(" OR _t = {}", at.t()),
+                Some((node, tx)) => format!(
+                    " OR (_t = {} AND _w = X'{}')",
+                    at.t(),
+                    sync::writer_bytes(node, tx)
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                ),
+            })
+            .collect();
         let sql = format!(
-            "SELECT _t FROM {} WHERE id = ?1 AND _b = ?2 AND (_st & {STATE_AS_SENT}) = 0 \
-             AND (_t <= ?3{extra}) ORDER BY _t DESC LIMIT 1",
+            "SELECT _t, _w FROM {} WHERE id = ?1 AND _b = ?2 AND (_st & {STATE_AS_SENT}) = 0 \
+             AND (_t <= ?3{extra}) ORDER BY _t DESC, _w DESC LIMIT 1",
             quote(&format!("{table}__h"))
         );
         self.conn
             .cached_row(
                 &sql,
                 rusqlite::params![row.0.as_bytes().to_vec(), key, cut.seq.t()],
-                |r| Ok(Pos::from_t(r.get(0)?)),
+                |r| Ok((Pos::from_t(r.get(0)?), r.get(1)?)),
             )
             .optional()
             .map_err(storage)
@@ -4208,7 +4280,7 @@ impl Inner {
         overlay: CutOverlay,
     ) -> Result<String, Error> {
         let table = self.schema.table(table)?;
-        let own = self.own_pos(self.seq + 1);
+        let own = self.own_rank(self.seq + 1);
         let cut = Cut {
             unsettled: false,
             seq: self.own_pos(self.seq),
@@ -4380,7 +4452,7 @@ impl Inner {
             let cut = Cut {
                 unsettled: false,
                 seq: self.own_pos(seq.saturating_sub(1)),
-                own: self.own_pos(seq),
+                own: self.own_rank(seq),
                 extra: Vec::new(),
                 overlay: Some(CutOverlay::Grounded(Arc::new(grounded.clone()))),
             };
@@ -4528,7 +4600,7 @@ impl Inner {
             let cut = Cut {
                 unsettled: false,
                 seq: self.own_pos(seq.saturating_sub(1)),
-                own: self.own_pos(seq),
+                own: self.own_rank(seq),
                 extra: Vec::new(),
                 overlay: Some(CutOverlay::Except {
                     table: stored.clone(),
@@ -4582,7 +4654,7 @@ impl Inner {
         let cut = Cut {
             unsettled: false,
             seq: before,
-            own: before,
+            own: self.own_rank(seq.saturating_sub(1)),
             extra: Vec::new(),
             overlay: None,
         };
@@ -5464,17 +5536,20 @@ impl Inner {
         let source = match at {
             None => Some(quote(&table.stored)),
             Some(cut) => match self.existing(&table.stored, row, from)? {
-                Some((current, _)) if cut.sees(current) => Some(quote(&table.stored)),
+                Some((current, _))
+                    if cut.sees(self.current_rank(&table.stored, row, from, current)) =>
+                {
+                    Some(quote(&table.stored))
+                }
                 _ => self
                     .version_at(&table.stored, row, from, cut)?
-                    .map(|version| {
-                        // Of two writers' versions at one position, the
-                        // later in order.
+                    .map(|(version, w)| {
                         format!(
-                            "(SELECT * FROM {} WHERE _t = {} AND id = ?3 AND _b = ?4 \
-                             ORDER BY _w DESC LIMIT 1)",
+                            "(SELECT * FROM {} WHERE _t = {} AND _w = X'{}' AND id = ?3 \
+                             AND _b = ?4)",
                             quote(&format!("{}__h", table.stored)),
-                            version.t()
+                            version.t(),
+                            w.iter().map(|b| format!("{b:02x}")).collect::<String>()
                         )
                     }),
             },
@@ -5562,7 +5637,13 @@ impl Inner {
         );
         self.exec(&sql, params_from_iter(values.iter()))
             .map_err(storage)?;
-        self.note_current(&table.stored, row, key, Some(self.own_writer_at(seq)));
+        self.note_current(
+            &table.stored,
+            row,
+            key,
+            self.own_pos(seq),
+            Some(self.own_writer_at(seq)),
+        );
         self.changed
             .borrow_mut()
             .push((table.stored.clone(), row, key.to_vec()));
@@ -5720,7 +5801,13 @@ impl Inner {
         );
         self.exec(&sql, params_from_iter(values.iter()))
             .map_err(storage)?;
-        self.note_current(&table.stored, row, &key, Some(self.own_writer_at(seq)));
+        self.note_current(
+            &table.stored,
+            row,
+            &key,
+            self.own_pos(seq),
+            Some(self.own_writer_at(seq)),
+        );
         self.changed
             .borrow_mut()
             .push((table.stored.clone(), row, key.clone()));
@@ -5918,7 +6005,7 @@ impl Inner {
                     return Ok(WriteHandle {
                         row,
                         seq: current,
-                        tx: self.own_seq_at(current).unwrap_or(current.seq),
+                        tx: self.own_seq_at((current, None)).unwrap_or(current.seq),
                     });
                 }
                 let held = (!staged_tombstone).then_some(&key[..]);
@@ -6973,7 +7060,7 @@ enum BatchKind {
 struct ReadRecord {
     prepared: PreparedQuery,
     include_deleted: bool,
-    rows: Vec<(RowUuid, Pos)>,
+    rows: Vec<(RowUuid, sync::Rank)>,
 }
 
 /// An upload the authority refused: the node and local seq of the commit
@@ -6991,16 +7078,18 @@ fn conflict(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::TransactionConflict, message)
 }
 
-fn versions(rows: &[CurrentRow]) -> Vec<(RowUuid, Pos)> {
-    rows.iter().map(|row| (row.id, row.seq)).collect()
+fn versions(rows: &[CurrentRow]) -> Vec<(Arc<str>, RowUuid, Pos)> {
+    rows.iter()
+        .map(|row| (row.table.clone(), row.id, row.seq))
+        .collect()
 }
 
 /// The versions of a relation tree's child rows, depth first.
-fn child_versions(node: &ResultNode, out: &mut Vec<(RowUuid, Pos)>) {
+fn child_versions(node: &ResultNode, out: &mut Vec<(Arc<str>, RowUuid, Pos)>) {
     for relation in node.relations.values() {
         if let ResultRelation::Array(children) = relation {
             for child in children {
-                out.push((child.row.id, child.row.seq));
+                out.push((child.row.table.clone(), child.row.id, child.row.seq));
                 child_versions(child, out);
             }
         }
@@ -7124,9 +7213,20 @@ impl Inner {
 
     /// The HLC a commit begun now would take ([`Inner::next_hlc`]).
     pub(crate) fn peek_hlc(&self) -> u64 {
+        // Past the last a pending `_t` holds, commits share it and order by
+        // writer and tx.
         self.hlc_last
             .saturating_add(1)
             .max(shard::hlc(self.hlc_clock_ms()))
+            .min(sync::MAX_SEQ)
+    }
+
+    /// `seen` as this store counts an HLC it was sent: no further ahead
+    /// than [`HLC_SKEW_MS`] past its own clock, and never past the last a
+    /// pending `_t` holds.
+    pub(crate) fn bounded_hlc(&self, seen: u64) -> u64 {
+        let ceiling = shard::hlc(self.hlc_clock_ms().saturating_add(HLC_SKEW_MS));
+        seen.min(ceiling).min(sync::MAX_SEQ)
     }
 
     /// Hold this store's HLC past one it received (a position or a commit
@@ -7135,8 +7235,7 @@ impl Inner {
     /// store's wall clock: a writer's clock far ahead cannot carry this
     /// store's commits with it.
     pub(crate) fn observe_hlc(&mut self, seen: u64) {
-        let ceiling = shard::hlc(self.hlc_clock_ms().saturating_add(HLC_SKEW_MS));
-        self.hlc_last = self.hlc_last.max(seen.min(ceiling));
+        self.hlc_last = self.hlc_last.max(self.bounded_hlc(seen));
     }
 
     /// Give commit `seq` its HLC if it has none yet: its writes are at it,
@@ -7165,15 +7264,19 @@ impl Inner {
     }
 
     /// Which of this store's own commits (on a relay, or of the session
-    /// commits it carries) `at` is the position of: the latest in order
-    /// where two share it.
-    pub(crate) fn own_seq_at(&self, at: Pos) -> Option<u64> {
-        if at.accepted() || self.me == sync::ACCEPTED {
+    /// commits it carries) wrote version `at`: by its writer, or with none
+    /// given, the latest in order at its position.
+    pub(crate) fn own_seq_at(&self, at: sync::Rank) -> Option<u64> {
+        let (pos, writer) = at;
+        if pos.accepted() || self.me == sync::ACCEPTED {
             return None;
         }
         self.own_order
             .iter()
-            .filter(|(_, order)| order.0 == at.seq)
+            .filter(|(_, order)| {
+                order.0 == pos.seq
+                    && writer.is_none_or(|(node, tx)| (order.1, order.2) == (node, tx))
+            })
             .max_by_key(|(_, order)| **order)
             .map(|(seq, _)| *seq)
     }
@@ -7311,6 +7414,26 @@ impl Inner {
             })
             .map(|seq| seq.map(|seq| seq as u64))
             .map_err(storage)
+    }
+
+    /// [`Self::newest_seq`] with its writer, when pending.
+    pub(crate) fn newest_version(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Option<sync::Rank>, Error> {
+        let sql = format!(
+            "SELECT _t, _b FROM {} WHERE id = ?1 ORDER BY _t DESC LIMIT 1",
+            quote(table)
+        );
+        let newest: Option<(i64, Vec<u8>)> = self
+            .conn
+            .cached_row(&sql, [row.0.as_bytes().to_vec()], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()
+            .map_err(storage)?;
+        Ok(newest.map(|(t, key)| self.current_rank(table, row, &key, Pos::from_t(t))))
     }
 
     /// The newest committed version of `row` in stored table `table` on
@@ -7453,11 +7576,11 @@ impl Db {
                 for (schema, op) in &batch.ops {
                     if let Some(row) = op.row()
                         && inner
-                            .newest_seq(schema.stored_table(op.table())?, row)?
+                            .newest_version(schema.stored_table(op.table())?, row)?
                             .is_some_and(|at| {
                                 let ours = inner.own_seq_at(at).is_some_and(|tx| own.contains(&tx))
-                                    || landed.values().any(|&landed| landed == at);
-                                !(at.accepted() || ours)
+                                    || landed.values().any(|&landed| landed == at.0);
+                                !(at.0.accepted() || ours)
                             })
                     {
                         return Err(conflict(
@@ -7501,7 +7624,8 @@ impl Db {
                                 || (now.1 != then.1
                                     && !(inner.own_seq_at(then.1).is_some_and(|tx| {
                                         own.contains(&tx)
-                                            && (now.1.accepted() || landed.get(&tx) == Some(&now.1))
+                                            && (now.1.0.accepted()
+                                                || landed.get(&tx) == Some(&now.1.0))
                                     })))
                         });
                     if changed {
@@ -7697,7 +7821,7 @@ impl Db {
         };
         inner.clear_derived();
         let result = applied.and_then(|()| {
-            let own = inner.own_pos(own);
+            let own = inner.own_rank(own);
             read(&mut inner, snapshot.map(|cut| Cut { own, ..cut }))
         });
         let keep = joins && result.is_ok();
@@ -7778,7 +7902,7 @@ impl Db {
         let result = inner
             .apply_with_edits(&ops, &edits, ops.len(), own)
             .and_then(|()| {
-                let own = inner.own_pos(own);
+                let own = inner.own_rank(own);
                 read(&mut inner, snapshot.map(|cut| Cut { own, ..cut }))
             });
         inner.changed.borrow_mut().truncate(mark);
@@ -7832,8 +7956,8 @@ impl Db {
         };
         let moved = inner.serializable_cut(*snapshot, own).and_then(|cut| {
             Ok(inner
-                .newest_seq(table, row)?
-                .is_some_and(|seq| !cut.sees(seq)))
+                .newest_version(table, row)?
+                .is_some_and(|version| !cut.sees(version)))
         });
         match moved {
             Ok(true) => conflict("a row written by the transaction changed since its snapshot"),

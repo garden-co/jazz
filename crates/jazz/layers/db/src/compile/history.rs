@@ -23,8 +23,10 @@ use crate::schema::history::{ACCEPTED_AT_COLUMN, HistoryMetadataColumn, TRANSACT
 
 use super::*;
 
-/// Bits below an HLC's physical milliseconds (its logical counter).
-const HLC_COUNTER_BITS: u32 = 18;
+/// Bits below the physical milliseconds of a `$acceptedAt` value (its
+/// logical counter): the jazz-types HLC encoding, not the commit HLC of
+/// positions (`shard::HLC_COUNTER_BITS`).
+const ACCEPTED_AT_COUNTER_BITS: u32 = 18;
 
 impl Ctx<'_> {
     /// A `history.<source>` read. See the module docs.
@@ -195,7 +197,7 @@ impl Ctx<'_> {
             }
         };
         let accepted =
-            format!("(COALESCE(v.\"$updatedAt\", v.\"$createdAt\") << {HLC_COUNTER_BITS})");
+            format!("(COALESCE(v.\"$updatedAt\", v.\"$createdAt\") << {ACCEPTED_AT_COUNTER_BITS})");
         let mut deletion = String::new();
         for column in ["$deletedAt", "$deletedBy"] {
             deletion.push_str(&format!(

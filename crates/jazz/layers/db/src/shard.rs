@@ -37,8 +37,9 @@ use crate::values::storage;
 /// position fits a JS number (Durable Object SQLite returns integers as
 /// one, and a pending `_t` holds one below its pending bit): 42 bits of
 /// ms last 139 years, and a node handing out more than 1,024 in a
-/// millisecond runs ahead of its clock until the clock catches up. Positions of different nodes then compare by time, and every part
-/// of a cross-shard commit can land at one.
+/// millisecond runs ahead of its clock until the clock catches up.
+/// Positions of different nodes then compare by time, and every part of a
+/// cross-shard commit can land at one.
 pub const HLC_EPOCH_MS: u64 = 1_735_689_600_000;
 /// The counter bits below the ms of an [`hlc`] position.
 pub const HLC_COUNTER_BITS: u32 = 10;

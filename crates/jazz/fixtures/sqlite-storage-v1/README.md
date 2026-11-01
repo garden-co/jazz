@@ -110,25 +110,19 @@ lineage dropped, and a replicated upsert the cells it writes only if it
 creates its row (`created`), changed the encoded pending ops, which
 regenerated it the same way.
 
-Replacing the `(_n, _seq)` pair with one scalar position `_t` (below 2^53),
-banded locally into accepted versions (the authority's seq), a session's
-copies of its relay's unsettled versions, and the store's own pending
-versions,
-regenerated it the same way. Every row and history table has `_t` in place
-of `_n` and `_seq` (history keyed by `(id, _b, _t)`, index `__by_t`),
-`_jazz_transactions` is `(n, tx, t, result)` (index
-`_jazz_transactions_by_t`), `_jazz_lv_via` has `t` in place of `node`/`seq`,
-`_jazz_watermarks` is one `through` per key, and the sequencer tables are
-gone.
-
 Ordering unsettled versions last-writer-wins by their commits' clocks gave
 each pending commit's header a `clock` (its writer's commit clock), which
 regenerated it the same way.
 
-Giving `_t` two kinds, accepted (the authority's position, below 2^52) and
-pending (`1<<52 |` the writer's commit HLC, the same in every store), in
-place of the three local bands, regenerated it the same way. History is
-keyed by `(id, _b, _t, _w)`: `_w` is a pending version's writer (its
-16-byte node and 8-byte big-endian tx), so two writers' versions at one
-`_t` both stay, and `X''` for an accepted version. A pending commit's
-`clock` is its commit HLC.
+Replacing the `(_n, _seq)` pair with one scalar position `_t` (below
+2^53) regenerated it the same way. `_t` has two kinds: accepted (the
+authority's position, below 2^52) and pending (`1<<52 |` the writer's
+commit HLC, the same in every store). Every row and history table has `_t`
+in place of `_n` and `_seq`, with index `__by_t`. History is keyed by
+`(id, _b, _t, _w)`: `_w` is a pending version's writer (its 16-byte node
+and 8-byte big-endian tx), so two writers' versions at one `_t` both stay,
+and `X''` for an accepted version. `_jazz_transactions` is
+`(n, tx, t, result)` (index `_jazz_transactions_by_t`), `_jazz_lv_via` has
+`t` in place of `node`/`seq`, `_jazz_watermarks` is one `through` per key,
+the sequencer tables are gone, and a pending commit's `clock` is its
+commit HLC.

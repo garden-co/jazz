@@ -386,7 +386,7 @@ const SHAPES: [&str; 13] = [
     "Read/live-branch-head",
     "AccessLost/hidden",
     "Commit/serializable",
-    "Rows/upstream-pending",
+    "Rows/pending",
     "Read/once-resumed",
     "Read/once-historical",
 ];

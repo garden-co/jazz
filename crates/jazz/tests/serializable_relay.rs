@@ -1360,3 +1360,64 @@ fn a_tabs_serializable_read_of_another_tabs_version_pending_at_its_worker_reads_
     );
     assert_eq!(net.holders(), ["alice"]);
 }
+
+/// Two tabs commit in the same millisecond, so their pending versions
+/// share a position. A serializable snapshot of the one that wrote the
+/// other row holds its own write and not the other tab's version at that
+/// position, and its commit over the other tab's pending write still
+/// conflicts.
+#[test]
+fn a_snapshot_over_an_own_commit_leaves_out_another_tabs_version_at_its_position() {
+    const CLOCK: i64 = 1_800_000_000_000;
+    let mut net = Net::new(2);
+    let seats = net.seed_seats(2);
+    let _watches = [net.watch_seats(net.tab(0)), net.watch_seats(net.tab(1))];
+    net.worker_offline();
+    for db in [net.tab(0), net.tab(1), &net.worker] {
+        db.set_clock_for_test(Some(CLOCK));
+    }
+    let other = block_on(
+        net.tab(0)
+            .update("seats", seats[0], holder("alice"), Default::default()),
+    )
+    .unwrap();
+    let own = block_on(
+        net.tab(1)
+            .update("seats", seats[1], holder("carol"), Default::default()),
+    )
+    .unwrap();
+    assert_eq!(other.version(), own.version(), "one position");
+    for _ in 0..4 {
+        net.pump();
+    }
+    let tab = net.tab(1);
+    let open = net.begin_pinned(tab);
+    let query = tab.prepare_query(&Query::from("seats")).unwrap();
+    let read: BTreeMap<RowUuid, Option<Value>> = net
+        .drive(tab.tx_ref(open).all_prepared(&query))
+        .unwrap()
+        .iter()
+        .map(|row| (row.row_uuid(), row.cell("holder")))
+        .collect();
+    assert_eq!(
+        read,
+        BTreeMap::from([
+            (seats[0], Some(Value::String(String::new()))),
+            (seats[1], Some(Value::String("carol".to_owned()))),
+        ]),
+        "the snapshot's seat under the other tab's write, and the own one"
+    );
+    net.drive(
+        tab.tx_ref(open)
+            .update("seats", seats[0], holder("bob"), Default::default()),
+    )
+    .unwrap();
+    let committed = net.drive(tab.commit_serializable_handle(open));
+    net.worker_online();
+    net.settle(net.tab(0), other.mergeable_tx_id())
+        .expect("the other tab's write lands");
+    assert_conflict_or_rejected(
+        committed.and_then(|receipt| net.settle(net.tab(1), receipt.0).map(drop)),
+    );
+    assert_eq!(net.holders(), ["alice", "carol"]);
+}

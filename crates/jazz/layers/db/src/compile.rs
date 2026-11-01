@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::db::Pos;
+use crate::db::sync::Rank;
 use crate::ids::{AuthorSubject, RowUuid};
 use crate::options::Error;
 use crate::query::{
@@ -231,12 +232,14 @@ pub struct Ctx<'a> {
 /// A frozen snapshot: every version at or before position `seq`, plus the
 /// open transaction's own staged writes (written at `own`), plus the
 /// versions written by the individual commits in `extra` (a replica's own
-/// writes that were not yet in `seq` when the snapshot was taken).
+/// writes that were not yet in `seq` when the snapshot was taken). `own`
+/// and each of `extra` name a pending version by its writer too, as two
+/// writers' pending versions can share a position.
 #[derive(Clone, Debug, Default)]
 pub struct Cut {
     pub seq: Pos,
-    pub own: Pos,
-    pub extra: Vec<Pos>,
+    pub own: Rank,
+    pub extra: Vec<Rank>,
     /// Every unsettled version is in the cut too: a live query reading as
     /// of its subscription's settled position still shows this replica's
     /// own pending writes, which no server position covers.
@@ -269,12 +272,14 @@ impl Cut {
         }
     }
 
-    /// Whether a version at `at` is in the cut.
-    pub fn sees(&self, at: Pos) -> bool {
-        at <= self.seq
-            || at == self.own
-            || self.extra.contains(&at)
-            || (self.unsettled && !at.accepted())
+    /// Whether version `at` is in the cut. A version whose writer is not
+    /// known matches a named one by position alone.
+    pub fn sees(&self, at: Rank) -> bool {
+        let named = |v: &Rank| v.0 == at.0 && (v.1.is_none() || at.1.is_none() || v.1 == at.1);
+        at.0 <= self.seq
+            || named(&self.own)
+            || self.extra.iter().any(named)
+            || (self.unsettled && !at.0.accepted())
     }
 }
 
@@ -381,16 +386,45 @@ impl<'a> Ctx<'a> {
             return name;
         };
         let seq = self.bind(Sql::Integer(cut.seq.t()));
-        let own_t = self.bind(Sql::Integer(cut.own.t()));
-        let own = format!("_t = {own_t}");
-        let c_own = format!("c._t = {own_t}");
-        // Positions are integers, so the extra commits are inlined.
-        let extra = cut
-            .extra
-            .iter()
-            .map(|at| at.t().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let history = quote(&format!("{}__h", table.stored));
+        // A named version: in the current table at its position, unless its
+        // writer's version there was superseded (by another writer's at
+        // that position, then it is in history); in history by position and
+        // writer.
+        let mut named = |version: &Rank, current: &str| -> (String, String) {
+            let t = self.bind(Sql::Integer(version.0.t()));
+            match version.1.filter(|_| !version.0.accepted()) {
+                None => (format!("{current}_t = {t}"), format!("h2._t = {t}")),
+                Some((node, tx)) => {
+                    let w = self.bind(Sql::Blob(crate::db::sync::writer_bytes(node, tx)));
+                    let outer = if current.is_empty() {
+                        format!("{name}.")
+                    } else {
+                        current.to_owned()
+                    };
+                    (
+                        format!(
+                            "({current}_t = {t} AND NOT EXISTS (SELECT 1 FROM {history} AS hw \
+                             WHERE hw.id = {outer}id AND hw._b = {outer}_b AND hw._t = {t} \
+                             AND hw._w = {w}))"
+                        ),
+                        format!("(h2._t = {t} AND h2._w = {w})"),
+                    )
+                }
+            }
+        };
+        let (own, h_own) = named(&cut.own, "");
+        let (c_own, _) = named(&cut.own, "c.");
+        let mut extra_here = Vec::new();
+        let mut extra_c = Vec::new();
+        let mut extra_h = Vec::new();
+        for version in &cut.extra {
+            let (here, h) = named(version, "");
+            let (c, _) = named(version, "c.");
+            extra_here.push(here);
+            extra_c.push(c);
+            extra_h.push(h);
+        }
         // The versions at `own` that are overlaid: all of them, or for a
         // write check the unit's grounded live rows.
         if cut.overlay.is_some() {
@@ -440,19 +474,20 @@ impl<'a> Ctx<'a> {
                 format!("({c_own} AND (c._st & {STATE_DELETED}) = 0)"),
             ),
         };
-        let (mut visible, h_visible, mut newer) = if extra.is_empty() {
-            (
-                format!("_t <= {seq} OR {overlaid_here}"),
-                format!("h2._t <= {seq}"),
-                format!("c._t > {seq} AND NOT {overlaid_c}"),
-            )
-        } else {
-            (
-                format!("_t <= {seq} OR {overlaid_here} OR _t IN ({extra})"),
-                format!("(h2._t <= {seq} OR h2._t IN ({extra}))"),
-                format!("c._t > {seq} AND NOT {overlaid_c} AND c._t NOT IN ({extra})"),
-            )
-        };
+        let mut visible = format!("_t <= {seq} OR {overlaid_here}");
+        let mut h_visible = format!("h2._t <= {seq}");
+        let mut newer = format!("c._t > {seq} AND NOT {overlaid_c}");
+        // The open unit's own version superseded at its position by another
+        // writer's is read from history, when every own version is overlaid.
+        if cut.overlay.is_none() && cut.own.1.is_some() {
+            h_visible.push_str(&format!(" OR {h_own}"));
+        }
+        for ((here, c), h) in extra_here.iter().zip(&extra_c).zip(&extra_h) {
+            visible.push_str(&format!(" OR {here}"));
+            h_visible.push_str(&format!(" OR {h}"));
+            newer.push_str(&format!(" AND NOT {c}"));
+        }
+        let h_visible = format!("({h_visible})");
         // An unsettled current version is newer than every accepted one:
         // it shows as it is, and only accepted rows past the cut fall back
         // to their history.
@@ -461,7 +496,6 @@ impl<'a> Ctx<'a> {
             visible.push_str(&format!(" OR _t >= {unsettled}"));
             newer.push_str(&format!(" AND c._t < {unsettled}"));
         }
-        let history = quote(&format!("{}__h", table.stored));
         // Both arms must let SQLite search by a correlated predicate (a
         // policy EXISTS's `m.band = a.band`), or every read through a cut
         // scans the whole table (#4298). History rows have no `rid`, and its
