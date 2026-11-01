@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts};
 use jazz::ids::{AuthorSubject, NodeUuid};
@@ -17,7 +18,7 @@ use web_time::Instant;
 use crate::browser::{self, Store, StoreSpec};
 
 thread_local! {
-    static OPEN: RefCell<Option<(Db, Option<Store>)>> = const { RefCell::new(None) };
+    static OPEN: RefCell<Option<(Rc<Db>, Option<Store>)>> = const { RefCell::new(None) };
 }
 
 fn schema() -> JazzSchema {
@@ -38,6 +39,11 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("docs")
                     .column("body", ColumnType::Text)
+                    .policies(policies.clone()),
+            )
+            .table(
+                TableSchemaBuilder::new("logs")
+                    .column("content", ColumnType::Bytea)
                     .policies(policies),
             )
             .build(),
@@ -71,6 +77,97 @@ fn ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }
 
+/// The `q` quantile of `samples` (sorted in place).
+fn quantile(samples: &mut [f64], q: f64) -> f64 {
+    samples.sort_by(f64::total_cmp);
+    samples
+        .get(((samples.len() as f64 - 1.0) * q).round() as usize)
+        .copied()
+        .unwrap_or(0.0)
+}
+
+fn todo(i: u32) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("title".to_owned(), Value::String(format!("todo {i:06}"))),
+        ("done".to_owned(), Value::Bool(i % 3 == 0)),
+        ("n".to_owned(), Value::I64(i as i64)),
+    ])
+}
+
+fn opened() -> Result<(Rc<Db>, Option<Store>), JsValue> {
+    OPEN.with(|open| open.borrow().clone().ok_or_else(|| err("not open")))
+}
+
+/// `n` todos, each awaited until durable (commit, then the store's flush):
+/// the latency a user's write waits for before it survives a crash.
+#[wasm_bindgen(js_name = browserBenchWriteDurable)]
+pub async fn browser_bench_write_durable(n: u32) -> Result<JsValue, JsValue> {
+    let (db, store) = opened()?;
+    let mut commits = Vec::new();
+    let mut durable = Vec::new();
+    for i in 0..n {
+        let start = Instant::now();
+        db.insert("todos", todo(1_000_000 + i), Default::default())
+            .await
+            .map_err(err)?;
+        commits.push(ms(start));
+        if let Some(store) = &store {
+            store.flush().await?;
+        }
+        durable.push(ms(start));
+    }
+    Ok(result(&[
+        ("commitP50Ms", quantile(&mut commits, 0.5)),
+        ("commitP95Ms", quantile(&mut commits, 0.95)),
+        ("durableP50Ms", quantile(&mut durable, 0.5)),
+        ("durableP95Ms", quantile(&mut durable, 0.95)),
+    ]))
+}
+
+/// One `bytes` value (a document's content log), committed and flushed.
+#[wasm_bindgen(js_name = browserBenchWriteBytes)]
+pub async fn browser_bench_write_bytes(bytes: Vec<u8>) -> Result<JsValue, JsValue> {
+    let (db, store) = opened()?;
+    let start = Instant::now();
+    db.insert(
+        "logs",
+        BTreeMap::from([("content".to_owned(), Value::Bytes(bytes))]),
+        Default::default(),
+    )
+    .await
+    .map_err(err)?;
+    let commit_ms = ms(start);
+    if let Some(store) = &store {
+        store.flush().await?;
+    }
+    Ok(result(&[
+        ("bytesCommitMs", commit_ms),
+        ("bytesDurableMs", ms(start)),
+    ]))
+}
+
+/// Read every log back whole.
+#[wasm_bindgen(js_name = browserBenchReadBytes)]
+pub fn browser_bench_read_bytes() -> Result<JsValue, JsValue> {
+    with_db(|db| {
+        let start = Instant::now();
+        let prepared = db.prepare_query(&Query::from("logs")).map_err(err)?;
+        let rows = jazz::db::block_on(db.all(&prepared, ReadOpts::default())).map_err(err)?;
+        let mut total = 0usize;
+        for row in &rows {
+            if let Some((_, Some(Value::Bytes(bytes)))) =
+                row.cells().find(|(name, _)| *name == "content")
+            {
+                total += bytes.len();
+            }
+        }
+        Ok(result(&[
+            ("logBytes", total as f64),
+            ("logReadMs", ms(start)),
+        ]))
+    })
+}
+
 /// Open `{ backend: "indexeddb" | "opfs" | "memory", path? }`.
 #[wasm_bindgen(js_name = browserBenchOpen)]
 pub async fn browser_bench_open(storage: JsValue) -> Result<JsValue, JsValue> {
@@ -87,7 +184,7 @@ pub async fn browser_bench_open(storage: JsValue) -> Result<JsValue, JsValue> {
         (db, Some(store))
     };
     let open_ms = ms(start);
-    OPEN.with(|open| *open.borrow_mut() = Some(opened));
+    OPEN.with(|open| *open.borrow_mut() = Some((Rc::new(opened.0), opened.1)));
     Ok(result(&[("openMs", open_ms)]))
 }
 
@@ -104,22 +201,17 @@ fn with_db<T>(f: impl FnOnce(&Db) -> Result<T, JsValue>) -> Result<T, JsValue> {
 pub fn browser_bench_write(n: u32) -> Result<JsValue, JsValue> {
     with_db(|db| {
         let start = Instant::now();
+        let mut each = Vec::with_capacity(n as usize);
         for i in 0..n {
-            jazz::db::block_on(db.insert(
-                "todos",
-                BTreeMap::from([
-                    ("title".to_owned(), Value::String(format!("todo {i:06}"))),
-                    ("done".to_owned(), Value::Bool(i % 3 == 0)),
-                    ("n".to_owned(), Value::I64(i as i64)),
-                ]),
-                Default::default(),
-            ))
-            .map_err(err)?;
+            let one = Instant::now();
+            jazz::db::block_on(db.insert("todos", todo(i), Default::default())).map_err(err)?;
+            each.push(ms(one));
         }
         let total = ms(start);
         Ok(result(&[
             ("writeMs", total),
             ("perWriteUs", total * 1000.0 / n.max(1) as f64),
+            ("writeP95Us", quantile(&mut each, 0.95) * 1000.0),
         ]))
     })
 }
@@ -194,6 +286,7 @@ pub async fn browser_bench_close() -> Result<JsValue, JsValue> {
         store.flush().await?;
     }
     let flush_ms = ms(start);
+    let db = Rc::try_unwrap(db).map_err(|_| err("still in use"))?;
     db.close().await.map_err(err)?;
     Ok(result(&[("flushMs", flush_ms)]))
 }
