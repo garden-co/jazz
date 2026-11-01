@@ -2,8 +2,8 @@ import {
   SECRET_PREFIX,
   SecretFormatError,
   formatSecret,
-  legacyJazzStorageKey,
   parseSecret,
+  secretStorageKey,
 } from "@garden-co/local-first-auth";
 
 /** The only portable at-rest/export representation of a local-first root. */
@@ -42,9 +42,9 @@ function scopePart(value: string | null | undefined, name: string): string | nul
 }
 
 /**
- * A stable, PII-free physical key for a logical app/profile identity scope.
- * The preimage's member order is part of the format contract.
+ * A stable, PII-free physical key for a logical app/profile identity scope:
+ * the package's storage key with the app ID as its scope.
  */
 export function authSecretStorageKey(scope: AuthSecretScope = {}): string {
-  return legacyJazzStorageKey(scopePart(scope.appId, "appId"), scopePart(scope.profile, "profile"));
+  return secretStorageKey(scopePart(scope.appId, "appId"), scopePart(scope.profile, "profile"));
 }
