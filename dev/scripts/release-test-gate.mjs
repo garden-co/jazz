@@ -22,6 +22,7 @@ export const RELEASE_TEST_WORKFLOWS = Object.freeze([
     label: "React Native device acceptance",
     events: Object.freeze(["workflow_dispatch"]),
   }),
+  Object.freeze({ file: "examples-e2e.yml", label: "Examples E2E", events: null }),
 ]);
 
 /** True when a run is a completed success of the given workflow at `headSha`. */

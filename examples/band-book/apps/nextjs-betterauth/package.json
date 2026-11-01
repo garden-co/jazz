@@ -10,7 +10,8 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:e2e": "node tests/e2e/flows.mjs"
+    "screenshots": "node tests/e2e/flows.mjs",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@astryxdesign/core": "0.6.3",
