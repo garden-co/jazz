@@ -85,4 +85,6 @@ jobs:
           assert_release_head
           gh workflow run rn-device-acceptance.yml --repo "${REPO}" --ref "${RELEASE_BRANCH}"
           assert_release_head
-          echo "Dispatched release CI, preview, starters E2E and RN device acceptance for ${RELEASE_BRANCH} at ${RELEASE_SHA} (PR #${PR_NUMBER})."
+          gh workflow run examples-e2e.yml --repo "${REPO}" --ref "${RELEASE_BRANCH}"
+          assert_release_head
+          echo "Dispatched release CI, preview, starters E2E, RN device acceptance and examples E2E for ${RELEASE_BRANCH} at ${RELEASE_SHA} (PR #${PR_NUMBER})."

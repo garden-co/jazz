@@ -1,0 +1,299 @@
+name: Examples E2E
+
+# Runs dev/examples-e2e/run.mjs against every hero example variant, blocking
+# the changesets release PR if any variant fails to install outside the
+# workspace from the packed packages, build for production, start, or pass its
+# Playwright suite against the production server. The variants are the tested
+# environment matrix (dev/examples-e2e/variants.mjs).
+#
+# Trigger: a changesets-managed release pull request targeting `release` (in
+# practice changesets-release-pr dispatches this workflow on
+# `changeset-release/release`, because the bot's PR events stop at
+# action_required), plus manual dispatch for ad-hoc runs. Ordinary pull
+# requests are skipped.
+#
+# Shape: the `prepare` job produces the three package tarballs (jazz-tools,
+# jazz-napi, jazz-wasm) and the linux-x64 NAPI binary. The `e2e` matrix then
+# downloads those and runs the harness per variant.
+#
+# Where the packages come from:
+# - Release runs (the Version Packages head) do not build. They wait for the
+#   release preview run on the same commit and download its assembled
+#   packages: the exact bytes publish-jazz-tools-alpha.yml later publishes.
+# - Manual dispatches build release WASM and NAPI from their own tree on 16
+#   vCPUs (`build:examples-e2e`). A dispatch can instead test a given preview
+#   run's packages with `preview_run_id`.
+#
+on:
+  pull_request:
+    branches: [release]
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "Single variant to run (omit for all of them)"
+        required: false
+        type: string
+      preview_run_id:
+        description: "Test this release preview run's packages instead of building (optional)"
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # A variant may pin its own pnpm via `packageManager`; without this,
+  # Corepack prompts on first download and the non-TTY CI run aborts.
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+jobs:
+  prepare:
+    # On PR events, only fire on the changesets release PR. Manual dispatch is
+    # always allowed (handy for testing a variant in isolation).
+    if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/release' }}
+    # Reusing the preview only waits and downloads, so it needs no build runner;
+    # its timeout covers waiting for a preview that has just been dispatched.
+    runs-on: ${{ (github.ref == 'refs/heads/changeset-release/release' || github.head_ref == 'changeset-release/release' || (github.event_name == 'workflow_dispatch' && inputs.preview_run_id != '')) && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-16vcpu-ubuntu-2404' }}
+    timeout-minutes: ${{ (github.ref == 'refs/heads/changeset-release/release' || github.head_ref == 'changeset-release/release' || (github.event_name == 'workflow_dispatch' && inputs.preview_run_id != '')) && 70 || 30 }}
+    permissions:
+      actions: read
+      contents: read
+    env:
+      REUSE_PREVIEW: ${{ github.ref == 'refs/heads/changeset-release/release' || github.head_ref == 'changeset-release/release' || (github.event_name == 'workflow_dispatch' && inputs.preview_run_id != '') }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Validate workflow_dispatch variant
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.variant != '' }}
+        env:
+          VARIANT: ${{ inputs.variant }}
+        run: |
+          node --input-type=module -e '
+            import { findVariant } from "./dev/examples-e2e/variants.mjs";
+            if (!findVariant(process.env.VARIANT)) {
+              console.log(`::error::Unknown variant ${process.env.VARIANT}`);
+              process.exit(1);
+            }'
+
+      - name: Validate workflow_dispatch preview run
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.preview_run_id != '' }}
+        env:
+          PREVIEW_RUN_ID: ${{ inputs.preview_run_id }}
+        run: |
+          if [[ ! "$PREVIEW_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::preview_run_id must be a workflow run ID, got '$PREVIEW_RUN_ID'"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: env.REUSE_PREVIEW != 'true'
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - run: corepack enable
+
+      - name: Get pnpm store directory
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: examples-e2e-pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            examples-e2e-pnpm-${{ runner.os }}-
+
+      - run: pnpm install --frozen-lockfile
+
+      # Same pinned, version-validated installer as the shipped package build.
+      - uses: ./.github/actions/install-rust-tool
+        if: env.REUSE_PREVIEW != 'true'
+        with:
+          tool: wasm-pack@0.13.1
+
+      - name: Build release artifacts and packages
+        if: env.REUSE_PREVIEW != 'true'
+        run: pnpm run build:examples-e2e
+
+      - name: Verify package artifact hand-off
+        if: env.REUSE_PREVIEW != 'true'
+        run: node dev/artifacts/verify-starter-e2e-artifacts.mjs
+
+      - name: Wait for the release preview of this commit
+        id: preview
+        if: env.REUSE_PREVIEW == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_BRANCH: ${{ github.head_ref || github.ref_name }}
+          PREVIEW_RUN_ID: ${{ inputs.preview_run_id }}
+        run: node dev/scripts/await-release-preview.mjs
+
+      - name: Download the release preview's packages
+        if: env.REUSE_PREVIEW == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: pkg-jazz-tools
+          path: packages/jazz-tools
+          run-id: ${{ steps.preview.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - if: env.REUSE_PREVIEW == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: pkg-jazz-wasm
+          path: crates/jazz-wasm
+          run-id: ${{ steps.preview.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - if: env.REUSE_PREVIEW == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: pkg-jazz-napi
+          path: crates/jazz-napi
+          run-id: ${{ steps.preview.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Restore executable permissions on CLI binaries
+        # Artifact downloads drop the mode bits; publish restores them the same way.
+        if: env.REUSE_PREVIEW == 'true'
+        run: |
+          chmod 755 \
+            packages/jazz-tools/bin/native/jazz-tools-darwin-arm64 \
+            packages/jazz-tools/bin/native/jazz-tools-darwin-x64 \
+            packages/jazz-tools/bin/native/jazz-tools-linux-arm64 \
+            packages/jazz-tools/bin/native/jazz-tools-linux-x64
+
+      - name: Pack workspace tarballs
+        # Mirrors PACKAGES_TO_PACK in dev/examples-e2e/run.mjs. The harness picks
+        # these up via `--tarball-dir` and pins them as overrides in each staged
+        # variant, exactly the same as running `pnpm pack` in-process.
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/_e2e-state/tarballs"
+          for pkg in jazz-tools jazz-napi jazz-wasm; do
+            dir="packages/$pkg"
+            if [ ! -d "$dir" ]; then dir="crates/$pkg"; fi
+            (cd "$dir" && pnpm pack --pack-destination "$GITHUB_WORKSPACE/_e2e-state/tarballs")
+          done
+          ls -la "$GITHUB_WORKSPACE/_e2e-state/tarballs"
+
+      - name: Verify packed preview jazz-napi and stage its Linux binary
+        # The same packed-payload check publish runs. The staged variants cannot
+        # install the unpublished @garden-co/jazz-napi-* platform packages, so
+        # the harness copies this binary into them after checking that its
+        # fingerprint matches the packed loader.
+        if: env.REUSE_PREVIEW == 'true'
+        run: |
+          node dev/artifacts/verify-packed-napi.mjs "$(ls "$GITHUB_WORKSPACE"/_e2e-state/tarballs/jazz-napi-*.tgz)"
+          cp crates/jazz-napi/npm/linux-x64-gnu/jazz-napi.linux-x64-gnu.node crates/jazz-napi/
+          node -e 'require("./crates/jazz-napi")'
+
+      - name: Upload prebuilt artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: examples-e2e-build-state
+          # Tarballs feed `--tarball-dir`; the NAPI binary is copied into each
+          # installed jazz-napi after its fingerprint is checked.
+          path: |
+            _e2e-state/tarballs/**
+            crates/jazz-napi/*.node
+          if-no-files-found: error
+          retention-days: 1
+
+  e2e:
+    needs: prepare
+    name: E2E ${{ matrix.variant }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/release' }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in sync with dev/examples-e2e/variants.mjs (checked by
+        # dev/gates/test/examples-e2e.test.mjs).
+        variant:
+          - band-chat
+          - jamazon
+          - jamazon-warehouse
+          - wequencer
+          - band-book
+          - poster-shop
+          - record-player
+          - music-agent
+          - big-label
+    steps:
+      - name: Skip if variant doesn't match dispatch filter
+        id: filter
+        if: github.event_name == 'workflow_dispatch' && inputs.variant != '' && inputs.variant != matrix.variant
+        run: echo "skip=1" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: steps.filter.outputs.skip != '1'
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        if: steps.filter.outputs.skip != '1'
+        with:
+          node-version-file: .nvmrc
+
+      - run: corepack enable
+        if: steps.filter.outputs.skip != '1'
+
+      - name: Get pnpm store directory
+        id: pnpm-store
+        if: steps.filter.outputs.skip != '1'
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        if: steps.filter.outputs.skip != '1'
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: examples-e2e-pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            examples-e2e-pnpm-${{ runner.os }}-
+
+      - run: pnpm install --frozen-lockfile
+        if: steps.filter.outputs.skip != '1'
+
+      - name: Restore prebuilt artifacts
+        if: steps.filter.outputs.skip != '1'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: examples-e2e-build-state
+          path: .
+
+      - name: Cache Playwright browsers
+        if: steps.filter.outputs.skip != '1'
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
+      - name: Install Playwright browsers
+        if: steps.filter.outputs.skip != '1'
+        run: pnpm exec playwright install chromium --with-deps
+
+      - name: Run the examples E2E harness
+        if: steps.filter.outputs.skip != '1'
+        # `--keep` retains the staged variant so the step below can upload
+        # Playwright traces on failure.
+        run: node dev/examples-e2e/run.mjs ${{ matrix.variant }} --tarball-dir "$GITHUB_WORKSPACE/_e2e-state/tarballs" --verbose --keep
+
+      - name: Upload Playwright traces on failure
+        if: failure() && steps.filter.outputs.skip != '1'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: playwright-traces-${{ matrix.variant }}
+          path: /tmp/examples-e2e-${{ matrix.variant }}-*/app/test-results/**
+          if-no-files-found: ignore
+          retention-days: 7

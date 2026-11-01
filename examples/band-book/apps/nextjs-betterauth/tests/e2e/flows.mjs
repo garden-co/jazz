@@ -108,7 +108,7 @@ try {
     .or(guest.locator("textarea", { hasText: "Bridge" }))
     .first()
     .waitFor();
-  const guestNav = await guest.getByRole("navigation", { name: "Pages" }).innerText();
+  const guestNav = await guest.getByRole("navigation", { name: "Side navigation" }).innerText();
   assert.ok(guestNav.includes("Harbour lights"), "guest sees the shared song");
   assert.ok(!guestNav.includes("Tour notes"), "guest does not see the rest of the band");
   await shoot(guest, "guest");

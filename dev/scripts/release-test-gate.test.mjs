@@ -39,6 +39,15 @@ function passingRuns() {
         conclusion: "success",
       },
     ],
+    "examples-e2e.yml": [
+      {
+        id: 4,
+        head_sha: headSha,
+        event: "workflow_dispatch",
+        status: "completed",
+        conclusion: "success",
+      },
+    ],
   };
 }
 
@@ -95,6 +104,14 @@ test("fails when a release workflow failed, is still running, or ran on another 
     assert.equal(result.ok, false, JSON.stringify(run));
     assert.ok(result.lines.some((line) => line.startsWith("Starters E2E: no successful")));
   }
+});
+
+test("fails when the examples E2E gate did not pass", async () => {
+  const runs = passingRuns();
+  runs["examples-e2e.yml"] = [{ ...runs["examples-e2e.yml"][0], conclusion: "failure" }];
+  const result = await evaluate(fakeGithub({ runs }));
+  assert.equal(result.ok, false);
+  assert.ok(result.lines.some((line) => line.startsWith("Examples E2E: no successful")));
 });
 
 test("fails when a release workflow never ran", async () => {
