@@ -1,6 +1,8 @@
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from "jose";
 
 const KID = "auth-simple-chat-test-key";
+export const TEST_JWT_ISSUER = "https://auth-simple-chat.test/";
+export const TEST_JWT_AUDIENCE = "auth-simple-chat";
 
 export interface TestKeySet {
   publicJwk: JWK;
@@ -16,12 +18,14 @@ export async function createTestKeySet(): Promise<TestKeySet> {
     alg: "ES256",
   };
 
-  // The auth-simple-chat permission policy reads `session.claims.role` to gate
-  // posting to the announcements room. The local Express auth server nests the
-  // role under `claims` in the payload it signs, so the test JWTs match.
+  // Test fixtures enroll with a JWT the local core trusts. The permission
+  // policy reads `session.claims.role`, which the app's backend sets from its
+  // own session in `authenticate`.
   async function mintJwt(role: string, sub: string): Promise<string> {
-    return new SignJWT({ claims: { role } })
+    return new SignJWT({ role })
       .setProtectedHeader({ alg: "ES256", kid: KID })
+      .setIssuer(TEST_JWT_ISSUER)
+      .setAudience(TEST_JWT_AUDIENCE)
       .setSubject(sub)
       .setIssuedAt()
       .setExpirationTime("1h")

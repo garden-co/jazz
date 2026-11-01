@@ -1,7 +1,7 @@
 /**
  * Jazz permission-DSL tests for auth-simple-chat.
  *
- * Mints role-tagged JWTs (admin / member / anonymous) against a local
+ * Enrolls test accounts with role-tagged JWTs (admin / member / anonymous) against a local
  * JWKS and asserts allow/deny outcomes for posting to ANNOUNCEMENTS_CHAT_ID
  * vs CHAT_ID.
  *

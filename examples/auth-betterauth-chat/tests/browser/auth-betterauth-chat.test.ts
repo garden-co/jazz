@@ -9,47 +9,42 @@
  * session cookies and JWT signing; these browser tests exercise Jazz policies.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { type JazzClient, createJazzSession } from "jazz-tools/react";
+import { type JazzClient, createJazzClient } from "jazz-tools/react";
+import { createAccountManager, type AccountHandle } from "jazz-tools";
 import { app } from "../../schema.js";
 import permissions from "../../permissions.js";
 import { schema as betterAuthSchema } from "../../schema-better-auth/schema.js";
 
-const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
-const registered = new Set<string>();
+const clients: JazzClient[] = [];
+const accountsByToken = new Map<string, Promise<AccountHandle>>();
 
 afterEach(async () => {
-  while (sessions.length > 0) await sessions.pop()!.close();
+  while (clients.length > 0) await clients.pop()!.shutdown();
 });
 
+// The test core trusts the local JWKS, so fixtures enroll with a minted JWT
+// directly; the app itself signs in through its backend.
 async function makeClient(jwt?: string): Promise<JazzClient> {
-  let stored: string | null = null;
-  const session = await createJazzSession({
+  const manager = await createAccountManager({ appId: __APP_ID__, serverUrl: __JAZZ_SERVER_URL__ });
+  let account: AccountHandle;
+  if (jwt) {
+    let enrolled = accountsByToken.get(jwt);
+    if (!enrolled) {
+      enrolled = manager.registerJWT({ getToken: async () => jwt });
+      accountsByToken.set(jwt, enrolled);
+    }
+    account = await enrolled;
+  } else {
+    account = manager.createLocalFirst();
+  }
+  const client = await createJazzClient({
     appId: __APP_ID__,
     serverUrl: __JAZZ_SERVER_URL__,
     driver: { type: "memory" },
-    initial: jwt ? undefined : "local-first",
-    store: {
-      async read() {
-        return stored;
-      },
-      async update(transform) {
-        stored = transform(stored);
-      },
-    },
+    account,
   });
-  sessions.push(session);
-  if (jwt) {
-    if (registered.has(jwt)) await session.loginJWT(jwt);
-    else {
-      await session.registerJWT(jwt);
-      registered.add(jwt);
-    }
-  }
-  const snapshot = session.getSnapshot();
-  if (snapshot.status !== "ready" || !snapshot.client) {
-    throw snapshot.error ?? new Error("Test session is not ready");
-  }
-  return snapshot.client;
+  clients.push(client);
+  return client;
 }
 
 async function send(client: JazzClient, chat_id: string, text: string): Promise<string> {
