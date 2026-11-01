@@ -1276,8 +1276,8 @@ impl<'a> Ctx<'a> {
                 projection.push((format!("{}.{column}", source.name), ty, tags));
             }
         }
-        // The root's writer; a history root's versions carry none, and its
-        // rows name their versions as no writer ever wrote them.
+        // The root's writer. A history root lists only accepted versions,
+        // which have none; NO_WRITER there is a fail-safe for a pending one.
         let writer = if sources[0].history {
             let (node, tx) = crate::db::sync::NO_WRITER;
             let none = crate::db::sync::writer_bytes(node, tx);
