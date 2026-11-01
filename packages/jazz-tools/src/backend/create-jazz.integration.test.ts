@@ -153,6 +153,11 @@ describe("createJazz", () => {
       new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
     );
     expect(await asBob.all(app.todos)).toEqual([]);
+    // API routes can name the request's account without a client credential.
+    await expect(
+      jazz.accountFor(new Request("http://app/x", { headers: { "x-test-user": "alice" } })),
+    ).resolves.toBe(alice.session!.user!.account);
+    await expect(jazz.accountFor(new Request("http://app/x"))).resolves.toBeNull();
     // The user synced over a socket, not the stream fallback.
     expect(requestPaths.some((path) => path.includes("/stream"))).toBe(false);
   }, 60_000);

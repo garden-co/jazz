@@ -130,6 +130,10 @@ export async function GET(request: Request) {
 }
 ```
 
+When a route acts with backend authority on a user's behalf (placing an order the user can't write
+directly, say), `await jazz.accountFor(request)` names that user's account, or `null` when signed
+out, so the backend's `db` can write rows that point at it.
+
 ## Edge-style Wasm setup
 
 Some runtimes (like Cloudflare Workers) don't load Jazz the same way a browser does. In those cases, provide the Wasm module or bytes directly.

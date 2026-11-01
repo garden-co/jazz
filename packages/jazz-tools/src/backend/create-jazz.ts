@@ -137,6 +137,12 @@ export interface Jazz {
   /** The database as the request's user, judged by your permissions. */
   forRequest(request: Request): Promise<Db>;
   /**
+   * The Jazz account of the request's signed-in user (created on first use),
+   * or null when `authenticate` names no user. For API routes that act on
+   * the user's data with the backend's own `db`.
+   */
+  accountFor(request: Request): Promise<string | null>;
+  /**
    * Make `to` another identity of the account `from` already uses: after
    * this, `authenticate` returning `to` opens that same account and its data.
    * Call it once your own auth has verified both, as when an anonymous or
@@ -916,6 +922,10 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       const user = await authenticate(request);
       if (!user) throw new Error("forRequest: the request has no signed-in user");
       return backendDbForSession(backend, await sessionFor(user));
+    },
+    async accountFor(request) {
+      const user = await authenticate(request);
+      return user ? ((await sessionFor(user)).account_id ?? null) : null;
     },
     close() {
       closing ??= (async () => {
