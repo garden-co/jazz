@@ -1154,7 +1154,7 @@ fn equal_clocks_order_by_the_writers_node() {
 }
 
 /// Two writers' pending versions of one row at the same commit HLC share
-/// one `_t`: the history key's writer keeps both, ordered by (node, tx).
+/// one `_clock`: the history key's writer keeps both, ordered by (node, tx).
 #[test]
 fn equal_clock_versions_of_one_row_both_stay_in_history() {
     for greater_first in [false, true] {
@@ -1327,7 +1327,7 @@ fn a_tab_clock_far_ahead_orders_no_further_than_the_bound_across_a_restart() {
     );
 }
 
-/// A store whose commit HLC reached the last a pending `_t` holds keeps
+/// A store whose commit HLC reached the last a pending `_clock` holds keeps
 /// committing there (its commits order by writer and tx), and its
 /// worker still takes them.
 #[test]

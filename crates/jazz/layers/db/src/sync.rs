@@ -4,7 +4,7 @@
 //! client is a `Db` whose store is a partial replica of server versions
 //! plus its own optimistic writes.
 //!
-//! * A row version is at a [`Pos`], stored as one scalar `_t`: accepted
+//! * A row version is at a [`Pos`], stored as one scalar `_clock`: accepted
 //!   at the authority's position (below 2^52), or pending at `1<<52 |` its
 //!   commit's HLC as the store holding it took it. A relay bounds a
 //!   writer's clock at ingest (`bounded_hlc`: no more than 500 ms past its
@@ -15,7 +15,7 @@
 //!   every accepted one, so every cut at a server seq leaves them out. Two
 //!   writers' pending versions can share a position, and commits whose
 //!   clocks reach `MAX_SEQ` all do; the current and history tables tell
-//!   them apart by writer (`_w`).
+//!   them apart by writer (`_writer`).
 //! * A row touched by a pending (unsettled) local transaction keeps its
 //!   upstream baseline in history, below this replica's local sequence range.
 //!   A transient cache selects that image during a tick; a rebase restores it
@@ -95,7 +95,7 @@ fn now_ms() -> i64 {
 pub const ACCEPTED: i64 = 0;
 pub const PENDING: i64 = 1;
 
-/// The bits of a position's seq in a stored `_t`: `_t` is the kind in the
+/// The bits of a position's seq in a stored `_clock`: `_clock` is the kind in the
 /// bit above and the seq below, so stored positions order as [`Pos`]es
 /// do, all under 2^53 (a JavaScript-safe integer).
 pub const SEQ_BITS: u32 = 52;
@@ -106,7 +106,7 @@ pub const MAX_SEQ: u64 = (1 << SEQ_BITS) - 1;
 /// A row version's position: its kind (`n`, see [`ACCEPTED`]) and its seq
 /// there (the authority's position, or a commit HLC as this store holds
 /// it). Every
-/// accepted version precedes every pending one. Stored as one `_t`
+/// accepted version precedes every pending one. Stored as one `_clock`
 /// ([`Pos::t`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pos {
@@ -143,13 +143,13 @@ impl Pos {
         self.n == ACCEPTED
     }
 
-    /// The stored `_t`.
+    /// The stored `_clock`.
     pub fn t(self) -> i64 {
         debug_assert!(self.seq <= MAX_SEQ, "a seq past its kind: {self:?}");
         (self.n << SEQ_BITS) | (self.seq & MAX_SEQ) as i64
     }
 
-    /// The position a stored `_t` is at.
+    /// The position a stored `_clock` is at.
     pub fn from_t(t: i64) -> Self {
         Self {
             n: t >> SEQ_BITS,
@@ -158,7 +158,7 @@ impl Pos {
     }
 }
 
-/// On the wire a position is its `_t`, one integer, the same in every
+/// On the wire a position is its `_clock`, one integer, the same in every
 /// store.
 impl Serialize for Pos {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -190,7 +190,7 @@ pub(crate) fn accepted_seq<'de, D: serde::Deserializer<'de>>(
     Ok(seq)
 }
 
-/// A commit's HLC as a peer sends it: refused past 2^52, as a pending `_t`
+/// A commit's HLC as a peer sends it: refused past 2^52, as a pending `_clock`
 /// holds it below the pending flag.
 pub(crate) fn commit_clock<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -213,7 +213,7 @@ pub(crate) fn accepted_seq_opt<'de, D: serde::Deserializer<'de>>(
     Ok(seq)
 }
 
-/// `_t` of the first version of kind `n`: `_t < band_start(PENDING)` is
+/// `_clock` of the first version of kind `n`: `_clock < band_start(PENDING)` is
 /// every accepted version (the settled-only cut).
 pub(crate) const fn band_start(n: i64) -> i64 {
     n << SEQ_BITS
@@ -643,7 +643,7 @@ pub struct Image {
     /// shipped to its tab).
     pub at: Pos,
     pub deleted: bool,
-    /// Whether the version's commit wrote content (stored in `_st`): history
+    /// Whether the version's commit wrote content (stored in `_state`): history
     /// reads list only content versions.
     pub content: bool,
     pub cells: Vec<(String, Cell)>,
@@ -661,7 +661,7 @@ pub struct Image {
 /// replaces it once the commits settle.
 pub type Order = (u64, [u8; 16], u64);
 
-/// A pending version's writer as history keys it (`_w`): its node, then its
+/// A pending version's writer as history keys it (`_writer`): its node, then its
 /// tx big-endian. An accepted version's is empty.
 pub(crate) fn writer_bytes(node: [u8; 16], tx: u64) -> Vec<u8> {
     let mut w = node.to_vec();
@@ -1252,7 +1252,7 @@ pub enum SyncMessage {
         id: TxId,
         /// Its sender's commit HLC: with `id`, where it orders among
         /// unsettled versions ([`Order`]) until the authority's order
-        /// replaces it. Refused past 2^52, where no pending `_t` holds it.
+        /// replaces it. Refused past 2^52, where no pending `_clock` holds it.
         #[serde(deserialize_with = "commit_clock")]
         clock: u64,
         kind: WireKind,
@@ -2927,10 +2927,10 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
     })
 }
 
-/// The image filter for one row version. `+_t` keeps the planner on the
-/// row-id index: after a bulk commit every row shares one `_t`, and the
-/// `_t` index would scan them all for each lookup.
-const ID_AT: &str = "id = ?1 AND +_t = ?2";
+/// The image filter for one row version. `+_clock` keeps the planner on the
+/// row-id index: after a bulk commit every row shares one `_clock`, and the
+/// `_clock` index would scan them all for each lookup.
+const ID_AT: &str = "id = ?1 AND +_clock = ?2";
 
 // ---- stored images ----------------------------------------------------------
 
@@ -3642,7 +3642,7 @@ impl Inner {
         // An as-sent version is no image: it never syncs.
         let sql = if history {
             format!(
-                "SELECT * FROM (SELECT * FROM {} WHERE (_st & {STATE_AS_SENT}) = 0) WHERE {filter}",
+                "SELECT * FROM (SELECT * FROM {} WHERE (_state & {STATE_AS_SENT}) = 0) WHERE {filter}",
                 quote(&name)
             )
         } else {
@@ -3675,17 +3675,17 @@ impl Inner {
                     match name.as_str() {
                         "rid" => {}
                         "id" => image.id = r.get::<_, Vec<u8>>(i)?.try_into().unwrap_or([0; 16]),
-                        "_b" => image.key = r.get(i)?,
-                        "_t" => image.at = Pos::from_t(r.get::<_, i64>(i)?),
-                        "_st" => {
+                        "_branch" => image.key = r.get(i)?,
+                        "_clock" => image.at = Pos::from_t(r.get::<_, i64>(i)?),
+                        "_state" => {
                             let state = r.get::<_, i64>(i)?;
                             image.deleted = state & STATE_DELETED != 0;
                             image.content = state & STATE_NO_CONTENT == 0;
                         }
                         // The authority's record of what the version was
                         // built on; never replicated.
-                        "_base" | "_cols" => {}
-                        "_w" => {
+                        "_base" | "_touched" => {}
+                        "_writer" => {
                             image.written = writer_of_bytes(&r.get::<_, Vec<u8>>(i)?)
                                 .map(|(node, tx)| (0, node, tx));
                         }
@@ -3699,7 +3699,7 @@ impl Inner {
             .map_err(storage)?;
         let mut images = rows.collect::<Result<Vec<_>, _>>().map_err(storage)?;
         for image in &mut images {
-            // A pending version's writer, as its row keeps it (`_w`).
+            // A pending version's writer, as its row keeps it (`_writer`).
             image.written = match image.written {
                 _ if image.at.accepted() => None,
                 written => written.map(|(_, node, tx)| (image.at.seq, node, tx)),
@@ -3845,7 +3845,7 @@ impl Inner {
             .images_where(
                 table,
                 false,
-                "id = ?1 AND _b = ?2 AND _t = ?3",
+                "id = ?1 AND _branch = ?2 AND _clock = ?3",
                 &[&id, &key, &at.0.t()],
             )?
             .pop()
@@ -3857,13 +3857,13 @@ impl Inner {
             Some((node, tx)) => self.images_where(
                 table,
                 true,
-                "id = ?1 AND _b = ?2 AND _t = ?3 AND _w = ?4",
+                "id = ?1 AND _branch = ?2 AND _clock = ?3 AND _writer = ?4",
                 &[&id, &key, &at.0.t(), &writer_bytes(node, tx)],
             )?,
             None => self.images_where(
                 table,
                 true,
-                "id = ?1 AND _b = ?2 AND _t = ?3 ORDER BY _w DESC",
+                "id = ?1 AND _branch = ?2 AND _clock = ?3 ORDER BY _writer DESC",
                 &[&id, &key, &at.0.t()],
             )?,
         };
@@ -4056,7 +4056,7 @@ impl Inner {
         mask: &fanout::ViewMask,
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, Error> {
         let mut heads: Vec<RowUuid> = self
-            .images_where(&mask.table, false, "_b = ?1", &[&mask.head])?
+            .images_where(&mask.table, false, "_branch = ?1", &[&mask.head])?
             .into_iter()
             .map(|image| RowUuid::from_bytes(image.id))
             .collect();
@@ -4083,7 +4083,7 @@ impl Inner {
         }
         let id = row.0.as_bytes().to_vec();
         self.exec(
-            "INSERT OR IGNORE INTO _jazz_withheld (tbl, id, _b) VALUES (?1, ?2, ?3)",
+            "INSERT OR IGNORE INTO _jazz_withheld (tbl, id, _branch) VALUES (?1, ?2, ?3)",
             rusqlite::params![table, id, key],
         )
         .map_err(storage)?;
@@ -4101,7 +4101,7 @@ impl Inner {
         let id = row.0.as_bytes().to_vec();
         let lifted = self
             .exec(
-                "DELETE FROM _jazz_withheld WHERE tbl = ?1 AND id = ?2 AND _b = ?3",
+                "DELETE FROM _jazz_withheld WHERE tbl = ?1 AND id = ?2 AND _branch = ?3",
                 rusqlite::params![table, id, key],
             )
             .map_err(storage)?;
@@ -4134,7 +4134,7 @@ impl Inner {
         let id = row.0.as_bytes().to_vec();
         self.conn
             .cached_row(
-                "SELECT count(*) FROM _jazz_withheld WHERE tbl = ?1 AND id = ?2 AND _b = ?3",
+                "SELECT count(*) FROM _jazz_withheld WHERE tbl = ?1 AND id = ?2 AND _branch = ?3",
                 rusqlite::params![table, id, key],
                 |r| r.get::<_, i64>(0),
             )
@@ -4149,7 +4149,7 @@ impl Inner {
         }
         let mut statement = self
             .conn
-            .prepare_cached("SELECT id FROM _jazz_withheld WHERE tbl = ?1 AND _b = ?2")
+            .prepare_cached("SELECT id FROM _jazz_withheld WHERE tbl = ?1 AND _branch = ?2")
             .map_err(storage)?;
         let ids = statement
             .query_map(rusqlite::params![table, key], |r| r.get::<_, Vec<u8>>(0))
@@ -4224,7 +4224,7 @@ impl Inner {
                     let terms: Vec<String> = (0..size)
                         .map(|i| {
                             let at = 2 * i;
-                            format!("(id = ?{} AND +_t = ?{})", at + 1, at + 2)
+                            format!("(id = ?{} AND +_clock = ?{})", at + 1, at + 2)
                         })
                         .collect();
                     terms.join(" OR ")
@@ -4377,11 +4377,11 @@ impl Inner {
         }
         let id = row.0.as_bytes().to_vec();
         Ok(self
-            .images_where(table, false, "id = ?1 AND _b = ?2", &[&id, &key])?
+            .images_where(table, false, "id = ?1 AND _branch = ?2", &[&id, &key])?
             .pop())
     }
 
-    /// The writer (`_w`) of a row's current version at `at`: empty for an
+    /// The writer (`_writer`) of a row's current version at `at`: empty for an
     /// accepted one, or when the row's current version is not at `at`.
     pub(crate) fn current_writer(
         &self,
@@ -4397,7 +4397,7 @@ impl Inner {
             .conn
             .cached_row(
                 &format!(
-                    "SELECT _w FROM {} WHERE id = ?1 AND _b = ?2 AND _t = ?3",
+                    "SELECT _writer FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3",
                     quote(table)
                 ),
                 rusqlite::params![row.0.as_bytes().to_vec(), key, at.t()],
@@ -4443,7 +4443,7 @@ impl Inner {
             } else {
                 image.table.clone()
             };
-            let meta = ["id", "_b", "_t", "_st", "_w"];
+            let meta = ["id", "_branch", "_clock", "_state", "_writer"];
             let names: Vec<String> = meta
                 .iter()
                 .map(|name| (*name).to_owned())
@@ -4480,13 +4480,16 @@ impl Inner {
         self.forget_current(table, row, key);
         let id = row.0.as_bytes().to_vec();
         self.exec(
-            &format!("DELETE FROM {} WHERE id = ?1 AND _b = ?2", quote(table)),
+            &format!(
+                "DELETE FROM {} WHERE id = ?1 AND _branch = ?2",
+                quote(table)
+            ),
             rusqlite::params![id, key],
         )
         .map_err(storage)?;
         self.exec(
             &format!(
-                "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND (_t >= ?3 OR (_t < 0 AND ?3 < ?4))",
+                "DELETE FROM {} WHERE id = ?1 AND _branch = ?2 AND (_clock >= ?3 OR (_clock < 0 AND ?3 < ?4))",
                 quote(&format!("{table}__h"))
             ),
             rusqlite::params![
@@ -4572,7 +4575,7 @@ impl Inner {
             at.1.map_or_else(Vec::new, |(node, tx)| writer_bytes(node, tx));
         self.exec(
             &format!(
-                "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _t = ?3 AND _w = ?4",
+                "DELETE FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3 AND _writer = ?4",
                 quote(&format!("{table}__h"))
             ),
             rusqlite::params![row.0.as_bytes().to_vec(), key, at.0.t(), w],
@@ -4755,7 +4758,7 @@ impl Inner {
             let Some(row) = op.row() else { continue };
             let table = op.table();
             let sql = format!(
-                "SELECT _b FROM {} WHERE id = ?1 UNION SELECT _b FROM {} WHERE {ID_AT}",
+                "SELECT _branch FROM {} WHERE id = ?1 UNION SELECT _branch FROM {} WHERE {ID_AT}",
                 quote(table),
                 quote(&format!("{table}__h"))
             );
@@ -4784,7 +4787,7 @@ impl Inner {
         for op in ops {
             let Some(row) = op.row() else { continue };
             let table = op.table();
-            let sql = format!("SELECT _b FROM {} WHERE {ID_AT}", quote(table));
+            let sql = format!("SELECT _branch FROM {} WHERE {ID_AT}", quote(table));
             let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
             let keys: Vec<Vec<u8>> = statement
                 .query_map(
@@ -4821,7 +4824,7 @@ impl Inner {
             .images_where(
                 table,
                 true,
-                "id = ?1 AND _b = ?2 AND _t >= 0 ORDER BY _t DESC, _w DESC",
+                "id = ?1 AND _branch = ?2 AND _clock >= 0 ORDER BY _clock DESC, _writer DESC",
                 &[&id, &key],
             )?
             .into_iter()
@@ -4927,7 +4930,7 @@ impl PendingPart {
 /// by the first such eviction, so that opening an existing store without
 /// one leaves the file byte-identical.
 pub(crate) const WITHHELD_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_withheld \
-    (tbl TEXT NOT NULL, id BLOB NOT NULL, _b BLOB NOT NULL, PRIMARY KEY (tbl, id, _b)) \
+    (tbl TEXT NOT NULL, id BLOB NOT NULL, _branch BLOB NOT NULL, PRIMARY KEY (tbl, id, _branch)) \
     WITHOUT ROWID";
 
 /// Per remote query, the authority seq its result was last settled
@@ -5696,7 +5699,7 @@ impl Inner {
                 .conn
                 .cached_row(
                     &format!(
-                        "SELECT MAX(_w) FROM {} WHERE length(_w) = 24 AND substr(_w, 1, 16) = ?1",
+                        "SELECT MAX(_writer) FROM {} WHERE length(_writer) = 24 AND substr(_writer, 1, 16) = ?1",
                         quote(&history)
                     ),
                     [&me],
@@ -5710,7 +5713,10 @@ impl Inner {
                 let max: Option<i64> = self
                     .conn
                     .cached_row(
-                        &format!("SELECT MAX(_t) FROM {} WHERE _t >= ?1", quote(&name)),
+                        &format!(
+                            "SELECT MAX(_clock) FROM {} WHERE _clock >= ?1",
+                            quote(&name)
+                        ),
                         [band_start(PENDING)],
                         |r| r.get(0),
                     )
@@ -6100,7 +6106,7 @@ impl Inner {
             let newer: Option<i64> = self
                 .conn
                 .cached_row(
-                    &format!("SELECT 1 FROM {} WHERE _t > ?1 LIMIT 1", quote(table)),
+                    &format!("SELECT 1 FROM {} WHERE _clock > ?1 LIMIT 1", quote(table)),
                     [since as i64],
                     |r| r.get(0),
                 )
@@ -6395,7 +6401,7 @@ impl Inner {
                 .conn
                 .cached_row(
                     &format!(
-                        "SELECT MAX(_t) FROM {} WHERE _t >= 0 AND _t < ?1",
+                        "SELECT MAX(_clock) FROM {} WHERE _clock >= 0 AND _clock < ?1",
                         quote(table)
                     ),
                     [band_start(PENDING)],
@@ -9206,7 +9212,7 @@ impl Inner {
         let from = band_start(PENDING);
         let tables: Vec<String> = self.physical.tables.keys().cloned().collect();
         for table in &tables {
-            let held = self.images_where(table, false, "_t >= ?1", &[&from])?;
+            let held = self.images_where(table, false, "_clock >= ?1", &[&from])?;
             for image in held {
                 let row_key = (
                     table.clone(),
@@ -9225,7 +9231,7 @@ impl Inner {
                     .images_where(
                         table,
                         true,
-                        "id = ?1 AND _b = ?2 AND _t >= 0 AND _t < ?3 ORDER BY _t DESC LIMIT 1",
+                        "id = ?1 AND _branch = ?2 AND _clock >= 0 AND _clock < ?3 ORDER BY _clock DESC LIMIT 1",
                         &[&image.id.to_vec(), &image.key, &from],
                     )?
                     .pop();
@@ -10395,7 +10401,7 @@ impl Db {
                     images.extend(inner.images_where(
                         &table,
                         true,
-                        "id = ?1 AND _b = ?2 AND _t = ?3 AND _w = ?4",
+                        "id = ?1 AND _branch = ?2 AND _clock = ?3 AND _writer = ?4",
                         &[&id, &key, &at.0.t(), &w],
                     )?);
                 }
@@ -10600,7 +10606,7 @@ impl Db {
                                 .images_where(
                                     &image.table,
                                     true,
-                                    "id = ?1 AND _b = ?2 AND _t = ?3 AND _w = ?4",
+                                    "id = ?1 AND _branch = ?2 AND _clock = ?3 AND _writer = ?4",
                                     &[
                                         &id,
                                         &image.key,
@@ -10614,7 +10620,7 @@ impl Db {
                                 .images_where(
                                     &image.table,
                                     true,
-                                    "id = ?1 AND _b = ?2 AND _t >= 0 AND _t < ?3 ORDER BY _t DESC",
+                                    "id = ?1 AND _branch = ?2 AND _clock >= 0 AND _clock < ?3 ORDER BY _clock DESC",
                                     &[&id, &image.key, &band_start(PENDING)],
                                 )?
                                 .into_iter()

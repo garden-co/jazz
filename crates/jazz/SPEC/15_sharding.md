@@ -71,7 +71,7 @@ shared coordination surface small:
   Exact multi-shard snapshots carry per-shard `(logical shard, GlobalTime)`
   frontiers, while a future wall-time query may apply one requested physical
   time to every participating shard.
-  Today a position is one scalar on disk (`_t`) and on the wire (SPEC 8):
+  Today a position is one scalar on disk (`_clock`) and on the wire (SPEC 8):
   only the one authority numbers accepted positions, and nothing names a
   sequencer. Per-shard positions will need a wire and storage change of
   their own rather than fitting into today's encoding.

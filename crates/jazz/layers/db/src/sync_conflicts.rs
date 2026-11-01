@@ -11,7 +11,7 @@
 //! accepted seq, or where the named commit landed. A write built on a
 //! rejected commit, or on one it never received, is rejected too. It keeps,
 //! in the version the write made (the row table and history alike), `_base`
-//! (what it was built on, [`Built::stored`]) and `_cols`, the columns it
+//! (what it was built on, [`Built::stored`]) and `_touched`, the columns it
 //! authored (a bitmask over the columns' positions in the row table, which
 //! only ever grows by `ADD COLUMN`). From those and the row's history it
 //! derives on demand whether the write overrode a version its writer never
@@ -82,7 +82,7 @@ struct Version {
     seq: u64,
     built: Option<Built>,
     /// Bitmask over the table's column codes; `None` authors every
-    /// column, `_st` included.
+    /// column, `_state` included.
     cols: Option<Vec<u8>>,
 }
 
@@ -124,10 +124,10 @@ impl Knowledge {
 }
 
 /// The authored-column name a deletion or restore writes.
-const DELETION: &str = "_st";
+const DELETION: &str = "_state";
 
 /// Whether two writes' authored-column bitmasks overlap; `None` authors
-/// every column, `_st` included.
+/// every column, `_state` included.
 fn authored_overlap(left: Option<&[u8]>, right: Option<&[u8]>) -> bool {
     match (left, right) {
         (Some(left), Some(right)) => left.iter().zip(right).any(|(l, r)| l & r != 0),
@@ -505,7 +505,7 @@ impl Inner {
                 .map_or(&[][..], Vec::as_slice);
             self.exec(
                 &format!(
-                    "UPDATE {} SET _base = ?1, _cols = ?2 WHERE id = ?3 AND _b = ?4 AND _t = ?5",
+                    "UPDATE {} SET _base = ?1, _touched = ?2 WHERE id = ?3 AND _branch = ?4 AND _clock = ?5",
                     quote(table),
                 ),
                 rusqlite::params![
@@ -527,7 +527,7 @@ impl Inner {
         table: &str,
         row: RowUuid,
     ) -> Result<Vec<(Vec<u8>, Pos)>, Error> {
-        let sql = format!("SELECT _b, _t FROM {} WHERE id = ?1", quote(table));
+        let sql = format!("SELECT _branch, _clock FROM {} WHERE id = ?1", quote(table));
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
         let versions = statement
             .query_map([row.0.as_bytes().to_vec()], |r| {
@@ -547,9 +547,9 @@ impl Inner {
         key: &[u8],
     ) -> Result<Vec<Version>, Error> {
         let sql = format!(
-            "SELECT _t, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 AND _t >= 0 AND _t < {upstream} \
-             UNION ALL SELECT _t, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 AND _t >= 0 \
-             AND _t < {upstream} AND (_st & {STATE_AS_SENT}) = 0 ORDER BY 1",
+            "SELECT _clock, _base, _touched FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock >= 0 AND _clock < {upstream} \
+             UNION ALL SELECT _clock, _base, _touched FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock >= 0 \
+             AND _clock < {upstream} AND (_state & {STATE_AS_SENT}) = 0 ORDER BY 1",
             quote(table),
             quote(&format!("{table}__h")),
             upstream = super::band_start(super::PENDING),
@@ -625,7 +625,7 @@ impl Inner {
     /// landing after `before` was built on, when merging the write needs it
     /// (SPEC 4 §4.6): a version before `before` the writer never saw
     /// authored the column. `None` takes the fast path: nothing to merge
-    /// with, so the write's value stands as sent. Only `_base` and `_cols`
+    /// with, so the write's value stands as sent. Only `_base` and `_touched`
     /// are read to decide; the value is read only when a merge is needed.
     ///
     /// The value is the newest one the writer's chain gave the column: an
@@ -681,7 +681,7 @@ impl Inner {
         let id = row.0.as_bytes().to_vec();
         if let Some(on) = sent {
             let sql = format!(
-                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _t = ?3",
+                "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3",
                 quote(column),
                 quote(&format!("{table}__h")),
             );
@@ -697,8 +697,8 @@ impl Inner {
             }
         }
         let sql = format!(
-            "SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _t = ?3 \
-             UNION ALL SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _t = ?3",
+            "SELECT {column} FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3 \
+             UNION ALL SELECT {column} FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3",
             quote(table),
             quote(&format!("{table}__h")),
             column = quote(column),
@@ -772,7 +772,7 @@ impl Db {
         self.inner().as_sent_versions()
     }
 
-    /// The `(_t, _w)` of every history version of `table`'s unbranched row
+    /// The `(_clock, _writer)` of every history version of `table`'s unbranched row
     /// `row`, in key order.
     #[cfg(feature = "testing")]
     pub fn history_keys_for_test(
@@ -783,7 +783,7 @@ impl Db {
         let inner = self.inner();
         let schema_table = inner.schema.table(table)?;
         let sql = format!(
-            "SELECT _t, _w FROM {} WHERE id = ?1 AND _b = ?2 ORDER BY _t, _w",
+            "SELECT _clock, _writer FROM {} WHERE id = ?1 AND _branch = ?2 ORDER BY _clock, _writer",
             quote(&format!("{}__h", schema_table.stored)),
         );
         let mut statement = inner.conn.prepare_cached(&sql).map_err(storage)?;
@@ -809,7 +809,7 @@ impl Db {
         let inner = self.inner();
         let schema_table = inner.schema.table(table)?;
         let sql = format!(
-            "SELECT length(CAST({} AS BLOB)) FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT length(CAST({} AS BLOB)) FROM {} WHERE id = ?1 AND _branch = ?2",
             quote(schema_table.stored_name(column)),
             quote(&schema_table.stored),
         );

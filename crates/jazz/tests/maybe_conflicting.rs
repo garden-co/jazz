@@ -1156,7 +1156,14 @@ fn a_resent_write_keeps_the_base_it_was_accepted_with() {
 
 #[test]
 fn an_app_column_cannot_take_a_stored_row_columns_name() {
-    for column in ["_base", "_cols", "_st", "_b", "_w", "_p"] {
+    for column in [
+        "_base",
+        "_touched",
+        "_state",
+        "_branch",
+        "_writer",
+        "_partition",
+    ] {
         let source = SchemaBuilder::new()
             .table(TableSchemaBuilder::new("todos").column(column, ColumnType::Text))
             .build();

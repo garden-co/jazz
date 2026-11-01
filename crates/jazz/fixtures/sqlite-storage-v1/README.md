@@ -27,7 +27,7 @@ nodes and write times:
   on a branch;
 - a client text edit to `documents.body` (text-merging) that the server
   merged with its own concurrent edit, so its history keeps the client's
-  write as sent (`_st` bit 2, at `_t` = minus the commit's position);
+  write as sent (`_state` bit 2, at `_clock` = minus the commit's position);
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
   rejected (so `_jazz_transactions` keeps a rejected fate with its reason name),
@@ -126,3 +126,8 @@ by `(id, _b, _t, _w)`, so two writers' versions at one `_t` both stay.
 `_jazz_transactions_by_t`), `_jazz_lv_via` has `t` in place of
 `node`/`seq`, `_jazz_watermarks` is one `through` per key, the sequencer
 tables are gone, and a pending commit's `clock` is its commit HLC.
+
+Giving the reserved row columns descriptive names regenerated it the same
+way: `_b` is `_branch`, `_t` is `_clock` (index `__by_clock`), `_w` is
+`_writer`, `_st` is `_state` and `_cols` is `_touched`; `_base` keeps its
+name. History is keyed by `(id, _branch, _clock, _writer)`.

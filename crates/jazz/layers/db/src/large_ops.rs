@@ -332,7 +332,7 @@ impl Inner {
             let cell: Option<Sql> = match writer {
                 Some((node, tx)) => self.conn.cached_row(
                     &format!(
-                        "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _t = ?3 AND _w = ?4",
+                        "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3 AND _writer = ?4",
                         quote(stored),
                         quote(&table)
                     ),
@@ -341,8 +341,8 @@ impl Inner {
                 ),
                 None => self.conn.cached_row(
                     &format!(
-                        "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _t = ?3 \
-                         ORDER BY _w DESC LIMIT 1",
+                        "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3 \
+                         ORDER BY _writer DESC LIMIT 1",
                         quote(stored),
                         quote(&table)
                     ),

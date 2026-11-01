@@ -863,9 +863,9 @@ impl Inner {
                 let mut branch = Vec::new();
                 let mut out = Vec::new();
                 for (i, name) in names.iter().enumerate() {
-                    if name == "_t" {
+                    if name == "_clock" {
                         seq = r.get(i)?;
-                    } else if name == "_b" {
+                    } else if name == "_branch" {
                         branch = r.get(i)?;
                     } else if columns.contains(name) {
                         out.push((name.clone(), canon(&r.get::<_, Sql>(i)?)));
@@ -887,8 +887,8 @@ impl Inner {
             .map_or(i64::MAX, |(seq, _, _)| *seq);
         let old = read(
             format!(
-                "SELECT * FROM {} WHERE id = ?1 AND _b = ?2 AND _t < ?3 \
-                 AND (_st & {}) = 0 ORDER BY _t DESC LIMIT 1",
+                "SELECT * FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock < ?3 \
+                 AND (_state & {}) = 0 ORDER BY _clock DESC LIMIT 1",
                 quote(&format!("{table}__h")),
                 crate::values::STATE_AS_SENT
             ),
