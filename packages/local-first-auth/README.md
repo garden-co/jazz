@@ -12,13 +12,15 @@ Jazz uses this package for its guests, but nothing in it depends on Jazz.
 import { identityOf, signToken } from "@garden-co/local-first-auth";
 import { browserSecretStore } from "@garden-co/local-first-auth/browser";
 
-const store = browserSecretStore({ key: "/jazz" });
+const store = browserSecretStore({ scope: "my-app" });
 const secret = await store.getOrCreate();
 
 identityOf(secret); // { issuer: "urn:jazz:local-first", subject: "<uuid>", publicKey }
 
 await fetch("/api/notes", {
-  headers: { authorization: `Bearer ${signToken(secret, { audience: "https://app.example" })}` },
+  headers: {
+    authorization: `Bearer ${signToken(secret, { audience: "https://app.example" })}`,
+  },
 });
 ```
 
@@ -35,13 +37,13 @@ const who = verifyRequest(request, { audience: "https://app.example" });
 
 ## Entry points
 
-| Import                        | What                                                                                           |
-| ----------------------------- | ---------------------------------------------------------------------------------------------- |
-| `@garden-co/local-first-auth` | `generateSecret`, `parseSecret`, `identityOf`, `signToken`, `verifyToken`, `createSecretStore` |
-| `/browser`                    | `browserSecretStore({ key, migrateFrom? })` on localStorage                                    |
-| `/server`                     | `verifyRequest(request, { audience })`                                                         |
-| `/recovery-phrase`            | `RecoveryPhrase.fromSecret` / `toSecret` (24-word BIP39)                                       |
-| `/passkey`                    | `BrowserPasskeyBackup`: wrap the secret in a passkey                                           |
+| Import                        | What                                                                                                               |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `@garden-co/local-first-auth` | `generateSecret`, `parseSecret`, `identityOf`, `signToken`, `verifyToken`, `createSecretStore`, `secretStorageKey` |
+| `/browser`                    | `browserSecretStore({ scope?, profile? })` on localStorage                                                         |
+| `/server`                     | `verifyRequest(request, { audience })`                                                                             |
+| `/recovery-phrase`            | `RecoveryPhrase.fromSecret` / `toSecret` (24-word BIP39)                                                           |
+| `/passkey`                    | `BrowserPasskeyBackup`: wrap the secret in a passkey                                                               |
 
 `createSecretStore` takes any `{ getItem, setItem, removeItem }` storage, sync
 or async, so React Native and Expo apps pass their secure store.
@@ -62,13 +64,13 @@ The formats are fixed and versioned, and match Jazz's Rust core byte for byte
 
 A secret is a credential: whoever has it is that user. Keep it out of logs.
 
-## Moving from Jazz's built-in store
+## Scope
 
-Up to alpha.59 Jazz stored the secret under a key hashed from the app ID. Pass
-that key in `migrateFrom` and existing users keep their identity:
+`scope` is any string that keeps one app's users apart from another's on the
+same storage: an app ID, an endpoint, or nothing when the storage belongs to
+one app. The library never interprets it; it only derives the storage key
+(`secretStorageKey(scope, profile)`, a fixed format). The token audience is
+separate and always passed to `signToken`.
 
-```ts
-import { legacyJazzStorageKey } from "@garden-co/local-first-auth";
-
-browserSecretStore({ key: "/jazz", migrateFrom: [legacyJazzStorageKey("my-app-id")] });
-```
+Jazz passes its app ID as the scope, so a secret saved by any earlier Jazz
+version is found again under the same key and the user keeps their identity.

@@ -3,7 +3,7 @@ import vectors from "../test-vectors.json" with { type: "json" };
 import {
   generateSecret,
   identityOf,
-  legacyJazzStorageKey,
+  secretStorageKey,
   LocalFirstTokenError,
   parseSecret,
   signToken,
@@ -67,7 +67,10 @@ describe("verifyToken", () => {
     const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     const sibling = alphabet[alphabet.indexOf(last) ^ 1]!;
     expect(() =>
-      verifyToken(`${header}.${claims}.${signature.slice(0, -1)}${sibling}`, { audience, now }),
+      verifyToken(`${header}.${claims}.${signature.slice(0, -1)}${sibling}`, {
+        audience,
+        now,
+      }),
     ).toThrow();
   });
   it("rejects malformed input", () => {
@@ -94,10 +97,10 @@ describe("secrets", () => {
   });
   it("computes the storage keys jazz-tools used up to alpha.59", () => {
     // Values from jazz-tools' authSecretStorageKey({ appId, profile }).
-    expect(legacyJazzStorageKey("chat-app")).toBe(
+    expect(secretStorageKey("chat-app")).toBe(
       "jazz-auth-store-v1-fwE2Hmmz8A0W6gji0yM1i7tD3GxrQW7lahy5g9s9m18",
     );
-    expect(legacyJazzStorageKey("chat-app", "alice")).toBe(
+    expect(secretStorageKey("chat-app", "alice")).toBe(
       "jazz-auth-store-v1-ELxnntGic7Xl4bdw9edWdyBgwjC_G-fte6I7041VVXQ",
     );
   });
