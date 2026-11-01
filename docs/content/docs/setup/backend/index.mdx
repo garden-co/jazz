@@ -32,7 +32,7 @@ export const jazz = await createJazz({
 - `store` says where the data lives. `sqlite({ path })` keeps it in a directory on this machine;
   `remote({ url, adminSecret, backendSecret })` uses a sync server elsewhere, such as Jazz Cloud;
   `memory()` is for tests and throwaway previews. See [Deployment](/docs/setup/deployment) for
-  Vercel and Cloudflare.
+  where the data can live.
 - `authenticate(request)` reads your own session (a cookie, a header) and returns
   `{ userId, claims? }`, or `null` when signed out. It is the only place that decides who a user
   is: sign-ins, sync connections and `forRequest` all ask it. No JWKS, issuer or audience to
