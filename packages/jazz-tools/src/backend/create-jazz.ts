@@ -137,6 +137,12 @@ export interface Jazz {
   /** The database as the request's user, judged by your permissions. */
   forRequest(request: Request): Promise<Db>;
   /**
+   * The Jazz account of the request's signed-in user (created on first use),
+   * or null when `authenticate` names no user. For API routes that act on
+   * the user's data with the backend's own `db`.
+   */
+  accountFor(request: Request): Promise<string | null>;
+  /**
    * Make `to` another identity of the account `from` already uses: after
    * this, `authenticate` returning `to` opens that same account and its data.
    * Call it once your own auth has verified both, as when an anonymous or
@@ -647,17 +653,19 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       unknown
     >;
     const others = ["backend_secret", "admin_secret", "backend_session"];
+    // Browser worker transports send `jwt_token: null` alongside a backend
+    // session; only a real token counts as one.
     const token = auth.jwt_token ?? parsed.jwt_token;
-    if (token !== undefined) {
+    if (token !== undefined && token !== null) {
       const localFirst =
         typeof token === "string" && parseJwtPayload(token)?.iss === LOCAL_FIRST_JWT_ISSUER;
-      const alone = others.every((key) => parsed[key] === undefined && auth[key] === undefined);
+      const alone = others.every((key) => parsed[key] == null && auth[key] == null);
       return localFirst && alone ? prelude : null;
     }
     const stated = auth.backend_session as { user_id?: unknown } | undefined;
     if (!stated || typeof stated !== "object") return null;
     for (const credential of ["backend_secret", "admin_secret"]) {
-      if (parsed[credential] !== undefined || auth[credential] !== undefined) return null;
+      if (parsed[credential] != null || auth[credential] != null) return null;
     }
     const user = await authenticate(request);
     if (!user || user.userId !== stated.user_id) return null;
@@ -916,6 +924,10 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       const user = await authenticate(request);
       if (!user) throw new Error("forRequest: the request has no signed-in user");
       return backendDbForSession(backend, await sessionFor(user));
+    },
+    async accountFor(request) {
+      const user = await authenticate(request);
+      return user ? ((await sessionFor(user)).account_id ?? null) : null;
     },
     close() {
       closing ??= (async () => {

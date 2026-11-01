@@ -65,7 +65,9 @@ beforeAll(async () => {
     jwtIssuer: issuer.issuer,
     jwtAudience: issuer.audience,
   });
-  process.env.NEXT_PUBLIC_JAZZ_SERVER_URL = server.url;
+  // The app's Jazz fronts this test server with remote().
+  process.env.JAZZ_SERVER_URL = server.url;
+  process.env.JAZZ_ADMIN_SECRET = server.adminSecret;
   process.env.NEXT_PUBLIC_JAZZ_APP_ID = server.appId;
   process.env.BACKEND_SECRET = server.backendSecret;
   process.env.BETTER_AUTH_SECRET = "music-agent-test-better-auth-secret-0123456789";

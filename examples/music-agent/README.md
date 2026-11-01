@@ -24,8 +24,14 @@ The family is split by concern:
 pnpm install
 pnpm build:ci            # builds the Jazz runtime and jazz-tools once
 cd examples/music-agent/apps/nextjs
-pnpm dev                 # starts Next.js and a local Jazz server
+pnpm dev                 # starts Next.js, with Jazz running inside it
 ```
+
+Jazz runs inside the Next app (`createJazz` in `src/lib/backend-jazz-client.ts`),
+mounted under `/jazz`. Its `authenticate` reads the Better Auth session cookie:
+there are no JWTs or token routes. Data lives in the git-ignored `.jazz/`
+directory; set `JAZZ_SERVER_URL`, `JAZZ_ADMIN_SECRET` and `BACKEND_SECRET` to
+sync through Jazz Cloud or your own sync server with `remote()` instead.
 
 Open <http://127.0.0.1:3000>, create an account and the first conversation
 seeds itself: a request with an attached rough mix, answered live by the agent.
