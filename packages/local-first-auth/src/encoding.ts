@@ -15,8 +15,11 @@ export function base64urlEncode(bytes: Uint8Array): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-/** Strict: rejects padding and characters outside the base64url alphabet. */
-export function base64urlDecode(text: string): Uint8Array {
+/**
+ * Strict: rejects padding, characters outside the base64url alphabet, and
+ * (unless `allowNonCanonical`) non-zero unused trailing bits.
+ */
+export function base64urlDecode(text: string, allowNonCanonical = false): Uint8Array {
   if (!/^[A-Za-z0-9_-]*$/.test(text) || text.length % 4 === 1) {
     throw new Error("invalid base64url");
   }
@@ -24,7 +27,8 @@ export function base64urlDecode(text: string): Uint8Array {
   const binary = atob(text.replace(/-/g, "+").replace(/_/g, "/") + padding);
   const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
   // Unused trailing bits must be zero, as in Rust's base64 decoder.
-  if (base64urlEncode(bytes) !== text) throw new Error("non-canonical base64url");
+  if (!allowNonCanonical && base64urlEncode(bytes) !== text)
+    throw new Error("non-canonical base64url");
   return bytes;
 }
 
