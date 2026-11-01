@@ -56,9 +56,9 @@ export const jazz = await createJazz({
   app,
   permissions,
   store: remote({
-    url: process.env.JAZZ_SYNC_URL!, // your sync server, or https://v2.sync.jazz.tools
+    url: process.env.JAZZ_SERVER_URL!, // your sync server, or https://v2.sync.jazz.tools
     adminSecret: process.env.JAZZ_ADMIN_SECRET!,
-    backendSecret: process.env.JAZZ_BACKEND_SECRET!,
+    backendSecret: process.env.BACKEND_SECRET!,
   }),
   authenticate: async (request) => /* your session */ null,
 });

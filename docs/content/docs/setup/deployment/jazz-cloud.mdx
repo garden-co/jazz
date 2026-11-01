@@ -1,0 +1,55 @@
+---
+title: Jazz Cloud
+description: "Store and sync your app's data on the hosted Jazz Cloud, with your own backend in front for auth."
+---
+
+Jazz Cloud stores and syncs your app's data. Your own backend sits in front of it: browsers talk only to your backend, which signs users in with your auth and connects to Jazz Cloud. Jazz Cloud does no user auth of its own.
+
+## Get an app ID
+
+Your app ID namespaces your data for storage and sync. Click below to generate one on Jazz Cloud. You also get the secrets your backend needs. Generated apps are unclaimed until you claim them in the dashboard, and unclaimed apps are deleted after 14 days.
+
+<GenerateAppId />
+
+## Connect your backend
+
+Put the generated values in your backend's environment. Only the app ID is public. The sync URL and both secrets stay server-side, like a database password:
+
+```bash title=".env"
+NEXT_PUBLIC_JAZZ_APP_ID="<your app ID>"
+JAZZ_SERVER_URL="https://v2.sync.jazz.tools/"
+JAZZ_ADMIN_SECRET="<admin secret>"
+BACKEND_SECRET="<backend secret>"
+```
+
+Then point `createJazz` at Jazz Cloud with the `remote()` store:
+
+```ts title="jazz.server.ts"
+import { createJazz, remote } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+
+export const jazz = await createJazz({
+  appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
+  app,
+  permissions,
+  store: remote({
+    url: process.env.JAZZ_SERVER_URL!,
+    adminSecret: process.env.JAZZ_ADMIN_SECRET!,
+    backendSecret: process.env.BACKEND_SECRET!,
+  }),
+  // Who is signed in, read from your own auth's session.
+  authenticate: async (request) => {
+    const session = await getSession(request);
+    return session ? { userId: session.user.id } : null;
+  },
+});
+```
+
+Mount the handler under `/jazz` and point the client's `serverUrl` at `"/jazz"`. Browsers sync with your backend, never with Jazz Cloud directly. On start, your backend applies its schema, migrations and permissions to the app on Jazz Cloud. For each request it tells Jazz Cloud who the user is, which is why `authenticate` lives in your backend. See [Backend](/docs/setup/backend) for mounting in Next.js, Vite and Effect, and [Custom auth](/docs/setup/auth/custom) for `authenticate`.
+
+Use the `.env` name prefix your framework exposes to the client (`VITE_`, `PUBLIC_`, `EXPO_PUBLIC_`) for the app ID only.
+
+## Coming next
+
+- Limits and pricing
+- Moving an app off Jazz Cloud onto your own deployment
