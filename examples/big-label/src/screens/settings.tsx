@@ -15,7 +15,6 @@ import { useDb } from "jazz-tools/react";
 import { app } from "../../schema";
 import { PageHeader, PageSection } from "../components/page";
 import { fixtureProfiles } from "../fixtures";
-import { getJwtFromBetterAuth } from "../lib/auth-client";
 import { useCan, useOrganization } from "../lib/organization";
 import { useWrite } from "../lib/use-write";
 
@@ -79,11 +78,10 @@ function DemoData() {
   const load = async () => {
     setState({ status: "loading" });
     try {
-      const token = await getJwtFromBetterAuth();
-      if (!token) throw new Error("Your session has expired. Sign in again.");
       const response = await fetch("/api/demo-data", {
         method: "POST",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({ profile }),
       });
       if (!response.ok) throw new Error(`The server couldn't load the data (${response.status}).`);

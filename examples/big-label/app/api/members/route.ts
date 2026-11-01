@@ -1,5 +1,5 @@
 import { app } from "../../../schema";
-import { authJazzClient } from "../../../src/lib/auth-jazz-client";
+import { jazz } from "../../../src/lib/jazz.server";
 import { addMember, findPersonByEmail } from "../../../src/lib/members";
 import { requestAccount } from "../../../src/lib/request-account";
 
@@ -20,8 +20,8 @@ export async function POST(request: Request) {
   if (typeof organizationId !== "string" || typeof email !== "string" || typeof role !== "string")
     return Response.json({ status: "invalid-request" }, { status: 400 });
 
-  const client = await authJazzClient();
-  const caller = await client.forRequest(request);
+  const backend = await jazz();
+  const caller = await backend.forRequest(request);
   // Answer only admins, read as the caller, so nobody else can probe which
   // emails have accounts or who belongs to the label. The membership write
   // below is still checked by permissions.ts on its own.
@@ -29,7 +29,7 @@ export async function POST(request: Request) {
     app.memberships.where({ organizationId, userId: account.accountId, role: "admin" }),
   );
   if (!isAdmin) return Response.json({ status: "forbidden" }, { status: 403 });
-  const person = await findPersonByEmail(client.db, email);
+  const person = await findPersonByEmail(backend.db, email);
   if (!person) return Response.json({ status: "not-found" }, { status: 404 });
   const status = await addMember(caller, { organizationId, person, role });
   return Response.json(status === "forbidden" ? { status } : { status, name: person.name }, {
