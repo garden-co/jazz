@@ -9,7 +9,8 @@
     "src/explicit-relationships.typecheck.ts",
     "src/payload-enum-init.typecheck.ts",
     "src/dependent-transforms.typecheck.ts",
-    "src/computed-columns.typecheck.ts"
+    "src/computed-columns.typecheck.ts",
+    "src/runtime/serializable-wait-options.typecheck.ts"
   ],
   "exclude": ["node_modules", "dist"]
 }
