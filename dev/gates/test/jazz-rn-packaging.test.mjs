@@ -820,11 +820,8 @@ test("React Native docs advertise the supported alpha session and account-handle
     previewWorkflow,
   ] = await Promise.all([
     readFile(new URL("../../../crates/jazz-rn/README.md", import.meta.url), "utf8"),
-    readFile(new URL("../../../docs/content/docs/install/client.mdx", import.meta.url), "utf8"),
-    readFile(
-      new URL("../../../docs/content/docs/getting-started/client-setup.mdx", import.meta.url),
-      "utf8",
-    ),
+    readFile(new URL("../../../docs/content/docs/setup/react-native.mdx", import.meta.url), "utf8"),
+    readFile(new URL("../../../docs/content/docs/setup/react-native.mdx", import.meta.url), "utf8"),
     readFile(
       new URL("../../../docs/content/docs/reference/durability-tiers.mdx", import.meta.url),
       "utf8",
@@ -865,8 +862,8 @@ test("React Native docs advertise the supported alpha session and account-handle
     /React Native and Expo are supported as an alpha[\s\S]*`jazz-tools\/react-native`[\s\S]*canonical Expo\s+scaffold/,
     "the public install guide must direct RN users to the supported account-handle client path",
   );
-  const expoSetup = clientSetupGuide.match(/## React Native and Expo\n([\s\S]*?)(?=\n## )/)?.[1];
-  assert.ok(expoSetup, "the client setup guide must include a React Native and Expo section");
+  const expoSetup = clientSetupGuide.match(/## Setup\n([\s\S]*?)(?=\n## )/)?.[1];
+  assert.ok(expoSetup, "the React Native guide must include a Setup section");
   assert.match(expoSetup, /import \{ JazzSessionProvider \} from "jazz-tools\/expo"/);
   assert.match(
     expoSetup,
