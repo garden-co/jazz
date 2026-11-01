@@ -24,31 +24,32 @@ export const permissions = s.definePermissions(app, ({ policy, session }) => {
 });
 ```
 
-Use the type-safe client in your backend.
+Jazz runs inside your backend: no separate database server and no deploy step. The schema and permissions your code imports are the ones it enforces.
 
 ```ts title="server.ts"
 import { Hono } from "hono";
-import { createJazzSession } from "jazz-tools/backend";
+import { createJazz, sqlite } from "jazz-tools/backend";
 import { app, permissions } from "./schema";
 
-const session = await createJazzSession({
-  appId: process.env.JAZZ_APP_ID!,
-  serverUrl: process.env.JAZZ_SERVER_URL!,
+const jazz = await createJazz({
+  appId: "my-app",
   app,
   permissions,
-  initial: { backendSecret: process.env.JAZZ_BACKEND_SECRET! },
+  store: sqlite({ path: "./data/jazz" }),
+  authenticate: async (request) => getSignedInUser(request), // your own auth: { userId } or null
 });
-const { client } = session.getSnapshot();
 
 new Hono()
+  // Sync for browsers, on your own origin
+  .all("/jazz/*", (c) => jazz.fetch(c.req.raw))
   // Runs as the signed-in user: the query only returns their own todos
   .get("/todos", async (c) => {
-    const db = await client!.forRequest(c.req.raw);
+    const db = await jazz.forRequest(c.req.raw);
     return c.json(await db.all(app.todos.where({ done: false })));
   })
   // Runs with backend authority and sees every todo (check admin access in your app first)
   .get("/admin/todos", async (c) => {
-    return c.json(await client!.db.all(app.todos));
+    return c.json(await jazz.db.all(app.todos));
   });
 ```
 
@@ -58,7 +59,7 @@ You can also query and write to the database right from your frontend. It is pro
 import { createDb } from "jazz-tools/thin";
 import { app } from "./schema";
 
-const db = createDb({ appId, serverUrl, account });
+const db = createDb({ appId, serverUrl: "/jazz", account });
 
 // Live query: updates as soon as the server (or anyone else) changes a todo
 db.subscribe(app.todos.where({ done: false }), (todos) => {

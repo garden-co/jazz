@@ -1,14 +1,48 @@
 ---
 title: Cloudflare
-description: "Deploy Jazz on Cloudflare."
+description: "Run Jazz on Cloudflare: mount it in your Worker and keep the data in a Durable Object."
 ---
 
+Jazz runs in your Worker. There's no Jazz server to deploy and no `jazz-tools deploy` step: the
+Worker version you ship carries its schema, migrations and permissions, and a rollback with
+`wrangler rollback` rolls Jazz back with it.
+
+## Mount Jazz
+
+```ts title="src/worker.ts"
+import { Hono } from "hono";
+import { jazz } from "./jazz.server";
+
+const api = new Hono();
+api.all("/jazz/*", (c) => jazz.fetch(c.req.raw));
+
+export default api;
+```
+
+## Where the data lives
+
 <Callout type="info">
-  Preview: this page is a rough outline for the server-first docs restructure. The bullets below are
-  what it will cover.
+  Coming next: the `durableObject()` store. It keeps the database in a Durable Object's SQLite
+  storage, with hibernating WebSockets so idle apps cost nothing. Until it lands, see the [Workers
+  runtime
+  example](https://github.com/garden-co/jazz/tree/main/examples/cloudflare-worker-runtime-ts) for
+  running a Jazz client in `workerd`.
 </Callout>
 
+```ts title="src/jazz.server.ts"
+import { createJazz, durableObject } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+
+export const jazz = await createJazz({
+  appId: "my-app",
+  app,
+  permissions,
+  store: durableObject(env.JAZZ), // coming next
+  authenticate: async (request) => /* your session */ null,
+});
+```
+
+## Coming next
+
 - Recipe an LLM can follow end to end
-- Sync server on Durable Objects, app on Workers (see the `cloudflare-worker-runtime-ts` example for the runtime)
-- Environment variables and secrets
 - Cost notes and calculator

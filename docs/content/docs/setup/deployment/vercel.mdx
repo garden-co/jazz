@@ -1,14 +1,50 @@
 ---
 title: Vercel
-description: "Deploy Jazz on Vercel."
+description: "Run Jazz on Vercel: mount it in a Next.js route, sync over a WebSocket, and keep the data in a Vercel Sandbox."
 ---
 
+Jazz runs in your Next.js app's own functions. There's no Jazz server to deploy and no
+`jazz-tools deploy` step: each deployment carries its schema, migrations and permissions, and a
+rollback in the Vercel dashboard rolls Jazz back with it.
+
+## Mount Jazz
+
+```ts title="app/jazz/[...path]/route.ts"
+import { jazz } from "@/jazz.server";
+
+export const { GET, POST, DELETE } = jazz.next();
+```
+
+Install `@vercel/functions` and `ws`. On Vercel, the route upgrades sync to a WebSocket with
+`upgradeWebSocket()`. For local development, `vc dev` does the same; plain `next dev` can't upgrade
+sockets, so the browser falls back to an HTTP stream on its own. Both work without configuration.
+
+## Where the data lives
+
 <Callout type="info">
-  Preview: this page is a rough outline for the server-first docs restructure. The bullets below are
-  what it will cover.
+  Coming next: the `vercelSandbox()` store. It keeps the database in a named Vercel Sandbox per
+  project and environment, created and woken by your functions with their own OIDC token. Until it
+  lands, run Jazz on Vercel with `memory()` for previews only, or keep the data on [your own
+  server](/docs/setup/deployment/own-server).
 </Callout>
 
+```ts title="jazz.server.ts"
+import { createJazz, vercelSandbox } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+
+export const jazz = await createJazz({
+  appId: "my-app",
+  app,
+  permissions,
+  store: vercelSandbox(), // coming next
+  authenticate: async (request) => /* your session */ null,
+});
+```
+
+- No secrets to set: the store authenticates as your deployment through Vercel OIDC.
+- Preview deployments get their own sandbox, so previews never touch production data.
+
+## Coming next
+
 - Recipe an LLM can follow end to end
-- Sync server on Vercel (sandbox + fluid proxy), app on Vercel functions
-- Environment variables and secrets
 - Cost notes and calculator

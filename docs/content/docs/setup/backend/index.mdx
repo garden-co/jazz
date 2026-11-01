@@ -1,65 +1,129 @@
 ---
 title: Backend
-description: "Run Jazz in your backend: one session per process, backend authority for system work, and user-scoped queries for requests."
+description: "Run Jazz inside your backend: one createJazz per process, mounted under /jazz, with backend authority for system work and user-scoped queries for requests."
 ---
 
-<Callout type="info">
-  Stub for discussion. It replaces the TypeScript Server tutorial and will absorb Trusted Backend
-  and User-Scoped Backend. Every section gets the same three tabs.
-</Callout>
+Jazz runs inside your backend. There is no separate Jazz server to start and no deploy step:
+`createJazz` opens the database in your backend's process, applies the schema, migrations and
+permissions your code declares, and serves sync on your own origin under `/jazz`.
 
-## Context setup
+## Create Jazz once
 
-- One `createJazzSession` per server process, created at startup and shared by all requests
-- Configured once: `appId`, `serverUrl`, your `app` schema and `permissions`, and the backend secret
-- Optional: `jwksUrl` or `jwtPublicKey` for your auth provider's tokens (see [Auth](/docs/setup/auth))
-- Where the secret and server URL come from in each environment (env vars, Vercel, Cloudflare)
+```ts title="jazz.server.ts"
+import { createJazz, sqlite } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+import { getUserFromCookie } from "./auth";
 
-<Tabs groupId="backend-framework" items={["Next.js", "Vite", "Effect"]} persist updateAnchor>
+export const jazz = await createJazz({
+  appId: "my-app",
+  app,
+  permissions,
+  store: sqlite({ path: "./data/jazz" }),
+  // Your app's own sign-in decides who the user is.
+  authenticate: async (request) => {
+    const user = await getUserFromCookie(request);
+    return user ? { userId: user.id } : null;
+  },
+});
+```
+
+- `app` and `permissions` are the ones your code imports. The bundle that's running is the bundle
+  Jazz enforces, so rolling back your backend rolls back its permissions too.
+- `store` says where the data lives. `sqlite({ path })` keeps it in a directory on this machine;
+  `memory()` is for tests and throwaway previews. See [Deployment](/docs/setup/deployment) for
+  Vercel and Cloudflare.
+- `authenticate(request)` reads your own session (a cookie, a header) and returns
+  `{ userId, claims? }`, or `null` when signed out. Jazz turns that into a short-lived credential for
+  the browser at `/jazz/session`. No JWKS, issuer or audience to configure.
+- Admin and backend routes never leave the process: from outside, only sync and sign-in are
+  reachable under `/jazz`.
+
+## Mount it
+
+<Tabs groupId="backend-framework" items={["Next.js", "Hono", "Express / Node"]} persist updateAnchor>
   <Tab value="Next.js">
-    ```ts title="lib/jazz.ts"
-    import { createJazzSession } from "jazz-tools/backend";
-    import { app, permissions } from "@/schema";
+    ```ts title="app/jazz/[...path]/route.ts"
+    import { jazz } from "@/jazz.server";
 
-    // Module scope: one session per server process, reused across route handlers
-    export const session = await createJazzSession({
-      appId: process.env.JAZZ_APP_ID!,
-      serverUrl: process.env.JAZZ_SERVER_URL!,
-      app,
-      permissions,
-      initial: { backendSecret: process.env.JAZZ_BACKEND_SECRET! },
-    });
+    export const { GET, POST, DELETE } = jazz.next();
+    ```
+
+    On Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/functions`; install
+    `@vercel/functions` and `ws`). Under plain `next dev`, which can't upgrade sockets, the browser
+    switches to an HTTP stream on its own.
+
+  </Tab>
+  <Tab value="Hono">
+    ```ts title="server.ts"
+    import { Hono } from "hono";
+    import { serve } from "@hono/node-server";
+    import { jazz } from "./jazz.server";
+
+    const api = new Hono();
+    api.all("/jazz/*", (c) => jazz.fetch(c.req.raw));
+
+    const server = serve({ fetch: api.fetch, port: 3000 });
+    await jazz.attach(server); // WebSocket upgrades on /jazz (needs `ws`)
     ```
 
   </Tab>
-  <Tab value="Vite">
-    TODO: a Vite app with its API server (Hono) next to it, sharing `schema.ts`.
+  <Tab value="Express / Node">
+    ```ts title="server.ts"
+    import express from "express";
+    import { jazz } from "./jazz.server";
 
-    <include cwd lang="ts" meta='title="server/index.ts"'>
-      ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-setup-ts
-    </include>
+    const api = express();
+    api.use((req, res, next) => jazz.nodeHandler(req, res, next));
 
-  </Tab>
-  <Tab value="Effect">
-    <include cwd lang="ts" meta='title="src/server.ts"'>
-      ../examples/docs/todo-effect/src/server.ts#quickstart-server-setup-effect
-    </include>
+    const server = api.listen(3000);
+    await jazz.attach(server); // WebSocket upgrades on /jazz (needs `ws`)
+    ```
+
   </Tab>
 </Tabs>
 
+## Connect the browser
+
+The browser talks to the same origin, so `serverUrl` is a path and your app's cookie is the only
+credential it needs:
+
+```ts title="src/jazz.ts"
+import { createJazzSession, backendToken } from "jazz-tools/client";
+
+export const session = await createJazzSession({ appId: "my-app", serverUrl: "/jazz" });
+await session.loginOrRegisterJWT({ getToken: backendToken() });
+```
+
+`backendToken()` asks `/jazz/session` for a credential. Call it again after your own sign-in
+changes; on sign-out, call `session.logout()`.
+
 ## Trusted backend use
 
-- `client.db` acts with backend authority: it sees and writes everything, so check access in your own code first
-- For system work: jobs, webhooks, migrations, admin routes
-- `withAttribution(account)` keeps backend authority but records the user as the author
-- Short example per tab: an admin route and a webhook that writes a row
+`jazz.db` acts with backend authority: it sees and writes everything, so check access in your own
+code first. Use it for system work: jobs, webhooks, migrations, admin routes.
+
+```ts
+import { jazz } from "./jazz.server";
+import { app } from "./schema";
+
+await jazz.db.insert(app.auditLog, { event: "invoice.paid" });
+```
 
 ## User-scoped use
 
-- `await client.forRequest(req)` verifies the caller's token and returns a database with that user's policies and authorship
-- The default for anything a user triggers: route handlers, server actions, server components
-- Concurrent requests stay isolated; never switch the shared session to a user
-- Short example per tab: a GET route with a query and a POST route that writes
+`await jazz.forRequest(request)` runs your `authenticate` and returns a database with that user's
+policies and authorship. It's the default for anything a user triggers: route handlers, server
+actions, server components. Concurrent requests stay isolated.
+
+```ts title="app/api/todos/route.ts"
+import { jazz } from "@/jazz.server";
+import { app } from "@/schema";
+
+export async function GET(request: Request) {
+  const db = await jazz.forRequest(request);
+  return Response.json(await db.all(app.todos));
+}
+```
 
 ## Edge-style Wasm setup
 
@@ -91,6 +155,6 @@ See the [Cloudflare Wrangler example](https://github.com/garden-co/jazz/tree/mai
 - **Auth:** which tokens `forRequest` accepts and how to link accounts. See [Auth](/docs/setup/auth).
 - **Permissions:** user-scoped queries run your [policies](/docs/schemas/policies); backend authority skips them.
 - **Reads and writes:** the same query and write API as clients. See [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data), including when a write counts as durable.
-- **Clients:** browsers and apps can talk to the same Jazz server directly, under the same policies. See [Browser](/docs/setup/web-client).
-- **Deployment:** where the backend and the Jazz server run. See [Deployment](/docs/setup/deployment).
+- **Clients:** browsers and apps sync through the same `/jazz` mount, under the same policies. See [Browser](/docs/setup/web-client).
+- **Deployment:** where the data lives in each environment. See [Deployment](/docs/setup/deployment).
 - **Testing:** permission tests against a local server. See [Testing](/docs/tooling/testing).
