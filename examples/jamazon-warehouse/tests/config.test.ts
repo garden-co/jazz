@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { LOCAL_SECRETS, resolveConfig, resolveSecret } from "../src/lib/config.js";
+import { LOCAL_SECRETS, jazzStore, resolveConfig, resolveSecret } from "../src/lib/config.js";
 
 describe("configuration fails closed", () => {
   it("uses local defaults for a development run", () => {
     const config = resolveConfig({ NODE_ENV: "development" });
     expect(config).toMatchObject({ appOrigin: "http://localhost:3000", isLocalOrigin: true });
-    expect(resolveSecret(config, "BACKEND_SECRET", undefined)).toBe(LOCAL_SECRETS.BACKEND_SECRET);
+    expect(resolveSecret(config, "BETTER_AUTH_SECRET", undefined)).toBe(
+      LOCAL_SECRETS.BETTER_AUTH_SECRET,
+    );
   });
 
   it("requires an origin in production", () => {
@@ -30,6 +32,15 @@ describe("configuration fails closed", () => {
       NEXT_PUBLIC_APP_ORIGIN: "https://warehouse.example",
     });
     expect(config.isLocalOrigin).toBe(false);
-    expect(() => resolveSecret(config, "BACKEND_SECRET", "")).toThrow(/BACKEND_SECRET must be set/);
+    expect(() => resolveSecret(config, "BETTER_AUTH_SECRET", "")).toThrow(
+      /BETTER_AUTH_SECRET must be set/,
+    );
+  });
+
+  it("keeps the data locally unless a sync server and both its secrets are set", () => {
+    expect(jazzStore({})).toEqual({ kind: "sqlite", path: ".jazz" });
+    const remote = { JAZZ_SERVER_URL: "https://jazz.example", JAZZ_ADMIN_SECRET: "a" };
+    expect(() => jazzStore(remote)).toThrow(/JAZZ_ADMIN_SECRET and BACKEND_SECRET/);
+    expect(jazzStore({ ...remote, BACKEND_SECRET: "b" })).toMatchObject({ kind: "remote" });
   });
 });
