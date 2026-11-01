@@ -35,7 +35,7 @@ use crate::values::storage;
 /// Commit positions are hybrid-clock timestamps: the wall clock in ms since
 /// [`HLC_EPOCH_MS`] above [`HLC_COUNTER_BITS`] bits of counter, so every
 /// position fits a JS number (Durable Object SQLite returns integers as
-/// one, and a pending `_t` holds one below its pending bit): 42 bits of
+/// one, and a pending `_clock` holds one below its pending bit): 42 bits of
 /// ms last 139 years, and a node handing out more than 1,024 in a
 /// millisecond runs ahead of its clock until the clock catches up.
 /// Positions of different nodes then compare by time, and every part of a
@@ -48,7 +48,7 @@ pub const HLC_COUNTER_BITS: u32 = 10;
 pub const HLC_MAX_OFFSET_MS: u64 = 500;
 
 /// The latest ms an [`hlc`] position can name: positions stay under 2^52,
-/// the accepted kind of `_t`.
+/// the accepted kind of `_clock`.
 const HLC_MAX_MS: u64 = (1 << (52 - HLC_COUNTER_BITS)) - 1;
 
 /// The first position at wall-clock time `ms` (Unix ms). A reading past

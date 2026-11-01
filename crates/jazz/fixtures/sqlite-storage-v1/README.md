@@ -12,9 +12,9 @@ pending uploads moved from one encoded message to a row per op, and
 watermarks became per-sequencer rows).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `5c478e21f7447123bc3c4cf486bc49c6977117683e7084103860d69c847c2f4a`.
+  the SQLite file `775997e916743e83dc13ef9c3c3615e39459fe2b89d580e4719451e1d0284748`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `cc0a6e7e98a0efe8189138f40e17fe48cb7bb503472c4f47abd0bc3e2c4e5a26`.
+  `57645f326a73a5b27cce7bf9026e3b41817c4229659d95a9dc46b6e35de5ac48`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -27,7 +27,7 @@ nodes and write times:
   on a branch;
 - a client text edit to `documents.body` (text-merging) that the server
   merged with its own concurrent edit, so its history keeps the client's
-  write as sent (`_st` bit 2, at `_t` = minus the commit's position);
+  write as sent (`_state` bit 2, at `_clock` = minus the commit's position);
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
   rejected (so `_jazz_transactions` keeps a rejected fate with its reason name),
@@ -126,3 +126,8 @@ by `(id, _b, _t, _w)`, so two writers' versions at one `_t` both stay.
 `_jazz_transactions_by_t`), `_jazz_lv_via` has `t` in place of
 `node`/`seq`, `_jazz_watermarks` is one `through` per key, the sequencer
 tables are gone, and a pending commit's `clock` is its commit HLC.
+
+Giving the reserved row columns descriptive names regenerated it the same
+way: `_b` is `_branch`, `_t` is `_clock` (index `__by_clock`), `_w` is
+`_writer`, `_st` is `_state` and `_cols` is `_touched`; `_base` keeps its
+name. History is keyed by `(id, _branch, _clock, _writer)`.

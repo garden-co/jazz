@@ -12,20 +12,20 @@ The model is small:
   holding complete history. Every accepted commit gets the next server seq.
 - A **replica** is a database whose store is a partial copy of server versions
   plus its own optimistic writes. Every stored version sits at one scalar
-  position `_t` (below 2^53), of one of two kinds: accepted (`_t` is the
+  position `_clock` (below 2^53), of one of two kinds: accepted (`_clock` is the
   authority position the version was shipped at, below 2^52) or pending
-  (`_t` is `1<<52 | ` its writer's commit HLC). The commit HLC is a
+  (`_clock` is `1<<52 | ` its writer's commit HLC). The commit HLC is a
   hybrid clock: milliseconds since `HLC_EPOCH_MS` (2025-01-01) above
   `HLC_COUNTER_BITS` bits of counter, each commit's past its writer's last
   and every one it has seen, carried as `Commit.clock`. The
-  same `_t`, wherever the version is stored. Unsettled versions of a row
-  order last-writer-wins by `_t`, then the writer's node and its tx: two
-  writers' versions at one `_t` are told apart by their writer (`_w` in
+  same `_clock`, wherever the version is stored. Unsettled versions of a row
+  order last-writer-wins by `_clock`, then the writer's node and its tx: two
+  writers' versions at one `_clock` are told apart by their writer (`_writer` in
   history, §4). Every store orders the same unsettled commits the same
   way, and the authority's order replaces it once they settle, so a row
   may change then. A write's explicit time (`updated_at_ms`) is provenance
   only and does not order it. Cuts and history on the replica are over
-  server versions: `_t < 1<<52` is every accepted version, so no cut at a
+  server versions: `_clock < 1<<52` is every accepted version, so no cut at a
   server seq sees a pending version.
 - **Writes travel up** as one `Commit` per transaction and come back as one
   `Fate`.
@@ -123,10 +123,10 @@ Positions travel as scalars: a `through`, a `since`, a serializable
 snapshot, a one-shot read's `at` and an accepted fate's `at` are each one
 authority seq (`since` and `at` optional), as is `ConnectionSettled`'s
 `through`. Only the authority numbers accepted positions; a relay with no
-server never does (§8.13). A row image's `at` is its `_t`, which the
+server never does (§8.13). A row image's `at` is its `_clock`, which the
 receiver stores as is: accepted, or pending at its writer's commit HLC,
 when the image names that writer (`Image.written`). A receiver refuses as
-malformed a pending image with no writer, a `_t` of neither kind, a
+malformed a pending image with no writer, a `_clock` of neither kind, a
 `Commit.clock` of 2^52 or more, and an authority seq of 2^52 or more where
 it names an accepted version: a `since`, a serializable snapshot, a
 delta's or an access proof's version, and a `BuiltOn::Seq`.
@@ -491,7 +491,7 @@ passes on (§8.13). Known limit: a branch view's read reads the current state.
 `known` is the connection's position, not any one result's: a live result may
 read further (its own read's settle), never less far. It is persisted, and a
 reopened replica rebuilds what reading by positions needs from its store
-alone: the newest accepted version each table holds (an indexed `MAX(_t)` in the accepted band),
+alone: the newest accepted version each table holds (an indexed `MAX(_clock)` in the accepted band),
 and its own commits accepted past `known`, from its settled-transaction
 records. Until its upstream settles again, every read of a reopened replica is
 as of `known`, its own writes included. A replica's history pruning must keep,
@@ -834,10 +834,10 @@ for its sessions (tabs). It serves a session's reads from its store per the
 read's tier, asking its upstream with the same `Read` where the tier needs
 the authority's answer, and tells its sessions the authority's seq it knows
 (`served_through`), so a session's snapshot is one the authority validates as
-it is. It ships its unsettled versions at their pending `_t`, each with its
+it is. It ships its unsettled versions at their pending `_clock`, each with its
 writer (`Image.written`), and a session stores them there: a relay keeps
-a session's commit clock, so a version is at the same `_t` in every store,
-and versions at one `_t` are told apart by writer (`INV-SYNC-50`). The relay replays its pending commits (its own and the
+a session's commit clock, so a version is at the same `_clock` in every store,
+and versions at one `_clock` are told apart by writer (`INV-SYNC-50`). The relay replays its pending commits (its own and the
 sessions' it carries) in that order, so a commit written earlier but
 delivered later goes under the later one. A session replays its own pending
 commits over the relay's version of a row only when they order after it,
