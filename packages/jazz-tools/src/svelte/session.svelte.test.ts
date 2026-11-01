@@ -19,10 +19,7 @@ async function setup(events: string[]) {
       createLocalFirst: () => old,
       restoreLocalFirst: () => old,
       logout: () => {},
-      registerJWT: async () => next,
-      loginJWT: async () => next,
-      loginOrRegisterJWT: async () => next,
-      linkJWT: async () => {
+      linkWithBackend: async () => {
         events.push("link");
         return next;
       },
@@ -114,7 +111,7 @@ describe("Svelte Jazz session", () => {
     });
     await settle();
     expect(target.textContent).toBe("Ready");
-    await session.linkJWT("token");
+    await session.linkWithBackend();
     await settle();
     expect(events.slice(0, 3)).toEqual(["detach", "shutdown:old", "link"]);
     expect(target.textContent).toBe("Ready");

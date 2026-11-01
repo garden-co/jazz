@@ -17,10 +17,7 @@ async function fixture() {
   const accounts = new AccountManager(
     {
       createLocalFirst: () => account,
-      registerJWT: async () => account,
-      loginJWT: async () => account,
-      loginOrRegisterJWT: async () => account,
-      linkJWT: async () => account,
+      loginWithBackend: async () => account,
     },
     account,
   );

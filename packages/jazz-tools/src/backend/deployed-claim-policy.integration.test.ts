@@ -53,21 +53,35 @@ describe("deployed permissions with claims in referenced read policies", () => {
       jwtIssuer: issuer.issuer,
       jwtAudience: issuer.audience,
     });
-    const sessions: { close(): Promise<void> }[] = [];
+    const owner = await createJazzSession({
+      appId,
+      app,
+      permissions,
+      serverUrl: server.url,
+      jwksUrl: issuer.jwksUrl,
+      jwtIssuer: issuer.issuer,
+      jwtAudience: issuer.audience,
+      driver: { type: "memory" },
+      initial: { backendSecret: server.backendSecret },
+    });
+    // Each user is a request scope verified from its own bearer JWT, carrying
+    // the claims the policies compare.
     const connect = async (subject: string, claims: Record<string, unknown>) => {
-      const session = await createJazzSession({
-        appId,
-        app,
-        permissions,
-        serverUrl: server.url,
-        driver: { type: "memory" },
-      });
-      sessions.push(session);
-      await session.loginOrRegisterJWT(issuer.jwtForUser(subject, claims));
-      const client = session.getSnapshot().client!;
-      const user = client.db.insert(app.users, { accountId: client.session!.user!.account });
+      const backend = owner.getSnapshot().client!;
+      const token = await issuer.jwtForUser(subject, claims);
+      const db = await backend.forRequest(
+        { headers: { authorization: `Bearer ${token}` } },
+        { account: "login-or-register" },
+      );
+      // Learn the user's account from a row it wrote.
+      const probe = db.insert(app.topics, { title: `${subject}'s first topic` });
+      expect(await outcome(probe)).toBe("accepted");
+      const { $createdBy } = (await backend.db.one(
+        app.topics.select("$createdBy").where({ id: probe.value.id }),
+      ))!;
+      const user = db.insert(app.users, { accountId: $createdBy.account });
       expect(await outcome(user)).toBe("accepted");
-      return { db: client.db, userId: user.value.id };
+      return { db, userId: user.value.id };
     };
     try {
       await deploy({
@@ -103,9 +117,7 @@ describe("deployed permissions with claims in referenced read policies", () => {
       // The denial must not break the session's later writes.
       expect(await outcome(editor.db.insert(app.topics, { title: "later" }))).toBe("accepted");
     } finally {
-      for (const session of [...sessions].reverse()) {
-        await session.close();
-      }
+      await owner.close();
       await server.stop();
       await issuer.stop();
     }

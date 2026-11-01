@@ -46,18 +46,29 @@ export async function requestAccountRegistry(
  * the app's cookies: the backend's `authenticate` decides, and the answer
  * carries the account, identity and claims but no credential.
  */
+/**
+ * Sign in through the app's backend (`createJazz`). With `link`, a local-first
+ * guest's token: the backend links that guest to the user it names.
+ */
 export async function requestBackendSignIn(
   registry: string,
   fetcher: typeof fetch = fetchFor(registry),
+  options: { link?: string } = {},
 ): Promise<unknown> {
   return withAuthRequestDeadline(async (signal) => {
-    const response = await fetcher(`${registry}/backend-sign-in`, {
-      signal,
-      method: "POST",
-      credentials: "same-origin",
-      redirect: "error",
-      headers: { "Content-Type": "application/json" },
-    });
+    const response = await fetcher(
+      `${registry}/${options.link ? "backend-link" : "backend-sign-in"}`,
+      {
+        signal,
+        method: "POST",
+        credentials: "same-origin",
+        redirect: "error",
+        headers: {
+          "Content-Type": "application/json",
+          ...(options.link ? { Authorization: `Bearer ${options.link}` } : {}),
+        },
+      },
+    );
     if (!response.ok) {
       const code = await response.text();
       throw new AccountAuthError(

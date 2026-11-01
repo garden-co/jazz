@@ -135,7 +135,7 @@ describe("React Native account preparation", () => {
     expect(manager.getLoggedIn()).toBe(account);
   });
 
-  it("neither retains an external assignment nor revalidates it in place", async () => {
+  it("does not retain an external assignment", async () => {
     const identity = { issuer: "https://issuer.example", subject: "alice" };
     const account = "00000000-0000-4000-8000-00000000000a";
     vi.stubGlobal(
@@ -155,13 +155,12 @@ describe("React Native account preparation", () => {
       store: accountStore,
     };
     const manager = await createAccountManager(config);
-    expect(manager.revalidatesInPlace).toBe(false);
     const exp = Math.floor(Date.now() / 1000) + 3600;
     await manager.loginJWT(
       `e30.${btoa(JSON.stringify({ iss: identity.issuer, sub: identity.subject, exp }))}.sig`,
     );
     await vi.waitFor(async () => expect(await accountStore.read()).not.toBeNull());
-    expect(JSON.parse((await accountStore.read())!).assignment).toBeNull();
+    expect(JSON.parse((await accountStore.read())!).assignment).toBeUndefined();
     expect((await createAccountManager(config)).getLoggedIn()).toBeUndefined();
   });
 });
