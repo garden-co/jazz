@@ -32,7 +32,12 @@ import type { WasmSchema } from "../drivers/types.js";
 import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
 import type { JazzSession } from "../session/state.js";
-import { backendDbForSession, createJazzSession, type JazzClient } from "./create-jazz-session.js";
+import {
+  backendDbAttributedTo,
+  backendDbForSession,
+  createJazzSession,
+  type JazzClient,
+} from "./create-jazz-session.js";
 import type { BackendSchemaInput } from "./create-jazz-context.js";
 
 /** Where the core keeps its data. */
@@ -142,6 +147,12 @@ export interface Jazz {
    * the user's data with the backend's own `db`.
    */
   accountFor(request: Request): Promise<string | null>;
+  /**
+   * The backend's own database (backend permissions), with every write
+   * stamped as the request's signed-in user: for server actions that do what
+   * the user may not do directly, on their behalf.
+   */
+  withAttribution(request: Request): Promise<Db>;
   /**
    * Make `to` another identity of the account `from` already uses: after
    * this, `authenticate` returning `to` opens that same account and its data.
@@ -924,6 +935,11 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       const user = await authenticate(request);
       if (!user) throw new Error("forRequest: the request has no signed-in user");
       return backendDbForSession(backend, await sessionFor(user));
+    },
+    async withAttribution(request) {
+      const user = await authenticate(request);
+      if (!user) throw new Error("withAttribution: the request has no signed-in user");
+      return backendDbAttributedTo(backend, await sessionFor(user));
     },
     async accountFor(request) {
       const user = await authenticate(request);

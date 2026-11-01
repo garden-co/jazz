@@ -344,16 +344,18 @@ export async function createJazzSession(
         },
         getSubscriptionStore(client),
       );
-      sessionScopes.set(backendClient, (session) => {
+      sessionScopes.set(backendClient, (session, attribution) => {
         assertActive();
-        return context.forSession(session);
+        return attribution
+          ? context.withAttributionForSession(session)
+          : context.forSession(session);
       });
       return backendClient;
     },
   });
 }
 
-const sessionScopes = new WeakMap<object, (session: Session) => Db>();
+const sessionScopes = new WeakMap<object, (session: Session, attribution: boolean) => Db>();
 
 /**
  * A `Db` acting as `session`, on a backend client: for an embedder that has
@@ -362,5 +364,15 @@ const sessionScopes = new WeakMap<object, (session: Session) => Db>();
 export function backendDbForSession(client: JazzClient, session: Session): Db {
   const scope = sessionScopes.get(client);
   if (!scope) throw new Error("Session scopes require a backend account");
-  return scope(session);
+  return scope(session, false);
+}
+
+/**
+ * A `Db` with backend authority whose writes are stamped as `session`'s user,
+ * on a backend client (createJazz). Not part of the public API.
+ */
+export function backendDbAttributedTo(client: JazzClient, session: Session): Db {
+  const scope = sessionScopes.get(client);
+  if (!scope) throw new Error("Session scopes require a backend account");
+  return scope(session, true);
 }

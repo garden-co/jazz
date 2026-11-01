@@ -179,6 +179,17 @@ describe("createJazz", () => {
       jazz.accountFor(new Request("http://app/x", { headers: { "x-test-user": "alice" } })),
     ).resolves.toBe(alice.session!.user!.account);
     await expect(jazz.accountFor(new Request("http://app/x"))).resolves.toBeNull();
+    // Server actions: backend authority, writes stamped as the request's user.
+    const onBehalf = await jazz.withAttribution(
+      new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
+    );
+    const stamped = await onBehalf
+      .insert(app.todos, { title: "on alice's behalf", owner: randomUUID() })
+      .wait({ tier: "global" });
+    const [withProvenance] = await jazz.db.all(
+      app.todos.where({ id: stamped.id }).select("title", "$createdBy"),
+    );
+    expect(withProvenance?.$createdBy).toMatchObject({ account: alice.session!.user!.account });
     // The user synced over a socket, not the stream fallback.
     expect(requestPaths.some((path) => path.includes("/stream"))).toBe(false);
   }, 60_000);
