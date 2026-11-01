@@ -39,6 +39,7 @@
   },
   "scripts": {
     "build": "rm -rf dist && tsc",
+    "prepare": "tsc",
     "check": "tsc --noEmit",
     "test": "vitest run"
   },
