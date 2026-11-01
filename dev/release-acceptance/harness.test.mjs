@@ -18,7 +18,6 @@ import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 const here = fileURLToPath(new URL(".", import.meta.url));
 const sha = "a".repeat(40),
-  other = "b".repeat(40),
   version = "2.0.0-alpha.56";
 const hash = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
 function workspace(t) {
@@ -182,69 +181,6 @@ for (const signal of ["SIGINT", "SIGTERM"])
       assert(!live(parent), "CLI survived runner interruption");
     },
   );
-function scaffoldFixture(t, { badInput = false, badDependency = false, longLived = false } = {}) {
-  const root = workspace(t),
-    bin = join(root, "bin"),
-    pidFile = join(root, "pid.json");
-  mkdirSync(bin);
-  const dependency = `https://pkg.pr.new/garden-co/jazz/jazz-tools@${badDependency ? `${other}#${sha}` : sha}`;
-  const program = longLived
-    ? `const child=require('node:child_process').spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{stdio:'ignore'});require('node:fs').writeFileSync(${JSON.stringify(pidFile)},JSON.stringify({parent:process.pid,descendant:child.pid}));process.on('SIGTERM',()=>{});setInterval(()=>{},1000);`
-    : `const fs=require('node:fs'),p=require('node:path');fs.mkdirSync(p.join(process.cwd(),'fixture'));fs.writeFileSync(p.join(process.cwd(),'fixture/package.json'),JSON.stringify({dependencies:{'jazz-tools':${JSON.stringify(dependency)}}}));`;
-  writeFileSync(join(bin, "npm"), `#!${process.execPath}\n${program}`);
-  chmodSync(join(bin, "npm"), 0o700);
-  const config = join(root, "config.json");
-  writeFileSync(
-    config,
-    JSON.stringify({
-      phase: "final-preview",
-      sourceSha: sha,
-      packageVersion: version,
-      parent: join(root, "parent"),
-      name: "fixture",
-      createJazzSpec: `https://pkg.pr.new/garden-co/jazz/create-jazz@${badInput ? `${other}#${sha}` : sha}`,
-    }),
-  );
-  return { config, pidFile, env: { PATH: `${bin}:${process.env.PATH}` } };
-}
-for (const bad of ["badInput", "badDependency"])
-  test(
-    `scaffold rejects SHA-fragment spoof in ${bad}`,
-    { skip: process.platform === "win32", timeout: 10000 },
-    async (t) => {
-      const f = scaffoldFixture(t, { [bad]: true }),
-        r = await run(t, "scaffold.mjs", f.config, f.env).exit;
-      assert.equal(r.code, 1);
-      assert.match(r.stderr, /exact candidate locator|exact preview pin/);
-      assert(!r.stdout.includes('"status":"PASS"'));
-    },
-  );
-for (const signal of ["SIGINT", "SIGTERM"])
-  test(
-    `scaffold ${signal} cleans npm and its descendant`,
-    { skip: process.platform === "win32", timeout: 10000 },
-    async (t) => {
-      const f = scaffoldFixture(t, { longLived: true }),
-        r = run(t, "scaffold.mjs", f.config, f.env),
-        pids = await ready(f.pidFile, r.child);
-      r.child.kill(signal);
-      const result = await r.exit;
-      assert.equal(result.code, signal === "SIGINT" ? 130 : 143);
-      assert(!live(pids.parent), "npm survived");
-      assert(!live(pids.descendant), "npm descendant survived");
-    },
-  );
-test(
-  "scaffold accepts the exact candidate dependency locator",
-  { skip: process.platform === "win32", timeout: 10000 },
-  async (t) => {
-    const f = scaffoldFixture(t),
-      r = await run(t, "scaffold.mjs", f.config, f.env).exit;
-    assert.equal(r.code, 0, r.stderr);
-    assert(r.stdout.includes('"status":"PASS"'));
-  },
-);
-
 test(
   "final runner rejects absent API artifact evidence before starting CLI",
   { skip: process.platform !== "linux", timeout: 10000 },

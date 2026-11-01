@@ -15,9 +15,6 @@ name: Nightly tests
 #   This is its only CI home since the realistic benchmark workflow was
 #   retired on 2026-10-15.
 #
-# Starters E2E is not part of the nightly: it runs only on release PRs
-# (see starters-e2e.yml).
-#
 # A scheduled failure opens (or reopens) one issue per job.
 
 on:

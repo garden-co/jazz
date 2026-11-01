@@ -102,11 +102,10 @@ preparing changesets and let versioning record consumed entries.
 The release workflow dispatches
 [Release preview (alpha)](.github/workflows/preview-jazz-tools-alpha-release.yml)
 on the generated release branch. Before merging the release PR, verify its
-versions and release notes, and require a successful preview on that exact head,
-the separate [Starters E2E](.github/workflows/starters-e2e.yml) matrix, and the
-required correctness and React Native device-acceptance receipts. The preview
+versions and release notes, and require a successful preview on that exact head
+and the required correctness and React Native device-acceptance receipts. The preview
 builds and verifies packed native/React Native artifacts and their consumers.
-If a preview or starter run is missing, dispatch its workflow on
+If a preview run is missing, dispatch its workflow on
 `changeset-release/main`.
 
 Merging the versioned release PR triggers the
