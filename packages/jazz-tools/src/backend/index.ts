@@ -30,6 +30,7 @@ export {
 export {
   createJazz,
   memory,
+  remote,
   sqlite,
   type CreateJazzOptions,
   type Jazz,

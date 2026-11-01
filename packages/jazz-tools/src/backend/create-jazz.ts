@@ -1,16 +1,8 @@
-import {
-  createPrivateKey,
-  createPublicKey,
-  generateKeyPairSync,
-  randomBytes,
-  randomUUID,
-} from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomBytes, randomUUID } from "node:crypto";
+import { mkdir } from "node:fs/promises";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
-import { join } from "node:path";
 import type { Duplex } from "node:stream";
-import { SignJWT } from "jose";
-import { JazzCore, type JazzCoreSocket, type JazzCoreSocketEvent } from "jazz-napi";
+import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
 import { registerInProcessTransport } from "../runtime/in-process-transport.js";
 import { accountAppId } from "../accounts/local-first.js";
 import type {
@@ -36,15 +28,22 @@ import { deployArtifacts } from "../dev/catalogue.js";
 import { fetchMigrationGraph } from "../dev/migration-graph.js";
 import type { PublishedTableLens } from "../dev/catalogue-api.js";
 import type { WasmSchema } from "../drivers/types.js";
+import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
 import type { JazzSession } from "../session/state.js";
-import { createJazzSession, type JazzClient } from "./create-jazz-session.js";
+import { backendDbForSession, createJazzSession, type JazzClient } from "./create-jazz-session.js";
 import type { BackendSchemaInput } from "./create-jazz-context.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
   | { readonly kind: "sqlite"; readonly path: string }
-  | { readonly kind: "memory" };
+  | { readonly kind: "memory" }
+  | {
+      readonly kind: "remote";
+      readonly url: string;
+      readonly adminSecret: string;
+      readonly backendSecret: string;
+    };
 
 /** A SQLite core in this process, kept in the directory `path`. */
 export function sqlite(options: { path: string }): JazzStore {
@@ -54,6 +53,25 @@ export function sqlite(options: { path: string }): JazzStore {
 /** An in-memory core in this process: for tests and throwaway previews. */
 export function memory(): JazzStore {
   return { kind: "memory" };
+}
+
+/**
+ * A core running elsewhere (Jazz Cloud, or a sync server you run), reached
+ * from this backend with the app's secrets. Browsers still talk only to your
+ * backend: it decides who each user is, and the core trusts it to say so.
+ * The secrets never leave your server.
+ */
+export function remote(options: {
+  url: string;
+  adminSecret: string;
+  backendSecret: string;
+}): JazzStore {
+  return {
+    kind: "remote",
+    url: options.url.replace(/\/+$/, ""),
+    adminSecret: options.adminSecret,
+    backendSecret: options.backendSecret,
+  };
 }
 
 /** Who the request's user is, as the app's own auth decides. */
@@ -72,12 +90,15 @@ export interface CreateJazzOptions {
   /**
    * Decide who sent `request`, with your app's own session (a cookie, a
    * header). Return null for a signed-out request. Jazz calls it when a
-   * browser asks for its sync credential and in `forRequest`.
+   * browser signs in or opens a sync session, and in `forRequest`.
    */
   authenticate?: (request: Request) => JazzUser | null | Promise<JazzUser | null>;
   /** The path Jazz is mounted under. Defaults to `/jazz`. */
   basePath?: string;
-  /** How long a browser's sync credential lasts. Defaults to one hour. */
+  /**
+   * How long a browser's sync session lasts before `authenticate` is asked
+   * again (the client reconnects on its own). Defaults to one hour.
+   */
   sessionTtlSeconds?: number;
 }
 
@@ -128,39 +149,39 @@ export interface Jazz {
 
 const DEFAULT_BASE_PATH = "/jazz";
 // Routes a browser may reach. Everything else (admin, backend admission,
-// shutdown) stays inside this process.
+// shutdown) stays behind this backend.
 const PUBLIC_APP_ROUTES = /^\/apps\/[^/]+\/(accounts\/[a-z/-]+|ws|schemas|schema\/[^/]+)$/;
 const STRIPPED_HEADERS = ["x-jazz-backend-secret", "x-jazz-admin-secret", "x-jazz-session"];
+// What a browser's request to a public route carries on to a remote core:
+// never its cookies or its app session.
+const REMOTE_FORWARDED_HEADERS = ["accept", "content-type", "if-none-match"];
 const MAX_STREAM_MESSAGE_BYTES = 2 * 1024 * 1024;
 
-interface SigningKey {
-  privateKey: ReturnType<typeof createPrivateKey>;
-  publicKeyPem: string;
+interface CoreReply {
+  status: number;
+  headers: string[][];
+  body: Uint8Array;
 }
 
-async function loadSigningKey(store: JazzStore): Promise<SigningKey> {
-  const fromPem = (pem: string): SigningKey => {
-    const privateKey = createPrivateKey(pem);
-    return {
-      privateKey,
-      publicKeyPem: createPublicKey(privateKey).export({ type: "spki", format: "pem" }).toString(),
-    };
-  };
-  const generate = () =>
-    generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-  if (store.kind === "memory") return fromPem(generate());
-  await mkdir(store.path, { recursive: true });
-  const file = join(store.path, "auth-key.pem");
-  try {
-    return fromPem(await readFile(file, "utf8"));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  const pem = generate();
-  await writeFile(file, pem, { mode: 0o600, flag: "wx" }).catch(async (error) => {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-  });
-  return fromPem(await readFile(file, "utf8"));
+/** One sync session on the core. */
+interface CoreSocket {
+  /** False once the session ended. */
+  send(data: Uint8Array): boolean;
+  close(): void;
+}
+
+/** The core this backend fronts: in this process, or reached over the network. */
+interface Core {
+  /** Where this process's own clients reach it. */
+  readonly serverUrl: string;
+  readonly adminSecret: string;
+  readonly backendSecret: string;
+  handle(method: string, path: string, headers: string[][], body: Uint8Array): Promise<CoreReply>;
+  openSocket(
+    headers: string[][],
+    onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
+  ): CoreSocket;
+  close(): Promise<void>;
 }
 
 function headerPairs(headers: Headers): string[][] {
@@ -203,7 +224,7 @@ function inProcessWebSocket(core: JazzCore): WebSocketConstructor {
     binaryType: "arraybuffer" | "blob" = "arraybuffer";
     readyState = 0;
     private readonly listeners = new Map<string, Array<(event?: any) => void>>();
-    private session: JazzCoreSocket | undefined;
+    private session: ReturnType<JazzCore["openSocket"]> | undefined;
 
     constructor(_url: string) {
       queueMicrotask(() => {
@@ -294,100 +315,227 @@ async function applyBundle(
   });
 }
 
+async function openInProcessCore(
+  appId: string,
+  store: Extract<JazzStore, { kind: "sqlite" | "memory" }>,
+): Promise<Core> {
+  const backendSecret = randomBytes(32).toString("base64url");
+  const adminSecret = randomBytes(32).toString("base64url");
+  if (store.kind === "sqlite") await mkdir(store.path, { recursive: true });
+  const core = await JazzCore.open({
+    appId,
+    backendSecret,
+    adminSecret,
+    ...(store.kind === "sqlite" ? { dataDir: store.path } : { inMemory: true }),
+  });
+  const handle = async (method: string, path: string, headers: string[][], body: Uint8Array) =>
+    core.handle(method, path, headers, Buffer.from(body));
+  const serverUrl = `http://jazz-${randomUUID()}.invalid`;
+  const unregister = registerInProcessTransport(serverUrl, {
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      return coreResponse(
+        await handle(
+          request.method,
+          url.pathname + url.search,
+          [...request.headers].map(([name, value]) => [name, value]),
+          new Uint8Array(await request.arrayBuffer()),
+        ),
+      );
+    },
+    WebSocket: inProcessWebSocket(core),
+  });
+  return {
+    serverUrl,
+    adminSecret,
+    backendSecret,
+    handle,
+    openSocket: (headers, onEvent) => core.openSocket(headers, onEvent),
+    async close() {
+      unregister();
+      await core.close();
+    },
+  };
+}
+
+function openRemoteCore(appId: string, store: Extract<JazzStore, { kind: "remote" }>): Core {
+  const socketUrl = `${store.url.replace(/^http/, "ws")}/apps/${encodeURIComponent(appId)}/ws`;
+  const NativeWebSocket = globalThis.WebSocket;
+  if (!NativeWebSocket) throw new Error("remote() needs a global WebSocket (Node 22 or newer)");
+  return {
+    serverUrl: store.url,
+    adminSecret: store.adminSecret,
+    backendSecret: store.backendSecret,
+    async handle(method, path, headers, body) {
+      const response = await fetch(`${store.url}${path}`, {
+        method,
+        headers: headers.map(([name, value]) => [name!, value!] as [string, string]),
+        ...(method === "GET" || method === "HEAD" ? {} : { body: body as BodyInit }),
+      });
+      const replyHeaders: string[][] = [];
+      response.headers.forEach((value, name) => {
+        // fetch already decoded the body.
+        if (name !== "content-encoding" && name !== "content-length") {
+          replyHeaders.push([name, value]);
+        }
+      });
+      return {
+        status: response.status,
+        headers: replyHeaders,
+        body: new Uint8Array(await response.arrayBuffer()),
+      };
+    },
+    openSocket(_headers, onEvent) {
+      const ws = new NativeWebSocket(socketUrl);
+      ws.binaryType = "arraybuffer";
+      const queued: Uint8Array[] = [];
+      let ended = false;
+      ws.addEventListener("open", () => {
+        for (const data of queued.splice(0)) ws.send(data as Uint8Array<ArrayBuffer>);
+      });
+      ws.addEventListener("message", (event) => {
+        const data =
+          typeof event.data === "string"
+            ? new TextEncoder().encode(event.data)
+            : new Uint8Array(event.data as ArrayBuffer);
+        onEvent(null, { kind: "message", data });
+      });
+      ws.addEventListener("close", (event) => {
+        if (ended) return;
+        ended = true;
+        onEvent(null, { kind: "close", code: event.code, reason: event.reason });
+      });
+      return {
+        send(data) {
+          if (ended) return false;
+          if (ws.readyState === 1) ws.send(data as Uint8Array<ArrayBuffer>);
+          else queued.push(data);
+          return true;
+        },
+        close() {
+          ended = true;
+          ws.close();
+        },
+      };
+    },
+    async close() {},
+  };
+}
+
 /**
- * Run Jazz inside your backend. The core opens in this process, applies the
- * schema, migrations and permissions your code declares, and serves sync on
- * your own origin under `basePath`. There is no separate Jazz server to run
- * and no deploy step: a rollback of your backend rolls Jazz back with it.
+ * Run Jazz inside your backend. It applies the schema, migrations and
+ * permissions your code declares to its core (in this process, or a remote
+ * one), and serves sync on your own origin under `basePath`. There is no
+ * separate deploy step: a rollback of your backend rolls Jazz back with it.
  */
 export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   const basePath = (options.basePath ?? DEFAULT_BASE_PATH).replace(/\/+$/, "");
   const issuer = `jazz:app:${options.appId}`;
-  const audience = `jazz:${options.appId}`;
-  const backendSecret = randomBytes(32).toString("base64url");
-  const adminSecret = randomBytes(32).toString("base64url");
-  const key = await loadSigningKey(options.store);
-  const core = await JazzCore.open({
-    appId: options.appId,
-    backendSecret,
-    adminSecret,
-    ...(options.store.kind === "sqlite" ? { dataDir: options.store.path } : { inMemory: true }),
-    jwtPublicKey: key.publicKeyPem,
-    jwtIssuer: issuer,
-    jwtAudience: audience,
-  });
-
-  const fetchCore: typeof fetch = async (input, init) => {
-    const request = new Request(input, init);
-    const url = new URL(request.url);
-    const body = new Uint8Array(await request.arrayBuffer());
-    const response = await core.handle(
-      request.method,
-      url.pathname + url.search,
-      [...request.headers].map(([name, value]) => [name, value]),
-      Buffer.from(body),
-    );
-    return coreResponse(response);
-  };
-  const origin = `http://jazz-${randomUUID()}.invalid`;
-  const unregister = registerInProcessTransport(origin, {
-    fetch: fetchCore,
-    WebSocket: inProcessWebSocket(core),
-  });
+  const store = options.store;
+  const core =
+    store.kind === "remote"
+      ? openRemoteCore(options.appId, store)
+      : await openInProcessCore(options.appId, store);
 
   let session: JazzSession<JazzClient>;
   try {
-    await applyBundle(origin, { ...options, adminSecret });
+    await applyBundle(core.serverUrl, { ...options, adminSecret: core.adminSecret });
     session = await createJazzSession({
       appId: options.appId,
       app: options.app,
       permissions: options.permissions,
-      serverUrl: origin,
+      serverUrl: core.serverUrl,
       driver: { type: "memory" },
-      jwtPublicKey: key.publicKeyPem,
-      jwtIssuer: issuer,
-      jwtAudience: audience,
-      initial: { backendSecret },
+      initial: { backendSecret: core.backendSecret },
     });
   } catch (error) {
-    unregister();
     await core.close();
     throw error;
   }
   const opened = session.getSnapshot();
   if (opened.status !== "ready" || !opened.client) {
     await session.close();
-    unregister();
     await core.close();
     throw opened.error ?? new Error(`Jazz backend session did not open (${opened.status})`);
   }
   const backend = opened.client;
-
-  async function mintToken(user: JazzUser): Promise<{ token: string; expiresAt: number }> {
-    const ttl = options.sessionTtlSeconds ?? 3600;
-    const expiresAt = Math.floor(Date.now() / 1000) + ttl;
-    const token = await new SignJWT({ ...user.claims })
-      .setProtectedHeader({ alg: "EdDSA" })
-      .setIssuer(issuer)
-      .setAudience(audience)
-      .setSubject(user.userId)
-      .setIssuedAt()
-      .setExpirationTime(expiresAt)
-      .sign(key.privateKey);
-    return { token, expiresAt };
-  }
 
   async function authenticate(request: Request): Promise<JazzUser | null> {
     if (!options.authenticate) return null;
     return (await options.authenticate(request)) ?? null;
   }
 
+  /** One admin account request to the core: this backend vouches for the identities. */
+  async function adminAccounts(operation: string, body: unknown): Promise<{ account: string }> {
+    const response = await core.handle(
+      "POST",
+      `/apps/${encodeURIComponent(accountAppId(options.appId))}/admin/accounts/${operation}`,
+      [
+        ["x-jazz-admin-secret", core.adminSecret],
+        ["content-type", "application/json"],
+      ],
+      new TextEncoder().encode(JSON.stringify(body)),
+    );
+    const text = new TextDecoder().decode(response.body);
+    if (response.status !== 200) {
+      throw new Error(`Jazz account ${operation} failed (${response.status}): ${text}`);
+    }
+    const parsed = JSON.parse(text) as { account: unknown };
+    return { ...parsed, account: String(parsed.account) };
+  }
+
+  const identity = (userId: string) => ({ issuer, subject: userId });
+
+  /** The user's session: their account, created on first sign-in. */
+  async function sessionFor(user: JazzUser): Promise<Session> {
+    const { account } = await adminAccounts("login-or-register", {
+      identity: identity(user.userId),
+    });
+    return {
+      account_id: account,
+      issuer,
+      user_id: user.userId,
+      claims: user.claims ?? {},
+      authMode: "external",
+    };
+  }
+
+  async function linkIdentity(link: { from: string; to: string }): Promise<{ account: string }> {
+    if (link.from === link.to) throw new Error("linkIdentity: from and to are the same identity");
+    const { account } = await adminAccounts("link", {
+      from: identity(link.from),
+      to: identity(link.to),
+    });
+    return { account };
+  }
+
+  /**
+   * The account sign-in a browser makes with only the app's own session: the
+   * backend's `authenticate` names the user, and the core resolves (or
+   * creates) their account.
+   */
+  async function backendSignIn(request: Request): Promise<Response> {
+    if (request.method !== "POST") return new Response(null, { status: 405 });
+    const user = await authenticate(request);
+    if (!user) return new Response("signed_out", { status: 401 });
+    const { account } = await adminAccounts("login-or-register", {
+      identity: identity(user.userId),
+    });
+    const expiresAt = Math.floor(Date.now() / 1000) + (options.sessionTtlSeconds ?? 3600);
+    return Response.json(
+      { account, identity: identity(user.userId), claims: user.claims ?? {}, expiresAt },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
   /**
    * A browser's sync session. The browser presents no credential: its first
-   * message (the auth prelude) names the account it means to act as, and the
+   * message (the auth prelude) names the user it means to act as, and the
    * backend's own `authenticate` decides whether this request is that user.
-   * The core then admits it as for any provider credential. The session ends
-   * when that admission expires, and the client reconnects and is asked again.
+   * The core then admits the session on the backend's word, with the user's
+   * permissions. It ends after `sessionTtlSeconds`, and the client
+   * reconnects and is asked again.
    */
   interface ClientSession {
     send(data: Uint8Array): boolean;
@@ -414,11 +562,10 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         end();
         return false;
       }
-      if (rewritten.expiresAt) {
-        expiry = setTimeout(end, Math.max(1000, rewritten.expiresAt * 1000 - Date.now()));
-        (expiry as unknown as { unref?: () => void }).unref?.();
-      }
-      return socket.send(rewritten.bytes);
+      const ttl = (options.sessionTtlSeconds ?? 3600) * 1000;
+      expiry = setTimeout(end, ttl);
+      (expiry as unknown as { unref?: () => void }).unref?.();
+      return socket.send(rewritten);
     };
     // Messages after the prelude wait for its admission, in order.
     let chain: Promise<boolean> | undefined;
@@ -428,6 +575,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         chain = chain
           ? chain.then((ok) => ok && !ended && socket.send(data))
           : admit(data).catch(() => {
+              onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
               end();
               return false;
             });
@@ -438,101 +586,32 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
 
   /**
-   * Replace a browser prelude's stated session with a credential the core
-   * verifies, minted for the user `authenticate` finds on this request.
-   * Preludes carrying their own credential pass through untouched.
+   * Turn a browser prelude into one the core admits on this backend's word:
+   * the user `authenticate` finds on this request, with their account and
+   * claims, vouched for with the backend secret. A prelude that brings any
+   * credential of its own, or names another user, is refused.
    */
-  async function admitPrelude(
-    request: Request,
-    prelude: Uint8Array,
-  ): Promise<{ bytes: Uint8Array; expiresAt?: number } | null> {
+  async function admitPrelude(request: Request, prelude: Uint8Array): Promise<Uint8Array | null> {
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(new TextDecoder().decode(prelude)) as Record<string, unknown>;
     } catch {
-      return { bytes: prelude };
+      return null;
     }
-    const stated = parsed.backend_session as { user_id?: unknown } | undefined;
-    if (!stated || typeof stated !== "object" || parsed.backend_secret || parsed.jwt_token) {
-      return { bytes: prelude };
-    }
-    const user = await authenticate(request);
-    if (!user || user.userId !== stated.user_id) return null;
-    const { token, expiresAt } = await mintToken(user);
-    const strip = (auth: Record<string, unknown>) => {
-      const { backend_session: _stated, ...rest } = auth;
-      return { ...rest, jwt_token: token };
-    };
-    const inner =
-      parsed.auth && typeof parsed.auth === "object"
-        ? strip(parsed.auth as Record<string, unknown>)
-        : undefined;
-    const rewritten = { ...strip(parsed), ...(inner ? { auth: inner } : {}) };
-    return { bytes: new TextEncoder().encode(JSON.stringify(rewritten)), expiresAt };
-  }
-
-  /** One account request to the core, made as `userId`. */
-  async function accountRequest(
-    userId: string,
-    operation: string,
-    body?: unknown,
-  ): Promise<Record<string, unknown>> {
-    const { token } = await mintToken({ userId });
-    const response = await core.handle(
-      "POST",
-      `/apps/${encodeURIComponent(accountAppId(options.appId))}/accounts/${operation}`,
-      [
-        ["authorization", `Bearer ${token}`],
-        ["content-type", "application/json"],
-      ],
-      Buffer.from(body === undefined ? "" : JSON.stringify(body)),
-    );
-    const text = Buffer.from(response.body).toString("utf8");
-    if (response.status !== 200) {
-      throw new Error(`Jazz account ${operation} failed (${response.status}): ${text}`);
-    }
-    return JSON.parse(text) as Record<string, unknown>;
-  }
-
-  async function linkIdentity(link: { from: string; to: string }): Promise<{ account: string }> {
-    if (link.from === link.to) throw new Error("linkIdentity: from and to are the same identity");
-    // `from` gets its account first if it never signed in.
-    await accountRequest(link.from, "login-or-register");
-    const intent = await accountRequest(link.from, "links/request", {
-      identity: { issuer, subject: link.to },
-    });
-    const linked = await accountRequest(link.to, "links/accept", { nonce: intent.nonce });
-    return { account: String(linked.account) };
-  }
-
-  /**
-   * The account sign-in a browser makes with only the app's cookie: the
-   * backend's `authenticate` names the user, and the core resolves (or
-   * creates) their account as it would for that user's own credential.
-   */
-  async function backendSignIn(request: Request, path: string): Promise<Response> {
-    if (request.method !== "POST") return new Response(null, { status: 405 });
-    const user = await authenticate(request);
-    if (!user) return new Response("signed_out", { status: 401 });
-    const { token, expiresAt } = await mintToken(user);
-    const response = await core.handle(
-      "POST",
-      path.replace(/\/backend-sign-in$/, "/login-or-register"),
-      [
-        ["authorization", `Bearer ${token}`],
-        ["content-type", "application/json"],
-      ],
-      Buffer.alloc(0),
-    );
-    if (response.status !== 200) return coreResponse(response);
-    const assignment = JSON.parse(Buffer.from(response.body).toString("utf8")) as Record<
+    const auth = (parsed.auth && typeof parsed.auth === "object" ? parsed.auth : parsed) as Record<
       string,
       unknown
     >;
-    return Response.json(
-      { ...assignment, claims: user.claims ?? {}, expiresAt },
-      { headers: { "Cache-Control": "no-store" } },
-    );
+    const stated = auth.backend_session as { user_id?: unknown } | undefined;
+    if (!stated || typeof stated !== "object") return null;
+    for (const credential of ["backend_secret", "admin_secret", "jwt_token"]) {
+      if (parsed[credential] !== undefined || auth[credential] !== undefined) return null;
+    }
+    const user = await authenticate(request);
+    if (!user || user.userId !== stated.user_id) return null;
+    const vouched = { backend_secret: core.backendSecret, backend_session: await sessionFor(user) };
+    const rewritten = { ...parsed, ...vouched, auth: { ...auth, ...vouched } };
+    return new TextEncoder().encode(JSON.stringify(rewritten));
   }
 
   // HTTP stream sessions, by id.
@@ -636,7 +715,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     const path = innerPath(request);
     if (path === null) return new Response("Not found", { status: 404 });
     if (/^\/apps\/[^/]+\/accounts\/backend-sign-in$/.test(path)) {
-      return backendSignIn(request, path);
+      return backendSignIn(request);
     }
     const stream = /^\/apps\/[^/]+\/stream(?:\/([^/]+))?$/.exec(path);
     if (stream) {
@@ -662,8 +741,16 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       request.method === "GET" || request.method === "HEAD"
         ? Buffer.alloc(0)
         : Buffer.from(await request.arrayBuffer());
+    const headers = headerPairs(request.headers);
     return coreResponse(
-      await core.handle(request.method, path + url.search, headerPairs(request.headers), body),
+      await core.handle(
+        request.method,
+        path + url.search,
+        store.kind === "remote"
+          ? headers.filter(([name]) => REMOTE_FORWARDED_HEADERS.includes(name!.toLowerCase()))
+          : headers,
+        body,
+      ),
     );
   }
 
@@ -773,18 +860,13 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     async forRequest(request) {
       const user = await authenticate(request);
       if (!user) throw new Error("forRequest: the request has no signed-in user");
-      const { token } = await mintToken(user);
-      return backend.forRequest(
-        { headers: { authorization: `Bearer ${token}` } },
-        { account: "login-or-register" },
-      );
+      return backendDbForSession(backend, await sessionFor(user));
     },
     close() {
       closing ??= (async () => {
         for (const socket of streams.values()) socket.close();
         streams.clear();
         await session.close();
-        unregister();
         await core.close();
       })();
       return closing;

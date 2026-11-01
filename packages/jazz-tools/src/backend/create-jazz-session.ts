@@ -18,7 +18,7 @@ import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
 import { JazzClient as RuntimeClient, type RequestLike } from "../runtime/client.js";
 import { resolveClientInternalSessionSync } from "../runtime/client-session.js";
-import type { AppContext, PublicSession } from "../runtime/context.js";
+import type { AppContext, PublicSession, Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
 import {
   getTrustedReservedSession,
@@ -286,7 +286,7 @@ export async function createJazzSession(
         if (closed) throw new Error("Backend client is closed");
         getBackendAuth(account, registry);
       };
-      return attachSubscriptionStore(
+      const backendClient = attachSubscriptionStore(
         {
           db,
           flush() {
@@ -343,6 +343,23 @@ export async function createJazzSession(
         },
         getSubscriptionStore(client),
       );
+      sessionScopes.set(backendClient, (session) => {
+        assertActive();
+        return context.forSession(session);
+      });
+      return backendClient;
     },
   });
+}
+
+const sessionScopes = new WeakMap<object, (session: Session) => Db>();
+
+/**
+ * A `Db` acting as `session`, on a backend client: for an embedder that has
+ * already decided who the user is (createJazz). Not part of the public API.
+ */
+export function backendDbForSession(client: JazzClient, session: Session): Db {
+  const scope = sessionScopes.get(client);
+  if (!scope) throw new Error("Session scopes require a backend account");
+  return scope(session);
 }

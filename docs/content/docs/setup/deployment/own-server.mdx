@@ -25,8 +25,8 @@ That's the whole deployment:
 - **No deploy step.** On start, Jazz applies the schema, migrations and permissions your code
   declares. If they can't be applied (a schema with no migration path), the process refuses to start
   instead of serving with the wrong rules.
-- **No secrets to manage.** The key that signs browser credentials is created on first start and
-  kept in the data directory (`auth-key.pem`, readable only by its owner).
+- **No secrets to manage.** Browsers hold no Jazz credential: your `authenticate` function
+  decides who each request is (see [Your Backend Decides](/docs/setup/auth/backend)).
 
 Keep the data directory on a durable disk (a Docker volume, an attached block device), and run one
 process per directory.
@@ -41,10 +41,37 @@ VOLUME /data
 CMD ["node", "dist/server.js"]
 ```
 
+## Data on another machine
+
+When the data should live apart from your app servers (several app instances sharing one database,
+serverless functions, an existing Jazz Cloud app), run the core elsewhere and point `createJazz` at
+it with `remote()`:
+
+```ts title="jazz.server.ts"
+import { createJazz, remote } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+
+export const jazz = await createJazz({
+  appId: "my-app",
+  app,
+  permissions,
+  store: remote({
+    url: process.env.JAZZ_SYNC_URL!, // your sync server, or https://v2.sync.jazz.tools
+    adminSecret: process.env.JAZZ_ADMIN_SECRET!,
+    backendSecret: process.env.JAZZ_BACKEND_SECRET!,
+  }),
+  authenticate: async (request) => /* your session */ null,
+});
+```
+
+Everything else stays the same. Browsers still sync with your backend under `/jazz` and never see
+the core's address or secrets. Your backend applies its schema, migrations and permissions to the
+core on start, and tells the core who each user is; the core does no auth of its own and trusts
+only the holder of the secrets. Keep them server-side, like a database password.
+
 ## Standalone sync server
 
-For a Jazz server separate from your app (operations, or apps that predate `createJazz`), the CLI
-runs the same core on its own port:
+The CLI runs the same core on its own port, for `remote()` or for apps that predate `createJazz`:
 
 <include cwd lang="bash" meta='title="Terminal"'>
   ../examples/docs/todo-server-rs/docs/self-host-cli.sh#setup-self-host-cli

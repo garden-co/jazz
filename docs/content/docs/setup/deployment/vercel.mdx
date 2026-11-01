@@ -24,8 +24,8 @@ sockets, so the browser falls back to an HTTP stream on its own. Both work witho
 <Callout type="info">
   Coming next: the `vercelSandbox()` store. It keeps the database in a named Vercel Sandbox per
   project and environment, created and woken by your functions with their own OIDC token. Until it
-  lands, run Jazz on Vercel with `memory()` for previews only, or keep the data on [your own
-  server](/docs/setup/deployment/own-server).
+  lands, run Jazz on Vercel with `memory()` for previews only, or keep the data on a sync server you
+  run elsewhere with [`remote()`](/docs/setup/deployment/own-server#data-on-another-machine).
 </Callout>
 
 ```ts title="jazz.server.ts"

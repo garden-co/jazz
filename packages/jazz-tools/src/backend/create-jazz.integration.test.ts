@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
-import { createJazz, createJazzSession, memory, sqlite, type Jazz } from "./index.js";
+import { startLocalJazzServer } from "../dev/dev-server.js";
+import { createJazz, createJazzSession, memory, remote, sqlite, type Jazz } from "./index.js";
 
 const app = s.defineApp(
   {
@@ -204,7 +205,7 @@ describe("createJazz", () => {
     expect(requestPaths.some((path) => path.endsWith(`/apps/${appId}/stream`))).toBe(true);
   }, 60_000);
 
-  it("keeps data and its signing key in the sqlite directory across restarts", async () => {
+  it("keeps data in the sqlite directory across restarts", async () => {
     const appId = randomUUID();
     const dir = await mkdtemp(join(tmpdir(), "jazz-embedded-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
@@ -214,11 +215,46 @@ describe("createJazz", () => {
       .insert(app.todos, { title: "kept", owner: randomUUID() })
       .wait({ tier: "global" });
     await first.close();
-    expect((await stat(join(dir, "auth-key.pem"))).mode & 0o777).toBe(0o600);
 
     const second = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
     cleanups.push(() => second.close());
     const rows = await second.db.all(app.todos.where({ id: inserted.id }));
     expect(rows.map((todo) => todo.title)).toEqual(["kept"]);
+  }, 60_000);
+
+  it("fronts a remote core: browsers reach only the backend, the core trusts it", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const store = remote({
+      url: core.url,
+      adminSecret: core.adminSecret,
+      backendSecret: core.backendSecret,
+    });
+    const jazz = await createJazz({ appId, app, permissions, store, authenticate });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+
+    const alice = await userSession(appId, origin, "alice");
+    const row = await alice.db
+      .insert(app.todos, { title: "through the backend", owner: alice.session!.user!.account })
+      .wait({ tier: "global" });
+
+    // A second backend on the same core (another instance, after a restart)
+    // sees the same data and the same accounts.
+    const other = await createJazz({ appId, app, permissions, store, authenticate });
+    cleanups.push(() => other.close());
+    const seen = await other.db.all(app.todos.where({ id: row.id }));
+    expect(seen.map((todo) => todo.title)).toEqual(["through the backend"]);
+    const asAlice = await other.forRequest(
+      new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
+    );
+    expect((await asAlice.all(app.todos)).map((todo) => todo.title)).toEqual([
+      "through the backend",
+    ]);
+    const asBob = await other.forRequest(
+      new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
+    );
+    expect(await asBob.all(app.todos)).toEqual([]);
   }, 60_000);
 });
