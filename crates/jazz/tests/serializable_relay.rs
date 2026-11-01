@@ -21,9 +21,13 @@ use jazz::db::{
     block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::{Query, col, eq, lit};
+use jazz::query::{Query, RelationQuery, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
+use jazz::tools::public_schema::{
+    RelationColumnRef, RelationExpr, RelationProjectColumn, RelationProjectExpr, RelationRowIdRef,
+    RelationUnionArm,
+};
 use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
@@ -515,37 +519,39 @@ fn a_tabs_commit_over_its_own_unsettled_write_is_accepted() {
     assert_eq!(net.count(&invite_query("own")), 1);
 }
 
-/// A worker with no server is its tabs' last word: it validates their
-/// serializable commits itself, ordering them so its tabs converge, but
-/// none of them becomes `Global`, since there is no authority.
+/// A worker with no server numbers no accepted positions: it keeps its
+/// tabs' serializable commits pending (none becomes `Global`, there is no
+/// authority), and a server added later validates them.
 #[test]
-fn a_worker_without_a_server_validates_its_tabs_serializable_commits() {
-    let net = Net::with_worker_hint(2, RemoteLinkHint::NoServer);
+fn a_worker_without_a_server_keeps_its_tabs_serializable_commits_until_a_server_decides() {
+    let mut net = Net::with_worker_hint(2, RemoteLinkHint::NoServer);
     let write = block_on(
         net.tab(0)
             .insert("invites", code("abc"), Default::default()),
     )
     .unwrap();
     net.never_global(net.tab(0), write.mergeable_tx_id());
+    // The tab's snapshot holds its own pending invite.
     let joined = net
-        .stage_redeem(net.tab(1), "abc", || {})
+        .stage_redeem(net.tab(0), "abc", || {})
         .expect("an unchanged read holds");
-    net.never_global(net.tab(1), joined);
-    let invite = write.row_uuid();
-    let revoked = net.redeem(net.tab(1), "abc", || {
-        let write = block_on(net.tab(0).delete("invites", invite, Default::default())).unwrap();
-        net.never_global(net.tab(0), write.mergeable_tx_id());
-    });
-    // The one-shot snapshot read does not stream the revocation to the tab.
-    // Its worker detects the conflict when validating the uploaded commit.
-    common::assert_serialization_conflict(&revoked.expect_err("worker rejects stale read"));
-    let members = net.worker.prepare_query(&members_query("abc")).unwrap();
-    assert_eq!(
-        block_on(net.worker.all(&members, ReadOpts::default()))
+    net.never_global(net.tab(0), joined);
+    // The other tab's snapshot is the authority's: the invite, pending at
+    // the worker, is not in it.
+    let open = OpenTransactionId::new();
+    block_on(net.tab(1).begin_serializable(open)).unwrap();
+    let invite = net.tab(1).prepare_query(&invite_query("abc")).unwrap();
+    assert!(
+        net.drive(net.tab(1).tx_ref(open).all_prepared(&invite))
             .unwrap()
-            .len(),
-        1
+            .is_empty(),
+        "another tab's pending write is not in a snapshot"
     );
+    net.worker_online();
+    net.settle(net.tab(0), joined)
+        .expect("the first server accepts the join");
+    assert_eq!(net.count(&members_query("abc")), 1);
+    assert_eq!(net.count(&invite_query("abc")), 1);
 }
 
 #[test]
@@ -627,10 +633,10 @@ fn a_worker_without_a_server_keeps_a_tabs_blind_delete_of_a_row_from_before_its_
 
 /// A tab pins its snapshot while its worker has a server (at an authority
 /// seq). The authority then accepts a foreign update of a seat, which the
-/// worker syncs, and the worker's server is removed. The tab's snapshot
-/// counts the authority's positions, which the worker no longer serves: a
-/// blind delete of the seat it never saw updated is a serialization
-/// conflict, and the update stays.
+/// worker syncs, and the worker's server is removed. With no server the
+/// worker decides nothing: the tab's commit stays pending until a server
+/// is added, which finds its blind delete of the seat it never saw updated
+/// a serialization conflict, and the update stays.
 #[test]
 fn a_snapshot_pinned_before_the_workers_server_was_removed_misses_an_authority_update() {
     let mut net = Net::new(2);
@@ -661,7 +667,12 @@ fn a_snapshot_pinned_before_the_workers_server_was_removed_misses_an_authority_u
     let receipt = net
         .drive(tab.commit_serializable_handle(open))
         .expect("the tab holds no version of the seat: no local conflict");
-    common::assert_serialization_conflict(&net.settle(tab, receipt.0).unwrap_err());
+    assert!(
+        fate_within_turns(&net, tab, receipt.0).is_none(),
+        "no server decides it"
+    );
+    net.worker_online();
+    common::assert_serialization_conflict(&net.settle(net.tab(1), receipt.0).unwrap_err());
     let seats = net.worker.prepare_query(&Query::from("seats")).unwrap();
     let rows = block_on(net.worker.all(&seats, ReadOpts::default())).unwrap();
     assert_eq!(
@@ -672,7 +683,8 @@ fn a_snapshot_pinned_before_the_workers_server_was_removed_misses_an_authority_u
 }
 
 /// As above, but the write the tab never saw is the other tab's, which the
-/// worker accepted after its server was removed, at its own position.
+/// worker holds pending after its server was removed and uploads ahead of
+/// the tab's commit once a server is added.
 #[test]
 fn a_snapshot_pinned_before_the_workers_server_was_removed_misses_another_tabs_write() {
     let mut net = Net::new(2);
@@ -713,7 +725,12 @@ fn a_snapshot_pinned_before_the_workers_server_was_removed_misses_another_tabs_w
     let receipt = net
         .drive(tab.commit_serializable_handle(open))
         .expect("the tab holds no version of the seat: no local conflict");
-    common::assert_serialization_conflict(&net.settle(tab, receipt.0).unwrap_err());
+    assert!(
+        fate_within_turns(&net, tab, receipt.0).is_none(),
+        "no server decides it"
+    );
+    net.worker_online();
+    common::assert_serialization_conflict(&net.settle(net.tab(1), receipt.0).unwrap_err());
     let seats = net.worker.prepare_query(&Query::from("seats")).unwrap();
     let rows = block_on(net.worker.all(&seats, ReadOpts::default())).unwrap();
     assert_eq!(rows.len(), 1, "the worker kept the other tab's write");
@@ -860,16 +877,15 @@ fn a_tab_of_a_worker_whose_server_was_removed_updates_a_synced_row() {
     );
 }
 
-/// a tab's pinning read is answered
-/// by its Live worker at authority seq S, but the read future is polled
-/// only after the tab has processed a later message from the worker with
-/// `by = worker` (its server was removed meanwhile).
-/// The worker meanwhile synced an authority update of the seat at S+1,
-/// which the tab never saw. The snapshot is the position the answer
-/// counted, (authority, S), so the tab's blind delete is a serialization
-/// conflict and the update stays.
+/// A tab's pinning read is answered by its Live worker at authority seq
+/// S, but the read future is polled only after the tab has processed a
+/// later message from the worker (its server was removed meanwhile). The
+/// worker meanwhile synced an authority update of the seat at S+1, which
+/// the tab never saw. The snapshot stays at the authority's S, the worker
+/// decides nothing without a server, and once one is added the tab's
+/// blind delete is a serialization conflict and the update stays.
 #[test]
-fn a_snapshot_pins_at_the_sequencer_that_answered_its_read() {
+fn a_snapshot_stays_at_the_authority_position_after_the_workers_server_is_removed() {
     let core = open(0xc0, AuthorSubject::SYSTEM);
     let worker = open(WORKER, author(WORKER));
     worker.set_remote_link_hint(RemoteLinkHint::Live);
@@ -927,7 +943,7 @@ fn a_snapshot_pins_at_the_sequencer_that_answered_its_read() {
         // The worker's server is removed.
         assert!(worker.detach_connection(&worker_up));
         worker.set_remote_link_hint(RemoteLinkHint::NoServer);
-        // A fate from the worker after its switch (by = worker).
+        // A write of the tab's, which the worker now keeps pending.
         block_on(tab.insert("invites", code("x"), Default::default())).unwrap();
         pump(5);
         let mut done = None;
@@ -965,7 +981,19 @@ fn a_snapshot_pins_at_the_sequencer_that_answered_its_read() {
         }
         pump(1);
     }
-    common::assert_serialization_conflict(&fate.expect("the worker decides").unwrap_err());
+    assert!(fate.is_none(), "no server decides it");
+    let (c, s) = duplex();
+    let _worker_up = block_on(worker.connect_upstream(c));
+    core.accept_subscriber(s, author(WORKER)).unwrap();
+    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    for _ in 0..MAX_TURNS {
+        if let Poll::Ready(f) = wait.as_mut().poll(&mut context) {
+            fate = Some(f);
+            break;
+        }
+        pump(1);
+    }
+    common::assert_serialization_conflict(&fate.expect("the server decides").unwrap_err());
     let rows = block_on(worker.all(&seats, ReadOpts::default())).unwrap();
     assert_eq!(
         rows.len(),
@@ -1287,4 +1315,216 @@ fn a_serverless_workers_own_blind_delete_over_an_update_it_never_synced_is_refus
     let fate = fate_within_turns(&net, &net.worker, receipt.0).expect("the authority decides");
     common::assert_serialization_conflict(&fate.unwrap_err());
     assert_eq!(core_seats(&net).len(), 1, "the authority kept the update");
+}
+
+/// A tab's serializable read of a row its worker holds another tab's
+/// unsettled version of reads the snapshot (the accepted version), not that
+/// version. Both commits upload once the worker is back: the other tab's
+/// lands first, and the read it outdated conflicts.
+#[test]
+fn a_tabs_serializable_read_of_another_tabs_version_pending_at_its_worker_reads_its_snapshot() {
+    let mut net = Net::new(2);
+    let seat = net.seed_seats(1)[0];
+    let _watches = [net.watch_seats(net.tab(0)), net.watch_seats(net.tab(1))];
+    net.worker_offline();
+    let pending = block_on(
+        net.tab(0)
+            .update("seats", seat, holder("alice"), Default::default()),
+    )
+    .unwrap()
+    .mergeable_tx_id();
+    for _ in 0..4 {
+        net.pump();
+    }
+    let tab = net.tab(1);
+    let open = net.begin_pinned(tab);
+    let seats = tab.prepare_query(&Query::from("seats")).unwrap();
+    let read: Vec<Option<Value>> = net
+        .drive(tab.tx_ref(open).all_prepared(&seats))
+        .unwrap()
+        .iter()
+        .map(|row| row.cell("holder"))
+        .collect();
+    assert_eq!(
+        read,
+        [Some(Value::String(String::new()))],
+        "the snapshot's seat, not the pending one"
+    );
+    net.drive(
+        tab.tx_ref(open)
+            .update("seats", seat, holder("bob"), Default::default()),
+    )
+    .unwrap();
+    let committed = net.drive(tab.commit_serializable_handle(open));
+    net.worker_online();
+    net.settle(net.tab(0), pending)
+        .expect("the pending write lands");
+    assert_conflict_or_rejected(
+        committed.and_then(|receipt| net.settle(net.tab(1), receipt.0).map(drop)),
+    );
+    assert_eq!(net.holders(), ["alice"]);
+}
+
+/// Two tabs commit in the same millisecond, so their pending versions
+/// share a position. A serializable snapshot of the one that wrote the
+/// other row holds its own write and not the other tab's version at that
+/// position, and its commit over the other tab's pending write still
+/// conflicts.
+#[test]
+fn a_snapshot_over_an_own_commit_leaves_out_another_tabs_version_at_its_position() {
+    const CLOCK: i64 = 1_800_000_000_000;
+    let mut net = Net::new(2);
+    let seats = net.seed_seats(2);
+    let _watches = [net.watch_seats(net.tab(0)), net.watch_seats(net.tab(1))];
+    net.worker_offline();
+    for db in [net.tab(0), net.tab(1), &net.worker] {
+        db.set_clock_for_test(Some(CLOCK));
+    }
+    let other = block_on(
+        net.tab(0)
+            .update("seats", seats[0], holder("alice"), Default::default()),
+    )
+    .unwrap();
+    let own = block_on(
+        net.tab(1)
+            .update("seats", seats[1], holder("carol"), Default::default()),
+    )
+    .unwrap();
+    assert_eq!(other.version(), own.version(), "one position");
+    for _ in 0..4 {
+        net.pump();
+    }
+    let tab = net.tab(1);
+    let open = net.begin_pinned(tab);
+    let query = tab.prepare_query(&Query::from("seats")).unwrap();
+    let read: BTreeMap<RowUuid, Option<Value>> = net
+        .drive(tab.tx_ref(open).all_prepared(&query))
+        .unwrap()
+        .iter()
+        .map(|row| (row.row_uuid(), row.cell("holder")))
+        .collect();
+    assert_eq!(
+        read,
+        BTreeMap::from([
+            (seats[0], Some(Value::String(String::new()))),
+            (seats[1], Some(Value::String("carol".to_owned()))),
+        ]),
+        "the snapshot's seat under the other tab's write, and the own one"
+    );
+    net.drive(
+        tab.tx_ref(open)
+            .update("seats", seats[0], holder("bob"), Default::default()),
+    )
+    .unwrap();
+    let committed = net.drive(tab.commit_serializable_handle(open));
+    net.worker_online();
+    net.settle(net.tab(0), other.mergeable_tx_id())
+        .expect("the other tab's write lands");
+    assert_conflict_or_rejected(
+        committed.and_then(|receipt| net.settle(net.tab(1), receipt.0).map(drop)),
+    );
+    assert_eq!(net.holders(), ["alice", "carol"]);
+}
+
+/// Two tabs write the same row in the same millisecond, so their versions
+/// share a position, and the later writer's shows. A serializable read on
+/// the earlier tab sees its own version from history and names that
+/// version, by its writer, in its read set: the authority takes the own
+/// write, then the later tab's, then the commit, which conflicts.
+#[test]
+fn a_serializable_read_of_an_own_version_under_another_tabs_at_its_position_names_its_own() {
+    own_version_under_another_tabs_conflicts(Query::from("seats"));
+}
+
+/// The same through a union, whose rows carry their versions' writers as
+/// a plain read's do.
+#[test]
+fn a_serializable_union_read_of_an_own_version_under_another_tabs_names_its_own() {
+    let columns = ["id", "show", "holder"]
+        .iter()
+        .map(|alias| RelationProjectColumn {
+            alias: (*alias).to_owned(),
+            expr: if *alias == "id" {
+                RelationProjectExpr::RowId(RelationRowIdRef::Current)
+            } else {
+                RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("seats".to_owned()),
+                    column: (*alias).to_owned(),
+                })
+            },
+        })
+        .collect();
+    let mut query = Query::from("seats");
+    query.relation = Some(RelationQuery {
+        rel: RelationExpr::Union {
+            inputs: vec![RelationUnionArm {
+                label: "seats".to_owned(),
+                input: RelationExpr::Project {
+                    input: Box::new(RelationExpr::TableScan {
+                        table: "seats".to_owned(),
+                        alias: None,
+                    }),
+                    columns,
+                },
+            }],
+        },
+    });
+    own_version_under_another_tabs_conflicts(query);
+}
+
+fn own_version_under_another_tabs_conflicts(query: Query) {
+    const CLOCK: i64 = 1_800_000_000_000;
+    let mut net = Net::new(2);
+    let seats = net.seed_seats(2);
+    let _watches = [net.watch_seats(net.tab(0)), net.watch_seats(net.tab(1))];
+    net.worker_offline();
+    for db in [net.tab(0), net.tab(1), &net.worker] {
+        db.set_clock_for_test(Some(CLOCK));
+    }
+    let own = block_on(
+        net.tab(0)
+            .update("seats", seats[0], holder("alice"), Default::default()),
+    )
+    .unwrap();
+    let later = block_on(
+        net.tab(1)
+            .update("seats", seats[0], holder("carol"), Default::default()),
+    )
+    .unwrap();
+    assert_eq!(own.version(), later.version(), "one position");
+    for _ in 0..4 {
+        net.pump();
+    }
+    let tab = net.tab(0);
+    let query = tab.prepare_query(&query).unwrap();
+    let live = block_on(tab.all(&query, ReadOpts::default())).unwrap();
+    let live = live.iter().find(|row| row.row_uuid() == seats[0]).unwrap();
+    assert_eq!(
+        live.cell("holder"),
+        Some(Value::String("carol".to_owned())),
+        "the later tab's version shows over the own one"
+    );
+    let open = net.begin_pinned(tab);
+    let read = net.drive(tab.tx_ref(open).all_prepared(&query)).unwrap();
+    let read = read.iter().find(|row| row.row_uuid() == seats[0]).unwrap();
+    assert_eq!(
+        read.cell("holder"),
+        Some(Value::String("alice".to_owned())),
+        "the snapshot reads the own version"
+    );
+    net.drive(
+        tab.tx_ref(open)
+            .update("seats", seats[1], holder("bob"), Default::default()),
+    )
+    .unwrap();
+    let committed = net.drive(tab.commit_serializable_handle(open));
+    net.worker_online();
+    net.settle(net.tab(0), own.mergeable_tx_id())
+        .expect("the own write lands");
+    net.settle(net.tab(1), later.mergeable_tx_id())
+        .expect("the later tab's write lands");
+    assert_conflict_or_rejected(
+        committed.and_then(|receipt| net.settle(net.tab(0), receipt.0).map(drop)),
+    );
+    assert_eq!(net.holders(), ["carol"]);
 }

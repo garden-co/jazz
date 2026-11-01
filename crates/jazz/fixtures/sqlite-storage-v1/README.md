@@ -12,9 +12,9 @@ pending uploads moved from one encoded message to a row per op, and
 watermarks became per-sequencer rows).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `1e1731ef32ba93f6c2a1d18918a0cbf129d7394c61abd90b9a585af23c5222f9`.
+  the SQLite file `5c478e21f7447123bc3c4cf486bc49c6977117683e7084103860d69c847c2f4a`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `df49e79d97b65c175574d29b1b97059e2fc38b3e439160a42e06ec131205adf3`.
+  `cc0a6e7e98a0efe8189138f40e17fe48cb7bb503472c4f47abd0bc3e2c4e5a26`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -27,7 +27,7 @@ nodes and write times:
   on a branch;
 - a client text edit to `documents.body` (text-merging) that the server
   merged with its own concurrent edit, so its history keeps the client's
-  write as sent (`_st` bit 2, at `_seq` = minus the commit's seq);
+  write as sent (`_st` bit 2, at `_t` = minus the commit's position);
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
   rejected (so `_jazz_transactions` keeps a rejected fate with its reason name),
@@ -109,3 +109,20 @@ Giving a replicated insert the backwards defaults of the columns its writer's
 lineage dropped, and a replicated upsert the cells it writes only if it
 creates its row (`created`), changed the encoded pending ops, which
 regenerated it the same way.
+
+Ordering unsettled versions last-writer-wins by their commits' clocks gave
+each pending commit's header a `clock` (its writer's commit clock), which
+regenerated it the same way.
+
+Replacing the `(_n, _seq)` pair with one scalar position `_t` (below
+2^53) regenerated it the same way. `_t` has two kinds: accepted (the
+authority's position, below 2^52) and pending (`1<<52 |` the commit's HLC
+as this store took it; a relay bounds a writer's clock to its own plus
+500 ms). Every row and history table has `_t` in place of `_n` and `_seq`,
+with index `__by_t`, and `_w`: a pending version's writer (its 16-byte node
+and 8-byte big-endian tx), `X''` for an accepted version. History is keyed
+by `(id, _b, _t, _w)`, so two writers' versions at one `_t` both stay.
+`_jazz_transactions` is `(n, tx, t, result)` (index
+`_jazz_transactions_by_t`), `_jazz_lv_via` has `t` in place of
+`node`/`seq`, `_jazz_watermarks` is one `through` per key, the sequencer
+tables are gone, and a pending commit's `clock` is its commit HLC.

@@ -54,12 +54,12 @@ use crate::values::{
     to_sql, unsupported,
 };
 pub use sync::{
-    AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
-    FrameJoiner, Image, LEAF, Outcome, Pos, RELAY, ReadSpan, RejectedTransaction, RelationSnapshot,
-    RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
-    TxName, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError, WireKind, WireOp,
-    WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite, WriteConflict,
-    decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
+    ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
+    FrameJoiner, Image, MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction,
+    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
+    TransportError, TxName, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError,
+    WireKind, WireOp, WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite,
+    WriteConflict, decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -165,6 +165,8 @@ pub struct WriteHandle {
     row: RowUuid,
     /// Where the row version this write left is.
     seq: Pos,
+    /// The local seq of the commit that wrote it.
+    tx: u64,
 }
 
 impl WriteHandle {
@@ -174,7 +176,7 @@ impl WriteHandle {
 
     /// The commit sequence number of the row version this write left.
     pub fn mergeable_tx_id(&self) -> u64 {
-        self.seq.seq
+        self.tx
     }
 
     /// The position of the row version this write left.
@@ -264,7 +266,7 @@ pub enum SubscriptionEvent {
 struct ReadSpec {
     include_deleted: bool,
     /// A replica's `ReadTier::Remote` read: its pending local versions
-    /// (at its own node) are left out, and a row they changed
+    /// (at `_t >= 1<<52`) are left out, and a row they changed
     /// reads as its settled version, as the server lists it. Unlike a
     /// [`ReadSpec::cut`] it stays live.
     settled_only: bool,
@@ -532,6 +534,17 @@ struct Inner {
     /// share a time, and later commits get strictly later ones, so
     /// `$createdAt` orders this node's writes even within one millisecond.
     last_stamp: (u64, i64),
+    /// The newest commit HLC this store gave or saw (see
+    /// [`Inner::next_hlc`]). Apart from `last_stamp`: a clock seen from
+    /// another writer moves no `$createdAt`/`$updatedAt` this store stamps.
+    hlc_last: u64,
+    /// The order of each of this store's own commits it knows unsettled
+    /// (on a relay, of each session commit it carries too), by local seq:
+    /// its HLC is where the commit's versions are ([`Pos::pending`]), its
+    /// writer (node, tx) what history keeps them under (`_w`).
+    pub(crate) own_order: HashMap<u64, sync::Order>,
+    /// A wall clock tests set (see `Db::set_clock_for_test`).
+    clock_for_test: Option<i64>,
     /// Interned author codes (see [`Inner::author_code`]), cached both ways.
     authors: RefCell<AuthorCodes>,
     /// By stored table and whether into its history: the columns the last
@@ -543,10 +556,10 @@ struct Inner {
     current_batch: RefCell<Option<HashMap<(String, RowUuid, Vec<u8>), Option<sync::Image>>>>,
     ids: Box<dyn RowIdSource>,
     /// The newest commit seq handed out: the authority's seq, or on a
-    /// replica its own node's counter.
+    /// replica its own commit counter (its commits' tx).
     seq: u64,
-    /// A replica's own node code (`_n` of its unsettled versions, see
-    /// [`sync::RELAY`]); 0 until it becomes one.
+    /// The kind of this store's own versions: [`sync::PENDING`] on a
+    /// replica, [`sync::ACCEPTED`] (0) until it becomes one.
     pub(crate) me: i64,
     /// Its clock and holds as a shard ([`shard`]); inert unsharded.
     pub(crate) shard: shard::ShardState,
@@ -1105,6 +1118,10 @@ pub const AUTHORIZATION_DENIED: &str = Reason::AuthorizationDenied.as_str();
 /// timestamp may be (SPEC 3, INV-TX-7).
 pub const SKEW_TOLERANCE_MS: i64 = 30_000;
 
+/// How far past its own clock a store counts an HLC it received (see
+/// [`Inner::observe_hlc`]): the shard offset bound.
+pub const HLC_SKEW_MS: u64 = shard::HLC_MAX_OFFSET_MS;
+
 /// The text leading the message of a write the authority refuses for a
 /// timestamp too far ahead (its reason is
 /// [`Reason::ClientClockTooFarAhead`], its code `WriteRejected`).
@@ -1323,8 +1340,11 @@ impl Db {
             for name in [table.clone(), format!("{table}__h")] {
                 let max: Option<i64> = conn
                     .cached_row(
-                        &format!("SELECT MAX(_seq) FROM {} WHERE _n = 0", quote(&name)),
-                        [],
+                        &format!(
+                            "SELECT MAX(_t) FROM {} WHERE _t >= 0 AND _t < ?1",
+                            quote(&name)
+                        ),
+                        [sync::band_start(sync::PENDING)],
                         |r| r.get(0),
                     )
                     .map_err(storage)?;
@@ -1335,8 +1355,8 @@ impl Db {
         // dedupe entry records it.
         let settled: Option<i64> = conn
             .cached_row(
-                "SELECT MAX(seq) FROM _jazz_transactions WHERE sn = 0",
-                [],
+                "SELECT MAX(t) FROM _jazz_transactions WHERE t < ?1",
+                [sync::band_start(sync::PENDING)],
                 |r| r.get(0),
             )
             .map_err(storage)?;
@@ -1380,6 +1400,9 @@ impl Db {
                 identity: config.identity,
                 writer: None,
                 last_stamp: (0, 0),
+                hlc_last: 0,
+                own_order: HashMap::new(),
+                clock_for_test: None,
                 authors: RefCell::new(AuthorCodes::default()),
                 image_inserts: RefCell::default(),
                 current_batch: RefCell::default(),
@@ -1771,6 +1794,22 @@ impl Db {
                 result => return result,
             }
         }
+    }
+
+    /// Run this store's wall clock at `ms` (Unix ms) from now on, or the
+    /// real one again for `None`: what tests of time-ordered writes set
+    /// instead of sleeping.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_clock_for_test(&self, ms: Option<i64>) {
+        self.inner().clock_for_test = ms;
+    }
+
+    /// Set this store's last commit HLC, as if it had handed out `hlc`.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_hlc_for_test(&self, hlc: u64) {
+        self.inner().hlc_last = hlc;
     }
 
     /// Make the next ticks fail with `codes`, in order, before doing any
@@ -2340,7 +2379,7 @@ impl Db {
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
             if let Err(error) = committed
-                .then(|| self.record_upload(vec![op], handle.seq.seq, sync::Kind::Mergeable, None))
+                .then(|| self.record_upload(vec![op], handle.tx, sync::Kind::Mergeable, None))
                 .transpose()
             {
                 let mut inner = self.inner();
@@ -3693,9 +3732,8 @@ impl Inner {
             } else {
                 row.get(0).map_err(storage)?
             };
-            let n: i64 = row.get(1).map_err(storage)?;
-            let seq: i64 = row.get(2).map_err(storage)?;
-            let state: i64 = row.get(3).map_err(storage)?;
+            let at = Pos::from_t(row.get(1).map_err(storage)?);
+            let state: i64 = row.get(2).map_err(storage)?;
             // A flat join: the root's version, then each joined row and
             // its version.
             let flat = compiled.joined > 0;
@@ -3711,23 +3749,23 @@ impl Inner {
                 )))
             };
             let root_version = if compiled.versioned {
-                version(4)?
+                version(3)?
             } else {
                 None
             };
             let joined = (0..compiled.joined)
                 .map(|i| {
-                    let id: Vec<u8> = row.get(5 + 2 * i).map_err(storage)?;
+                    let id: Vec<u8> = row.get(4 + 2 * i).map_err(storage)?;
                     Ok(crate::values::JoinedRow {
                         row: uuid::Uuid::from_slice(&id)
                             .map(RowUuid)
                             .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?,
-                        version: version(6 + 2 * i)?,
+                        version: version(5 + 2 * i)?,
                     })
                 })
                 .collect::<Result<Arc<[_]>, Error>>()?;
             let union_arm = if compiled.union {
-                let label: String = row.get(4).map_err(storage)?;
+                let label: String = row.get(3).map_err(storage)?;
                 Some(match arms.iter().find(|arm| ***arm == *label) {
                     Some(arm) => arm.clone(),
                     None => {
@@ -3740,9 +3778,9 @@ impl Inner {
                 None
             };
             let first = if flat {
-                5 + 2 * compiled.joined
+                4 + 2 * compiled.joined
             } else {
-                4 + usize::from(compiled.versioned) + usize::from(compiled.union)
+                3 + usize::from(compiled.versioned) + usize::from(compiled.union)
             };
             let cells = compiled
                 .projection
@@ -3763,13 +3801,22 @@ impl Inner {
                     }
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
+            let writer = if compiled.writer {
+                let w: Vec<u8> = row
+                    .get(first + compiled.projection.len())
+                    .map_err(storage)?;
+                Some(Arc::from(w))
+            } else {
+                None
+            };
             out.push(CurrentRow {
                 table: names.clone(),
                 id: RowUuid(
                     uuid::Uuid::from_slice(&id)
                         .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?,
                 ),
-                seq: Pos { n, seq: seq as u64 },
+                seq: at,
+                writer,
                 deleted: state & STATE_DELETED != 0,
                 cells: Arc::new(cells),
                 types: types.clone(),
@@ -3833,7 +3880,7 @@ impl Inner {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
-    ) -> Result<Vec<(RowUuid, Pos)>, Error> {
+    ) -> Result<Vec<(RowUuid, sync::Rank)>, Error> {
         let roots = self.run(prepared, identity, read)?;
         let mut out = versions(&roots);
         if !prepared.query.array_subqueries.is_empty() {
@@ -3849,7 +3896,23 @@ impl Inner {
                 child_versions(&node, &mut out);
             }
         }
-        Ok(out)
+        out.into_iter()
+            .map(|(_, row, at, writer)| Ok((row, Self::read_rank(at, writer))))
+            .collect()
+    }
+
+    /// A version a read returned, with its writer when pending: two
+    /// writers' versions of a row can share a position. The read carries
+    /// the writer of the version its cut picked, current or in history; a
+    /// pending version read without one (an aggregate's, a history read's)
+    /// is named by a writer no commit has, so the commit conflicts rather
+    /// than validating against another writer's version.
+    fn read_rank(at: Pos, writer: Option<Arc<[u8]>>) -> sync::Rank {
+        if at.accepted() {
+            return (at, None);
+        }
+        let writer = writer.as_deref().and_then(sync::writer_of_bytes);
+        (at, Some(writer.unwrap_or(sync::NO_WRITER)))
     }
 
     /// A row with its array relations, read as the row was: through the
@@ -3904,9 +3967,26 @@ impl Inner {
     // ---- write primitives ---------------------------------------------
 
     /// Where this store's own commit `seq` writes its versions: the
-    /// authority's seq, or its own node's on a replica.
+    /// authority's seq, or pending at the commit's HLC on a replica.
     pub(crate) fn own_pos(&self, seq: u64) -> Pos {
-        Pos { n: self.me, seq }
+        if self.me == sync::ACCEPTED {
+            Pos::at(seq)
+        } else {
+            Pos::pending(self.commit_hlc(seq))
+        }
+    }
+
+    /// Own commit `seq`'s version: its position and, pending, its writer.
+    pub(crate) fn own_rank(&self, seq: u64) -> sync::Rank {
+        let at = self.own_pos(seq);
+        if at.accepted() {
+            return (at, None);
+        }
+        let writer = match self.own_order.get(&seq) {
+            Some(&(_, node, tx)) => (node, tx),
+            None => (*self.identity.node.as_bytes(), seq),
+        };
+        (at, Some(writer))
     }
 
     fn existing(
@@ -3916,21 +3996,13 @@ impl Inner {
         key: &[u8],
     ) -> Result<Option<(Pos, bool)>, Error> {
         let sql = format!(
-            "SELECT _n, _seq, (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT _t, (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2",
             quote(table)
         );
         match self.conn.cached_row(
             &sql,
             rusqlite::params![row.0.as_bytes().to_vec(), key],
-            |r| {
-                Ok((
-                    Pos {
-                        n: r.get(0)?,
-                        seq: r.get::<_, i64>(1)? as u64,
-                    },
-                    r.get::<_, i64>(2)? != 0,
-                ))
-            },
+            |r| Ok((Pos::from_t(r.get(0)?), r.get::<_, i64>(1)? != 0)),
         ) {
             Ok(found) => Ok(Some(found)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -3952,73 +4024,83 @@ impl Inner {
             return Ok(current);
         };
         if let Some((seq, _)) = current
-            && cut.sees(seq)
+            && cut.sees(self.current_rank(table, row, key, seq)?)
         {
             return Ok(current);
         }
-        let Some(version) = self.version_at(table, row, key, cut)? else {
+        let Some((version, w)) = self.version_at(table, row, key, cut)? else {
             return Ok(None);
         };
         let sql = format!(
             "SELECT (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2 \
-             AND _n = ?3 AND _seq = ?4",
+             AND _t = ?3 AND _w = ?4",
             quote(&format!("{table}__h"))
         );
         let deleted: i64 = self
             .conn
             .cached_row(
                 &sql,
-                rusqlite::params![
-                    row.0.as_bytes().to_vec(),
-                    key,
-                    version.n,
-                    version.seq as i64
-                ],
+                rusqlite::params![row.0.as_bytes().to_vec(), key, version.t(), w],
                 |r| r.get(0),
             )
             .map_err(storage)?;
         Ok(Some((version, deleted != 0)))
     }
 
-    /// The newest superseded version of a row that `cut` sees.
+    /// A row's current version at `at` as a cut names it: with its writer,
+    /// when pending.
+    pub(crate) fn current_rank(
+        &self,
+        table: &str,
+        row: RowUuid,
+        key: &[u8],
+        at: Pos,
+    ) -> Result<sync::Rank, Error> {
+        if at.accepted() {
+            return Ok((at, None));
+        }
+        Ok((
+            at,
+            sync::writer_of_bytes(&self.current_writer(table, row, key, at)?),
+        ))
+    }
+
+    /// The newest superseded version of a row that `cut` sees: its
+    /// position and writer (`_w`).
     fn version_at(
         &self,
         table: &str,
         row: RowUuid,
         key: &[u8],
         cut: &Cut,
-    ) -> Result<Option<Pos>, Error> {
-        let extra = if cut.extra.is_empty() {
-            String::new()
-        } else {
-            let positions = cut
-                .extra
-                .iter()
-                .map(|at| format!("({}, {})", at.n, at.seq))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(" OR (_n, _seq) IN (VALUES {positions})")
-        };
+    ) -> Result<Option<(Pos, Vec<u8>)>, Error> {
+        // Positions are integers and writers fixed-width bytes, so the
+        // named versions are inlined.
+        let extra: String = cut
+            .extra
+            .iter()
+            .map(|(at, writer)| match writer.filter(|_| !at.accepted()) {
+                None => format!(" OR _t = {}", at.t()),
+                Some((node, tx)) => format!(
+                    " OR (_t = {} AND _w = X'{}')",
+                    at.t(),
+                    sync::writer_bytes(node, tx)
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                ),
+            })
+            .collect();
         let sql = format!(
-            "SELECT _n, _seq FROM {} WHERE id = ?1 AND _b = ?2 AND (_st & {STATE_AS_SENT}) = 0 \
-             AND ((_n, _seq) <= (?3, ?4){extra}) ORDER BY _n DESC, _seq DESC LIMIT 1",
+            "SELECT _t, _w FROM {} WHERE id = ?1 AND _b = ?2 AND (_st & {STATE_AS_SENT}) = 0 \
+             AND (_t <= ?3{extra}) ORDER BY _t DESC, _w DESC LIMIT 1",
             quote(&format!("{table}__h"))
         );
         self.conn
             .cached_row(
                 &sql,
-                rusqlite::params![
-                    row.0.as_bytes().to_vec(),
-                    key,
-                    cut.seq.n,
-                    cut.seq.seq as i64
-                ],
-                |r| {
-                    Ok(Pos {
-                        n: r.get(0)?,
-                        seq: r.get::<_, i64>(1)? as u64,
-                    })
-                },
+                rusqlite::params![row.0.as_bytes().to_vec(), key, cut.seq.t()],
+                |r| Ok((Pos::from_t(r.get(0)?), r.get(1)?)),
             )
             .optional()
             .map_err(storage)
@@ -4192,7 +4274,7 @@ impl Inner {
         overlay: CutOverlay,
     ) -> Result<String, Error> {
         let table = self.schema.table(table)?;
-        let own = self.own_pos(self.seq + 1);
+        let own = self.own_rank(self.seq + 1);
         let cut = Cut {
             unsettled: false,
             seq: self.own_pos(self.seq),
@@ -4256,12 +4338,22 @@ impl Inner {
         table: &Table,
         row: RowUuid,
         key: &[u8],
-        at: Pos,
+        at: sync::Rank,
         author: AuthorSubject,
         operation: Operation,
     ) -> Result<bool, Error> {
         let session = self.session(author);
-        self.holds_as_of(table, row, key, Cut::at(at), |ctx| {
+        // A pending version by its writer: another writer's can share its
+        // position.
+        let cut = match at.1.filter(|_| !at.0.accepted()) {
+            Some(_) => Cut {
+                seq: Pos::from_t(at.0.t() - 1),
+                own: at,
+                ..Cut::default()
+            },
+            None => Cut::at(at.0),
+        };
+        self.holds_as_of(table, row, key, cut, |ctx| {
             ctx.operation_policy(table, operation, "a", &session)
         })
     }
@@ -4364,7 +4456,7 @@ impl Inner {
             let cut = Cut {
                 unsettled: false,
                 seq: self.own_pos(seq.saturating_sub(1)),
-                own: self.own_pos(seq),
+                own: self.own_rank(seq),
                 extra: Vec::new(),
                 overlay: Some(CutOverlay::Grounded(Arc::new(grounded.clone()))),
             };
@@ -4512,7 +4604,7 @@ impl Inner {
             let cut = Cut {
                 unsettled: false,
                 seq: self.own_pos(seq.saturating_sub(1)),
-                own: self.own_pos(seq),
+                own: self.own_rank(seq),
                 extra: Vec::new(),
                 overlay: Some(CutOverlay::Except {
                     table: stored.clone(),
@@ -4566,7 +4658,7 @@ impl Inner {
         let cut = Cut {
             unsettled: false,
             seq: before,
-            own: before,
+            own: self.own_rank(seq.saturating_sub(1)),
             extra: Vec::new(),
             overlay: None,
         };
@@ -5275,7 +5367,7 @@ impl Inner {
 
     /// Keep, for each row version the upload at `seq` wrote whose text
     /// merge changed a value, that version as its writer sent it (SPEC 4
-    /// §4.3): in `__h` at `_seq` = `-seq` with [`STATE_AS_SENT`] set, its
+    /// §4.3): in `__h` at `_t` = minus its own `_t` with [`STATE_AS_SENT`] set, its
     /// merged columns holding their values as sent and every other cell
     /// the version's. A later write chained on it merges over these values
     /// ([`Inner::merge_base`]); no read takes it for a version.
@@ -5301,9 +5393,9 @@ impl Inner {
             }
             self.exec(
                 &format!(
-                    "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _seq < 0 \
+                    "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _t < 0 \
                      AND (_st & {STATE_AS_SENT}) <> 0 AND EXISTS (SELECT 1 FROM _jazz_transactions AS s \
-                     JOIN _jazz_nodes AS n ON n.n = s.n WHERE s.sn = _n AND s.seq = -_seq AND n.node = ?3)",
+                     JOIN _jazz_nodes AS n ON n.n = s.n WHERE s.t = -_t AND n.node = ?3)",
                     quote(&format!("{stored}__h"))
                 ),
                 rusqlite::params![row.0.as_bytes().to_vec(), key, node.to_vec()],
@@ -5318,7 +5410,7 @@ impl Inner {
             let mut values = vec![
                 Sql::Blob(row.0.as_bytes().to_vec()),
                 Sql::Blob(key),
-                Sql::Integer(seq as i64),
+                Sql::Integer(self.own_pos(seq).t()),
             ];
             let mut sent = BTreeMap::new();
             for (name, value) in columns {
@@ -5340,12 +5432,11 @@ impl Inner {
                 })
                 .collect();
             let sql = format!(
-                "INSERT INTO {} (id, _b, _n, _seq, _st, _base, _cols{columns}) \
-                 SELECT id, _b, _n, -_seq, _st | {STATE_AS_SENT}, NULL, NULL{cells} FROM {} \
-                 WHERE id = ?1 AND _b = ?2 AND _n = {} AND _seq = ?3",
+                "INSERT INTO {} (id, _b, _t, _w, _st, _base, _cols{columns}) \
+                 SELECT id, _b, -_t, _w, _st | {STATE_AS_SENT}, NULL, NULL{cells} FROM {} \
+                 WHERE id = ?1 AND _b = ?2 AND _t = ?3",
                 quote(&format!("{stored}__h")),
                 quote(&stored),
-                self.me
             );
             self.exec(&sql, params_from_iter(values.iter()))
                 .map_err(storage)?;
@@ -5396,22 +5487,37 @@ impl Inner {
     /// Copy the row's current image into its history before it is
     /// superseded (history holds superseded images only).
     fn snapshot(&self, table: &Table, row: RowUuid, key: &[u8], seq: u64) -> Result<(), Error> {
-        let columns = self.columns_list(table);
-        let sql = format!(
-            "INSERT INTO {} (id, _b, _n, _seq, _st, _base, _cols{columns}) \
-             SELECT id, _b, _n, _seq, _st, _base, _cols{columns} FROM {} \
-             WHERE id = ?1 AND _b = ?2 AND NOT (_n = {} AND _seq = ?3)",
-            quote(&format!("{}__h", table.stored)),
-            quote(&table.stored),
-            self.me
-        );
+        let id = row.0.as_bytes().to_vec();
+        let current: Option<(i64, Vec<u8>)> = self
+            .conn
+            .cached_row(
+                &format!(
+                    "SELECT _t, _w FROM {} WHERE id = ?1 AND _b = ?2",
+                    quote(&table.stored)
+                ),
+                rusqlite::params![id, key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(storage)?;
+        let Some((at, w)) = current.map(|(t, w)| (Pos::from_t(t), w)) else {
+            return Ok(());
+        };
         // An image written earlier in the same commit is not superseded
         // history: history holds committed images only.
-        self.exec(
-            &sql,
-            rusqlite::params![row.0.as_bytes().to_vec(), key, seq as i64],
-        )
-        .map_err(storage)?;
+        if at == self.own_pos(seq) && w == self.own_writer_at(seq) {
+            return Ok(());
+        }
+        let columns = self.columns_list(table);
+        let sql = format!(
+            "INSERT INTO {} (id, _b, _t, _w, _st, _base, _cols{columns}) \
+             SELECT id, _b, _t, _w, _st, _base, _cols{columns} FROM {} \
+             WHERE id = ?1 AND _b = ?2",
+            quote(&format!("{}__h", table.stored)),
+            quote(&table.stored),
+        );
+        self.exec(&sql, rusqlite::params![id, key])
+            .map_err(storage)?;
         Ok(())
     }
 
@@ -5433,15 +5539,20 @@ impl Inner {
         let source = match at {
             None => Some(quote(&table.stored)),
             Some(cut) => match self.existing(&table.stored, row, from)? {
-                Some((current, _)) if cut.sees(current) => Some(quote(&table.stored)),
+                Some((current, _))
+                    if cut.sees(self.current_rank(&table.stored, row, from, current)?) =>
+                {
+                    Some(quote(&table.stored))
+                }
                 _ => self
                     .version_at(&table.stored, row, from, cut)?
-                    .map(|version| {
+                    .map(|(version, w)| {
                         format!(
-                            "(SELECT * FROM {} WHERE _n = {} AND _seq = {})",
+                            "(SELECT * FROM {} WHERE _t = {} AND _w = X'{}' AND id = ?3 \
+                             AND _b = ?4)",
                             quote(&format!("{}__h", table.stored)),
-                            version.n,
-                            version.seq
+                            version.t(),
+                            w.iter().map(|b| format!("{b:02x}")).collect::<String>()
                         )
                     }),
             },
@@ -5454,14 +5565,17 @@ impl Inner {
         };
         // The copy keeps the base's deletion and authored no content.
         let sql = format!(
-            "INSERT INTO {name} (id, _b, _n, _seq, _st{columns}) \
-             SELECT id, ?1, {me}, ?2, _st | {STATE_NO_CONTENT}{columns} \
+            "INSERT INTO {name} (id, _b, _t, _w, _st{columns}) \
+             SELECT id, ?1, ?2, ?5, _st | {STATE_NO_CONTENT}{columns} \
              FROM {source} WHERE id = ?3 AND _b = ?4",
             name = quote(&table.stored),
-            me = self.me
         );
-        self.exec(&sql, rusqlite::params![to, seq as i64, id, from])
-            .map_err(storage)?;
+        let w = self.own_writer_at(seq);
+        self.exec(
+            &sql,
+            rusqlite::params![to, self.own_pos(seq).t(), id, from, w],
+        )
+        .map_err(storage)?;
         self.set_cells(table, row, to, head_cells, Cells::Carried, seq, None, false)
     }
 
@@ -5480,11 +5594,11 @@ impl Inner {
         deleted: Option<bool>,
         content: bool,
     ) -> Result<(), Error> {
-        // Right-hand sides read the row before this update: `_seq` is still
+        // Right-hand sides read the row before this update: `_t` is still
         // the previous version's.
         // What a new version was built on is the authority's to write
         // (SPEC 4 §4.6).
-        let mut values = vec![Sql::Integer(seq as i64)];
+        let mut values = vec![Sql::Integer(self.own_pos(seq).t())];
         let deletion = match deleted {
             Some(deleted) => {
                 values.push(Sql::Integer(if deleted { STATE_DELETED } else { 0 }));
@@ -5495,12 +5609,13 @@ impl Inner {
         // The no-content bit stays set only while no write of the commit
         // authored content.
         let no_content = if content { 0 } else { STATE_NO_CONTENT };
-        let me = self.me;
+        values.push(Sql::Blob(self.own_writer_at(seq)));
         let mut sets = vec![
-            format!("_n = {me}, _seq = ?1"),
+            "_t = ?1".to_owned(),
+            format!("_w = ?{}", values.len()),
             "_base = NULL, _cols = NULL".to_owned(),
             format!(
-                "_st = (CASE WHEN _n = {me} AND _seq = ?1 THEN _st & {no_content} ELSE {no_content} END) \
+                "_st = (CASE WHEN _t = ?1 THEN _st & {no_content} ELSE {no_content} END) \
                  | {deletion}"
             ),
         ];
@@ -5535,6 +5650,15 @@ impl Inner {
             .borrow_mut()
             .push((table.stored.clone(), row, key.to_vec()));
         Ok(())
+    }
+
+    /// The writer of a version commit `seq` writes: none for an accepted one.
+    fn own_writer_at(&self, seq: u64) -> Vec<u8> {
+        if self.own_pos(seq).accepted() {
+            Vec::new()
+        } else {
+            self.own_writer(seq)
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5607,14 +5731,14 @@ impl Inner {
         let mut names = vec![
             "id".to_owned(),
             "_b".to_owned(),
-            "_n".to_owned(),
-            "_seq".to_owned(),
+            "_t".to_owned(),
+            "_w".to_owned(),
         ];
         let mut values = vec![
             Sql::Blob(row.0.as_bytes().to_vec()),
             Sql::Blob(key.clone()),
-            Sql::Integer(self.me),
-            Sql::Integer(seq as i64),
+            Sql::Integer(self.own_pos(seq).t()),
+            Sql::Blob(self.own_writer_at(seq)),
         ];
         for column in &table.columns {
             let given = match (cells.get(&column.name), &column.default) {
@@ -5694,6 +5818,7 @@ impl Inner {
         Ok(WriteHandle {
             row,
             seq: self.own_pos(seq),
+            tx: seq,
         })
     }
 
@@ -5878,7 +6003,11 @@ impl Inner {
                     self.authorize_patch(table, row, &key, &who, verb)?;
                 }
                 if cells.is_empty() && !staged_tombstone {
-                    return Ok(WriteHandle { row, seq: current });
+                    return Ok(WriteHandle {
+                        row,
+                        seq: current,
+                        tx: self.own_seq_at((current, None)).unwrap_or(current.seq),
+                    });
                 }
                 let held = (!staged_tombstone).then_some(&key[..]);
                 let cells = self.merged_cells(table, row, held, Some((&key, seq)), cells)?;
@@ -5930,6 +6059,7 @@ impl Inner {
         Ok(WriteHandle {
             row,
             seq: self.own_pos(seq),
+            tx: seq,
         })
     }
 
@@ -6037,6 +6167,7 @@ impl Inner {
         Ok(WriteHandle {
             row,
             seq: self.own_pos(seq),
+            tx: seq,
         })
     }
 
@@ -6107,6 +6238,7 @@ impl Inner {
         Ok(WriteHandle {
             row,
             seq: self.own_pos(seq),
+            tx: seq,
         })
     }
 }
@@ -6488,6 +6620,7 @@ impl MergeableTxHandle<'_> {
         Ok(WriteHandle {
             row,
             seq: Pos::default(),
+            tx: 0,
         })
     }
 
@@ -6928,7 +7061,7 @@ enum BatchKind {
 struct ReadRecord {
     prepared: PreparedQuery,
     include_deleted: bool,
-    rows: Vec<(RowUuid, Pos)>,
+    rows: Vec<(RowUuid, sync::Rank)>,
 }
 
 /// An upload the authority refused: the node and local seq of the commit
@@ -6946,16 +7079,27 @@ fn conflict(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::TransactionConflict, message)
 }
 
-fn versions(rows: &[CurrentRow]) -> Vec<(RowUuid, Pos)> {
-    rows.iter().map(|row| (row.id, row.seq)).collect()
+/// A read row's version: its table, row, position and writer, when the
+/// read carried it.
+type ReadVersion = (Arc<str>, RowUuid, Pos, Option<Arc<[u8]>>);
+
+fn versions(rows: &[CurrentRow]) -> Vec<ReadVersion> {
+    rows.iter()
+        .map(|row| (row.table.clone(), row.id, row.seq, row.writer.clone()))
+        .collect()
 }
 
 /// The versions of a relation tree's child rows, depth first.
-fn child_versions(node: &ResultNode, out: &mut Vec<(RowUuid, Pos)>) {
+fn child_versions(node: &ResultNode, out: &mut Vec<ReadVersion>) {
     for relation in node.relations.values() {
         if let ResultRelation::Array(children) = relation {
             for child in children {
-                out.push((child.row.id, child.row.seq));
+                out.push((
+                    child.row.table.clone(),
+                    child.row.id,
+                    child.row.seq,
+                    child.row.writer.clone(),
+                ));
                 child_versions(child, out);
             }
         }
@@ -7053,15 +7197,107 @@ impl Inner {
         self.apply_as(op, who, seq)
     }
 
+    /// Wall-clock Unix ms (or the one a test set).
+    pub(crate) fn now_ms(&self) -> i64 {
+        self.clock_for_test.unwrap_or_else(|| {
+            web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64)
+        })
+    }
+
+    /// The clock commit HLCs read (Unix ms): this store's configured clock
+    /// (`DbConfig::with_clock`), or the one a test set.
+    fn hlc_clock_ms(&self) -> u64 {
+        self.clock_for_test
+            .map_or_else(|| (self.shard.clock)(), |ms| ms.max(0) as u64)
+    }
+
+    /// The next commit HLC: after every one this store gave or saw, and
+    /// not before its wall clock.
+    pub(crate) fn next_hlc(&mut self) -> u64 {
+        let next = self.peek_hlc();
+        self.hlc_last = next;
+        next
+    }
+
+    /// The HLC a commit begun now would take ([`Inner::next_hlc`]).
+    pub(crate) fn peek_hlc(&self) -> u64 {
+        // Past the last a pending `_t` holds, commits share it and order by
+        // writer and tx.
+        self.hlc_last
+            .saturating_add(1)
+            .max(shard::hlc(self.hlc_clock_ms()))
+            .min(sync::MAX_SEQ)
+    }
+
+    /// `seen` as this store counts an HLC it was sent: no further ahead
+    /// than [`HLC_SKEW_MS`] past its own clock, and never past the last a
+    /// pending `_t` holds.
+    pub(crate) fn bounded_hlc(&self, seen: u64) -> u64 {
+        let ceiling = shard::hlc(self.hlc_clock_ms().saturating_add(HLC_SKEW_MS));
+        seen.min(ceiling).min(sync::MAX_SEQ)
+    }
+
+    /// Hold this store's HLC past one it received (a position or a commit
+    /// clock), so a commit it makes after seeing that orders after it. A
+    /// received HLC counts no further ahead than [`HLC_SKEW_MS`] past this
+    /// store's wall clock: a writer's clock far ahead cannot carry this
+    /// store's commits with it.
+    pub(crate) fn observe_hlc(&mut self, seen: u64) {
+        self.hlc_last = self.hlc_last.max(self.bounded_hlc(seen));
+    }
+
+    /// Give commit `seq` its HLC if it has none yet: its writes are at it,
+    /// written by this store's node as tx `seq`.
+    fn stamp_commit(&mut self, seq: u64) {
+        if self.me != sync::ACCEPTED && !self.own_order.contains_key(&seq) {
+            let hlc = self.next_hlc();
+            let node = *self.identity.node.as_bytes();
+            self.own_order.insert(seq, (hlc, node, seq));
+        }
+    }
+
+    /// Commit `seq`'s HLC, or the one a commit begun now would take.
+    pub(crate) fn commit_hlc(&self, seq: u64) -> u64 {
+        self.own_order
+            .get(&seq)
+            .map_or_else(|| self.peek_hlc(), |order| order.0)
+    }
+
+    /// Commit `seq`'s writer, as history keeps it (`_w`).
+    pub(crate) fn own_writer(&self, seq: u64) -> Vec<u8> {
+        match self.own_order.get(&seq) {
+            Some(&(_, node, tx)) => sync::writer_bytes(node, tx),
+            None => sync::writer_bytes(*self.identity.node.as_bytes(), seq),
+        }
+    }
+
+    /// Which of this store's own commits (on a relay, or of the session
+    /// commits it carries) wrote version `at`: by its writer, or with none
+    /// given, the latest in order at its position.
+    pub(crate) fn own_seq_at(&self, at: sync::Rank) -> Option<u64> {
+        let (pos, writer) = at;
+        if pos.accepted() || self.me == sync::ACCEPTED {
+            return None;
+        }
+        self.own_order
+            .iter()
+            .filter(|(_, order)| {
+                order.0 == pos.seq
+                    && writer.is_none_or(|(node, tx)| (order.1, order.2) == (node, tx))
+            })
+            .max_by_key(|(_, order)| **order)
+            .map(|(seq, _)| *seq)
+    }
+
     /// Apply one write as `who`: policies apply for a session identity.
     fn apply_as(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
         let author = match who {
             Who::Session(author) | Who::Attributed(author) => author,
             Who::Local => self.stamp_author(),
         };
-        let now = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as i64);
+        let now = self.now_ms();
         if let Some(session) = self.checked(who) {
             Self::admit_session_write(op, session, now)?;
         }
@@ -7069,12 +7305,13 @@ impl Inner {
         let at = if seq == last_seq {
             last_at
         } else {
-            now.max(last_at + 1)
+            now.max(last_at.saturating_add(1))
         };
         self.last_stamp = (seq, at);
         // An explicit timestamp (a backfill) stamps this write alone; the
         // clock's monotonic stamps go on.
         let at = op.updated_at_ms().map_or(at, |ms| ms as i64);
+        self.stamp_commit(seq);
         self.writer = Some(Stamp {
             at,
             author: self.author_code(&author_key(&author))?,
@@ -7177,8 +7414,9 @@ impl Inner {
     /// On a replica, the newest version of `row` the authority settled.
     fn settled_seq(&self, table: &str, row: RowUuid) -> Result<Option<u64>, Error> {
         let sql = format!(
-            "SELECT MAX(_seq) FROM {} WHERE id = ?1 AND _n = 0",
-            quote(table)
+            "SELECT MAX(_t) FROM {} WHERE id = ?1 AND _t >= 0 AND _t < {}",
+            quote(table),
+            sync::band_start(sync::PENDING)
         );
         self.conn
             .cached_row(&sql, [row.0.as_bytes().to_vec()], |r| {
@@ -7188,19 +7426,38 @@ impl Inner {
             .map_err(storage)
     }
 
+    /// [`Self::newest_seq`] with its writer, when pending.
+    pub(crate) fn newest_version(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Option<sync::Rank>, Error> {
+        let sql = format!(
+            "SELECT _t, _b FROM {} WHERE id = ?1 ORDER BY _t DESC LIMIT 1",
+            quote(table)
+        );
+        let newest: Option<(i64, Vec<u8>)> = self
+            .conn
+            .cached_row(&sql, [row.0.as_bytes().to_vec()], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()
+            .map_err(storage)?;
+        newest
+            .map(|(t, key)| self.current_rank(table, row, &key, Pos::from_t(t)))
+            .transpose()
+    }
+
     /// The newest committed version of `row` in stored table `table` on
     /// any branch.
     pub(crate) fn newest_seq(&self, table: &str, row: RowUuid) -> Result<Option<Pos>, Error> {
         let sql = format!(
-            "SELECT _n, _seq FROM {} WHERE id = ?1 ORDER BY _n DESC, _seq DESC LIMIT 1",
+            "SELECT _t FROM {} WHERE id = ?1 ORDER BY _t DESC LIMIT 1",
             quote(table)
         );
         self.conn
             .cached_row(&sql, [row.0.as_bytes().to_vec()], |r| {
-                Ok(Pos {
-                    n: r.get(0)?,
-                    seq: r.get::<_, i64>(1)? as u64,
-                })
+                Ok(Pos::from_t(r.get(0)?))
             })
             .optional()
             .map_err(storage)
@@ -7226,10 +7483,7 @@ impl Db {
         let (snapshot, own) = {
             let inner = self.inner.borrow();
             let snapshot = match &inner.client {
-                Some(client) => Pos {
-                    n: client.known_n,
-                    seq: client.known,
-                },
+                Some(client) => Pos::at(client.known),
                 None => inner.frontier(),
             };
             (snapshot, inner.unsettled_own())
@@ -7334,11 +7588,11 @@ impl Db {
                 for (schema, op) in &batch.ops {
                     if let Some(row) = op.row()
                         && inner
-                            .newest_seq(schema.stored_table(op.table())?, row)?
+                            .newest_version(schema.stored_table(op.table())?, row)?
                             .is_some_and(|at| {
-                                let ours = at.n == inner.me && own.contains(&at.seq)
-                                    || landed.values().any(|&landed| landed == at);
-                                !(at.accepted() || ours)
+                                let ours = inner.own_seq_at(at).is_some_and(|tx| own.contains(&tx))
+                                    || landed.values().any(|&landed| landed == at.0);
+                                !(at.0.accepted() || ours)
                             })
                     {
                         return Err(conflict(
@@ -7380,10 +7634,11 @@ impl Db {
                         || now.iter().zip(&read.rows).any(|(now, then)| {
                             now.0 != then.0
                                 || (now.1 != then.1
-                                    && !(then.1.n == inner.me
-                                        && own.contains(&then.1.seq)
-                                        && (now.1.accepted()
-                                            || landed.get(&then.1.seq) == Some(&now.1))))
+                                    && !(inner.own_seq_at(then.1).is_some_and(|tx| {
+                                        own.contains(&tx)
+                                            && (now.1.0.accepted()
+                                                || landed.get(&tx) == Some(&now.1.0))
+                                    })))
                         });
                     if changed {
                         return Err(conflict(
@@ -7392,7 +7647,7 @@ impl Db {
                     }
                 }
             }
-            let (reads, by) = {
+            let reads = {
                 let inner = self.inner();
                 let reads = reads
                     .iter()
@@ -7411,19 +7666,20 @@ impl Db {
                                 .rows
                                 .iter()
                                 .map(|(row, at)| {
-                                    Ok((*row.0.as_bytes(), inner.node_of(at.n)?, at.seq))
+                                    let (by, seq) = inner.read_version(*at);
+                                    (*row.0.as_bytes(), by, seq)
                                 })
-                                .collect::<Result<_, Error>>()?,
+                                .collect(),
                         })
                     })
                     .collect::<Result<Vec<_>, Error>>()?;
-                (reads, inner.node_of(snapshot.n)?)
+                debug_assert!(snapshot.accepted(), "a snapshot is the authority's");
+                reads
             };
             return self.commit_ops(
                 &batch,
                 sync::Kind::Serializable {
                     snapshot: snapshot.seq,
-                    by,
                     reads,
                     own: own.clone(),
                 },
@@ -7577,7 +7833,7 @@ impl Db {
         };
         inner.clear_derived();
         let result = applied.and_then(|()| {
-            let own = inner.own_pos(own);
+            let own = inner.own_rank(own);
             read(&mut inner, snapshot.map(|cut| Cut { own, ..cut }))
         });
         let keep = joins && result.is_ok();
@@ -7658,7 +7914,7 @@ impl Db {
         let result = inner
             .apply_with_edits(&ops, &edits, ops.len(), own)
             .and_then(|()| {
-                let own = inner.own_pos(own);
+                let own = inner.own_rank(own);
                 read(&mut inner, snapshot.map(|cut| Cut { own, ..cut }))
             });
         inner.changed.borrow_mut().truncate(mark);
@@ -7712,8 +7968,8 @@ impl Db {
         };
         let moved = inner.serializable_cut(*snapshot, own).and_then(|cut| {
             Ok(inner
-                .newest_seq(table, row)?
-                .is_some_and(|seq| !cut.sees(seq)))
+                .newest_version(table, row)?
+                .is_some_and(|version| !cut.sees(version)))
         });
         match moved {
             Ok(true) => conflict("a row written by the transaction changed since its snapshot"),
@@ -7829,6 +8085,7 @@ impl TxRef<'_> {
         Ok(WriteHandle {
             row,
             seq: Pos::default(),
+            tx: 0,
         })
     }
 
@@ -7844,6 +8101,7 @@ impl TxRef<'_> {
         Ok(WriteHandle {
             row,
             seq: Pos::default(),
+            tx: 0,
         })
     }
 
@@ -7865,6 +8123,7 @@ impl TxRef<'_> {
         Ok(WriteHandle {
             row,
             seq: Pos::default(),
+            tx: 0,
         })
     }
 
@@ -7879,6 +8138,7 @@ impl TxRef<'_> {
         Ok(WriteHandle {
             row,
             seq: Pos::default(),
+            tx: 0,
         })
     }
 
@@ -7895,6 +8155,7 @@ impl TxRef<'_> {
         Ok(WriteHandle {
             row,
             seq: Pos::default(),
+            tx: 0,
         })
     }
 
