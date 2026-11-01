@@ -1,7 +1,6 @@
 export const LOCAL_DEFAULTS = Object.freeze({
   origin: "http://127.0.0.1:3000",
-  appId: "jamazon-local",
-  serverUrl: "http://127.0.0.1:4200",
+  appId: "00000000-0000-0000-0000-0000000a3a20",
   // Local runs take card payments from the in-app sandbox provider, and say so
   // on every payment screen. It is chosen here, never as a fallback.
   paymentProvider: "sandbox",
@@ -14,15 +13,22 @@ export function readBuildConfig(env = process.env) {
   return {
     nodeEnv: env.NODE_ENV,
     /** Public settings set explicitly rather than defaulted (deployments must set all). */
-    unsetPublic: [
-      "NEXT_PUBLIC_APP_ORIGIN",
-      "NEXT_PUBLIC_JAZZ_APP_ID",
-      "NEXT_PUBLIC_JAZZ_SERVER_URL",
-    ].filter((name) => !env[name]),
+    unsetPublic: ["NEXT_PUBLIC_APP_ORIGIN", "NEXT_PUBLIC_JAZZ_APP_ID"].filter((name) => !env[name]),
     origin: env.NEXT_PUBLIC_APP_ORIGIN || LOCAL_DEFAULTS.origin,
     appId: env.NEXT_PUBLIC_JAZZ_APP_ID || LOCAL_DEFAULTS.appId,
-    serverUrl: env.NEXT_PUBLIC_JAZZ_SERVER_URL || LOCAL_DEFAULTS.serverUrl,
-    backendSecret: env.BACKEND_SECRET || undefined,
+    /**
+     * Where the data lives. With JAZZ_SERVER_URL set, the backend connects to
+     * that sync server (such as Jazz Cloud) with the app's secrets; otherwise
+     * it keeps the data in a local SQLite directory.
+     */
+    remote: env.JAZZ_SERVER_URL
+      ? {
+          url: env.JAZZ_SERVER_URL,
+          adminSecret: env.JAZZ_ADMIN_SECRET || undefined,
+          backendSecret: env.BACKEND_SECRET || undefined,
+        }
+      : undefined,
+    dataPath: env.JAZZ_DATA_PATH || ".jazz",
     betterAuthSecret: env.BETTER_AUTH_SECRET || undefined,
     paymentProvider: env.PAYMENT_PROVIDER || undefined,
     stripeSecretKey: env.STRIPE_SECRET_KEY || undefined,
@@ -34,8 +40,6 @@ export function readBuildConfig(env = process.env) {
  * A local run is a non-production process (`next dev`, tests) on a loopback
  * origin. Anything else, including a production build that forgot to set
  * NEXT_PUBLIC_APP_ORIGIN, is a deployment and must be configured explicitly.
- * The app id and server URL are not part of the test: `withJazz` generates
- * both for `next dev`.
  * @param {ReturnType<typeof readBuildConfig>} config
  */
 export function usesLocalDefaults(config = readBuildConfig()) {
@@ -69,10 +73,11 @@ export function paymentProvider(config = readBuildConfig()) {
 }
 
 /**
- * Reject incomplete configurations before any route runs. Both secrets are
- * always required: there are no checked-in secrets, and `pnpm dev` generates
- * local ones (see dev-secrets.mjs). Deployments must also name their origin,
- * Jazz app and server, and payment provider.
+ * Reject incomplete configurations before any route runs. The Better Auth
+ * secret is always required: there are no checked-in secrets, and `pnpm dev`
+ * generates a local one (see dev-secrets.mjs). Deployments must also name
+ * their origin, Jazz app and payment provider, and a remote sync server needs
+ * both of the app's secrets.
  * @param {ReturnType<typeof readBuildConfig>} config
  */
 export function assertBuildConfiguration(config = readBuildConfig()) {
@@ -80,8 +85,9 @@ export function assertBuildConfiguration(config = readBuildConfig()) {
   const missing = [
     ...(local ? [] : config.unsetPublic),
     !local && !config.paymentProvider && "PAYMENT_PROVIDER",
-    !config.backendSecret && "BACKEND_SECRET",
     !config.betterAuthSecret && "BETTER_AUTH_SECRET",
+    config.remote && !config.remote.adminSecret && "JAZZ_ADMIN_SECRET",
+    config.remote && !config.remote.backendSecret && "BACKEND_SECRET",
   ].filter(Boolean);
   if (missing.length) {
     throw new Error(

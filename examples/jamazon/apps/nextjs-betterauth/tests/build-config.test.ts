@@ -6,12 +6,11 @@ import {
   usesLocalDefaults,
 } from "../src/lib/build-config.mjs";
 
-const secrets = { BACKEND_SECRET: "backend-secret", BETTER_AUTH_SECRET: "auth-secret" };
+const secrets = { BETTER_AUTH_SECRET: "auth-secret" };
 const deployment = {
   NODE_ENV: "production",
   NEXT_PUBLIC_APP_ORIGIN: "https://shop.example",
   NEXT_PUBLIC_JAZZ_APP_ID: "jamazon",
-  NEXT_PUBLIC_JAZZ_SERVER_URL: "https://sync.example",
   PAYMENT_PROVIDER: "sandbox",
   ...secrets,
 };
@@ -23,7 +22,7 @@ describe("build configuration fails closed", () => {
     const config = readBuildConfig({ NODE_ENV: "production", ...secrets });
     expect(usesLocalDefaults(config)).toBe(false);
     expect(() => assertBuildConfiguration(config)).toThrow(
-      /must set NEXT_PUBLIC_APP_ORIGIN, NEXT_PUBLIC_JAZZ_APP_ID, NEXT_PUBLIC_JAZZ_SERVER_URL, PAYMENT_PROVIDER/,
+      /must set NEXT_PUBLIC_APP_ORIGIN, NEXT_PUBLIC_JAZZ_APP_ID, PAYMENT_PROVIDER/,
     );
   });
 
@@ -36,9 +35,7 @@ describe("build configuration fails closed", () => {
   });
 
   it("never falls back to built-in secrets, locally or deployed", () => {
-    expect(() => check({ NODE_ENV: "development" })).toThrow(
-      /missing BACKEND_SECRET, BETTER_AUTH_SECRET/,
-    );
+    expect(() => check({ NODE_ENV: "development" })).toThrow(/missing BETTER_AUTH_SECRET/);
     expect(() => check({ ...deployment, BETTER_AUTH_SECRET: "" })).toThrow(
       /must set BETTER_AUTH_SECRET/,
     );
@@ -60,6 +57,29 @@ describe("build configuration fails closed", () => {
     const config = check({ NODE_ENV: "development", ...secrets });
     expect(usesLocalDefaults(config)).toBe(true);
     expect(paymentProvider(config)).toBe("sandbox");
+  });
+
+  it("needs both of the app's secrets to sync through a remote server", () => {
+    expect(() => check({ ...deployment, JAZZ_SERVER_URL: "https://sync.example" })).toThrow(
+      /must set JAZZ_ADMIN_SECRET, BACKEND_SECRET/,
+    );
+    const config = check({
+      ...deployment,
+      JAZZ_SERVER_URL: "https://sync.example",
+      JAZZ_ADMIN_SECRET: "admin",
+      BACKEND_SECRET: "backend",
+    });
+    expect(config.remote).toEqual({
+      url: "https://sync.example",
+      adminSecret: "admin",
+      backendSecret: "backend",
+    });
+  });
+
+  it("keeps data in local SQLite unless a sync server is named", () => {
+    const config = check({ NODE_ENV: "development", ...secrets });
+    expect(config.remote).toBeUndefined();
+    expect(config.dataPath).toBe(".jazz");
   });
 
   it("refuses live Stripe keys", () => {
