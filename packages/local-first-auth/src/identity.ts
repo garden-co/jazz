@@ -56,11 +56,7 @@ function subjectOf(publicKey: Uint8Array): string {
 /** The identity a secret stands for. Pure and offline. */
 export function identityOf(secret: string): LocalFirstIdentity {
   const publicKey = ed25519.getPublicKey(signingKey(secret));
-  return {
-    issuer: LOCAL_FIRST_ISSUER,
-    subject: subjectOf(publicKey),
-    publicKey,
-  };
+  return { issuer: LOCAL_FIRST_ISSUER, subject: subjectOf(publicKey), publicKey };
 }
 
 export interface SignTokenOptions {

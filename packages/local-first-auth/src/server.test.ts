@@ -19,10 +19,7 @@ describe("verifyRequest", () => {
   });
   it("throws for an invalid local-first bearer", () => {
     expect(() =>
-      verifyRequest(request(`Bearer ${cases[0]!.token}`), {
-        audience: "x",
-        now,
-      }),
+      verifyRequest(request(`Bearer ${cases[0]!.token}`), { audience: "x", now }),
     ).toThrow(/audience/);
   });
 });
