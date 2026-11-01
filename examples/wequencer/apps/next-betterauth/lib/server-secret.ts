@@ -3,7 +3,7 @@
  * runnable without a secret manager. Production must always inject its own
  * secret; a bundled fallback would silently collapse the trust boundary.
  */
-export function serverSecret(name: "BACKEND_SECRET" | "BETTER_AUTH_SECRET", devFallback: string) {
+export function serverSecret(name: "BETTER_AUTH_SECRET", devFallback: string) {
   const configured = process.env[name];
   if (configured) return configured;
   if (process.env.NODE_ENV === "production") {

@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { app } from "@/schema";
-import { authJazzClient } from "@/lib/auth-jazz-client";
+import { jazz } from "@/lib/jazz.server";
 
 /** Provision the signed-in profile outside the application's read path. */
 export async function ensureProfile(accountId: string, displayName: string) {
   const author = accountId;
-  const db = (await authJazzClient()).db;
+  const db = (await jazz()).db;
   const existing = await db.one(app.profiles.where({ author }));
   if (existing) {
     if (existing.displayName !== displayName)
