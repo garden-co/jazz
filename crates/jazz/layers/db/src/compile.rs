@@ -992,7 +992,8 @@ impl<'a> Ctx<'a> {
             let source = self.source(table)?;
             let mut body = format!(
                 "SELECT {alias}.id AS id, {alias}._t AS _t, {alias}._st AS _st, \
-                 {label} AS _arm{columns}{keys_sql} FROM {source} AS {alias} WHERE {}",
+                 {label} AS _arm{columns}{keys_sql}, {alias}._w AS _w FROM {source} AS {alias} \
+                 WHERE {}",
                 and(&wheres)
             );
             // An arm's own window applies before the union.
@@ -1022,7 +1023,7 @@ impl<'a> Ctx<'a> {
         let offset = self.bind(Sql::Integer(plan.offset as i64));
         let columns: String = (0..projection.len()).map(|i| format!(", c{i}")).collect();
         let sql = format!(
-            "SELECT id, _t, _st, _arm{columns} FROM ({}) ORDER BY {} \
+            "SELECT id, _t, _st, _arm{columns}, _w FROM ({}) ORDER BY {} \
              LIMIT {limit} OFFSET {offset}",
             arms.join(" UNION ALL "),
             order.join(", ")
@@ -1036,7 +1037,7 @@ impl<'a> Ctx<'a> {
             joined: 0,
             versioned: false,
             union: true,
-            writer: false,
+            writer: true,
             partial: Vec::new(),
         })
     }
@@ -1275,8 +1276,17 @@ impl<'a> Ctx<'a> {
                 projection.push((format!("{}.{column}", source.name), ty, tags));
             }
         }
+        // The root's writer; a history root's versions carry none, and its
+        // rows name their versions as no writer ever wrote them.
+        let writer = if sources[0].history {
+            let (node, tx) = crate::db::sync::NO_WRITER;
+            let none = crate::db::sync::writer_bytes(node, tx);
+            self.bind(Sql::Blob(none))
+        } else {
+            "t._w".to_owned()
+        };
         let sql = format!(
-            "SELECT t.id, t._t, t._st{ids}{columns} FROM {} AS t{joins} \
+            "SELECT t.id, t._t, t._st{ids}{columns}, {writer} FROM {} AS t{joins} \
              WHERE {} ORDER BY {}",
             sql_of(&sources[0]),
             and(&wheres),
@@ -1292,7 +1302,7 @@ impl<'a> Ctx<'a> {
             joined: sources.len() - 1,
             versioned: true,
             union: false,
-            writer: false,
+            writer: true,
         })
     }
 

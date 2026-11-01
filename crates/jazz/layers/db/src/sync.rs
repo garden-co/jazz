@@ -104,7 +104,8 @@ pub const SEQ_BITS: u32 = 52;
 pub const MAX_SEQ: u64 = (1 << SEQ_BITS) - 1;
 
 /// A row version's position: its kind (`n`, see [`ACCEPTED`]) and its seq
-/// there (the authority's position, or its writer's commit HLC). Every
+/// there (the authority's position, or a commit HLC as this store holds
+/// it). Every
 /// accepted version precedes every pending one. Stored as one `_t`
 /// ([`Pos::t`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -126,7 +127,7 @@ impl Pos {
         Self { n: ACCEPTED, seq }
     }
 
-    /// A pending version, by its writer's commit HLC.
+    /// A pending version, at a commit HLC.
     pub const fn pending(hlc: u64) -> Self {
         Self {
             n: PENDING,
@@ -653,9 +654,11 @@ pub struct Image {
 }
 
 /// Where an unsettled commit orders among the unsettled versions of a row:
-/// its writer's commit HLC (its position), then its writer's node and that
-/// node's tx, so every store orders the same commits the same way. The
-/// authority's order replaces it once the commits settle.
+/// its commit HLC as the store holding it took it (its position), then
+/// its writer's node and that node's tx. A relay bounds a writer's clock at
+/// ingest, so a commit from a writer whose clock runs ahead can order
+/// differently there than in its writer's store. The authority's order
+/// replaces it once the commits settle.
 pub type Order = (u64, [u8; 16], u64);
 
 /// A pending version's writer as history keys it (`_w`): its node, then its
@@ -667,6 +670,10 @@ pub(crate) fn writer_bytes(node: [u8; 16], tx: u64) -> Vec<u8> {
 }
 
 /// The writer [`writer_bytes`] encoded.
+/// A writer no commit has: a serializable read that cannot tell which
+/// writer's pending version it read names it so, and conflicts.
+pub(crate) const NO_WRITER: ([u8; 16], u64) = ([0xff; 16], u64::MAX);
+
 pub(crate) fn writer_of_bytes(w: &[u8]) -> Option<([u8; 16], u64)> {
     let node: [u8; 16] = w.get(..16)?.try_into().ok()?;
     let tx: [u8; 8] = w.get(16..24)?.try_into().ok()?;
@@ -1240,7 +1247,7 @@ pub enum SyncMessage {
     /// [`Acting`]).
     Commit {
         id: TxId,
-        /// Its writer's commit HLC: with `id`, where it orders among
+        /// Its sender's commit HLC: with `id`, where it orders among
         /// unsettled versions ([`Order`]) until the authority's order
         /// replaces it. Refused past 2^52, where no pending `_t` holds it.
         #[serde(deserialize_with = "commit_clock")]
@@ -4373,11 +4380,18 @@ impl Inner {
 
     /// The writer (`_w`) of a row's current version at `at`: empty for an
     /// accepted one, or when the row's current version is not at `at`.
-    pub(crate) fn current_writer(&self, table: &str, row: RowUuid, key: &[u8], at: Pos) -> Vec<u8> {
+    pub(crate) fn current_writer(
+        &self,
+        table: &str,
+        row: RowUuid,
+        key: &[u8],
+        at: Pos,
+    ) -> Result<Vec<u8>, Error> {
         if at.accepted() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        self.conn
+        Ok(self
+            .conn
             .cached_row(
                 &format!(
                     "SELECT _w FROM {} WHERE id = ?1 AND _b = ?2 AND _t = ?3",
@@ -4387,9 +4401,8 @@ impl Inner {
                 |r| r.get(0),
             )
             .optional()
-            .ok()
-            .flatten()
-            .unwrap_or_default()
+            .map_err(storage)?
+            .unwrap_or_default())
     }
 
     fn put_image(&self, image: &Image, history: bool) -> Result<(), Error> {
@@ -4397,7 +4410,7 @@ impl Inner {
         let w = match image.written {
             _ if image.at.accepted() => Vec::new(),
             Some((_, node, tx)) => writer_bytes(node, tx),
-            None => self.current_writer(&image.table, row, &image.key, image.at),
+            None => self.current_writer(&image.table, row, &image.key, image.at)?,
         };
         if !history {
             self.forget_current(&image.table, row, &image.key);
@@ -9165,9 +9178,9 @@ impl Inner {
     /// is overlaid by a pending write).
     /// Name the writer of each of this relay's unsettled versions among
     /// `images` by its commit's [`Order`], which a session orders it by.
-    fn mark_written(&self, images: &mut [Image]) {
+    fn mark_written(&self, images: &mut [Image]) -> Result<(), Error> {
         if self.client.is_none() {
-            return;
+            return Ok(());
         }
         for image in images
             .iter_mut()
@@ -9175,9 +9188,10 @@ impl Inner {
         {
             let row = RowUuid::from_bytes(image.id);
             image.written =
-                writer_of_bytes(&self.current_writer(&image.table, row, &image.key, image.at))
+                writer_of_bytes(&self.current_writer(&image.table, row, &image.key, image.at)?)
                     .map(|(node, tx)| (image.at.seq, node, tx));
         }
+        Ok(())
     }
 
     /// Drop the pending versions this replica shows of other writers: a
@@ -9226,7 +9240,8 @@ impl Inner {
 
     fn receive_image(&mut self, mut image: Image) -> Result<bool, Error> {
         // An upstream ships accepted versions and unsettled ones, each at
-        // its writer's commit HLC and named by its writer.
+        // the commit HLC it holds the commit at (bounded at its ingest) and
+        // named by its writer.
         if image.at.accepted() {
             image.written = None;
         } else {
@@ -10640,7 +10655,7 @@ impl Db {
             }
             for message in &mut out {
                 if let SyncMessage::Rows { images, .. } = message {
-                    inner.mark_written(images);
+                    inner.mark_written(images)?;
                 }
             }
             // Chunked cells go as deltas over the version of their row the
@@ -11424,7 +11439,7 @@ impl Db {
                 }));
                 session.outbox.extend(lost);
                 session.outbox.extend(hidden);
-                inner.mark_written(&mut images);
+                inner.mark_written(&mut images)?;
                 let session = &mut inner.sessions[index];
                 session
                     .outbox
@@ -12197,9 +12212,10 @@ impl Db {
                     }
                 }
             }
-            // A relay keeps the session's commit clock: the versions it
-            // stores for the session are at the session's pending position,
-            // written by the session (SPEC 8 §8.13).
+            // A relay holds the session's commit at its clock as bounded
+            // at ingest (`bounded_hlc`), which can be below the session's
+            // own: the versions it stores for the session are at that
+            // position, written by the session (SPEC 8 §8.13).
             if relay {
                 inner.observe_hlc(clock);
                 inner.own_order.insert(seq, (clock, id.0, id.1));

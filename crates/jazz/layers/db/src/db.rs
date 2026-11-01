@@ -3897,41 +3897,22 @@ impl Inner {
             }
         }
         out.into_iter()
-            .map(|(table, row, at, writer)| Ok((row, self.read_rank(&table, row, at, writer)?)))
+            .map(|(_, row, at, writer)| Ok((row, Self::read_rank(at, writer))))
             .collect()
     }
 
     /// A version a read returned, with its writer when pending: two
     /// writers' versions of a row can share a position. The read carries
     /// the writer of the version its cut picked, current or in history; a
-    /// read that does not (a union, a flat join) names the current one.
-    fn read_rank(
-        &self,
-        table: &str,
-        row: RowUuid,
-        at: Pos,
-        writer: Option<Arc<[u8]>>,
-    ) -> Result<sync::Rank, Error> {
+    /// pending version read without one (an aggregate's, a history read's)
+    /// is named by a writer no commit has, so the commit conflicts rather
+    /// than validating against another writer's version.
+    fn read_rank(at: Pos, writer: Option<Arc<[u8]>>) -> sync::Rank {
         if at.accepted() {
-            return Ok((at, None));
+            return (at, None);
         }
-        if let Some(writer) = writer {
-            return Ok((at, sync::writer_of_bytes(&writer)));
-        }
-        let stored = self.schema.stored_table(table).unwrap_or(table).to_owned();
-        let w: Option<Vec<u8>> = self
-            .conn
-            .cached_row(
-                &format!(
-                    "SELECT _w FROM {} WHERE id = ?1 AND _t = ?2 LIMIT 1",
-                    quote(&stored)
-                ),
-                rusqlite::params![row.0.as_bytes().to_vec(), at.t()],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(storage)?;
-        Ok((at, w.as_deref().and_then(sync::writer_of_bytes)))
+        let writer = writer.as_deref().and_then(sync::writer_of_bytes);
+        (at, Some(writer.unwrap_or(sync::NO_WRITER)))
     }
 
     /// A row with its array relations, read as the row was: through the
@@ -4043,7 +4024,7 @@ impl Inner {
             return Ok(current);
         };
         if let Some((seq, _)) = current
-            && cut.sees(self.current_rank(table, row, key, seq))
+            && cut.sees(self.current_rank(table, row, key, seq)?)
         {
             return Ok(current);
         }
@@ -4074,14 +4055,14 @@ impl Inner {
         row: RowUuid,
         key: &[u8],
         at: Pos,
-    ) -> sync::Rank {
+    ) -> Result<sync::Rank, Error> {
         if at.accepted() {
-            return (at, None);
+            return Ok((at, None));
         }
-        (
+        Ok((
             at,
-            sync::writer_of_bytes(&self.current_writer(table, row, key, at)),
-        )
+            sync::writer_of_bytes(&self.current_writer(table, row, key, at)?),
+        ))
     }
 
     /// The newest superseded version of a row that `cut` sees: its
@@ -5559,7 +5540,7 @@ impl Inner {
             None => Some(quote(&table.stored)),
             Some(cut) => match self.existing(&table.stored, row, from)? {
                 Some((current, _))
-                    if cut.sees(self.current_rank(&table.stored, row, from, current)) =>
+                    if cut.sees(self.current_rank(&table.stored, row, from, current)?) =>
                 {
                     Some(quote(&table.stored))
                 }
@@ -7462,7 +7443,9 @@ impl Inner {
             })
             .optional()
             .map_err(storage)?;
-        Ok(newest.map(|(t, key)| self.current_rank(table, row, &key, Pos::from_t(t))))
+        newest
+            .map(|(t, key)| self.current_rank(table, row, &key, Pos::from_t(t)))
+            .transpose()
     }
 
     /// The newest committed version of `row` in stored table `table` on

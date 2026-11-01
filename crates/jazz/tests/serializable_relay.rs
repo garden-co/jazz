@@ -21,9 +21,13 @@ use jazz::db::{
     block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::{Query, col, eq, lit};
+use jazz::query::{Query, RelationQuery, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
+use jazz::tools::public_schema::{
+    RelationColumnRef, RelationExpr, RelationProjectColumn, RelationProjectExpr, RelationRowIdRef,
+    RelationUnionArm,
+};
 use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
@@ -1425,10 +1429,50 @@ fn a_snapshot_over_an_own_commit_leaves_out_another_tabs_version_at_its_position
 /// Two tabs write the same row in the same millisecond, so their versions
 /// share a position, and the later writer's shows. A serializable read on
 /// the earlier tab sees its own version from history and names that
-/// version, by its writer, in its read set: the later tab's write lands
-/// over it before the commit, so the commit conflicts.
+/// version, by its writer, in its read set: the authority takes the own
+/// write, then the later tab's, then the commit, which conflicts.
 #[test]
 fn a_serializable_read_of_an_own_version_under_another_tabs_at_its_position_names_its_own() {
+    own_version_under_another_tabs_conflicts(Query::from("seats"));
+}
+
+/// The same through a union, whose rows carry their versions' writers as
+/// a plain read's do.
+#[test]
+fn a_serializable_union_read_of_an_own_version_under_another_tabs_names_its_own() {
+    let columns = ["id", "show", "holder"]
+        .iter()
+        .map(|alias| RelationProjectColumn {
+            alias: (*alias).to_owned(),
+            expr: if *alias == "id" {
+                RelationProjectExpr::RowId(RelationRowIdRef::Current)
+            } else {
+                RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("seats".to_owned()),
+                    column: (*alias).to_owned(),
+                })
+            },
+        })
+        .collect();
+    let mut query = Query::from("seats");
+    query.relation = Some(RelationQuery {
+        rel: RelationExpr::Union {
+            inputs: vec![RelationUnionArm {
+                label: "seats".to_owned(),
+                input: RelationExpr::Project {
+                    input: Box::new(RelationExpr::TableScan {
+                        table: "seats".to_owned(),
+                        alias: None,
+                    }),
+                    columns,
+                },
+            }],
+        },
+    });
+    own_version_under_another_tabs_conflicts(query);
+}
+
+fn own_version_under_another_tabs_conflicts(query: Query) {
     const CLOCK: i64 = 1_800_000_000_000;
     let mut net = Net::new(2);
     let seats = net.seed_seats(2);
@@ -1452,7 +1496,7 @@ fn a_serializable_read_of_an_own_version_under_another_tabs_at_its_position_name
         net.pump();
     }
     let tab = net.tab(0);
-    let query = tab.prepare_query(&Query::from("seats")).unwrap();
+    let query = tab.prepare_query(&query).unwrap();
     let live = block_on(tab.all(&query, ReadOpts::default())).unwrap();
     let live = live.iter().find(|row| row.row_uuid() == seats[0]).unwrap();
     assert_eq!(
