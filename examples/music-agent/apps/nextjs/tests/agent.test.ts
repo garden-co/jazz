@@ -10,7 +10,9 @@ import permissions from "../permissions";
 let server: LocalJazzServerHandle;
 beforeAll(async () => {
   server = await startLocalJazzServer({ inMemory: true, schema: app, permissions });
-  process.env.NEXT_PUBLIC_JAZZ_SERVER_URL = server.url;
+  // The app's Jazz fronts this test server with remote().
+  process.env.JAZZ_SERVER_URL = server.url;
+  process.env.JAZZ_ADMIN_SECRET = server.adminSecret;
   process.env.NEXT_PUBLIC_JAZZ_APP_ID = server.appId;
   process.env.BACKEND_SECRET = server.backendSecret;
   process.env.BETTER_AUTH_SECRET = "music-agent-test-better-auth-secret-0123456789";
@@ -29,7 +31,6 @@ let secondSession: { close(): Promise<void> } | undefined;
 async function secondBackend(): Promise<Db> {
   if (second) return second;
   const { createJazzSession } = await import("jazz-tools/backend");
-  const { jazzEnv } = await import("../src/lib/jazz-env");
   const session = await createJazzSession({
     app,
     permissions,
@@ -37,7 +38,6 @@ async function secondBackend(): Promise<Db> {
     driver: { type: "memory" },
     serverUrl: server.url,
     initial: { backendSecret: server.backendSecret },
-    env: jazzEnv,
   });
   secondSession = session;
   const client = session.getSnapshot().client;

@@ -16,18 +16,15 @@ export class AccessError extends Error {
 /**
  * A Db that reads as the signed-in user, under the same permissions as the
  * browser, so permissions.ts stays the only place ownership is decided.
- *
- * Routes the browser calls without a bearer token, such as the audio
- * element's range requests, carry only the Better Auth cookie: the server
- * mints the user's app JWT from it and admits the request with that token,
- * exactly as the Jazz server admits the browser.
+ * Requests carry only the Better Auth cookie, which the app's Jazz reads in
+ * `authenticate`, exactly as it does for the browser's sync.
  */
 export async function userDb(request: Request): Promise<Db> {
-  const minted = await auth.api.getToken({ headers: request.headers }).catch(() => null);
-  if (!minted?.token) throw new AccessError("sign in required", 401);
-  const client = await backendJazzClient();
+  const session = await auth.api.getSession({ headers: request.headers }).catch(() => null);
+  if (!session?.user) throw new AccessError("sign in required", 401);
+  const jazz = await backendJazzClient();
   try {
-    return await client.forRequest({ headers: { authorization: `Bearer ${minted.token}` } });
+    return await jazz.forRequest(request);
   } catch (error) {
     const code = accountAuthErrorCode(error);
     // Only the account registry's answer about this user is an auth failure.

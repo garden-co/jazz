@@ -10,7 +10,7 @@ import { TopNav, TopNavHeading } from "@astryxdesign/core/TopNav";
 import { app } from "@/schema";
 import { StatusScreen } from "@/components/status-screen";
 import { bootstrapWorkspace } from "@/src/lib/account-enrollment";
-import { authClient, getJwtFromBetterAuth } from "@/src/lib/auth-client";
+import { authClient } from "@/src/lib/auth-client";
 import { ConversationView } from "./conversation-view";
 
 /** Prepare the workspace once (server-side, idempotent), then show the app. */
@@ -20,8 +20,8 @@ export function ChatPage({ agentLabel }: { agentLabel: string }) {
   useEffect(() => {
     if (!session) return;
     let cancelled = false;
-    void getJwtFromBetterAuth()
-      .then((token) => (token ? bootstrapWorkspace(token) : undefined))
+    void bootstrapWorkspace()
+      .catch(() => undefined)
       .then((response) => {
         if (!cancelled) setBootstrap(response?.ok ? "ready" : "failed");
       });
