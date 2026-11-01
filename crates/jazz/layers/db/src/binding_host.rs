@@ -1625,6 +1625,7 @@ impl Binding {
         updated_at_ms: Option<f64>,
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
+        transaction: Option<&str>,
     ) -> HostResult<StreamingMutation> {
         let identity = match (author, attribution) {
             (Some(_), Some(_)) => {
@@ -1658,12 +1659,18 @@ impl Binding {
                 "backend-attributed streaming mutations do not support branch writes".into(),
             );
         }
+        let transaction = transaction.map(open_transaction).transpose()?;
+        let identity = match transaction {
+            Some(id) => self.staged_identity(id, identity)?,
+            None => identity,
+        };
         let upload = self
             .db
             .begin_streaming_value_upload(&table, &cells, &column)?;
         Ok(StreamingMutation {
             state: Some(Box::new(StreamingState {
                 binding: self.clone(),
+                transaction,
                 upload,
                 mutation,
                 table,
@@ -1841,6 +1848,8 @@ struct StreamingState {
     updated_at_ms: Option<u64>,
     head: Option<BranchSelector>,
     base: Option<BranchViewBase>,
+    /// The open transaction the finished value is staged in.
+    transaction: Option<OpenTransactionId>,
 }
 
 /// A large value uploaded in chunks, then published as one row mutation.
@@ -1880,6 +1889,15 @@ impl StreamingMutation {
         if self.failed {
             return Err(closed());
         }
+        if self
+            .state
+            .as_ref()
+            .is_some_and(|state| state.transaction.is_some())
+        {
+            return Err(HostError::Argument(
+                "a streaming mutation begun in a transaction finishes in it".into(),
+            ));
+        }
         let state = *self.state.take().ok_or_else(closed)?;
         let write = block_on(state.binding.db.finish_streaming_value_upload(
             state.upload,
@@ -1894,6 +1912,42 @@ impl StreamingMutation {
             state.base,
         ));
         state.binding.write(write)
+    }
+
+    /// Whether the mutation began in a transaction, and so finishes with
+    /// [`Self::finish_in_transaction`].
+    pub fn in_transaction(&self) -> bool {
+        self.state
+            .as_ref()
+            .is_some_and(|state| state.transaction.is_some())
+    }
+
+    /// Stage the uploaded value's row mutation in the transaction the
+    /// mutation began in. Like any staged write, a refusal decided by the
+    /// row's stored state is reported by the commit.
+    pub fn finish_in_transaction(&mut self) -> HostResult<()> {
+        if self.failed {
+            return Err(closed());
+        }
+        let Some(id) = self.state.as_ref().and_then(|state| state.transaction) else {
+            return Err(HostError::Argument(
+                "a streaming mutation begun outside a transaction finishes with finish".into(),
+            ));
+        };
+        let state = *self.state.take().ok_or_else(closed)?;
+        let staged = block_on(state.binding.db.tx_ref(id).finish_streaming_value_upload(
+            state.upload,
+            state.mutation,
+            &state.table,
+            state.row,
+            state.cells,
+            &state.column,
+            state.identity,
+            state.updated_at_ms,
+            state.head,
+            state.base,
+        ));
+        state.binding.staged(id, staged)
     }
 
     /// Drop the upload; `false` when already closed.

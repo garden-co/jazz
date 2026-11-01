@@ -48,6 +48,7 @@ import {
   type OpenTransactionId,
   type TxId,
   type PermissionAdvice,
+  type StreamingMutationKind,
   type StreamingValueSource,
   validateWriteWaitTimeout,
   WriteWaitTimeoutError,
@@ -1784,6 +1785,107 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const result = ownerClient.rollbackTransaction(openTransactionId);
     preparation.cancelled = true;
     return result;
+  }
+
+  /**
+   * Stream one Text, Json, or Bytea column into a new row, staged in this
+   * transaction. Resolves with the row id once the stream is consumed; the
+   * commit waits for it and fails if the stream did.
+   */
+  insertStreaming<T, Init, StreamingInit>(
+    table: TableProxy<T, Init, StreamingInit>,
+    data: StreamingInit,
+    options?: StreamingInsertOptions,
+  ): Promise<{ id: string }> {
+    return this.streamingMutation("insert", table, options?.id, data, options);
+  }
+
+  /** Stream one large column of an existing row, staged in this transaction. */
+  updateStreaming<T, Init, StreamingInit, StreamingUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate>,
+    id: string,
+    data: StreamingUpdate,
+    options?: UpdateOptions,
+  ): Promise<{ id: string }> {
+    return this.streamingMutation("update", table, id, data, options);
+  }
+
+  /** Stream one large column of a row, creating it if absent, staged in this transaction. */
+  upsertStreaming<T, Init, StreamingInit, StreamingUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate>,
+    id: string,
+    data: StreamingUpdate,
+    options?: UpdateOptions,
+  ): Promise<{ id: string }> {
+    return this.streamingMutation("upsert", table, id, data, options);
+  }
+
+  private streamingMutation(
+    mutation: StreamingMutationKind,
+    table: TableProxy<any, any, any, any>,
+    id: string | undefined,
+    data: unknown,
+    options?: StreamingInsertOptions | UpdateOptions,
+  ): Promise<{ id: string }> {
+    assertWritableTable(table);
+    this.bindTable(table);
+    const client = this.resolveClient(table._schema);
+    const operation =
+      mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
+    const { openTransactionId, session, attribution, preparation } = this.requireBinding(
+      `${mutation}Streaming`,
+    );
+    const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
+    rejectIncompleteDependencies(table, ordinaryData, [column]);
+    const rowId =
+      id ??
+      (missingWriteDependencies(table, ordinaryData).includes("id") ? reserveRowId() : undefined);
+    const stage = async () => {
+      const record =
+        mutation === "insert"
+          ? transformInputColumns(table, ordinaryData, rowId ? { id: rowId } : {}, true)
+          : await prepareInputColumns(
+              table,
+              ordinaryData,
+              operation,
+              rowId!,
+              client,
+              session,
+              undefined,
+              normalizeViewOptions(table._schema, table._table, options as UpdateOptions),
+            );
+      const values = toWriteRecordForOperation(operation, record, table._schema, table._table);
+      const branch =
+        mutation === "insert" ? deriveStreamingInsertBranch(table, ordinaryData) : undefined;
+      const normalized =
+        mutation === "insert"
+          ? normalizeSelectorOptions(table._schema, table._table, {
+              ...options,
+              ...(rowId ? { id: rowId } : {}),
+              ...(branch ? { branch } : {}),
+            })
+          : normalizeViewOptions(table._schema, table._table, options as UpdateOptions);
+      return client.streamingMutationInTransaction(
+        mutation,
+        table._table,
+        values,
+        column,
+        source,
+        openTransactionId,
+        normalized,
+        session,
+        attribution,
+        rowId,
+      );
+    };
+    return Promise.resolve(
+      preparation.run(() =>
+        runAfterPreparation(client, () => (preparation.cancelled ? undefined : stage())),
+      ),
+    ).then((staged) => {
+      if (!staged) throw new Error("Transaction was rolled back before the stream was staged");
+      return staged;
+    });
   }
 
   /**

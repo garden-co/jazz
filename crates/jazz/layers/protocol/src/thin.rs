@@ -200,6 +200,8 @@ pub enum ThinOp {
         /// JSON write options.
         #[serde(with = "serde_bytes")]
         options: Vec<u8>,
+        /// The open transaction the finished value is staged in.
+        transaction: Option<String>,
     },
     /// The next chunk of upload `stream`. Answered with [`ThinBody::Ok`]
     /// once applied.
@@ -211,7 +213,8 @@ pub enum ThinOp {
         chunk: Vec<u8>,
     },
     /// Publish upload `stream` as its row mutation. Answered with
-    /// [`ThinBody::Written`].
+    /// [`ThinBody::Written`], or [`ThinBody::Staged`] for an upload begun in
+    /// a transaction.
     FinishStream {
         /// The `id` of the `BeginStream` request.
         stream: u64,

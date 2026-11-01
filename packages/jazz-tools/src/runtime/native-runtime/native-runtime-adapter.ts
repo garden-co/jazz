@@ -350,6 +350,7 @@ type NativeDb = {
     updatedAtMs?: number,
     head?: unknown,
     base?: unknown,
+    transaction?: OpenTransactionId,
   ): NativeStreamingMutation;
   requestInsertPermissionAdvice?(
     table: string,
@@ -448,6 +449,8 @@ type NativeDb = {
 type NativeStreamingMutation = {
   push(chunk: Uint8Array): void | Promise<void>;
   finish(): Write | Promise<Write>;
+  /** Stage the row mutation in the transaction the mutation began in. */
+  finishInTransaction?(): void | Promise<void>;
   abort(): boolean | Promise<boolean>;
 };
 
@@ -1757,9 +1760,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const operation =
       mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
     this.assertMutationAdmission(operation);
-    if (this.currentTx(writeContext, operation)) {
-      throw new Error("Streaming mutations are not supported inside a transaction");
-    }
+    const tx = this.currentTx(writeContext, operation);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
@@ -1767,6 +1768,10 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     rejectAttributedBranchWrite(attribution, branchView);
+    if (tx) {
+      this.assertTransactionAttribution(tx, attribution);
+      this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+    }
     if (!begin) throw new Error("Native runtime does not expose streaming mutations");
 
     const definition = this.table(table);
@@ -1794,7 +1799,12 @@ export class NativeRuntimeAdapter implements Runtime {
       updatedAtMs ?? undefined,
       branchView?.head,
       branchView?.base,
+      tx?.id,
     );
+    if (tx && !upload.finishInTransaction) {
+      await upload.abort();
+      throw new Error("This native runtime does not support streaming inside a transaction yet");
+    }
     const owner = this.ownerRuntime;
     let releaseAdmission!: () => void;
     const admission = new Promise<void>((resolve) => {
@@ -1841,7 +1851,13 @@ export class NativeRuntimeAdapter implements Runtime {
       await previousFinalization;
       let receipt: MutationResult;
       try {
-        receipt = this.finishMutation(await upload.finish());
+        if (tx) {
+          await upload.finishInTransaction!();
+          tx.hasStagedMutations = true;
+          receipt = { kind: "staged", openTransactionId: tx.id };
+        } else {
+          receipt = this.finishMutation(await upload.finish());
+        }
       } finally {
         releaseFinalization();
       }

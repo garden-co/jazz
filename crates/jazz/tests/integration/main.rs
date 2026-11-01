@@ -145,6 +145,8 @@ mod storage_corpus;
 mod storage_errors;
 #[path = "../stored_identities.rs"]
 mod stored_identities;
+#[path = "../streaming_transaction.rs"]
+mod streaming_transaction;
 #[path = "../streaming_upload_ownership.rs"]
 mod streaming_upload_ownership;
 #[path = "../structured_result_tree.rs"]
