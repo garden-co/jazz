@@ -844,7 +844,7 @@ impl Inner {
     ) -> Vec<Vec<(String, String)>> {
         let read = |sql: String,
                     params: &[&dyn rusqlite::ToSql]|
-         -> Vec<((i64, i64), Vec<u8>, Vec<(String, String)>)> {
+         -> Vec<(i64, Vec<u8>, Vec<(String, String)>)> {
             let Ok(mut statement) = self.conn.prepare_cached(&sql) else {
                 return Vec::new();
             };
@@ -859,14 +859,12 @@ impl Inner {
                         .map(|i| statement.column_name(i).map(str::to_owned))
                         .collect::<Result<_, _>>()?;
                 }
-                let mut seq = (0, 0);
+                let mut seq = 0i64;
                 let mut branch = Vec::new();
                 let mut out = Vec::new();
                 for (i, name) in names.iter().enumerate() {
-                    if name == "_n" {
-                        seq.0 = r.get(i)?;
-                    } else if name == "_seq" {
-                        seq.1 = r.get(i)?;
+                    if name == "_t" {
+                        seq = r.get(i)?;
                     } else if name == "_b" {
                         branch = r.get(i)?;
                     } else if columns.contains(name) {
@@ -886,15 +884,15 @@ impl Inner {
         let seq = current
             .iter()
             .find(|(_, branch, _)| branch.as_slice() == key)
-            .map_or((i64::MAX, i64::MAX), |(seq, _, _)| *seq);
+            .map_or(i64::MAX, |(seq, _, _)| *seq);
         let old = read(
             format!(
-                "SELECT * FROM {} WHERE id = ?1 AND _b = ?2 AND (_n, _seq) < (?3, ?4) \
-                 AND (_st & {}) = 0 ORDER BY _n DESC, _seq DESC LIMIT 1",
+                "SELECT * FROM {} WHERE id = ?1 AND _b = ?2 AND _t < ?3 \
+                 AND (_st & {}) = 0 ORDER BY _t DESC LIMIT 1",
                 quote(&format!("{table}__h")),
                 crate::values::STATE_AS_SENT
             ),
-            &[&id, &key, &seq.0, &seq.1],
+            &[&id, &key, &seq],
         );
         current
             .into_iter()
@@ -1345,8 +1343,15 @@ impl Inner {
             let Some(before) = prior.get(&out.row.id) else {
                 continue;
             };
-            let from = before.seq;
-            if from == out.row.seq {
+            // Two writers' pending versions can share a position.
+            let rank = |row: &CurrentRow| {
+                (
+                    row.seq,
+                    row.writer.as_deref().and_then(sync::writer_of_bytes),
+                )
+            };
+            let (from, to) = (rank(before), rank(&out.row));
+            if from == to {
                 continue;
             }
             for column in &group.key.splices {
@@ -1373,7 +1378,7 @@ impl Inner {
                     &group.prepared.query.table,
                     out.row.id,
                     column,
-                    (from, out.row.seq),
+                    (from, to),
                     group.identity,
                 ) {
                     out.splices.push((column.clone(), splices));

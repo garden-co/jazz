@@ -6,8 +6,8 @@
 //! when its commit wrote content (`_st` without
 //! [`crate::values::STATE_NO_CONTENT`]; deletes and restores without
 //! content are not versions), it is no merged text write's value as sent
-//! ([`crate::values::STATE_AS_SENT`]) and the authority accepted it (`_n`
-//! is 0: a replica's pending writes are at its own node's code). Access
+//! ([`crate::values::STATE_AS_SENT`]) and the authority accepted it (`_t`
+//! in the accepted band: a replica's pending writes are in its own). Access
 //! follows the current row: its read policy, in its branch, gates every
 //! version of it, and a deleted current row hides its history unless the
 //! read includes deleted rows.
@@ -23,8 +23,10 @@ use crate::schema::history::{ACCEPTED_AT_COLUMN, HistoryMetadataColumn, TRANSACT
 
 use super::*;
 
-/// Bits below an HLC's physical milliseconds (its logical counter).
-const HLC_COUNTER_BITS: u32 = 18;
+/// Bits below the physical milliseconds of a `$acceptedAt` value (its
+/// logical counter): the jazz-types HLC encoding, not the commit HLC of
+/// positions (`shard::HLC_COUNTER_BITS`).
+const ACCEPTED_AT_COUNTER_BITS: u32 = 18;
 
 impl Ctx<'_> {
     /// A `history.<source>` read. See the module docs.
@@ -98,7 +100,7 @@ impl Ctx<'_> {
             Some(OrderDirection::Desc) => "DESC",
             _ => "ASC",
         };
-        let order = format!("{order}, {alias}._seq {tie}");
+        let order = format!("{order}, {alias}._t {tie}");
         let columns = projection
             .iter()
             .map(|(name, ..)| Ok(format!(", {}", column_sql(versions, alias, name)?)))
@@ -107,7 +109,7 @@ impl Ctx<'_> {
         let offset = self.bind(Sql::Integer(query.offset as i64));
         let statement = |order: &str| {
             format!(
-                "SELECT {alias}.id, {alias}._n, {alias}._seq, {alias}._st, {alias}.{} \
+                "SELECT {alias}.id, {alias}._t, {alias}._st, {alias}.{} \
                  {columns} FROM {source} AS {alias} WHERE {} ORDER BY {order} LIMIT {limit} \
                  OFFSET {offset}",
                 quote(TRANSACTION_ID_COLUMN),
@@ -123,6 +125,7 @@ impl Ctx<'_> {
             joined: 0,
             versioned: true,
             union: false,
+            writer: false,
             partial: Vec::new(),
         })
     }
@@ -160,7 +163,10 @@ impl Ctx<'_> {
         let mut gate = vec!["a.id = v.id".to_owned(), "a._b = v._b".to_owned()];
         let mut keep = vec![
             format!("(v._st & {}) = 0", STATE_NO_CONTENT | STATE_AS_SENT),
-            "v._n = 0".to_owned(),
+            format!(
+                "v._t < {}",
+                crate::db::sync::band_start(crate::db::sync::PENDING)
+            ),
         ];
         if let Some(view) = &self.view
             && !table.branch_by.is_empty()
@@ -180,10 +186,10 @@ impl Ctx<'_> {
         ));
         let recorded = "(SELECT unhex(printf('%016x', s.tx) || hex(n.node)) \
                         FROM _jazz_transactions AS s JOIN _jazz_nodes AS n ON n.n = s.n \
-                        WHERE s.sn = 0 AND s.seq = v._seq)";
+                        WHERE s.t = v._t)";
         let transaction = match self.history_origin {
             Some(node) => format!(
-                "COALESCE({recorded}, unhex(printf('%016x', v._seq) || '{}'))",
+                "COALESCE({recorded}, unhex(printf('%016x', v._t) || '{}'))",
                 hex(&node)
             ),
             None => {
@@ -192,7 +198,7 @@ impl Ctx<'_> {
             }
         };
         let accepted =
-            format!("(COALESCE(v.\"$updatedAt\", v.\"$createdAt\") << {HLC_COUNTER_BITS})");
+            format!("(COALESCE(v.\"$updatedAt\", v.\"$createdAt\") << {ACCEPTED_AT_COUNTER_BITS})");
         let mut deletion = String::new();
         for column in ["$deletedAt", "$deletedBy"] {
             deletion.push_str(&format!(
@@ -202,9 +208,9 @@ impl Ctx<'_> {
             ));
         }
         let source = format!(
-            "(SELECT v.id, v._b, v._n, v._seq, 0 AS _st{v_stored}, {transaction} AS {}, \
-             {accepted} AS {}{deletion} FROM (SELECT id, _b, _n, _seq, _st{stored} FROM {name} AS c \
-             WHERE {current_bound} UNION ALL SELECT id, _b, _n, _seq, _st{stored} FROM {history} AS h \
+            "(SELECT v.id, v._b, v._t, 0 AS _st{v_stored}, {transaction} AS {}, \
+             {accepted} AS {}{deletion} FROM (SELECT id, _b, _t, _st{stored} FROM {name} AS c \
+             WHERE {current_bound} UNION ALL SELECT id, _b, _t, _st{stored} FROM {history} AS h \
              WHERE {history_bound}) AS v WHERE {})",
             quote(TRANSACTION_ID_COLUMN),
             quote(ACCEPTED_AT_COLUMN),

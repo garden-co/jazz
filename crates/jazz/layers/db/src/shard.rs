@@ -35,19 +35,21 @@ use crate::values::storage;
 /// Commit positions are hybrid-clock timestamps: the wall clock in ms since
 /// [`HLC_EPOCH_MS`] above [`HLC_COUNTER_BITS`] bits of counter, so every
 /// position fits a JS number (Durable Object SQLite returns integers as
-/// one): 42 bits of ms last 139 years, and a node handing out more than
-/// 2,048 in a millisecond runs ahead of its clock until the clock catches
-/// up. Positions of different nodes then compare by time, and every part
-/// of a cross-shard commit can land at one.
+/// one, and a pending `_t` holds one below its pending bit): 42 bits of
+/// ms last 139 years, and a node handing out more than 1,024 in a
+/// millisecond runs ahead of its clock until the clock catches up.
+/// Positions of different nodes then compare by time, and every part of a
+/// cross-shard commit can land at one.
 pub const HLC_EPOCH_MS: u64 = 1_735_689_600_000;
 /// The counter bits below the ms of an [`hlc`] position.
-pub const HLC_COUNTER_BITS: u32 = 11;
+pub const HLC_COUNTER_BITS: u32 = 10;
 /// How far ahead of this node's clock an observed position may be (ms):
 /// further is a peer whose clock (or claim) cannot be trusted.
 pub const HLC_MAX_OFFSET_MS: u64 = 500;
 
-/// The latest ms an [`hlc`] position can name: positions stay under 2^53.
-const HLC_MAX_MS: u64 = (1 << (53 - HLC_COUNTER_BITS)) - 1;
+/// The latest ms an [`hlc`] position can name: positions stay under 2^52,
+/// the accepted kind of `_t`.
+const HLC_MAX_MS: u64 = (1 << (52 - HLC_COUNTER_BITS)) - 1;
 
 /// The first position at wall-clock time `ms` (Unix ms). A reading past
 /// what positions can name is taken as the last ms they can.
@@ -190,7 +192,12 @@ impl Inner {
     /// out or observed, and on a shard no earlier than its clock (past the
     /// offset bound it waits out after a reopen, for a write that does not
     /// wait).
+    /// A replica numbers its own commits locally: their versions sit at
+    /// their commit HLCs (see [`Inner::stamp_commit`]).
     pub(crate) fn next_seq(&self) -> u64 {
+        if self.me != crate::db::sync::ACCEPTED {
+            return self.seq + 1;
+        }
         let floor = self.waits_out().map_or(0, |after| hlc(after) + 1);
         (self.seq + 1).max(hlc((self.shard.clock)())).max(floor)
     }
@@ -317,7 +324,7 @@ impl Inner {
             .conn
             .query_row(
                 "SELECT 1 FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
-                 WHERE n.node = ?1 AND t.tx = ?2 AND t.seq IS NOT NULL",
+                 WHERE n.node = ?1 AND t.tx = ?2 AND t.t IS NOT NULL",
                 rusqlite::params![commit.node.to_vec(), commit.tx as i64],
                 |r| r.get(0),
             )
