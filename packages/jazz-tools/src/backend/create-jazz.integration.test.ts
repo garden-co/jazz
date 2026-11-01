@@ -116,9 +116,6 @@ describe("createJazz", () => {
       });
       expect(response.status).toBe(404);
     }
-    // The endpoint names its app, for browsers configured with only "/jazz".
-    const wellKnown = await fetch(`${origin}/jazz/.well-known/jazz`);
-    expect(await wellKnown.json()).toEqual({ appId });
     // Requests outside the mount fall through to the app.
     expect(await (await fetch(`${origin}/other`)).text()).toBe("app route");
 

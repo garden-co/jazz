@@ -785,11 +785,6 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   async function handle(request: Request): Promise<Response> {
     const path = innerPath(request);
     if (path === null) return new Response("Not found", { status: 404 });
-    if (path === "/.well-known/jazz") {
-      // Which app this endpoint serves, so a browser needs no app id of its own.
-      if (request.method !== "GET") return new Response(null, { status: 405 });
-      return Response.json({ appId: options.appId }, { headers: { "cache-control": "no-cache" } });
-    }
     if (/^\/apps\/[^/]+\/accounts\/backend-sign-in$/.test(path)) {
       return backendSignIn(request);
     }
