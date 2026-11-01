@@ -1,6 +1,7 @@
 import { installNativeRuntimeEntropy } from "../runtime/runtime-entropy.js";
 import type { RuntimeClientContext } from "../runtime/runtime-source.js";
 import { RuntimeSource } from "../runtime/runtime-source.js";
+import type { TextAnchors } from "../runtime/text-anchors.js";
 import type { JazzClient } from "../runtime/client.js";
 import { JazzClient as JazzRuntimeClient } from "../runtime/client.js";
 import type { Session } from "../runtime/context.js";
@@ -67,6 +68,20 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
   private pendingCapability: Uint8Array | null = null;
   private ownsAdmission = false;
   private explicitlyOffline = false;
+
+  override textAnchors(): TextAnchors {
+    const call = this.foregroundFactory?.textAnchors;
+    if (!call) throw new Error("This React Native runtime does not support text anchors");
+    const run = (request: Record<string, unknown>) => JSON.parse(call(JSON.stringify(request)));
+    return {
+      captureAnchor: (text, position, side, version) =>
+        run({ op: "captureAnchor", text, position, side, version }),
+      resolveAnchor: (anchor, text, version) => run({ op: "resolveAnchor", anchor, text, version }),
+      captureRange: (text, start, end, version) =>
+        run({ op: "captureRange", text, start, end, version }),
+      resolveRange: (range, text, version) => run({ op: "resolveRange", range, text, version }),
+    };
+  }
 
   override async load(config: ReactNativeDbConfig): Promise<void> {
     if (shouldRequireSqliteDriver(config)) {

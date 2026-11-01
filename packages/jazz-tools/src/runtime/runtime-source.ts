@@ -5,6 +5,7 @@ import type { WasmSchema } from "../drivers/types.js";
 import type { JazzClient } from "./client.js";
 import type { DbConfig } from "./db.js";
 import type { AuthFailureReason } from "./auth-state.js";
+import type { TextAnchors } from "./text-anchors.js";
 
 export interface RuntimeTokenOptions {
   secret: string;
@@ -209,5 +210,9 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
 
   mintAnonymousToken(_options: RuntimeTokenOptions): string {
     throw new Error("Db runtime source does not support anonymous auth");
+  }
+
+  textAnchors(): TextAnchors {
+    throw new Error("Db runtime source does not support text anchors yet");
   }
 }

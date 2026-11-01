@@ -1,0 +1,971 @@
+[
+  {
+    "name": "edits in different paragraphs",
+    "format": "markdown",
+    "intent": "disjoint edits both apply",
+    "base": "Load-in is at 2pm.\n\nDoors open at 8pm.\n",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "2pm",
+        "with": "1pm"
+      },
+      {
+        "user": "B",
+        "replace": "8pm",
+        "with": "7:30pm"
+      }
+    ],
+    "expect": "Load-in is at 1pm.\n\nDoors open at 7:30pm.\n"
+  },
+  {
+    "name": "edits to different words of one sentence",
+    "format": "plain",
+    "intent": "disjoint edits inside one sentence both apply",
+    "base": "The van leaves Leeds at nine with four people.",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "Leeds",
+        "with": "Manchester"
+      },
+      {
+        "user": "B",
+        "replace": "four",
+        "with": "five"
+      }
+    ],
+    "expect": "The van leaves Manchester at nine with five people."
+  },
+  {
+    "name": "both insert at the same point",
+    "format": "plain",
+    "intent": "both inserts kept, the earlier write first",
+    "base": "Setlist: Intro, Encore.",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "Intro,",
+        "with": "Intro, Night Drive,"
+      },
+      {
+        "user": "B",
+        "replace": "Intro,",
+        "with": "Intro, Glass Hearts,"
+      }
+    ],
+    "expect": "Setlist: Intro, Night Drive, Glass Hearts, Encore."
+  },
+  {
+    "name": "same typo fixed by both",
+    "format": "plain",
+    "intent": "an identical change applies once",
+    "base": "Teh show starts at nine.",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "Teh",
+        "with": "The"
+      },
+      {
+        "user": "B",
+        "replace": "Teh",
+        "with": "The"
+      }
+    ],
+    "expect": "The show starts at nine."
+  },
+  {
+    "name": "same sentence deleted by both",
+    "format": "plain",
+    "intent": "a delete both made applies once and nothing else goes",
+    "base": "Keep this. Remove this sentence. Keep that.",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "Remove this sentence. ",
+        "with": ""
+      },
+      {
+        "user": "B",
+        "replace": "Remove this sentence. ",
+        "with": ""
+      }
+    ],
+    "expect": "Keep this. Keep that."
+  },
+  {
+    "name": "competing rewrites of one word",
+    "format": "plain",
+    "intent": "two replacements of the same span: the later write wins",
+    "base": "Meet at the stage door at six.",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "six",
+        "with": "five"
+      },
+      {
+        "user": "B",
+        "replace": "six",
+        "with": "seven"
+      }
+    ],
+    "expect": "Meet at the stage door at seven."
+  },
+  {
+    "name": "a typing burst while a bandmate edits elsewhere",
+    "format": "plain",
+    "intent": "a chain of small own writes merges with a concurrent edit",
+    "base": "Notes: van booked. Hotel pending.",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "van booked.",
+        "with": "van booked for"
+      },
+      {
+        "user": "A",
+        "replace": "booked for",
+        "with": "booked for Friday"
+      },
+      {
+        "user": "B",
+        "replace": "Hotel pending.",
+        "with": "Hotel confirmed."
+      },
+      {
+        "user": "A",
+        "replace": "for Friday",
+        "with": "for Friday morning."
+      }
+    ],
+    "expect": "Notes: van booked for Friday morning. Hotel confirmed."
+  },
+  {
+    "name": "offline session against online edits",
+    "format": "markdown",
+    "intent": "a long offline chain merges with edits made meanwhile",
+    "base": "# Rider\n\n- water\n- towels\n- fruit\n",
+    "steps": [
+      {
+        "offline": "A"
+      },
+      {
+        "user": "A",
+        "replace": "- water",
+        "with": "- still water"
+      },
+      {
+        "user": "A",
+        "replace": "- fruit",
+        "with": "- fruit\n- hummus"
+      },
+      {
+        "user": "A",
+        "replace": "- hummus",
+        "with": "- hummus and bread"
+      },
+      {
+        "user": "B",
+        "replace": "- towels",
+        "with": "- 6 towels"
+      },
+      {
+        "user": "B",
+        "replace": "# Rider",
+        "with": "# Rider (Leeds)"
+      },
+      {
+        "online": "A"
+      }
+    ],
+    "expect": "# Rider (Leeds)\n\n- still water\n- 6 towels\n- fruit\n- hummus and bread\n"
+  },
+  {
+    "name": "paragraph split while the second half is edited",
+    "format": "markdown",
+    "intent": "a split and an edit after it both apply",
+    "base": "We drove to Leeds. The show was sold out and loud.\n",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "Leeds. The",
+        "with": "Leeds.\n\nThe"
+      },
+      {
+        "user": "B",
+        "replace": "sold out",
+        "with": "completely sold out"
+      }
+    ],
+    "expect": "We drove to Leeds.\n\nThe show was completely sold out and loud.\n"
+  },
+  {
+    "name": "paragraphs joined while one is edited",
+    "format": "markdown",
+    "intent": "a join and an edit inside both apply",
+    "base": "We drove to Leeds.\n\nThe show was sold out.\n",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "Leeds.\n\nThe",
+        "with": "Leeds. The"
+      },
+      {
+        "user": "B",
+        "replace": "drove",
+        "with": "flew"
+      }
+    ],
+    "expect": "We flew to Leeds. The show was sold out.\n"
+  },
+  {
+    "name": "edit inside a paragraph someone deleted",
+    "format": "markdown",
+    "intent": "no lost work: an insert inside a deleted span survives",
+    "base": "Intro.\n\nThe Glasgow date is cancelled.\n\nOutro.\n",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "The Glasgow date is cancelled.\n\n",
+        "with": ""
+      },
+      {
+        "user": "B",
+        "replace": "cancelled.",
+        "with": "cancelled. Refunds go out Monday."
+      }
+    ],
+    "keeps": ["Refunds go out Monday.", "Intro.", "Outro."]
+  },
+  {
+    "name": "paragraph moved while edited",
+    "format": "markdown",
+    "intent": "an edit follows its moved paragraph, no duplicate",
+    "base": "## Monday\nRehearsal at the studio.\n\n## Tuesday\nRadio interview at noon.\n",
+    "steps": [
+      {
+        "user": "A",
+        "set": "## Tuesday\nRadio interview at noon.\n\n## Monday\nRehearsal at the studio.\n"
+      },
+      {
+        "user": "B",
+        "replace": "the studio",
+        "with": "the new studio"
+      }
+    ],
+    "expect": "## Tuesday\nRadio interview at noon.\n\n## Monday\nRehearsal at the new studio.\n"
+  },
+  {
+    "name": "list item moved while its text is edited",
+    "format": "markdown",
+    "intent": "an edit follows its moved list item, no duplicate",
+    "base": "- soundcheck\n- dinner\n- show at nine\n",
+    "steps": [
+      {
+        "user": "A",
+        "set": "- show at nine\n- soundcheck\n- dinner\n"
+      },
+      {
+        "user": "B",
+        "replace": "dinner",
+        "with": "dinner at the curry house"
+      }
+    ],
+    "expect": "- show at nine\n- soundcheck\n- dinner at the curry house\n"
+  },
+  {
+    "name": "sentence cut and pasted earlier while a typo in it is fixed",
+    "format": "plain",
+    "intent": "the fix follows the moved sentence",
+    "base": "Bring ID. Doors at 8. Merch table needs a volunteeer.",
+    "steps": [
+      {
+        "user": "A",
+        "set": "Merch table needs a volunteeer. Bring ID. Doors at 8."
+      },
+      {
+        "user": "B",
+        "replace": "volunteeer",
+        "with": "volunteer"
+      }
+    ],
+    "expect": "Merch table needs a volunteer. Bring ID. Doors at 8."
+  },
+  {
+    "name": "bold added while a word inside is changed",
+    "format": "markdown",
+    "intent": "formatting and a text edit inside it both apply",
+    "base": "Bring the red van keys.\n",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "red van keys",
+        "with": "**red van keys**"
+      },
+      {
+        "user": "B",
+        "replace": "red",
+        "with": "blue"
+      }
+    ],
+    "expect": "Bring the **blue van keys**.\n"
+  },
+  {
+    "name": "link target and link text changed concurrently",
+    "format": "markdown",
+    "intent": "both parts of the link change",
+    "base": "Tickets: [buy here](https://old.example/tix).\n",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "https://old.example/tix",
+        "with": "https://new.example/tickets"
+      },
+      {
+        "user": "B",
+        "replace": "buy here",
+        "with": "get tickets"
+      }
+    ],
+    "expect": "Tickets: [get tickets](https://new.example/tickets).\n"
+  },
+  {
+    "name": "checklist item ticked while its text is edited",
+    "format": "markdown",
+    "intent": "the tick and the edit both apply",
+    "base": "- [ ] book the van\n- [ ] print setlists\n",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "- [ ] book",
+        "with": "- [x] book"
+      },
+      {
+        "user": "B",
+        "replace": "book the van",
+        "with": "book the big van"
+      }
+    ],
+    "expect": "- [x] book the big van\n- [ ] print setlists\n"
+  },
+  {
+    "name": "heading level and heading text changed concurrently",
+    "format": "markdown",
+    "intent": "level and text both change",
+    "base": "## Tour notes\n\nText.\n",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "## Tour",
+        "with": "### Tour"
+      },
+      {
+        "user": "B",
+        "replace": "Tour notes",
+        "with": "Tour notes 2026"
+      }
+    ],
+    "expect": "### Tour notes 2026\n\nText.\n"
+  },
+  {
+    "name": "markdown table cells edited in different rows",
+    "format": "markdown",
+    "intent": "cell edits in different rows both apply",
+    "base": "| City | Date |\n| --- | --- |\n| Leeds | 3 May |\n| York | 4 May |\n",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "3 May",
+        "with": "5 May"
+      },
+      {
+        "user": "B",
+        "replace": "York",
+        "with": "Hull"
+      }
+    ],
+    "expect": "| City | Date |\n| --- | --- |\n| Leeds | 5 May |\n| Hull | 4 May |\n"
+  },
+  {
+    "name": "list renumbered by an insert at the top while an item is edited",
+    "format": "markdown",
+    "intent": "the renumbering and the edit both apply",
+    "base": "1. soundcheck\n2. dinner\n3. show\n",
+    "steps": [
+      {
+        "user": "A",
+        "set": "1. load in\n2. soundcheck\n3. dinner\n4. show\n"
+      },
+      {
+        "user": "B",
+        "replace": "dinner",
+        "with": "dinner (vegan)"
+      }
+    ],
+    "expect": "1. load in\n2. soundcheck\n3. dinner (vegan)\n4. show\n"
+  },
+  {
+    "name": "nested list indent while the item text is edited",
+    "format": "markdown",
+    "intent": "the indent and the edit both apply",
+    "base": "- gear\n- cables\n- pedals\n",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "- cables",
+        "with": "  - cables"
+      },
+      {
+        "user": "B",
+        "replace": "cables",
+        "with": "XLR cables"
+      }
+    ],
+    "expect": "- gear\n  - XLR cables\n- pedals\n"
+  },
+  {
+    "name": "code block edited in two places",
+    "format": "markdown",
+    "intent": "disjoint edits inside a fenced code block apply",
+    "base": "```\nnpm run lights\nnpm run sound\n```\n",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "run lights",
+        "with": "run lights -- --venue=leeds"
+      },
+      {
+        "user": "B",
+        "replace": "run sound",
+        "with": "run sound -- --loud"
+      }
+    ],
+    "expect": "```\nnpm run lights -- --venue=leeds\nnpm run sound -- --loud\n```\n"
+  },
+  {
+    "name": "plain client overwrites the whole text with one change",
+    "format": "markdown",
+    "intent": "a whole-value write merges as the one change it made",
+    "base": "Load-in 2pm.\nDoors 8pm.\nCurfew 11pm.\n",
+    "steps": [
+      {
+        "user": "B",
+        "replace": "Doors 8pm.",
+        "with": "Doors 7:30pm."
+      },
+      {
+        "user": "A",
+        "set": "Load-in 2pm.\nDoors 8pm.\nCurfew 11:30pm.\n"
+      }
+    ],
+    "expect": "Load-in 2pm.\nDoors 7:30pm.\nCurfew 11:30pm.\n"
+  },
+  {
+    "name": "an editor normalizes emphasis markers while a bandmate edits",
+    "format": "markdown",
+    "intent": "a cosmetic rewrite elsewhere keeps the real edit",
+    "base": "This is *really* important.\nBring *two* spare strings.\n",
+    "steps": [
+      {
+        "user": "A",
+        "set": "This is _really_ important.\nBring _two_ spare strings.\n"
+      },
+      {
+        "user": "B",
+        "replace": "important.",
+        "with": "important, everyone."
+      }
+    ],
+    "expect": "This is _really_ important, everyone.\nBring _two_ spare strings.\n"
+  },
+  {
+    "name": "repeated words with an insert and a later edit",
+    "format": "plain",
+    "intent": "an ambiguous insert does not swallow a concurrent edit",
+    "base": "la la la, sing it.",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "la la la",
+        "with": "la la la la"
+      },
+      {
+        "user": "B",
+        "replace": "sing it",
+        "with": "shout it"
+      }
+    ],
+    "expect": "la la la la, shout it."
+  },
+  {
+    "name": "emoji and accents edited concurrently",
+    "format": "plain",
+    "intent": "multi-unit characters merge without corruption",
+    "base": "🎸 Café gig in Zürich 🎉",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "🎸",
+        "with": "🎸🥁"
+      },
+      {
+        "user": "B",
+        "replace": "Zürich",
+        "with": "Zürich and Bern"
+      }
+    ],
+    "expect": "🎸🥁 Café gig in Zürich and Bern 🎉"
+  },
+  {
+    "name": "Japanese text edited in two places",
+    "format": "plain",
+    "intent": "per-character merge of text without spaces",
+    "base": "東京でライブをします。明日は大阪です。",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "東京",
+        "with": "横浜"
+      },
+      {
+        "user": "B",
+        "replace": "大阪",
+        "with": "京都"
+      }
+    ],
+    "expect": "横浜でライブをします。明日は京都です。"
+  },
+  {
+    "name": "html: text inside a paragraph and a new paragraph",
+    "format": "html",
+    "intent": "an edit inside a tag and an added element both apply",
+    "base": "<p>Doors at 8.</p><p>Bring ID.</p>",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "Doors at 8.",
+        "with": "Doors at 7:30."
+      },
+      {
+        "user": "B",
+        "replace": "<p>Bring ID.</p>",
+        "with": "<p>Bring ID.</p><p>No re-entry.</p>"
+      }
+    ],
+    "expect": "<p>Doors at 7:30.</p><p>Bring ID.</p><p>No re-entry.</p>"
+  },
+  {
+    "name": "html: sentence wrapped in strong while a word inside changes",
+    "format": "html",
+    "intent": "wrapping and a text edit inside it both apply",
+    "base": "<p>Bring the red van keys.</p>",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "the red van keys",
+        "with": "<strong>the red van keys</strong>"
+      },
+      {
+        "user": "B",
+        "replace": "red",
+        "with": "blue"
+      }
+    ],
+    "expect": "<p>Bring <strong>the blue van keys</strong>.</p>"
+  },
+  {
+    "name": "html: attribute changed while the element text changes",
+    "format": "html",
+    "intent": "an attribute edit and a text edit both apply",
+    "base": "<a href=\"https://old.example\">Tickets</a>",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "https://old.example",
+        "with": "https://new.example"
+      },
+      {
+        "user": "B",
+        "replace": "Tickets",
+        "with": "Buy tickets"
+      }
+    ],
+    "expect": "<a href=\"https://new.example\">Buy tickets</a>"
+  },
+  {
+    "name": "html: concurrent deletes leave well-formed markup",
+    "format": "html",
+    "intent": "deleting overlapping element ranges never leaves a dangling tag",
+    "base": "<ul><li>one</li><li>two</li><li>three</li></ul>",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "<li>one</li><li>two</li>",
+        "with": ""
+      },
+      {
+        "user": "B",
+        "replace": "<li>two</li><li>three</li>",
+        "with": ""
+      }
+    ],
+    "expect": "<ul></ul>"
+  },
+  {
+    "name": "two people type in the same sentence, syncing often",
+    "format": "plain",
+    "intent": "live co-typing with frequent syncs keeps every word",
+    "base": "Plan: .",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "Plan: ",
+        "with": "Plan: drive"
+      },
+      {
+        "user": "B",
+        "replace": "Plan: .",
+        "with": "Plan: . Eat."
+      },
+      {
+        "sync": "A"
+      },
+      {
+        "sync": "B"
+      },
+      {
+        "user": "A",
+        "replace": "drive",
+        "with": "drive north"
+      },
+      {
+        "user": "B",
+        "replace": "Eat.",
+        "with": "Eat early."
+      },
+      {
+        "sync": "A"
+      },
+      {
+        "sync": "B"
+      },
+      {
+        "user": "A",
+        "replace": "north",
+        "with": "north at six"
+      }
+    ],
+    "expect": "Plan: drive north at six. Eat early."
+  },
+  {
+    "name": "both edit the same paragraph offline for a while",
+    "format": "markdown",
+    "intent": "two long offline sessions on different sentences both survive",
+    "base": "Day one: drive. Day two: rest. Day three: show.\n",
+    "steps": [
+      {
+        "offline": "A"
+      },
+      {
+        "offline": "B"
+      },
+      {
+        "user": "A",
+        "replace": "drive.",
+        "with": "drive to Leeds."
+      },
+      {
+        "user": "A",
+        "replace": "to Leeds.",
+        "with": "to Leeds via York."
+      },
+      {
+        "user": "B",
+        "replace": "show.",
+        "with": "big show."
+      },
+      {
+        "user": "B",
+        "replace": "big show.",
+        "with": "big show, then party."
+      },
+      {
+        "user": "A",
+        "replace": "rest.",
+        "with": "rest and laundry."
+      },
+      {
+        "online": "B"
+      },
+      {
+        "online": "A"
+      }
+    ],
+    "expect": "Day one: drive to Leeds via York. Day two: rest and laundry. Day three: big show, then party.\n"
+  },
+  {
+    "name": "one rewrites a sentence while the other appends to it",
+    "format": "plain",
+    "intent": "an append at the end of a rewritten sentence survives",
+    "base": "The van is ready.",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "The van is ready.",
+        "with": "Our van has been serviced and is ready."
+      },
+      {
+        "user": "B",
+        "replace": "ready.",
+        "with": "ready. Keys are in the office."
+      }
+    ],
+    "keeps": ["serviced", "Keys are in the office."]
+  },
+  {
+    "name": "a trailing newline added by one editor",
+    "format": "markdown",
+    "intent": "a whitespace-only normalization does not fight a real edit",
+    "base": "Final line",
+    "steps": [
+      {
+        "user": "A",
+        "set": "Final line\n"
+      },
+      {
+        "user": "B",
+        "replace": "Final line",
+        "with": "Final line, really"
+      }
+    ],
+    "expect": "Final line, really\n"
+  },
+  {
+    "name": "block moved while both sides edit inside and outside it",
+    "format": "markdown",
+    "intent": "edits inside a moved block follow it, edits elsewhere stay",
+    "base": "## Setlist\nIntro, Night Drive, Glass Hearts.\n\n## Merch\nShirts, tote bags, posters.\n\n## Travel\nVan leaves at nine.\n",
+    "steps": [
+      {
+        "user": "A",
+        "set": "## Merch\nShirts, tote bags, posters.\n\n## Setlist\nIntro, Night Drive, Glass Hearts.\n\n## Travel\nVan leaves at nine.\n"
+      },
+      {
+        "user": "B",
+        "replace": "tote bags",
+        "with": "tote bags, stickers"
+      },
+      {
+        "user": "B",
+        "replace": "at nine",
+        "with": "at half nine"
+      }
+    ],
+    "expect": "## Merch\nShirts, tote bags, stickers, posters.\n\n## Setlist\nIntro, Night Drive, Glass Hearts.\n\n## Travel\nVan leaves at half nine.\n"
+  },
+  {
+    "name": "quote wrapped around a paragraph while it is edited",
+    "format": "markdown",
+    "intent": "the quote marker and the edit both apply",
+    "base": "She said the show was great.\n",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "She said",
+        "with": "> She said"
+      },
+      {
+        "user": "B",
+        "replace": "great",
+        "with": "amazing"
+      }
+    ],
+    "expect": "> She said the show was amazing.\n"
+  },
+  {
+    "name": "list item split into two while another item is edited",
+    "format": "markdown",
+    "intent": "split and edit both apply",
+    "base": "- strings and picks\n- drum keys\n",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "strings and picks",
+        "with": "strings\n- picks"
+      },
+      {
+        "user": "B",
+        "replace": "drum keys",
+        "with": "spare drum keys"
+      }
+    ],
+    "expect": "- strings\n- picks\n- spare drum keys\n"
+  },
+  {
+    "name": "italic and bold applied to neighbouring words",
+    "format": "markdown",
+    "intent": "formatting of adjacent words both apply",
+    "base": "Bring water and snacks.\n",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "water",
+        "with": "*water*"
+      },
+      {
+        "user": "B",
+        "replace": "snacks",
+        "with": "**snacks**"
+      }
+    ],
+    "expect": "Bring *water* and **snacks**.\n"
+  },
+  {
+    "name": "concurrent appends to the end of a document",
+    "format": "markdown",
+    "intent": "both appended paragraphs survive, earlier first",
+    "base": "# Notes\n",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "# Notes\n",
+        "with": "# Notes\nFirst idea.\n"
+      },
+      {
+        "user": "B",
+        "replace": "# Notes\n",
+        "with": "# Notes\nSecond idea.\n"
+      }
+    ],
+    "keeps": ["First idea.", "Second idea."],
+    "order": ["# Notes", "First idea.", "Second idea."]
+  },
+  {
+    "name": "repeated paragraph edited in its second copy",
+    "format": "markdown",
+    "intent": "an edit to one of two identical paragraphs stays on that copy",
+    "base": "Chorus: la la la.\n\nVerse one.\n\nChorus: la la la.\n",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "Verse one.",
+        "with": "Verse one, louder."
+      },
+      {
+        "user": "B",
+        "replace": "la la la.",
+        "with": "la la la, hey!",
+        "nth": 1
+      }
+    ],
+    "expect": "Chorus: la la la.\n\nVerse one, louder.\n\nChorus: la la la, hey!\n"
+  },
+  {
+    "name": "stale whole-value overwrite from a client that never synced",
+    "format": "plain",
+    "intent": "an overwrite based on an old version keeps edits it never saw",
+    "base": "Van: booked. Hotel: pending. Food: pending.",
+    "steps": [
+      {
+        "user": "B",
+        "replace": "Hotel: pending",
+        "with": "Hotel: confirmed"
+      },
+      {
+        "user": "B",
+        "replace": "Food: pending",
+        "with": "Food: pizza"
+      },
+      {
+        "user": "A",
+        "set": "Van: booked for Friday. Hotel: pending. Food: pending."
+      }
+    ],
+    "expect": "Van: booked for Friday. Hotel: confirmed. Food: pizza."
+  },
+  {
+    "name": "undo of a deletion while someone edits nearby",
+    "format": "plain",
+    "intent": "text restored by an undo comes back next to the concurrent edit",
+    "base": "Keep this sentence. Remove me. End.",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "Remove me. ",
+        "with": ""
+      },
+      {
+        "sync": "A"
+      },
+      {
+        "user": "B",
+        "replace": "End.",
+        "with": "The end."
+      },
+      {
+        "user": "A",
+        "replace": "End.",
+        "with": "Remove me. End."
+      }
+    ],
+    "expect": "Keep this sentence. Remove me. The end."
+  },
+  {
+    "name": "html: list item added and another edited",
+    "format": "html",
+    "intent": "an added element and an edit in a sibling both apply",
+    "base": "<ul><li>soundcheck</li><li>dinner</li></ul>",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "<li>dinner</li>",
+        "with": "<li>dinner</li><li>show</li>"
+      },
+      {
+        "user": "B",
+        "replace": "soundcheck",
+        "with": "long soundcheck"
+      }
+    ],
+    "expect": "<ul><li>long soundcheck</li><li>dinner</li><li>show</li></ul>"
+  },
+  {
+    "name": "html: element moved while its text changes",
+    "format": "html",
+    "intent": "the edit follows its moved element",
+    "base": "<p>Monday rehearsal at the studio.</p><p>Tuesday radio interview at noon.</p>",
+    "steps": [
+      {
+        "user": "A",
+        "set": "<p>Tuesday radio interview at noon.</p><p>Monday rehearsal at the studio.</p>"
+      },
+      {
+        "user": "B",
+        "replace": "the studio",
+        "with": "the new studio"
+      }
+    ],
+    "expect": "<p>Tuesday radio interview at noon.</p><p>Monday rehearsal at the new studio.</p>"
+  },
+  {
+    "name": "large document with edits far apart",
+    "format": "markdown",
+    "intent": "edits at both ends of a long document both apply",
+    "base": "# Tour diary\n\nDay 1: we played a show in city number 1 and drove on.\n\nDay 2: we played a show in city number 2 and drove on.\n\nDay 3: we played a show in city number 3 and drove on.\n\nDay 4: we played a show in city number 4 and drove on.\n\nDay 5: we played a show in city number 5 and drove on.\n\nDay 6: we played a show in city number 6 and drove on.\n\nDay 7: we played a show in city number 7 and drove on.\n\nDay 8: we played a show in city number 8 and drove on.\n\nDay 9: we played a show in city number 9 and drove on.\n\nDay 10: we played a show in city number 10 and drove on.\n\nDay 11: we played a show in city number 11 and drove on.\n\nDay 12: we played a show in city number 12 and drove on.\n\nDay 13: we played a show in city number 13 and drove on.\n\nDay 14: we played a show in city number 14 and drove on.\n\nDay 15: we played a show in city number 15 and drove on.\n\nDay 16: we played a show in city number 16 and drove on.\n\nDay 17: we played a show in city number 17 and drove on.\n\nDay 18: we played a show in city number 18 and drove on.\n\nDay 19: we played a show in city number 19 and drove on.\n\nDay 20: we played a show in city number 20 and drove on.\n\nDay 21: we played a show in city number 21 and drove on.\n\nDay 22: we played a show in city number 22 and drove on.\n\nDay 23: we played a show in city number 23 and drove on.\n\nDay 24: we played a show in city number 24 and drove on.\n\nDay 25: we played a show in city number 25 and drove on.\n\nDay 26: we played a show in city number 26 and drove on.\n\nDay 27: we played a show in city number 27 and drove on.\n\nDay 28: we played a show in city number 28 and drove on.\n\nDay 29: we played a show in city number 29 and drove on.\n\nDay 30: we played a show in city number 30 and drove on.\n\nDay 31: we played a show in city number 31 and drove on.\n\nDay 32: we played a show in city number 32 and drove on.\n\nDay 33: we played a show in city number 33 and drove on.\n\nDay 34: we played a show in city number 34 and drove on.\n\nDay 35: we played a show in city number 35 and drove on.\n\nDay 36: we played a show in city number 36 and drove on.\n\nDay 37: we played a show in city number 37 and drove on.\n\nDay 38: we played a show in city number 38 and drove on.\n\nDay 39: we played a show in city number 39 and drove on.\n\nDay 40: we played a show in city number 40 and drove on.\n\nDay 41: we played a show in city number 41 and drove on.\n\nDay 42: we played a show in city number 42 and drove on.\n\nDay 43: we played a show in city number 43 and drove on.\n\nDay 44: we played a show in city number 44 and drove on.\n\nDay 45: we played a show in city number 45 and drove on.\n\nDay 46: we played a show in city number 46 and drove on.\n\nDay 47: we played a show in city number 47 and drove on.\n\nDay 48: we played a show in city number 48 and drove on.\n\nDay 49: we played a show in city number 49 and drove on.\n\nDay 50: we played a show in city number 50 and drove on.\n\nDay 51: we played a show in city number 51 and drove on.\n\nDay 52: we played a show in city number 52 and drove on.\n\nDay 53: we played a show in city number 53 and drove on.\n\nDay 54: we played a show in city number 54 and drove on.\n\nDay 55: we played a show in city number 55 and drove on.\n\nDay 56: we played a show in city number 56 and drove on.\n\nDay 57: we played a show in city number 57 and drove on.\n\nDay 58: we played a show in city number 58 and drove on.\n\nDay 59: we played a show in city number 59 and drove on.\n\n",
+    "steps": [
+      {
+        "user": "A",
+        "replace": "Day 1: we played",
+        "with": "Day 1: we finally played"
+      },
+      {
+        "user": "B",
+        "replace": "Day 59: we played",
+        "with": "Day 59: we last played"
+      }
+    ],
+    "keeps": ["Day 1: we finally played", "Day 59: we last played", "Day 30: we played"]
+  }
+]

@@ -1,6 +1,7 @@
 import type { ClientMigrations } from "./client-migrations.js";
 import { JazzClient, type ConnectRuntimeOptions } from "./client.js";
 import { loadWasmModule, type WasmModule } from "./wasm-loader.js";
+import { textAnchorsFrom, type TextAnchors } from "./text-anchors.js";
 import type { AppContext } from "./context.js";
 import { resolveDefaultPersistentDbName, type DbConfig } from "./db.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "./db-internal-session.js";
@@ -433,6 +434,10 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       options.ttlSeconds,
       options.nowSeconds,
     );
+  }
+
+  override textAnchors(): TextAnchors {
+    return textAnchorsFrom(this.wasmModule);
   }
 
   override mintAnonymousToken(options: RuntimeTokenOptions): string {
