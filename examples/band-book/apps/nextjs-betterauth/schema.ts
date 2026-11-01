@@ -75,7 +75,9 @@ const schema = {
         parentBlockId: s.uuid().optional(),
         position: s.float(),
         kind: s.enum("paragraph", "heading", "todo", "bullet", "quote", "divider", "image", "file"),
-        text: s.string(),
+        // Inline Markdown (bold, italic, code, links). Concurrent edits to the
+        // same block merge on the server instead of the last write winning.
+        text: s.string().merge("markdown"),
         checked: s.boolean(),
         attachmentId: s.uuid().optional(),
       },

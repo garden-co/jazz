@@ -5,7 +5,7 @@ const address = "bandbook.example.com";
 export default {
   id: "band-book",
   summary:
-    'A bandmate shares one song with a "Can edit" link; the guest sees only that song and its subpage, typing shows up in both copies live, and edits made while his Wi-Fi is off merge once it’s back.',
+    'A bandmate shares one song with a "Can edit" link; the guest sees only that song and its subpage, typing shows up in both copies live, and edits both make to the same paragraph while his Wi-Fi is off merge once it’s back.',
   devices: {
     a: { name: "Ada's laptop", address },
     b: { name: "Bo's laptop", address, color: "#ea580c" },
@@ -68,8 +68,8 @@ export default {
 
     { caption: "Bo's Wi-Fi drops…" },
     { wifi: "off", on: "b" },
-    { caption: "…and both keep editing the same song" },
-    { do: "append", on: "b", args: ["Bridge: stay on the IV chord", ", then back to D"] },
+    { caption: "…and both keep editing the same paragraph" },
+    { do: "prepend", on: "b", args: ["Key of D", "Intro: four bars. "] },
     { do: "append", on: "a", args: ["Count in on four.", " Tuning: drop D."] },
     { wait: 1200 },
     { do: "expectNoText", on: "b", args: ["drop D"] },
@@ -77,9 +77,9 @@ export default {
     { caption: "Wi-Fi back on…" },
     { wifi: "on", on: "b" },
     { do: "waitForText", on: "b", args: ["drop D."] },
-    { do: "waitForText", on: "a", args: ["then back to D"] },
+    { do: "waitForText", on: "a", args: ["Intro: four bars."] },
     {
-      caption: "…and both edits arrive. Each keystroke is a small text splice, so they merge.",
+      caption: "…and both edits arrive. Block text is a Markdown merge column, so they merge.",
       hold: 3000,
     },
     { caption: "" },

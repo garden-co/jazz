@@ -8,9 +8,8 @@ const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff;
  * coordinates Jazz uses for string diffs by default). The edited range never
  * splits a surrogate pair, which Jazz would reject.
  *
- * Sending a splice rather than the whole string lets two people type in the
- * same block at once: Jazz merges their splices instead of letting the last
- * full write win.
+ * The block editor uses it to carry edits that were still waiting to be
+ * written over a newer value from Jazz (see `rebaseText`).
  */
 export function textSplice(base: string, next: string): TextSplice | null {
   if (base === next) return null;
@@ -36,7 +35,7 @@ export function textSplice(base: string, next: string): TextSplice | null {
   return { at: start, delete: baseEnd - start, insert: next.slice(start, nextEnd) };
 }
 
-/** Apply a splice locally; used by tests to check `textSplice` round-trips. */
+/** Apply a splice to a string. */
 export function applyTextSplice(base: string, splice: TextSplice): string {
   return base.slice(0, splice.at) + splice.insert + base.slice(splice.at + splice.delete);
 }

@@ -455,7 +455,10 @@ test("the nightly suite measures only the nightly extras, never a merge case", a
   const native = (name, benches) =>
     `--package jazz-example-${name}-benchmark ${benches.map((b) => `--bench ${b}`).join(" ")} --features jazz-benchmark-guard/mimalloc`;
   assert.equal(buildArgs("stage-plan", "nightly").join(" "), native("stage-plan", ["nightly"]));
-  assert.equal(buildArgs("band-book", "nightly").join(" "), native("band-book", ["nightly"]));
+  assert.equal(
+    buildArgs("band-book", "nightly").join(" "),
+    native("band-book", ["nightly", "text_merge"]),
+  );
   // Only workloads with extras run at night, in only the groups holding them.
   // The perf timeline admits scheduled main runs, so a nightly run that
   // re-measured a merge case would add a second point at the same commit.

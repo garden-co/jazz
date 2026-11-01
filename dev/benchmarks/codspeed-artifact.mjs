@@ -54,8 +54,9 @@ const workloadSpecs = {
   "band-chat": nativeExample("band-chat"),
   "band-book": {
     ...nativeExample("band-book"),
-    // The rest of the policy sweep: the other arms and the 10k table.
-    nightly: { benches: ["nightly"], env: {}, timeout: 20 },
+    // The rest of the policy sweep (the other arms and the 10k table), and
+    // the block text merges beyond one paragraph.
+    nightly: { benches: ["nightly", "text_merge"], env: {}, timeout: 30 },
   },
   "world-tour": nativeExample("world-tour"),
   wequencer: nativeExample("wequencer"),

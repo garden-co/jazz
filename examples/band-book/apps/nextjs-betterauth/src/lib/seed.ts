@@ -60,7 +60,7 @@ export const DEMO_PAGES: SeedPage[] = [
         title: "Harbour lights",
         kind: "doc",
         blocks: [
-          { kind: "paragraph", text: "Key of D, 92 bpm. Capo 2 on the acoustic." },
+          { kind: "paragraph", text: "Key of D, 92 bpm. **Capo 2** on the acoustic." },
           { kind: "heading", text: "Verse 1" },
           {
             kind: "quote",
@@ -121,7 +121,7 @@ export const DEMO_PAGES: SeedPage[] = [
         kind: "doc",
         blocks: [
           { kind: "heading", text: "Load-in" },
-          { kind: "paragraph", text: "Doors 20:00, load-in 16:00 through the side entrance." },
+          { kind: "paragraph", text: "Doors 20:00, load-in 16:00 through the *side entrance*." },
           { kind: "todo", text: "Send stage plot to the venue", checked: true },
           { kind: "todo", text: "Book two hotel rooms near the venue" },
         ],
