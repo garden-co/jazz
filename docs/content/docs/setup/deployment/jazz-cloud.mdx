@@ -1,0 +1,28 @@
+---
+title: Jazz Cloud
+description: "The hosted Jazz Cloud, and how to move an app off it onto your own deployment."
+---
+
+Jazz Cloud stores and syncs your app's data. Your own backend sits in front of it: browsers talk only to your backend, which signs users in with your auth and connects to Jazz Cloud. Jazz Cloud does no user auth of its own.
+
+## Get an app ID
+
+Your app ID namespaces your data for storage and sync. Click below to generate one on Jazz Cloud. You also get the secrets your backend needs. Generated apps are unclaimed until you claim them in the dashboard, and unclaimed apps are deleted after 14 days.
+
+<GenerateAppId />
+
+## Connect your backend
+
+Your backend connects to Jazz Cloud with the `remote()` store, using the app's admin and backend secrets. See [Backend](/docs/setup/backend) for the setup in Next.js, Vite and Effect.
+
+## Moving off Jazz Cloud
+
+Jazz Cloud stays available for existing apps, but new apps should run Jazz themselves on [Vercel](/docs/setup/deployment/vercel), [Cloudflare](/docs/setup/deployment/cloudflare) or [your own server](/docs/setup/deployment/own-server). Moving an app is a store swap in your backend: `remote()` becomes the store for your platform, and your schema, permissions, queries and auth stay the same.
+
+Outline, to be written with the self-hosting setup:
+
+- Export your app's data from Jazz Cloud
+- Import it into the new deployment, with the same app ID
+- Switch your backend's store and redeploy; clients need no change because they only talk to your backend
+- Check the move: row counts, a live query, and a permission test against the new deployment
+- Roll back by switching the store back to `remote()`

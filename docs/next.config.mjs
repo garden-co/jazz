@@ -119,11 +119,6 @@ const config = {
       },
       { source: "/docs/faq", destination: "/docs/how-jazz-works#faq", permanent: false },
       {
-        source: "/docs/setup/deployment/jazz-cloud",
-        destination: "/docs/setup/deployment",
-        permanent: false,
-      },
-      {
         source: "/docs/auth/authentication",
         destination: "/docs/setup/auth/custom",
         permanent: false,
