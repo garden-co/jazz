@@ -38,8 +38,9 @@ New applications should use the two product read choices `"local-first"` and `"r
 - `"local-first"` uses cached local knowledge and shows pending local writes immediately, while still syncing.
 - `"remote"` uses the server's current query scope, without pending local writes. It waits while offline.
 
-Without a `tier`, browser clients read `"local-first"`. Other clients read `"remote"` when they have a
-server, and `"local-first"` when they don't.
+Without a `tier`, browser and React Native clients read `"local-first"`, and when they have a server
+the first result waits up to 5 seconds for it (see below). Other clients read `"remote"` when they
+have a server, and `"local-first"` when they don't.
 
 Remote reads and your own writes:
 
@@ -52,8 +53,10 @@ Remote reads and your own writes:
 ### Waiting for the server (`firstLoadRemoteWaitMs`)
 
 A local-first read accepts an optional `firstLoadRemoteWaitMs` that bounds how long
-its first result may wait for the server. The default, `0`, is plain `"local-first"`. It applies to
-`"local-first"` and the browser default; TypeScript rejects it with `"remote"` (JavaScript callers have it ignored). In Rust, use
+its first result may wait for the server. With an explicit `tier: "local-first"` the default is `0`,
+plain `"local-first"`. A browser or React Native read that names no tier defaults to `5000` when a
+server is configured; pass `firstLoadRemoteWaitMs: 0` to show local data at once. TypeScript rejects
+the option with `"remote"` (JavaScript callers have it ignored). In Rust, use
 `client.query_local_first(query, timeout)` and `client.subscribe_local_first(query, timeout)`.
 
 Only the initial load waits: a one-shot read, or a subscription's first callback. While the client

@@ -1,7 +1,77 @@
 ---
 title: Your Own Server
-description: "Run the Jazz sync server on your own machine, VM or container."
+description: "Run Jazz inside your own Node server, VM or container, with the data in SQLite on its disk."
 ---
+
+On your own machine, Jazz is part of your backend's process. Mount it as on
+[Backend](/docs/setup/backend) and give it a directory:
+
+```ts title="jazz.server.ts"
+import { createJazz, sqlite } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+
+export const jazz = await createJazz({
+  appId: "my-app",
+  app,
+  permissions,
+  store: sqlite({ path: process.env.JAZZ_DATA_DIR ?? "./data/jazz" }),
+  authenticate: async (request) => /* your session */ null,
+});
+```
+
+That's the whole deployment:
+
+- **No separate process and no port.** Sync is served by your own HTTP server under `/jazz`.
+- **No deploy step.** On start, Jazz applies the schema, migrations and permissions your code
+  declares. If they can't be applied (a schema with no migration path), the process refuses to start
+  instead of serving with the wrong rules.
+- **No secrets to manage.** Browsers hold no Jazz credential: your `authenticate` function
+  decides who each request is (see [Your Backend Decides](/docs/setup/auth/backend)).
+
+Keep the data directory on a durable disk (a Docker volume, an attached block device), and run one
+process per directory.
+
+```dockerfile title="Dockerfile"
+FROM node:22-slim
+WORKDIR /app
+COPY . .
+RUN npm ci && npm run build
+ENV JAZZ_DATA_DIR=/data/jazz
+VOLUME /data
+CMD ["node", "dist/server.js"]
+```
+
+## Data on another machine
+
+When the data should live apart from your app servers (several app instances sharing one database,
+serverless functions, an existing Jazz Cloud app), run the core elsewhere and point `createJazz` at
+it with `remote()`:
+
+```ts title="jazz.server.ts"
+import { createJazz, remote } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+
+export const jazz = await createJazz({
+  appId: "my-app",
+  app,
+  permissions,
+  store: remote({
+    url: process.env.JAZZ_SYNC_URL!, // your sync server, or https://v2.sync.jazz.tools
+    adminSecret: process.env.JAZZ_ADMIN_SECRET!,
+    backendSecret: process.env.JAZZ_BACKEND_SECRET!,
+  }),
+  authenticate: async (request) => /* your session */ null,
+});
+```
+
+Everything else stays the same. Browsers still sync with your backend under `/jazz` and never see
+the core's address or secrets. Your backend applies its schema, migrations and permissions to the
+core on start, and tells the core who each user is; the core does no auth of its own and trusts
+only the holder of the secrets. Keep them server-side, like a database password.
+
+## Standalone sync server
+
+The CLI runs the same core on its own port, for `remote()` or for apps that predate `createJazz`:
 
 <include cwd lang="bash" meta='title="Terminal"'>
   ../examples/docs/todo-server-rs/docs/self-host-cli.sh#setup-self-host-cli
@@ -43,6 +113,6 @@ See [Monitoring](/docs/operating/monitoring) for heap profiling and diagnostics.
 
 ## Coming next
 
-- Docker image and systemd recipes
+- systemd recipe
 - TLS, reverse proxies, data dir on durable disks
 - Backups and upgrades (see [Operating Jazz](/docs/operating/backups-and-upgrades))

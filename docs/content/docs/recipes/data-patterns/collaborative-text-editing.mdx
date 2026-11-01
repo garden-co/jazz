@@ -21,6 +21,7 @@ survive; where two people replaced the same words, the later edit wins that part
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
+import { migrations } from "./migrations";
 
 const schema = {
   notes: s.table(
@@ -33,7 +34,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
 ```
 
 Pick the format that matches what the column holds: `"text"` for prose, `"markdown"` for Markdown

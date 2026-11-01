@@ -32,15 +32,26 @@ There's no check command. Your agent shows you each of these working:
 
 It finishes with the commands to run, what it chose and why, and any docs that were wrong or missing, with their URLs.
 
-## Run a local server yourself
+## Run it yourself
 
-You can also run the sync server directly, with no account anywhere:
+Jazz runs inside your backend's dev server, so there's nothing extra to start. Create it once and
+mount it under `/jazz`:
 
-<include cwd lang="bash" meta='title="Terminal"'>
-  ../examples/docs/todo-server-rs/docs/self-host-cli.sh#setup-self-host-cli
-</include>
+```ts title="jazz.server.ts"
+import { createJazz, sqlite } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
 
-See [Your Own Server](/docs/setup/deployment/own-server) for every option.
+export const jazz = await createJazz({
+  appId: "my-app",
+  app,
+  permissions,
+  store: sqlite({ path: "./data/jazz" }),
+  authenticate: async (request) => /* your session */ null,
+});
+```
+
+Edit `schema.ts` or `permissions.ts` and restart the dev server: Jazz applies them on start. See
+[Backend](/docs/setup/backend) for mounting it in Next.js, Hono or Express.
 
 ## How we test this page
 

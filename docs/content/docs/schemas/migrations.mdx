@@ -71,6 +71,22 @@ In practice, this lets you:
    head. Retrying reuses stored artifacts. If another deploy wins the permissions-head check,
    review that release before retrying yours.
 
+### Shipping migrations with your app
+
+`validate` and `deploy` also regenerate `migrations/index.ts`. It bundles every schema version and
+every lens, and your app passes it to `defineApp`:
+
+```ts title="schema.ts"
+import { migrations } from "./migrations";
+
+export const app = s.defineApp(schema, { migrations });
+```
+
+Commit it with your schema. Clients use it to read and write data from any version, including
+before they first sync, so a client never has to rename or reshape stored data later. A client
+whose schema version is missing from the bundle refuses to open with an error telling you to
+regenerate it.
+
 Permission-only changes in `permissions.ts` don't need a migration but still need to be deployed:
 `pnpm dlx jazz-tools@alpha deploy <appId>`. See [Permissions](/docs/schemas/policies) for details.
 
