@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node src/lib/dev-secrets.mjs && next dev",
     "prebuild": "node src/lib/check-config.mjs",
-    "build": "node ../../../../packages/jazz-tools/dist/cli.js validate && next build",
+    "build": "jazz-tools validate && next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test:permissions": "vitest run tests/permissions.test.ts tests/single-transaction.test.ts",
