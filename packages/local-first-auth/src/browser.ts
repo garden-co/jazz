@@ -1,10 +1,12 @@
 import { createSecretStore, type SecretStore, type SecretStorage } from "./store.js";
 
 export interface BrowserSecretStoreOptions {
-  /** The localStorage key, e.g. `/jazz`. localStorage is already separate per origin. */
-  key: string;
-  /** Older keys to adopt an existing secret from. See {@link createSecretStore}. */
-  migrateFrom?: readonly string[];
+  /**
+   * Keeps apps on one origin apart. See {@link createSecretStore}. localStorage
+   * is already separate per origin, so a single-app origin can omit it.
+   */
+  scope?: string | null;
+  profile?: string | null;
   /** Defaults to `globalThis.localStorage`. */
   storage?: SecretStorage;
 }
@@ -31,9 +33,9 @@ function requireLocalStorage(): Storage {
  */
 export function browserSecretStore(options: BrowserSecretStoreOptions): SecretStore {
   return createSecretStore({
-    key: options.key,
+    scope: options.scope,
+    profile: options.profile,
     storage: options.storage ?? lazyLocalStorage,
-    migrateFrom: options.migrateFrom,
   });
 }
 

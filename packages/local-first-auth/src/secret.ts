@@ -56,11 +56,13 @@ export function generateSecret(): string {
 }
 
 /**
- * The storage key Jazz used up to alpha.59 for a secret scoped to
- * `{ appId, profile }`. Only needed to migrate an existing secret to a new key.
+ * The storage key for a secret in `scope` (and optional `profile`). The scope is
+ * any string the app picks to keep its users apart from other apps' on the same
+ * storage, such as an app ID or an endpoint. The derivation is fixed: Jazz has
+ * used it since before this package, so the same scope finds the same secret.
  */
-export function legacyJazzStorageKey(appId: string | null, profile: string | null = null): string {
-  // Member order is part of the old format.
-  const scope = JSON.stringify({ appId, profile });
-  return `jazz-auth-store-v1-${base64urlEncode(sha256(utf8(scope)))}`;
+export function secretStorageKey(scope: string | null, profile: string | null = null): string {
+  // The member names and order are part of the format.
+  const material = JSON.stringify({ appId: scope, profile });
+  return `jazz-auth-store-v1-${base64urlEncode(sha256(utf8(material)))}`;
 }

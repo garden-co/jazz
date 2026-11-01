@@ -1,4 +1,4 @@
-import { generateSecret, parseSecret } from "./secret.js";
+import { generateSecret, parseSecret, secretStorageKey } from "./secret.js";
 
 /** Where a store keeps its secret. Sync or async; localStorage, SecureStore and friends fit. */
 export interface SecretStorage {
@@ -8,15 +8,15 @@ export interface SecretStorage {
 }
 
 export interface SecretStoreOptions {
-  /** The storage key, chosen by the app. Jazz uses its endpoint path, e.g. `/jazz`. */
-  key: string;
   storage: SecretStorage;
   /**
-   * Older keys to adopt a secret from when `key` is empty, tried in order.
-   * The secret is copied to `key`; the old entry is left in place so an older
-   * app version still finds it.
+   * Keeps this app's secret apart from other apps on the same storage: any
+   * string, such as an app ID or an endpoint. Jazz passes its app ID. Omit it
+   * when the storage already belongs to one app.
    */
-  migrateFrom?: readonly string[];
+  scope?: string | null;
+  /** A second namespace inside the scope, e.g. for several accounts on one device. */
+  profile?: string | null;
 }
 
 export interface SecretState {
@@ -27,8 +27,9 @@ export interface SecretState {
 }
 
 export interface SecretStore {
+  /** The storage key, derived from scope and profile by {@link secretStorageKey}. */
   readonly key: string;
-  /** The stored secret (after migration), or null. */
+  /** The stored secret, or null. */
   load(): Promise<string | null>;
   /** The stored secret, creating and persisting one on first use. */
   getOrCreate(): Promise<string>;
@@ -41,24 +42,29 @@ export interface SecretStore {
   subscribe(listener: () => void): () => void;
 }
 
-const initialState: SecretState = { secret: null, isLoading: true, error: null };
+const initialState: SecretState = {
+  secret: null,
+  isLoading: true,
+  error: null,
+};
 
 const stores = new WeakMap<SecretStorage, Map<string, SecretStore>>();
 
 /**
- * The store for `key` in `storage`. Calls with the same storage and key share
- * one instance, so every consumer sees saves and clears.
+ * The store for `scope` in `storage`. Calls with the same storage, scope and
+ * profile share one instance, so every consumer sees saves and clears.
  */
 export function createSecretStore(options: SecretStoreOptions): SecretStore {
+  const key = secretStorageKey(options.scope ?? null, options.profile ?? null);
   let byKey = stores.get(options.storage);
   if (!byKey) {
     byKey = new Map();
     stores.set(options.storage, byKey);
   }
-  let store = byKey.get(options.key);
+  let store = byKey.get(key);
   if (!store) {
-    store = newSecretStore(options);
-    byKey.set(options.key, store);
+    store = newSecretStore(key, options.storage);
+    byKey.set(key, store);
   }
   return store;
 }
@@ -67,7 +73,7 @@ function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-function newSecretStore({ key, storage, migrateFrom = [] }: SecretStoreOptions): SecretStore {
+function newSecretStore(key: string, storage: SecretStorage): SecretStore {
   let tail: Promise<unknown> = Promise.resolve();
   const serialize = <T>(operation: () => Promise<T>): Promise<T> => {
     const result = tail.then(operation);
@@ -77,18 +83,8 @@ function newSecretStore({ key, storage, migrateFrom = [] }: SecretStoreOptions):
 
   const read = async (): Promise<string | null> => {
     const current = await storage.getItem(key);
-    if (current !== null) {
-      parseSecret(current);
-      return current;
-    }
-    for (const oldKey of migrateFrom) {
-      const old = await storage.getItem(oldKey);
-      if (old === null) continue;
-      parseSecret(old);
-      await storage.setItem(key, old);
-      return old;
-    }
-    return null;
+    if (current !== null) parseSecret(current);
+    return current;
   };
 
   const listeners = new Set<() => void>();

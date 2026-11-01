@@ -3,8 +3,8 @@ export {
   SecretFormatError,
   formatSecret,
   generateSecret,
-  legacyJazzStorageKey,
   parseSecret,
+  secretStorageKey,
 } from "./secret.js";
 export {
   LOCAL_FIRST_ISSUER,
