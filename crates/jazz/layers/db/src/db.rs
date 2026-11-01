@@ -1805,6 +1805,28 @@ impl Db {
         self.inner().clock_for_test = ms;
     }
 
+    /// The versions open serializable transaction `id` recorded its reads
+    /// at, each pending one with the writer it names: what its commit is
+    /// validated by.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn read_set_for_test(
+        &self,
+        id: OpenTransactionId,
+    ) -> Vec<(RowUuid, Pos, Option<([u8; 16], u64)>)> {
+        match self.inner().batches.get(&id) {
+            Some(Batch {
+                kind: BatchKind::Serializable { reads, .. },
+                ..
+            }) => reads
+                .iter()
+                .flat_map(|read| read.rows.iter())
+                .map(|&(row, (at, writer))| (row, at, writer))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Set this store's last commit HLC, as if it had handed out `hlc`.
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
@@ -3903,9 +3925,10 @@ impl Inner {
 
     /// A version a read returned, with its writer when pending: two
     /// writers' versions of a row can share a position. The read carries
-    /// the writer of the version its cut picked, current or in history; a
-    /// pending version read without one (an aggregate's, a history read's)
-    /// is named by a writer no commit has, so the commit conflicts rather
+    /// the writer of the version its cut picked, current or in history.
+    /// Aggregates and history reads return only accepted versions, so a
+    /// pending version without a writer should not occur; one is named by
+    /// [`sync::NO_WRITER`] as a fail-safe, and its commit conflicts rather
     /// than validating against another writer's version.
     fn read_rank(at: Pos, writer: Option<Arc<[u8]>>) -> sync::Rank {
         if at.accepted() {

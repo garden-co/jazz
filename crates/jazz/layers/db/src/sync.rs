@@ -669,11 +669,14 @@ pub(crate) fn writer_bytes(node: [u8; 16], tx: u64) -> Vec<u8> {
     w
 }
 
-/// The writer [`writer_bytes`] encoded.
-/// A writer no commit has: a serializable read that cannot tell which
-/// writer's pending version it read names it so, and conflicts.
+/// A writer no commit has. Every read path carries the writer of the
+/// pending versions it returns (aggregates and history reads return only
+/// accepted ones), so this is a fail-safe: a serializable read that could
+/// not tell which writer's pending version it read names this one, and its
+/// commit conflicts rather than validating against another writer's.
 pub(crate) const NO_WRITER: ([u8; 16], u64) = ([0xff; 16], u64::MAX);
 
+/// The writer [`writer_bytes`] encoded.
 pub(crate) fn writer_of_bytes(w: &[u8]) -> Option<([u8; 16], u64)> {
     let node: [u8; 16] = w.get(..16)?.try_into().ok()?;
     let tx: [u8; 8] = w.get(16..24)?.try_into().ok()?;
@@ -9174,8 +9177,6 @@ impl Inner {
         Ok(())
     }
 
-    /// Apply one server image; returns whether a rebase is needed (the row
-    /// is overlaid by a pending write).
     /// Name the writer of each of this relay's unsettled versions among
     /// `images` by its commit's [`Order`], which a session orders it by.
     fn mark_written(&self, images: &mut [Image]) -> Result<(), Error> {
@@ -11431,6 +11432,8 @@ impl Db {
                 tx_ids.extend(named);
                 let through = at.unwrap_or_else(|| inner.served_through());
                 let authority = inner.client.is_none();
+                // Name the writers first: a failure leaves the session as it was.
+                inner.mark_written(&mut images)?;
                 let session = &mut inner.sessions[index];
                 session.unsettled.extend(images.iter().filter_map(|image| {
                     let row = RowUuid::from_bytes(image.id);
@@ -11439,8 +11442,6 @@ impl Db {
                 }));
                 session.outbox.extend(lost);
                 session.outbox.extend(hidden);
-                inner.mark_written(&mut images)?;
-                let session = &mut inner.sessions[index];
                 session
                     .outbox
                     .extend(rows_messages(images, tx_ids, ROWS_MESSAGE_BYTES));
