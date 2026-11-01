@@ -1440,6 +1440,11 @@ fn a_serializable_read_of_an_own_version_under_another_tabs_at_its_position_name
 /// a plain read's do.
 #[test]
 fn a_serializable_union_read_of_an_own_version_under_another_tabs_names_its_own() {
+    own_version_under_another_tabs_conflicts(seats_union());
+}
+
+/// The seats through a one-armed union.
+fn seats_union() -> Query {
     let columns = ["id", "show", "holder"]
         .iter()
         .map(|alias| RelationProjectColumn {
@@ -1469,7 +1474,7 @@ fn a_serializable_union_read_of_an_own_version_under_another_tabs_names_its_own(
             }],
         },
     });
-    own_version_under_another_tabs_conflicts(query);
+    query
 }
 
 fn own_version_under_another_tabs_conflicts(query: Query) {
@@ -1511,6 +1516,22 @@ fn own_version_under_another_tabs_conflicts(query: Query) {
         read.cell("holder"),
         Some(Value::String("alice".to_owned())),
         "the snapshot reads the own version"
+    );
+    // The read set names the own version by its writer, not the later
+    // tab's that shares its position: what the authority validates by.
+    let named: Vec<_> = tab
+        .read_set_for_test(open)
+        .into_iter()
+        .filter(|(row, ..)| *row == seats[0])
+        .collect();
+    assert_eq!(
+        named,
+        [(
+            seats[0],
+            own.version(),
+            Some(([WORKER + 1; 16], own.mergeable_tx_id()))
+        )],
+        "the read names the own version's writer"
     );
     net.drive(
         tab.tx_ref(open)
