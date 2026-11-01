@@ -45,7 +45,7 @@ export const jazz = await createJazz({
 });
 ```
 
-Mount the handler under `/jazz` and point the client's `serverUrl` at `"/jazz"`. Browsers sync with your backend, never with Jazz Cloud directly. On start, your backend applies its schema, migrations and permissions to the app on Jazz Cloud. For each request it tells Jazz Cloud who the user is, which is why `authenticate` lives in your backend. See [Backend](/docs/setup/backend) for mounting in Next.js, Vite and Effect, and [Custom auth](/docs/setup/auth/custom) for `authenticate`.
+Mount the handler under `/jazz` and point the client's `serverUrl` at `"/jazz"`. Browsers sync with your backend, never with Jazz Cloud directly. On start, your backend applies its schema, migrations and permissions to the app on Jazz Cloud. For each request it tells Jazz Cloud who the user is, which is why `authenticate` lives in your backend. See [Backend](/docs/setup/backend) for mounting in Next.js, Hono or Express, and [Custom auth](/docs/setup/auth/custom) for `authenticate`.
 
 Use the `.env` name prefix your framework exposes to the client (`VITE_`, `PUBLIC_`, `EXPO_PUBLIC_`) for the app ID only.
 
