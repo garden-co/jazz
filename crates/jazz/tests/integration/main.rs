@@ -105,6 +105,8 @@ mod prepared_claim_routing;
 mod provenance;
 #[path = "../read_deadline_scheduling.rs"]
 mod read_deadline_scheduling;
+#[path = "../read_request_lifecycle.rs"]
+mod read_request_lifecycle;
 #[path = "../recheck_policies.rs"]
 mod recheck_policies;
 #[path = "../recheck_queries.rs"]
@@ -210,3 +212,9 @@ mod write_receipt_owner;
 
 #[path = "../transaction_read_prefix.rs"]
 mod transaction_read_prefix;
+
+#[path = "../accepted_rpc_reads.rs"]
+mod accepted_rpc_reads;
+
+#[path = "../accepted_evidence_wire.rs"]
+mod accepted_evidence_wire;
