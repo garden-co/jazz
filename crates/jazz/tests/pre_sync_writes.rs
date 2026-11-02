@@ -396,11 +396,11 @@ fn a_client_opened_ahead_uploads_once_its_server_has_the_version() {
     assert_eq!(ids(&client), vec![1, 2]);
 }
 
-/// One commit uploads under one version: a replica refuses a transaction
-/// staged through views of different versions when it commits, and keeps
-/// none of it; one staged through a single view commits.
+/// A commit names tables and columns by stored names, so one transaction
+/// may write through views of different versions: a replica uploads it as
+/// one commit, which lands whole once the server deploys the versions.
 #[test]
-fn a_replica_refuses_a_transaction_through_views_of_different_versions() {
+fn a_replica_uploads_a_transaction_through_views_of_different_versions() {
     let dir = tempfile::tempdir().unwrap();
     let server = authority_at(v1(), &dir.path().join("server.sqlite"));
     let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
@@ -433,22 +433,11 @@ fn a_replica_refuses_a_transaction_through_views_of_different_versions() {
         row(5),
     ))
     .unwrap();
-    let error = block_on(client.commit_mergeable_handle(mixed)).unwrap_err();
-    assert!(error.message.contains("not supported"), "{}", error.message);
-    assert_eq!(ids(&client), Vec::<u8>::new());
-
-    let single = OpenTransactionId::new();
-    block_on(ahead.begin_mergeable(single)).unwrap();
-    block_on(ahead.tx_ref(single).insert(
-        "notes",
-        cells(&[("title", "v2"), ("tag", "new")]),
-        row(5),
-    ))
-    .unwrap();
-    block_on(ahead.commit_mergeable_handle(single)).unwrap();
+    let tx = block_on(client.commit_mergeable_handle(mixed)).unwrap().0;
+    assert_eq!(ids(&client), vec![4, 5]);
     block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
-    pump(&server, &[&client]);
-    assert_eq!(ids(&server), vec![5]);
+    fate(&server, &client, tx).expect("the mixed transaction lands whole");
+    assert_eq!(ids(&server), vec![4, 5]);
     assert_eq!(tag(&server, 5), some("new"));
 }
 
@@ -513,7 +502,7 @@ fn fate_by(client: &Db, tx: u64, mut pump: impl FnMut()) -> Result<(), Error> {
 }
 
 /// A `transaction` opened on the owner whose writes go through a view
-/// uploads under the view's version; one mixing versions is refused.
+/// uploads them by stored names, as does one mixing versions.
 #[test]
 fn a_transaction_uploads_under_the_version_its_writes_name() {
     let dir = tempfile::tempdir().unwrap();
@@ -532,22 +521,22 @@ fn a_transaction_uploads_under_the_version_its_writes_name() {
             .await?;
         Ok(())
     }));
-    let error = mixed.map(drop).unwrap_err();
-    assert!(error.message.contains("not supported"), "{}", error.message);
-    assert_eq!(ids(&client), Vec::<u8>::new());
+    mixed.unwrap();
+    assert_eq!(ids(&client), vec![4, 5]);
 
     block_on(client.transaction(async |_| {
         ahead
-            .insert("notes", cells(&[("title", "v2"), ("tag", "new")]), row(5))
+            .insert("notes", cells(&[("title", "v2"), ("tag", "new")]), row(6))
             .await?;
         Ok(())
     }))
     .unwrap();
     block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
     pump(&server, &[&client]);
-    assert_eq!(ids(&client), vec![5]);
-    assert_eq!(ids(&server), vec![5]);
+    assert_eq!(ids(&client), vec![4, 5, 6]);
+    assert_eq!(ids(&server), vec![4, 5, 6]);
     assert_eq!(tag(&server, 5), some("new"));
+    assert_eq!(tag(&server, 6), some("new"));
 }
 
 /// A stranded store answers no `Remote` read: its rows were never the
@@ -566,6 +555,24 @@ fn a_stranded_store_refuses_remote_reads() {
         matches!(&read, Some(Err(m)) if m.contains("before it became a replica")),
         "{read:?}"
     );
+}
+
+/// A reopened stranded store reads every row it holds: none of its own
+/// versions is past a position it reads as of.
+#[test]
+fn a_reopened_stranded_store_reads_all_its_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    let path = dir.path().join("client.sqlite");
+    {
+        let client = open_at(v1(), 1, &path);
+        insert(&client, 2, &[("title", "standalone")]);
+        let _link = link(&client, &server);
+        pump(&server, &[&client]);
+        insert(&client, 3, &[("title", "after")]);
+    }
+    let client = open_at(v1(), 1, &path);
+    assert_eq!(ids(&client), vec![2, 3]);
 }
 
 /// Schema work before a store becomes a replica writes no rows: the
@@ -828,4 +835,62 @@ fn an_offline_worker_keeps_a_view_write_pending() {
     fate_by(&tab, tx, || pump3(&core, &worker, &tab)).expect("lands");
     assert_eq!(ids(&core), vec![2]);
     assert_eq!(tag(&core, 2), some("t"));
+}
+
+/// v1 with `title` defaulting to "untitled": a version that changes only
+/// a default, adding no stored column.
+fn v1_defaulted() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column_with_default(
+                        "title",
+                        ColumnType::Text,
+                        jazz::tools::Value::Text("untitled".into()),
+                    )
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+/// SPEC 8.9: a write through a view of a version the server lacks, from a
+/// session on a deployed one, that names only stored columns the server
+/// holds says all it means by them: the server validates it under its
+/// current schema and applies it, its writer's default included.
+#[test]
+fn a_view_write_naming_only_stored_columns_the_server_holds_applies() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
+    let _link = link(&client, &server);
+    pump(&server, &[&client]);
+    let to_defaulted = MigrationLens::new(
+        v1().version_id(),
+        v1_defaulted().version_id(),
+        vec![TableLens {
+            source_table: "notes".into(),
+            target_table: "notes".into(),
+            ops: vec![],
+        }],
+    )
+    .unwrap();
+    block_on(client.admit_schema_with_lenses(v1_defaulted(), &[to_defaulted])).unwrap();
+    let defaulted = block_on(client.register_schema_view(v1_defaulted())).unwrap();
+    let tx = insert(&defaulted, 2, &[]);
+    fate(&server, &client, tx).expect("applied under the server's current schema");
+    assert_eq!(ids(&server), vec![2]);
+    let prepared = server.prepare_query(&Query::from("notes")).unwrap();
+    let titles: Vec<_> = block_on(server.all(&prepared, ReadOpts::default()))
+        .unwrap()
+        .iter()
+        .flat_map(|row| {
+            row.cells()
+                .filter(|(name, _)| *name == "title")
+                .filter_map(|(_, value)| value.cloned())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(titles, vec![Value::String("untitled".into())]);
 }

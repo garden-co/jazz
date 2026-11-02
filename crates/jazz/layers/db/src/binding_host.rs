@@ -416,6 +416,9 @@ pub struct OpenConfig {
     /// `schemas` and `migrations`), which the binding lowers into
     /// [`DbConfig::with_migrations`] (SPEC 10.7).
     pub migrations: Option<Vec<u8>>,
+    /// The node SYSTEM provenance names when it is not `identity.node`: a
+    /// backend that draws a fresh node per open keeps one stable subject.
+    pub system_node: Option<NodeUuid>,
 }
 
 /// The identity in an [`OpenConfig`].
@@ -538,7 +541,8 @@ pub fn open_identity(config: &mut OpenConfig, how: OpenAs<'_>) -> HostResult<(Db
 
 /// The [`DbConfig`] for `schema` under `config` and `identity`.
 pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) -> DbConfig {
-    let db_config = DbConfig::new(schema, identity);
+    let mut db_config = DbConfig::new(schema, identity);
+    db_config.system_node = config.system_node;
     match config.row_id_seed {
         Some(seed) => db_config.with_id_source(SeededRowIdSource::new(seed)),
         None => db_config,

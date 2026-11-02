@@ -29,11 +29,19 @@ pub struct DbConfig {
     /// Where settled large-value leaf bytes live. `None` keeps them in the
     /// SQLite file ([`crate::chunk_store`]).
     pub chunk_store: Option<std::sync::Arc<dyn crate::chunk_store::ChunkStore>>,
+    /// The wall clock (Unix ms) the store draws commit positions from, as
+    /// hybrid-clock timestamps ([`crate::db::shard`]), so the positions of
+    /// every store compare by time. `None` reads the system clock
+    /// ([`crate::db::shard::wall_clock_ms`]).
+    pub clock: Option<Box<dyn Fn() -> u64>>,
     /// The app's earlier schema versions and the lenses between them, as
     /// it ships them. A store that has not admitted `schema` admits the
     /// versions on a lens path to it first, so it stores each column where
     /// the authority does without asking (SPEC 10.7).
     pub migrations: Migrations,
+    /// The node SYSTEM provenance names, when it is not this replica's own:
+    /// a backend that draws a fresh node per open keeps one stable subject.
+    pub system_node: Option<NodeUuid>,
 }
 
 /// Schema versions and the lenses between them (see
@@ -52,8 +60,16 @@ impl DbConfig {
             identity,
             id_source: None,
             chunk_store: None,
+            clock: None,
             migrations: Migrations::default(),
+            system_node: None,
         }
+    }
+
+    /// Stamp SYSTEM provenance as `node` instead of this replica's node.
+    pub fn with_system_node(mut self, node: NodeUuid) -> Self {
+        self.system_node = Some(node);
+        self
     }
 
     /// Override the row id source, typically with [`SeededRowIdSource`] in tests.
@@ -69,6 +85,13 @@ impl DbConfig {
         store: std::sync::Arc<dyn crate::chunk_store::ChunkStore>,
     ) -> Self {
         self.chunk_store = Some(store);
+        self
+    }
+
+    /// Draw commit positions from `clock` (Unix ms) instead of the system
+    /// clock: a simulation's virtual time, or a skewed clock in a test.
+    pub fn with_clock(mut self, clock: impl Fn() -> u64 + 'static) -> Self {
+        self.clock = Some(Box::new(clock));
         self
     }
 

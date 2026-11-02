@@ -52,16 +52,19 @@ s.definePermissions(exampleApp, ({ policy, allOf, session }) => {
 // #endregion permissions-simple-ts
 
 // #region permissions-created-by-ts
-s.definePermissions(exampleApp, ({ policy }) => {
-  // Sugar for applying `$createdBy === session.user` to read/insert/update/delete.
-  policy.todos.managedByCreator();
+s.definePermissions(exampleApp, ({ policy, session }) => {
+  // Only the row's creator can read, create, update, or delete it.
+  policy.todos.allowRead.where({ $createdBy: session.user });
+  policy.todos.allowInsert.where({ $createdBy: session.user });
+  policy.todos.allowUpdate.where({ $createdBy: session.user });
+  policy.todos.allowDelete.where({ $createdBy: session.user });
 });
 // #endregion permissions-created-by-ts
 
 // #region permissions-created-by-combinator-ts
-s.definePermissions(exampleApp, ({ policy, anyOf, isCreator }) => {
-  // The same creator condition can still be composed with other rules.
-  policy.todos.allowRead.where(anyOf([isCreator, { done: true }]));
+s.definePermissions(exampleApp, ({ policy, anyOf, session }) => {
+  // The creator condition composes with other rules like any row predicate.
+  policy.todos.allowRead.where(anyOf([{ $createdBy: session.user }, { done: true }]));
 });
 // #endregion permissions-created-by-combinator-ts
 

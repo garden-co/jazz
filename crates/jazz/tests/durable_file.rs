@@ -118,7 +118,10 @@ fn reopening_restores_rows_history_and_the_commit_seq() {
     let next = block_on(db.insert("items", item(100), Default::default()))
         .unwrap()
         .mergeable_tx_id();
-    assert_eq!(next, before + 1, "the commit seq continues");
+    assert!(
+        next > before,
+        "the commit seq continues above what it numbered"
+    );
     // History survived: an as-of read of the superseded image.
     let open = OpenTransactionId::new();
     block_on(db.begin_serializable(open)).unwrap();

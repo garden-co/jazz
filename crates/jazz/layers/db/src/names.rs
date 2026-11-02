@@ -257,8 +257,10 @@ pub(crate) struct Names {
     lens_cells: Vec<LensCell>,
     /// By stored table: its stored branch columns and their defaults.
     branches: BTreeMap<String, BTreeMap<String, Option<Sql>>>,
-    /// By (stored table, stored column): its value type.
-    types: BTreeMap<(String, String), ValueType>,
+    /// By stored table, then stored column: its value type. Nested, so a
+    /// lookup by borrowed names allocates nothing (images look up every
+    /// cell's type).
+    types: BTreeMap<String, BTreeMap<String, ValueType>>,
     /// The digests this replica's authority confirmed, by version.
     confirmed: HashMap<SchemaVersionId, [u8; 16]>,
     /// Every stored enum column's tags.
@@ -378,7 +380,7 @@ impl Names {
             let ty = ty.ok_or_else(|| bad("column without a type in _jazz_stored_columns"))?;
             let ty =
                 serde_json::from_str(&ty).map_err(|_| bad("value type in _jazz_stored_columns"))?;
-            names.types.insert((table, column), ty);
+            names.types.entry(table).or_default().insert(column, ty);
         }
         drop(statement);
         if table_exists(conn, "_jazz_enum_tags")? {
@@ -500,6 +502,32 @@ impl Names {
         !self.lens_cells.is_empty()
     }
 
+    /// The copies a row a replicated insert (one by stored names, from
+    /// whichever version) writes into stored `table` fills, decided by the
+    /// stored columns it `given`s rather than by its writer's version: a
+    /// copy it leaves out, which a later version than its writer's made,
+    /// takes the value of a source it gives, as (source, copy). A dropped
+    /// column's backwards default is never filled here: only a writer whose
+    /// version descends from the drop names it, and it sends that default
+    /// itself (see `Inner::stored_op`), so an older writer's row takes the
+    /// stored column's own default.
+    pub(crate) fn stored_copies(
+        &self,
+        table: &str,
+        given: impl Fn(&str) -> bool,
+    ) -> Vec<(String, String)> {
+        self.lens_cells
+            .iter()
+            .filter(|cell| cell.table == table && !given(&cell.column))
+            .filter_map(|cell| match &cell.rule {
+                LensCellRule::Copy(source) if given(source) => {
+                    Some((source.clone(), cell.column.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The lens cells a row admitted `version` inserts into `table` fills:
     /// (column, stored copy) for copies later versions' lenses made of its
     /// columns, and (stored column, backwards default) for columns earlier
@@ -606,7 +634,10 @@ impl Names {
             if let Some(default) = column.branch {
                 branches.insert(column.column.clone(), default);
             }
-            self.types.insert((column.table, column.column), ty);
+            self.types
+                .entry(column.table)
+                .or_default()
+                .insert(column.column, ty);
         }
         Ok(())
     }
@@ -627,13 +658,12 @@ impl Names {
             }
             let branch = branch_columns(table);
             for column in &table.columns {
-                let key = (table.stored.clone(), column.stored.clone());
-                if self.types.contains_key(&key) {
+                if self.stored_type(&table.stored, &column.stored).is_some() {
                     continue;
                 }
                 new.push(NewStoredColumn {
-                    table: key.0,
-                    column: key.1,
+                    table: table.stored.clone(),
+                    column: column.stored.clone(),
                     ty: Some(column.stored_type()),
                     branch: branch
                         .get(column.stored.as_str())
@@ -667,7 +697,7 @@ impl Names {
     /// The value type of stored column `column` of stored table `table`,
     /// once a version storing it was admitted.
     pub(crate) fn stored_type(&self, table: &str, column: &str) -> Option<&ValueType> {
-        self.types.get(&(table.to_owned(), column.to_owned()))
+        self.types.get(table)?.get(column)
     }
 
     /// Every stored enum column's tags.

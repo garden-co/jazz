@@ -166,7 +166,7 @@ fn the_originating_store_keeps_a_refused_payload_until_it_is_reported() {
     };
     assert_eq!((table.as_str(), written), ("notes", row.0.as_bytes()));
     assert_eq!(
-        cells.get("title"),
+        cells.get(&common::stored(&client, "notes", "title")),
         Some(&Value::String("in bob's name".into()))
     );
     assert!(server.rejected_transactions().unwrap().is_empty());

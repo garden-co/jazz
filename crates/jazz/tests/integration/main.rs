@@ -135,6 +135,8 @@ mod serializable_sync;
 mod session_policy_values;
 #[path = "../session_write_checks.rs"]
 mod session_write_checks;
+#[path = "../shard_role.rs"]
+mod shard_role;
 #[path = "../slow_queries.rs"]
 mod slow_queries;
 #[path = "../snapshots.rs"]
@@ -153,6 +155,8 @@ mod structured_result_tree;
 mod sync_access_loss;
 #[path = "../sync_aggregates.rs"]
 mod sync_aggregates;
+#[path = "../sync_connection_settled.rs"]
+mod sync_connection_settled;
 #[path = "../sync_differential.rs"]
 mod sync_differential;
 #[path = "../sync_echo.rs"]
@@ -161,6 +165,8 @@ mod sync_echo;
 mod sync_frame_bounds;
 #[path = "../sync_gather.rs"]
 mod sync_gather;
+#[path = "../sync_join.rs"]
+mod sync_join;
 #[path = "../sync_resume.rs"]
 mod sync_resume;
 #[path = "../sync_sessions.rs"]

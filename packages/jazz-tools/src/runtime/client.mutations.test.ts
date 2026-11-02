@@ -9,7 +9,6 @@ import {
   type TxId,
   type OpenTransactionId,
   type Runtime,
-  type TransactionalRuntime,
   type WriteReceipt,
 } from "./client.js";
 import type { AppContext, Session } from "./context.js";
@@ -19,7 +18,7 @@ import {
   internalSessionFromVerifiedReservedJwtPayload,
 } from "./client-session.js";
 
-function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
+function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const receipt = (
     writeContextJson: string | null | undefined,
     committedId: string,
@@ -40,7 +39,7 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
   const deleteCalls: Array<[string, string, string | undefined]> = [];
   const dryRunCalls: Array<[string, ...unknown[]]> = [];
 
-  const runtimeBase: TransactionalRuntime = {
+  const runtimeBase: Runtime = {
     beginTransaction: (_mode, id) => id,
     insert: (
       table: string,
@@ -119,7 +118,7 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
     commitTransaction: vi.fn(() => "committed-batch" as TxId),
     rollbackTransaction: async () => false,
   };
-  const runtime: TransactionalRuntime = { ...runtimeBase, ...runtimeOverrides };
+  const runtime: Runtime = { ...runtimeBase, ...runtimeOverrides };
 
   const context: AppContext = {
     appId: "test-app",
@@ -150,7 +149,7 @@ describe("JazzClient write attribution", () => {
       ["ready", "rejected", "cancelled"].map((outcome) => ({ delayed, outcome })),
     ),
   )("owns the opening prerequisite (delayed=$delayed, $outcome)", async ({ delayed, outcome }) => {
-    const opening = vi.fn<TransactionalRuntime["beginTransaction"]>((_kind, id) => id);
+    const opening = vi.fn<Runtime["beginTransaction"]>((_kind, id) => id);
     const { client } = makeClient({ beginTransaction: opening });
     const source = new (class extends RuntimeSource<DbConfig> {
       override createClient(): JazzClient {

@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS _jazz_lv_upload_node (id BLOB NOT NULL, hash BLOB NOT
 CREATE INDEX IF NOT EXISTS _jazz_lv_upload_node_hash ON _jazz_lv_upload_node (hash);
 CREATE TABLE IF NOT EXISTS _jazz_lv_reclaim (root BLOB PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS _jazz_lv_via (root BLOB PRIMARY KEY, tbl TEXT NOT NULL, \
- id BLOB NOT NULL, key BLOB NOT NULL, seq INTEGER NOT NULL, node BLOB) WITHOUT ROWID;
+ id BLOB NOT NULL, key BLOB NOT NULL, t INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TRIGGER IF NOT EXISTS _jazz_lv_root_unreferenced AFTER UPDATE OF refs ON _jazz_lv_root \
  WHEN NEW.refs = 0 BEGIN \
  INSERT INTO _jazz_lv_reclaim (root) SELECT NEW.root \
@@ -1567,14 +1567,28 @@ pub(crate) fn settle_receipts(
 }
 
 /// Drop receipts that expired by `now`; their nodes are reclaimed unless a
-/// commit referenced them meanwhile.
+/// commit referenced them meanwhile. Servers run this every tick: a cached
+/// probe, and the writes only once a receipt expired.
 pub(crate) fn expire_receipts(conn: &Connection, now: i64) -> Result<(), Error> {
-    conn.execute_batch(&format!(
+    let expired: bool = conn
+        .cached_row(
+            "SELECT EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE expires <= ?1)",
+            [now],
+            |r| r.get(0),
+        )
+        .map_err(storage)?;
+    if !expired {
+        return Ok(());
+    }
+    conn.prepare_cached(
         "INSERT OR IGNORE INTO _jazz_lv_reclaim (root) \
-         SELECT hash FROM _jazz_lv_receipt WHERE expires <= {now}; \
-         DELETE FROM _jazz_lv_receipt WHERE expires <= {now};"
-    ))
-    .map_err(storage)
+         SELECT hash FROM _jazz_lv_receipt WHERE expires <= ?1",
+    )
+    .and_then(|mut statement| statement.execute([now]))
+    .and_then(|_| conn.prepare_cached("DELETE FROM _jazz_lv_receipt WHERE expires <= ?1"))
+    .and_then(|mut statement| statement.execute([now]))
+    .map_err(storage)?;
+    Ok(())
 }
 
 struct Stored<'a> {
@@ -1758,17 +1772,16 @@ pub(crate) struct Via {
     pub table: String,
     pub id: [u8; 16],
     pub key: Vec<u8>,
-    pub seq: u64,
-    /// The node whose unsettled version it is (as `Image::by`).
-    pub by: Option<[u8; 16]>,
+    /// The version's position here (as `Image::at`).
+    pub at: crate::db::sync::Pos,
 }
 
 /// Record that `root` arrived in `via`, the version later pulls of its
 /// nodes cite.
 pub(crate) fn record_via(conn: &Connection, root: &[u8; 32], via: &Via) -> Result<(), Error> {
     conn.prepare_cached(
-        "INSERT OR REPLACE INTO _jazz_lv_via (root, tbl, id, key, seq, node) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT OR REPLACE INTO _jazz_lv_via (root, tbl, id, key, t) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
     )
     .and_then(|mut statement| {
         statement.execute(rusqlite::params![
@@ -1776,8 +1789,7 @@ pub(crate) fn record_via(conn: &Connection, root: &[u8; 32], via: &Via) -> Resul
             via.table,
             via.id.as_slice(),
             via.key,
-            via.seq as i64,
-            via.by.map(|node| node.to_vec())
+            via.at.t()
         ])
     })
     .map_err(storage)?;
@@ -1793,7 +1805,7 @@ const UPWARD_WALK: usize = 4096;
 /// stored parent or a descriptor).
 pub(crate) fn via_of(conn: &Connection, hash: &[u8; 32]) -> Result<Option<([u8; 32], Via)>, Error> {
     let mut via = conn
-        .prepare_cached("SELECT tbl, id, key, seq, node FROM _jazz_lv_via WHERE root = ?1")
+        .prepare_cached("SELECT tbl, id, key, t FROM _jazz_lv_via WHERE root = ?1")
         .map_err(storage)?;
     let mut parents = conn
         .prepare_cached("SELECT parent FROM _jazz_lv_edge WHERE child = ?1")
@@ -1811,23 +1823,20 @@ pub(crate) fn via_of(conn: &Connection, hash: &[u8; 32]) -> Result<Option<([u8; 
                     r.get::<_, Vec<u8>>(1)?,
                     r.get::<_, Vec<u8>>(2)?,
                     r.get::<_, i64>(3)?,
-                    r.get::<_, Option<Vec<u8>>>(4)?,
                 ))
             })
             .optional()
             .map_err(storage)?;
-        if let Some((table, id, key, seq, by)) = found
+        if let Some((table, id, key, t)) = found
             && let Ok(id) = <[u8; 16]>::try_from(id.as_slice())
         {
-            let seq = seq as u64;
             return Ok(Some((
                 hash,
                 Via {
                     table,
                     id,
                     key,
-                    seq,
-                    by: by.and_then(|node| <[u8; 16]>::try_from(node.as_slice()).ok()),
+                    at: crate::db::sync::Pos::from_t(t),
                 },
             )));
         }
@@ -2024,6 +2033,14 @@ fn named_nodes(
         }
     }
     Ok(out)
+}
+
+/// Whether nodes wait in the reclaim queue.
+pub(crate) fn reclaim_queued(conn: &Connection) -> Result<bool, Error> {
+    conn.cached_row("SELECT EXISTS (SELECT 1 FROM _jazz_lv_reclaim)", [], |r| {
+        r.get(0)
+    })
+    .map_err(storage)
 }
 
 /// Delete up to `budget` unreferenced nodes. A root is reclaimed once no
@@ -2324,6 +2341,7 @@ mod tests {
             policies: Default::default(),
             indexes: Vec::new(),
             branch_by: Vec::new(),
+            branch_key_names: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
         };
@@ -2383,6 +2401,7 @@ mod tests {
             policies: Default::default(),
             indexes: Vec::new(),
             branch_by: Vec::new(),
+            branch_key_names: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
         };
@@ -2699,6 +2718,7 @@ mod tests {
             policies: Default::default(),
             indexes: Vec::new(),
             branch_by: Vec::new(),
+            branch_key_names: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
         };

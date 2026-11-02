@@ -81,6 +81,35 @@ fn undo_key(conn: &rusqlite::Connection) -> usize {
 /// it, and a later connection may get its handle's address.
 pub(crate) fn forget_tag_undo(conn: &rusqlite::Connection) {
     TAG_UNDO.with(|undo| undo.borrow_mut().remove(&undo_key(conn)));
+    ROLLBACKS.with(|rollbacks| rollbacks.borrow_mut().remove(&undo_key(conn)));
+}
+
+thread_local! {
+    /// By connection: how many times it rolled back a savepoint or a whole
+    /// transaction. What a cache learned inside an open transaction holds
+    /// while this count stays as it was.
+    static ROLLBACKS: RefCell<std::collections::HashMap<usize, u64>> = RefCell::default();
+}
+
+/// How many rollbacks `conn` has seen (see [`ROLLBACKS`]).
+pub(crate) fn rollbacks(conn: &rusqlite::Connection) -> u64 {
+    ROLLBACKS.with(|rollbacks| {
+        rollbacks
+            .borrow()
+            .get(&undo_key(conn))
+            .copied()
+            .unwrap_or(0)
+    })
+}
+
+/// Count a rollback on the connection whose [`rollback_key`] is `key`.
+pub(crate) fn note_rollback(key: usize) {
+    ROLLBACKS.with(|rollbacks| *rollbacks.borrow_mut().entry(key).or_default() += 1);
+}
+
+/// `conn`'s key for [`note_rollback`], for a hook that cannot borrow it.
+pub(crate) fn rollback_key(conn: &rusqlite::Connection) -> usize {
+    undo_key(conn)
 }
 
 /// Stored enum column `tags` is about to change on `conn`: the innermost
@@ -152,6 +181,9 @@ pub(crate) fn end_savepoint(
     match conn.execute_batch(&sql) {
         Ok(()) => {
             close_tag_undo(conn, keep, false);
+            if !keep {
+                note_rollback(undo_key(conn));
+            }
             Ok(())
         }
         Err(error) => {
@@ -160,6 +192,11 @@ pub(crate) fn end_savepoint(
             // and so is its log.
             if conn.is_autocommit() {
                 close_tag_undo(conn, false, true);
+            }
+            // The `ROLLBACK TO` may have run before its `RELEASE` failed:
+            // counting one too many only drops a cache entry.
+            if !keep {
+                note_rollback(undo_key(conn));
             }
             if !keep && conn.is_autocommit() {
                 Ok(())
@@ -904,6 +941,12 @@ pub struct Table {
     pub indexes: Vec<Vec<String>>,
     /// Branch-key columns. A row's identity is `(id, branch key)`.
     pub branch_by: Vec<String>,
+    /// The names `branch_by`'s columns are keyed by in a row's branch key,
+    /// where those are not the names `branch_by` uses: a stored view's
+    /// table keys rows by the names the app gives its branch columns, as
+    /// every version does (a branch column is never renamed). Empty
+    /// otherwise.
+    pub branch_key_names: Vec<String>,
     /// Engine-maintained provenance columns (`$createdAt`, ...): kept on
     /// every row version, readable by name, never written by the app and
     /// not part of the default projection.
@@ -934,7 +977,7 @@ pub(crate) const PROVENANCE: [&str; 12] = [
 /// The current deletion of a row, readable with `includeDeleted`: the
 /// deleting version's update stamp, NULL for live and restored rows. Never
 /// stored: a deleted row is its current version with [`STATE_DELETED`] set
-/// in `_st`, and that version's update stamp is the deletion's.
+/// in `_state`, and that version's update stamp is the deletion's.
 pub(crate) const DELETION: [&str; 6] = [
     "$deletedAt",
     "$deletedBy",
@@ -944,15 +987,15 @@ pub(crate) const DELETION: [&str; 6] = [
     "$deletedBy.identity.subject",
 ];
 
-/// `_st` bit: the version's commit wrote no content, only a delete, a
+/// `_state` bit: the version's commit wrote no content, only a delete, a
 /// restore or a move. Clear on an ordinary write, so a live content
 /// version stores 0. History reads list versions with it clear.
 pub(crate) const STATE_NO_CONTENT: i64 = 1;
-/// `_st` bit: the version is a tombstone. Live versions are `_st < 2`.
+/// `_state` bit: the version is a tombstone. Live versions are `_state < 2`.
 pub(crate) const STATE_DELETED: i64 = 2;
-/// `_st` bit: the version is an authority text merge's write as its writer
+/// `_state` bit: the version is an authority text merge's write as its writer
 /// sent it, superseded by the merged version at the same seq (SPEC 4
-/// §4.3). Kept only in `__h`, at `_seq` = minus the commit's seq, as the
+/// §4.3). Kept only in `__h`, at `_clock` = minus the version's own, as the
 /// base of its writer's next chained write; never read as a version, so
 /// every read of `__h` that is not by exact seq requires this bit clear.
 pub(crate) const STATE_AS_SENT: i64 = 4;
@@ -1163,6 +1206,9 @@ pub struct Schema {
     /// the current schema's policies, compiled under its names (tables
     /// match by stored name; see [`crate::compile::Ctx`]).
     pub policies_from: Option<std::rc::Rc<Schema>>,
+    /// Tables and columns are named by their stored names, as writes travel
+    /// on the wire (see [`Schema::stored_view`]).
+    pub stored_names: bool,
 }
 
 impl Schema {
@@ -1243,6 +1289,7 @@ impl Schema {
                         .unwrap_or_default(),
                     indexes,
                     branch_by: table.branch_by.clone(),
+                    branch_key_names: Vec::new(),
                     provenance: provenance_columns(),
                     stored_provenance: stored_provenance_columns(),
                 },
@@ -1253,6 +1300,7 @@ impl Schema {
             jazz: jazz.clone(),
             version: jazz.version_id(),
             policies_from: None,
+            stored_names: false,
         }
     }
 
@@ -1328,6 +1376,65 @@ impl Schema {
         }
         self.policies_from = Some(current);
         self
+    }
+
+    /// `current` named by stored names, the names writes travel by: each
+    /// table and column takes its stored name, and each table also holds
+    /// the stored columns only other admitted versions name (`physical`'s,
+    /// nullable and without a default), so a write made through any
+    /// version applies without knowing which. Tables only other versions
+    /// hold are kept as stored. Governed by `current`'s policies.
+    pub fn stored_view(current: &std::rc::Rc<Schema>, physical: &Schema) -> Self {
+        let mut tables = BTreeMap::new();
+        for table in current.tables.values() {
+            let mut view = table.physical();
+            view.branch_key_names = table.branch_by.clone();
+            view.references = table
+                .references
+                .iter()
+                .map(|(column, target)| {
+                    let target = current
+                        .tables
+                        .get(target)
+                        .map_or_else(|| target.clone(), |target| target.stored.clone());
+                    (table.stored_name(column).to_owned(), target)
+                })
+                .collect();
+            if let Some(stored) = physical.tables.get(&table.stored) {
+                // A column a lens added keeps the lens's default in the
+                // store (its DDL default), though the schema declares none.
+                for column in &mut view.columns {
+                    if column.default.is_none() {
+                        column.default = stored
+                            .column(&column.stored)
+                            .and_then(|stored| stored.default.clone());
+                    }
+                }
+                for column in &stored.columns {
+                    if view.columns.iter().all(|c| c.stored != column.stored) {
+                        view.columns.push(other_versions_column(column));
+                    }
+                }
+            }
+            tables.insert(view.name.clone(), view);
+        }
+        for (name, table) in &physical.tables {
+            if !tables.contains_key(name) {
+                let mut table = table.clone();
+                for column in &mut table.columns {
+                    *column = other_versions_column(column);
+                }
+                tables.insert(name.clone(), table);
+            }
+        }
+        Self {
+            tables,
+            jazz: current.jazz.clone(),
+            version: current.version,
+            policies_from: None,
+            stored_names: true,
+        }
+        .with_policies_of(current.clone())
     }
 
     /// The schema whose names this schema's policies use.
@@ -1419,6 +1526,19 @@ impl Schema {
     }
 }
 
+/// A stored column only versions other than the current one name, in
+/// [`Schema::stored_view`]: a write may leave it out whatever its type was
+/// there (its stored default fills it).
+fn other_versions_column(column: &Column) -> Column {
+    let mut column = column.clone();
+    column.name = column.stored.clone();
+    column.default = None;
+    if !column.nullable() {
+        column.ty = ValueType::Nullable(Box::new(column.ty));
+    }
+    column
+}
+
 /// Where one schema stores its tables and columns: logical table ->
 /// (stored table, logical column -> stored column).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1452,6 +1572,7 @@ impl Table {
             policies: TablePolicies::default(),
             indexes: Vec::new(),
             branch_by: Vec::new(),
+            branch_key_names: Vec::new(),
             provenance: provenance_columns(),
             stored_provenance: stored_provenance_columns(),
         }
@@ -1464,7 +1585,7 @@ impl Table {
         let lead = if table.branch_by.is_empty() {
             ""
         } else {
-            "_b, "
+            "_branch, "
         };
         let index = table.stored_index(index);
         let keys: Vec<String> = index
@@ -1493,26 +1614,29 @@ impl Table {
             .collect();
         let name = quote(&table.stored);
         let history = quote(&format!("{}__h", table.stored));
-        // `_b` is the canonical branch key ('' for unbranched tables).
-        // Rows are unique per (id, branch); branch views select by `_b`
-        // first, so every index leads with it. A version is at (`_n`,
-        // `_seq`): the code of the sequencer that numbered it (0 for the
-        // authority, see [`crate::db::RELAY`]) and its seq there. `_st` is the version's state
+        // `_branch` is the canonical branch key ('' for unbranched tables).
+        // Rows are unique per (id, branch); branch views select by `_branch`
+        // first, so every index leads with it. A version is at `_clock`: its
+        // position, kind and seq (see [`crate::sync::Pos::t`]), under 2^53.
+        // A pending version also keeps its writer, `_writer` (node, then tx
+        // big-endian; empty for an accepted one), current or in history:
+        // two writers' pending versions of a row can share a `_clock`.
+        // `_state` is the version's state
         // bits ([`STATE_NO_CONTENT`], [`STATE_DELETED`], and in history
         // [`STATE_AS_SENT`]): 0 for a live version whose commit wrote
-        // content. `_base` and `_cols` are what the authority keeps of the
+        // content. `_base` and `_touched` are what the authority keeps of the
         // version an accepted upload wrote: what it was built on and the
         // columns it authored (SPEC 4 §4.6); NULL everywhere else.
         sql.push_str(&format!(
             "CREATE TABLE {name} (rid INTEGER PRIMARY KEY, id BLOB NOT NULL, \
-             _b BLOB NOT NULL DEFAULT X'', _n INTEGER NOT NULL DEFAULT 0, _seq INTEGER NOT NULL, \
-             _st INTEGER NOT NULL DEFAULT 0, _base INTEGER, _cols BLOB{columns}, \
-             UNIQUE (id, _b));\n\
-             CREATE INDEX {} ON {name}(_n, _seq);\n\
-             CREATE TABLE {history} (id BLOB NOT NULL, _b BLOB NOT NULL, \
-             _n INTEGER NOT NULL DEFAULT 0, _seq INTEGER NOT NULL, _st INTEGER NOT NULL, \
-             _base INTEGER, _cols BLOB{columns}, PRIMARY KEY (id, _b, _n, _seq)) WITHOUT ROWID;\n",
-            quote(&format!("{}__by_seq", table.stored)),
+             _branch BLOB NOT NULL DEFAULT X'', _clock INTEGER NOT NULL, _writer BLOB NOT NULL DEFAULT X'', \
+             _state INTEGER NOT NULL DEFAULT 0, _base INTEGER, _touched BLOB{columns}, \
+             UNIQUE (id, _branch));\n\
+             CREATE INDEX {} ON {name}(_clock);\n\
+             CREATE TABLE {history} (id BLOB NOT NULL, _branch BLOB NOT NULL, \
+             _clock INTEGER NOT NULL, _writer BLOB NOT NULL DEFAULT X'', _state INTEGER NOT NULL, \
+             _base INTEGER, _touched BLOB{columns}, PRIMARY KEY (id, _branch, _clock, _writer)) WITHOUT ROWID;\n",
+            quote(&format!("{}__by_clock", table.stored)),
         ));
         for index in &table.indexes {
             sql.push_str(&table.index_ddl(index));
@@ -1596,7 +1720,7 @@ impl Table {
                     value = *inner;
                 }
                 values.insert(
-                    column.clone(),
+                    self.branch_key_name(column).to_owned(),
                     crate::protocol::BranchColumnValue::from(value),
                 );
             }
@@ -1613,11 +1737,27 @@ impl Table {
                 value = *inner;
             }
             values.insert(
-                column.clone(),
+                self.branch_key_name(column).to_owned(),
                 crate::protocol::BranchColumnValue::from(value),
             );
         }
         self.normalized_branch_key(values)
+    }
+
+    /// The name branch column `column` is keyed by in a branch key.
+    fn branch_key_name<'a>(&'a self, column: &'a str) -> &'a str {
+        match self.branch_by.iter().position(|c| c == column) {
+            Some(i) => self.branch_key_names.get(i).map_or(column, String::as_str),
+            None => column,
+        }
+    }
+
+    /// The branch column keyed by `name` in a branch key.
+    fn branch_column_keyed<'a>(&'a self, name: &'a str) -> &'a str {
+        match self.branch_key_names.iter().position(|n| n == name) {
+            Some(i) => &self.branch_by[i],
+            None => name,
+        }
     }
 
     /// The branch key of these branch-column values. A branch column at its
@@ -1630,7 +1770,7 @@ impl Table {
         mut values: BTreeMap<String, crate::protocol::BranchColumnValue>,
     ) -> Vec<u8> {
         values.retain(|name, value| {
-            self.branch_default(name)
+            self.branch_default(self.branch_column_keyed(name))
                 .is_none_or(|default| *value != crate::protocol::BranchColumnValue::from(default))
         });
         branch_key(&values)
@@ -1693,6 +1833,9 @@ pub struct CurrentRow {
     pub(crate) id: RowUuid,
     /// Where the row's version is.
     pub(crate) seq: crate::db::Pos,
+    /// The version's writer as history keys it (`_writer`), when the read
+    /// carried it: empty for an accepted version.
+    pub(crate) writer: Option<Arc<[u8]>>,
     pub(crate) deleted: bool,
     /// Projected cells in projection order. `None` is an unwritten cell.
     pub(crate) cells: Arc<Vec<(String, Option<Value>)>>,
@@ -1789,7 +1932,7 @@ impl CurrentRow {
         self.deleted
     }
 
-    /// Where this row version is: its sequencer's code and its seq there.
+    /// Where this row version is: its banded position `_clock`.
     pub fn seq(&self) -> crate::db::Pos {
         self.seq
     }
