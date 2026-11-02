@@ -216,6 +216,16 @@
       "name": "Read/once-historical",
       "reader": "server",
       "batch_hex": "01300006056e6f74657300000000000000000000000000000000000101ffffffffffffffffff010000010180d88ea9cfba0d"
+    },
+    {
+      "name": "Fate/storage",
+      "reader": "client",
+      "batch_hex": "01300b011055555555555555555555555555555555010103186461746162617365206f72206469736b2069732066756c6c01"
+    },
+    {
+      "name": "Fate/other",
+      "reader": "client",
+      "batch_hex": "012e0b011055555555555555555555555555555555010102166c65676163792067656e65726963206661696c75726501"
     }
   ],
   "rejections": [

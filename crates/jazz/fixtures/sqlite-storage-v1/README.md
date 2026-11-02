@@ -131,3 +131,14 @@ Giving the reserved row columns descriptive names regenerated it the same
 way: `_b` is `_branch`, `_t` is `_clock` (index `__by_clock`), `_w` is
 `_writer`, `_st` is `_state` and `_cols` is `_touched`; `_base` keeps its
 name. History is keyed by `(id, _branch, _clock, _writer)`.
+
+Storage failures now use the appended `WireError::Storage(String)` tag 3 in
+recorded verdicts (`_jazz_transactions.result` and the originating retry store's
+`_jazz_rejected.error`). Existing tags 0 through 2 still decode unchanged;
+the pinned files contain no storage failure, so their bytes do not change.
+The sync wire corpus pins the new tag and the old generic tag, and the
+storage-error reopen test checks replay from disk. Earlier builds cannot
+read a verdict using tag 3. This is an in-place change to the unshipped
+format 1, requiring matching builds as described in SPEC 8.3.
+The storage payload contains the original error message, without the
+`Storage:` display prefix, so relaying and recording it again preserve it.

@@ -327,7 +327,10 @@ read-your-writes end to end.
 - `Refused { through, error }`: the commit was refused and landed nowhere.
   `error` is `Conflict`, `Rejected { reason, message }` (a `Reason` by
   stable name; an unknown name arrives as a rejection without a reason) or
-  `Other`. The rows the commit wrote shipped back ahead of the fate as they
+  `Other`, or `Storage`. `Storage` preserves the diagnostic text and the public
+  error code `storage` through relays and replay of a recorded verdict; it is
+  a final failure, not a request to retry the same transaction. `Other` keeps
+  its `protocol` classification. The rows the commit wrote shipped back ahead of the fate as they
   are, and the session is complete through position `through` with them: a
   retry's snapshot reads at it, so a serializable retry sees what the commit
   conflicted with.
@@ -376,6 +379,15 @@ re-uploads its pending commits, and the authority answers a commit it already
 decided with the known fate, shipping the rows that commit wrote as they now
 are, and as the commit left them if since superseded (a resend's writer may
 not hold them either way).
+
+Compatibility: in the unshipped SQLite sync wire v1, `Storage(String)` is
+appended to `WireError` at postcard tag 3; `Conflict`, `Rejected`, and `Other`
+keep tags 0, 1, and 2. The corpus pins both `Fate/storage` and `Fate/other`.
+Recorded fates in storage format 1 use the same encoding (see its corpus
+README). Earlier builds cannot decode tag 3, so endpoints and stored-fate
+readers must upgrade together before alpha.60; no mixed-build support is
+claimed. A storage failure that prevents recording a verdict still closes
+the session with the existing retryable transport error.
 
 ### 8.4 Downstream: reads and rows
 

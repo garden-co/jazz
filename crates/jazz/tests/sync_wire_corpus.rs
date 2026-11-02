@@ -375,7 +375,8 @@ impl Transport for Recording {
 /// `AccessLost` (a branch view's row whose head version the reader may not
 /// read), and serializable `Commit`s with a snapshot the authority served
 /// and one a worker with no server numbered.
-const SHAPES: [&str; 13] = [
+/// Storage and generic failures pin their distinct fate tags.
+const SHAPES: [&str; 15] = [
     "Read/once",
     "Rows/tx_ids",
     "Catalogue/versions",
@@ -389,6 +390,8 @@ const SHAPES: [&str; 13] = [
     "Rows/pending",
     "Read/once-resumed",
     "Read/once-historical",
+    "Fate/storage",
+    "Fate/other",
 ];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
@@ -455,6 +458,22 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
             kind: WireKind::Serializable { .. },
             ..
         } => Some(SHAPES[9]),
+        SyncMessage::Fate {
+            outcome:
+                Outcome::Refused {
+                    error: SyncWireError::Storage(_),
+                    ..
+                },
+            ..
+        } => Some(SHAPES[13]),
+        SyncMessage::Fate {
+            outcome:
+                Outcome::Refused {
+                    error: SyncWireError::Other(_),
+                    ..
+                },
+            ..
+        } => Some(SHAPES[14]),
         _ => None,
     }
 }
@@ -1016,6 +1035,21 @@ fn produce_sqlite_sync_wire_corpus_v1() {
         "set JAZZ_WRITE_SQLITE_SYNC_WIRE_CORPUS=1 to overwrite the pinned corpus"
     );
     let mut recorded = record();
+    // Pin both error tags through the production encoder without depending
+    // on platform-specific SQL diagnostics. Storage tests cover failed uploads.
+    for error in [
+        SyncWireError::Storage("database or disk is full".to_owned()),
+        SyncWireError::Other("legacy generic failure".to_owned()),
+    ] {
+        let message = SyncMessage::Fate {
+            id: jazz::tx::TxId::new(jazz::time::TxTime(1), NodeUuid::from_bytes([0x55; 16])),
+            outcome: Outcome::Refused { through: 1, error },
+            global: true,
+        };
+        let name = shape(&message).expect("an error fate shape");
+        let [frame] = encode_frames(message).unwrap().try_into().unwrap();
+        recorded.insert(name.to_owned(), ("client".to_owned(), frame));
+    }
     let missing: Vec<&str> = VARIANTS
         .iter()
         .copied()
