@@ -18,15 +18,24 @@
 //! stand again when it reopens, and a reopened shard waits out
 //! [`HLC_MAX_OFFSET_MS`] past its clock before numbering its sessions'
 //! commits ([`ShardRole::waits_out`]), so it numbers above anything it may
-//! have observed before. While a hold stands, a commit writing one of the rows
-//! its part writes waits (another writer's), or is refused (another
-//! cross-shard part's hold, which could otherwise wait on it in turn).
+//! have observed before. While a hold stands, every other writer of the rows
+//! its part writes waits: a session's commit, the store's own local write,
+//! and another cross-shard part's hold (queued, and granted once the rows
+//! are free: [`ShardRole::take_granted`]). So a fixed part always lands.
+//!
+//! A hold keeps its part's data ([`ShardRole::part`]), so a shard can land
+//! its part without its gateway. A cross-shard commit is decided once, by
+//! one participant (its decider): committed when the decider's own part
+//! lands, aborted when [`ShardRole::abort`] records it refused first. Either
+//! is the commit's recorded fate there, kept like every fate, and
+//! [`ShardRole::resolution`] reads it back.
 //!
 //! Only a replica of an upstream takes no shard role: its upstream numbers
 //! what it commits, so every call below except `served_through` is
 //! refused there.
 
 use std::collections::{BTreeMap, HashMap};
+use std::task::{Poll, Waker};
 
 use super::{Db, Inner};
 use crate::options::{Error, ErrorCode};
@@ -112,6 +121,26 @@ impl HeldRow {
     }
 }
 
+/// What [`ShardRole::hold`] answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Held {
+    /// Held at this position.
+    At(u64),
+    /// Queued behind another part holding one of its rows.
+    Queued,
+    /// The commit is already decided here.
+    Decided(Resolution),
+}
+
+/// How a cross-shard commit was decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resolution {
+    /// Committed: every part lands at this position.
+    Committed(u64),
+    /// Aborted: no part lands.
+    Aborted,
+}
+
 /// A store's shard state: its clock, and the positions it holds for
 /// cross-shard parts still to land.
 pub(crate) struct ShardState {
@@ -123,11 +152,19 @@ pub(crate) struct ShardState {
     fixed: HashMap<CommitRef, u64>,
     /// The rows each held part writes, and who holds each row.
     rows: HashMap<HeldRow, CommitRef>,
+    /// Holds asked for rows another part holds, in the order asked: each is
+    /// granted once its rows are free ([`ShardRole::take_granted`]).
+    queued: Vec<(CommitRef, Vec<HeldRow>, Vec<u8>)>,
+    /// Local writes waiting for a held row to be free.
+    waiters: Vec<Waker>,
     /// On a reopened shard, the clock reading (ms) it waits out before
     /// numbering: its clock at reopen plus the offset bound.
     resumes_after: Option<u64>,
     /// Whether [`SHARD_OBSERVED`] is set.
     observed: bool,
+    /// On a replica applying its leader's log, the position the next thing
+    /// it numbers takes ([`ShardRole::number_at`]), while above `seq`.
+    pinned: Option<u64>,
 }
 
 /// The `_jazz_meta` key a clocked store sets the first time it observes a
@@ -135,12 +172,15 @@ pub(crate) struct ShardState {
 /// position it keeps no record of.
 const SHARD_OBSERVED: &str = "shard_observed";
 
-/// The durable record of holds: one row per held part, with its fixed
-/// position once fixed, and one per row it writes. Created by the first
-/// hold, so the file of a store that never held a part has none.
+/// The durable record of holds: one row per held part, with its data and
+/// its fixed position once fixed, and one per row it writes; and of queued
+/// holds, in the order asked, with their data and rows. Created by the
+/// first hold, so a store that never held a part has none.
 const HOLDS_DDL: &str = "\
-    CREATE TABLE IF NOT EXISTS _jazz_shard_holds (at INTEGER PRIMARY KEY, node BLOB NOT NULL, tx INTEGER NOT NULL, fixed INTEGER, UNIQUE (node, tx));\
-    CREATE TABLE IF NOT EXISTS _jazz_shard_held_rows (node BLOB NOT NULL, tx INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL, PRIMARY KEY (tbl, id));";
+    CREATE TABLE IF NOT EXISTS _jazz_shard_holds (at INTEGER PRIMARY KEY, node BLOB NOT NULL, tx INTEGER NOT NULL, fixed INTEGER, part BLOB NOT NULL, UNIQUE (node, tx));\
+    CREATE TABLE IF NOT EXISTS _jazz_shard_held_rows (node BLOB NOT NULL, tx INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL, PRIMARY KEY (tbl, id));\
+    CREATE TABLE IF NOT EXISTS _jazz_shard_queued (asked INTEGER PRIMARY KEY, node BLOB NOT NULL, tx INTEGER NOT NULL, part BLOB NOT NULL, UNIQUE (node, tx));\
+    CREATE TABLE IF NOT EXISTS _jazz_shard_queued_rows (node BLOB NOT NULL, tx INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL);";
 
 impl ShardState {
     pub(crate) fn new(clock: Box<dyn Fn() -> u64>) -> Self {
@@ -149,8 +189,11 @@ impl ShardState {
             holds: BTreeMap::new(),
             fixed: HashMap::new(),
             rows: HashMap::new(),
+            queued: Vec::new(),
+            waiters: Vec::new(),
             resumes_after: None,
             observed: false,
+            pinned: None,
         }
     }
 
@@ -169,6 +212,29 @@ impl ShardState {
         self.holds.retain(|_, held| *held != commit);
         self.fixed.remove(&commit);
         self.rows.retain(|_, held| *held != commit);
+        self.queued.retain(|(queued, ..)| *queued != commit);
+        for waiter in self.waiters.drain(..) {
+            waiter.wake();
+        }
+    }
+
+    /// Ready once no part holds one of `rows`; else the waker is woken when
+    /// a part lands or is released.
+    pub(crate) fn wait_unheld(
+        &mut self,
+        rows: &[[u8; 16]],
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<()> {
+        if !self.holds_any(rows) {
+            return Poll::Ready(());
+        }
+        self.waiters.push(cx.waker().clone());
+        Poll::Pending
+    }
+
+    /// Whether a part holds one of `rows` (by row id, whatever table).
+    fn holds_any(&self, rows: &[[u8; 16]]) -> bool {
+        !self.rows.is_empty() && self.rows.keys().any(|held| rows.contains(&held.row))
     }
 
     /// Whether a commit `by` writing `rows` waits: another part holds one
@@ -197,6 +263,11 @@ impl Inner {
     pub(crate) fn next_seq(&self) -> u64 {
         if self.me != crate::db::sync::ACCEPTED {
             return self.seq + 1;
+        }
+        if let Some(pinned) = self.shard.pinned
+            && pinned > self.seq
+        {
+            return pinned;
         }
         let floor = self.waits_out().map_or(0, |after| hlc(after) + 1);
         (self.seq + 1).max(hlc((self.shard.clock)())).max(floor)
@@ -314,6 +385,154 @@ impl Inner {
                 self.shard.rows.insert(row, commit);
             }
         }
+        // Queued holds wait on, in the order they were asked; one whose
+        // commit was decided meanwhile is dropped.
+        self.conn.execute_batch(HOLDS_DDL).map_err(storage)?;
+        let queued: Vec<(CommitRef, Vec<u8>)> = {
+            let mut statement = self
+                .conn
+                .prepare("SELECT node, tx, part FROM _jazz_shard_queued ORDER BY asked")
+                .map_err(storage)?;
+            statement
+                .query_map([], |r| {
+                    let node: Vec<u8> = r.get(0)?;
+                    Ok((
+                        CommitRef {
+                            node: node.try_into().unwrap_or([0; 16]),
+                            tx: r.get::<_, i64>(1)? as u64,
+                        },
+                        r.get(2)?,
+                    ))
+                })
+                .map_err(storage)?
+                .collect::<Result<_, _>>()
+                .map_err(storage)?
+        };
+        for (commit, part) in queued {
+            if self.shard.held(commit).is_some() || self.resolution(commit)?.is_some() {
+                self.forget_queued(commit)?;
+                continue;
+            }
+            let rows: Vec<HeldRow> = {
+                let mut statement = self
+                    .conn
+                    .prepare(
+                        "SELECT tbl, id FROM _jazz_shard_queued_rows WHERE node = ?1 AND tx = ?2",
+                    )
+                    .map_err(storage)?;
+                statement
+                    .query_map(
+                        rusqlite::params![commit.node.to_vec(), commit.tx as i64],
+                        |r| {
+                            let id: Vec<u8> = r.get(1)?;
+                            Ok(HeldRow {
+                                table: r.get(0)?,
+                                row: id.try_into().unwrap_or([0; 16]),
+                            })
+                        },
+                    )
+                    .map_err(storage)?
+                    .collect::<Result<_, _>>()
+                    .map_err(storage)?
+            };
+            self.shard.queued.push((commit, rows, part));
+        }
+        Ok(())
+    }
+
+    /// Queue a hold for `commit`, durably: it is granted in the order
+    /// asked, after a restart too.
+    fn queue(&mut self, commit: CommitRef, rows: &[HeldRow], part: &[u8]) -> Result<(), Error> {
+        self.conn.execute_batch(HOLDS_DDL).map_err(storage)?;
+        let node = commit.node.to_vec();
+        self.exec(
+            "INSERT INTO _jazz_shard_queued (node, tx, part) VALUES (?1, ?2, ?3)",
+            rusqlite::params![node, commit.tx as i64, part],
+        )
+        .map_err(storage)?;
+        for row in rows {
+            self.exec(
+                "INSERT INTO _jazz_shard_queued_rows (node, tx, tbl, id) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![node, commit.tx as i64, row.table, row.row.to_vec()],
+            )
+            .map_err(storage)?;
+        }
+        self.shard
+            .queued
+            .push((commit, rows.to_vec(), part.to_vec()));
+        Ok(())
+    }
+
+    /// Drop the durable record of `commit`'s queued hold, if any.
+    fn forget_queued(&self, commit: CommitRef) -> Result<(), Error> {
+        let params = rusqlite::params![commit.node.to_vec(), commit.tx as i64];
+        self.exec(
+            "DELETE FROM _jazz_shard_queued WHERE node = ?1 AND tx = ?2",
+            params,
+        )
+        .map_err(storage)?;
+        self.exec(
+            "DELETE FROM _jazz_shard_queued_rows WHERE node = ?1 AND tx = ?2",
+            params,
+        )
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    /// Hold a position for `commit` now (its rows are free).
+    fn hold_now(&mut self, commit: CommitRef, rows: &[HeldRow], part: &[u8]) -> Result<u64, Error> {
+        let at = self.next_seq();
+        self.conn.execute_batch(HOLDS_DDL).map_err(storage)?;
+        let node = commit.node.to_vec();
+        self.exec(
+            "INSERT INTO _jazz_shard_holds (at, node, tx, part) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![at as i64, node, commit.tx as i64, part],
+        )
+        .map_err(storage)?;
+        for row in rows {
+            self.exec(
+                "INSERT INTO _jazz_shard_held_rows (node, tx, tbl, id) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![node, commit.tx as i64, row.table, row.row.to_vec()],
+            )
+            .map_err(storage)?;
+        }
+        self.seq = at;
+        self.shard.holds.insert(at, commit);
+        for row in rows {
+            self.shard.rows.insert(row.clone(), commit);
+        }
+        Ok(at)
+    }
+
+    /// `commit`'s recorded fate here, as a decision.
+    pub(crate) fn resolution(&self, commit: CommitRef) -> Result<Option<Resolution>, Error> {
+        let Some(fate) = self.applied_fate(commit.node, commit.tx)? else {
+            return Ok(None);
+        };
+        if fate.is_err() {
+            return Ok(Some(Resolution::Aborted));
+        }
+        let at: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT t.t FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
+                 WHERE n.node = ?1 AND t.tx = ?2",
+                rusqlite::params![commit.node.to_vec(), commit.tx as i64],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        Ok(at.map(|at| Resolution::Committed(at as u64)))
+    }
+
+    /// Whether a part holds one of `rows`: a local write of them waits (or,
+    /// where it cannot, is refused), so a fixed part never lands under it.
+    pub(crate) fn refuse_held(&self, rows: &[[u8; 16]]) -> Result<(), Error> {
+        if self.shard.holds_any(rows) {
+            return Err(Error::new(
+                ErrorCode::Backpressure,
+                "a cross-shard commit holds a row this write writes: retry once it lands",
+            ));
+        }
         Ok(())
     }
 
@@ -363,7 +582,7 @@ impl Inner {
             params,
         )
         .map_err(storage)?;
-        Ok(())
+        self.forget_queued(commit)
     }
 }
 
@@ -435,48 +654,116 @@ impl ShardRole<'_> {
 
     /// Hold a position for the cross-shard part `commit`, which writes
     /// `rows` and lands later at a position at or above the hold
-    /// ([`Self::fix`]). Until it lands (or is [`Self::release`]d), what the
-    /// store serves as settled stays below the hold, and another commit
-    /// writing one of `rows` waits. Holding a part again returns its
-    /// standing hold. A row another part holds refuses the hold: two
-    /// cross-shard commits holding each other's rows on two shards would
-    /// otherwise wait on each other.
-    pub fn hold(&self, commit: CommitRef, rows: &[HeldRow]) -> Result<u64, Error> {
+    /// ([`Self::fix`]); `part` is the part's data, kept with the hold (see
+    /// [`Self::part`]). Until it lands (or is [`Self::release`]d), what the
+    /// store serves as settled stays below the hold, and every other writer
+    /// of one of `rows` waits. Holding a part again returns its standing
+    /// hold, and a part whose commit is already decided here answers its
+    /// [`Resolution`]. A row another part holds queues the hold: it is
+    /// granted, in the order asked, once its rows are free
+    /// ([`Self::take_granted`]).
+    pub fn hold(&self, commit: CommitRef, rows: &[HeldRow], part: &[u8]) -> Result<Held, Error> {
         let mut inner = self.db.inner.borrow_mut();
         self.require(&inner)?;
         if let Some(at) = inner.shard.held(commit) {
-            return Ok(at);
+            return Ok(Held::At(at));
+        }
+        if let Some(resolution) = inner.resolution(commit)? {
+            return Ok(Held::Decided(resolution));
         }
         if inner.shard.blocks(commit, rows) {
-            return Err(Error::new(
-                ErrorCode::Protocol,
-                "not supported yet: a row of this cross-shard part is held by another \
-                 cross-shard commit (retry once it lands)",
-            ));
+            if !inner
+                .shard
+                .queued
+                .iter()
+                .any(|(queued, ..)| *queued == commit)
+            {
+                inner.queue(commit, rows, part)?;
+            }
+            return Ok(Held::Queued);
         }
-        let at = inner.next_seq();
-        inner.conn.execute_batch(HOLDS_DDL).map_err(storage)?;
-        let node = commit.node.to_vec();
+        inner.hold_now(commit, rows, part).map(Held::At)
+    }
+
+    /// Holds queued behind another part's rows that are granted now, in the
+    /// order they were asked: each with its position.
+    pub fn take_granted(&self) -> Result<Vec<(CommitRef, u64)>, Error> {
+        let mut inner = self.db.inner.borrow_mut();
+        if inner.shard.queued.is_empty() || inner.waits_out().is_some() {
+            return Ok(Vec::new());
+        }
+        let mut granted = Vec::new();
+        let queued = std::mem::take(&mut inner.shard.queued);
+        for (commit, rows, part) in queued {
+            // Behind a queued hold of the same rows, a later one waits on.
+            if inner.shard.blocks(commit, &rows)
+                || inner
+                    .shard
+                    .queued
+                    .iter()
+                    .any(|(_, ahead, _)| ahead.iter().any(|row| rows.contains(row)))
+            {
+                inner.shard.queued.push((commit, rows, part));
+                continue;
+            }
+            inner.forget_queued(commit)?;
+            granted.push((commit, inner.hold_now(commit, &rows, &part)?));
+        }
+        Ok(granted)
+    }
+
+    /// The data kept with the part `commit`'s hold, while it stands.
+    pub fn part(&self, commit: CommitRef) -> Result<Option<Vec<u8>>, Error> {
+        let inner = self.db.inner.borrow();
+        if inner.shard.held(commit).is_none() {
+            return Ok(None);
+        }
         inner
-            .exec(
-                "INSERT INTO _jazz_shard_holds (at, node, tx) VALUES (?1, ?2, ?3)",
-                rusqlite::params![at as i64, node, commit.tx as i64],
+            .conn
+            .query_row(
+                "SELECT part FROM _jazz_shard_holds WHERE node = ?1 AND tx = ?2",
+                rusqlite::params![commit.node.to_vec(), commit.tx as i64],
+                |r| r.get(0),
             )
-            .map_err(storage)?;
-        for row in rows {
-            inner
-                .exec(
-                    "INSERT INTO _jazz_shard_held_rows (node, tx, tbl, id) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![node, commit.tx as i64, row.table, row.row.to_vec()],
-                )
-                .map_err(storage)?;
+            .optional()
+            .map_err(storage)
+    }
+
+    /// Every standing hold: its part, its position, and its fixed position
+    /// once fixed.
+    pub fn holds(&self) -> Vec<(CommitRef, u64, Option<u64>)> {
+        let inner = self.db.inner.borrow();
+        inner
+            .shard
+            .holds
+            .iter()
+            .map(|(&at, &commit)| (commit, at, inner.shard.fixed(commit)))
+            .collect()
+    }
+
+    /// How the cross-shard commit `commit` was decided here, if it was: its
+    /// part's recorded fate. On the commit's decider, that is the commit's
+    /// one decision. A fate is never forgotten, so the answer holds however
+    /// late it is asked.
+    pub fn resolution(&self, commit: CommitRef) -> Result<Option<Resolution>, Error> {
+        self.db.inner.borrow().resolution(commit)
+    }
+
+    /// Decide the cross-shard commit `commit` aborted unless it is decided
+    /// already: its part here is recorded refused (a resend of it gets that
+    /// fate), its hold dropped. Returns the decision that stands, which is
+    /// `Committed` when the part landed first. Called on the commit's
+    /// decider only.
+    pub fn abort(&self, commit: CommitRef) -> Result<Resolution, Error> {
+        let mut inner = self.db.inner.borrow_mut();
+        self.require(&inner)?;
+        if let Some(resolution) = inner.resolution(commit)? {
+            return Ok(resolution);
         }
-        inner.seq = at;
-        inner.shard.holds.insert(at, commit);
-        for row in rows {
-            inner.shard.rows.insert(row.clone(), commit);
-        }
-        Ok(at)
+        inner.record_aborted(commit)?;
+        inner.forget_hold(commit)?;
+        inner.shard.landed(commit);
+        Ok(Resolution::Aborted)
     }
 
     /// Land the part `commit` at `position` when it arrives: the position
@@ -509,12 +796,92 @@ impl ShardRole<'_> {
         Ok(())
     }
 
+    /// The highest position the store numbered, held, fixed or observed:
+    /// nothing it numbers later lands at or below it.
+    pub fn numbered(&self) -> u64 {
+        self.db.inner.borrow().seq
+    }
+
+    /// A replica applies its leader's log (SPEC 15 §15.6, replicas): the
+    /// next position it numbers (a commit, a local write or a hold) is
+    /// `position`, where its leader numbered the same entry. `position`
+    /// must be above everything the store numbered or observed. A replica
+    /// that follows numbers nothing of its own, so it does not wait out an
+    /// offset bound after a reopen (see [`Self::lead`]).
+    pub fn number_at(&self, position: u64) -> Result<(), Error> {
+        let mut inner = self.db.inner.borrow_mut();
+        self.require(&inner)?;
+        if position <= inner.seq {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                format!(
+                    "position {position} is not above {}, which the store numbered or observed",
+                    inner.seq
+                ),
+            ));
+        }
+        inner.shard.pinned = Some(position);
+        inner.shard.resumes_after = None;
+        Ok(())
+    }
+
+    /// The time (Unix ms) the store stamped the writes it made at
+    /// `position` with (their `$createdAt`/`$updatedAt`), if its last
+    /// writes were made there.
+    pub fn stamp_of(&self, position: u64) -> Option<i64> {
+        let inner = self.db.inner.borrow();
+        (inner.last_stamp.0 == position).then_some(inner.last_stamp.1)
+    }
+
+    /// A replica applies its leader's writes at `position`: they are
+    /// stamped at `ms`, as the leader stamped them ([`Self::stamp_of`]),
+    /// not at the replica's own clock.
+    pub fn stamp(&self, position: u64, ms: i64) {
+        self.db.inner.borrow_mut().last_stamp = (position, ms);
+    }
+
+    /// A replica applies a position its leader fixed or observed: nothing
+    /// it numbers later lands at or below `position`. Unlike
+    /// [`Self::observe`] it is not capped by the replica's clock: its
+    /// leader checked it against its own.
+    pub fn follow(&self, position: u64) -> Result<(), Error> {
+        let mut inner = self.db.inner.borrow_mut();
+        self.require(&inner)?;
+        if position > inner.seq && !inner.shard.observed {
+            inner.persist_meta(SHARD_OBSERVED, 1)?;
+            inner.shard.observed = true;
+        }
+        inner.seq = inner.seq.max(position);
+        inner.shard.resumes_after = None;
+        Ok(())
+    }
+
+    /// A replica takes over as its shard's leader: before it numbers, it
+    /// waits until its clock passes the highest position it applied plus
+    /// [`HLC_MAX_OFFSET_MS`] (INV-SHARD-21), as a reopened shard does
+    /// ([`Self::waits_out`]), so it numbers above anything its old leader
+    /// may have handed out.
+    pub fn lead(&self) -> Result<(), Error> {
+        let mut inner = self.db.inner.borrow_mut();
+        self.require(&inner)?;
+        inner.shard.pinned = None;
+        let after = hlc_ms(inner.seq).saturating_add(HLC_MAX_OFFSET_MS);
+        inner.shard.resumes_after = Some(after);
+        Ok(())
+    }
+
     /// Drop the part `commit`'s hold without it landing: its cross-shard
-    /// commit was refused. Releasing a part not held does nothing.
+    /// commit was refused. A queued hold is dropped too. Releasing a part
+    /// neither held nor queued does nothing.
     pub fn release(&self, commit: CommitRef) -> Result<(), Error> {
         let mut inner = self.db.inner.borrow_mut();
         self.require(&inner)?;
-        if inner.shard.held(commit).is_none() {
+        let queued = inner
+            .shard
+            .queued
+            .iter()
+            .any(|(queued, ..)| *queued == commit);
+        if inner.shard.held(commit).is_none() && !queued {
             return Ok(());
         }
         inner.forget_hold(commit)?;

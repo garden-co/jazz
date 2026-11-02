@@ -5744,6 +5744,21 @@ impl Inner {
             .map_err(storage)
     }
 
+    /// Record the cross-shard part `commit` refused, as its decider's
+    /// abort decides it: a resend of it gets this fate.
+    pub(crate) fn record_aborted(&self, commit: crate::db::shard::CommitRef) -> Result<(), Error> {
+        self.record_fate(
+            commit.node,
+            commit.tx,
+            &Err(WireError::Rejected {
+                reason: None,
+                message: "its cross-shard commit was decided aborted: retry it as a new commit"
+                    .into(),
+            }),
+        )?;
+        self.record_settled(commit.node, commit.tx, None)
+    }
+
     fn record_fate(
         &self,
         node: [u8; 16],
@@ -11563,6 +11578,7 @@ impl Db {
                                     (node, tx),
                                     clock,
                                     possession,
+                                    false,
                                 )
                             })
                         }) {
@@ -11992,6 +12008,53 @@ impl Db {
         Ok(roots)
     }
 
+    /// Checks the cross-shard part `(node, tx)`, writing `ops`, as its
+    /// writer's session `identity` (with `claims`, acting as `acting`)
+    /// would commit it here now, without writing anything: every check
+    /// its landing would run (SPEC 15 §15.3). A shard checks a part when
+    /// it holds it; since every other writer of its rows waits while the
+    /// hold stands, the part then lands as checked.
+    pub fn check_part(
+        &self,
+        identity: AuthorSubject,
+        claims: Option<BTreeMap<String, Value>>,
+        acting: Acting,
+        (node, tx): ([u8; 16], u64),
+        ops: Vec<WireOp>,
+    ) -> Result<(), Error> {
+        if !self.inner.borrow().holds_names(&ops) {
+            return Err(schema_version_not_deployed());
+        }
+        let policy = Some(identity);
+        let who = commit_who(policy, &acting)?;
+        let db = self.stored_db();
+        let (ops, mut roots) = db.resolve_deltas(policy, ops)?;
+        roots.extend(db.proof_roots(policy, &ops)?);
+        let possession = crate::large::Possession {
+            author: receipt_author(&identity),
+            checked: true,
+            roots,
+            settle: Default::default(),
+        };
+        self.with_claims(claims.map(|claims| (identity, claims)), || {
+            db.authorize_commit(
+                who,
+                policy,
+                WireKind::Mergeable,
+                ops,
+                (node, tx),
+                // Trial validation does not persist a sender's commit clock.
+                0,
+                possession,
+                true,
+            )
+        })
+        .map(drop)
+        .map_err(|(error, _)| error)
+    }
+
+    /// Applies an uploaded commit, or with `trial` only checks it: it
+    /// applies and every check runs, then nothing of it is kept.
     #[allow(clippy::too_many_arguments)]
     fn authorize_commit(
         &self,
@@ -12002,6 +12065,7 @@ impl Db {
         id: ([u8; 16], u64),
         clock: u64,
         possession: crate::large::Possession,
+        trial: bool,
     ) -> Result<(Vec<RowKey>, Vec<Echoable>), (Error, Vec<RowKey>)> {
         // A clock past what this store counts (its own plus the offset
         // bound) is held there: the commit stores, relays and orders at the
@@ -12190,8 +12254,10 @@ impl Db {
             let mut inner = self.inner();
             // A cross-shard part lands where all its parts do: at the
             // position its gateway fixed, under commits this shard accepted
-            // since its hold. None of those wrote its rows: they waited
-            // while the hold stood (see `serve_session`).
+            // since its hold. None of those wrote its rows: every other
+            // writer of them waited while the hold stood (sessions in
+            // `serve_session`, local writes in `Db::unheld`), so it always
+            // lands (INV-SHARD-19).
             let part = crate::db::shard::CommitRef {
                 node: id.0,
                 tx: id.1,
@@ -12199,26 +12265,6 @@ impl Db {
             let fixed = inner.shard.fixed(part);
             let seq = fixed.unwrap_or_else(|| inner.next_seq());
             let prior = inner.seq;
-            if let Some(at) = fixed {
-                for op in &ops {
-                    let Some(row) = op.row() else { continue };
-                    let newest = inner
-                        .schema
-                        .stored_table(op.table())
-                        .and_then(|table| inner.newest_seq(table, row))
-                        .map_err(|e| (e, Vec::new()))?;
-                    if newest.is_some_and(|newest| newest.seq > at) {
-                        return Err((
-                            Error::new(
-                                ErrorCode::Protocol,
-                                "a row of this cross-shard part was written above its fixed \
-                                 position, though its hold stood (INV-SHARD-19)",
-                            ),
-                            Vec::new(),
-                        ));
-                    }
-                }
-            }
             // A relay holds the session's commit at its clock as bounded
             // at ingest (`bounded_hlc`), which can be below the session's
             // own: the versions it stores for the session are at that
@@ -12261,6 +12307,12 @@ impl Db {
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
                 let rows = mentioned(&inner);
                 return Err((error, rows));
+            }
+            if trial {
+                inner.as_sent.borrow_mut().clear();
+                inner.changed.borrow_mut().truncate(mark);
+                end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
+                return Ok((Vec::new(), Vec::new()));
             }
             let recorded = inner
                 .record_fate(id.0, id.1, &Ok(()))

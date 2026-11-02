@@ -2313,6 +2313,18 @@ impl Db {
 
     // ---- writes ---------------------------------------------------------
 
+    /// Waits while a cross-shard part this shard holds writes one of `rows`
+    /// (SPEC 15 §15.3): a local write of a held row lands after the part,
+    /// never under it. Ready at once on an unsharded store.
+    async fn unheld(&self, rows: &[Option<RowUuid>]) {
+        let rows: Vec<[u8; 16]> = rows.iter().flatten().map(|r| *r.0.as_bytes()).collect();
+        self.unheld_rows(&rows).await;
+    }
+
+    async fn unheld_rows(&self, rows: &[[u8; 16]]) {
+        std::future::poll_fn(|cx| self.inner.borrow_mut().shard.wait_unheld(rows, cx)).await
+    }
+
     pub async fn insert(
         &self,
         table: &str,
@@ -2324,6 +2336,7 @@ impl Db {
         }
         let who = who(opts.identity);
         let op = StagedOp::Insert(table.to_owned(), cells, opts);
+        self.unheld(&[op.row()]).await;
         self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
@@ -2336,6 +2349,7 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
         let op = StagedOp::Update(table.to_owned(), row, cells, opts);
+        self.unheld(&[Some(row)]).await;
         self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
@@ -2348,6 +2362,7 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
         let op = StagedOp::Upsert(table.to_owned(), row, cells, BTreeMap::new(), opts);
+        self.unheld(&[Some(row)]).await;
         self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
@@ -2359,6 +2374,7 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
         let op = StagedOp::Delete(table.to_owned(), row, opts);
+        self.unheld(&[Some(row)]).await;
         self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
@@ -2371,6 +2387,7 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
         let op = StagedOp::Restore(table.to_owned(), row, content, opts);
+        self.unheld(&[Some(row)]).await;
         self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
@@ -2378,6 +2395,9 @@ impl Db {
     /// upload: it is recorded for the authority, which decides its fate.
     fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
         self.inner().require_mutation_admission()?;
+        if let Some(row) = op.row() {
+            self.inner().refuse_held(&[*row.0.as_bytes()])?;
+        }
         self.with_upload(|| {
             let table = op.table().to_owned();
             let (prior, mark) = {
@@ -7068,6 +7088,15 @@ struct BatchPrefix {
 }
 
 impl Batch {
+    /// The rows the batch writes, by id.
+    fn rows(&self) -> Vec<[u8; 16]> {
+        self.ops
+            .iter()
+            .filter_map(|(_, op)| op.row())
+            .map(|row| *row.0.as_bytes())
+            .collect()
+    }
+
     fn prefix(&self) -> BatchPrefix {
         BatchPrefix {
             ops: self.ops.len(),
@@ -7585,6 +7614,7 @@ impl Db {
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
+        self.unheld_rows(&batch.rows()).await;
         if !matches!(batch.kind, BatchKind::Mergeable) {
             return Err(rejected(format!("transaction {id:?} is not mergeable")));
         }
@@ -7602,6 +7632,7 @@ impl Db {
         id: OpenTransactionId,
     ) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
+        self.unheld_rows(&batch.rows()).await;
         let BatchKind::Serializable {
             snapshot,
             reads,
@@ -7759,6 +7790,7 @@ impl Db {
 
     fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
         self.inner().require_mutation_admission()?;
+        self.inner().refuse_held(&batch.rows())?;
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();
