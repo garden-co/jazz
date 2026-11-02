@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
-import { createServer, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -55,6 +55,18 @@ async function serve(jazz: Jazz, options: { sockets: boolean }): Promise<string>
       }),
   );
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+/** A request's status, sent past `signInAs` (as another browser would). */
+function statusOf(url: string, method: string, headers: Record<string, string>): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(url, { method, headers }, (res) => {
+      res.resume();
+      resolve(res.statusCode ?? 0);
+    });
+    req.on("error", reject);
+    req.end();
+  });
 }
 
 /**
@@ -359,6 +371,47 @@ describe("createJazz", () => {
     const seen = await jazz.db.all(app.todos.where({ id: row.id }));
     expect(seen.map((todo) => todo.title)).toEqual(["over the stream"]);
     expect(requestPaths.some((path) => path.endsWith(`/apps/${appId}/stream`))).toBe(true);
+
+    // A session id alone (it can end up in logs) doesn't let another user
+    // act in the session, nor end it.
+    const sessionPath = requestPaths.find((path) => /\/stream\/[^/]+$/.test(path))!;
+    for (const method of ["POST", "DELETE"]) {
+      expect(await statusOf(`${origin}${sessionPath}`, method, { "x-test-user": "bob" })).toBe(403);
+    }
+    // A session this process doesn't hold says why.
+    const unknown = await fetch(`${origin}/jazz/apps/${appId}/stream/nope`, { method: "POST" });
+    expect(unknown.status).toBe(404);
+    expect(await unknown.text()).toContain("sticky routing");
+    // Alice's session still works after both attempts.
+    const later = await alice.db
+      .insert(app.todos, { title: "still over the stream", owner: alice.session!.user!.account })
+      .wait({ tier: "global" });
+    expect((await jazz.db.all(app.todos.where({ id: later.id }))).length).toBe(1);
+  }, 60_000);
+
+  it("opens a sqlite directory in one core at a time, and not on serverless hosts", async () => {
+    const appId = randomUUID();
+    const dir = await mkdtemp(join(tmpdir(), "jazz-lock-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const first = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
+    await expect(
+      createJazz({ appId, app, permissions, store: sqlite({ path: dir }) }),
+    ).rejects.toThrow(/already open in this process/);
+    await first.close();
+    // Closed, the directory is free again.
+    const second = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
+    await second.close();
+
+    const previous = process.env.VERCEL;
+    process.env.VERCEL = "1";
+    try {
+      await expect(
+        createJazz({ appId, app, permissions, store: sqlite({ path: dir }) }),
+      ).rejects.toThrow(/Use remote\(/);
+    } finally {
+      if (previous === undefined) delete process.env.VERCEL;
+      else process.env.VERCEL = previous;
+    }
   }, 60_000);
 
   it("keeps data in the sqlite directory across restarts", async () => {
