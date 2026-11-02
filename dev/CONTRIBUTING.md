@@ -24,6 +24,15 @@ This requires a working C compiler:
 - macOS: `xcode-select --install` is enough.
 - Linux: install `build-essential` (Debian/Ubuntu) or `gcc` (Fedora).
 
+### WASM builds on macOS
+
+Install Homebrew LLVM with `brew install llvm`. The WASM build script selects
+`llvm-ar` from `PATH` or Homebrew's LLVM installation automatically; no shell
+`PATH` changes are needed. Apple's archive tools cannot bundle SQLite's WASM
+object files. This selection applies only to WASM builds, leaving native builds
+unchanged. Explicit `AR_wasm32-unknown-unknown` and `AR_wasm32_unknown_unknown`
+environment overrides take precedence.
+
 ## API documentation
 
 Keep API documentation attached to an authoritative, maintained source rather
@@ -76,6 +85,29 @@ behaviour. Each case still owns a fresh server, client context and rows, and
 publishes its catalogue through the real deployment interface. Keep filesystem
 schema-loading coverage in the CLI and loader suites rather than repeating it
 in adapter setup.
+
+### TypeScript correctness partition
+
+```sh
+node dev/gates/local-ci-equivalent.mjs --ci-partition typescript
+pnpm --filter jazz-tools typecheck:react-native
+```
+
+The partition prepares and verifies sealed native artifacts before building
+and testing their consumers. Package tests run with three Turbo tasks; Jazz
+Tools retains its eight-worker Node cap and four-worker Chromium cap.
+
+`build:test` always validates the DSL fixture, runs the test compiler and checks
+public interface types. Its test compiler reuses
+`node_modules/.cache/tsc/tests.tsbuildinfo`; CI restores compatible state and
+TypeScript invalidates changed source, compiler options and native declarations.
+Keep cache options on the command, not in `tsconfig.tests.json`: generated
+migration fixtures extend that configuration and must not share package state.
+
+The `test` target owns the React Native/Expo compile-only contract, so
+`build:test` does not repeat it. The standalone typecheck remains available.
+Compare the complete partition as well as focused phases before claiming a
+performance improvement.
 
 ### Focus one Rust test safely
 

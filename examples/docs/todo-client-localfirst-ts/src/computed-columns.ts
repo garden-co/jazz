@@ -12,5 +12,5 @@ const tasks = s.table(
   },
 );
 
-export const app = s.defineApp({ tasks });
+export const app = s.defineApp({ tasks }, { migrations: "none" });
 // #endregion computed-columns-ts

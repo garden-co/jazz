@@ -9,10 +9,13 @@ import { resolveSchemaSource } from "../schema-source.js";
 import type { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { createJazzSession } from "./index.js";
 
-const app = s.defineApp({
-  notes: s.table({ text: s.string() }, {}),
-  posts: s.table({ text: s.string() }, {}),
-});
+const app = s.defineApp(
+  {
+    notes: s.table({ text: s.string() }, {}),
+    posts: s.table({ text: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const permissions = s.definePermissions(app, ({ policy }) => {
   policy.posts.allowRead.always();
   policy.posts.allowInsert.always();

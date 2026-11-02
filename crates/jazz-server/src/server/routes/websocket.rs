@@ -2358,7 +2358,9 @@ mod tests {
         let addr = start_ws_test_server(state.clone()).await;
         let mut ws =
             open_negotiated_ws(addr, &state, AuthorSubject::for_test_bytes([0x7b; 16])).await;
-        ws.send(WsMessage::Binary(ws_frame_batch(&[vec![0xff; 8]]).into()))
+        // 0x7f is no sync message's tag (0xff would begin a split
+        // message's leading part, which waits for the rest).
+        ws.send(WsMessage::Binary(ws_frame_batch(&[vec![0x7f; 8]]).into()))
             .await
             .expect("send malformed sync frame");
         let error = tokio::time::timeout(Duration::from_secs(5), async {
@@ -2380,6 +2382,91 @@ mod tests {
         assert_eq!(error.code, WireErrorCode::MalformedFrame);
         assert_eq!(error.retry, WireRetry::Never);
         assert!(!error.asks_reconnect_later(), "{error:?}");
+    }
+
+    /// An untrusted peer's split message may grow only to its session
+    /// budget (`MAX_UNTRUSTED_MESSAGE_BYTES`), end to end: the part that
+    /// takes it past 8 MiB ends the link with a typed error that does not
+    /// ask for a retry, before the peer has sent the rest.
+    #[tokio::test]
+    async fn an_untrusted_split_message_over_its_budget_ends_the_link() {
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        // A backend session: served under its identity's policies, so
+        // untrusted (an admin link is served as the trusted system link).
+        let mut ws =
+            open_negotiated_ws_session(addr, &state, AuthorSubject::for_test_bytes([0x7c; 16]))
+                .await;
+        // Leading parts (0xff) of about 2 MiB each: the fifth takes the
+        // joined bytes past 8 MiB, the last never goes.
+        let part = {
+            let mut part = vec![0x42; MAX_WIRE_FRAME_BYTES - 128];
+            part[0] = 0xff;
+            part
+        };
+        let parts = jazz::protocol_limits::MAX_UNTRUSTED_MESSAGE_BYTES / (part.len() - 1) + 1;
+        assert_eq!(parts, 5);
+        for _ in 0..parts {
+            ws.send(WsMessage::Binary(ws_frame_batch(&[part.clone()]).into()))
+                .await
+                .expect("send a leading part");
+        }
+        let error = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let message = ws
+                    .next()
+                    .await
+                    .expect("websocket ended before an error frame")
+                    .expect("websocket result");
+                for frame in decode_ws_message(&message) {
+                    if let WireFrame::Error(error) = frame {
+                        return error;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("wait for the error frame");
+        assert_eq!(error.code, WireErrorCode::MalformedFrame, "{error:?}");
+        assert_eq!(error.retry, WireRetry::Never);
+        assert!(
+            error.message.contains("beyond the message ceiling"),
+            "{error:?}"
+        );
+
+        // A trusted link's split message may grow to the logical ceiling:
+        // the same parts leave it waiting for the rest, still open.
+        let mut trusted = open_negotiated_ws(addr, &state, AuthorSubject::SYSTEM).await;
+        for _ in 0..parts {
+            trusted
+                .send(WsMessage::Binary(ws_frame_batch(&[part.clone()]).into()))
+                .await
+                .expect("send a leading part");
+        }
+        let ping = vec![0x61, 0x62];
+        trusted
+            .send(WsMessage::Ping(ping.clone().into()))
+            .await
+            .expect("ping after the parts");
+        let pong = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match trusted.next().await {
+                    Some(Ok(WsMessage::Pong(payload))) => break payload,
+                    Some(Ok(message)) => {
+                        for frame in decode_ws_message(&message) {
+                            assert!(
+                                !matches!(frame, WireFrame::Error(_)),
+                                "the trusted link was refused: {frame:?}"
+                            );
+                        }
+                    }
+                    other => panic!("the trusted link ended: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("wait for pong");
+        assert_eq!(pong.as_ref(), ping.as_slice());
     }
 
     #[test]
@@ -2643,7 +2730,7 @@ mod tests {
             row_seed: u64,
             author: AuthorSubject,
         ) -> Self {
-            let db = Db::open(
+            Self::open(
                 DbConfig::new(
                     schema,
                     DbIdentity {
@@ -2654,7 +2741,10 @@ mod tests {
                 .with_id_source(SeededRowIdSource::new(row_seed)),
             )
             .await
-            .expect("open client db");
+        }
+
+        async fn open(config: DbConfig) -> Self {
+            let db = Db::open(config).await.expect("open client db");
             let transport = TestWireTransport::default();
             let received = Rc::new(RefCell::new(Vec::new()));
             db.connect_upstream(Box::new(ObservedTransport {
@@ -3222,9 +3312,8 @@ mod tests {
         core.shutdown().await;
     }
 
-    /// A revoke whose journal append lands but whose durable flush fails
-    /// returns an error and poisons the registry; a restart replays the
-    /// revocation. The per-message gate must fail closed, exactly like a
+    /// A revoke whose write lands but whose durable flush fails returns an
+    /// error; the committed revocation is what every later lookup reads. The per-message gate must fail closed, exactly like a
     /// fresh registry lookup, rather than keep trusting Alice's last
     /// successful check. Guards the #3387 gate: the owner announces every
     /// attempted mutation, not only successful ones.
@@ -3294,7 +3383,7 @@ mod tests {
         let state = core.server_state();
         let mut changes = state.accounts.as_ref().map(|registry| registry.subscribe());
         let registry = state.accounts.as_ref().expect("account registry");
-        registry.fail_next_append_for_test();
+        registry.fail_next_write_for_test();
         let revoked = client
             .post(format!("{accounts}/revoke"))
             .bearer_auth(&alice)
@@ -3305,14 +3394,12 @@ mod tests {
             "the injected flush failure surfaces as a failed revoke"
         );
         assert!(
-            !registry.append_failure_pending_for_test(),
+            !registry.write_failure_pending_for_test(),
             "the injected flush failure was consumed by the revoke"
         );
 
-        // The failed revoke was announced; a failed lookup on the poisoned
-        // registry must be announced too.
-        let mut observer = state.accounts.as_ref().map(|registry| registry.subscribe());
-        // The poisoned registry now refuses every fresh lookup.
+        // The revoke committed before its flush failed: a fresh lookup
+        // reads it and refuses Alice.
         let lookup = super::super::accounts::resolve_assignment(
             &core.server_state(),
             jazz::account_registry::Principal {
@@ -3322,14 +3409,6 @@ mod tests {
         )
         .await;
         assert!(lookup.is_err());
-        assert!(
-            observer
-                .as_mut()
-                .expect("registry")
-                .has_changed()
-                .expect("owner alive"),
-            "a lookup on the poisoned registry is announced"
-        );
 
         // The per-message decision the reader/outgoing branches make, on a
         // receiver subscribed before the revoke (as the live socket's is).
@@ -3342,7 +3421,7 @@ mod tests {
         );
         assert!(
             per_message_new.is_err(),
-            "after a journaled revoke poisoned the registry, the per-message gate must not keep admitting Alice (fresh lookup: {per_message_old:?})"
+            "after a revoke whose flush failed was announced, the per-message gate must not keep admitting Alice (fresh lookup: {per_message_old:?})"
         );
         core.shutdown().await;
     }
@@ -3568,11 +3647,11 @@ mod tests {
         });
         let addr = server.block_on(start_ws_test_server(state.clone()));
         let accounts = state.accounts.as_ref().unwrap();
-        let catalogue = state
+        let probe = state
             .store
             .as_ref()
             .unwrap()
-            .kv(crate::kv::CATALOGUE)
+            .kv(jazz::host::HostTable::new("load_probe"))
             .unwrap();
         let principal = jazz::account_registry::Principal {
             issuer: "https://issuer.example".into(),
@@ -3586,7 +3665,7 @@ mod tests {
         let mut idle = (0..20)
             .map(|n: u32| {
                 let at = std::time::Instant::now();
-                catalogue
+                probe
                     .write_many(&[(b"idle-probe".to_vec(), n.to_le_bytes().to_vec())])
                     .unwrap();
                 at.elapsed()
@@ -3639,7 +3718,7 @@ mod tests {
             server.block_on(accounts.login(principal.clone())).unwrap();
             logins.push(at.elapsed());
             let at = std::time::Instant::now();
-            catalogue
+            probe
                 .write_many(&[(
                     b"probe".to_vec(),
                     at.elapsed().as_nanos().to_le_bytes().to_vec(),
@@ -3730,8 +3809,8 @@ mod tests {
                     .borrow_mut()
                     .drain(..)
                     .filter_map(|message| {
-                        if let SyncMessage::Fate { tx, .. } = message {
-                            Some(tx)
+                        if let SyncMessage::Fate { id, .. } = message {
+                            Some(id.time.0)
                         } else {
                             None
                         }
@@ -3907,6 +3986,7 @@ mod tests {
             .build();
         let v1_hash = SchemaHash::compute(&v1);
         let v2_hash = SchemaHash::compute(&v2);
+        let (v1_source, v2_source) = (v1.clone(), v2.clone());
         let state = ServerBuilder::new(AppId::random())
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
@@ -3937,13 +4017,30 @@ mod tests {
             },
             false,
         );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
         state
             .catalogue
-            .publish_lens(
-                &state.catalogue_store,
-                &Lens::new(v1_hash, v2_hash, transform),
-            )
+            .publish_lens(&state.catalogue_store, &lens)
             .expect("persist target lineage");
+        // Clients ship the app's versions and lenses (SPEC 10.7), so they
+        // store `title` where the authority does.
+        let bundled = |node: u8, row: u64| {
+            DbConfig::new(
+                ws_public_schema_convert(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([node; 16]),
+                    author: AuthorSubject::for_test_bytes([node; 16]),
+                },
+            )
+            .with_id_source(SeededRowIdSource::new(row))
+            .with_migrations(
+                vec![JazzSchema::new(&v1_source).expect("v1 compiles")],
+                vec![
+                    jazz::tools::schema_lens::runtime::compile_lens(&lens, &v1_source, &v2_source)
+                        .expect("lens compiles"),
+                ],
+            )
+        };
 
         let addr = start_ws_test_server(state.clone()).await;
         let policies = public_table_policies().with_select(PolicyExpr::eq_session(
@@ -3975,7 +4072,7 @@ mod tests {
 
         let reader_identity = AuthorSubject::for_test_bytes([0xb2; 16]);
         let (_, visible_title) = issuer_and_subject(reader_identity);
-        let writer = TestClient::new(ws_public_schema_convert(), 0xa1, 0xa100).await;
+        let writer = TestClient::open(bundled(0xa1, 0xa100)).await;
         let mut writer_ws =
             open_negotiated_ws(addr, &state, AuthorSubject::for_test_bytes([0xa1; 16])).await;
         let (_, writer_attachment) = settle_ws_todos_query(&writer, &mut writer_ws).await;
@@ -3991,7 +4088,7 @@ mod tests {
         }
         writer.detach_query(writer_attachment);
 
-        let reader = TestClient::new(ws_public_schema_convert(), 0xb2, 0xb200).await;
+        let reader = TestClient::open(bundled(0xb2, 0xb200)).await;
         let mut reader_ws = open_negotiated_ws_session(addr, &state, reader_identity).await;
         let (query, attachment) = settle_ws_todos_query(&reader, &mut reader_ws).await;
         assert_eq!(

@@ -1,4 +1,4 @@
-//! Retry one atomic publication without duplicating accepted frame prefixes.
+//! Flush one atomic publication without duplicating accepted frame prefixes.
 use jazz::db::{
     FrameJoiner, Image, SyncCell, SyncMessage, Transport, WireTransportAdapter, encode_frames,
 };
@@ -43,12 +43,14 @@ fn publication() -> SyncMessage {
                 table: "notes".into(),
                 id: [i; 16],
                 key: vec![],
-                seq: 1,
+                at: jazz::db::Pos::at(1),
+                written: None,
                 deleted: false,
                 content: true,
                 cells: vec![("body".into(), SyncCell::Blob(vec![i; 1_048_576]))],
             })
             .collect(),
+        tx_ids: Vec::new(),
     }
 }
 
@@ -64,7 +66,11 @@ fn partial_send_resumes_at_the_first_unsent_frame() {
     let mut bob = FrameJoiner::default();
     for i in 0..expected.len() {
         state.borrow_mut().allowance = 1;
-        let result = alice.send(message.clone());
+        let result = if i == 0 {
+            alice.send(message.clone())
+        } else {
+            alice.flush()
+        };
         assert_eq!(state.borrow().sent.len(), i + 1);
         assert!(
             state.borrow().sent[i] == expected[i],
@@ -74,11 +80,15 @@ fn partial_send_resumes_at_the_first_unsent_frame() {
         if i + 1 == expected.len() {
             result.unwrap();
             match received {
-                Some(SyncMessage::Rows { images }) => assert_eq!(images.len(), 4),
+                Some(SyncMessage::Rows { images, .. }) => assert_eq!(images.len(), 4),
                 other => panic!("{other:?}"),
             }
         } else {
-            assert_eq!(result, Err(TransportError::Backpressure));
+            if i == 0 {
+                result.unwrap(); // The adapter accepted the message, including its queued tail.
+            } else {
+                assert_eq!(result, Err(TransportError::Backpressure));
+            }
             assert!(received.is_none());
         }
     }
@@ -86,24 +96,20 @@ fn partial_send_resumes_at_the_first_unsent_frame() {
 }
 
 /// While Alice's publication is partially sent, Bob's unrelated message cannot
-/// interleave with it. Alice's exact retry finishes before Bob can send normally.
+/// interleave with it. The adapter flushes Alice's tail before accepting Bob's message.
 #[test]
 fn different_message_cannot_interleave_with_pending_publication() {
     let message = publication();
     let expected = encode_frames(message.clone()).unwrap();
     let (mut alice, state) = setup();
     state.borrow_mut().allowance = 1;
-    assert_eq!(
-        alice.send(message.clone()),
-        Err(TransportError::Backpressure)
-    );
-    state.borrow_mut().allowance = usize::MAX;
+    alice.send(message.clone()).unwrap();
     let other = SyncMessage::Unsubscribe { id: 128 };
     assert_eq!(alice.send(other.clone()), Err(TransportError::Backpressure));
     assert_eq!(state.borrow().sent.len(), 1);
-    alice.send(message).unwrap();
-    assert_eq!(state.borrow().sent, expected);
+    state.borrow_mut().allowance = usize::MAX;
     alice.send(other.clone()).unwrap();
+    assert_eq!(&state.borrow().sent[..expected.len()], expected);
     assert_eq!(
         state.borrow().sent.last().unwrap(),
         &encode_frames(other).unwrap()[0]
@@ -117,13 +123,10 @@ fn failed_partial_send_closes_the_adapter_and_reports_once() {
     let message = publication();
     let (mut alice, state) = setup();
     state.borrow_mut().allowance = 1;
-    assert_eq!(
-        alice.send(message.clone()),
-        Err(TransportError::Backpressure)
-    );
+    alice.send(message.clone()).unwrap();
     state.borrow_mut().fail = true;
     let failure = TransportError::Failed("bob disconnected".into());
-    assert_eq!(alice.send(message.clone()), Err(failure.clone()));
+    assert_eq!(alice.flush(), Err(failure.clone()));
     assert_eq!(alice.take_failure(), Some(failure));
     assert_eq!(alice.take_failure(), None);
     let calls = state.borrow().calls;
@@ -142,7 +145,8 @@ fn failed_partial_send_closes_the_adapter_and_reports_once() {
 #[test]
 fn receive_failure_also_refuses_future_sends() {
     let (mut alice, state) = setup();
-    state.borrow_mut().incoming.push_back(vec![255]);
+    // An empty terminal fragment cannot decode to a message.
+    state.borrow_mut().incoming.push_back(vec![0xfe]);
     assert!(alice.try_recv().is_none());
     assert!(matches!(
         alice.take_failure(),

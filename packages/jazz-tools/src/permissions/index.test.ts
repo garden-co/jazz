@@ -656,9 +656,9 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("composes a type-column row predicate with isCreator", () => {
-    const compiled = definePermissions(documentApp, ({ policy, allOf, isCreator }) => [
-      policy.documents.allowRead.where(allOf([{ type: "Cmp" }, isCreator])),
+  it("composes a type-column row predicate with a creator condition", () => {
+    const compiled = definePermissions(documentApp, ({ policy, allOf, session }) => [
+      policy.documents.allowRead.where(allOf([{ type: "Cmp" }, { $createdBy: session.user }])),
     ]);
 
     expect(compiled.documents!.select?.using).toEqual({
@@ -850,10 +850,10 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("exposes isCreator as creator-based condition sugar", () => {
-    const compiled = definePermissions(app, ({ policy, isCreator }) => [
-      policy.todos.allowRead.where(isCreator),
-      policy.todos.allowUpdate.where(isCreator),
+  it("compiles a symmetric creator condition for read and update", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => [
+      policy.todos.allowRead.where({ $createdBy: session.user }),
+      policy.todos.allowUpdate.where({ $createdBy: session.user }),
     ]);
 
     expect(compiled.todos!.select?.using).toEqual(creatorCondition);
@@ -861,9 +861,9 @@ describe("permissions DSL", () => {
     expect(compiled.todos!.update?.with_check).toEqual(creatorCondition);
   });
 
-  it("scopes creator helpers to the canonical issuer-scoped author", () => {
-    const compiled = definePermissions(app, ({ policy, isCreator }) => [
-      policy.todos.allowRead.where(isCreator),
+  it("scopes creator conditions to the canonical issuer-scoped author", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => [
+      policy.todos.allowRead.where({ $createdBy: session.user }),
     ]);
     expect(compiled.todos!.select?.using).toEqual({
       type: "Cmp",
@@ -877,9 +877,12 @@ describe("permissions DSL", () => {
     expect(matching).not.toBe(canonicalAuthorSubject("https://issuer-b.example", "same-sub"));
   });
 
-  it("compiles managedByCreator() to creator-scoped CRUD rules", () => {
-    const compiled = definePermissions(app, ({ policy }) => {
-      policy.todos.managedByCreator();
+  it("compiles creator-scoped CRUD rules", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => {
+      policy.todos.allowRead.where({ $createdBy: session.user });
+      policy.todos.allowInsert.where({ $createdBy: session.user });
+      policy.todos.allowUpdate.where({ $createdBy: session.user });
+      policy.todos.allowDelete.where({ $createdBy: session.user });
     });
 
     expect(compiled.todos!.select?.using).toEqual(creatorCondition);
@@ -889,9 +892,9 @@ describe("permissions DSL", () => {
     expect(compiled.todos!.delete?.using).toEqual(creatorCondition);
   });
 
-  it("composes isCreator inside anyOf()", () => {
-    const compiled = definePermissions(app, ({ policy, anyOf, isCreator }) => [
-      policy.todos.allowUpdate.where(anyOf([isCreator, { done: true }])),
+  it("composes a creator condition inside anyOf()", () => {
+    const compiled = definePermissions(app, ({ policy, anyOf, session }) => [
+      policy.todos.allowUpdate.where(anyOf([{ $createdBy: session.user }, { done: true }])),
     ]);
 
     expect(compiled.todos!.update?.using).toEqual({

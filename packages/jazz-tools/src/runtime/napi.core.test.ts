@@ -486,9 +486,12 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       account: testAccountId(authorSeed),
       identity: { issuer: "urn:jazz:test", subject: authorSeed },
     };
-    const provenanceApp = s.defineApp({
-      todos: s.table({ title: s.string(), done: s.boolean() }, {}),
-    });
+    const provenanceApp = s.defineApp(
+      {
+        todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+      },
+      { migrations: "none" },
+    );
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,

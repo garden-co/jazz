@@ -88,6 +88,8 @@ mod schema_migration_policies;
 mod scope_revocation;
 #[path = "../server_subscriptions.rs"]
 mod server_subscriptions;
+#[path = "../split_messages.rs"]
+mod split_messages;
 #[path = "../subscription_initial_hydration.rs"]
 mod subscription_initial_hydration;
 #[path = "../subscription_lifecycle.rs"]

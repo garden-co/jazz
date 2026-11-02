@@ -78,6 +78,12 @@ fn large_notes(prefix: &str) -> String {
     format!("{prefix}{}", "n".repeat(LEAF_MAX_BYTES * 2))
 }
 
+/// Long notes that stay inline: a chunked value sorts by its cell, not its
+/// content (SPEC 19.5), so ordering tests use values under the threshold.
+fn sorting_notes(prefix: &str) -> String {
+    format!("{prefix}{}", "n".repeat(8 * 1024))
+}
+
 fn insert_file(db: &Db, id: RowUuid, name: &str, notes: &str, bytes: &[u8]) {
     let write = block_on(db.insert(
         FILES,
@@ -203,10 +209,10 @@ fn projected_listing_leaves_excluded_large_columns_unread() {
     }
 }
 
-/// Ordering by a selected large column still orders by its logical value
-/// while another large column is projected away.
+/// Ordering by a selected large-capable column still orders by its value
+/// while a chunked column is projected away.
 ///
-/// alice ──insert notes c…, a…, b… (each larger than one leaf)──► db
+/// alice ──insert notes c…, a…, b… (long inline values)──► db
 /// alice ──read select(name, notes) order_by(notes)──► a, b, c
 #[test]
 fn projected_listing_orders_by_a_large_column() {
@@ -216,21 +222,21 @@ fn projected_listing_orders_by_a_large_column() {
         &db,
         row(0x52),
         "third",
-        &large_notes("c"),
+        &sorting_notes("c"),
         &contents(0x52, 2),
     );
     insert_file(
         &db,
         row(0x53),
         "first",
-        &large_notes("a"),
+        &sorting_notes("a"),
         &contents(0x53, 2),
     );
     insert_file(
         &db,
         row(0x54),
         "second",
-        &large_notes("b"),
+        &sorting_notes("b"),
         &contents(0x54, 2),
     );
 
@@ -247,7 +253,10 @@ fn projected_listing_orders_by_a_large_column() {
         names,
         ["first", "second", "third"].map(|name| Some(Value::String(name.to_owned())))
     );
-    assert_eq!(rows[0].cell("notes"), Some(Value::String(large_notes("a"))));
+    assert_eq!(
+        rows[0].cell("notes"),
+        Some(Value::String(sorting_notes("a")))
+    );
     assert_eq!(rows[0].cell("contents"), None);
 }
 
@@ -261,7 +270,10 @@ fn projected_listing_orders_by_a_large_column() {
 /// server-side read as bob, whole row────────► visible row with full notes
 #[test]
 fn large_column_read_policy_still_gates_range_and_projected_reads() {
-    let allowed = large_notes("shared/");
+    // The policy compares the large-capable column with an inline literal:
+    // the visible row's notes are inline and equal it, the hidden row's are
+    // chunked and so equal no inline literal (SPEC 19.5).
+    let allowed = "shared/".to_owned();
     let policy = read_and_allow_all_writes(PolicyExpr::eq_literal(
         "notes",
         PublicValue::Text(allowed.clone()),
@@ -273,9 +285,13 @@ fn large_column_read_policy_still_gates_range_and_projected_reads() {
     let hidden = row(0x63);
     let visible_bytes = contents(0x62, 2);
     insert_file(&db, visible, "visible", &allowed, &visible_bytes);
-    // Differs from the allowed value only in its final byte.
-    let near_miss = format!("{}x", &allowed[..allowed.len() - 1]);
-    insert_file(&db, hidden, "hidden", &near_miss, &contents(0x63, 2));
+    insert_file(
+        &db,
+        hidden,
+        "hidden",
+        &large_notes(&allowed),
+        &contents(0x63, 2),
+    );
 
     assert_eq!(
         block_on(db.read_value_range(FILES, visible, "contents", 5..13)).expect("visible range"),
@@ -365,7 +381,7 @@ fn projected_listing_does_not_confuse_public_and_storage_names() {
 fn local_large_value_edits_are_staged_without_a_local_read_check() {
     let policy = read_and_allow_all_writes(PolicyExpr::eq_literal(
         "notes",
-        PublicValue::Text(large_notes("shared/")),
+        PublicValue::Text("shared/".to_owned()),
     ));
     let schema = files_schema(policy);
     let bob = AuthorSubject::for_test_bytes([0xb0; 16]);
