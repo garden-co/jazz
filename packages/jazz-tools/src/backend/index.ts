@@ -36,6 +36,7 @@ export {
   type CreateJazzOptions,
   type Jazz,
   type JazzStore,
+  type BackendCredential,
   type JazzUser,
   type VercelStoreOptions,
   type WsLikeSocket,

@@ -82,15 +82,18 @@ export interface VercelCore {
   readonly serverUrl: string;
   readonly adminSecret: string;
   readonly backendSecret: string;
+  /** `access` is what the backend states next to its credential (see `Core`). */
   handle(
     method: string,
     path: string,
     headers: string[][],
     body: Uint8Array,
+    access?: "admin" | "backend" | "session",
   ): Promise<{ status: number; headers: string[][]; body: Uint8Array }>;
   openSocket(
     headers: string[][],
     onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
+    access?: "admin" | "backend" | "session",
   ): { send(data: Uint8Array): boolean; close(): void };
   close(): Promise<void>;
 }
@@ -576,10 +579,10 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     serverUrl,
     adminSecret: first.core.adminSecret,
     backendSecret: first.core.backendSecret,
-    async handle(method, path, headers, body) {
-      return (await ensure()).core.handle(method, path, headers, body);
+    async handle(method, path, headers, body, access) {
+      return (await ensure()).core.handle(method, path, headers, body, access);
     },
-    openSocket(headers, onEvent) {
+    openSocket(headers, onEvent, access) {
       sockets++;
       let inner: ReturnType<VercelCore["openSocket"]> | undefined;
       let closed = false;
@@ -592,10 +595,14 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
         ({ core }) => {
           if (closed) return;
           try {
-            inner = core.openSocket(headers, (error, event) => {
-              if (error || event.kind === "close") done();
-              onEvent(error, event);
-            });
+            inner = core.openSocket(
+              headers,
+              (error, event) => {
+                if (error || event.kind === "close") done();
+                onEvent(error, event);
+              },
+              access,
+            );
           } catch (error) {
             done();
             onEvent(error instanceof Error ? error : new Error(String(error)), {

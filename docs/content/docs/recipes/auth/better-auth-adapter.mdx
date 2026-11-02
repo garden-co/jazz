@@ -119,8 +119,7 @@ export const jazz = await createJazz({
   permissions,
   store: remote({
     url: process.env.JAZZ_SERVER_URL!,
-    adminSecret: process.env.JAZZ_ADMIN_SECRET!,
-    backendSecret: process.env.JAZZ_BACKEND_SECRET!,
+    secret: process.env.JAZZ_ADMIN_SECRET!,
   }),
   authenticate: async (request) => {
     const session = await auth.api.getSession({ headers: request.headers });

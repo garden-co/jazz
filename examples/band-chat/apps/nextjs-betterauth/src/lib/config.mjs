@@ -17,14 +17,13 @@ export function readConfig(env = process.env) {
     betterAuthSecret: env.BETTER_AUTH_SECRET || undefined,
     /**
      * Where the data lives. With JAZZ_SERVER_URL set, the backend connects to
-     * that sync server (such as Jazz Cloud) with the app's secrets; otherwise
+     * that sync server (such as Jazz Cloud) with the app's admin secret; otherwise
      * it keeps the data in a local SQLite directory.
      */
     remote: env.JAZZ_SERVER_URL
       ? {
           url: env.JAZZ_SERVER_URL,
           adminSecret: env.JAZZ_ADMIN_SECRET || undefined,
-          backendSecret: env.BACKEND_SECRET || undefined,
         }
       : undefined,
     dataPath: env.JAZZ_DATA_PATH || ".jazz",
@@ -47,7 +46,7 @@ export function usesLocalDefaults(config = readConfig()) {
  * Rejects incomplete configurations before any route runs. The Better Auth
  * secret is always required (`pnpm dev` generates a local one, see
  * dev-secrets.mjs); deployments must also name their origin and Jazz app, and
- * a remote sync server needs both of the app's secrets.
+ * a remote sync server needs the app's admin secret.
  * @param {ReturnType<typeof readConfig>} config
  */
 export function assertConfiguration(config = readConfig()) {
@@ -56,7 +55,6 @@ export function assertConfiguration(config = readConfig()) {
     ...(local ? [] : config.unsetPublic),
     ...(config.betterAuthSecret ? [] : ["BETTER_AUTH_SECRET"]),
     ...(config.remote && !config.remote.adminSecret ? ["JAZZ_ADMIN_SECRET"] : []),
-    ...(config.remote && !config.remote.backendSecret ? ["BACKEND_SECRET"] : []),
   ];
   if (missing.length) {
     throw new Error(

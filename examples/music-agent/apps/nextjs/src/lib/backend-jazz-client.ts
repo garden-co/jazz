@@ -33,11 +33,7 @@ export function backendJazzClient(): Promise<Jazz> {
     app,
     permissions,
     store: url
-      ? remote({
-          url,
-          adminSecret: requiredSecret("JAZZ_ADMIN_SECRET"),
-          backendSecret: requiredSecret("BACKEND_SECRET"),
-        })
+      ? remote({ url, secret: requiredSecret("JAZZ_ADMIN_SECRET") })
       : sqlite({ path: process.env.JAZZ_DATA_PATH || ".jazz" }),
     // Better Auth's session cookie decides who the user is.
     authenticate: async (request) => {
