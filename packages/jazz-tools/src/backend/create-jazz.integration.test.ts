@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -35,11 +35,16 @@ function authenticate(request: Request) {
 }
 
 const requestPaths: string[] = [];
+/** The stream key each request carried, by request path. */
+const streamKeys = new Map<string, string>();
 
 async function serve(jazz: Jazz, options: { sockets: boolean }): Promise<string> {
   requestPaths.length = 0;
+  streamKeys.clear();
   const server: Server = createServer((req, res) => {
     requestPaths.push(req.url ?? "");
+    const key = req.headers["x-jazz-stream-key"];
+    if (typeof key === "string") streamKeys.set(req.url ?? "", key);
     jazz.nodeHandler(req, res, () => {
       res.statusCode = 404;
       res.end("app route");
@@ -204,6 +209,11 @@ describe("createJazz", () => {
     expect(withProvenance?.$createdBy).toMatchObject({ account: alice.session!.user!.account });
     // The user synced over a socket, not the stream fallback.
     expect(requestPaths.some((path) => path.includes("/stream"))).toBe(false);
+    // This host upgrades sockets, so a failed socket isn't sent to the stream:
+    // the probe gets no stream marker and the client retries the socket.
+    const probe = await fetch(`${origin}/jazz/apps/${appId}/ws`);
+    expect(probe.status).toBe(426);
+    expect(probe.headers.get("x-jazz-stream")).toBeNull();
   }, 60_000);
 
   it("refuses sign-in and sync started by a page on another origin", async () => {
@@ -376,11 +386,23 @@ describe("createJazz", () => {
     expect(seen.map((todo) => todo.title)).toEqual(["over the stream"]);
     expect(requestPaths.some((path) => path.endsWith(`/apps/${appId}/stream`))).toBe(true);
 
-    // A session id alone (it can end up in logs) doesn't let another user
-    // act in the session, nor end it.
+    // A session id alone (it can end up in logs) doesn't let anyone act in
+    // the session, nor end it, not even with alice's cookie; and the key
+    // with another user's cookie doesn't either.
     const sessionPath = requestPaths.find((path) => /\/stream\/[^/]+$/.test(path))!;
+    const key = streamKeys.get(sessionPath)!;
+    expect(key).toBeTruthy();
     for (const method of ["POST", "DELETE"]) {
       expect(await statusOf(`${origin}${sessionPath}`, method, { "x-test-user": "bob" })).toBe(403);
+      expect(await statusOf(`${origin}${sessionPath}`, method, { "x-test-user": "alice" })).toBe(
+        403,
+      );
+      expect(
+        await statusOf(`${origin}${sessionPath}`, method, {
+          "x-test-user": "bob",
+          "x-jazz-stream-key": key,
+        }),
+      ).toBe(403);
     }
     // A session this process doesn't hold says why.
     const unknown = await fetch(`${origin}/jazz/apps/${appId}/stream/nope`, { method: "POST" });
@@ -397,10 +419,13 @@ describe("createJazz", () => {
     const appId = randomUUID();
     const dir = await mkdtemp(join(tmpdir(), "jazz-lock-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    // A lock file left by a process that died (under Docker often our own
+    // pid, back after a restart) holds nothing: only the OS lock counts.
+    await writeFile(join(dir, "jazz.lock"), `process ${process.pid}`);
     const first = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
     await expect(
       createJazz({ appId, app, permissions, store: sqlite({ path: dir }) }),
-    ).rejects.toThrow(/already open in this process/);
+    ).rejects.toThrow(/is already open/);
     await first.close();
     // Closed, the directory is free again.
     const second = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });

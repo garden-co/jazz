@@ -1,6 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
@@ -210,7 +208,9 @@ const DEFAULT_BASE_PATH = "/jazz";
 const PRELUDE_DEADLINE_MS = 30_000;
 /** On createJazz's 426 for a socket path: this endpoint serves the HTTP stream. */
 const STREAM_AVAILABLE_HEADER = "x-jazz-stream";
-const PUBLIC_APP_ROUTES = /^\/apps\/[^/]+\/(ws|schemas|schema\/[^/]+)$/;
+/** The stream session's key, on each send and close (see `openStream`). */
+const STREAM_KEY_HEADER = "x-jazz-stream-key";
+const PUBLIC_APP_ROUTES = /^\/apps\/[^/]+\/(schemas|schema\/[^/]+)$/;
 const STRIPPED_HEADERS = ["x-jazz-backend-secret", "x-jazz-admin-secret", "x-jazz-session"];
 // What a browser's request to a public route carries on to a remote core:
 // never its cookies or its app session.
@@ -381,12 +381,8 @@ async function openInProcessCore(
 ): Promise<Core> {
   const backendSecret = randomBytes(32).toString("base64url");
   const adminSecret = randomBytes(32).toString("base64url");
-  let releaseLock = async () => {};
-  if (store.kind === "sqlite") {
-    refuseServerlessDisk(store.path);
-    await mkdir(store.path, { recursive: true });
-    releaseLock = await lockDirectory(store.path);
-  }
+  // The core holds `<path>/jazz.lock` with an OS lock while it's open.
+  if (store.kind === "sqlite") refuseServerlessDisk(store.path);
   const core = await JazzCore.open({
     appId,
     backendSecret,
@@ -420,48 +416,8 @@ async function openInProcessCore(
     async close() {
       unregister();
       await core.close();
-      await releaseLock();
     },
   };
-}
-
-/**
- * Hold `dir` for this process: two cores on one sqlite directory (a dev
- * server's hot reload without a cached instance, cluster mode, a rolling
- * deploy on one disk) would each believe they own its data. A lock left by
- * a process that has exited is taken over.
- */
-async function lockDirectory(dir: string): Promise<() => Promise<void>> {
-  const lock = join(dir, "jazz.lock");
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      await writeFile(lock, String(process.pid), { flag: "wx" });
-      return async () => {
-        await unlink(lock).catch(() => undefined);
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-    const holder = Number((await readFile(lock, "utf8").catch(() => "")).trim());
-    if (Number.isInteger(holder) && holder > 0 && processAlive(holder)) {
-      throw new Error(
-        `sqlite(): ${dir} is already open in ${holder === process.pid ? "this process" : `process ${holder}`}. ` +
-          "One core per directory: create Jazz once and reuse it (cache it on globalThis across hot reloads), " +
-          "and give each process its own directory or use remote().",
-      );
-    }
-    await unlink(lock).catch(() => undefined);
-  }
-  throw new Error(`sqlite(): could not lock ${dir}`);
-}
-
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
 }
 
 /**
@@ -838,11 +794,14 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     return { prelude: new TextEncoder().encode(JSON.stringify(rewritten)), userId: user.userId };
   }
 
-  // HTTP stream sessions, by id.
-  const streams = new Map<string, ClientSession>();
+  // HTTP stream sessions, by id, with the key that proves a request comes
+  // from the client that opened them.
+  const streams = new Map<string, { session: ClientSession; key: Buffer }>();
 
   function openStream(request: Request): Response {
     const id = randomUUID();
+    // The id goes in URLs (and so in logs); the key only in a header.
+    const key = randomBytes(32);
     let controller!: ReadableStreamDefaultController<Uint8Array>;
     let closed = false;
     const end = (code: number, reason: string) => {
@@ -861,7 +820,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         controller = c;
       },
       cancel() {
-        streams.get(id)?.close();
+        streams.get(id)?.session.close();
         end(1001, "client went away");
       },
     });
@@ -878,8 +837,13 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     } catch (error) {
       return new Response(error instanceof Error ? error.message : String(error), { status: 503 });
     }
-    streams.set(id, socket);
-    controller.enqueue(encodeStreamRecord(STREAM_RECORD_SESSION, new TextEncoder().encode(id)));
+    streams.set(id, { session: socket, key });
+    controller.enqueue(
+      encodeStreamRecord(
+        STREAM_RECORD_SESSION,
+        new TextEncoder().encode(JSON.stringify({ id, key: key.toString("base64url") })),
+      ),
+    );
     return new Response(body, {
       headers: {
         "Content-Type": "application/octet-stream",
@@ -890,18 +854,26 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
 
   /**
-   * The stream session `id`, when `request` comes from its user: a session
-   * id alone (which can end up in logs) doesn't let anyone else act in it.
+   * The stream session `id`, when `request` comes from the client that
+   * opened it (it carries the session's key) and, once the session is
+   * admitted as a user, from that user still: a session id alone (which
+   * can end up in logs) doesn't let anyone act in it, before admission or
+   * for a guest either.
    */
   async function ownStream(id: string, request: Request): Promise<ClientSession | Response> {
-    const socket = streams.get(id);
-    if (!socket) {
+    const entry = streams.get(id);
+    if (!entry) {
       // Sessions live in the process that opened them.
       return new Response(
         "unknown stream session: HTTP stream sessions need a single backend instance or sticky routing",
         { status: 404 },
       );
     }
+    const given = Buffer.from(request.headers.get(STREAM_KEY_HEADER) ?? "", "base64url");
+    if (given.length !== entry.key.length || !timingSafeEqual(given, entry.key)) {
+      return new Response("not this stream's client", { status: 403 });
+    }
+    const socket = entry.session;
     if (socket.userId !== undefined) {
       const user = await authenticate(request);
       if (user?.userId !== socket.userId) return new Response("not signed in", { status: 403 });
@@ -959,6 +931,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
    * client, which holds no ambient cookie) passes. The backend's own origin
    * is the host the request was sent to, as a proxy forwards it.
    */
+  /** Set by attach(): this process upgrades sockets on its own server. */
+  let upgradesSockets = false;
+
   function originAllowed(request: Request): boolean {
     const origin = request.headers.get("origin");
     if (origin === null) {
@@ -1019,9 +994,14 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       return new Response(null, { status: 405 });
     }
     if (path.endsWith("/ws")) {
-      // A socket upgrade this host couldn't perform. The browser client
-      // switches to the HTTP stream when it sees this.
-      // The header marks a createJazz endpoint, which serves the stream.
+      // A plain request for the socket path: the browser client asks this
+      // after a socket failed before it opened. Where this host upgrades
+      // sockets (attach(), or Vercel), that failure was transient (a
+      // restart, a draining instance) and the client should retry the
+      // socket. Only where it can't does the marker send it to the stream.
+      if (upgradesSockets || process.env.VERCEL) {
+        return new Response("Upgrade to a WebSocket", { status: 426 });
+      }
       return new Response("WebSocket upgrade not available here; use the HTTP stream", {
         status: 426,
         headers: { [STREAM_AVAILABLE_HEADER]: "1" },
@@ -1118,6 +1098,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
 
   async function attach(server: Server): Promise<void> {
+    upgradesSockets = true;
     const { WebSocketServer } = (await import("ws" as string)) as {
       WebSocketServer: new (options: { noServer: true; maxPayload: number }) => {
         handleUpgrade(
@@ -1172,7 +1153,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     },
     close() {
       closing ??= (async () => {
-        for (const socket of streams.values()) socket.close();
+        for (const { session: stream } of streams.values()) stream.close();
         streams.clear();
         await session.close();
         await core.close();
