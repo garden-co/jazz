@@ -103,6 +103,8 @@ mod prepared_claim_routing;
 mod provenance;
 #[path = "../read_deadline_scheduling.rs"]
 mod read_deadline_scheduling;
+#[path = "../read_request_lifecycle.rs"]
+mod read_request_lifecycle;
 #[path = "../recheck_policies.rs"]
 mod recheck_policies;
 #[path = "../recheck_queries.rs"]

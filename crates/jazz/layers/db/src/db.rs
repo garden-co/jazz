@@ -7020,15 +7020,37 @@ struct Overlay {
 /// The store behind its one gate: every borrow first undoes a transaction
 /// handle's overlay, so nothing but that handle's next stage or read sees
 /// it.
-struct Store(RefCell<Inner>);
+struct Store(RefCell<Inner>, RefCell<Vec<u64>>);
 
 impl Store {
     fn new(inner: Inner) -> Self {
-        Self(RefCell::new(inner))
+        Self(RefCell::new(inner), RefCell::new(Vec::new()))
+    }
+
+    /// A callback can drop a read while the store is borrowed. Keep that
+    /// cleanup outside Inner until the next exclusive borrow can apply it.
+    fn cancel_fetch(&self, id: u64) {
+        if let Ok(mut inner) = self.0.try_borrow_mut() {
+            if let Some(client) = inner.client.as_mut() {
+                client.forget_once(id);
+            }
+        } else {
+            self.1.borrow_mut().push(id);
+        }
+    }
+
+    fn flush_cancelled_fetches(&self, inner: &mut Inner) {
+        let cancelled = std::mem::take(&mut *self.1.borrow_mut());
+        if let Some(client) = inner.client.as_mut() {
+            for id in cancelled {
+                client.forget_once(id);
+            }
+        }
     }
 
     fn borrow_mut(&self) -> std::cell::RefMut<'_, Inner> {
         let mut inner = self.0.borrow_mut();
+        self.flush_cancelled_fetches(&mut inner);
         inner.settle_overlay();
         inner
     }
@@ -7037,6 +7059,7 @@ impl Store {
         // A borrow already held means the overlay was undone when it was
         // taken.
         if let Ok(mut inner) = self.0.try_borrow_mut() {
+            self.flush_cancelled_fetches(&mut inner);
             inner.settle_overlay();
         }
         self.0.borrow()
@@ -7044,7 +7067,9 @@ impl Store {
 
     /// The store with a handle's overlay kept for its next stage.
     fn staging(&self) -> std::cell::RefMut<'_, Inner> {
-        self.0.borrow_mut()
+        let mut inner = self.0.borrow_mut();
+        self.flush_cancelled_fetches(&mut inner);
+        inner
     }
 }
 

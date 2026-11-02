@@ -4973,10 +4973,8 @@ struct PendingFetch<'a> {
 
 impl Drop for PendingFetch<'_> {
     fn drop(&mut self) {
-        if let Some((id, _)) = self.asked
-            && let Some(client) = self.db.inner.borrow_mut().client.as_mut()
-        {
-            client.forget_once(id);
+        if let Some((id, _)) = self.asked {
+            self.db.inner.cancel_fetch(id);
         }
     }
 }
@@ -6433,7 +6431,7 @@ impl Inner {
 }
 
 impl Client {
-    fn forget_once(&mut self, id: u64) {
+    pub(super) fn forget_once(&mut self, id: u64) {
         self.answers.remove(&id);
         self.reads.remove(&id);
         self.outbox.retain(|message| {
