@@ -11,6 +11,9 @@ describe("local-first tokens from @garden-co/local-first-auth", () => {
   const apps = [
     "6b0c3f8e-2d9a-4f61-9a57-1c2e3d4f5a6b",
     "6B0C3F8E-2D9A-4F61-9A57-1C2E3D4F5A6B",
+    "6b0c3f8e2d9a4f619a571c2e3d4f5a6b",
+    "{6b0c3f8e-2d9a-4f61-9a57-1c2e3d4f5a6b}",
+    "urn:uuid:6b0c3f8e-2d9a-4f61-9a57-1c2e3d4f5a6b",
     "chat-app",
   ];
 
