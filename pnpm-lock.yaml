@@ -2066,9 +2066,9 @@ importers:
 
   packages/jazz-tools:
     dependencies:
-      '@garden-co/local-first-auth':
-        specifier: workspace:*
-        version: link:../local-first-auth
+      '@noble/curves':
+        specifier: 2.0.1
+        version: 2.0.1
       '@noble/hashes':
         specifier: 2.0.1
         version: 2.0.1
@@ -2090,6 +2090,9 @@ importers:
       '@opentelemetry/sdk-trace-base':
         specifier: ^2.7.1
         version: 2.7.1(@opentelemetry/api@1.9.1)
+      '@scure/bip39':
+        specifier: 2.0.1
+        version: 2.0.1
       '@standard-schema/spec':
         specifier: ^1.1.0
         version: 1.1.0
@@ -2239,28 +2242,6 @@ importers:
       jazz-napi:
         specifier: workspace:*
         version: link:../../crates/jazz-napi
-
-  packages/local-first-auth:
-    dependencies:
-      '@noble/curves':
-        specifier: 2.0.1
-        version: 2.0.1
-      '@noble/hashes':
-        specifier: 2.0.1
-        version: 2.0.1
-      '@scure/bip39':
-        specifier: 2.0.1
-        version: 2.0.1
-    devDependencies:
-      '@types/node':
-        specifier: catalog:default
-        version: 22.19.13
-      typescript:
-        specifier: catalog:default
-        version: 6.0.2
-      vitest:
-        specifier: catalog:default
-        version: 4.1.0(@edge-runtime/vm@3.2.0)(@opentelemetry/api@1.9.1)(@types/node@22.19.13)(@vitest/browser-playwright@4.1.0)(@vitest/ui@4.1.0)(happy-dom@20.8.4)(jsdom@28.1.0(@noble/hashes@2.0.1))(vite@8.0.1(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
 
   starters/next-betterauth:
     dependencies:

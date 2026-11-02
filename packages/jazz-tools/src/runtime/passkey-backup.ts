@@ -1,5 +1,5 @@
-export { BrowserPasskeyBackup, PasskeyBackupError } from "@garden-co/local-first-auth/passkey";
+export { BrowserPasskeyBackup, PasskeyBackupError } from "../local-first-auth/passkey.js";
 export type {
   BrowserPasskeyBackupOptions,
   PasskeyBackupErrorCode,
-} from "@garden-co/local-first-auth/passkey";
+} from "../local-first-auth/passkey.js";
