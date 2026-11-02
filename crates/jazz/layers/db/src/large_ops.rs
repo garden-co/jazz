@@ -1564,6 +1564,7 @@ impl TxRef<'_> {
                 table.to_owned(),
                 row,
                 cells,
+                BTreeMap::new(),
                 UpsertOptions {
                     identity,
                     target: view_target(head, base),
@@ -1584,6 +1585,7 @@ impl TxRef<'_> {
         Ok(WriteHandle {
             row,
             seq: Pos::default(),
+            tx: 0,
         })
     }
 
