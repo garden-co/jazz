@@ -165,7 +165,7 @@ export interface Jazz {
   readonly appId: string;
   readonly basePath: string;
   /** Answer one request under `basePath` (sync, sign-in, the HTTP stream). */
-  fetch(request: Request): Promise<Response>;
+  handle(request: Request): Promise<Response>;
   /** Route handlers for a Next.js catch-all route (`app/jazz/[...path]/route.ts`). */
   next(): {
     GET(request: Request): Promise<Response>;
@@ -174,7 +174,7 @@ export interface Jazz {
   };
   /**
    * Accept sync sockets on a Node HTTP server (needs the `ws` package).
-   * Plain requests still go through `nodeHandler` or `fetch`.
+   * Plain requests still go through `nodeHandler` or `handle`.
    */
   attach(server: Server): Promise<void>;
   /** Node `(req, res)` handler for requests under `basePath` (Express, Fastify's raw mode). */
@@ -952,7 +952,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
    * client, which holds no ambient cookie) passes. The backend's own origin
    * is the host the request was sent to, as a proxy forwards it.
    */
-  /** This process upgrades sockets for fetch() and nodeHandler (set by attach()). */
+  /** This process upgrades sockets for handle() and nodeHandler (set by attach()). */
   let upgradesSockets = options.upgradesSockets ?? false;
 
   function originAllowed(request: Request): boolean {
@@ -1157,7 +1157,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   return {
     appId: options.appId,
     basePath,
-    fetch: (request) => handle(request),
+    handle: (request) => handle(request),
     next: () => ({ GET: nextHandler, POST: nextHandler, DELETE: nextHandler }),
     attach,
     nodeHandler,
