@@ -2,16 +2,18 @@ export interface BandChatConfig {
   nodeEnv: string | undefined;
   unsetPublic: string[];
   origin: string;
-  appId: string | undefined;
-  serverUrl: string | undefined;
-  backendSecret: string | undefined;
+  appId: string;
   betterAuthSecret: string | undefined;
+  remote:
+    | { url: string; adminSecret: string | undefined; backendSecret: string | undefined }
+    | undefined;
+  dataPath: string;
 }
 export declare const LOCAL_ORIGIN: string;
-export declare const JWT_AUDIENCE: string;
+export declare const LOCAL_APP_ID: string;
 export declare function readConfig(env?: Record<string, string | undefined>): BandChatConfig;
 export declare function usesLocalDefaults(config?: BandChatConfig): boolean;
-export declare function assertConfiguration(
-  config?: BandChatConfig,
-): BandChatConfig & { backendSecret: string; betterAuthSecret: string };
-export declare function jazzServer(config?: BandChatConfig): { appId: string; serverUrl: string };
+export declare function assertConfiguration(config?: BandChatConfig): BandChatConfig & {
+  betterAuthSecret: string;
+  remote: { url: string; adminSecret: string; backendSecret: string } | undefined;
+};

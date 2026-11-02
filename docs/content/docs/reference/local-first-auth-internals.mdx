@@ -19,15 +19,15 @@ Local-first JWTs use Ed25519, `iss: "urn:jazz:local-first"`, the derived identit
 
 This proves control of the identity without an external JWKS provider. The deterministic founder rule lets core admit that identity's account without a competing registration choice. It does not let the caller choose an arbitrary account ID.
 
-The core registry records the exact identity-to-account assignment. External identities require explicit registration or linking; merely verifying an external JWT does not create an account.
+The core registry records the exact identity-to-account assignment. A signed-in user of the app's own auth gets an account when the app's backend vouches for them (`loginWithBackend`), or joins an existing local-first account when the backend links them (`linkWithBackend`).
 
-## Linking a provider identity
+## Linking a signed-in user
 
-The provider keeps its normal issuer and subject. It does not rewrite its user ID, accept a Jazz-specific signup proof, or mint custom linking claims.
+The provider keeps its normal user ID. It does not rewrite it, accept a Jazz-specific signup proof, or mint custom linking claims.
 
-The app first gracefully closes its current context with `shutdown({ waitForSync: true })`. If synchronization fails, it keeps that context and retries later. Once closed, it calls `accounts.linkJWT({ getToken })` outside any context, then opens a new context using the returned handle.
+The client calls `linkWithBackend()`. The session gracefully closes its current context with `shutdown({ waitForSync: true })`; if synchronization fails, it keeps that context. Once closed, the client posts to the backend's `backend-link` route with its own local-first JWT as the bearer. The backend runs `authenticate`, asks the core to verify the local-first token, and then links the user's identity (`jazz:app:<appId>`, user ID) to that account with its admin secret. The client opens a new context using the returned handle.
 
-The core linking protocol uses a nonce and two authenticated proofs: a currently permitted identity authorizes linking a particular target identity, and that target proves control through its ordinary JWT. The ordered registry accepts the link only if the target identity is unassigned. An identity already assigned to another account cannot be moved or merged, including after revocation.
+The core accepts the link only if the user's identity is unassigned. An identity already assigned to another account cannot be moved or merged, including after revocation.
 
 Existing rows retain their original structured authorship. Their account IDs stay unchanged, while new writes record the linked provider identity. Policies comparing `.account` keep ownership stable; comparisons of the entire author also distinguish the acting identity.
 

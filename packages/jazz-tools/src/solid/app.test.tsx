@@ -3,7 +3,7 @@ import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
-import { jwtAuth } from "../session/app.js";
+import { backendAuth } from "../session/app.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
 import { JazzProvider, useJazzAuth } from "./app.js";
 import { useJazzClient } from "./provider.js";
@@ -22,6 +22,7 @@ afterEach(async () => {
   factory.mockReset();
   document.body.replaceChildren();
 });
+const backend = { user: "unused" };
 async function setup() {
   const events: string[] = [];
   const handle = (id: string) =>
@@ -32,10 +33,8 @@ async function setup() {
     logout: () => {
       if (failLogout) throw new Error("logout failed");
     },
-    registerJWT: async () => handle("unused"),
-    loginJWT: async () => handle("unused"),
-    loginOrRegisterJWT: async (auth: any) => handle(await auth.getToken()),
-    linkJWT: async () => handle("unused"),
+    // The backend names whoever the test's provider says is signed in.
+    loginWithBackend: async () => handle(backend.user),
   });
   const owner = await createJazzSessionOwner({
     accounts,
@@ -103,9 +102,13 @@ it("retries startup through the default UI and exposes unified auth to children"
   await flush();
   expect(node.textContent).toContain("logout failed");
 });
-it("reacts to JWT getters, conceals children during provider pending, and releases before shutdown", async () => {
+it("reacts to provider keys, conceals children during provider pending, and releases before shutdown", async () => {
   const { owner, events } = await setup();
-  const [key, setKey] = createSignal<string | null>(null);
+  const [key, setProviderKey] = createSignal<string | null>(null);
+  const setKey = (next: string | null) => {
+    if (next) backend.user = next;
+    setProviderKey(next);
+  };
   const [pending, setPending] = createSignal(false);
   const seen: boolean[] = [];
   let mounts = 0;
@@ -122,10 +125,9 @@ it("reacts to JWT getters, conceals children during provider pending, and releas
     () => (
       <JazzProvider
         appId="test"
-        auth={jwtAuth({
+        auth={backendAuth({
           key: key(),
           isPending: pending(),
-          getToken: async () => key()!,
           logout: async () => {
             setKey(null);
           },
