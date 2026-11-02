@@ -29,11 +29,7 @@ export function jazz(): Promise<Jazz> {
     app,
     permissions,
     store: config.remote
-      ? remote({
-          url: config.remote.url,
-          adminSecret: config.remote.adminSecret,
-          backendSecret: config.remote.backendSecret,
-        })
+      ? remote({ url: config.remote.url, secret: config.remote.adminSecret })
       : process.env.NODE_ENV === "test"
         ? memory()
         : sqlite({ path: config.dataPath }),

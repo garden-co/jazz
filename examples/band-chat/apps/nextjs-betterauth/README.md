@@ -82,7 +82,7 @@ listed in `.env.example`, or it refuses to start (`src/lib/config.mjs`,
 
 By default the backend stores data in SQLite next to the app. To sync through
 Jazz Cloud or your own sync server instead, set `JAZZ_SERVER_URL`,
-`JAZZ_ADMIN_SECRET` and `BACKEND_SECRET`; the backend then uses `remote()`.
+and the app's admin secret in `JAZZ_ADMIN_SECRET`; the backend then uses `remote()`.
 Browsers still talk only to `/jazz` and never see these values.
 
 ## Checks

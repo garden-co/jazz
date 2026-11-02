@@ -12,21 +12,19 @@ export function readConfig(env = process.env) {
     env.BETTER_AUTH_SECRET || (production ? undefined : "record-player-development-secret");
   /**
    * Where the data lives. With JAZZ_SERVER_URL set, the backend connects to
-   * that sync server (such as Jazz Cloud) with the app's secrets; otherwise
+   * that sync server (such as Jazz Cloud) with the app's admin secret; otherwise
    * it keeps the data in a local SQLite directory.
    */
   const remote = env.JAZZ_SERVER_URL
     ? {
         url: env.JAZZ_SERVER_URL,
-        adminSecret: env.JAZZ_ADMIN_SECRET || undefined,
-        backendSecret: env.BACKEND_SECRET || undefined,
+        secret: env.JAZZ_ADMIN_SECRET || undefined,
       }
     : undefined;
   const missing = [
     !appId && "NEXT_PUBLIC_JAZZ_APP_ID",
     !betterAuthSecret && "BETTER_AUTH_SECRET",
-    remote && !remote.adminSecret && "JAZZ_ADMIN_SECRET",
-    remote && !remote.backendSecret && "BACKEND_SECRET",
+    remote && !remote.secret && "JAZZ_ADMIN_SECRET",
   ].filter(Boolean);
   if (missing.length) throw new Error(`RecordPlayer must be configured with ${missing.join(", ")}`);
   return {
@@ -35,8 +33,7 @@ export function readConfig(env = process.env) {
     betterAuthSecret: /** @type {string} */ (betterAuthSecret),
     remote: remote && {
       url: remote.url,
-      adminSecret: /** @type {string} */ (remote.adminSecret),
-      backendSecret: /** @type {string} */ (remote.backendSecret),
+      secret: /** @type {string} */ (remote.secret),
     },
     dataPath: env.JAZZ_DATA_PATH || ".jazz",
   };
