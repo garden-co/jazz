@@ -5630,12 +5630,16 @@ impl Inner {
     /// its transactions before it sends them, and builds on its commits
     /// under its own claims.
     ///
-    /// One hand-over is allowed: a local-first guest that signs up keeps its
-    /// account and its store, and so its node, and goes on writing under the
-    /// principal the app's backend names. The first commit as a guest's node
-    /// by another principal of the same account takes the node over, and
-    /// from then on only that principal writes as it; the guest's key no
-    /// longer does.
+    /// The node moves with its account's sign-in: a local-first guest that
+    /// signs up keeps its account and its store, and so its node, and goes on
+    /// writing under the principal the app's backend names; later the same
+    /// account may sign in another way (another issuer, or an identity the
+    /// backend linked). The first commit as the node by another signed-in
+    /// principal of the same account takes the node over, and from then on
+    /// only that principal writes as it, until another one takes it over.
+    /// A local-first principal never takes a node over, so a guest's key
+    /// (unexpired, or leaked) no longer writes as its node once the account
+    /// has signed in.
     fn claim_node(&self, node: [u8; 16], identity: &AuthorSubject) -> Result<bool, Error> {
         let author = self.author_code(&author_key(identity))?;
         let code = self.node_code(node)?;
@@ -5653,7 +5657,7 @@ impl Inner {
         if owner == author {
             return Ok(true);
         }
-        if !self.signs_up_from(owner, identity)? {
+        if !self.takes_over_from(owner, identity)? {
             return Ok(false);
         }
         // Only the owner we read is handed over: if the node changed hands in
@@ -5667,9 +5671,9 @@ impl Inner {
         Ok(handed_over == 1)
     }
 
-    /// Whether `identity` is a signed-up guest taking over a node of its
-    /// own account's local-first principal (author code `owner`).
-    fn signs_up_from(&self, owner: i64, identity: &AuthorSubject) -> Result<bool, Error> {
+    /// Whether `identity`, a signed-in principal, takes over a node of
+    /// another principal (author code `owner`) of its own account.
+    fn takes_over_from(&self, owner: i64, identity: &AuthorSubject) -> Result<bool, Error> {
         let Some(account) = identity.account_id() else {
             return Ok(false);
         };
@@ -5679,12 +5683,11 @@ impl Inner {
             return Ok(false);
         }
         match self.conn.cached_row(
-            "SELECT account, issuer FROM _jazz_authors WHERE n = ?1",
+            "SELECT account FROM _jazz_authors WHERE n = ?1",
             [owner],
-            |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?)),
+            |r| r.get::<_, Vec<u8>>(0),
         ) {
-            Ok((stored, issuer)) => Ok(stored.as_slice() == account.0.as_bytes().as_slice()
-                && issuer == jazz_types::identity::LOCAL_FIRST_ISSUER),
+            Ok(stored) => Ok(stored.as_slice() == account.0.as_bytes().as_slice()),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
             Err(error) => Err(storage(error)),
         }
