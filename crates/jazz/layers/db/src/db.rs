@@ -47,7 +47,7 @@ pub mod shard;
 #[path = "transaction_reads.rs"]
 mod transaction_reads;
 pub use crate::names::LensEffects;
-pub use crate::options::REMOTE_LINK_ATTEMPT_WINDOW;
+pub use crate::options::{REMOTE_LINK_ATTEMPT_WINDOW, TickScheduler, TickUrgency};
 use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
 use crate::values::{
@@ -456,6 +456,8 @@ pub struct SchemaPublication {
 
 struct Inner {
     conn: Connection,
+    scheduler: Option<Rc<dyn TickScheduler>>,
+    read_deadlines: Vec<Weak<web_time::Instant>>,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
     /// Errors the next ticks fail with, for tests of a tick driver.
@@ -1368,6 +1370,8 @@ impl Db {
             view: None,
             inner: Rc::new(Store::new(Inner {
                 conn,
+                scheduler: None,
+                read_deadlines: Vec::new(),
                 mutation_admission_closed: false,
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),
@@ -1640,7 +1644,9 @@ impl Db {
             inner.fan.collect();
             inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
         }
-        self.pump_chunk_store().await
+        let result = self.pump_chunk_store().await;
+        self.schedule_read_deadlines();
+        result
     }
 
     /// Fetch the offloaded nodes reads wait on, move settled leaves to the
