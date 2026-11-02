@@ -16,6 +16,22 @@ No JWT plugin, JWKS or bearer tokens are involved.
 Mount Jazz under `/jazz` next to Better Auth's own handler (see [Backend](/docs/setup/backend#mount-it)).
 Pass anything your policies need, such as the `admin` plugin's role, as `claims`.
 
+### Act as the signed-in user
+
+In a route handler, act as the signed-in user with `jazz.forRequest(request)`, which runs the same `authenticate`:
+
+```ts title="messages.ts"
+import { jazz } from "./jazz.server";
+import { app } from "./schema";
+
+export async function messages(request: Request) {
+  const db = await jazz.forRequest(request);
+  return Response.json(await db.all(app.messages, { tier: "remote" }));
+}
+```
+
+This keeps the signed-in user's policies and authorship without switching your main backend's own identity. For account-owned rows, compare ownership against `session.user.account` in permissions; a Better Auth user ID is not a Jazz account UUID. Never accept a raw account ID from a request as authority.
+
 ## Client
 
 The plain Better Auth client is enough:
@@ -203,22 +219,6 @@ export const auth = betterAuth({
   The Jazz adapter does not support Better Auth experimental joins yet, so do not enable
   `experimental.joins`.
 </Callout>
-
-### Act as the signed-in user
-
-The adapter stores Better Auth users, password credentials, and application sessions; the client side stays as in [Connecting to Jazz](#connecting-to-jazz). In a route handler, act as the signed-in user with `jazz.forRequest(request)`, which runs the same `authenticate`:
-
-```ts title="messages.ts"
-import { jazz } from "./auth";
-import { app } from "./schema";
-
-export async function messages(request: Request) {
-  const db = await jazz.forRequest(request);
-  return Response.json(await db.all(app.messages, { tier: "remote" }));
-}
-```
-
-These scopes keep the signed-in user's policies and authorship without switching the backend's own identity. For account-owned rows, compare ownership against `session.user.account` in permissions; a Better Auth user ID is not a Jazz account UUID. Never accept a raw account ID from a request as authority.
 
 ### Publishing schema and permissions
 
