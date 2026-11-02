@@ -69,8 +69,12 @@ was used.
 
 ## Upgrading a guest, linking identities
 
-When a user's id changes, for example a guest or local-first user signing up, link the two once your
-auth has verified both:
+A local-first guest who signs up keeps its account and data: after your sign-up sets its session,
+the client calls `linkWithBackend()`. It proves it owns the guest account with its own local-first
+key; your backend runs `authenticate` and links the new user to that account. In React, call it from
+`useJazzAuth().sessionActions` in your sign-up form.
+
+To link from your own backend code instead, for example a second identity your auth issued, call:
 
 ```ts title="app/api/sign-up/route.ts"
 await jazz.linkIdentity({ from: guestId, to: user.id });

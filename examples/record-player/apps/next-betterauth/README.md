@@ -28,9 +28,11 @@ audio back in byte ranges.
   listener or an editor. The invitation stays `pending` until the recipient
   accepts it; only then does the read (and, for editors, write) policy admit
   them. The owner can revoke. See `permissions.ts`.
-- **Better Auth → Jazz.** Better Auth owns the browser session and signs an
-  ES256 JWT; Jazz enrolls it (`registerJWT` on sign-up, `loginJWT` on sign-in)
-  and the app opens a client for that account (`app/record-player-provider.tsx`).
+- **Better Auth → Jazz.** Better Auth owns the browser session. Jazz runs
+  inside the Next app (`createJazz` in `src/lib/jazz.server.ts`, mounted at
+  `/jazz`), and its `authenticate` reads that session cookie, so the browser
+  signs in through the backend with no token of its own
+  (`app/record-player-provider.tsx`).
 
 The library is a shared catalogue: every signed-in account can add albums and
 everyone can browse and play them. Playlists are private until shared.
@@ -45,14 +47,10 @@ cp .env.example .env
 pnpm dev
 ```
 
-`withJazz` (in `next.config.ts`) starts a local Jazz server in development and
-supplies the public app ID and server URL. Set real `BETTER_AUTH_SECRET` and
-`BACKEND_SECRET` values before any shared deployment.
-
-`NEXT_PUBLIC_APP_ORIGIN` is also the JWT issuer and audience. Better Auth signs
-tokens with both, and the Jazz server is told to expect both (`jwtIssuer` and
-`jwtAudience` next to `jwksUrl`). If they drift apart, sign-in still succeeds
-but account login fails with `invalid account credential`.
+In development Jazz uses a local app id and keeps its data in `.jazz/`; no
+separate server runs. A deployment sets its own `NEXT_PUBLIC_JAZZ_APP_ID` and
+`BETTER_AUTH_SECRET`. To keep the data on a sync server such as Jazz Cloud,
+also set `JAZZ_SERVER_URL`, `JAZZ_ADMIN_SECRET` and `BACKEND_SECRET`.
 
 Sign in with the pre-filled demo account (choose **Create account** the first
 time). An empty library offers **Add demo library**: three albums of short

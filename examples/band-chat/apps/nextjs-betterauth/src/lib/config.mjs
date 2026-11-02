@@ -1,38 +1,40 @@
-// BandChat's server configuration, shared by next.config.ts, the auth routes
-// and the pre-build check. It fails closed: local defaults apply only to a
+// BandChat's server configuration, shared by next.config.ts, the backend and
+// the pre-build check. It fails closed: local defaults apply only to a
 // non-production process on a loopback origin, and no secret is checked in.
 
 export const LOCAL_ORIGIN = "http://127.0.0.1:3000";
-
-/**
- * The audience Better Auth writes into BandChat's JWTs and the Jazz server
- * requires. The issuer is the app origin.
- */
-export const JWT_AUDIENCE = "band-chat";
+/** The Jazz app id a local run uses when none is set. */
+export const LOCAL_APP_ID = "00000000-0000-0000-0000-0000000b0c4a";
 
 /** @param {Record<string, string | undefined>} env */
 export function readConfig(env = process.env) {
   return {
     nodeEnv: env.NODE_ENV,
     /** Public settings that were not set explicitly. */
-    unsetPublic: [
-      "NEXT_PUBLIC_APP_ORIGIN",
-      "NEXT_PUBLIC_JAZZ_APP_ID",
-      "NEXT_PUBLIC_JAZZ_SERVER_URL",
-    ].filter((name) => !env[name]),
+    unsetPublic: ["NEXT_PUBLIC_APP_ORIGIN", "NEXT_PUBLIC_JAZZ_APP_ID"].filter((name) => !env[name]),
     origin: env.NEXT_PUBLIC_APP_ORIGIN || LOCAL_ORIGIN,
-    appId: env.NEXT_PUBLIC_JAZZ_APP_ID || undefined,
-    serverUrl: env.NEXT_PUBLIC_JAZZ_SERVER_URL || undefined,
-    backendSecret: env.BACKEND_SECRET || undefined,
+    appId: env.NEXT_PUBLIC_JAZZ_APP_ID || LOCAL_APP_ID,
     betterAuthSecret: env.BETTER_AUTH_SECRET || undefined,
+    /**
+     * Where the data lives. With JAZZ_SERVER_URL set, the backend connects to
+     * that sync server (such as Jazz Cloud) with the app's secrets; otherwise
+     * it keeps the data in a local SQLite directory.
+     */
+    remote: env.JAZZ_SERVER_URL
+      ? {
+          url: env.JAZZ_SERVER_URL,
+          adminSecret: env.JAZZ_ADMIN_SECRET || undefined,
+          backendSecret: env.BACKEND_SECRET || undefined,
+        }
+      : undefined,
+    dataPath: env.JAZZ_DATA_PATH || ".jazz",
   };
 }
 
 /**
  * A local run is a non-production process (`next dev`, tests) on a loopback
  * origin. Anything else, including a production build that forgot to set its
- * origin, is a deployment and must be configured explicitly. In development
- * `withJazz` supplies the Jazz app id and server URL.
+ * origin, is a deployment and must be configured explicitly.
  * @param {ReturnType<typeof readConfig>} config
  */
 export function usesLocalDefaults(config = readConfig()) {
@@ -42,17 +44,19 @@ export function usesLocalDefaults(config = readConfig()) {
 }
 
 /**
- * Rejects incomplete configurations before any route runs. Both secrets are
- * always required (`pnpm dev` generates local ones, see dev-secrets.mjs);
- * deployments must also name their origin, Jazz app and sync server.
+ * Rejects incomplete configurations before any route runs. The Better Auth
+ * secret is always required (`pnpm dev` generates a local one, see
+ * dev-secrets.mjs); deployments must also name their origin and Jazz app, and
+ * a remote sync server needs both of the app's secrets.
  * @param {ReturnType<typeof readConfig>} config
  */
 export function assertConfiguration(config = readConfig()) {
   const local = usesLocalDefaults(config);
   const missing = [
     ...(local ? [] : config.unsetPublic),
-    ...(config.backendSecret ? [] : ["BACKEND_SECRET"]),
     ...(config.betterAuthSecret ? [] : ["BETTER_AUTH_SECRET"]),
+    ...(config.remote && !config.remote.adminSecret ? ["JAZZ_ADMIN_SECRET"] : []),
+    ...(config.remote && !config.remote.backendSecret ? ["BACKEND_SECRET"] : []),
   ];
   if (missing.length) {
     throw new Error(
@@ -62,17 +66,4 @@ export function assertConfiguration(config = readConfig()) {
     );
   }
   return config;
-}
-
-/**
- * The Jazz app id and sync server for the auth backend. `withJazz` sets both
- * in development; deployments set them explicitly.
- * @param {ReturnType<typeof readConfig>} config
- */
-export function jazzServer(config = readConfig()) {
-  assertConfiguration(config);
-  if (!config.appId || !config.serverUrl) {
-    throw new Error("NEXT_PUBLIC_JAZZ_APP_ID and NEXT_PUBLIC_JAZZ_SERVER_URL are not configured");
-  }
-  return { appId: config.appId, serverUrl: config.serverUrl };
 }

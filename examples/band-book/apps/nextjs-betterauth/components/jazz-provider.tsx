@@ -5,13 +5,14 @@ import { betterAuth, JazzProvider as CoreJazzProvider } from "jazz-tools/react";
 import { SignInForm } from "@/components/sign-in-form";
 import { StatusScreen } from "@/components/status-screen";
 import { authClient } from "@/src/lib/auth-client";
-import { jazzAppId, jazzEnv, jazzServerUrl } from "@/src/lib/config";
+import { jazzAppId } from "@/src/lib/config";
 
 const auth = betterAuth(authClient);
 
 /**
- * Jazz owns the session lifecycle: it follows Better Auth's session,
- * atomically logs in or registers the account, and renders the app only once
+ * Jazz owns the session lifecycle: it follows Better Auth's session, signs in
+ * through BandBook's backend (`createJazz` in src/lib/jazz.server.ts), which
+ * reads that session in `authenticate`, and renders the app only once
  * its client is ready. Signed-out visitors see the sign-in form wherever they
  * land, so an invite link works before and after signing in.
  */
@@ -19,8 +20,7 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
   return (
     <CoreJazzProvider
       appId={jazzAppId}
-      serverUrl={jazzServerUrl}
-      env={jazzEnv}
+      serverUrl="/jazz"
       auth={auth}
       signedOut={<SignInForm />}
       loading={<StatusScreen label="Opening BandBook" />}

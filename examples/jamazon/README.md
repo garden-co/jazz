@@ -20,7 +20,7 @@ the Jazz design system.
   different quantities the later edit wins. Lines are zeroed rather than deleted, so removing
   and re-adding a product addresses the same row everywhere.
 - **Guest carts that follow you.** Creating an account links the Better Auth identity to the
-  guest's Jazz account (`linkJWT`), so the cart stays put. Signing in to an existing account
+  guest's Jazz account (`linkWithBackend`), so the cart stays put. Signing in to an existing account
   switches accounts, and the app claims the guest cart's lines into the account's cart, keeping
   the larger quantity where both have the product.
 - **An idempotent checkout.** Shipping details live on the cart row (they sync too). Reaching the
@@ -39,7 +39,11 @@ the Jazz design system.
   Either way the browser never marks an order paid. Results are written back idempotently: a
   succeeded payment is final, and each status appears once on the timeline.
 
-- **Backend authority.** A backend Jazz client seeds the catalogue, places orders, records
+- **Jazz inside the Next app.** `createJazz` in `src/server/backend.ts` runs Jazz in the app
+  itself, mounted under `/jazz`. Its `authenticate` reads the Better Auth session cookie, so there
+  are no JWTs or token routes; store API routes find the shopper's account with
+  `jazz.accountFor(request)`.
+- **Backend authority.** The backend's own database seeds the catalogue, places orders, records
   payments and runs a fulfilment worker that subscribes to paid orders and ships them after a
   short packing delay. Shoppers watch the order timeline (placed, paid, shipped) advance through
   the same live query.
@@ -55,16 +59,20 @@ pnpm install
 pnpm --filter jamazon-nextjs-betterauth dev
 ```
 
-Open <http://127.0.0.1:3000>. `pnpm dev` starts a local Jazz server alongside Next.js, selects
-the sandbox payment provider and, on first run, generates local `BACKEND_SECRET` and
-`BETTER_AUTH_SECRET` values into `.env.development.local` (git-ignored). No secret is checked in.
+Open <http://127.0.0.1:3000>. `pnpm dev` keeps Jazz data in the git-ignored `.jazz/` directory,
+selects the sandbox payment provider and, on first run, generates a local `BETTER_AUTH_SECRET`
+into `.env.development.local` (git-ignored). No secret is checked in.
 
 Configuration fails closed. Local defaults apply only to a non-production process on a loopback
-origin; any production build or start must set the origin, Jazz app, both secrets and
+origin; any production build or start must set the origin, Jazz app, the Better Auth secret and
 `PAYMENT_PROVIDER` (see [`.env.example`](apps/nextjs-betterauth/.env.example)), or it refuses to
 start.
 That includes `next dev` on a non-loopback host (for example a LAN address or a tunnel): it
 needs the full deployment configuration too.
+
+By default the backend stores data in SQLite next to the app. To sync through Jazz Cloud or your
+own sync server instead, set `JAZZ_SERVER_URL`, `JAZZ_ADMIN_SECRET` and `BACKEND_SECRET`; the
+backend then uses `remote()`, and browsers still talk only to `/jazz`.
 
 To try Stripe test mode, set `PAYMENT_PROVIDER=stripe`, `STRIPE_SECRET_KEY=sk_test_…` and
 `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_…`. Live keys are refused.
