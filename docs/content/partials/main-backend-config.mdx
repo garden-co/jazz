@@ -1,0 +1,8 @@
+- `app` and `permissions` are the ones your code imports. The bundle that's running is the bundle
+  Jazz enforces, so rolling back your backend rolls back its permissions too.
+- `authenticate(request)` reads your own session (a cookie, a header) and returns
+  `{ userId, claims? }`, or `null` when signed out. It is the only place that decides who a user
+  is: sign-ins, sync connections and `forRequest` all ask it. No JWKS, issuer or audience to
+  configure, and no Jazz token in the browser. See [How Auth Works in Jazz](/docs/setup/auth/backend).
+- Admin and backend routes never leave the process: from outside, only sync and sign-in are
+  reachable under `/jazz`.

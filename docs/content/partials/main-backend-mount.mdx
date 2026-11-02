@@ -1,0 +1,94 @@
+## Mount it
+
+<Tabs groupId="backend-framework" items={["Next.js", "Hono", "Express / Node", "Bun", "Effect"]} persist updateAnchor>
+  <Tab value="Next.js">
+    ```ts title="app/jazz/[...path]/route.ts"
+    import { jazz } from "@/jazz.server";
+
+    export const { GET, POST, DELETE } = jazz.next();
+    ```
+
+    On Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/functions`; install
+    `@vercel/functions` and `ws`). Under plain `next dev`, which can't upgrade sockets, the browser
+    switches to an HTTP stream on its own.
+
+  </Tab>
+  <Tab value="Hono">
+    ```ts title="server.ts"
+    import { Hono } from "hono";
+    import { serve } from "@hono/node-server";
+    import { jazz } from "./jazz.server";
+
+    const api = new Hono();
+    api.all("/jazz/*", (c) => jazz.handle(c.req.raw));
+
+    const server = serve({ fetch: api.fetch, port: 3000 });
+    await jazz.attach(server); // WebSocket upgrades on /jazz (needs `ws`)
+    ```
+
+  </Tab>
+  <Tab value="Express / Node">
+    ```ts title="server.ts"
+    import express from "express";
+    import { jazz } from "./jazz.server";
+
+    const api = express();
+    api.use((req, res, next) => jazz.nodeHandler(req, res, next));
+
+    const server = api.listen(3000);
+    await jazz.attach(server); // WebSocket upgrades on /jazz (needs `ws`)
+    ```
+
+  </Tab>
+  <Tab value="Bun">
+    ```ts title="server.ts"
+    import { jazz } from "./jazz.server";
+    import { app } from "./schema";
+
+    Bun.serve({
+      port: 3000,
+      routes: {
+        "/api/todos": async (request) => {
+          const db = await jazz.forRequest(request);
+          return Response.json(await db.all(app.todos));
+        },
+      },
+      fetch: jazz.handle, // sync and sign-in under /jazz
+      websocket: jazz.websocket, // WebSocket upgrades on /jazz
+    });
+    ```
+
+  </Tab>
+  <Tab value="Effect">
+    ```ts title="server.ts"
+    import { createServer } from "node:http";
+    import { Effect, Layer } from "effect";
+    import { HttpRouter, HttpServerResponse } from "effect/http";
+    import { NodeHttpServer, NodeRuntime } from "@effect/platform-node";
+    import { Jazz, JazzBackend } from "jazz-tools/effect/backend";
+    import { jazzConfig } from "./jazz.server"; // the object you'd pass to createJazz
+    import { app } from "./schema";
+
+    const listTodos = HttpRouter.add(
+      "GET",
+      "/api/todos",
+      Effect.gen(function* () {
+        const jazz = yield* Jazz;
+        return yield* HttpServerResponse.json(yield* jazz.all(app.todos));
+      }).pipe(JazzBackend.forCurrentRequest()), // as the signed-in user
+    );
+
+    HttpRouter.serve(Layer.mergeAll(listTodos, JazzBackend.routes)).pipe( // routes: /jazz/*
+      Layer.provide(JazzBackend.layer(jazzConfig)),
+      Layer.provide(NodeHttpServer.layer(createServer, { port: 3000 })),
+      Layer.launch,
+      NodeRuntime.runMain,
+    );
+    ```
+
+    `JazzBackend.layer` takes the same config as `createJazz` and opens Jazz for the server's
+    lifetime. `JazzBackend.routes` mounts sync and sign-in under `/jazz`, WebSockets included. See
+    [Effect](/docs/recipes/effect) for the `Jazz` service.
+
+  </Tab>
+</Tabs>

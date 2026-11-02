@@ -1,0 +1,55 @@
+## Connect the browser
+
+The browser talks to `/jazz` on the same origin by default, so there's no `serverUrl` to set, and your
+app's own session cookie is all it needs. It needs no Jazz API key or token:
+
+```tsx title="App.tsx"
+const { data, isPending } = authClient.useSession(); // any auth library's current user
+
+<JazzProvider user={isPending ? undefined : (data?.user.id ?? null)}>
+  <App />
+</JazzProvider>;
+```
+
+When `user` changes, the client signs in through `/jazz`: `authenticate` answers, and the client gets
+the account, identity and claims as plain data. Every sync connection asks `authenticate` again, so
+a sign-out or changed claims apply without client code. See
+[How Auth Works in Jazz](/docs/setup/auth/backend#in-the-browser).
+
+## Trusted backend use
+
+`jazz.db` acts with backend authority: it sees and writes everything, so check access in your own
+code first. Use it for system work: jobs, webhooks, migrations, admin routes.
+
+```ts
+import { jazz } from "./jazz.server";
+import { app } from "./schema";
+
+await jazz.db.insert(app.auditLog, { event: "invoice.paid" });
+```
+
+## User-scoped use
+
+`await jazz.forRequest(request)` runs your `authenticate` and returns a database with that user's
+policies and authorship. It's the default for anything a user triggers: route handlers, server
+actions, server components. Concurrent requests stay isolated.
+
+```ts title="app/api/todos/route.ts"
+import { jazz } from "@/jazz.server";
+import { app } from "@/schema";
+
+export async function GET(request: Request) {
+  const db = await jazz.forRequest(request);
+  return Response.json(await db.all(app.todos));
+}
+```
+
+When a route acts with backend authority on a user's behalf (placing an order the user can't write
+directly, say), `await jazz.accountFor(request)` names that user's account, or `null` when signed
+out, so the backend's `db` can write rows that point at it.
+
+## Backend clients
+
+Other trusted machines, such as a job runner, a worker on another cloud or a partner's service,
+connect to this backend's `/jazz` as [backend clients](/docs/setup/backend-client), with their own
+machine-to-machine credential. List the ones you trust in `createJazz({ backendClients })`.

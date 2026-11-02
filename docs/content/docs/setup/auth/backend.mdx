@@ -13,7 +13,7 @@ Auth in Jazz has three parts:
 
 ## Your backend decides
 
-When Jazz runs inside your main backend ([Backend](/docs/setup/backend)), auth is one function. Your
+When Jazz runs inside your [main backend](/docs/setup/deployment), auth is one function. Your
 backend already knows who is signed in, so it tells Jazz:
 
 ```ts title="jazz.server.ts"
@@ -189,7 +189,7 @@ Your main backend has full access by default. To run code as a user instead:
   authorization decision.
 
 A copied account id or claim is not authorization: Jazz checks the request or handle itself. See
-[Trusted backend](/docs/setup/backend/trusted) for background jobs and backend clients.
+[Backend Client](/docs/setup/backend-client) for background jobs and other machines.
 
 ## Guests and linking
 

@@ -1,0 +1,104 @@
+---
+title: Backend Client
+description: "Connect other trusted machines (jobs, workers, scripts, partner services) to Jazz through your main backend: machine-to-machine access with the machine's own OIDC token."
+---
+
+Your [main backend](/docs/setup/deployment) is the one that runs `createJazz`: browsers and apps sync
+through it, and its `authenticate` decides who each user is. A **backend client** is any other
+trusted machine that reads and writes the same data, such as a CI job, a worker on another cloud,
+a script or a partner's service. It connects to your main backend's `/jazz` like a browser does,
+but proves who it is with its own machine-to-machine credential, not a user's session.
+
+A backend client is one of two kinds:
+
+- **Trusted.** It acts with your main backend's own authority: your permissions are not checked,
+  and it may act on behalf of any user. Use it for system work such as imports, migrations and
+  scheduled jobs.
+- **Scoped.** It acts as one user, with that user's permissions, exactly as if `authenticate` had
+  named the user. Use it for an agent or service that should only touch one account's data.
+
+## Trust the machine in your main backend
+
+Most platforms give their workloads an OIDC token: GitHub Actions, Vercel, Google Cloud, Azure and
+Kubernetes all do. List each machine you trust in `backendClients`, naming it by the token's issuer,
+audience and the claims only that machine has:
+
+```ts title="jazz.server.ts"
+import { createJazz, sqlite, trustWorkload } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+
+export const jazz = await createJazz({
+  app,
+  permissions,
+  store: sqlite({ path: "./data/jazz" }),
+  authenticate: async (request) => /* your users' sessions */ null,
+  backendClients: [
+    // The nightly import job in this repo's production environment: a trusted machine.
+    trustWorkload({
+      issuer: "https://token.actions.githubusercontent.com",
+      audience: "jazz:my-app",
+      claims: { sub: "repo:acme/my-app:environment:production" },
+      as: "backend",
+    }),
+    // A support agent that acts as its own user.
+    trustWorkload({
+      issuer: "https://token.actions.githubusercontent.com",
+      audience: "jazz:my-app",
+      claims: { sub: "repo:acme/support-agent:environment:production" },
+      as: () => ({ userId: "support-agent", claims: { role: "agent" } }),
+    }),
+  ],
+});
+```
+
+- `issuer` is where Jazz finds the token's signing keys, through its OpenID discovery document.
+- `audience` must match the token's `aud`, so tokens minted for other services are refused.
+- `claims` must all match exactly. Name the workload down to its environment: every workload of the
+  same issuer gets tokens signed by the same keys, so `claims` can't be empty.
+- `as` decides the kind: `"backend"` for a trusted machine, or a function from the token's claims to
+  a user (`{ userId, claims? }`, or `null` to refuse) for a scoped one.
+
+A token from a listed issuer that fails any check is refused. It never reaches `authenticate`.
+
+## Connect from the machine
+
+On the machine, open a Jazz session against your main backend and pass a function that returns a
+fresh token. Jazz calls it for every request and socket, so short-lived tokens just work:
+
+```ts title="import-job.ts"
+import { createJazzSession } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+
+const session = await createJazzSession({
+  app,
+  permissions,
+  serverUrl: "https://my-app.com/jazz",
+  driver: { type: "memory" },
+  credential: githubOidcToken,
+});
+
+const { client } = session.getSnapshot();
+await client!.db.insert(app.imports, { source: "nightly" }).wait({ tier: "global" });
+await session.close();
+
+// GitHub Actions hands out OIDC tokens to jobs with `permissions: id-token: write`.
+async function githubOidcToken() {
+  const url = `${process.env.ACTIONS_ID_TOKEN_REQUEST_URL}&audience=jazz:my-app`;
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+  });
+  return (await response.json()).value as string;
+}
+```
+
+The session opens as whatever your main backend trusts the token as: with backend authority for a
+trusted machine, or signed in as its user for a scoped one. Your main backend's API routes see the
+same identity, so `jazz.forRequest(request)` and `jazz.accountFor(request)` work for requests that
+carry the token as `Authorization: Bearer …`.
+
+## Machines without an OIDC token
+
+Some machines can't get a platform OIDC token, such as a developer's laptop, an AWS workload signing
+with SigV4, or a Cloudflare Worker. Give those your app's own credential instead, such as an API key
+or a token your backend issues, and resolve it to a user in `authenticate`, like any other sign-in.
+They then act as that user, with that user's permissions.

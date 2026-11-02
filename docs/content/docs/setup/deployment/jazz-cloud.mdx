@@ -5,6 +5,10 @@ description: "Store and sync your app's data on the hosted Jazz Cloud, with your
 
 Jazz Cloud stores and syncs your app's data. Your own backend sits in front of it: browsers talk only to your backend, which signs users in with your auth and connects to Jazz Cloud. Jazz Cloud does no user auth of its own.
 
+This page sets up your **main backend**: the backend that runs `createJazz`, serves sync to your
+browsers and apps, and decides who each user is. Other trusted machines reach Jazz through it as
+[backend clients](/docs/setup/backend-client).
+
 ## Get an app ID
 
 Your app ID namespaces your data for storage and sync. Click below to generate one on Jazz Cloud. You also get the secrets your backend needs. Generated apps are unclaimed until you claim them in the dashboard, and unclaimed apps are deleted after 14 days.
@@ -45,7 +49,13 @@ export const jazz = await createJazz({
 });
 ```
 
-Mount the handler under `/jazz`, where clients connect by default. Browsers sync with your backend, never with Jazz Cloud directly. On start, your backend applies its schema, migrations and permissions to the app on Jazz Cloud. For each request it tells Jazz Cloud who the user is, which is why `authenticate` lives in your backend. See [Backend](/docs/setup/backend) for mounting in Next.js, Hono or Express, and [Custom auth](/docs/setup/auth/custom) for `authenticate`.
+<include>../../../partials/main-backend-config.mdx</include>
+
+On start, your backend applies its schema, migrations and permissions to the app on Jazz Cloud. For each request it tells Jazz Cloud who the user is, which is why `authenticate` lives in your backend. Browsers sync with your backend under `/jazz`, never with Jazz Cloud directly.
+
+<include>../../../partials/main-backend-mount.mdx</include>
+
+<include>../../../partials/main-backend-use.mdx</include>
 
 ## Coming next
 

@@ -29,7 +29,7 @@ export const jazz = await createJazz({
 });
 ```
 
-Mount it under `/jazz` (see [Backend](/docs/setup/backend#mount-it)). The browser talks only to your
+Mount it under `/jazz` (see [Main Backend](/docs/setup/deployment)). The browser talks only to your
 backend; the core behind `remote()` trusts your backend to say who the user is, and never sees your
 users' credentials.
 
@@ -141,6 +141,6 @@ share account ownership while keeping distinct authorship.
 
 `await jazz.forRequest(request)` runs your `authenticate` and returns a database with that user's
 policies and authorship; `jazz.db` acts with backend authority. See
-[Backend](/docs/setup/backend#user-scoped-use).
+[Main Backend](/docs/setup/deployment/own-server#user-scoped-use).
 
 Full working examples: [Better Auth chat](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat), [simple auth chat](https://github.com/garden-co/jazz/tree/main/examples/auth-simple-chat), [WorkOS chat](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat).

@@ -3,8 +3,14 @@ title: Your Own Server
 description: "Run Jazz inside your own Node server, VM or container, with the data in SQLite on its disk."
 ---
 
-On your own machine, Jazz is part of your backend's process. Mount it as on
-[Backend](/docs/setup/backend) and give it a directory:
+On your own machine, Jazz is part of your backend's process, with the data in a directory on its
+disk.
+
+This page sets up your **main backend**: the backend that runs `createJazz`, serves sync to your
+browsers and apps, and decides who each user is. Other trusted machines reach Jazz through it as
+[backend clients](/docs/setup/backend-client).
+
+## Create Jazz once
 
 ```ts title="jazz.server.ts"
 import { createJazz, sqlite } from "jazz-tools/backend";
@@ -17,6 +23,12 @@ export const jazz = await createJazz({
   authenticate: async (request) => /* your session */ null,
 });
 ```
+
+<include>../../../partials/main-backend-config.mdx</include>
+
+<include>../../../partials/main-backend-mount.mdx</include>
+
+## Deploy it
 
 That's the whole deployment:
 
@@ -39,6 +51,8 @@ ENV JAZZ_DATA_DIR=/data/jazz
 VOLUME /data
 CMD ["node", "dist/server.js"]
 ```
+
+<include>../../../partials/main-backend-use.mdx</include>
 
 ## Data on another machine
 
@@ -109,6 +123,30 @@ If you prefer to start the database server programmatically, you can use `startL
 It expects similar arguments as the CLI.
 
 See [Monitoring](/docs/operating/monitoring) for heap profiling and diagnostics.
+
+## Edge-style Wasm setup
+
+Some runtimes (like Cloudflare Workers) don't load Jazz the same way a browser does. In those cases, provide the Wasm module or bytes directly.
+
+<include cwd lang="ts" meta='title="worker.ts"'>
+  ../examples/cloudflare-worker-runtime-ts/src/docs-snippets.ts#edge-wasm-module
+</include>
+
+If your platform hands you raw bytes instead of a compiled module, use `runtimeSources.wasmSource`:
+
+```ts title="worker.ts"
+import { createDb, type AccountHandle } from "jazz-tools";
+
+// The request's account manager prepared this handle before context creation.
+export function openRequestDb(account: AccountHandle, wasmBytes: Uint8Array) {
+  return createDb({
+    account,
+    runtimeSources: { wasmSource: wasmBytes },
+  });
+}
+```
+
+See the [Cloudflare Wrangler example](https://github.com/garden-co/jazz/tree/main/examples/cloudflare-worker-runtime-ts) for a complete `workerd` setup.
 
 ## Coming next
 

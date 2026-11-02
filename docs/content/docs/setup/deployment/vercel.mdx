@@ -7,6 +7,10 @@ On Vercel, your Next.js app is the whole deployment. The `vercel()` store keeps 
 data in a persistent [Vercel Sandbox](https://vercel.com/docs/vercel-sandbox) that your functions
 start on demand. There's no separate service to set up and no secrets to copy.
 
+This page sets up your **main backend**: the backend that runs `createJazz`, serves sync to your
+browsers and apps, and decides who each user is. Other trusted machines reach Jazz through it as
+[backend clients](/docs/setup/backend-client).
+
 ## Set it up
 
 Install the Sandbox SDK next to `jazz-tools`:
@@ -32,7 +36,9 @@ export const jazz = await createJazz({
 });
 ```
 
-Mount it like any Next.js backend (see [Backend](/docs/setup/backend#mount-it)):
+<include>../../../partials/main-backend-config.mdx</include>
+
+Mount it with a catch-all route under `/jazz`, where clients connect by default:
 
 ```ts title="app/jazz/[...path]/route.ts"
 import { jazz } from "@/jazz.server";
@@ -43,6 +49,12 @@ export const { GET, POST, DELETE } = jazz.next();
 Then deploy as usual with `git push` or `vercel deploy`. Your functions authenticate to Vercel with
 their own OIDC token, and the core's secrets are generated inside the Sandbox, so there are no
 environment variables to set.
+
+On Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/functions`; install
+`@vercel/functions` and `ws`). Under plain `next dev`, which can't upgrade sockets, the browser
+switches to an HTTP stream on its own.
+
+<include>../../../partials/main-backend-use.mdx</include>
 
 ## Local development
 

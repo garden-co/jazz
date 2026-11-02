@@ -92,9 +92,10 @@ const config = {
         destination: "/docs/setup/auth/better-auth#store-better-auths-tables-in-jazz",
         permanent: false,
       },
+      { source: "/docs/setup/backend", destination: "/docs/setup/deployment", permanent: false },
       {
         source: "/docs/setup/backend/install",
-        destination: "/docs/setup/backend",
+        destination: "/docs/setup/deployment",
         permanent: false,
       },
       {
@@ -186,7 +187,7 @@ const config = {
       },
       {
         source: "/docs/install/typescript-server",
-        destination: "/docs/setup/backend",
+        destination: "/docs/setup/deployment",
         permanent: false,
       },
       { source: "/docs/quickstart", destination: "/docs/setup/run-locally", permanent: false },
