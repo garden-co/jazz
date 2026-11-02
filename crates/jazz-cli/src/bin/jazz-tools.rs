@@ -169,10 +169,12 @@ enum Commands {
         #[arg(long, env = "JAZZ_ALLOW_LOCAL_FIRST_AUTH")]
         allow_local_first_auth: bool,
 
-        /// Secret for backend session impersonation
         /// Trust only this OIDC workload instead of shared secrets: every
-        /// request and session must carry its token. Needs the subject and
-        /// audience flags too; replaces the backend and admin secrets.
+        /// request and session must carry its token in
+        /// X-Jazz-Backend-Credential, and states its access in
+        /// X-Jazz-Backend-Access. Needs the subject and audience flags too;
+        /// replaces the backend and admin secrets. Graceful shutdown then
+        /// goes through SIGTERM.
         #[arg(
             long,
             env = "JAZZ_TRUSTED_WORKLOAD_ISSUER",
@@ -197,6 +199,7 @@ enum Commands {
         )]
         trusted_workload_subject: Option<String>,
 
+        /// Secret for backend session impersonation
         #[arg(long, env = "JAZZ_BACKEND_SECRET")]
         backend_secret: Option<String>,
 

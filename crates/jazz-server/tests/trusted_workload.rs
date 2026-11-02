@@ -17,12 +17,13 @@ async fn start_issuer() -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let jwks_uri = format!("{base}/jwks");
+    let issuer = base.clone();
     let router = Router::new()
         .route(
             "/.well-known/openid-configuration",
             get(move || {
-                let jwks_uri = jwks_uri.clone();
-                async move { Json(json!({ "jwks_uri": jwks_uri })) }
+                let (issuer, jwks_uri) = (issuer.clone(), jwks_uri.clone());
+                async move { Json(json!({ "issuer": issuer, "jwks_uri": jwks_uri })) }
             }),
         )
         .route(
@@ -95,7 +96,7 @@ async fn admits_only_the_trusted_workload() {
     assert_eq!(guessed.status(), 401);
 
     // The workload's token passes the gate on its own (the route then asks
-    // for its own credential), and stands in for the admin secret.
+    // for its own credential).
     let passed = http
         .get(format!("{app}/schemas"))
         .header("X-Jazz-Backend-Credential", &good)
@@ -106,9 +107,35 @@ async fn admits_only_the_trusted_workload() {
         .await
         .unwrap();
     assert!(!passed.contains("workload"), "{passed}");
+
+    // A secret the request carries itself (say, a client header the backend
+    // forwarded) grants nothing next to the credential, nor does the token
+    // in a secret slot: only the access the backend states counts.
+    for (name, value) in [
+        ("X-Jazz-Admin-Secret", "x".to_owned()),
+        ("X-Jazz-Admin-Secret", good.clone()),
+    ] {
+        let forwarded = http
+            .get(format!("{app}/admin/permissions"))
+            .header("X-Jazz-Backend-Credential", &good)
+            .header(name, value)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(forwarded.status(), 401);
+    }
+    let backend = http
+        .get(format!("{app}/admin/permissions"))
+        .header("X-Jazz-Backend-Credential", &good)
+        .header("X-Jazz-Backend-Access", "backend")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(backend.status(), 401);
     let admin = http
         .get(format!("{app}/admin/permissions"))
-        .header("X-Jazz-Admin-Secret", &good)
+        .header("X-Jazz-Backend-Credential", &good)
+        .header("X-Jazz-Backend-Access", "admin")
         .send()
         .await
         .unwrap();
