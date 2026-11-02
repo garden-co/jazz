@@ -588,6 +588,11 @@ fn a_clean_handoff_reuses_the_node_above_its_high_water() {
     let capability = fixture.admit(&directory.path().join("handoff.sqlite"), "alice", 0xc1);
     let first = fixture.open(&capability);
     let node = fixture.metadata_node(first);
+    assert_eq!(
+        (node[6] >> 4, node[8] >> 6),
+        (4, 0b10),
+        "the pool mints random version-4 nodes"
+    );
     let first_tx = fixture.insert_todo(first, [0xd1; 16], "first lease holder");
     fixture.close(first);
 
@@ -838,12 +843,13 @@ fn pending_upload_count_has_pinned_bytes_and_answers() {
     let fixture = Fixture::new();
     let capability = fixture.admit(&directory.path().join("alice.sqlite"), "alice", 0x11);
     let foreground = fixture.open(&capability);
-    // Without a server nothing is ever uploaded.
+    // A relay with no server decides nothing: the commit stays pending
+    // until a server is added and accepts it.
     fixture.insert_todo(foreground, [0xa1; 16], "local only");
     fixture.tick(foreground);
     assert_eq!(
         fixture.execute(foreground, ForegroundDbCommandRequest::PendingUploadCount),
-        ForegroundDbCommandResponse::PendingUploadCount { count: 0 }
+        ForegroundDbCommandResponse::PendingUploadCount { count: 1 }
     );
     fixture.close(foreground);
 }
@@ -961,4 +967,45 @@ fn slow_query_commands_have_pinned_bytes_and_answer() {
         "nothing ran for an hour"
     );
     fixture.close(foreground);
+}
+
+/// A relay uploads its clients' writes as its own identity, so it serves
+/// clients of that identity only: one of another identity is refused
+/// before its database is opened.
+#[test]
+fn a_relay_refuses_a_client_of_another_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let identity = |byte: u8| DbIdentity {
+        node: NodeUuid::from_bytes([byte; 16]),
+        author: AuthorSubject::for_test_bytes([0x5a; 16]),
+    };
+    let relay = NativeRelay::spawn(RelayOpenConfig {
+        supported_abi: NativeRelayAbiRange {
+            minimum: NATIVE_RELAY_ABI_V1,
+            maximum: NATIVE_RELAY_ABI_V1,
+        },
+        scope: RelayScope {
+            app_namespace: "app".to_owned(),
+            storage_namespace: "default".to_owned(),
+            auth_scope: Some("alice".to_owned()),
+        },
+        sqlite_path: directory.path().join("alice.sqlite"),
+        schema: schema(),
+        identity: identity(0x01),
+    })
+    .unwrap();
+    let other = DbIdentity {
+        author: AuthorSubject::for_test_bytes([0x5b; 16]),
+        ..identity(0x02)
+    };
+    match relay.attach_client(other, BTreeMap::new()) {
+        Err(RelayError::Host(binding_host::HostError::Engine(error))) => {
+            assert_eq!(error.reason, Some(jazz::db::Reason::IdentityMismatch));
+        }
+        Err(error) => panic!("expected an identity mismatch, got {error}"),
+        Ok(_) => panic!("the relay served a client of another identity"),
+    }
+    relay
+        .attach_client(identity(0x03), BTreeMap::new())
+        .expect("the relay serves its own identity");
 }

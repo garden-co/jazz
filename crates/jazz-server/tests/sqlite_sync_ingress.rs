@@ -27,19 +27,21 @@ async fn malformed_sqlite_message_closes_only_its_session() {
     .unwrap();
     let runtime =
         ServerRuntimeHandle::start_with_storage(schema.clone(), StorageConfig::InMemory).unwrap();
-    let hello = postcard::to_allocvec(&SyncMessage::Schema {
+    let hello = postcard::to_allocvec(&SyncMessage::Join {
+        known: Vec::new(),
         version: *schema.version_id().as_bytes(),
     })
     .unwrap();
-    let fetch = postcard::to_allocvec(&SyncMessage::Fetch {
+    let fetch = postcard::to_allocvec(&SyncMessage::Read {
         id: 71,
-        query: Query::from("notes"),
+        query: Box::new(Query::from("notes")),
         binding: BTreeMap::new(),
-        at: None,
+        span: jazz::db::ReadSpan::Once { at: None },
+        since: None,
         include_deleted: false,
         tier: ReadTier::Remote,
         wait: None,
-        view: ReadViewSourceSpec::Current,
+        view: Box::new(ReadViewSourceSpec::Current),
     })
     .unwrap();
     for malformed in [
@@ -76,7 +78,7 @@ async fn malformed_sqlite_message_closes_only_its_session() {
                             assert!(
                                 !matches!(
                                     jazz::db::decode_message(&frame).unwrap(),
-                                    SyncMessage::Answer { id: 71, .. }
+                                    SyncMessage::Settled { id: 71, .. }
                                 ),
                                 "malformed prefix must not admit the following request"
                             );
@@ -120,7 +122,7 @@ async fn malformed_sqlite_message_closes_only_its_session() {
             if frames.iter().any(|frame| {
                 matches!(
                     jazz::db::decode_message(frame).unwrap(),
-                    SyncMessage::Answer { id: 71, .. }
+                    SyncMessage::Settled { id: 71, .. }
                 )
             }) {
                 break;

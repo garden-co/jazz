@@ -21,7 +21,7 @@ const prioritySchema = {
 };
 
 type PriorityAppSchema = s.Schema<typeof prioritySchema>;
-const priorityApp: s.App<PriorityAppSchema> = s.defineApp(prioritySchema);
+const priorityApp: s.App<PriorityAppSchema> = s.defineApp(prioritySchema, { migrations: "none" });
 const relatedSchema = {
   parents: s.table(
     {
@@ -52,7 +52,7 @@ const relatedSchema = {
 };
 
 type RelatedAppSchema = s.Schema<typeof relatedSchema>;
-const relatedApp: s.App<RelatedAppSchema> = s.defineApp(relatedSchema);
+const relatedApp: s.App<RelatedAppSchema> = s.defineApp(relatedSchema, { migrations: "none" });
 describe("TS transformed columns", () => {
   let db: Db | undefined;
 

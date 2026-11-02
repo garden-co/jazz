@@ -78,7 +78,7 @@ See [Filters & Sorting](/docs/reading/filters-and-sorting) for the full list of 
 
 ## Read durability
 
-Queries and subscriptions return results as soon as they are available locally by default. Local reads are effectively instant, and remote updates stream in as they arrive, which is normally a good default. When you need a stronger guarantee for the first result, pass a `tier` option to fetch data from a different tier before returning.
+In browsers and React Native, queries and subscriptions read local-first by default: their first result waits briefly (up to 5 seconds) for the server while the client is online, and shows local data at once when it is offline. After that, local writes show instantly and remote updates stream in as they arrive. When you need a stronger guarantee for the first result, pass a `tier` option to fetch data from a different tier before returning.
 
 <DurabilityTiersTable />
 
@@ -157,8 +157,9 @@ In Rust, use `client.query_local_first(query, Duration::from_millis(500))` and
   remote changes show when they arrive.
 - Queries with an `offset` read the server's page while waiting, because a partly synced cache
   would apply the offset to the wrong rows. On timeout they show the cached page.
-- The default, `0`, is plain `"local-first"`. The option applies to local-first reads (including
-  the browser default); TypeScript rejects it on a `"remote"` read, which
+- With an explicit `tier: "local-first"` the default is `0`, plain `"local-first"`. A browser or
+  React Native read that names no tier defaults to `5000` when a server is configured; pass
+  `firstLoadRemoteWaitMs: 0` to show local data at once. TypeScript rejects the option on a `"remote"` read, which
   always waits for the server (plain JavaScript callers have it ignored).
 
 <Callout type="warn" title="Removed read tiers">

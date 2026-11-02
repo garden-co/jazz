@@ -412,6 +412,13 @@ pub struct OpenConfig {
     /// The public `initialSyncFlushEvery` option. Each applied batch commits
     /// on its own, so there is nothing to tune and any value is accepted.
     pub initial_sync_flush_every: Option<u32>,
+    /// The app's schema versions and migrations as JSON (a deployment's
+    /// `schemas` and `migrations`), which the binding lowers into
+    /// [`DbConfig::with_migrations`] (SPEC 10.7).
+    pub migrations: Option<Vec<u8>>,
+    /// The node SYSTEM provenance names when it is not `identity.node`: a
+    /// backend that draws a fresh node per open keeps one stable subject.
+    pub system_node: Option<NodeUuid>,
 }
 
 /// The identity in an [`OpenConfig`].
@@ -534,7 +541,8 @@ pub fn open_identity(config: &mut OpenConfig, how: OpenAs<'_>) -> HostResult<(Db
 
 /// The [`DbConfig`] for `schema` under `config` and `identity`.
 pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) -> DbConfig {
-    let db_config = DbConfig::new(schema, identity);
+    let mut db_config = DbConfig::new(schema, identity);
+    db_config.system_node = config.system_node;
     match config.row_id_seed {
         Some(seed) => db_config.with_id_source(SeededRowIdSource::new(seed)),
         None => db_config,
@@ -866,7 +874,18 @@ impl Binding {
 
     /// A typed schema view backed by the same runtime.
     pub fn register_schema(&self, schema: &[u8]) -> HostResult<Self> {
+        self.register_schema_shipping(schema, crate::db::Migrations::default())
+    }
+
+    /// A typed schema view of an app that ships `migrations` (see
+    /// [`crate::db::Db::add_migrations`]), backed by the same runtime.
+    pub fn register_schema_shipping(
+        &self,
+        schema: &[u8],
+        migrations: crate::db::Migrations,
+    ) -> HostResult<Self> {
         let schema = decode_schema(schema)?;
+        self.db.add_migrations(migrations);
         let view = block_on(self.db.register_schema_view(schema))?;
         Ok(Self {
             db: Rc::new(view),
@@ -1673,7 +1692,6 @@ impl Binding {
         let queues = WireQueues::default();
         let transport = Box::new(QueueTransport {
             queues: queues.clone(),
-            joiner: FrameJoiner::default(),
             failed: None,
         });
         let upstream = block_on(self.db.connect_upstream(transport));
@@ -1686,23 +1704,24 @@ impl Binding {
     }
 
     /// Serve a subscriber (another replica) as `identity` with `claims`.
-    pub fn accept_subscriber(&self, identity: AuthorSubject, claims: Cells) -> Link {
-        self.db.set_identity_claims(identity, claims);
+    /// A store configured as a user refuses any other identity (see
+    /// [`Db::accept_subscriber`]).
+    pub fn accept_subscriber(&self, identity: AuthorSubject, claims: Cells) -> HostResult<Link> {
         let queues = WireQueues::default();
         let transport = Box::new(QueueTransport {
             queues: queues.clone(),
-            joiner: FrameJoiner::default(),
             failed: None,
         });
-        let subscriber = self.db.accept_subscriber(transport, identity);
-        Link {
+        let subscriber = self.db.accept_subscriber(transport, identity)?;
+        self.db.set_identity_claims(identity, claims);
+        Ok(Link {
             binding: self.clone(),
             queues,
             kind: LinkKind::Subscriber {
                 id: Some(subscriber),
                 identity,
             },
-        }
+        })
     }
 
     /// Close the database (a schema view leaves its owner open).
@@ -1898,22 +1917,14 @@ impl StreamingMutation {
 /// The frame queues between a link and its host carrier.
 #[derive(Clone, Default)]
 pub struct WireQueues {
-    inbound: Rc<RefCell<VecDeque<InboundFrame>>>,
+    inbound: Rc<RefCell<VecDeque<Result<SyncMessage, TransportError>>>>,
+    inbound_joiner: Rc<RefCell<FrameJoiner>>,
     outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound_ready: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
-enum InboundFrame {
-    Raw(Vec<u8>),
-    Decoded {
-        message: Box<SyncMessage>,
-        bytes: usize,
-    },
-}
-
 struct QueueTransport {
     queues: WireQueues,
-    joiner: FrameJoiner,
     failed: Option<Option<TransportError>>,
 }
 
@@ -1934,21 +1945,11 @@ impl Transport for QueueTransport {
         if self.failed.is_some() {
             return None;
         }
-        loop {
-            let frame = self.queues.inbound.borrow_mut().pop_front()?;
-            let joined = match frame {
-                InboundFrame::Raw(bytes) => self.joiner.push(&bytes),
-                InboundFrame::Decoded { message, bytes } => {
-                    self.joiner.push_decoded(*message, bytes)
-                }
-            };
-            match joined {
-                Ok(Some(message)) => return Some(message),
-                Ok(None) => {}
-                Err(error) => {
-                    self.failed = Some(Some(error));
-                    return None;
-                }
+        match self.queues.inbound.borrow_mut().pop_front()? {
+            Ok(message) => Some(message),
+            Err(error) => {
+                self.failed = Some(Some(error));
+                None
             }
         }
     }
@@ -1982,29 +1983,43 @@ impl Link {
 
     /// Frames received from the peer; applied on the next tick.
     pub fn receive(&self, frames: impl IntoIterator<Item = Vec<u8>>) {
-        self.queues
-            .inbound
-            .borrow_mut()
-            .extend(frames.into_iter().map(InboundFrame::Raw));
+        let mut joiner = self.queues.inbound_joiner.borrow_mut();
+        let mut inbound = self.queues.inbound.borrow_mut();
+        for frame in frames {
+            match joiner.push(&frame) {
+                Ok(Some(message)) => inbound.push_back(Ok(message)),
+                Ok(None) => {}
+                Err(error) => {
+                    inbound.push_back(Err(error));
+                    break;
+                }
+            }
+        }
+        drop(inbound);
+        drop(joiner);
         self.binding.hooks.schedule_tick();
     }
 
-    /// Canonically decode the entire host batch before admitting any prefix.
-    /// Multipart ordering and cumulative limits remain enforced by the link.
+    /// Join and canonically decode the whole host batch before admitting any
+    /// prefix. Stage partial bytes too, so a rejected batch cannot change the
+    /// link's previous reassembly state. Completed messages are decoded once.
     pub fn receive_checked(
         &self,
         frames: impl IntoIterator<Item = impl AsRef<[u8]>>,
     ) -> Result<(), Error> {
-        let decoded = frames
-            .into_iter()
-            .map(|frame| {
-                let bytes = frame.as_ref();
-                crate::sync_codec::decode_sync_message(bytes).map(|message| InboundFrame::Decoded {
-                    message: Box::new(message),
-                    bytes: bytes.len(),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut staged = self.queues.inbound_joiner.borrow().clone();
+        let mut decoded = Vec::new();
+        for frame in frames {
+            if let Some(message) = staged.push(frame.as_ref()).map_err(|error| {
+                Error::new(
+                    ErrorCode::Protocol,
+                    format!("invalid SQLite sync frame: {error}"),
+                )
+            })? {
+                decoded.push(Ok(message));
+            }
+        }
+        *self.queues.inbound_joiner.borrow_mut() = staged;
         self.queues.inbound.borrow_mut().extend(decoded);
         self.binding.hooks.schedule_tick();
         Ok(())
