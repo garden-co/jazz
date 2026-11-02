@@ -127,7 +127,7 @@ export function createBrowserWorkerFingerprint(
   return JSON.stringify({
     protocolVersion: SHARED_RUNTIME_PROTOCOL_VERSION,
     storageFormatVersion: BROWSER_STORAGE_FORMAT_VERSION,
-    appId: config.appId,
+    appId: clientScope(config),
     dbName,
     env: config.env ?? "dev",
     schemaHash,
@@ -211,7 +211,7 @@ export function createBrowserAuthSessionKey(config: DbConfig): string {
   // the same external provider subject without sharing a relay lifecycle.
   return JSON.stringify({
     version: 1,
-    appId: config.appId,
+    appId: clientScope(config),
     env: config.env ?? "dev",
     auth: browserAuthScope(config),
     ...(config.accountId ? { registry: accountRegistryAuthority(config) } : {}),
@@ -233,7 +233,7 @@ export function createBrowserStorageOwner(config: DbConfig): string {
   // auth scope above, never a credential or arbitrary claims.
   return JSON.stringify({
     version: 1,
-    appId: config.appId,
+    appId: clientScope(config),
     env: config.env ?? "dev",
     auth: browserStorageScope(config),
   });
@@ -269,7 +269,7 @@ export function assertBrowserStorageOwnerUnchanged(current: DbConfig, next: DbCo
 export function createBrowserPhysicalDatabaseName(config: DbConfig, baseName: string): string {
   const scope = JSON.stringify({
     version: 1,
-    appId: config.appId,
+    appId: clientScope(config),
     env: config.env ?? "dev",
     auth: browserStorageScope(config),
   });

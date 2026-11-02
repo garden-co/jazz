@@ -6,6 +6,7 @@ import { registerInProcessTransport } from "../runtime/in-process-transport.js";
 import { accountAppId } from "../accounts/local-first.js";
 import { LOCAL_FIRST_JWT_ISSUER, parseJwtPayload } from "../runtime/client-session.js";
 import { verifyLocalFirstToken } from "../runtime/local-first-token.js";
+import { endpointScope } from "../runtime/client-scope.js";
 import type {
   BrowserWebSocket,
   WebSocketConstructor,
@@ -101,6 +102,15 @@ export interface CreateJazzOptions {
   authenticate?: (request: Request) => JazzUser | null | Promise<JazzUser | null>;
   /** The path Jazz is mounted under. Defaults to `/jazz`. */
   basePath?: string;
+  /**
+   * The URL browsers reach Jazz at, when a proxy in front of this backend
+   * changes the host or path (e.g. pages call `https://app.example.com/api/jazz`
+   * and the proxy forwards to `/jazz` here). A browser client is scoped by the
+   * URL it uses, so its guests' proofs name that URL. Without this, Jazz
+   * accepts the page's own origin (or an `allowedOrigins` entry) and this
+   * request's Host, each under `basePath`.
+   */
+  publicUrl?: string | string[];
   /**
    * How long a browser's sync session lasts before `authenticate` is asked
    * again (the client reconnects on its own). Defaults to one hour.
@@ -502,6 +512,17 @@ function openRemoteCore(appId: string, store: Extract<JazzStore, { kind: "remote
  */
 export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   const basePath = (options.basePath ?? DEFAULT_BASE_PATH).replace(/\/+$/, "");
+  const publicUrls = [options.publicUrl ?? []].flat().map((value) => {
+    try {
+      // The same form a browser client scopes itself by (`clientScope`).
+      if (!/^(https?|wss?):\/\//.test(value)) throw new Error("relative");
+      return endpointScope(value);
+    } catch {
+      throw new Error(
+        `createJazz: publicUrl ${JSON.stringify(value)} is not an absolute URL like "https://app.example.com/jazz"`,
+      );
+    }
+  });
   const allowedOrigins = new Set(
     (options.allowedOrigins ?? []).map((origin) => {
       let parsed: string | undefined;
@@ -1004,28 +1025,48 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
    * serves, and this request's own host, each with `basePath`.
    */
   function endpointAudiences(request: Request): string[] {
+    if (publicUrls.length) return publicUrls;
     const audiences = new Set<string>();
+    // Only hosts a forged header can't name: the Host the request reached
+    // (or the platform's request URL) and the configured allowed origins.
+    // X-Forwarded-Host is not trusted here; set `publicUrl` behind a proxy
+    // that rewrites the host or path.
+    const url = new URL(request.url);
+    const host = request.headers.get("host") || url.host;
+    const forwardedProto = request.headers
+      .get("x-forwarded-proto")
+      ?.split(",")[0]
+      ?.trim()
+      .toLowerCase();
+    const scheme = forwardedProto === "https" || url.protocol === "https:" ? "https" : "http";
     const origin = request.headers.get("origin");
-    if (origin && originAllowed(request)) {
+    if (origin) {
       try {
-        audiences.add(`${new URL(origin).origin}${basePath}`);
+        const parsed = new URL(origin);
+        if (allowedOrigins.has(parsed.origin) || parsed.host === host)
+          audiences.add(`${parsed.origin}${basePath}`);
       } catch {
         // Not an origin a page has.
       }
     }
-    const host =
-      request.headers.get("x-forwarded-host")?.split(",")[0]?.trim() ||
-      request.headers.get("host") ||
-      new URL(request.url).host;
-    // A proxy that ends TLS may hand us plain http for an https page.
-    for (const scheme of ["https", "http"]) {
-      try {
-        audiences.add(`${new URL(`${scheme}://${host}`).origin}${basePath}`);
-      } catch {
-        // A host header no URL takes.
-      }
+    try {
+      audiences.add(`${new URL(`${scheme}://${host}`).origin}${basePath}`);
+    } catch {
+      // A host header no URL takes.
     }
     return [...audiences];
+  }
+
+  const warnedAudiences = new Set<string>();
+  /** Say once per audience why a guest's proof was refused, so a proxy mismatch is visible. */
+  function warnUnknownAudience(token: string, accepted: string[]) {
+    const audience = parseJwtPayload(token)?.aud;
+    const named = typeof audience === "string" ? audience : JSON.stringify(audience);
+    if (warnedAudiences.has(named) || warnedAudiences.size > 100) return;
+    warnedAudiences.add(named);
+    console.warn(
+      `createJazz: refused a local-first guest whose proof is for ${named}; this endpoint accepts ${JSON.stringify([options.appId, ...accepted])}. If browsers reach Jazz through a proxy that changes the host or path, set publicUrl to the URL they use.`,
+    );
   }
 
   /**
@@ -1040,7 +1081,8 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     } catch {
       // Not this app's id; try the endpoint.
     }
-    for (const endpoint of endpointAudiences(request)) {
+    const endpoints = endpointAudiences(request);
+    for (const endpoint of endpoints) {
       try {
         verifyLocalFirstToken(token, endpoint);
         return { endpoint };
@@ -1048,6 +1090,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         // Not this one.
       }
     }
+    warnUnknownAudience(token, endpoints);
     return null;
   }
 

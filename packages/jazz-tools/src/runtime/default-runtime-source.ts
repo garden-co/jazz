@@ -203,7 +203,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       !browserMode,
       selfSignedClientProof,
       backendMode,
-      { appId: config.appId, thresholdMs: config.slowQueryThresholdMs },
+      { appId: clientScope(config), thresholdMs: config.slowQueryThresholdMs },
       migrations,
     );
     if (foregroundNodeLease) {
