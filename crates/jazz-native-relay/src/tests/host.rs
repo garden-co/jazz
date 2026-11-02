@@ -843,12 +843,13 @@ fn pending_upload_count_has_pinned_bytes_and_answers() {
     let fixture = Fixture::new();
     let capability = fixture.admit(&directory.path().join("alice.sqlite"), "alice", 0x11);
     let foreground = fixture.open(&capability);
-    // Without a server nothing is ever uploaded.
+    // A relay with no server decides nothing: the commit stays pending
+    // until a server is added and accepts it.
     fixture.insert_todo(foreground, [0xa1; 16], "local only");
     fixture.tick(foreground);
     assert_eq!(
         fixture.execute(foreground, ForegroundDbCommandRequest::PendingUploadCount),
-        ForegroundDbCommandResponse::PendingUploadCount { count: 0 }
+        ForegroundDbCommandResponse::PendingUploadCount { count: 1 }
     );
     fixture.close(foreground);
 }
