@@ -276,16 +276,26 @@ pub(super) async fn resolve_assignment(
 }
 
 /// Offline local founding becomes durable on the first authenticated connection.
+/// The namespace a local-first founder's account id derives from: the
+/// audience its proof was verified against (see
+/// [`crate::middleware::auth::LOCAL_FIRST_AUDIENCE_HEADER`]).
+fn founding_app(state: &ServerState, headers: &HeaderMap) -> Result<Uuid, UnauthenticatedResponse> {
+    let audience =
+        crate::middleware::auth::local_first_audience(headers, state.app_id, &state.auth_config)?;
+    Ok(*crate::middleware::auth::local_first_founding_app(&audience).uuid())
+}
+
 pub(super) async fn admit_local_founder(
     state: &ServerState,
     principal: &Principal,
-    _headers: &HeaderMap,
+    headers: &HeaderMap,
 ) -> Result<(), AdmissionError> {
+    let app = founding_app(state, headers)?;
     if let Some(registry) = &state.accounts {
         registry
             .execute(AccountCommand::FoundLocalFirst {
                 principal: principal.clone(),
-                app: *state.app_id.uuid(),
+                app,
             })
             .await
             .map_err(AdmissionError::from)?;
@@ -423,10 +433,12 @@ pub(super) async fn found_local_first(
     if principal.issuer != jazz::tools::identity::LOCAL_FIRST_ISSUER {
         return Err((StatusCode::BAD_REQUEST, "local_first_proof_required"));
     }
+    let app = founding_app(&state, &headers)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid account credential"))?;
     let result = owner(&state)?
         .execute(AccountCommand::FoundLocalFirst {
             principal: principal.clone(),
-            app: *state.app_id.uuid(),
+            app,
         })
         .await
         .map_err(failure)?;

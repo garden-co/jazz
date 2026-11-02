@@ -268,6 +268,11 @@ struct WebSocketPrelude {
     /// own immutable admitted relay capability or rejects the connection.
     #[serde(default)]
     requested_link: RequestedWebSocketLink,
+    /// The audience a trusted backend verified the client's local-first
+    /// proof against; honoured only with that backend's secret (see
+    /// [`crate::middleware::auth::LOCAL_FIRST_AUDIENCE_HEADER`]).
+    #[serde(default)]
+    local_first_audience: Option<String>,
 }
 
 /// The only client-selectable *request* at the WebSocket boundary.  This is
@@ -321,6 +326,7 @@ async fn ws_admission(
 ) -> Result<WebSocketAdmission, super::accounts::AdmissionError> {
     let peer_identity = ws_peer_identity(&prelude.peer_identity)?;
     let requested_link = prelude.requested_link;
+    let local_first_audience = prelude.local_first_audience;
     let auth = prelude.auth;
 
     if let Some(admin_secret) = auth.admin_secret.as_deref() {
@@ -348,6 +354,11 @@ async fn ws_admission(
         let value = axum::http::HeaderValue::from_str(secret)
             .map_err(|error| format!("invalid backend_secret header value: {error}"))?;
         headers.insert("X-Jazz-Backend-Secret", value);
+    }
+    if let Some(audience) = local_first_audience.as_deref() {
+        let value = axum::http::HeaderValue::from_str(audience)
+            .map_err(|error| format!("invalid local_first_audience value: {error}"))?;
+        headers.insert(crate::middleware::auth::LOCAL_FIRST_AUDIENCE_HEADER, value);
     }
     if let Some(session_value) = auth.backend_session.as_ref() {
         use base64::Engine as _;
@@ -1500,6 +1511,7 @@ mod tests {
                 backend_session: Some(serde_json::json!({ "attacker": true })),
                 ..Default::default()
             },
+            local_first_audience: None,
         };
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1644,6 +1656,7 @@ mod tests {
                     })),
                     ..Default::default()
                 },
+                local_first_audience: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1686,6 +1699,7 @@ mod tests {
                     backend_secret: Some("backend-secret".to_owned()),
                     ..Default::default()
                 },
+                local_first_audience: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1724,6 +1738,7 @@ mod tests {
                     admin_secret: Some("admin-secret".to_owned()),
                     ..Default::default()
                 },
+                local_first_audience: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1746,6 +1761,7 @@ mod tests {
                     admin_secret: Some("admin-secret".to_owned()),
                     ..Default::default()
                 },
+                local_first_audience: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1767,6 +1783,7 @@ mod tests {
                     backend_secret: Some("backend-secret".to_owned()),
                     ..Default::default()
                 },
+                local_first_audience: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1801,6 +1818,7 @@ mod tests {
                 })),
                 ..Default::default()
             },
+            local_first_audience: None,
         };
 
         let error = ws_admission(prelude, &HeaderMap::new(), &state)
@@ -1844,6 +1862,7 @@ mod tests {
                 })),
                 ..Default::default()
             },
+            local_first_audience: None,
         };
 
         let admission = ws_admission(prelude, &HeaderMap::new(), &state)
@@ -3334,6 +3353,119 @@ mod tests {
         })
         .await;
         assert!(closed.is_ok(), "the revoked socket must close");
+        core.shutdown().await;
+    }
+
+    /// A browser without an app id signs its local-first proof for the
+    /// endpoint it syncs with. Its backend verifies that audience and vouches
+    /// for it with the backend secret; the core then admits the founder, with
+    /// the account id namespaced by that audience. Without the backend secret
+    /// the vouched audience is refused, and the bare proof fails the app-id
+    /// audience check.
+    #[cfg(feature = "embedded-server")]
+    #[tokio::test]
+    async fn a_backend_vouched_audience_admits_an_endpoint_scoped_local_first_founder() {
+        use crate::server::testing::JazzServer;
+
+        let schema = SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .policies(public_table_policies()),
+            )
+            .build();
+        let core = JazzServer::start_with_schema(schema)
+            .await
+            .expect("start test server");
+        let endpoint = "https://app.example.com/jazz";
+        let token = jazz::tools::identity::mint_jazz_self_signed_token(
+            &[0x5a; 32],
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            endpoint,
+            3600,
+        )
+        .expect("mint endpoint-scoped proof");
+        let verified = jazz::tools::identity::verify_jazz_self_signed_proof(&token, endpoint)
+            .expect("verify endpoint-scoped proof");
+        let account = jazz::account_registry::local_first_account_id(
+            *crate::middleware::auth::local_first_founding_app(endpoint).uuid(),
+            &verified.user_id,
+        );
+        let identity = AuthorSubject::reserved(verified.issuer, &verified.user_id)
+            .expect("local-first author")
+            .with_account(account);
+
+        async fn first_frames(core: &JazzServer, prelude: serde_json::Value) -> Vec<WireFrame> {
+            let (mut ws, _) = connect_async(format!(
+                "ws://127.0.0.1:{}/apps/{}/ws",
+                core.port(),
+                core.app_id()
+            ))
+            .await
+            .expect("connect");
+            ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
+                .await
+                .expect("send prelude");
+            ws.send(WsMessage::Binary(
+                ws_client_hello_batch_with_features(current_wire_features()).into(),
+            ))
+            .await
+            .expect("send hello");
+            match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
+                Ok(Some(Ok(message))) => decode_ws_message(&message),
+                _ => Vec::new(),
+            }
+        }
+        let admitted = |frames: &[WireFrame]| matches!(frames, [WireFrame::Hello(_), ..]);
+
+        let unvouched = first_frames(
+            &core,
+            serde_json::json!({
+                "peer_identity": identity.canonical(),
+                "auth": { "jwt_token": token },
+            }),
+        )
+        .await;
+        assert!(!admitted(&unvouched), "the app id is the default audience");
+
+        let forged = first_frames(
+            &core,
+            serde_json::json!({
+                "peer_identity": identity.canonical(),
+                "auth": { "jwt_token": token },
+                "local_first_audience": endpoint,
+            }),
+        )
+        .await;
+        assert!(
+            !admitted(&forged),
+            "only the backend can name another audience"
+        );
+
+        let vouched = first_frames(
+            &core,
+            serde_json::json!({
+                "peer_identity": identity.canonical(),
+                "auth": { "jwt_token": token, "backend_secret": JazzServer::BACKEND_SECRET },
+                "local_first_audience": endpoint,
+            }),
+        )
+        .await;
+        assert!(admitted(&vouched), "{vouched:?}");
+
+        let elsewhere = first_frames(
+            &core,
+            serde_json::json!({
+                "peer_identity": identity.canonical(),
+                "auth": { "jwt_token": token, "backend_secret": JazzServer::BACKEND_SECRET },
+                "local_first_audience": "https://other.example.com/jazz",
+            }),
+        )
+        .await;
+        assert!(
+            !admitted(&elsewhere),
+            "the proof is bound to its own endpoint"
+        );
         core.shutdown().await;
     }
 
