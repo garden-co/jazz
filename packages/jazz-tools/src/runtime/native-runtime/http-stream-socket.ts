@@ -13,6 +13,8 @@ import type { BrowserWebSocket, WebSocketConstructor } from "./websocket.js";
  * A record is `[kind u8][length u32 BE][payload]`.
  */
 export const STREAM_RECORD_SESSION = 0;
+/** Header carrying the stream session's key, which the session record hands over. */
+const STREAM_KEY_HEADER = "x-jazz-stream-key";
 export const STREAM_RECORD_MESSAGE = 1;
 export const STREAM_RECORD_CLOSE = 2;
 
@@ -105,7 +107,7 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
   readyState = 0;
   private readonly streamUrl: string;
   private readonly abort = new AbortController();
-  private session: string | undefined;
+  private session: { id: string; key: string } | undefined;
   private queued: Uint8Array[] = [];
   private sending = false;
 
@@ -127,9 +129,10 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
     const session = this.session;
     this.finish(1000, "client closed");
     if (session) {
-      void fetch(`${this.streamUrl}/${encodeURIComponent(session)}`, {
+      void fetch(`${this.streamUrl}/${encodeURIComponent(session.id)}`, {
         method: "DELETE",
         credentials: "same-origin",
+        headers: { [STREAM_KEY_HEADER]: session.key },
       }).catch(() => undefined);
     }
   }
@@ -164,7 +167,7 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
 
   private receive(kind: number, payload: Uint8Array): void {
     if (kind === STREAM_RECORD_SESSION) {
-      this.session = textDecoder.decode(payload);
+      this.session = JSON.parse(textDecoder.decode(payload)) as { id: string; key: string };
       this.readyState = 1;
       this.emit("open");
     } else if (kind === STREAM_RECORD_MESSAGE) {
@@ -189,10 +192,13 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
       while (this.queued.length > 0 && this.readyState === 1) {
         const body = concatBytes(this.queued);
         this.queued = [];
-        const response = await fetch(`${this.streamUrl}/${encodeURIComponent(this.session)}`, {
+        const response = await fetch(`${this.streamUrl}/${encodeURIComponent(this.session.id)}`, {
           method: "POST",
           credentials: "same-origin",
-          headers: { "Content-Type": "application/octet-stream" },
+          headers: {
+            "Content-Type": "application/octet-stream",
+            [STREAM_KEY_HEADER]: this.session.key,
+          },
           body: body as BodyInit,
         });
         if (!response.ok) throw new Error(`HTTP stream send refused (${response.status})`);
