@@ -74,7 +74,7 @@ fn slow_queries_report_their_plan_and_the_index_that_would_help() {
     let find = |needle: &str| {
         shapes
             .iter()
-            .find(|shape| shape.sql.contains(needle) && shape.table == "tasks")
+            .find(|shape| common::unhashed(&shape.sql).contains(needle) && shape.table == "tasks")
             .unwrap_or_else(|| panic!("no shape with {needle}: {shapes:#?}"))
     };
     // The same query twice is one shape with two runs; its literal is a

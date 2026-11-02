@@ -87,7 +87,8 @@ fn reconnect(alice: &Db, bob: &Db, gate: &Gate) {
         inner: up,
         gate: gate.clone(),
     })));
-    bob.accept_subscriber(down, AuthorSubject::for_test_bytes([1; 16]));
+    bob.accept_subscriber(down, AuthorSubject::for_test_bytes([1; 16]))
+        .unwrap();
     alice.set_remote_link_hint(RemoteLinkHint::Live);
 }
 fn poll<T>(future: Pin<&mut impl Future<Output = T>>) -> Poll<T> {

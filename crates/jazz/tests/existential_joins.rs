@@ -153,7 +153,7 @@ fn connect(server: &Db, author: AuthorSubject) -> Db {
     let client = open(author.principal_parts().1.len() as u8 % 200 + 1, author);
     let (client_side, server_side) = duplex();
     let _ = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, author);
+    server.accept_subscriber(server_side, author).unwrap();
     client
 }
 
@@ -377,7 +377,9 @@ fn a_synced_join_through_an_array_ships_the_rows_holding_the_result() {
     let client = open_bundles(9);
     let (client_side, server_side) = duplex();
     let _ = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
     let prepared = client.prepare_query(&parts_of_bundle_one()).unwrap();
     let subscription = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &client);

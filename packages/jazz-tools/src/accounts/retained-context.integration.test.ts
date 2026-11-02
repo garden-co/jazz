@@ -45,7 +45,10 @@ it("opens a retained account's local data before its credential, then adopts the
   });
   const account = accounts.getLoggedIn()!;
   expect(isProvisionalAccount(account)).toBe(true);
-  const app = schema.defineApp({ notes: schema.table({ text: schema.string() }, {}) });
+  const app = schema.defineApp(
+    { notes: schema.table({ text: schema.string() }, {}) },
+    { migrations: "none" },
+  );
   const db = await createDb({ appId, account, driver: { type: "memory" } });
   try {
     expect(db.getConfig().jwtToken).toBeUndefined();
