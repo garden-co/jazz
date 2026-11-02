@@ -8,7 +8,13 @@
 //
 // The authority ticks whenever it has sync work, in the same event as
 // the frames that caused it; each tick's wall time is recorded.
-import { WasmDb, durableObjectSqlStats, initSync } from "./pkg/jazz_do.js";
+import {
+  WasmDb,
+  durableObjectSqlQueries,
+  durableObjectSqlStats,
+  durableObjectSqlTrace,
+  initSync,
+} from "./pkg/jazz_do.js";
 import wasmModule from "./pkg/jazz_do_bg.wasm";
 
 let wasm = null;
@@ -18,8 +24,10 @@ function bytes(base64) {
 }
 
 export class Authority {
-  constructor(ctx) {
+  constructor(ctx, env) {
     this.ctx = ctx;
+    // TRACE=1 counts execs by statement text; stats returns them.
+    this.trace = Boolean(env.TRACE);
     this.db = null;
     this.sessions = new Set();
     this.ticking = false;
@@ -28,10 +36,12 @@ export class Authority {
     this.frames = { in: 0, out: 0, inBytes: 0, outBytes: 0 };
     this.sqlBase = {};
     this.errors = [];
+    this.schedules = 0;
   }
 
   open(schema, config) {
     wasm ??= initSync({ module: wasmModule });
+    if (this.trace) durableObjectSqlTrace(true);
     const start = performance.now();
     this.db = WasmDb.openDurableObject(this.ctx.storage.sql, bytes(schema), bytes(config));
     this.db.setTickScheduler(() => this.schedule());
@@ -40,6 +50,7 @@ export class Authority {
   }
 
   schedule() {
+    this.schedules += 1;
     if (this.ticking) {
       this.again = true;
       return;
@@ -87,11 +98,14 @@ export class Authority {
       wasmMemoryBytes: wasm?.memory.buffer.byteLength ?? null,
       databaseBytes: this.ctx.storage.sql.databaseSize,
       errors: this.errors.slice(-5),
+      schedules: this.schedules,
+      ...(this.trace ? { queries: durableObjectSqlQueries() } : {}),
     };
     if (reset) {
       this.ticks = [];
       this.frames = { in: 0, out: 0, inBytes: 0, outBytes: 0 };
       this.sqlBase = durableObjectSqlStats();
+      this.schedules = 0;
     }
     return out;
   }

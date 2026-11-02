@@ -25,7 +25,9 @@ use std::cell::{Cell as StdCell, RefCell};
 use std::ffi::{c_char, c_int, c_uchar, c_uint, c_void, CStr};
 use std::ptr;
 
-use js_sys::{Array, ArrayBuffer, Uint8Array};
+use std::collections::HashMap;
+
+use js_sys::JsString;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -36,18 +38,103 @@ extern "C" {
     /// `ctx.storage.sql`.
     #[derive(Clone)]
     pub type SqlStorage;
-    #[wasm_bindgen(method, catch, variadic)]
-    fn exec(this: &SqlStorage, query: &str, bindings: &Array) -> Result<SqlCursor, JsValue>;
+}
 
-    type SqlCursor;
-    #[wasm_bindgen(method)]
-    fn raw(this: &SqlCursor) -> JsValue;
-    #[wasm_bindgen(method, getter, js_name = columnNames)]
-    fn column_names(this: &SqlCursor) -> Array;
-    #[wasm_bindgen(method, getter, js_name = rowsRead)]
-    fn rows_read(this: &SqlCursor) -> f64;
-    #[wasm_bindgen(method, getter, js_name = rowsWritten)]
-    fn rows_written(this: &SqlCursor) -> f64;
+// One call into JS per statement: the bindings go in as one buffer and the
+// whole result comes back as one, in the cell encoding `Cells` reads. Per
+// cell and per binding calls across the boundary cost more than the
+// statement itself.
+#[wasm_bindgen(inline_js = r#"
+const decoder = new TextDecoder();
+const encoder = new TextEncoder();
+let out = new Uint8Array(1 << 16);
+let view = new DataView(out.buffer);
+function room(pos, n) {
+  if (pos + n <= out.length) return;
+  let size = out.length * 2;
+  while (size < pos + n) size *= 2;
+  const next = new Uint8Array(size);
+  next.set(out.subarray(0, pos));
+  out = next;
+  view = new DataView(out.buffer);
+}
+function text(pos, s) {
+  room(pos, 5 + s.length * 3);
+  out[pos] = 3;
+  const { written } = encoder.encodeInto(s, out.subarray(pos + 5));
+  view.setUint32(pos + 1, written, true);
+  return pos + 5 + written;
+}
+function bytes(pos, b) {
+  room(pos, 5 + b.length);
+  out[pos] = 4;
+  view.setUint32(pos + 1, b.length, true);
+  out.set(b, pos + 5);
+  return pos + 5 + b.length;
+}
+function args(input) {
+  const v = new DataView(input.buffer, input.byteOffset, input.byteLength);
+  const list = [];
+  let i = 0;
+  while (i < input.length) {
+    const tag = input[i++];
+    if (tag === 0) {
+      list.push(null);
+    } else if (tag === 1) {
+      list.push(v.getFloat64(i, true));
+      i += 8;
+    } else {
+      const n = v.getUint32(i, true);
+      i += 4;
+      const part = input.subarray(i, i + n);
+      i += n;
+      list.push(tag === 3 ? decoder.decode(part) : part.slice().buffer);
+    }
+  }
+  return list;
+}
+export function jazz_do_exec(sql, query, bindings) {
+  const cursor = sql.exec(query, ...args(bindings));
+  const rows = cursor.raw().toArray();
+  const names = cursor.columnNames;
+  room(0, 24);
+  view.setFloat64(0, cursor.rowsRead, true);
+  view.setFloat64(8, cursor.rowsWritten, true);
+  view.setUint32(16, names.length, true);
+  view.setUint32(20, rows.length, true);
+  let pos = 24;
+  for (const name of names) pos = text(pos, name);
+  for (const row of rows) {
+    for (const cell of row) {
+      if (cell === null || cell === undefined) {
+        room(pos, 1);
+        out[pos++] = 0;
+      } else if (typeof cell === "number") {
+        room(pos, 9);
+        out[pos] = Number.isInteger(cell) ? 1 : 2;
+        view.setFloat64(pos + 1, cell, true);
+        pos += 9;
+      } else if (typeof cell === "string") {
+        pos = text(pos, cell);
+      } else if (cell instanceof ArrayBuffer) {
+        pos = bytes(pos, new Uint8Array(cell));
+      } else if (ArrayBuffer.isView(cell)) {
+        pos = bytes(pos, new Uint8Array(cell.buffer, cell.byteOffset, cell.byteLength));
+      } else {
+        throw new Error("Durable Object SQLite returned a value of unknown type");
+      }
+    }
+  }
+  return out.subarray(0, pos);
+}
+"#)]
+extern "C" {
+    #[wasm_bindgen(catch)]
+    fn jazz_do_exec(
+        sql: &SqlStorage,
+        query: &JsString,
+        bindings: &[u8],
+    ) -> Result<Vec<u8>, JsValue>;
 }
 
 thread_local! {
@@ -55,6 +142,39 @@ thread_local! {
     static STATS: RefCell<Stats> = RefCell::new(Stats::default());
     /// Savepoints open on the object's database.
     static DEPTH: StdCell<u32> = const { StdCell::new(0) };
+    /// Execs by statement text, while tracing.
+    static QUERIES: RefCell<Option<HashMap<String, f64>>> = const { RefCell::new(None) };
+}
+
+fn traced(query: &str) {
+    QUERIES.with(|queries| {
+        if let Some(queries) = queries.borrow_mut().as_mut() {
+            let key: String = query.split_whitespace().collect::<Vec<_>>().join(" ");
+            let key: String = key.chars().take(160).collect();
+            *queries.entry(key).or_default() += 1.0;
+        }
+    });
+}
+
+/// Count execs by statement text from now on (`on`), or stop.
+#[wasm_bindgen(js_name = durableObjectSqlTrace)]
+pub fn durable_object_sql_trace(on: bool) {
+    QUERIES.with(|queries| *queries.borrow_mut() = on.then(HashMap::new));
+}
+
+/// The execs counted since tracing started, `{ text: count }`, and start
+/// counting again.
+#[wasm_bindgen(js_name = durableObjectSqlQueries)]
+pub fn durable_object_sql_queries() -> JsValue {
+    let out = js_sys::Object::new();
+    QUERIES.with(|queries| {
+        if let Some(queries) = queries.borrow_mut().as_mut() {
+            for (key, count) in queries.drain() {
+                let _ = js_sys::Reflect::set(&out, &key.into(), &count.into());
+            }
+        }
+    });
+    out.into()
 }
 
 #[derive(Default)]
@@ -173,6 +293,96 @@ struct Conn {
     code: c_int,
     message: Vec<u8>,
     commit_hook: Option<(CommitHook, *mut c_void)>,
+    /// Statement texts as JS strings, so each crosses into JS once.
+    texts: HashMap<String, JsString>,
+    /// `changes()` after the last statement, when it was a write that
+    /// counted its own rows (see `counting`).
+    changes: Option<i64>,
+}
+
+/// A result in `jazz_do_exec`'s encoding.
+struct Cells<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl Cells<'_> {
+    fn take(&mut self, n: usize) -> Result<&[u8], String> {
+        let part = self
+            .bytes
+            .get(self.at..self.at + n)
+            .ok_or("Durable Object SQLite result is cut short")?;
+        self.at += n;
+        Ok(part)
+    }
+
+    fn u32(&mut self) -> Result<usize, String> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()) as usize)
+    }
+
+    fn f64(&mut self) -> Result<f64, String> {
+        Ok(f64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+
+    fn value(&mut self) -> Result<Value, String> {
+        Ok(match self.take(1)?[0] {
+            0 => Value::Null,
+            1 => {
+                let n = self.f64()?;
+                if n.abs() > MAX_SAFE as f64 {
+                    return Err(format!(
+                        "the integer {n} is beyond 2^53, which Durable Object SQLite returns inexactly: not supported yet"
+                    ));
+                }
+                Value::Integer(n as i64)
+            }
+            2 => Value::Real(self.f64()?),
+            3 => {
+                let n = self.u32()?;
+                let mut text = Vec::with_capacity(n + 1);
+                text.extend_from_slice(self.take(n)?);
+                text.push(0);
+                Value::Text(text)
+            }
+            4 => {
+                let n = self.u32()?;
+                Value::Blob(self.take(n)?.to_vec())
+            }
+            _ => return Err("Durable Object SQLite result has an unknown cell".into()),
+        })
+    }
+}
+
+/// A bound value, in the encoding `jazz_do_exec` reads.
+#[derive(Clone)]
+enum Bound {
+    Null,
+    Number(f64),
+    Text(Vec<u8>),
+    Blob(Vec<u8>),
+}
+
+fn encode(bindings: &[Bound]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for bound in bindings {
+        match bound {
+            Bound::Null => out.push(0),
+            Bound::Number(n) => {
+                out.push(1);
+                out.extend_from_slice(&n.to_le_bytes());
+            }
+            Bound::Text(bytes) | Bound::Blob(bytes) => {
+                out.push(if matches!(bound, Bound::Text(_)) {
+                    3
+                } else {
+                    4
+                });
+                out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                out.extend_from_slice(bytes);
+            }
+        }
+    }
+    out
 }
 
 impl Conn {
@@ -188,12 +398,22 @@ impl Conn {
         self.message.clear();
     }
 
-    /// Run `query`; a refusal is recorded as this connection's error.
-    fn run(&mut self, query: &str, bindings: &Array) -> Result<SqlCursor, c_int> {
-        match self.sql.exec(query, bindings) {
-            Ok(cursor) => {
+    /// Run `query`, its result in `jazz_do_exec`'s encoding; a refusal is
+    /// recorded as this connection's error.
+    fn run(&mut self, query: &str, bindings: &[Bound]) -> Result<Vec<u8>, c_int> {
+        if self.texts.len() > 4096 {
+            self.texts.clear();
+        }
+        let text = self
+            .texts
+            .entry(query.to_owned())
+            .or_insert_with(|| JsString::from(query));
+        traced(query);
+        self.changes = None;
+        match jazz_do_exec(&self.sql, text, &encode(bindings)) {
+            Ok(result) => {
                 STATS.with(|stats| stats.borrow_mut().execs += 1.0);
-                Ok(cursor)
+                Ok(result)
             }
             Err(error) => {
                 let message = js_message(&error);
@@ -207,15 +427,19 @@ impl Conn {
     /// One integer from a query of one row and column.
     fn lookup(&mut self, query: &str) -> i64 {
         STATS.with(|stats| stats.borrow_mut().lookups += 1.0);
-        let Ok(cursor) = self.run(query, &Array::new()) else {
+        let Ok(result) = self.run(query, &[]) else {
             return 0;
         };
-        let rows = Array::from(&cursor.raw());
-        rows.get(0)
-            .dyn_into::<Array>()
-            .ok()
-            .and_then(|row| row.get(0).as_f64())
-            .unwrap_or(0.0) as i64
+        match Outcome::from_bytes(&result) {
+            Ok(result) => match result.rows.first().and_then(|row| row.first()) {
+                Some(Value::Integer(n)) => *n,
+                _ => 0,
+            },
+            Err(message) => {
+                self.fail(SQLITE_ERROR, message);
+                0
+            }
+        }
     }
 
     fn committed(&mut self) {
@@ -246,11 +470,47 @@ enum Value {
     Blob(Vec<u8>),
 }
 
+/// One statement's decoded result.
+struct Outcome {
+    rows_read: f64,
+    rows_written: f64,
+    columns: Vec<Vec<u8>>,
+    rows: Vec<Vec<Value>>,
+}
+
+impl Outcome {
+    fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        let mut cells = Cells { bytes, at: 0 };
+        let rows_read = cells.f64()?;
+        let rows_written = cells.f64()?;
+        let width = cells.u32()?;
+        let height = cells.u32()?;
+        let columns = (0..width)
+            .map(|_| match cells.value()? {
+                Value::Text(name) => Ok(name),
+                _ => Err("Durable Object SQLite column name is not text".to_string()),
+            })
+            .collect::<Result<_, _>>()?;
+        let rows = (0..height)
+            .map(|_| (0..width).map(|_| cells.value()).collect())
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            rows_read,
+            rows_written,
+            columns,
+            rows,
+        })
+    }
+}
+
 struct Stmt {
     conn: *mut Conn,
+    /// The text as run: a write that counts its own rows has ` RETURNING 1`
+    /// appended (see `counting`).
     query: String,
+    counted: bool,
     kind: Kind,
-    bindings: Vec<JsValue>,
+    bindings: Vec<Bound>,
     columns: Vec<Vec<u8>>,
     rows: Vec<Vec<Value>>,
     /// The row a step last returned, plus one; 0 before the first step.
@@ -268,7 +528,7 @@ impl Stmt {
         self.rows.get(self.at.checked_sub(1)?)?.get(col as usize)
     }
 
-    fn bind(&mut self, index: c_int, value: JsValue) -> c_int {
+    fn bind(&mut self, index: c_int, value: Bound) -> c_int {
         let Some(slot) = (index as usize)
             .checked_sub(1)
             .and_then(|i| self.bindings.get_mut(i))
@@ -307,74 +567,33 @@ impl Stmt {
             }
             Kind::Run => {}
         }
-        let bindings: Array = self.bindings.iter().collect();
-        let cursor = match conn.run(&self.query, &bindings) {
-            Ok(cursor) => cursor,
+        let result = match conn.run(&self.query, &self.bindings) {
+            Ok(result) => result,
             Err(code) => return code,
         };
-        let raw = Array::from(&cursor.raw());
+        let result = match Outcome::from_bytes(&result) {
+            Ok(result) => result,
+            Err(message) => return conn.fail(SQLITE_TOOBIG, message),
+        };
         STATS.with(|stats| {
             let mut stats = stats.borrow_mut();
-            stats.rows_read += cursor.rows_read();
-            stats.rows_written += cursor.rows_written();
+            stats.rows_read += result.rows_read;
+            stats.rows_written += result.rows_written;
         });
-        self.columns = cursor
-            .column_names()
-            .iter()
-            .map(|name| {
-                let mut name = name.as_string().unwrap_or_default().into_bytes();
-                name.push(0);
-                name
-            })
-            .collect();
-        let mut rows = Vec::with_capacity(raw.length() as usize);
-        for row in raw.iter() {
-            let row: Array = row.unchecked_into();
-            let mut cells = Vec::with_capacity(row.length() as usize);
-            for cell in row.iter() {
-                match value(cell) {
-                    Ok(cell) => cells.push(cell),
-                    Err(message) => return conn.fail(SQLITE_TOOBIG, message),
-                }
-            }
-            rows.push(cells);
+        if self.counted {
+            // rusqlite's `execute` reads `changes()` next; the rows answer
+            // it without another exec, and are not the statement's own.
+            conn.changes = Some(result.rows.len() as i64);
+        } else {
+            self.columns = result.columns;
+            self.rows = result.rows;
         }
-        self.rows = rows;
         if DEPTH.with(StdCell::get) == 0 {
             conn.committed();
         }
         conn.ok();
         SQLITE_OK
     }
-}
-
-fn value(cell: JsValue) -> Result<Value, String> {
-    if cell.is_null() || cell.is_undefined() {
-        return Ok(Value::Null);
-    }
-    if let Some(n) = cell.as_f64() {
-        if n.fract() != 0.0 || !n.is_finite() {
-            return Ok(Value::Real(n));
-        }
-        if n.abs() > MAX_SAFE as f64 {
-            return Err(format!(
-                "the integer {n} is beyond 2^53, which Durable Object SQLite returns inexactly: not supported yet"
-            ));
-        }
-        return Ok(Value::Integer(n as i64));
-    }
-    if let Some(text) = cell.as_string() {
-        let mut bytes = text.into_bytes();
-        bytes.push(0);
-        return Ok(Value::Text(bytes));
-    }
-    if let Some(buffer) = cell.dyn_ref::<ArrayBuffer>() {
-        return Ok(Value::Blob(Uint8Array::new(buffer).to_vec()));
-    }
-    if let Some(bytes) = cell.dyn_ref::<Uint8Array>() {
-        return Ok(Value::Blob(bytes.to_vec()));
-    }
-    Err("Durable Object SQLite returned a value of unknown type".into())
 }
 
 fn js_message(error: &JsValue) -> String {
@@ -528,6 +747,57 @@ fn complete(query: &str) -> bool {
     ended
 }
 
+/// Whether `query` can count its own changes with ` RETURNING 1` appended,
+/// so `changes()` needs no exec of its own: one INSERT, UPDATE or DELETE
+/// whose end is plainly the end of its last clause. Anything else (a
+/// SELECT, ORDER BY or LIMIT outside parentheses, comments, a RETURNING
+/// already) runs as written and `changes()` is asked separately.
+fn counting(query: &str) -> bool {
+    if query.contains("--") || query.contains("/*") {
+        return false;
+    }
+    let body = query.trim_end_matches(|c: char| c == ';' || c.is_whitespace());
+    let bytes = body.as_bytes();
+    let (mut words, mut depth, mut i) = (Vec::new(), 0i32, 0);
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'\'' | b'"' | b'`') => {
+                i += 1;
+                while i < bytes.len() && !(bytes[i] == quote && bytes.get(i + 1) != Some(&quote)) {
+                    i += if bytes[i] == quote { 2 } else { 1 };
+                }
+            }
+            b'[' => {
+                while i < bytes.len() && bytes[i] != b']' {
+                    i += 1;
+                }
+            }
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b';' => return false,
+            c if depth == 0 && (c.is_ascii_alphabetic() || c == b'_') => {
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                words.push(body[start..i].to_ascii_uppercase());
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let first = words.first().map(String::as_str);
+    let writes = matches!(first, Some("INSERT" | "UPDATE" | "DELETE" | "REPLACE"));
+    let plain = words.iter().enumerate().all(|(n, word)| {
+        !matches!(
+            word.as_str(),
+            "SELECT" | "RETURNING" | "ORDER" | "LIMIT" | "WITH"
+        ) && !(word == "FROM" && !(n == 1 && first == Some("DELETE")))
+    });
+    writes && plain && depth == 0
+}
+
 fn kind(query: &str) -> Kind {
     let words: Vec<String> = query
         .split(|c: char| c.is_whitespace() || c == ';')
@@ -583,6 +853,8 @@ pub unsafe extern "C" fn sqlite3_open_v2(
         code: SQLITE_OK,
         message: Vec::new(),
         commit_hook: None,
+        texts: HashMap::new(),
+        changes: None,
     })) as *mut c_void;
     SQLITE_OK
 }
@@ -632,11 +904,20 @@ pub unsafe extern "C" fn sqlite3_prepare_v3(
     } else {
         0
     };
+    let counted = kind == Kind::Run && counting(query);
     *pp_stmt = Box::into_raw(Box::new(Stmt {
         conn: conn as *mut Conn,
-        query: query.to_owned(),
+        query: if counted {
+            format!(
+                "{} RETURNING 1",
+                query.trim_end_matches(|c: char| c == ';' || c.is_whitespace())
+            )
+        } else {
+            query.to_owned()
+        },
+        counted,
         kind,
-        bindings: vec![JsValue::NULL; count],
+        bindings: vec![Bound::Null; count],
         columns: Vec::new(),
         rows: Vec::new(),
         at: 0,
@@ -688,7 +969,7 @@ pub unsafe extern "C" fn sqlite3_reset(s: *mut c_void) -> c_int {
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_clear_bindings(s: *mut c_void) -> c_int {
     if let Some(stmt) = stmt(s) {
-        stmt.bindings.fill(JsValue::NULL);
+        stmt.bindings.fill(Bound::Null);
     }
     SQLITE_OK
 }
@@ -700,25 +981,25 @@ pub unsafe extern "C" fn sqlite3_bind_parameter_count(s: *mut c_void) -> c_int {
 
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_bind_null(s: *mut c_void, i: c_int) -> c_int {
-    stmt(s).map_or(SQLITE_MISUSE, |stmt| stmt.bind(i, JsValue::NULL))
+    stmt(s).map_or(SQLITE_MISUSE, |stmt| stmt.bind(i, Bound::Null))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_bind_int64(s: *mut c_void, i: c_int, v: i64) -> c_int {
     let value = if (-MAX_SAFE..=MAX_SAFE).contains(&v) {
-        JsValue::from_f64(v as f64)
+        Bound::Number(v as f64)
     } else {
         // Durable Object SQLite refuses BigInt; an INTEGER column's
         // affinity turns the text back into this integer.
         STATS.with(|stats| stats.borrow_mut().wide_int_binds += 1.0);
-        JsValue::from_str(&v.to_string())
+        Bound::Text(v.to_string().into_bytes())
     };
     stmt(s).map_or(SQLITE_MISUSE, |stmt| stmt.bind(i, value))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_bind_double(s: *mut c_void, i: c_int, v: f64) -> c_int {
-    stmt(s).map_or(SQLITE_MISUSE, |stmt| stmt.bind(i, JsValue::from_f64(v)))
+    stmt(s).map_or(SQLITE_MISUSE, |stmt| stmt.bind(i, Bound::Number(v)))
 }
 
 #[no_mangle]
@@ -731,7 +1012,7 @@ pub unsafe extern "C" fn sqlite3_bind_text64(
     _encoding: c_uchar,
 ) -> c_int {
     let bytes = std::slice::from_raw_parts(data as *const u8, len as usize);
-    let text = std::str::from_utf8(bytes).map(JsValue::from_str);
+    let text = std::str::from_utf8(bytes).map(|text| Bound::Text(text.as_bytes().to_vec()));
     destroy(data as *const c_void, destructor);
     let Some(stmt) = stmt(s) else {
         return SQLITE_MISUSE;
@@ -758,14 +1039,14 @@ pub unsafe extern "C" fn sqlite3_bind_blob64(
     } else {
         std::slice::from_raw_parts(data as *const u8, len as usize)
     };
-    let value: JsValue = Uint8Array::from(bytes).buffer().into();
+    let value = Bound::Blob(bytes.to_vec());
     destroy(data, destructor);
     stmt(s).map_or(SQLITE_MISUSE, |stmt| stmt.bind(i, value))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_bind_zeroblob(s: *mut c_void, i: c_int, n: c_int) -> c_int {
-    let value: JsValue = ArrayBuffer::new(n.max(0) as u32).into();
+    let value = Bound::Blob(vec![0; n.max(0) as usize]);
     stmt(s).map_or(SQLITE_MISUSE, |stmt| stmt.bind(i, value))
 }
 
@@ -838,7 +1119,11 @@ pub unsafe extern "C" fn sqlite3_column_bytes(s: *mut c_void, col: c_int) -> c_i
 
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_changes64(db: *mut c_void) -> i64 {
-    conn(db).lookup("SELECT changes()")
+    let conn = conn(db);
+    match conn.changes {
+        Some(changes) => changes,
+        None => conn.lookup("SELECT changes()"),
+    }
 }
 
 #[no_mangle]

@@ -15,6 +15,10 @@
 //! the sessions connect.
 //!
 //! `STORE=10000 SESSIONS=50 GROUP=5 ROWS=10 WRITES=200 doc-shelf-do-ceiling-ws ws://127.0.0.1:8787`
+//!
+//! With `NATIVE=1` the authority is a native in-memory store in this
+//! process instead, reached over in-memory queues: the same workload's
+//! baseline, with only the authority's ticks timed.
 
 use std::collections::BTreeMap;
 use std::net::TcpStream;
@@ -145,8 +149,14 @@ fn percent(text: &str) -> String {
         .collect()
 }
 
-/// One request on the control socket.
-fn control(socket: &mut Socket, request: Json) -> Json {
+/// One request on the control socket, or to the native authority.
+fn control(socket: &mut Option<Socket>, request: Json) -> Json {
+    let Some(socket) = socket else {
+        return match request["op"].as_str() {
+            Some("stats") => local_stats(request["reset"] == true),
+            _ => json!({ "ok": true, "openMs": 0 }),
+        };
+    };
     socket
         .send(Message::text(request.to_string()))
         .expect("send control");
@@ -218,6 +228,7 @@ fn pump(db: &Db, mut done: impl FnMut() -> bool) {
     let start = Instant::now();
     while !done() {
         block_on(db.tick()).expect("replica tick");
+        tick_authority();
         assert!(
             start.elapsed() < Duration::from_secs(TIMEOUT_S),
             "timed out"
@@ -227,6 +238,77 @@ fn pump(db: &Db, mut done: impl FnMut() -> bool) {
 }
 
 const TIMEOUT_S: u64 = 20;
+
+thread_local! {
+    /// The `NATIVE=1` authority, and the wall time of each of its ticks.
+    static LOCAL: std::cell::RefCell<Option<(Db, Vec<f64>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Tick the native authority, if there is one.
+fn tick_authority() {
+    LOCAL.with(|local| {
+        if let Some((db, ticks)) = local.borrow_mut().as_mut() {
+            let start = Instant::now();
+            block_on(db.tick()).expect("authority tick");
+            ticks.push(start.elapsed().as_secs_f64() * 1e3);
+        }
+    });
+}
+
+/// The native authority's stats, shaped as the object's.
+fn local_stats(reset: bool) -> Json {
+    LOCAL.with(|local| {
+        let mut local = local.borrow_mut();
+        let (_, ticks) = local.as_mut().expect("native authority");
+        // Ticks with nothing to do are not the write's.
+        let busy: Vec<f64> = ticks.iter().copied().filter(|t| *t > 0.002).collect();
+        let out = json!({
+            "ok": true,
+            "ticks": busy.len(),
+            "tickMsTotal": ticks.iter().sum::<f64>(),
+            "tickMsP99": 0,
+            "frames": { "out": 0, "outBytes": 0, "in": 0 },
+            "sql": {},
+            "schedules": 0,
+        });
+        if reset {
+            ticks.clear();
+        }
+        out
+    })
+}
+
+/// A frame queue pair end, for the native authority.
+struct Queue {
+    outbound: std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<Vec<u8>>>>,
+    inbound: std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<Vec<u8>>>>,
+}
+
+impl WireTransport for Queue {
+    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        self.outbound.borrow_mut().push_back(frame);
+        Ok(())
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        self.inbound.borrow_mut().pop_front()
+    }
+}
+
+fn queue_pair() -> (Queue, Queue) {
+    let up = std::rc::Rc::default();
+    let down = std::rc::Rc::default();
+    (
+        Queue {
+            outbound: std::rc::Rc::clone(&up),
+            inbound: std::rc::Rc::clone(&down),
+        },
+        Queue {
+            outbound: down,
+            inbound: up,
+        },
+    )
+}
 
 fn settled(db: &Db, tx: u64) -> bool {
     use futures_util::FutureExt;
@@ -258,7 +340,20 @@ fn main() {
     assert!(groups <= projects, "more project groups than projects");
     let writers = groups.min(env("WRITERS", 20)).max(1);
 
-    let mut control_socket = connect(&format!("{base}/control"));
+    let native = std::env::var_os("NATIVE").is_some();
+    let mut control_socket = (!native).then(|| connect(&format!("{base}/control")));
+    if native {
+        let config = DbConfig::new(
+            JazzSchema::new(&schema()).expect("schema compiles"),
+            DbIdentity {
+                node: node(0),
+                author: AuthorSubject::SYSTEM,
+            },
+        );
+        let db = block_on(Db::open(config)).expect("open authority");
+        db.set_authority();
+        LOCAL.with(|local| *local.borrow_mut() = Some((db, Vec::new())));
+    }
     let config = OpenConfig {
         identity: OpenIdentity {
             node: node(0),
@@ -289,11 +384,23 @@ fn main() {
             },
         );
         let db = block_on(Db::open(config)).expect("open replica");
-        let wire = Wire::new(&format!(
-            "{base}/session?author={}",
-            percent(author(s).canonical())
-        ));
-        let link = block_on(db.connect_upstream(Box::new(WireTransportAdapter::current(wire))));
+        let transport: Box<dyn jazz::db::Transport> = if native {
+            let (client, server) = queue_pair();
+            LOCAL.with(|local| {
+                let local = local.borrow();
+                let (authority, _) = local.as_ref().expect("native authority");
+                authority
+                    .accept_subscriber(Box::new(WireTransportAdapter::current(server)), author(s))
+                    .expect("accept");
+            });
+            Box::new(WireTransportAdapter::current(client))
+        } else {
+            Box::new(WireTransportAdapter::current(Wire::new(&format!(
+                "{base}/session?author={}",
+                percent(author(s).canonical())
+            ))))
+        };
+        let link = block_on(db.connect_upstream(transport));
         (db, link)
     };
 
@@ -348,6 +455,7 @@ fn main() {
     }
     let tick_all = |replicas: &mut Vec<_>| {
         let mut events = 0;
+        tick_authority();
         for (db, _, stream, _) in replicas.iter_mut() {
             let db: &Db = db;
             block_on(db.tick()).expect("replica tick");
@@ -356,6 +464,7 @@ fn main() {
                 events += 1;
             }
         }
+        tick_authority();
         events
     };
     // Every session holds its project once nothing arrives for a while.
@@ -374,6 +483,8 @@ fn main() {
     let writer_slots: Vec<usize> = (0..sessions)
         .filter(|s| s % group == 0 && s / group < writers)
         .collect();
+    // profile.mjs profiles between these two lines.
+    eprintln!("phase: writing");
     let mut trips = Vec::with_capacity(writes);
     let mut events = 0;
     for done in 0..writes {
@@ -405,6 +516,7 @@ fn main() {
     // Let the last fan-out land before reading the object's numbers.
     std::thread::sleep(Duration::from_millis(200));
     events += tick_all(&mut replicas);
+    eprintln!("phase: written");
     let written = control(&mut control_socket, json!({ "op": "stats", "reset": true }));
 
     trips.sort();
@@ -421,6 +533,8 @@ fn main() {
             "seed_s": seeded.as_secs_f64(),
             "connect_s": connected.as_secs_f64(),
             "object_ms_per_write": tick_ms / writes as f64,
+            "object_schedules_per_write": written["schedules"].as_f64().unwrap_or(0.0) / writes as f64,
+            "object_frames_in_per_write": written["frames"]["in"].as_f64().unwrap_or(0.0) / writes as f64,
             "object_ticks_per_write": written["ticks"].as_f64().unwrap_or(0.0) / writes as f64,
             "object_tick_p99_ms": written["tickMsP99"],
             "object_ceiling_writes_per_s": writes as f64 / (tick_ms / 1e3),
@@ -443,7 +557,11 @@ fn main() {
             "database_mb": mb(&written["databaseBytes"]),
             "connect_object_ms": after_connect["tickMsTotal"],
             "sql_totals": written["sql"],
+            "queries": written["queries"],
         }))
         .expect("json")
     );
+    // The process exits next; dropping the native authority in TLS
+    // teardown would touch other thread locals already destroyed.
+    LOCAL.with(|local| std::mem::forget(local.borrow_mut().take()));
 }
