@@ -35,6 +35,10 @@ const who = verifyRequest(request, { audience: "https://app.example" });
 // throws LocalFirstTokenError: a local-first bearer that is invalid
 ```
 
+`verifyRequest` takes a Fetch API `Request`, or anything with a Fetch `Headers`
+object as `headers`. For Node's `IncomingMessage`, read the `authorization`
+header yourself and call `verifyToken`.
+
 ## Entry points
 
 | Import                        | What                                                                                                               |
@@ -59,10 +63,31 @@ The formats are fixed and versioned, and match Jazz's Rust core byte for byte
 - Token: compact JWT, header `{"alg":"EdDSA","typ":"JWT"}`, claims
   `{ iss: "urn:jazz:local-first", sub, aud, jazz_pub_key, iat, exp }`.
   Verification checks the strict Ed25519 signature, that `jazz_pub_key`
-  derives `sub`, the exact `aud`, `iat` at most 60 s ahead, `exp` not passed,
+  derives `sub`, the `aud`, `iat` at most 60 s ahead, `exp` not passed,
   and a lifetime of at most 1 h unless configured. Unknown claims are rejected.
+- Audience: both sides normalize it like Jazz's Rust core
+  (`normalizeAudience`). A UUID in any common form becomes its lowercase
+  hyphenated form; any other string becomes UUIDv5(DNS namespace, audience).
+  The audience is required and must be non-empty.
 
-A secret is a credential: whoever has it is that user. Keep it out of logs.
+## Threat model
+
+- **Identities are self-asserted.** Anyone can create as many as they like, at
+  no cost. A verified token proves "the same device as before", not a vetted
+  person. Rate-limit by subject and IP, and gate anything valuable behind a
+  real sign-up.
+- **Tokens are bearer tokens.** They have no `jti` and are not bound to a
+  request, so a leaked token replays until it expires, for up to 1 h by
+  default. Send them only over TLS, keep them out of logs and URLs, and keep
+  lifetimes short.
+- **The secret is the account.** Whoever holds it is that user, on every
+  device, with no revocation. `browserSecretStore` keeps it in plaintext
+  `localStorage`, so any script on the origin (XSS) can read it. On React
+  Native and Expo, pass a secure store such as `expo-secure-store`, never
+  AsyncStorage. Offer a recovery phrase or passkey backup before anything
+  valuable is tied to it.
+- **Clocks.** `iat` may be up to 60 s in the future. `exp` gets no leeway, and
+  a token is rejected from the second it expires.
 
 ## Scope
 
@@ -71,6 +96,11 @@ same storage: an app ID, an endpoint, or nothing when the storage belongs to
 one app. The library never interprets it; it only derives the storage key
 (`secretStorageKey(scope, profile)`, a fixed format). The token audience is
 separate and always passed to `signToken`.
+
+Subscribing to a store (`subscribe`) creates a secret on first use, which is
+the point: users are signed in before they sign up. `clear()` signs out, and
+subscribers then see no secret until the app calls `getOrCreate()` again,
+which creates a new identity.
 
 Jazz passes its app ID as the scope, so a secret saved by any earlier Jazz
 version is found again under the same key and the user keeps their identity.

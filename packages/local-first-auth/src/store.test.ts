@@ -89,10 +89,26 @@ describe("createSecretStore", () => {
     expect(states.at(-1)).toBe(restored);
     await store.clear();
     await new Promise((r) => setTimeout(r, 0));
-    // A cleared store creates a fresh secret for its subscribers.
-    expect(states.at(-1)).not.toBe(restored);
+    // Clearing signs out: subscribers see no secret until getOrCreate runs.
+    expect(states.at(-1)).toBeNull();
     expect(states).toHaveLength(3);
     unsubscribe();
+  });
+});
+
+describe("serialization", () => {
+  it("creates one secret even through two adapters over the same storage", async () => {
+    const backing = memoryStorage();
+    const adapter = (): SecretStorage => ({
+      getItem: async (key) => backing.getItem(key),
+      setItem: async (key, value) => backing.setItem(key, value),
+      removeItem: async (key) => backing.removeItem(key),
+    });
+    const a = createSecretStore({ scope: "app", storage: adapter() });
+    const b = createSecretStore({ scope: "app", storage: adapter() });
+    expect(a).not.toBe(b);
+    const [x, y] = await Promise.all([a.getOrCreate(), b.getOrCreate()]);
+    expect(x).toBe(y);
   });
 });
 

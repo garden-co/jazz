@@ -35,9 +35,16 @@ export interface SecretStore {
   getOrCreate(): Promise<string>;
   /** Replace the stored secret, e.g. after restoring a backup. */
   save(secret: string): Promise<void>;
-  /** Remove the secret. Back it up first if the identity should be recoverable. */
+  /**
+   * Remove the secret. Back it up first if the identity should be recoverable.
+   * Subscribers then see `secret: null`; the next {@link getOrCreate} creates a
+   * new identity.
+   */
   clear(): Promise<void>;
-  /** Current state for UI bindings. Loading starts with the first subscriber. */
+  /**
+   * Current state for UI bindings. The first subscriber starts loading with
+   * {@link getOrCreate}, so subscribing creates an identity on first use.
+   */
   getState(): SecretState;
   subscribe(listener: () => void): () => void;
 }
@@ -49,6 +56,11 @@ const initialState: SecretState = {
 };
 
 const stores = new WeakMap<SecretStorage, Map<string, SecretStore>>();
+/**
+ * Operations on one key run one at a time, even across store instances (for
+ * example two inline storage adapters over the same localStorage).
+ */
+const queues = new Map<string, Promise<unknown>>();
 
 /**
  * The store for `scope` in `storage`. Calls with the same storage, scope and
@@ -74,10 +86,13 @@ function toError(error: unknown): Error {
 }
 
 function newSecretStore(key: string, storage: SecretStorage): SecretStore {
-  let tail: Promise<unknown> = Promise.resolve();
   const serialize = <T>(operation: () => Promise<T>): Promise<T> => {
-    const result = tail.then(operation);
-    tail = result.catch(() => {});
+    const result = (queues.get(key) ?? Promise.resolve()).then(operation);
+    const tail = result.catch(() => {});
+    queues.set(key, tail);
+    void tail.then(() => {
+      if (queues.get(key) === tail) queues.delete(key);
+    });
     return result;
   };
 
@@ -94,11 +109,11 @@ function newSecretStore(key: string, storage: SecretStorage): SecretStore {
     state = next;
     for (const listener of listeners) listener();
   };
-  const reload = () => {
+  const reload = (create: boolean) => {
     if (listeners.size === 0) return;
     const current = ++generation;
     if (!state.isLoading) setState({ ...state, isLoading: true });
-    store.getOrCreate().then(
+    (create ? store.getOrCreate() : store.load()).then(
       (secret) => current === generation && setState({ secret, isLoading: false, error: null }),
       (error) =>
         current === generation &&
@@ -122,20 +137,20 @@ function newSecretStore(key: string, storage: SecretStorage): SecretStore {
       try {
         await serialize(async () => storage.setItem(key, secret));
       } finally {
-        reload();
+        reload(false);
       }
     },
     async clear() {
       try {
         await serialize(async () => storage.removeItem(key));
       } finally {
-        reload();
+        reload(false);
       }
     },
     getState: () => state,
     subscribe(listener) {
       listeners.add(listener);
-      if (listeners.size === 1) reload();
+      if (listeners.size === 1) reload(true);
       return () => {
         listeners.delete(listener);
         if (listeners.size === 0) {

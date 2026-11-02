@@ -22,6 +22,15 @@ const VECTORS: &str = concat!(
 );
 const NOW: u64 = 1_800_000_000;
 const APP: &str = "6b0c3f8e-2d9a-4f61-9a57-1c2e3d4f5a6b";
+const AUDIENCES: &[&str] = &[
+    "6B0C3F8E-2D9A-4F61-9A57-1C2E3D4F5A6B",
+    "6b0c3f8e2d9a4f619a571c2e3d4f5a6b",
+    "{6b0c3f8e-2d9a-4f61-9a57-1c2e3d4f5a6b}",
+    "urn:uuid:6b0c3f8e-2d9a-4f61-9a57-1c2e3d4f5a6b",
+    "my-app",
+    "https://app.example/jazz",
+    "6b0c3f8e-2d9a-4f61-9a57-1c2e3d4f5a6",
+];
 
 fn seeds() -> Vec<[u8; 32]> {
     vec![
@@ -47,7 +56,31 @@ fn generate() -> Value {
             })
         })
         .collect();
-    json!({ "now": NOW, "audience": APP, "ttlSeconds": 3600, "cases": cases })
+    // How each audience form is normalized into `aud`: a UUID in any form Uuid
+    // parses becomes its lowercase hyphenated form; anything else becomes
+    // uuidv5(DNS, audience).
+    let seed = seeds()[2];
+    let audiences: Vec<Value> = AUDIENCES
+        .iter()
+        .map(|audience| {
+            let token =
+                mint_jazz_self_signed_token_at(&seed, LOCAL_FIRST_ISSUER, audience, 3600, NOW)
+                    .unwrap();
+            let claims = URL_SAFE_NO_PAD
+                .decode(token.split('.').nth(1).unwrap())
+                .unwrap();
+            let claims: Value = serde_json::from_slice(&claims).unwrap();
+            json!({ "audience": audience, "aud": claims["aud"], "token": token })
+        })
+        .collect();
+    json!({
+        "now": NOW,
+        "audience": APP,
+        "ttlSeconds": 3600,
+        "cases": cases,
+        "audienceSecret": format!("jazz-auth-v1:{}", URL_SAFE_NO_PAD.encode(seed)),
+        "audiences": audiences,
+    })
 }
 
 #[test]
@@ -67,5 +100,10 @@ fn local_first_wire_format_matches_shared_vectors() {
         let verified =
             verify_jazz_self_signed_proof_at(case["token"].as_str().unwrap(), APP, NOW).unwrap();
         assert_eq!(verified.user_id, case["subject"].as_str().unwrap());
+    }
+    for case in stored["audiences"].as_array().unwrap() {
+        let token = case["token"].as_str().unwrap();
+        verify_jazz_self_signed_proof_at(token, case["audience"].as_str().unwrap(), NOW).unwrap();
+        verify_jazz_self_signed_proof_at(token, case["aud"].as_str().unwrap(), NOW).unwrap();
     }
 }

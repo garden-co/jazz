@@ -1,3 +1,5 @@
+import { formatSecret, parseSecret } from "./secret.js";
+
 export type PasskeyBackupErrorCode =
   | "not-supported"
   | "invalid-secret"
@@ -144,4 +146,3 @@ export class BrowserPasskeyBackup {
     return formatSecret(new Uint8Array(userHandle));
   }
 }
-import { formatSecret, parseSecret } from "./secret.js";

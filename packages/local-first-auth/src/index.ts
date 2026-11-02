@@ -10,6 +10,7 @@ export {
   LOCAL_FIRST_ISSUER,
   LocalFirstTokenError,
   identityOf,
+  normalizeAudience,
   signToken,
   verifyToken,
 } from "./identity.js";
