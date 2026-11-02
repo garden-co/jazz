@@ -10,8 +10,7 @@
       "jazz-rn",
       "jazz-rn-ios",
       "jazz-rn-android",
-      "create-jazz",
-      "@garden-co/local-first-auth"
+      "create-jazz"
     ]
   ],
   "linked": [],

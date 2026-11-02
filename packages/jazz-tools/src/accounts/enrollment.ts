@@ -1,4 +1,4 @@
-import { signChallenge } from "@garden-co/local-first-auth";
+import { signChallenge } from "../local-first-auth/index.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import {
   AccountAuthError,

@@ -4,12 +4,12 @@ import {
   formatSecret,
   parseSecret,
   secretStorageKey,
-} from "@garden-co/local-first-auth";
+} from "../local-first-auth/index.js";
 
 /** The only portable at-rest/export representation of a local-first root. */
 export const AUTH_SECRET_PREFIX = SECRET_PREFIX;
 
-export { SecretFormatError as AuthSecretFormatError } from "@garden-co/local-first-auth";
+export { SecretFormatError as AuthSecretFormatError } from "../local-first-auth/index.js";
 
 /** Format exactly 256 bits of root entropy for storage, backup, or export. */
 export const formatAuthSecret: (bytes: Uint8Array) => string = formatSecret;

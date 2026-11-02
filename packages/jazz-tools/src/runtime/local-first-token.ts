@@ -1,8 +1,8 @@
-import { SECRET_PREFIX, signToken, verifyToken } from "@garden-co/local-first-auth";
+import { SECRET_PREFIX, signToken, verifyToken } from "../local-first-auth/index.js";
 
 /**
  * Local-first tokens for Jazz, minted and verified by
- * `@garden-co/local-first-auth` instead of the native runtimes. The audience is
+ * the self-contained `src/local-first-auth` module instead of the native runtimes. The audience is
  * the raw app ID; the package normalizes it exactly as the Rust core does (any
  * UUID form parsed, other names as a UUIDv5), so these tokens are
  * byte-identical to the ones the native runtimes used to mint.
