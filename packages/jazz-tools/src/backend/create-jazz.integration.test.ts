@@ -421,8 +421,26 @@ describe("createJazz", () => {
     expect(account).toBe(
       ((await (await post("backend-sign-in", "alice")).json()) as { account: string }).account,
     );
-    // The same proof again is refused, even for the user it named.
+    // The same proof again is refused, even for the user it named: its
+    // nonce is used. A fresh challenge for alice is a repeat of a link that
+    // stands, and answers it.
     expect((await link("alice", { challenge, proof })).status).toBe(409);
+    const fresh = await challengeFor("alice");
+    const repeated = await link("alice", { challenge: fresh, proof: signChallenge(secret, fresh) });
+    expect(repeated.status).toBe(200);
+    expect(((await repeated.json()) as { account: string }).account).toBe(account);
+
+    // An expired challenge links nothing.
+    const stale = await challengeFor("carol");
+    const realNow = Date.now;
+    Date.now = () => realNow() + 121_000;
+    try {
+      expect(
+        (await link("carol", { challenge: stale, proof: signChallenge(secret, stale) })).status,
+      ).toBe(400);
+    } finally {
+      Date.now = realNow;
+    }
     // Founding is the guest's own account, whatever was tried before.
     expect(account).toBe(
       ((await (await post("backend-sign-in", "alice")).json()) as { account: string }).account,
@@ -477,6 +495,59 @@ describe("createJazz", () => {
     },
     60_000,
   );
+
+  it("revokes the guest key on a retry when the first link's revoke didn't happen", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    // Two backends on one core: the first links without revoking, as a
+    // link whose revoke failed would leave it; the second revokes.
+    const backend = async (guestKeyAfterLink: "keep" | "revoke") => {
+      const store = remote({
+        url: core.url,
+        adminSecret: core.adminSecret,
+        backendSecret: core.backendSecret,
+      });
+      const jazz = await createJazz({
+        appId,
+        app,
+        permissions,
+        store,
+        authenticate,
+        guestKeyAfterLink,
+      });
+      cleanups.push(() => jazz.close());
+      const origin = await serve(jazz, { sockets: true });
+      const accounts = `${origin}/jazz/apps/${appId}/accounts`;
+      const post = (path: string, user: string, body?: unknown) =>
+        fetch(`${accounts}/${path}`, {
+          method: "POST",
+          headers: { "x-test-user": user, "content-type": "application/json" },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+      return async (user: string, secret: string) => {
+        const { challenge } = (await (await post("backend-link/challenge", user)).json()) as {
+          challenge: string;
+        };
+        return post("backend-link", user, { challenge, proof: signChallenge(secret, challenge) });
+      };
+    };
+    const keeps = await backend("keep");
+    const revokes = await backend("revoke");
+    const secret = generateSecret();
+
+    const first = await keeps("alice", secret);
+    expect(first.status).toBe(200);
+    const { account } = (await first.json()) as { account: string };
+    // The retry links nothing new, and retires the key.
+    const retried = await revokes("alice", secret);
+    expect(retried.status).toBe(200);
+    expect(((await retried.json()) as { account: string }).account).toBe(account);
+    expect((await keeps("bob", secret)).status).toBe(409);
+    // A retry whose response was lost still answers alice, and only her.
+    expect((await revokes("alice", secret)).status).toBe(200);
+    expect((await revokes("bob", secret)).status).toBe(409);
+  }, 60_000);
 
   it("syncs over the HTTP stream when the host can't upgrade sockets", async () => {
     const appId = randomUUID();

@@ -4,7 +4,7 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
 import { registerInProcessTransport } from "../runtime/in-process-transport.js";
-import { accountAppId } from "../accounts/local-first.js";
+import { accountAppId, localFirstAccountId } from "../accounts/local-first.js";
 import { LOCAL_FIRST_JWT_ISSUER, parseJwtPayload } from "../runtime/client-session.js";
 import type {
   BrowserWebSocket,
@@ -571,7 +571,12 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     );
     const text = new TextDecoder().decode(response.body);
     if (response.status !== 200) {
-      throw new Error(`Jazz account ${operation} failed (${response.status}): ${text}`);
+      throw Object.assign(
+        new Error(`Jazz account ${operation} failed (${response.status}): ${text}`),
+        {
+          status: response.status,
+        },
+      );
     }
     const parsed = JSON.parse(text) as { account: unknown };
     return { ...parsed, account: String(parsed.account) };
@@ -643,7 +648,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
    * intent id at the core, so a proof works once.
    */
   const challengeKey = createHmac("sha256", core.adminSecret)
-    .update("jazz-link-challenge-v1")
+    .update(`jazz-link-challenge-v1\0${accountAppId(options.appId)}`)
     .digest();
   const LINK_CHALLENGE_TTL_SECONDS = 120;
   const challengeMac = (payload: string) =>
@@ -718,23 +723,42 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     } catch {
       return new Response("invalid_local_first_proof", { status: 401 });
     }
-    let account: string;
+    // The guest's account follows from its key alone, as the core founds it.
+    const account = localFirstAccountId(options.appId, guest.subject);
+    const userIs = async (expected: string) =>
+      (await adminAccounts("resolve", { identity: identity(user.userId) })).account === expected;
+    let guestRevoked = false;
     try {
-      await adminAccounts("found-local-first", { identity: guest });
-      ({ account } = await adminAccounts("link", {
-        from: guest,
-        to: identity(user.userId),
-        nonce,
-      }));
+      try {
+        await adminAccounts("found-local-first", { identity: guest });
+      } catch (error) {
+        // A guest key an earlier link retired: only that link's own user
+        // gets an answer (the retry of a link whose response was lost).
+        if ((error as { status?: number }).status !== 403 || !(await userIs(account))) throw error;
+        guestRevoked = true;
+      }
+      if (!guestRevoked) {
+        try {
+          await adminAccounts("link", { from: guest, to: identity(user.userId), nonce });
+        } catch (error) {
+          // Linking is idempotent for this guest and this user: when the user
+          // already belongs to the guest's account (an earlier link went
+          // through, then perhaps its revoke failed), this link is done. A
+          // used challenge (the core refuses its nonce first) and a user of
+          // another account are still refused.
+          if ((error as { status?: number }).status !== 409 || !(await userIs(account)))
+            throw error;
+        }
+      }
     } catch {
       // The core's reason (e.g. the identity already belongs to another
       // account, or the challenge was used) stays on the backend.
       return new Response("link_refused", { status: 409 });
     }
-    if (options.guestKeyAfterLink === "revoke") {
-      // The link already stands. If the revoke fails (the core just
-      // answered the link, so this is rare), the guest key stays usable:
-      // that is a server error, logged here, not a silent success.
+    if (options.guestKeyAfterLink === "revoke" && !guestRevoked) {
+      // The link already stands. If the revoke fails, the guest key stays
+      // usable until the browser retries the link, which is idempotent and
+      // revokes then: a server error, logged here, not a silent success.
       const revoked = await core.handle(
         "POST",
         `/apps/${encodeURIComponent(accountAppId(options.appId))}/admin/accounts/revoke`,

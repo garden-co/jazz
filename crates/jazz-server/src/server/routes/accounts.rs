@@ -739,7 +739,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_ne!(replayed.status(), StatusCode::OK);
+        assert_eq!(replayed.status(), StatusCode::BAD_REQUEST);
         let mallory = post(
             "resolve",
             serde_json::json!({ "identity": user("mallory") }),
@@ -785,6 +785,71 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(alice.status(), StatusCode::OK);
+        core.shutdown().await;
+    }
+
+    /// A link nonce stays used across a core restart.
+    #[tokio::test]
+    async fn admin_link_nonce_stays_used_after_a_restart() {
+        let dir = tempfile::tempdir().expect("data dir");
+        let app_id = jazz::tools::AppId::random();
+        let start = || {
+            JazzServer::builder()
+                .with_app_id(app_id)
+                .with_data_dir(dir.path().to_path_buf())
+                .with_persistent_storage()
+                .start()
+        };
+        let user =
+            |subject: &str| serde_json::json!({ "issuer": "jazz:app:test", "subject": subject });
+        let guest = serde_json::json!({
+            "issuer": jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            "subject": "6f9619ff-8b86-5011-b42d-00c04fc964ff",
+        });
+        let nonce = Uuid::new_v4();
+        let client = reqwest::Client::new();
+        let post = |core: &JazzServer, path: &str, body: serde_json::Value| {
+            client
+                .post(format!(
+                    "{}/apps/{}/admin/accounts/{path}",
+                    core.base_url(),
+                    core.app_id()
+                ))
+                .header("x-jazz-admin-secret", core.admin_secret())
+                .json(&body)
+                .send()
+        };
+
+        let core = start().await.expect("start test server");
+        let founded = post(
+            &core,
+            "found-local-first",
+            serde_json::json!({ "identity": guest }),
+        );
+        assert_eq!(founded.await.unwrap().status(), StatusCode::OK);
+        let linked = post(
+            &core,
+            "link",
+            serde_json::json!({ "from": guest, "to": user("alice"), "nonce": nonce }),
+        );
+        assert_eq!(linked.await.unwrap().status(), StatusCode::OK);
+        core.shutdown().await;
+
+        let core = start().await.expect("restart test server");
+        let replayed = post(
+            &core,
+            "link",
+            serde_json::json!({ "from": guest, "to": user("mallory"), "nonce": nonce }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(replayed.status(), StatusCode::BAD_REQUEST);
+        let mallory = post(
+            &core,
+            "resolve",
+            serde_json::json!({ "identity": user("mallory") }),
+        );
+        assert_eq!(mallory.await.unwrap().status(), StatusCode::NOT_FOUND);
         core.shutdown().await;
     }
 
