@@ -10,6 +10,9 @@ export default withJazz(
   {
     reactStrictMode: true,
     serverExternalPackages: ["jazz-napi", "jazz-tools/backend"],
+    // The app is served on 127.0.0.1 (its Better Auth origin); Next only
+    // trusts localhost for dev resources such as the HMR socket.
+    allowedDevOrigins: ["127.0.0.1"],
   },
   {
     server: {

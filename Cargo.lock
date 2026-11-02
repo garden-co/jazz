@@ -2028,6 +2028,7 @@ dependencies = [
  "codspeed-divan-compat",
  "jazz",
  "jazz-benchmark-guard",
+ "libsqlite3-sys",
  "uuid",
 ]
 
