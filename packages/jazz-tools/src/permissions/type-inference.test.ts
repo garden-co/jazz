@@ -215,11 +215,10 @@ const app = {
 
 describe("permissions type inference", () => {
   it("infers row callback and where key types", () => {
-    definePermissions(app, ({ policy, anyOf, allowedTo, raw, session, isCreator }) => {
+    definePermissions(app, ({ policy, anyOf, allowedTo, raw, session }) => {
       expectTypeOf(session.claims["sub"].path).toEqualTypeOf<string[]>();
       expectTypeOf(session.user.path).toEqualTypeOf<string[]>();
       expectTypeOf(session.claims["role"]!.path).toEqualTypeOf<string[]>();
-      expectTypeOf(isCreator).toEqualTypeOf<PermissionExpressionInput>();
       expectTypeOf(anyOf([])).toEqualTypeOf<PermissionExpressionInput>();
       expectTypeOf(allowedTo.read("project")).toEqualTypeOf<PermissionExpressionInput>();
 
@@ -248,7 +247,7 @@ describe("permissions type inference", () => {
         policy.todos.allowRead.where((todo) =>
           anyOf([
             { done: false },
-            isCreator,
+            { $createdBy: session.user },
             session.where({ "claims.role": "manager" }),
             policy.projects.exists.where({
               id: todo.projectId,
@@ -269,9 +268,9 @@ describe("permissions type inference", () => {
   });
 
   it("supports reusable helpers annotated with the public condition input type", () => {
-    definePermissions(app, ({ policy, allOf, anyOf, allowedTo, isCreator, raw, session }) => {
+    definePermissions(app, ({ policy, allOf, anyOf, allowedTo, raw, session }) => {
       const policyAtom = (): PermissionExpressionInput => allowedTo.read("project");
-      const creatorAtom: PermissionExpressionInput = isCreator;
+      const creatorAtom: PermissionExpressionInput = allOf([{ $createdBy: session.user }]);
 
       const legacyRawHelper = (): PolicyExpr => ({ type: "True" });
       const rawAtom = (): PermissionExpression => raw(legacyRawHelper());
@@ -356,13 +355,6 @@ describe("permissions type inference", () => {
         policy.todos.allowRead.where((todo) => ({ ownerId: todo.missingColumn }));
       }
 
-      return [];
-    });
-  });
-
-  it("exposes managedByCreator() on table builders", () => {
-    definePermissions(app, ({ policy }) => {
-      policy.todos.managedByCreator();
       return [];
     });
   });

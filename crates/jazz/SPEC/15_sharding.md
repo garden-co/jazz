@@ -18,6 +18,13 @@ Invariant digest:
 - `INV-SHARD-12`: A multi-shard subscription result MUST NOT be marked complete unless completeness evidence has been obtained for every shard contributing to the result.
 - `INV-SHARD-13`: Cross-shard permission closures MUST be obtained through shard-core subscriptions or an explicitly equivalent mechanism before a shard-core assigns a fate that depends on remote-shard policy data.
 - `INV-SHARD-14`: Rebalancing MUST NOT flip partition ownership in the catalogue until the destination shard-core has the partition history needed to serve that ownership and the protocol has defined treatment of in-flight fates/subscriptions.
+- `INV-SHARD-15`: Every authority MUST take the shard role and number positions from a hybrid clock (the system clock unless one is given); only a replica of an upstream takes none, and there observing, holding and fixing positions MUST be refused as not supported (§15.3).
+- `INV-SHARD-16`: A shard's commit positions MUST be hybrid-clock timestamps: each above every position it handed out or observed and no earlier than its clock; a position more than `HLC_MAX_OFFSET_MS` ahead of its clock MUST be observed only up to its clock plus that offset (§15.3).
+- `INV-SHARD-17`: While a hold stands, the position a shard serves as settled MUST stay below its lowest hold (§15.3).
+- `INV-SHARD-18`: A fixed cross-shard part MUST land at its fixed position, which is at or above its hold (§15.3).
+- `INV-SHARD-19`: While a part's hold stands, a session commit writing one of the part's rows MUST wait until the part lands or is released; a part with a row the shard wrote above its fixed position anyway MUST be refused, not landed under the newer version (§15.3).
+- `INV-SHARD-20`: A shard's holds, their rows and fixed positions MUST survive a restart until their part lands or is released (§15.3).
+- `INV-SHARD-21`: A reopened shard MUST wait out its clock plus `HLC_MAX_OFFSET_MS` at reopen before numbering its sessions' commits (a fixed part's and a resend's aside), so it never numbers at or below a position it served or observed before it stopped (§15.3).
 
 ## Details
 
@@ -64,6 +71,10 @@ shared coordination surface small:
   Exact multi-shard snapshots carry per-shard `(logical shard, GlobalTime)`
   frontiers, while a future wall-time query may apply one requested physical
   time to every participating shard.
+  Today a position is one scalar on disk (`_clock`) and on the wire (SPEC 8):
+  only the one authority numbers accepted positions, and nothing names a
+  sequencer. Per-shard positions will need a wire and storage change of
+  their own rather than fitting into today's encoding.
 - **Cross-shard via subscriptions.** Shard-core ↔ shard-core subscriptions carry
   permission closures and query assembly. Routing a client query to all of its
   owning shard-cores remains part of the future design.
@@ -75,6 +86,70 @@ shared coordination surface small:
 The former sharding sketch's rendezvous/top-2 replication and two-level
 subscription ideas are treated as candidate mechanisms for the same open design.
 They do not supersede the authority and completeness questions below.
+
+### 15.3 The shard role (engine API)
+
+The jazz engine offers the calls a sharded deployment's gateway makes of the
+store serving one shard, as an API with no wire of its own
+(`jazz::db::shard`, `Db::shard()`). It is the engine side of the per-query
+visibility design (SPEC 8 §8.4): the gateway, its protocol to the shards and
+the shard ownership above are outside this repository and stay exploratory
+(`INV-SHARD-1`).
+
+- **Clock.** Every authority takes the shard role: an unsharded server is the
+  one shard of its deployment, running the same code. Its commit positions are hybrid-clock timestamps: the wall clock's ms since
+  `HLC_EPOCH_MS` above `HLC_COUNTER_BITS` bits of counter, so they fit a JS
+  number and the positions of every shard compare by time. Each position is
+  above every one the store handed out or observed, and no earlier than its
+  clock (`INV-SHARD-16`). The clock is the system clock unless
+  `DbConfig::with_clock` gives another (a simulation's virtual time, a skewed
+  clock in a test). A replica of an upstream takes no shard role and refuses
+  every shard call below (`INV-SHARD-15`).
+- **Observe.** `observe(position)` closes the store at `position`: nothing it
+  commits later lands at or below it. A gateway closes a quiet shard so its
+  settles reach a position another shard named. A position more than
+  `HLC_MAX_OFFSET_MS` ahead of the store's clock is observed only up to the
+  clock plus that offset, since that peer's clock (or claim) cannot be
+  trusted further; `observe` returns the position it observed, and the caller
+  observes the rest once the store's clock has caught up. A `fix` above that
+  bound is refused, unless the store already numbered or held past it.
+- **Hold, fix, release.** A cross-shard commit lands at one position on every
+  shard it writes. The gateway `hold`s a position for the part on each shard
+  (`CommitRef`, the writer's node and transaction number), then `fix`es each
+  part at the highest hold before the part arrives. The part then lands at
+  its fixed position, under commits the shard accepted since its hold
+  (`INV-SHARD-18`). While a hold stands, `served_through` (what the store
+  serves its sessions as settled) stays below `lowest_hold` (`INV-SHARD-17`),
+  so no session is told it is settled past a position a part may still take.
+  `release` drops a refused commit's hold. Holding a part again returns its
+  standing hold, a part is fixed only once it is held, and a resent part that
+  already landed holds nothing.
+- **Blocking.** A hold names the rows its part writes (`HeldRow`). A
+  session commit writing one of them waits in its session's backlog until
+  the part lands or is released (`INV-SHARD-19`), so the part never lands
+  under a newer version of its row. A second part holding one of those rows
+  is refused (to retry once the first lands): two cross-shard commits holding
+  each other's rows on two shards would otherwise wait on each other. The
+  shard's own local writes do not wait; a part with a row the shard wrote
+  above its fixed position is refused instead of landing under it.
+- **Durability.** Holds, their rows and fixed positions are written to the
+  store (`_jazz_shard_holds`, `_jazz_shard_held_rows`) and reloaded on reopen
+  (`INV-SHARD-20`); a part landing deletes them in the same savepoint, and a
+  hold whose part had already landed is dropped on reload, as is the durable
+  hold of a resent part that already landed. A reopened shard that ever
+  observed a position past what it numbered (it records that it did, once)
+  may have served positions up to its clock plus `HLC_MAX_OFFSET_MS` before
+  it stopped, so it waits that bound out (`waits_out`, `INV-SHARD-21`): until
+  its clock passes it, its sessions' commits wait in their backlogs (a fixed
+  part's lands, at its position, and a resend gets its recorded fate), and
+  its host answers holds only after. It then numbers from its clock again
+  rather than from the bound, so its positions stay no further ahead of its
+  peers' clocks than its own clock is, and a peer fixes a part at them. A
+  write that does not wait (the shard's own) numbers past the bound.
+- **Known limit.** A hold whose cross-shard commit is never decided (its
+  gateway stopped before the commit point and the writer never resends)
+  stands until released, blocking its rows and what the shard serves as
+  settled. Holds need a lease.
 
 ## Open Questions
 

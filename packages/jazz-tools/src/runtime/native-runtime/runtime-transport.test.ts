@@ -3024,6 +3024,35 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.close();
   });
 
+  it("admits a peer as its own replica's identity, which the engine checks against the store's", async () => {
+    const declared: Uint8Array[] = [];
+    const transport = new FakeTransport([]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            acceptSubscriber: (identity: Uint8Array) => {
+              declared.push(identity);
+              return transport;
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const other = new Uint8Array([9]);
+    await runtime.acceptPeer({}, undefined, other);
+    await runtime.acceptPeer();
+    expect(declared).toEqual([other, TEST_RUNTIME_AUTHOR]);
+    await runtime.close();
+  });
+
   it("admits a peer only after a suspended owner-wide evaluator pass exits", async () => {
     let releaseTick!: () => void;
     let accepted = 0;

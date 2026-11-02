@@ -9,7 +9,7 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 it.each(["standalone", "transaction"])(
   "can delete a restored plaintext row (%s)",
   async (mode) => {
-    const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+    const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
     const permissions = definePermissions(app, ({ policy }) => {
       policy.notes.allowRead.always();
       policy.notes.allowInsert.always();

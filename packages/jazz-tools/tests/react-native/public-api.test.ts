@@ -2,9 +2,12 @@ import { expect, it } from "vitest";
 import { schema } from "../../src/schema-namespace.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = schema.defineApp({
-  todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
-});
+const app = schema.defineApp(
+  {
+    todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
+  },
+  { migrations: "none" },
+);
 
 it("runs public CRUD, query, subscription and foreground propagation through the real RN owner, then closes", async () => {
   await withNativeRelayFixture(app, {}, async (fixture) => {

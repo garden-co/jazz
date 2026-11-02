@@ -313,7 +313,9 @@ fn synced_flat_join_ships_joined_rows() {
     let client = open(schema(None), 1);
     let (client_side, server_side) = duplex();
     let _ = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
 
     let prepared = client.prepare_query(&by_author()).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
@@ -385,7 +387,9 @@ fn synced_flat_join_with_history_ships_versions() {
     let client = open(schema(None), 1);
     let (client_side, server_side) = duplex();
     let _ = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
     let query = Query::from("posts")
         .flat_join("history.posts", "posts.id", "history.posts.id")
         .filter(eq(col("posts.id"), lit(Value::Uuid(post(1).0))));
@@ -406,7 +410,9 @@ fn synced_flat_join_with_history_ships_versions() {
     let writer = open(schema(None), 3);
     let (client_side, server_side) = duplex();
     let _ = block_on(writer.connect_upstream(client_side));
-    server.accept_subscriber(server_side, AuthorSubject::for_test_bytes([0xb0; 16]));
+    server
+        .accept_subscriber(server_side, AuthorSubject::for_test_bytes([0xb0; 16]))
+        .unwrap();
     let posts = writer.prepare_query(&Query::from("posts")).unwrap();
     let _held = block_on(writer.subscribe(&posts, ReadOpts::default())).unwrap();
     pump(&server, &writer);
@@ -421,7 +427,9 @@ fn synced_flat_join_with_history_ships_versions() {
     let fresh = open(schema(None), 2);
     let (client_side, server_side) = duplex();
     let _ = block_on(fresh.connect_upstream(client_side));
-    server.accept_subscriber(server_side, AuthorSubject::for_test_bytes([0xa1; 16]));
+    server
+        .accept_subscriber(server_side, AuthorSubject::for_test_bytes([0xa1; 16]))
+        .unwrap();
     let posts = fresh.prepare_query(&Query::from("posts")).unwrap();
     let _ready = block_on(fresh.subscribe(&posts, ReadOpts::default())).unwrap();
     pump(&server, &fresh);
