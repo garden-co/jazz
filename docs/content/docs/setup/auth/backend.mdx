@@ -1,0 +1,85 @@
+---
+title: Your Backend Decides
+description: "With createJazz, your backend's authenticate function is the only place that decides who a user is. The browser holds no Jazz credential."
+---
+
+When Jazz runs inside your backend ([Backend](/docs/setup/backend)), auth is one function. Your
+backend already knows who is signed in, so it tells Jazz:
+
+```ts title="jazz.server.ts"
+import { createJazz, sqlite } from "jazz-tools/backend";
+import { auth } from "./auth"; // your Better Auth instance
+import { app, permissions } from "./schema";
+
+export const jazz = await createJazz({
+  appId: "my-app",
+  app,
+  permissions,
+  store: sqlite({ path: "./data/jazz" }),
+  authenticate: async (request) => {
+    const session = await auth.api.getSession({ headers: request.headers });
+    return session ? { userId: session.user.id, claims: { role: session.user.role } } : null;
+  },
+});
+```
+
+- `userId` is your user's stable id. Jazz gives each one an account the first time they sign in.
+- `claims` are anything your [policies](/docs/schemas/policies) should see, under `session.claims`.
+- Return `null` for a signed-out request.
+
+Jazz asks `authenticate` on every sign-in, on every sync connection and in `jazz.forRequest`. A
+sign-out or changed claims apply on the next reconnect, and a connection ends when its sign-in
+expires (after an hour by default, `sessionTtlSeconds`), so the client reconnects and is asked
+again. There are no JWKS, issuer or audience settings, and no Jazz token in the browser.
+
+## In the browser
+
+```tsx title="App.tsx"
+import { JazzProvider, backendAuth } from "jazz-tools/react";
+import { authClient } from "./auth-client";
+
+function Root() {
+  const { data, isPending } = authClient.useSession();
+  return (
+    <JazzProvider
+      appId="my-app"
+      serverUrl="/jazz"
+      auth={backendAuth({
+        key: data?.user.id ?? null,
+        isPending,
+        logout: () => authClient.signOut(),
+      })}
+      signedOut={<SignIn />}
+    >
+      <App />
+    </JazzProvider>
+  );
+}
+```
+
+`key` is whatever identifies the signed-in user on the client, or `null`. When it changes, Jazz signs
+in again through your backend; the identity itself always comes from `authenticate`. Without React,
+call `session.loginWithBackend()` after your own sign-in and `session.logout()` on sign-out.
+
+## Several sign-in methods
+
+Email, Google, passkeys and the rest belong to your auth library, which already merges them into one
+user. As long as `authenticate` returns that user's id, Jazz sees the same account whichever method
+was used.
+
+## Upgrading a guest, linking identities
+
+When a user's id changes, for example a guest or local-first user signing up, link the two once your
+auth has verified both:
+
+```ts title="app/api/sign-up/route.ts"
+await jazz.linkIdentity({ from: guestId, to: user.id });
+```
+
+From then on, `authenticate` returning `user.id` opens the guest's account and all its data. An
+identity can belong to only one account, so `to` must not have signed in to Jazz on its own yet.
+
+<Callout type="info">
+  Coming next: local-first auth as its own package. Its client half keeps a key on the device and
+  works offline from the first launch; its server half verifies that key inside `authenticate`.
+</Callout>
