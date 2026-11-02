@@ -33,5 +33,10 @@ export function verifyRequest(
   return verifyToken(token, options);
 }
 
-export { verifyToken, LocalFirstTokenError, LOCAL_FIRST_ISSUER } from "./identity.js";
+export {
+  verifyChallenge,
+  verifyToken,
+  LocalFirstTokenError,
+  LOCAL_FIRST_ISSUER,
+} from "./identity.js";
 export type { LocalFirstIdentity, VerifyTokenOptions } from "./identity.js";

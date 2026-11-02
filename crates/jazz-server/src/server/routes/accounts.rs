@@ -141,11 +141,46 @@ pub(super) async fn login_or_register_for_admin(
     Ok(response(request.identity, assignment))
 }
 
+/// The app's backend vouches for a local-first guest: it checked the
+/// guest's proof of its key itself (`createJazz` links a guest only on a
+/// fresh, single-use challenge the guest signed). The core founds the
+/// guest's account deterministically, as `found-local-first` would for the
+/// guest's own token.
+pub(super) async fn found_local_first_for_admin(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<RequestLink>,
+) -> Result<Json<AccountResponse>, Failure> {
+    crate::middleware::auth::validate_admin_secret(
+        super::http::admin_secret_header(&headers),
+        &state.auth_config,
+    )?;
+    if request.identity.issuer != jazz::tools::identity::LOCAL_FIRST_ISSUER {
+        return Err((StatusCode::BAD_REQUEST, "local_first_identity_required"));
+    }
+    let result = owner(&state)?
+        .execute(AccountCommand::FoundLocalFirst {
+            principal: request.identity.clone(),
+            app: *state.app_id.uuid(),
+        })
+        .await
+        .map_err(failure)?;
+    let AccountCommandResult::Assignment(assignment) = result else {
+        unreachable!("founding result")
+    };
+    Ok(response(request.identity, assignment))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AdminLink {
     from: Principal,
     to: Principal,
+    /// The link's single-use intent id, when the backend has one (the nonce
+    /// of the challenge a guest signed): a second link with the same nonce
+    /// is refused, whoever it names.
+    #[serde(default)]
+    nonce: Option<Uuid>,
 }
 
 /// The app's backend vouches for both identities: link `to` to the account
@@ -174,7 +209,7 @@ pub(super) async fn link_for_admin(
     let expires_at = now
         .checked_add(300)
         .ok_or((StatusCode::SERVICE_UNAVAILABLE, "invalid_clock"))?;
-    let nonce = Uuid::new_v4();
+    let nonce = request.nonce.unwrap_or_else(Uuid::new_v4);
     registry
         .execute(AccountCommand::RequestLink {
             approver: request.from,
@@ -591,6 +626,97 @@ mod tests {
             link("guest", "bob").await.unwrap().status(),
             StatusCode::CONFLICT
         );
+        core.shutdown().await;
+    }
+
+    /// A guest linked on the backend's word: the backend founds the guest
+    /// and links it with the nonce of the challenge the guest signed, and a
+    /// second link with that nonce is refused, whoever it names.
+    #[tokio::test]
+    async fn admin_link_nonce_is_single_use() {
+        let core = JazzServer::start().await.expect("start test server");
+        let client = reqwest::Client::new();
+        let admin = format!("{}/apps/{}/admin/accounts", core.base_url(), core.app_id());
+        let user =
+            |subject: &str| serde_json::json!({ "issuer": "jazz:app:test", "subject": subject });
+        let guest = serde_json::json!({
+            "issuer": jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            "subject": "6f9619ff-8b86-5011-b42d-00c04fc964ff",
+        });
+        let post = |path: &str, body: serde_json::Value, secret: Option<&str>| {
+            let mut request = client.post(format!("{admin}/{path}")).json(&body);
+            if let Some(secret) = secret {
+                request = request.header("x-jazz-admin-secret", secret);
+            }
+            request.send()
+        };
+        let secret = Some(core.admin_secret());
+
+        // Founding needs the admin secret, and only founds local-first guests.
+        let denied = post(
+            "found-local-first",
+            serde_json::json!({ "identity": guest }),
+            None,
+        );
+        assert_eq!(denied.await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        let external = post(
+            "found-local-first",
+            serde_json::json!({ "identity": user("alice") }),
+            secret,
+        );
+        assert_eq!(external.await.unwrap().status(), StatusCode::BAD_REQUEST);
+        let founded = post(
+            "found-local-first",
+            serde_json::json!({ "identity": guest }),
+            secret,
+        )
+        .await
+        .unwrap();
+        assert_eq!(founded.status(), StatusCode::OK);
+        let guest_account = founded.json::<AccountResponse>().await.unwrap().account;
+        // Founding is deterministic and repeatable.
+        let again = post(
+            "found-local-first",
+            serde_json::json!({ "identity": guest }),
+            secret,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            again.json::<AccountResponse>().await.unwrap().account,
+            guest_account
+        );
+
+        let nonce = Uuid::new_v4();
+        let linked = post(
+            "link",
+            serde_json::json!({ "from": guest, "to": user("alice"), "nonce": nonce }),
+            secret,
+        )
+        .await
+        .unwrap();
+        assert_eq!(linked.status(), StatusCode::OK);
+        assert_eq!(
+            linked.json::<AccountResponse>().await.unwrap().account,
+            guest_account
+        );
+        // The same nonce again, for another user: refused, nothing linked.
+        let replayed = post(
+            "link",
+            serde_json::json!({ "from": guest, "to": user("mallory"), "nonce": nonce }),
+            secret,
+        )
+        .await
+        .unwrap();
+        assert_ne!(replayed.status(), StatusCode::OK);
+        let mallory = post(
+            "resolve",
+            serde_json::json!({ "identity": user("mallory") }),
+            secret,
+        )
+        .await
+        .unwrap();
+        assert_eq!(mallory.status(), StatusCode::NOT_FOUND);
         core.shutdown().await;
     }
 

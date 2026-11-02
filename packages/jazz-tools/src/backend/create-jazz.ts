@@ -1,4 +1,5 @@
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { verifyChallenge } from "@garden-co/local-first-auth/server";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
@@ -624,38 +625,100 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
 
   /**
+   * Link challenges: a guest links only on a proof made for one challenge,
+   * never on its sync token, so a leaked token can't link it to someone
+   * else. A challenge names the user it links to and expires quickly; it is
+   * signed with a key only this app's backend instances share (derived from
+   * the core's admin secret), and its nonce becomes the link's single-use
+   * intent id at the core, so a proof works once.
+   */
+  const challengeKey = createHmac("sha256", core.adminSecret)
+    .update("jazz-link-challenge-v1")
+    .digest();
+  const LINK_CHALLENGE_TTL_SECONDS = 120;
+  const challengeMac = (payload: string) =>
+    createHmac("sha256", challengeKey).update(payload).digest("base64url");
+
+  function issueLinkChallenge(userId: string): { challenge: string; expiresAt: number } {
+    const expiresAt = Math.floor(Date.now() / 1000) + LINK_CHALLENGE_TTL_SECONDS;
+    const payload = Buffer.from(
+      JSON.stringify({ v: 1, sub: userId, nonce: randomUUID(), exp: expiresAt }),
+    ).toString("base64url");
+    return { challenge: `${payload}.${challengeMac(payload)}`, expiresAt };
+  }
+
+  /** The nonce of a challenge this backend issued for `userId`, still fresh; else null. */
+  function readLinkChallenge(challenge: unknown, userId: string): string | null {
+    if (typeof challenge !== "string" || challenge.length > 1024) return null;
+    const [payload, mac, extra] = challenge.split(".");
+    if (!payload || !mac || extra !== undefined) return null;
+    const expected = Buffer.from(challengeMac(payload));
+    const given = Buffer.from(mac);
+    if (expected.length !== given.length || !timingSafeEqual(expected, given)) return null;
+    let claims: { v?: unknown; sub?: unknown; nonce?: unknown; exp?: unknown };
+    try {
+      claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    } catch {
+      return null;
+    }
+    if (
+      claims.v !== 1 ||
+      claims.sub !== userId ||
+      typeof claims.nonce !== "string" ||
+      typeof claims.exp !== "number" ||
+      claims.exp <= Date.now() / 1000
+    ) {
+      return null;
+    }
+    return claims.nonce;
+  }
+
+  /** A challenge for the guest to sign before it links to the signed-in user. */
+  async function backendLinkChallenge(request: Request): Promise<Response> {
+    if (request.method !== "POST") return new Response(null, { status: 405 });
+    const user = await authenticate(request);
+    if (!user) return new Response("signed_out", { status: 401 });
+    return Response.json(issueLinkChallenge(user.userId), {
+      headers: { "Cache-Control": "no-store" },
+    });
+  }
+
+  /**
    * A local-first guest who just signed up: link the guest's identity to the
    * user `authenticate` now names, so the account and its data carry over.
-   * The guest proves itself with its local-first token, which the core
-   * verifies while founding the guest's account.
+   * The guest proves itself by signing a challenge issued for this user
+   * (see {@link issueLinkChallenge}).
    */
   async function backendLink(request: Request): Promise<Response> {
     if (request.method !== "POST") return new Response(null, { status: 405 });
     const user = await authenticate(request);
     if (!user) return new Response("signed_out", { status: 401 });
-    const bearer = /^Bearer (.+)$/.exec(request.headers.get("authorization") ?? "")?.[1];
-    if (!bearer || parseJwtPayload(bearer)?.iss !== LOCAL_FIRST_JWT_ISSUER) {
+    let body: { challenge?: unknown; proof?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
       return new Response("local_first_proof_required", { status: 400 });
     }
-    const founded = await core.handle(
-      "POST",
-      `/apps/${encodeURIComponent(accountAppId(options.appId))}/accounts/found-local-first`,
-      [["authorization", `Bearer ${bearer}`]],
-      new Uint8Array(),
-    );
-    if (founded.status !== 200) return coreResponse(founded);
-    const guest = JSON.parse(new TextDecoder().decode(founded.body)) as {
-      identity: { issuer: string; subject: string };
-    };
+    const nonce = readLinkChallenge(body?.challenge, user.userId);
+    if (!nonce) return new Response("invalid_link_challenge", { status: 400 });
+    let guest: { issuer: string; subject: string };
+    try {
+      const proven = verifyChallenge(String(body.proof ?? ""), body.challenge as string);
+      guest = { issuer: proven.issuer, subject: proven.subject };
+    } catch {
+      return new Response("invalid_local_first_proof", { status: 401 });
+    }
     let account: string;
     try {
+      await adminAccounts("found-local-first", { identity: guest });
       ({ account } = await adminAccounts("link", {
-        from: guest.identity,
+        from: guest,
         to: identity(user.userId),
+        nonce,
       }));
     } catch {
       // The core's reason (e.g. the identity already belongs to another
-      // account) stays on the backend.
+      // account, or the challenge was used) stays on the backend.
       return new Response("link_refused", { status: 409 });
     }
     const expiresAt = Math.floor(Date.now() / 1000) + (options.sessionTtlSeconds ?? 3600);
@@ -968,6 +1031,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     }
     if (/^\/apps\/[^/]+\/accounts\/backend-link$/.test(path)) {
       return backendLink(request);
+    }
+    if (/^\/apps\/[^/]+\/accounts\/backend-link\/challenge$/.test(path)) {
+      return backendLinkChallenge(request);
     }
     const stream = /^\/apps\/[^/]+\/stream(?:\/([^/]+))?$/.exec(path);
     if (stream) {

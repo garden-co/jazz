@@ -2066,6 +2066,9 @@ importers:
 
   packages/jazz-tools:
     dependencies:
+      '@garden-co/local-first-auth':
+        specifier: workspace:*
+        version: link:../local-first-auth
       '@noble/hashes':
         specifier: 2.0.1
         version: 2.0.1

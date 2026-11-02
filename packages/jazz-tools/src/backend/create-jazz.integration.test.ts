@@ -4,6 +4,7 @@ import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { generateSecret, identityOf, signChallenge, signToken } from "@garden-co/local-first-auth";
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
@@ -241,7 +242,7 @@ describe("createJazz", () => {
     expect(await signIn({ "sec-fetch-site": "cross-site" })).toBe(403);
     // The right host, but a plain-http page acting on a backend reached over https.
     expect(await signIn({ origin, "x-forwarded-proto": "https" })).toBe(403);
-    for (const route of ["accounts/backend-link", "stream"]) {
+    for (const route of ["accounts/backend-link", "accounts/backend-link/challenge", "stream"]) {
       const response = await fetch(`${origin}/jazz/apps/${appId}/${route}`, {
         method: "POST",
         headers: { "x-test-user": "alice", origin: "https://evil.example" },
@@ -361,6 +362,73 @@ describe("createJazz", () => {
     },
     60_000,
   );
+
+  it("links a guest only on a fresh proof for one challenge, never on its token", async () => {
+    const appId = randomUUID();
+    const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const accounts = `${origin}/jazz/apps/${appId}/accounts`;
+    const post = (path: string, user: string, init: RequestInit = {}) =>
+      fetch(`${accounts}/${path}`, {
+        ...init,
+        method: "POST",
+        headers: { "x-test-user": user, "content-type": "application/json", ...init.headers },
+      });
+    const challengeFor = async (user: string) =>
+      ((await (await post("backend-link/challenge", user)).json()) as { challenge: string })
+        .challenge;
+    const link = (user: string, body: unknown) =>
+      post("backend-link", user, { body: JSON.stringify(body) });
+
+    const secret = generateSecret();
+    const guest = identityOf(secret).subject;
+    // The guest's own (unexpired, or leaked) sync token links nothing.
+    const token = signToken(secret, { audience: appId });
+    const withToken = await post("backend-link", "mallory", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(withToken.status).toBe(400);
+    // Signed out: no challenge.
+    expect((await fetch(`${accounts}/backend-link/challenge`, { method: "POST" })).status).toBe(
+      401,
+    );
+
+    const challenge = await challengeFor("alice");
+    const proof = signChallenge(secret, challenge);
+    // A proof for alice's challenge links no one else, and a forged or
+    // tampered challenge links nothing.
+    expect((await link("mallory", { challenge, proof })).status).toBe(400);
+    const [payload, mac] = challenge.split(".");
+    const forged = `${Buffer.from(
+      JSON.stringify({
+        ...JSON.parse(Buffer.from(payload!, "base64url").toString()),
+        sub: "mallory",
+      }),
+    ).toString("base64url")}.${mac}`;
+    expect(
+      (await link("mallory", { challenge: forged, proof: signChallenge(secret, forged) })).status,
+    ).toBe(400);
+    // Another key's proof for the challenge doesn't prove this guest.
+    expect(
+      (await link("alice", { challenge, proof: signChallenge(generateSecret(), `${challenge}x`) }))
+        .status,
+    ).toBe(401);
+
+    const linked = await link("alice", { challenge, proof });
+    expect(linked.status).toBe(200);
+    const { account } = (await linked.json()) as { account: string };
+    expect(account).toBe(
+      ((await (await post("backend-sign-in", "alice")).json()) as { account: string }).account,
+    );
+    // The same proof again is refused, even for the user it named.
+    expect((await link("alice", { challenge, proof })).status).toBe(409);
+    // Founding is the guest's own account, whatever was tried before.
+    expect(account).toBe(
+      ((await (await post("backend-sign-in", "alice")).json()) as { account: string }).account,
+    );
+    expect(guest).toMatch(/^[0-9a-f-]{36}$/);
+  }, 60_000);
 
   it("syncs over the HTTP stream when the host can't upgrade sockets", async () => {
     const appId = randomUUID();
