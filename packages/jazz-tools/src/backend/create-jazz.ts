@@ -109,9 +109,10 @@ export function remote(
  * A core in a persistent Vercel Sandbox in your own Vercel project, with its
  * data on a Drive: one for production and one per Git branch for previews.
  * It is created on first use, wakes when a request needs it (about a second)
- * and stops after `idleMs` without requests or sockets. It authenticates with
- * the function's OIDC token, so it needs no env vars; install
- * `@vercel/sandbox` next to `jazz-tools`. A deployment of a newer jazz-tools
+ * and stops after `idleMs` without requests or sockets. The function's Vercel
+ * OIDC token is its only credential: the core admits only functions of this
+ * project and environment, so there are no secrets and no env vars. Install
+ * `@vercel/sandbox` and `@vercel/functions` next to `jazz-tools`. A deployment of a newer jazz-tools
  * restarts the core on its version, and an older deployment never moves it
  * back. Outside a production or preview deployment (`next dev`, `vercel dev`,
  * tests) it runs `local` instead: by default a SQLite core in `.jazz/local`.
@@ -699,13 +700,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         ? await openVercelCore({
             appId: options.appId,
             options: store.options,
-            // The core's admin secret is its backend credential.
-            openRemote: ({ appId, url, adminSecret, backendSecret }) =>
-              openRemoteCore(appId, {
-                url,
-                backendCredential: () => adminSecret,
-                secrets: { adminSecret, backendSecret },
-              }),
+            // The function's OIDC token is the core's only credential.
+            openRemote: ({ appId, url, backendCredential }) =>
+              openRemoteCore(appId, { url, backendCredential }),
           })
         : await openInProcessCore(options.appId, store);
 

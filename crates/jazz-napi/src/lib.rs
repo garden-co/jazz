@@ -2053,6 +2053,15 @@ struct JazzServerStartOptions {
     allow_local_first_auth: Option<bool>,
     telemetry_collector_url: Option<String>,
     schema: Option<Vec<u8>>,
+    /// Trust this OIDC workload instead of the shared secrets.
+    trusted_workload: Option<TrustedWorkloadOptions>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrustedWorkloadOptions {
+    issuer: String,
+    audience: String,
+    subject: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2178,7 +2187,7 @@ impl JazzServer {
     #[napi(factory, ts_return_type = "Promise<JazzServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; backendSecret: string; adminSecret: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[] }"
+            ts_arg_type = "{ appId: string; backendSecret: string; adminSecret: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -2203,6 +2212,20 @@ impl JazzServer {
             backend_secret: Some(opts.backend_secret.clone()),
             admin_secret: Some(opts.admin_secret.clone()),
             ..Default::default()
+        };
+        // A trusted workload replaces the shared secrets.
+        let auth_config = match opts.trusted_workload.take() {
+            Some(workload) => AuthConfig {
+                backend_secret: None,
+                admin_secret: None,
+                trusted_workload: Some(jazz_server::middleware::workload::TrustedWorkload {
+                    issuer: workload.issuer,
+                    audience: workload.audience,
+                    subject: workload.subject,
+                }),
+                ..auth_config
+            },
+            None => auth_config,
         };
 
         let in_memory = opts.in_memory.unwrap_or(false);

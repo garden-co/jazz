@@ -39,6 +39,8 @@ interface LocalJazzServerOptions {
   adminSecret?: string;
   allowLocalFirstAuth?: boolean;
   telemetryCollectorUrl?: string;
+  /** Trust only this OIDC workload instead of the shared secrets. */
+  trustedWorkload?: { issuer: string; audience: string; subject: string };
   enableLogs?: boolean;
 }
 
@@ -123,6 +125,7 @@ export async function startLocalJazzServer(
       allowLocalFirstAuth: options.allowLocalFirstAuth,
       telemetryCollectorUrl: options.telemetryCollectorUrl,
       schema: schema ? [...schema] : undefined,
+      trustedWorkload: options.trustedWorkload,
     });
   } catch (error) {
     if (ownsDataDir && dataDir) {

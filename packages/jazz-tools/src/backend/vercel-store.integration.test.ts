@@ -1,4 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
@@ -9,6 +11,7 @@ import {
   onVercelDeployment,
   onVercelHost,
   startScript,
+  workloadOf,
   type SandboxHandle,
   type SandboxSdk,
 } from "./vercel-store.js";
@@ -26,16 +29,53 @@ afterEach(async () => {
   while (cleanups.length) await cleanups.pop()!().catch(() => undefined);
 });
 
+const SIGNING_KEY = "synthetic-vercel-oidc-signing-key-0123456789";
+const AUDIENCE = "https://vercel.com/garden-co";
+const SUBJECT = "owner:garden-co:project:app:environment:production";
+
+/** A stand-in for Vercel's OIDC issuer: discovery plus one HS256 key. */
+async function startIssuer(): Promise<string> {
+  const server = createServer((request, response) => {
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/.well-known/openid-configuration") {
+      response.end(JSON.stringify({ issuer: base, jwks_uri: `${base}/jwks` }));
+    } else {
+      const k = Buffer.from(SIGNING_KEY).toString("base64url");
+      response.end(JSON.stringify({ keys: [{ kty: "oct", kid: "v1", alg: "HS256", k }] }));
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  cleanups.push(() => new Promise((resolve) => server.close(resolve)));
+  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+/** A function's OIDC token, as `getVercelOidcToken()` returns it. */
+function oidcToken(issuer: string, subject = SUBJECT): string {
+  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const exp = Math.floor(Date.now() / 1000) + 600;
+  const unsigned = `${part({ alg: "HS256", kid: "v1", typ: "JWT" })}.${part({ iss: issuer, aud: AUDIENCE, sub: subject, exp })}`;
+  const signature = createHmac("sha256", SIGNING_KEY).update(unsigned).digest("base64url");
+  return `${unsigned}.${signature}`;
+}
+
+/** The core as the start script runs it: trusting only the function's workload. */
+async function startTrustedCore(appId: string) {
+  const issuer = await startIssuer();
+  const core = await startLocalJazzServer({
+    appId,
+    inMemory: true,
+    trustedWorkload: { issuer, audience: AUDIENCE, subject: SUBJECT },
+  });
+  cleanups.push(() => core.stop());
+  return { appId, url: core.url, issuer, credential: () => oidcToken(issuer) };
+}
+
 /**
  * `@vercel/sandbox` standing in for Vercel: one Sandbox whose port routes to a
- * local jazz-tools server, and whose Drive holds that server's secrets.
+ * local jazz-tools server, and whose Drive holds that server's app id.
  */
-function fakeVercel(core: {
-  appId: string;
-  url: string;
-  adminSecret: string;
-  backendSecret: string;
-}) {
+function fakeVercel(core: { appId: string; url: string }) {
   const calls: string[] = [];
   const state = {
     exists: false,
@@ -46,14 +86,7 @@ function fakeVercel(core: {
     /** What the core runs; a start script switches it to its own version. */
     running: undefined as string | undefined,
   };
-  const files = new Map<string, Buffer>([
-    [
-      "/data/secrets.env",
-      Buffer.from(
-        `JAZZ_APP_ID=${core.appId}\nJAZZ_ADMIN_SECRET=${core.adminSecret}\nJAZZ_BACKEND_SECRET=${core.backendSecret}\n`,
-      ),
-    ],
-  ]);
+  const files = new Map<string, Buffer>([["/data/app-id", Buffer.from(`${core.appId}\n`)]]);
   const handle = (): SandboxHandle => ({
     get status() {
       return state.status;
@@ -136,37 +169,81 @@ function onVercel(env: Record<string, string>) {
 describe("vercel() store", () => {
   it("creates the app's Sandbox and Drive on first use and serves through it", async () => {
     const appId = randomUUID();
-    const core = await startLocalJazzServer({ appId, inMemory: true });
-    cleanups.push(() => core.stop());
+    const core = await startTrustedCore(appId);
     const fake = fakeVercel({ ...core, appId });
     onVercel({ VERCEL: "1", VERCEL_ENV: "preview", VERCEL_PROJECT_ID: "prj_test" });
 
-    const jazz = await createJazz({ appId, app, permissions, store: vercel({ sdk: fake.sdk }) });
+    const jazz = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
+    });
     cleanups.push(() => jazz.close());
     const name = defaultCoreName("prj_test", { VERCEL_ENV: "preview" });
     expect(fake.calls.slice(0, 2)).toEqual([`drive ${name}-data`, `create ${name}`]);
     expect(fake.calls[2]).toMatch(/^start /);
     const scripts = [...fake.files.keys()].filter((path) => path.startsWith("/tmp/jazz-start-"));
-    expect(fake.files.get(scripts[0]!)?.toString()).toContain(`app_id='${appId}'`);
+    const script = fake.files.get(scripts[0]!)?.toString();
+    expect(script).toContain(`app_id='${appId}'`);
+    // The core trusts exactly the workload the function's own token names.
+    expect(script).toContain(`--trusted-workload-issuer '${core.issuer}'`);
+    expect(script).toContain(`--trusted-workload-audience '${AUDIENCE}'`);
+    expect(script).toContain(`--trusted-workload-subject '${SUBJECT}'`);
 
     // The backend's own database reaches the core in the Sandbox.
     const row = await jazz.db.insert(app.notes, { text: "on vercel" }).wait({ tier: "global" });
-    const again = await createJazz({ appId, app, permissions, store: vercel({ sdk: fake.sdk }) });
+    const again = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
+    });
     cleanups.push(() => again.close());
     const seen = await again.db.all(app.notes.where({ id: row.id }));
     expect(seen.map((note) => note.text)).toEqual(["on vercel"]);
   }, 60_000);
 
+  it("reaches a core only with the trusted workload's token", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const fake = fakeVercel(core);
+    fake.state.exists = true;
+    fake.state.drive = true;
+    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
+
+    // Another environment's function holds a token, but not this core's.
+    const preview = () => oidcToken(core.issuer, "owner:garden-co:project:app:environment:preview");
+    await expect(
+      createJazz({
+        appId,
+        app,
+        permissions,
+        store: vercel({ sdk: fake.sdk, backendCredential: preview }),
+      }),
+    ).rejects.toThrow();
+
+    // No secret gets past it either: only the token's stated access counts.
+    const guessed = await fetch(`${core.url}/apps/${appId}/admin/permissions`, {
+      headers: { "X-Jazz-Admin-Secret": "stated-by-backend-credential" },
+    });
+    expect(guessed.status).toBe(401);
+  }, 60_000);
+
   it("resumes a stopped Sandbox instead of creating another", async () => {
     const appId = randomUUID();
-    const core = await startLocalJazzServer({ appId, inMemory: true });
-    cleanups.push(() => core.stop());
+    const core = await startTrustedCore(appId);
     const fake = fakeVercel({ ...core, appId });
     fake.state.exists = true;
     fake.state.drive = true;
     onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
 
-    const jazz = await createJazz({ appId, app, permissions, store: vercel({ sdk: fake.sdk }) });
+    const jazz = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
+    });
     cleanups.push(() => jazz.close());
     expect(fake.calls).toContain("resume jazz-prj-test-production");
     expect(fake.calls.some((call) => call.startsWith("create"))).toBe(false);
@@ -174,12 +251,7 @@ describe("vercel() store", () => {
 
   it("runs its local store outside a Vercel deployment", async () => {
     const appId = randomUUID();
-    const fake = fakeVercel({
-      appId,
-      url: "http://unused.invalid",
-      adminSecret: "a",
-      backendSecret: "b",
-    });
+    const fake = fakeVercel({ appId, url: "http://unused.invalid" });
     const before = process.env.VERCEL;
     delete process.env.VERCEL;
     cleanups.push(async () => {
@@ -199,8 +271,7 @@ describe("vercel() store", () => {
 
   it("restarts an older core on this version, and never moves a newer one back", async () => {
     const appId = randomUUID();
-    const core = await startLocalJazzServer({ appId, inMemory: true });
-    cleanups.push(() => core.stop());
+    const core = await startTrustedCore(appId);
     onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
 
     const older = fakeVercel({ ...core, appId });
@@ -209,7 +280,7 @@ describe("vercel() store", () => {
       appId,
       app,
       permissions,
-      store: vercel({ sdk: older.sdk }),
+      store: vercel({ sdk: older.sdk, backendCredential: core.credential }),
     });
     cleanups.push(() => upgraded.close());
     expect(older.calls.filter((call) => call.startsWith("start"))).toHaveLength(1);
@@ -217,7 +288,12 @@ describe("vercel() store", () => {
 
     const newer = fakeVercel({ ...core, appId });
     Object.assign(newer.state, { exists: true, drive: true, status: "running", running: "99.0.0" });
-    const old = await createJazz({ appId, app, permissions, store: vercel({ sdk: newer.sdk }) });
+    const old = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: vercel({ sdk: newer.sdk, backendCredential: core.credential }),
+    });
     cleanups.push(() => old.close());
     expect(newer.calls.some((call) => call.startsWith("start"))).toBe(false);
     expect(newer.state.running).toBe("99.0.0");
@@ -255,32 +331,49 @@ describe("vercel() store", () => {
 
   it("refuses a Sandbox that holds another app's core", async () => {
     const appId = randomUUID();
-    const core = await startLocalJazzServer({ appId, inMemory: true });
-    cleanups.push(() => core.stop());
+    const core = await startTrustedCore(appId);
     const fake = fakeVercel({ ...core, appId: randomUUID() });
     fake.state.exists = true;
     fake.state.drive = true;
     onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
     await expect(
-      createJazz({ appId, app, permissions, store: vercel({ sdk: fake.sdk }) }),
+      createJazz({
+        appId,
+        app,
+        permissions,
+        store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
+      }),
     ).rejects.toThrow(/belongs to app/);
   }, 60_000);
 
   it("generates the app id on the Drive unless one is given", () => {
-    const script = startScript(undefined, "2.0.0-alpha.60", "https://example.invalid/t.tgz");
+    const trust = { issuer: "https://oidc.vercel.com/t", audience: AUDIENCE, subject: SUBJECT };
+    const script = startScript(undefined, "2.0.0-alpha.60", "https://example.invalid/t.tgz", trust);
     expect(script).toContain("app_id=$(cat /proc/sys/kernel/random/uuid)");
-    expect(script).toContain(`server "$JAZZ_APP_ID" --port 1625`);
+    expect(script).toContain(`server "$app_id" --port 1625`);
+    expect(script).not.toContain("SECRET");
   });
 
-  it("installs the server binary for the running version once, and generates secrets once", () => {
+  it("installs the server binary for the running version once, and the app id once", () => {
+    const trust = { issuer: "https://oidc.vercel.com/t", audience: AUDIENCE, subject: SUBJECT };
     const script = startScript(
       "app'1",
       "2.0.0-alpha.60",
       "https://registry.npmjs.org/jazz-tools/-/jazz-tools-2.0.0-alpha.60.tgz",
+      trust,
     );
     expect(script).toContain("version='2.0.0-alpha.60'");
     expect(script).toContain("bin=$data/bin/jazz-tools-$version");
-    expect(script).toContain(`if [ ! -f "$data/secrets.env" ]`);
+    expect(script).toContain(`if [ ! -s "$data/app-id" ]`);
     expect(script).toContain(`app_id='app'\\''1'`);
+  });
+
+  it("reads the trusted workload from the function's token", () => {
+    expect(workloadOf(oidcToken("https://oidc.vercel.com/garden-co"))).toEqual({
+      issuer: "https://oidc.vercel.com/garden-co",
+      audience: AUDIENCE,
+      subject: SUBJECT,
+    });
+    expect(() => workloadOf("not-a-token")).toThrow(/not an OIDC token/);
   });
 });
