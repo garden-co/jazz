@@ -825,6 +825,15 @@ impl WasmStreamingMutation {
         }
     }
 
+    /// Stage the value's row mutation in the transaction it began in.
+    #[wasm_bindgen(js_name = finishInTransaction)]
+    pub fn finish_in_transaction(&self) -> Result<(), JsValue> {
+        self.mutation
+            .borrow_mut()
+            .finish_in_transaction()
+            .map_err(host_error)
+    }
+
     pub fn abort(&self) -> js_sys::Promise {
         match self.mutation.borrow_mut().abort() {
             Ok(aborted) => js_sys::Promise::resolve(&JsValue::from_bool(aborted)),
@@ -1526,6 +1535,7 @@ impl WasmDb {
         updated_at_ms: Option<f64>,
         head: Option<JsValue>,
         base: Option<JsValue>,
+        transaction: Option<String>,
     ) -> Result<WasmStreamingMutation, JsValue> {
         let head = present(head)
             .map(|value| serde_wasm_bindgen::from_value(value).map_err(to_js_error))
@@ -1547,6 +1557,7 @@ impl WasmDb {
                 updated_at_ms,
                 head,
                 base,
+                transaction.as_deref(),
             )
             .map_err(host_error)?;
         Ok(WasmStreamingMutation {

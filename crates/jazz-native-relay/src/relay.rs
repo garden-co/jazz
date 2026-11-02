@@ -1331,6 +1331,8 @@ struct StreamingOptions {
     updated_at_ms: Option<f64>,
     head: Option<jazz::protocol::BranchSelector>,
     base: Option<jazz::protocol::BranchViewBase>,
+    /// The open transaction the finished value is staged in.
+    transaction: Option<String>,
 }
 
 fn foreground_command(
@@ -1660,6 +1662,7 @@ fn foreground_command(
                 options.updated_at_ms,
                 options.head,
                 options.base,
+                options.transaction.as_deref(),
             )?;
             let handle = client.handle();
             client.uploads.insert(handle, upload);
@@ -1679,9 +1682,14 @@ fn foreground_command(
             let mut mutation = client.uploads.remove(&upload).ok_or_else(|| {
                 HostError::Argument(format!("unknown streaming mutation {upload}"))
             })?;
-            let (tx_id, _) = client.track(mutation.finish()?);
-            Response::TransactionCommitted {
-                tx_id: *tx_id.as_bytes(),
+            if mutation.in_transaction() {
+                mutation.finish_in_transaction()?;
+                Response::MutationStaged
+            } else {
+                let (tx_id, _) = client.track(mutation.finish()?);
+                Response::TransactionCommitted {
+                    tx_id: *tx_id.as_bytes(),
+                }
             }
         }
         Request::AbortStreamingMutation { upload } => Response::StreamingMutationAborted {
