@@ -13,7 +13,6 @@ const deployment = {
 const remote = {
   JAZZ_SERVER_URL: "https://jazz.example",
   JAZZ_ADMIN_SECRET: "admin-secret",
-  BACKEND_SECRET: "backend-secret",
 };
 
 describe("PosterShop build configuration", () => {
@@ -36,7 +35,7 @@ describe("PosterShop build configuration", () => {
     );
   });
 
-  it.each(["JAZZ_ADMIN_SECRET", "BACKEND_SECRET"])("rejects a sync server without %s", (name) => {
+  it.each(["JAZZ_ADMIN_SECRET"])("rejects a sync server without %s", (name) => {
     expect(() =>
       assertBuildConfiguration(readBuildConfig({ ...deployment, ...remote, [name]: undefined })),
     ).toThrow(`must set ${name}`);

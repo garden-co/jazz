@@ -23,7 +23,7 @@ export const serverConfig = {
   origin: build.origin,
   appId: build.appId,
   /** A remote sync server (Jazz Cloud), or undefined for local SQLite. */
-  remote: build.remote as { url: string; adminSecret: string; backendSecret: string } | undefined,
+  remote: build.remote as { url: string; secret: string } | undefined,
   dataPath: build.dataPath,
   paymentProvider: paymentProvider(build),
   stripeSecretKey: build.stripeSecretKey,
