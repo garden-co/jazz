@@ -103,6 +103,8 @@ mod pre_sync_writes;
 mod prepared_claim_routing;
 #[path = "../provenance.rs"]
 mod provenance;
+#[path = "../read_deadline_scheduling.rs"]
+mod read_deadline_scheduling;
 #[path = "../recheck_policies.rs"]
 mod recheck_policies;
 #[path = "../recheck_queries.rs"]
@@ -191,6 +193,10 @@ mod text_merge;
 mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]
 mod transaction_handles;
+#[path = "../transaction_identity.rs"]
+mod transaction_identity;
+#[path = "../transaction_read_guards.rs"]
+mod transaction_read_guards;
 #[path = "../transaction_read_tiers.rs"]
 mod transaction_read_tiers;
 #[path = "../union_queries.rs"]
