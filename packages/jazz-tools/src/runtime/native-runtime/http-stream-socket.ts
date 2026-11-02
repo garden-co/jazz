@@ -253,6 +253,8 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
     binaryType: "arraybuffer" | "blob" = "arraybuffer";
     private inner: BrowserWebSocket;
     private settled = false;
+    /** The native socket failed and we're asking whether to use the stream. */
+    private probing = false;
 
     constructor(private readonly url: string) {
       super();
@@ -262,7 +264,8 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
     }
 
     get readyState(): number {
-      return this.inner.readyState;
+      // Still connecting while the probe runs: the session hasn't failed yet.
+      return this.probing ? 0 : this.inner.readyState;
     }
 
     send(data: Uint8Array | string): void {
@@ -271,6 +274,7 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
 
     close(): void {
       this.settled = true;
+      this.probing = false;
       this.inner.close();
     }
 
@@ -286,7 +290,9 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
           return;
         }
         failure = { [kind]: event };
+        this.probing = true;
         void servesStreamInstead(this.url).then((stream) => {
+          this.probing = false;
           if (this.settled) return;
           this.settled = true;
           if (stream) {

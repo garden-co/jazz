@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -188,6 +188,11 @@ describe("createJazz", () => {
     expect(await asBob.all(app.todos)).toEqual([]);
     // The user synced over a socket, not the stream fallback.
     expect(requestPaths.some((path) => path.includes("/stream"))).toBe(false);
+    // This host upgrades sockets, so a failed socket isn't sent to the stream:
+    // the probe gets no stream marker and the client retries the socket.
+    const probe = await fetch(`${origin}/jazz/apps/${appId}/ws`);
+    expect(probe.status).toBe(426);
+    expect(probe.headers.get("x-jazz-stream")).toBeNull();
   }, 60_000);
 
   it("refuses sign-in and sync started by a page on another origin", async () => {
@@ -320,10 +325,13 @@ describe("createJazz", () => {
     const appId = randomUUID();
     const dir = await mkdtemp(join(tmpdir(), "jazz-lock-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    // A lock file left by a process that died (under Docker often our own
+    // pid, back after a restart) holds nothing: only the OS lock counts.
+    await writeFile(join(dir, "jazz.lock"), `process ${process.pid}`);
     const first = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
     await expect(
       createJazz({ appId, app, permissions, store: sqlite({ path: dir }) }),
-    ).rejects.toThrow(/already open in this process/);
+    ).rejects.toThrow(/is already open/);
     await first.close();
     // Closed, the directory is free again.
     const second = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
