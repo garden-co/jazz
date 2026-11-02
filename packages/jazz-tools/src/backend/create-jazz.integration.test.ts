@@ -4,7 +4,7 @@ import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generateSecret, identityOf, signChallenge, signToken } from "@garden-co/local-first-auth";
+import { generateSecret, identityOf, signChallenge, signToken } from "../local-first-auth/index.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";

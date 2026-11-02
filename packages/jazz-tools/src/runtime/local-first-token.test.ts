@@ -5,9 +5,9 @@ import { generateAuthSecret } from "./auth-secret-store.js";
 import { mintLocalFirstTokenFromSeed, verifyLocalFirstToken } from "./local-first-token.js";
 
 // The native runtimes minted local-first tokens until alpha.60. Tokens from
-// @garden-co/local-first-auth must stay interchangeable with theirs, so
+// src/local-first-auth must stay interchangeable with theirs, so
 // existing identities keep working against every core.
-describe("local-first tokens from @garden-co/local-first-auth", () => {
+describe("local-first tokens from src/local-first-auth", () => {
   const apps = [
     "6b0c3f8e-2d9a-4f61-9a57-1c2e3d4f5a6b",
     "6B0C3F8E-2D9A-4F61-9A57-1C2E3D4F5A6B",
