@@ -60,6 +60,7 @@
     "wequencer-next-betterauth": "0.1.0",
     "jazz-rn-android": "2.0.0-alpha.54",
     "jazz-rn-ios": "2.0.0-alpha.54",
+    "@garden-co/local-first-auth": "2.0.0-alpha.59",
     "todo-effect-docs": "0.1.0",
     "ts-effect-betterauth": "0.1.0",
     "ts-effect-localfirst": "0.1.0",
