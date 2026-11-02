@@ -156,8 +156,13 @@ describe("shared Jazz application lifecycle", () => {
     consumer.acknowledge(ready);
     await tick();
     expect(f.events).not.toContain("flush:one");
-    consumer.acknowledge(app.getSnapshot());
-    await tick();
+    // Switching users signs "one" out first, then signs "two" in: the
+    // consumer acknowledges each step it has detached from.
+    for (let step = 0; step < 4 && app.getSnapshot().status !== "ready"; step++) {
+      consumer.acknowledge(app.getSnapshot());
+      await tick();
+    }
+    expect(f.events.indexOf("flush:one")).toBeLessThan(f.events.indexOf("open:two"));
     expect(app.getSnapshot().status).toBe("ready");
     expect(f.events).toContain("open:two");
     consumer.release();

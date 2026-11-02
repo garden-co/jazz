@@ -335,3 +335,27 @@ it("backend transitions wait for detach and sync, and restore the old account on
   lease.release();
   await session.close();
 });
+
+it("clearOnSignOut wipes the signed-out account's storage instead of syncing it", async () => {
+  const old = handle("old");
+  const accounts = new AccountManager(
+    {
+      createLocalFirst: () => old,
+      restoreLocalFirst: () => old,
+      logout() {},
+      loginWithBackend: async () => old,
+    },
+    old,
+  );
+  const calls: string[] = [];
+  const openClient = async () => ({
+    db: { deleteClientStorage: async () => void calls.push("wipe") },
+    shutdown: async (options?: { waitForSync?: boolean }) =>
+      void calls.push(options?.waitForSync ? "sync+shutdown" : "shutdown"),
+  });
+  const session = await createJazzSessionOwner({ accounts, openClient, clearOnSignOut: true });
+  await session.logout();
+  expect(calls).toEqual(["wipe", "shutdown"]);
+  expect(session.getSnapshot().status).toBe("signed-out");
+  await session.close();
+});
