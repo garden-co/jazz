@@ -2248,6 +2248,44 @@ mod tests {
         }
     }
 
+    /// A socket whose credential states session access gets no secret, even
+    /// when its prelude carries the real admin secret.
+    #[tokio::test]
+    async fn websocket_backend_credential_stating_session_ignores_prelude_secrets() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let prelude = serde_json::json!({
+            "peer_identity": AuthorSubject::SYSTEM.canonical(),
+            "auth": { "admin_secret": "admin-secret", "backend_secret": "backend-secret" },
+        })
+        .to_string();
+        let mut request = ws_url(addr, state.app_id).into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("X-Jazz-Backend-Credential", "admin-secret".parse().unwrap());
+        let (mut ws, _) = connect_async(request).await.expect("connect websocket");
+        ws.send(WsMessage::Text(prelude.into()))
+            .await
+            .expect("send prelude");
+        let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("admission resolves")
+            .expect("response")
+            .expect("wire response");
+        let WsMessage::Binary(bytes) = response else {
+            panic!("expected an admission error, got {response:?}")
+        };
+        let frames: Vec<Vec<u8>> = postcard::from_bytes(&bytes).expect("frame batch");
+        assert!(matches!(
+            decode_frame(&frames[0]).expect("error frame"),
+            WireFrame::Error(WireError {
+                code: WireErrorCode::AuthFailed,
+                ..
+            })
+        ));
+    }
+
     #[tokio::test]
     async fn websocket_prelude_v1_fixture_writers_reach_server_handshake() {
         let state = make_ws_test_state().await;

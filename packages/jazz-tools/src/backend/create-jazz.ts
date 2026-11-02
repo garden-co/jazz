@@ -98,6 +98,11 @@ export function remote(
     backendCredential = options.backendCredential;
   } else {
     const secret = options.secret;
+    if (secret === undefined && "adminSecret" in options) {
+      throw new Error(
+        "remote(): `adminSecret` and `backendSecret` were replaced by one `secret`, the app's admin secret",
+      );
+    }
     if (typeof secret !== "string" || !secret.trim()) {
       throw new Error("remote(): secret must be the app's admin secret (it is empty)");
     }
@@ -611,8 +616,8 @@ function openRemoteCore(
       ended = true;
       onEvent(null, { kind: "close", code, reason });
     };
-    credentialHeaders(access).then(
-      (headers) => {
+    credentialHeaders(access)
+      .then((headers) => {
         if (ended) return;
         ws = new NativeWebSocket(url, { headers: Object.fromEntries(headers) });
         ws.binaryType = "arraybuffer";
@@ -627,10 +632,11 @@ function openRemoteCore(
           onEvent(null, { kind: "message", data });
         });
         ws.addEventListener("close", (event) => finish(event.code, event.reason));
-      },
-      (error: unknown) =>
+      })
+      // A failing credential hook, or a socket that can't even be created.
+      .catch((error: unknown) =>
         finish(1011, error instanceof Error ? error.message : "no backend credential"),
-    );
+      );
     return {
       send(data) {
         if (ended) return false;
