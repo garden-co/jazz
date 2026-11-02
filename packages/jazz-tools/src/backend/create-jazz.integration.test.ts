@@ -224,6 +224,48 @@ describe("createJazz", () => {
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: true });
     const seed = randomBytes(32).toString("base64url");
+    const link = (audience: string, headers: Record<string, string> = {}) =>
+      fetch(`${origin}/jazz/apps/${appId}/accounts/backend-link`, {
+        method: "POST",
+        headers: {
+          "x-test-user": `user-for-${audience}`,
+          authorization: `Bearer ${mintLocalFirstTokenFromSeed(seed, audience, 60)}`,
+          ...headers,
+        },
+      }).then((response) => response.status);
+
+    // Another app's backend replaying a guest's proof here gets nothing.
+    expect(await link("https://elsewhere.example/jazz")).toBe(401);
+    // Nor does naming that other endpoint in headers a client can forge.
+    const forged = { "x-forwarded-host": "elsewhere.example", "x-forwarded-proto": "https" };
+    expect(await link("https://elsewhere.example/jazz", forged)).toBe(401);
+    expect(
+      await link("https://elsewhere.example/jazz", {
+        ...forged,
+        origin: "https://elsewhere.example",
+      }),
+    ).toBe(401);
+    // This host over https is not the plain-http endpoint the test serves.
+    expect(await link(`${origin.replace("http:", "https:")}/jazz`)).toBe(401);
+    expect(await link(randomUUID())).toBe(401);
+    expect(await link(`${origin}/jazz`)).toBe(200);
+    // The same key, already founded under the endpoint, is not founded again.
+    expect(await link(appId)).toBe(409);
+  });
+
+  it("accepts guests of the public URL a proxy serves this endpoint at", async () => {
+    const appId = randomUUID();
+    const jazz = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+      publicUrl: "https://app.example.com/api/jazz/",
+    });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const seed = randomBytes(32).toString("base64url");
     const link = (audience: string) =>
       fetch(`${origin}/jazz/apps/${appId}/accounts/backend-link`, {
         method: "POST",
@@ -232,13 +274,11 @@ describe("createJazz", () => {
           authorization: `Bearer ${mintLocalFirstTokenFromSeed(seed, audience, 60)}`,
         },
       }).then((response) => response.status);
-
-    // Another app's backend replaying a guest's proof here gets nothing.
-    expect(await link("https://elsewhere.example/jazz")).toBe(401);
-    expect(await link(randomUUID())).toBe(401);
-    expect(await link(`${origin}/jazz`)).toBe(200);
-    // The same key, already founded under the endpoint, is not founded again.
-    expect(await link(appId)).toBe(409);
+    expect(await link(`${origin}/jazz`)).toBe(401);
+    expect(await link("https://app.example.com/api/jazz")).toBe(200);
+    await expect(
+      createJazz({ appId, app, permissions, store: memory(), authenticate, publicUrl: "/jazz" }),
+    ).rejects.toThrow("not an absolute URL");
   });
 
   it("refuses sign-in and sync started by a page on another origin", async () => {
