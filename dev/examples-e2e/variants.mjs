@@ -85,6 +85,13 @@ export const VARIANTS = Object.freeze([
     }),
   }),
   Object.freeze({
+    name: "music-agent-hono",
+    dir: "examples/music-agent/apps/ts-hono",
+    environment: "Vanilla TypeScript, no framework, agent in a Hono server",
+    publicPrefix: "VITE_",
+    env: Object.freeze({}),
+  }),
+  Object.freeze({
     name: "big-label",
     dir: "examples/big-label",
     environment: "Next.js, organizations and members, Better Auth",
