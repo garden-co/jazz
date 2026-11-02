@@ -34,6 +34,7 @@ import {
   createOpenTransactionId,
   setWriteWaitReadiness,
   type TransactionKind,
+  type Runtime,
   type ReadTierOptions,
   type InternalQueryExecutionOptions,
   type QueryVisibility,
@@ -2532,6 +2533,21 @@ export class Db {
 
   protected getCurrentClient(): JazzClient | null {
     return this.connection.getCurrentClient();
+  }
+
+  /** @internal The runtime behind this Db's client, once it exists. */
+  currentRuntime(): Runtime | null {
+    return this.getCurrentClient()?.getRuntime() ?? null;
+  }
+
+  /**
+   * @internal Read each runtime query at the remote tier, so that this Db's
+   * store holds what the server holds for it before anything subscribes.
+   */
+  async prefetchRuntimeQueries(schema: WasmSchema, queryJsons: readonly string[]): Promise<void> {
+    const client = this.getClient(schema);
+    await this.ensureReady("server");
+    await Promise.all(queryJsons.map((queryJson) => client.query(queryJson, { tier: "remote" })));
   }
 
   protected async ensureReady(

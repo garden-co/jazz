@@ -51,6 +51,10 @@
       "types": "./dist/client/index.d.ts",
       "default": "./dist/client/index.js"
     },
+    "./thin": {
+      "types": "./dist/thin/index.d.ts",
+      "default": "./dist/thin/index.js"
+    },
     "./react": {
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
@@ -192,6 +196,7 @@
     "pack:dry-run": "npm pack --dry-run"
   },
   "dependencies": {
+    "@noble/curves": "2.0.1",
     "@noble/hashes": "2.0.1",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-logs-otlp-http": "^0.216.0",

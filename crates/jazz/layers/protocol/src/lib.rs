@@ -30,5 +30,7 @@ pub mod authorization_scope;
 pub mod protocol;
 /// Protocol admission and semantic size limits.
 pub mod protocol_limits;
+/// Thin client requests and responses.
+pub mod thin;
 /// Versioned transport frames around the semantic sync protocol.
 pub mod wire;

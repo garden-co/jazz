@@ -1,5 +1,4 @@
 import type { AuthUpdate } from "../client.js";
-import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import {
   ConnectionManager,
   type ConnectionManagerClientInput,
@@ -40,7 +39,7 @@ export class DirectConnectionManager extends ConnectionManager {
           // have been minted. Returning the confirmed prior high-water is a
           // complete clean handoff, not an uncertain retirement.
           await lease.returnWithHighWater(lease.confirmedTxTime);
-        } else if (!(runtime instanceof NativeRuntimeAdapter)) {
+        } else if (!runtime.quiesceForegroundTxTimeHighWater) {
           await lease.retire();
         } else {
           await lease.returnWithHighWater(await runtime.quiesceForegroundTxTimeHighWater());

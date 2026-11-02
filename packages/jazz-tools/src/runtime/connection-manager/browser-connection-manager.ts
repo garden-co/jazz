@@ -9,7 +9,6 @@ import type { RemoteLinkState } from "../remote-link-state.js";
 import { CONNECTED, CONNECTING, offlineLink, type LinkStatus } from "../sync-status.js";
 import { reloadAfterStorageInvalidation } from "../browser-storage-invalidation.js";
 import { runCleanupSteps } from "../run-cleanup-steps.js";
-import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { BrowserWorkerUnresponsiveError } from "../native-runtime/browser-worker-protocol.js";
 import {
   ConnectionManager,
@@ -565,7 +564,7 @@ export class BrowserConnectionManager extends ConnectionManager {
               if (!runtime) {
                 if (flushFailed) await lease.retire();
                 else await lease.returnWithHighWater(lease.confirmedTxTime);
-              } else if (!(runtime instanceof NativeRuntimeAdapter)) {
+              } else if (!runtime.quiesceForegroundTxTimeHighWater) {
                 await lease.retire();
               } else {
                 // Even after an ordinary flush failure, close mutation admission
