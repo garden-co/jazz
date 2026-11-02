@@ -103,6 +103,11 @@ function fakeVercel(core: { appId: string; url: string }) {
     runCommand: async ({ args }) => {
       const script = files.get(/exec bash (\S+)/.exec(args.at(-1)!)![1]!)!.toString();
       const version = /^version='(.*)'$/m.exec(script)![1]!;
+      // Like the real script: the first start pins the trust, others don't move it.
+      const trust = /^trust='(.*)'$/m.exec(script)![1]!;
+      const pinned = files.get("/data/trust")?.toString().trim();
+      if (pinned && pinned !== trust) return;
+      files.set("/data/trust", Buffer.from(`${trust}\n`));
       if (!state.running || newerVersion(version, state.running)) state.running = version;
       calls.push(`start ${version}`);
     },
@@ -207,12 +212,45 @@ describe("vercel() store", () => {
   it("reaches a core only with the trusted workload's token", async () => {
     const appId = randomUUID();
     const core = await startTrustedCore(appId);
-    const fake = fakeVercel(core);
-    fake.state.exists = true;
-    fake.state.drive = true;
     onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
+    const preview = () => oidcToken(core.issuer, "owner:garden-co:project:app:environment:preview");
 
-    // Another environment's function holds a token, but not this core's.
+    // The core itself refuses another workload's token.
+    const fresh = fakeVercel(core);
+    Object.assign(fresh.state, { exists: true, drive: true });
+    await expect(
+      createJazz({
+        appId,
+        app,
+        permissions,
+        store: vercel({ sdk: fresh.sdk, backendCredential: preview }),
+      }),
+    ).rejects.toThrow(/401/);
+
+    // No secret gets past it either: only the token's stated access counts.
+    const guessed = await fetch(`${core.url}/apps/${appId}/admin/permissions`, {
+      headers: { "X-Jazz-Admin-Secret": "stated-by-backend-credential" },
+    });
+    expect(guessed.status).toBe(401);
+  }, 60_000);
+
+  it("never retargets a core to another environment's workload", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const fake = fakeVercel(core);
+    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
+    const jazz = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
+    });
+    cleanups.push(() => jazz.close());
+    const pinned = fake.files.get("/data/trust")?.toString();
+    expect(pinned).toContain(SUBJECT);
+
+    // A preview deployment that reaches the production Sandbox (a shared
+    // name) finds it pinned, and its start leaves the pin alone.
     const preview = () => oidcToken(core.issuer, "owner:garden-co:project:app:environment:preview");
     await expect(
       createJazz({
@@ -221,13 +259,21 @@ describe("vercel() store", () => {
         permissions,
         store: vercel({ sdk: fake.sdk, backendCredential: preview }),
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/trusts .*environment:production, not this deployment/);
+    expect(fake.files.get("/data/trust")?.toString()).toBe(pinned);
+  }, 60_000);
 
-    // No secret gets past it either: only the token's stated access counts.
-    const guessed = await fetch(`${core.url}/apps/${appId}/admin/permissions`, {
-      headers: { "X-Jazz-Admin-Secret": "stated-by-backend-credential" },
+  it("refuses a token for another environment than the deployment's", async () => {
+    onVercel({ VERCEL: "1", VERCEL_ENV: "preview", VERCEL_PROJECT_ID: "prj_test" });
+    const fake = fakeVercel({ appId: randomUUID(), url: "http://unused.invalid" });
+    process.env.VERCEL_OIDC_TOKEN = oidcToken("https://oidc.vercel.com/garden-co");
+    cleanups.push(async () => {
+      delete process.env.VERCEL_OIDC_TOKEN;
     });
-    expect(guessed.status).toBe(401);
+    await expect(
+      createJazz({ appId: randomUUID(), app, permissions, store: vercel({ sdk: fake.sdk }) }),
+    ).rejects.toThrow(/preview deployment's OIDC token is for .*environment:production/);
+    expect(fake.calls).toEqual([]);
   }, 60_000);
 
   it("resumes a stopped Sandbox instead of creating another", async () => {

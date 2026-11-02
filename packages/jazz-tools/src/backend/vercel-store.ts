@@ -221,6 +221,13 @@ newer() {
 }
 version=${q(version)}
 trust=${q(trustLine)}
+# The first start pins the workload this core trusts; a start for another
+# workload never retargets it.
+pinned=$(cat "$data/trust" 2>/dev/null || true)
+if [ -n "$pinned" ] && [ "$pinned" != "$trust" ]; then
+  echo "jazz: this core trusts $pinned; not retargeting it to $trust" >&2
+  exit 1
+fi
 highest=$(cat "$data/version" 2>/dev/null || true)
 if [ -n "$highest" ] && newer "$highest" "$version"; then
   # A newer deployment owns this Drive: run its server, never ours.
@@ -243,8 +250,7 @@ fi
 # process runs one of our server binaries.
 pid=$(cat "$run/jazz.pid" 2>/dev/null || true)
 if [ -n "$pid" ] && [[ "$(tr '\\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" == *"$data/bin/jazz-tools-"* ]]; then
-  [ "$(cat "$run/jazz.version" 2>/dev/null)" = "$version" ] &&
-    [ "$(cat "$run/jazz.trust" 2>/dev/null)" = "$trust" ] && exit 0
+  [ "$(cat "$run/jazz.version" 2>/dev/null)" = "$version" ] && exit 0
   kill -TERM "$pid" 2>/dev/null || true
   for _ in $(seq 150); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
   kill -KILL "$pid" 2>/dev/null || true
@@ -254,13 +260,13 @@ if [ ! -s "$data/app-id" ]; then
   printf '%s\\n' "$app_id" > "$data/app-id.tmp" && mv "$data/app-id.tmp" "$data/app-id"
 fi
 app_id=$(cat "$data/app-id")
+[ -n "$pinned" ] || { printf '%s\\n' "$trust" > "$data/trust.tmp" && mv "$data/trust.tmp" "$data/trust"; }
 export NODE_ENV=production
 mkdir -p "$data/store"
 printf '%s\\n' "$version" > "$data/version.tmp" && mv "$data/version.tmp" "$data/version"
 # Older servers are never started again (see above).
 find "$data/bin" -name 'jazz-tools-*' ! -name "jazz-tools-$version" -delete
 printf '%s\\n' "$version" > "$run/jazz.version"
-printf '%s\\n' "$trust" > "$run/jazz.trust"
 echo $$ > "$run/jazz.pid"
 exec 9>&-
 # The core admits only the deploying function's own workload.
@@ -290,18 +296,41 @@ export function workloadOf(token: string): TrustedWorkload {
   return { issuer: claims.iss, audience, subject: claims.sub };
 }
 
+const expiry = (token: string): number => {
+  try {
+    const { exp } = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString());
+    return typeof exp === "number" ? exp * 1000 : 0;
+  } catch {
+    return 0;
+  }
+};
+let latestToken: string | undefined;
+
+/**
+ * The function's OIDC token. Vercel hands a fresh one to each request; work
+ * outside a request (reconnects, the first open at cold start) uses the
+ * freshest one seen, or `VERCEL_OIDC_TOKEN`.
+ */
 async function functionOidcToken(): Promise<string> {
+  let fetched: string | undefined;
+  let failure: unknown;
   try {
     const { getVercelOidcToken } = (await import(
       /* @vite-ignore */ "@vercel/functions/oidc" as string
     )) as { getVercelOidcToken(): Promise<string> };
-    return await getVercelOidcToken();
+    fetched = await getVercelOidcToken();
   } catch (error) {
-    if (process.env.VERCEL_OIDC_TOKEN) return process.env.VERCEL_OIDC_TOKEN;
-    throw new Error(
-      `vercel(): no Vercel OIDC token (enable OIDC for the project, or pass backendCredential): ${String(error)}`,
-    );
+    failure = error;
+    fetched = process.env.VERCEL_OIDC_TOKEN;
   }
+  for (const token of [fetched, latestToken]) {
+    if (token && (!latestToken || expiry(token) > expiry(latestToken))) latestToken = token;
+  }
+  if (latestToken && expiry(latestToken) > Date.now()) return latestToken;
+  throw new Error(
+    `vercel(): no current Vercel OIDC token (enable OIDC for the project, or pass backendCredential)` +
+      (failure ? `: ${String(failure)}` : ""),
+  );
 }
 
 /** Whether this process runs in a Vercel deployment (not `vercel dev` or a pulled env). */
@@ -322,7 +351,10 @@ export function onVercelHost(env: Record<string, string | undefined> = process.e
 /**
  * The core for this deployment: one for production, and one per Git branch
  * for previews, so a branch's schema and permissions never apply to
- * another branch's data.
+ * another branch's data. This keeps honest branches apart; it is not a
+ * security boundary: every preview deployment's OIDC token names the same
+ * workload (`…:environment:preview`), so any preview function can reach any
+ * branch's core. Production is its own workload.
  */
 export function defaultCoreName(project: string, env: Record<string, string | undefined>): string {
   const target = env.VERCEL_ENV ?? "development";
@@ -383,6 +415,14 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   // The core trusts the workload this function's token names, so every
   // instance of this project and environment reaches it, and nothing else.
   const trust = workloadOf(await backendCredential());
+  // A deployment only ever starts or reaches its own environment's core.
+  const target = env.VERCEL_ENV;
+  if (!options.backendCredential && target && !trust.subject.endsWith(`:environment:${target}`)) {
+    throw new Error(
+      `vercel(): this ${target} deployment's OIDC token is for ${trust.subject}; refusing to start its core`,
+    );
+  }
+  const trustLine = `${trust.issuer} ${trust.audience} ${trust.subject}`;
   const script = Buffer.from(startScript(appId, version, tarballUrl, trust));
 
   const startServer = async (sbx: SandboxHandle) => {
@@ -555,6 +595,14 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
         if (!coreAppId) throw new Error(`vercel(): core ${name} has no app id on its Drive`);
         if (appId && coreAppId !== appId) {
           throw new Error(`vercel(): core ${name} belongs to app ${coreAppId}, not ${appId}`);
+        }
+        const pinned = (await sbx.readFileToBuffer({ path: "/data/trust" }).catch(() => null))
+          ?.toString("utf8")
+          .trim();
+        if (pinned && pinned !== trustLine) {
+          throw new Error(
+            `vercel(): core ${name} trusts ${pinned.split(" ").at(-1)}, not this deployment (${trust.subject})`,
+          );
         }
         if (live?.base === base) {
           live.sbx = sbx;

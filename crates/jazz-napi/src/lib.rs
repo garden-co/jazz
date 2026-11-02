@@ -2047,8 +2047,9 @@ struct JazzServerStartOptions {
     jwks_url: Option<String>,
     jwt_issuer: Option<String>,
     jwt_audience: Option<String>,
-    backend_secret: String,
-    admin_secret: String,
+    /// Required unless the server trusts a workload, which replaces them.
+    backend_secret: Option<String>,
+    admin_secret: Option<String>,
     upstream_url: Option<String>,
     allow_local_first_auth: Option<bool>,
     telemetry_collector_url: Option<String>,
@@ -2187,7 +2188,7 @@ impl JazzServer {
     #[napi(factory, ts_return_type = "Promise<JazzServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; backendSecret: string; adminSecret: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }"
+            ts_arg_type = "{ appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -2204,28 +2205,42 @@ impl JazzServer {
         let app_id =
             AppId::from_string(&opts.app_id).unwrap_or_else(|_| AppId::from_name(&opts.app_id));
 
+        // A trusted workload replaces the shared secrets.
+        let trusted_workload = opts.trusted_workload.take().map(|workload| {
+            jazz_server::middleware::workload::TrustedWorkload {
+                issuer: workload.issuer,
+                audience: workload.audience,
+                subject: workload.subject,
+            }
+        });
+        let (admin_secret, backend_secret) = match (
+            &trusted_workload,
+            opts.admin_secret.take(),
+            opts.backend_secret.take(),
+        ) {
+            (None, Some(admin), Some(backend)) => (Some(admin), Some(backend)),
+            (Some(_), None, None) => (None, None),
+            (None, _, _) => {
+                return Err(napi::Error::from_reason(
+                    "JazzServer needs adminSecret and backendSecret (or a trustedWorkload)",
+                ));
+            }
+            (Some(_), _, _) => {
+                return Err(napi::Error::from_reason(
+                    "a trustedWorkload replaces adminSecret and backendSecret; pass neither",
+                ));
+            }
+        };
+
         let auth_config = AuthConfig {
             jwks_url: opts.jwks_url,
             jwt_issuer: opts.jwt_issuer,
             jwt_audience: opts.jwt_audience,
             allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
-            backend_secret: Some(opts.backend_secret.clone()),
-            admin_secret: Some(opts.admin_secret.clone()),
+            backend_secret: backend_secret.clone(),
+            admin_secret: admin_secret.clone(),
+            trusted_workload,
             ..Default::default()
-        };
-        // A trusted workload replaces the shared secrets.
-        let auth_config = match opts.trusted_workload.take() {
-            Some(workload) => AuthConfig {
-                backend_secret: None,
-                admin_secret: None,
-                trusted_workload: Some(jazz_server::middleware::workload::TrustedWorkload {
-                    issuer: workload.issuer,
-                    audience: workload.audience,
-                    subject: workload.subject,
-                }),
-                ..auth_config
-            },
-            None => auth_config,
         };
 
         let in_memory = opts.in_memory.unwrap_or(false);
@@ -2263,8 +2278,8 @@ impl JazzServer {
             opts.host,
             app_id,
             ServerDataDir::from_path(std::path::PathBuf::from(&data_dir)),
-            opts.admin_secret.clone(),
-            opts.backend_secret.clone(),
+            admin_secret.unwrap_or_default(),
+            backend_secret.unwrap_or_default(),
         )
         .await
         .map_err(napi::Error::from_reason)?;

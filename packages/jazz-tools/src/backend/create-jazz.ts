@@ -110,9 +110,15 @@ export function remote(
  * data on a Drive: one for production and one per Git branch for previews.
  * It is created on first use, wakes when a request needs it (about a second)
  * and stops after `idleMs` without requests or sockets. The function's Vercel
- * OIDC token is its only credential: the core admits only functions of this
- * project and environment, so there are no secrets and no env vars. Install
- * `@vercel/sandbox` and `@vercel/functions` next to `jazz-tools`. A deployment of a newer jazz-tools
+ * OIDC token is its only credential, so there are no secrets and no env vars:
+ * the core admits only tokens naming the workload its first start pinned
+ * (team, project and environment by name), and a deployment of another
+ * environment refuses to start or retarget it. All previews share one
+ * workload, so preview branches' cores are kept apart, not secured from each
+ * other. Anyone with Sandbox access to the project controls its cores. The
+ * token comes with each request; work between requests uses the freshest one
+ * seen, and open sockets outlive its expiry. Install `@vercel/sandbox` and
+ * `@vercel/functions` next to `jazz-tools`. A deployment of a newer jazz-tools
  * restarts the core on its version, and an older deployment never moves it
  * back. Outside a production or preview deployment (`next dev`, `vercel dev`,
  * tests) it runs `local` instead: by default a SQLite core in `.jazz/local`.

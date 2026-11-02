@@ -96,14 +96,17 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(existsSync(join(root, "data/bin/jazz-tools-1.0.0"))).toBe(false);
   });
 
-  it("restarts the same version when the trusted workload changes", async () => {
+  it("never retargets a running core to another workload", async () => {
     installFake("1.0.0");
     expect(await start("1.0.0")).toBe("running");
     const first = read("tmp/jazz.pid");
+    expect(read("data/trust")).toBe(`${trust.issuer} ${trust.audience} ${trust.subject}`);
     const other = { ...trust, subject: "owner:garden-co:project:app:environment:preview" };
-    expect(await start("1.0.0", undefined, other)).toBe("running");
-    expect(alive(first)).toBe(false);
-    expect(read("servers.log")!.split("\n").at(-1)).toContain(other.subject);
+    expect(await start("1.0.0", undefined, other)).toBe(1);
+    expect(await start("2.0.0", undefined, other)).toBe(1);
+    expect(alive(first)).toBe(true);
+    expect(read("data/trust")).toContain(trust.subject);
+    expect(read("servers.log")!.split("\n")).toHaveLength(1);
   });
 
   it("never moves a newer server back", async () => {

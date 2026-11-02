@@ -55,7 +55,9 @@ export interface LocalJazzServerHandle {
   port: number;
   url: string;
   dataDir: string;
+  /** Empty for a server that trusts a workload instead. */
   adminSecret: string;
+  /** Empty for a server that trusts a workload instead. */
   backendSecret: string;
   stop: () => Promise<void>;
 }
@@ -106,8 +108,14 @@ export async function startLocalJazzServer(
   const port = options.port ?? 0;
   const ownsDataDir = options.inMemory !== true && options.dataDir === undefined;
   const dataDir = ownsDataDir ? await createOwnedDataDir() : options.dataDir;
-  const adminSecret = options.adminSecret ?? `jazz-test-admin-${randomUUID().slice(0, 8)}`;
-  const backendSecret = options.backendSecret ?? `jazz-test-backend-${randomUUID().slice(0, 8)}`;
+  // A trusted workload replaces the shared secrets.
+  const workload = options.trustedWorkload !== undefined;
+  const adminSecret = workload
+    ? undefined
+    : (options.adminSecret ?? `jazz-test-admin-${randomUUID().slice(0, 8)}`);
+  const backendSecret = workload
+    ? undefined
+    : (options.backendSecret ?? `jazz-test-backend-${randomUUID().slice(0, 8)}`);
 
   let server;
   try {
