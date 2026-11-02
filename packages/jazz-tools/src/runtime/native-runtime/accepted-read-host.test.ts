@@ -650,9 +650,11 @@ for (const host of ["NAPI", "WASM"] as const) {
             expect(() => adapter.commitTransaction(id)).toThrow(/claims changed/);
           }
           if (operation === "streaming") {
-            const rows = await client.query(JSON.stringify({ table: "notes" }), { tier: "remote" });
+            const rows = await client.query(JSON.stringify({ table: "notes", select: ["body"] }), {
+              tier: "remote",
+            });
             expect(rows).toHaveLength(1);
-            expect(rows[0]?.values.body).toEqual({
+            expect(rows[0]?.values[0]).toEqual({
               type: "Text",
               value: mode === "same-peer" ? "changed" : "seed",
             });
