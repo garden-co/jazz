@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../../drivers/types.js";
-import { PostcardReader, PostcardWriter } from "./native-codec.js";
+import { PostcardWriter } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
   decodeWebSocketFrameBatch,
