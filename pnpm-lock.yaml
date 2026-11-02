@@ -2096,6 +2096,9 @@ importers:
       '@vercel/functions':
         specifier: '>=3.10.0'
         version: 3.10.5(ws@8.19.0)
+      '@vercel/sandbox':
+        specifier: '>=3.9.0'
+        version: 3.9.1
       esbuild:
         specifier: ^0.27.0
         version: 0.27.4
@@ -7607,12 +7610,19 @@ packages:
       vue-router:
         optional: true
 
+  '@vercel/cli-config@0.3.1':
+    resolution: {integrity: sha512-sISbygqlFXYb8qfPu/+2Cf/A8IjrlAuZePdag3EDQr2PRA455s7UZtl9Ro674CWsB/saBRmz3jEkw0YsQs8OoQ==}
+
   '@vercel/cli-config@0.3.5':
     resolution: {integrity: sha512-O7y3EFzHENSLtE/3fjM3vIRqDpFFhZor2dMcZaND4G1d88gQk9u8yBcZhRR9CKnBowgzXdl0qcXkuINI05I72w==}
 
   '@vercel/cli-exec@1.0.1':
     resolution: {integrity: sha512-g9XerViJ/paZujufXYcu5XYI2vU2rtB4sgdpjUHde5RnOkdmpu0ngH46LCFGHoPXO/C+qDPSczIHIRN+8Q2YKQ==}
     engines: {node: '>= 18'}
+
+  '@vercel/detect-agent@1.2.5':
+    resolution: {integrity: sha512-0krENrjuitlW8s6TJu0MlqCevyCU7K7JK63jZAf7xZ6n17tx+vUEwzHT3sTxawtwZxaW21hu+oFUpoOrm49FsQ==}
+    engines: {node: '>=14'}
 
   '@vercel/functions@3.10.5':
     resolution: {integrity: sha512-IDqsDlIbVjWk5zoV63N41vKSShH3LgJ8Y5gAQc+dq7HEkHRrVh3naJ/klZxit4B8G+8WEK7ezb/tkOU2g3UViw==}
@@ -7626,9 +7636,16 @@ packages:
       ws:
         optional: true
 
+  '@vercel/oidc@4.0.0':
+    resolution: {integrity: sha512-ko6ATeRUlHZMB5hLFdC7+/Q1dI2f3NX3gZHxtpALdkxurwjD5HFHGWYF+4o+4SF0E47jg6KzcHknmRpHcKgJ5A==}
+    engines: {node: '>= 20'}
+
   '@vercel/oidc@4.0.5':
     resolution: {integrity: sha512-E+duTxv0W8r3qNCGUYxTLt0V0BlLUlrEqxYOu2OoFubIbxwGjwm4wofache+YgU6Sr0MwoAA/vsSrrNrrWjimw==}
     engines: {node: '>= 20'}
+
+  '@vercel/sandbox@3.9.1':
+    resolution: {integrity: sha512-8/3vqPknI2WrE1Zd4O3LbMFbrD9elCXqCe0JjqSJH+EqsEtBHGafwwxx1raq1kTWvpLLk4lh0bZW9dMy6L5efA==}
 
   '@vitejs/plugin-react-swc@4.3.0':
     resolution: {integrity: sha512-mOkXCII839dHyAt/gpoSlm28JIVDwhZ6tnG6wJxUy2bmOx7UaPjvOyIDf3SFv5s7Eo7HVaq6kRcu6YMEzt5Z7w==}
@@ -7752,6 +7769,9 @@ packages:
 
   '@vue/shared@3.5.29':
     resolution: {integrity: sha512-w7SR0A5zyRByL9XUkCfdLs7t9XOHUyJ67qPGQjOou3p6GvBeBW+AVjUUmlxtZ4PIYaRvE+1LmK44O4uajlZwcg==}
+
+  '@workflow/serde@4.1.0-beta.2':
+    resolution: {integrity: sha512-8kkeoQKLDaKXefjV5dbhBj2aErfKp1Mc4pb6tj8144cF+Em5SPbyMbyLCHp+BVrFfFVCBluCtMx+jjvaFVZGww==}
 
   '@workos-inc/node@11.0.0':
     resolution: {integrity: sha512-swUT6CbkuVQXMOtUpI70LZ8usjSg8OXcKMjKdoYLeqCApRI0Oo97l+nZ0lKzZ5GxjxgcVZGGVK025h7z9WyCJg==}
@@ -7978,6 +7998,14 @@ packages:
     resolution: {integrity: sha512-qIj0G9wZbMGNLjLmg1PT6v2mE9AH2zlnADJD/2tC6E00hgmhUOfEB6greHPAfLRSufHqROIUTkw6E+M3lH0PTQ==}
     engines: {node: '>= 0.4'}
 
+  b4a@1.9.0:
+    resolution: {integrity: sha512-dpfcF9fDNR6++cthXR67iyhgqWy9CBouAvIWhIntzBG6cvK/cnIPiZQjBwi/ZqjjBEDGfoNDtmB0kTjroOJ3pQ==}
+    peerDependencies:
+      react-native-b4a: '*'
+    peerDependenciesMeta:
+      react-native-b4a:
+        optional: true
+
   babel-jest@29.7.0:
     resolution: {integrity: sha512-BrvGY3xZSwEcCzKvKsCi2GgHqDqsYkOP4/by5xCgIwGXQxIEh+8ew3gmrE1y7XRR6LHZIj6yLYnUi/mm2KXKBg==}
     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
@@ -8098,6 +8126,14 @@ packages:
       bare-url: '*'
     peerDependenciesMeta:
       bare-url:
+        optional: true
+
+  bare-events@2.9.2:
+    resolution: {integrity: sha512-AIPKioV7/Y/8KfZ3AAhjPJxLLbY49S64Ym5DakZlUg75qQiTgUq9hEJoEwa4eUezPUlXRy/i5NpsKvo9jgKmoA==}
+    peerDependencies:
+      bare-abort-controller: '*'
+    peerDependenciesMeta:
+      bare-abort-controller:
         optional: true
 
   bare-module-resolve@1.12.4:
@@ -9264,6 +9300,9 @@ packages:
     resolution: {integrity: sha512-i/2XbnSz/uxRCU6+NdVJgKWDTM427+MqYbkQzD321DuCQJUqOuJKIA0IM2+W2xtYHdKOmZ4dR6fExsd4SXL+WQ==}
     engines: {node: '>=6'}
 
+  events-universal@1.0.1:
+    resolution: {integrity: sha512-LUd5euvbMLpwOF8m6ivPCbhQeSiYVNb8Vs0fQ8QjXo0JTkEHpz8pxdQf0gStltaPpw0Cca8b39KxvK9cfKRiAw==}
+
   execa@4.1.0:
     resolution: {integrity: sha512-j5W0//W7f8UxAn8hXVnwG8tLwdiUy4FJLcSupCg6maBYZDpyBvTApK7KyuI4bKj8KOh1r2YH+6ucuYtJv1bTZA==}
     engines: {node: '>=10'}
@@ -9520,6 +9559,9 @@ packages:
 
   fast-diff@1.3.0:
     resolution: {integrity: sha512-VxPP4NqbUjj6MaAOafWeUn2cXWLcCtljklUtZf0Ind4XQ+QPtmA0b18zZy0jIQx+ExRVCR/ZQpBmik5lXshNsw==}
+
+  fast-fifo@1.3.2:
+    resolution: {integrity: sha512-/d9sfos4yxzpwkDkuN7k2SqFKtYNmCTzgfEpz82x34IM9/zc8KGxQoXg1liNC/izpRM/MBdt44Nmx41ZWqk+FQ==}
 
   fast-glob@3.3.3:
     resolution: {integrity: sha512-7MptL8U0cqcFdzIzwOTHoilX9x5BrNqye7Z/LuC7kCMRio1EMSyqRK3BEAUD7sXRq4iT4AzTVuZdhgQ2TCvYLg==}
@@ -10687,6 +10729,9 @@ packages:
   jose@6.2.2:
     resolution: {integrity: sha512-d7kPDd34KO/YnzaDOlikGpOurfF0ByC2sEV4cANCtdqLlTfBlw2p14O/5d/zv40gJPbIQxfES3nSx1/oYNyuZQ==}
 
+  jose@6.2.3:
+    resolution: {integrity: sha512-YYVDInQKFJfR/xa3ojUTl8c2KoTwiL1R5Wg9YCydwH0x0B9grbzlg5HC7mMjCtUJjbQ/YnGEZIhI5tCgfTb4Hw==}
+
   joycon@3.1.1:
     resolution: {integrity: sha512-34wB/Y7MW7bzjKRjUKTa46I2Z7eV62Rkhva+KkopW7Qvv/OSWBqvkSY7vusOPrNuZcUG3tApvdVgNB8POj3SPw==}
     engines: {node: '>=10'}
@@ -10764,6 +10809,9 @@ packages:
 
   jsonfile@6.2.0:
     resolution: {integrity: sha512-FGuPw30AdOIUTRMC2OMRtQV+jkVj2cfPqSeWXv1NEAJ1qZ5zb1X6z1mFhbfOB/iy3ssJCD+3KuZ8r8C3uVFlAg==}
+
+  jsonlines@0.1.1:
+    resolution: {integrity: sha512-ekDrAGso79Cvf+dtm+mL8OBI2bmAOt3gssYs833De/C9NmIpWDWyUO4zPgB5x2/OhY366dkhgfPMYfwZF7yOZA==}
 
   jsonparse@1.3.1:
     resolution: {integrity: sha512-POQXvpdL69+CluYsillJ7SUhKvytYjW9vG/GKpnf+xP8UWgYEM/RaMzHHofbALDiKbbP1W8UEYmgGl39WkPZsg==}
@@ -12974,6 +13022,9 @@ packages:
     resolution: {integrity: sha512-uyQK/mx5QjHun80FLJTfaWE7JtwfRMKBLkMne6udYOmvH0CawotVa7TfgYHzAnpphn4+TweIx1QKMnRIbipmUg==}
     engines: {node: '>= 0.10.0'}
 
+  streamx@2.28.1:
+    resolution: {integrity: sha512-zEzXb0s5Cds7tqMH6rhZ05lcJydCWiQPEwiNngVqzsxCc962vLY4Uw+mW7od8kDH258k2Uz/JrOkdIAAhSh9VA==}
+
   string-length@4.0.2:
     resolution: {integrity: sha512-+l6rNN5fYHNhZZy41RXsYptCjA2Igmq4EG7kZAYFQI1E1VTXarr6ZPXBg6eq7Y6eK4FEhY6AJlyuFIb/v/S0VQ==}
     engines: {node: '>=10'}
@@ -13154,6 +13205,9 @@ packages:
     resolution: {integrity: sha512-g9ljZiwki/LfxmQADO3dEY1CbpmXT5Hm2fJ+QaGKwSXUylMybePR7/67YW7jOrrvjEgL1Fmz5kzyAjWVWLlucg==}
     engines: {node: '>=6'}
 
+  tar-stream@3.1.7:
+    resolution: {integrity: sha512-qJj60CXt7IU1Ffyc3NJMjh6EkuCFej46zUqJ4J7pqYlThyd9bO0XBTmcOIhSzZJVWfsLks0+nle/j538YAW9RQ==}
+
   tar@6.2.1:
     resolution: {integrity: sha512-DZ4yORTwrbTj/7MZYq2w+/ZFdI6OZ/f9SFHR+71gIVUZhOQPHzVCLpvRnPgyaMpfWxxk/4ONva3GQSyNIKRv6A==}
     engines: {node: '>=10'}
@@ -13179,6 +13233,9 @@ packages:
   test-exclude@6.0.0:
     resolution: {integrity: sha512-cAGWPIyOHU6zlmg88jwm7VRyXnMN7iV68OGAbYDk/Mh/xC/pzVPlQtY6ngoIH/5/tciuhGfvESU8GrHrcxD56w==}
     engines: {node: '>=8'}
+
+  text-decoder@1.2.7:
+    resolution: {integrity: sha512-vlLytXkeP4xvEq2otHeJfSQIRyWxo/oZGEbXrtEEF9Hnmrdly59sUbzZ/QgyWuLYHctCHxFF4tRQZNQ9k60ExQ==}
 
   text-extensions@2.4.0:
     resolution: {integrity: sha512-te/NtwBwfiNRLf9Ijqx3T0nlqZiQ2XrrtBvu+cLL8ZRrGkO0NHTug8MYFKyoSrv/sHTaSKfilUkizV6XhxMJ3g==}
@@ -13453,6 +13510,10 @@ packages:
 
   undici@7.24.4:
     resolution: {integrity: sha512-BM/JzwwaRXxrLdElV2Uo6cTLEjhSb3WXboncJamZ15NgUURmvlXvxa6xkwIOILIjPNo9i8ku136ZvWV0Uly8+w==}
+    engines: {node: '>=20.18.1'}
+
+  undici@7.30.1:
+    resolution: {integrity: sha512-03KrMbjIFDWQR5RNPrSw3bd1r12JpyFQl9/yxjUbJtqkjmllqC5lFjZh6ujeuJCKr8EOQvRW872Oy/az+nLYxg==}
     engines: {node: '>=20.18.1'}
 
   unenv@2.0.0-rc.24:
@@ -13948,6 +14009,10 @@ packages:
   xcode@3.0.1:
     resolution: {integrity: sha512-kCz5k7J7XbJtjABOvkc5lJmkiDh8VhjVCGNiqdKCscmVpdVUpEAyXv1xmCLkQJ5dsHqx3IPO4XW+NTDhU/fatA==}
     engines: {node: '>=10.0.0'}
+
+  xdg-app-paths@5.1.0:
+    resolution: {integrity: sha512-RAQ3WkPf4KTU1A8RtFx3gWywzVKe00tfOPFfl2NDGqbIFENQO4kqAJp7mhQjNj/33W5x5hiWWUdyfPq/5SU3QA==}
+    engines: {node: '>=6'}
 
   xdg-app-paths@5.5.1:
     resolution: {integrity: sha512-hI3flOB4PLZIy5prbtTpirobtPE2ZtZ52szO+2mM9Efp6ErM398La+C1lIpNWDfNoQk+6Lsi6nMcCwVB7pxeMQ==}
@@ -19507,6 +19572,11 @@ snapshots:
       svelte: 5.53.6
       vue: 3.5.29(typescript@6.0.2)
 
+  '@vercel/cli-config@0.3.1':
+    dependencies:
+      xdg-app-paths: 5.5.1
+      zod: 4.1.11
+
   '@vercel/cli-config@0.3.5':
     dependencies:
       xdg-app-paths: 5.5.1
@@ -19516,17 +19586,44 @@ snapshots:
     dependencies:
       execa: 5.1.1
 
+  '@vercel/detect-agent@1.2.5': {}
+
   '@vercel/functions@3.10.5(ws@8.19.0)':
     dependencies:
       '@vercel/oidc': 4.0.5
     optionalDependencies:
       ws: 8.19.0
 
+  '@vercel/oidc@4.0.0':
+    dependencies:
+      '@vercel/cli-config': 0.3.1
+      '@vercel/cli-exec': 1.0.1
+      jose: 5.10.0
+
   '@vercel/oidc@4.0.5':
     dependencies:
       '@vercel/cli-config': 0.3.5
       '@vercel/cli-exec': 1.0.1
       jose: 5.10.0
+
+  '@vercel/sandbox@3.9.1':
+    dependencies:
+      '@vercel/detect-agent': 1.2.5
+      '@vercel/oidc': 4.0.0
+      '@workflow/serde': 4.1.0-beta.2
+      async-retry: 1.3.3
+      jose: 6.2.3
+      jsonlines: 0.1.1
+      lru-cache: 10.4.3
+      ms: 2.1.3
+      picocolors: 1.1.1
+      tar-stream: 3.1.7
+      undici: 7.30.1
+      xdg-app-paths: 5.1.0
+      zod: 4.3.6
+    transitivePeerDependencies:
+      - bare-abort-controller
+      - react-native-b4a
 
   '@vitejs/plugin-react-swc@4.3.0(vite@8.0.1(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))':
     dependencies:
@@ -19762,6 +19859,8 @@ snapshots:
 
   '@vue/shared@3.5.29': {}
 
+  '@workflow/serde@4.1.0-beta.2': {}
+
   '@workos-inc/node@11.0.0': {}
 
   '@xmldom/xmldom@0.8.13': {}
@@ -19992,6 +20091,8 @@ snapshots:
 
   axobject-query@4.1.0: {}
 
+  b4a@1.9.0: {}
+
   babel-jest@29.7.0(@babel/core@7.29.0):
     dependencies:
       '@babel/core': 7.29.0
@@ -20213,6 +20314,8 @@ snapshots:
     dependencies:
       bare-module-resolve: 1.12.4
       bare-semver: 1.1.0
+
+  bare-events@2.9.2: {}
 
   bare-module-resolve@1.12.4:
     dependencies:
@@ -21530,6 +21633,12 @@ snapshots:
 
   event-target-shim@5.0.1: {}
 
+  events-universal@1.0.1:
+    dependencies:
+      bare-events: 2.9.2
+    transitivePeerDependencies:
+      - bare-abort-controller
+
   execa@4.1.0:
     dependencies:
       cross-spawn: 7.0.6
@@ -21887,6 +21996,8 @@ snapshots:
   fast-deep-equal@3.1.3: {}
 
   fast-diff@1.3.0: {}
+
+  fast-fifo@1.3.2: {}
 
   fast-glob@3.3.3:
     dependencies:
@@ -23347,6 +23458,8 @@ snapshots:
 
   jose@6.2.2: {}
 
+  jose@6.2.3: {}
+
   joycon@3.1.1: {}
 
   js-tokens@4.0.0: {}
@@ -23477,6 +23590,8 @@ snapshots:
       universalify: 2.0.1
     optionalDependencies:
       graceful-fs: 4.2.11
+
+  jsonlines@0.1.1: {}
 
   jsonparse@1.3.1: {}
 
@@ -26448,6 +26563,15 @@ snapshots:
 
   stream-buffers@2.2.0: {}
 
+  streamx@2.28.1:
+    dependencies:
+      events-universal: 1.0.1
+      fast-fifo: 1.3.2
+      text-decoder: 1.2.7
+    transitivePeerDependencies:
+      - bare-abort-controller
+      - react-native-b4a
+
   string-length@4.0.2:
     dependencies:
       char-regex: 1.0.2
@@ -26659,6 +26783,15 @@ snapshots:
 
   tapable@2.3.0: {}
 
+  tar-stream@3.1.7:
+    dependencies:
+      b4a: 1.9.0
+      fast-fifo: 1.3.2
+      streamx: 2.28.1
+    transitivePeerDependencies:
+      - bare-abort-controller
+      - react-native-b4a
+
   tar@6.2.1:
     dependencies:
       chownr: 2.0.0
@@ -26695,6 +26828,12 @@ snapshots:
       '@istanbuljs/schema': 0.1.6
       glob: 7.2.3
       minimatch: 3.1.5
+
+  text-decoder@1.2.7:
+    dependencies:
+      b4a: 1.9.0
+    transitivePeerDependencies:
+      - react-native-b4a
 
   text-extensions@2.4.0: {}
 
@@ -26952,6 +27091,8 @@ snapshots:
   undici@6.23.0: {}
 
   undici@7.24.4: {}
+
+  undici@7.30.1: {}
 
   unenv@2.0.0-rc.24:
     dependencies:
@@ -27580,6 +27721,10 @@ snapshots:
     dependencies:
       simple-plist: 1.3.1
       uuid: 7.0.3
+
+  xdg-app-paths@5.1.0:
+    dependencies:
+      xdg-portable: 7.3.0
 
   xdg-app-paths@5.5.1:
     dependencies:
