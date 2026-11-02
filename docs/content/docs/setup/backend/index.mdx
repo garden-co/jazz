@@ -34,7 +34,7 @@ export const jazz = await createJazz({
   holds across containers on one host's volume and on EFS, but not on NFS mounted with `nolock` or
   `local_lock`). On serverless hosts
   (Vercel, AWS Lambda, Netlify) functions have no lasting disk, so `sqlite()` refuses to start
-  there: use `remote({ url, adminSecret, backendSecret })`, a sync server elsewhere such as Jazz
+  there: use `remote({ url, secret })` with the app's admin secret, a sync server elsewhere such as Jazz
   Cloud. `memory()` is for tests and throwaway previews, and keeps nothing. See [Deployment](/docs/setup/deployment) for
   where the data can live.
 - `authenticate(request)` reads your own session (a cookie, a header) and returns

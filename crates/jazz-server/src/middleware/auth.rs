@@ -1119,7 +1119,9 @@ pub async fn extract_session(
             .and_then(|v| v.to_str().ok());
 
         match (&config.backend_secret, backend_secret) {
-            (Some(expected), Some(got)) if expected == got => {
+            (Some(expected), Some(got))
+                if crate::middleware::workload::constant_time_eq(expected, got) =>
+            {
                 let session = decode_session_header(session_b64)
                     .ok_or_else(|| UnauthenticatedResponse::invalid("Invalid session format"))?;
                 return Ok(Some(session));
@@ -1244,7 +1246,11 @@ pub fn validate_backend_secret(
     config: &AuthConfig,
 ) -> Result<(), (StatusCode, &'static str)> {
     match (&config.backend_secret, provided) {
-        (Some(expected), Some(got)) if expected == got => Ok(()),
+        (Some(expected), Some(got))
+            if crate::middleware::workload::constant_time_eq(expected, got) =>
+        {
+            Ok(())
+        }
         (Some(_), Some(_)) => Err((StatusCode::UNAUTHORIZED, "Invalid backend secret")),
         (Some(_), None) => Err((
             StatusCode::UNAUTHORIZED,
@@ -1265,7 +1271,11 @@ pub fn validate_admin_secret(
     config: &AuthConfig,
 ) -> Result<(), (StatusCode, &'static str)> {
     match (&config.admin_secret, provided) {
-        (Some(expected), Some(got)) if expected == got => Ok(()),
+        (Some(expected), Some(got))
+            if crate::middleware::workload::constant_time_eq(expected, got) =>
+        {
+            Ok(())
+        }
         (Some(_), Some(_)) => Err((StatusCode::UNAUTHORIZED, "Invalid admin secret")),
         (Some(_), None) => Err((
             StatusCode::UNAUTHORIZED,
