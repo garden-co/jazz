@@ -17,7 +17,7 @@ the Effect that runs inside them.
 ## The `Jazz` service
 
 `Jazz.layer(config)` opens a database for the lifetime of the layer and shuts it down when the layer's
-scope closes. It takes the same config as `createDb`. If you already own a `Db`, use
+scope closes. It takes the same config as `createClient`. If you already own a `Db`, use
 `Jazz.layerDb(db)` instead.
 
 ```ts

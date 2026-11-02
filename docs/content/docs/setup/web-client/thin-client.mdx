@@ -22,8 +22,7 @@ The default web client: about 86 KB gzipped, no Wasm, no local storage. The serv
 ## Configure one session
 
 - Import from `jazz-tools/thin`
-- `createAccountManager()`&hairsp;—&hairsp;the same account API as `jazz-tools`
-- `createDb({ account })`&hairsp;—&hairsp;returns the normal `Db`; queries, `subscribe`, insert/update/upsert/delete and the framework hooks all work
+- `await createClient()`&hairsp;—&hairsp;signs in through your backend (`/jazz`, with your app's session cookie) and returns the normal `Db`; queries, `subscribe`, insert/update/upsert/delete and the framework hooks all work
 - User auth: see [Auth](/docs/setup/auth)
 - Tabs per framework, as on the local-first page
 
@@ -48,4 +47,4 @@ Each is an explicit "not supported" error:
 
 ## Upgrading to local-first
 
-- `upgradeToLocalFirst(thinDb, () => import("jazz-tools").then((jazz) => jazz.createDb(config)))` loads every subscribed query into a local-first `Db` for the same account, lets the thin `Db` finish its writes, and hands back the new `Db` to swap in. See [Local-First Client](/docs/setup/web-client/local-first-client).
+- `upgradeToLocalFirst(thinDb, () => import("jazz-tools").then((jazz) => jazz.createClient(config)))` loads every subscribed query into a local-first `Db` for the same account, lets the thin `Db` finish its writes, and hands back the new `Db` to swap in. See [Local-First Client](/docs/setup/web-client/local-first-client).

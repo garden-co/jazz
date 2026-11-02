@@ -55,10 +55,11 @@ new Hono()
 You can also query and write to the database right from your frontend. It is protected by the same auth as your backend, and the same permission policies apply. Pick a thin client (about 86 kB gzipped) or a full local-first client (about 1 MB gzipped, mostly the WASM engine).
 
 ```ts title="client.ts"
-import { createDb } from "jazz-tools/thin";
+import { createClient } from "jazz-tools/thin";
 import { app } from "./schema";
 
-const db = createDb({ account }); // syncs with /jazz on this origin by default;
+// Signs in through your backend's /jazz route, with your app's own session cookie
+const db = await createClient();
 
 // Live query: updates as soon as the server (or anyone else) changes a todo
 db.subscribe(app.todos.where({ done: false }), (todos) => {
