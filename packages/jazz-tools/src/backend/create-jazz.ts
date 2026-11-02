@@ -275,7 +275,10 @@ const STREAM_KEY_HEADER = "x-jazz-stream-key";
 const PUBLIC_APP_ROUTES = /^\/apps\/[^/]+\/(schemas|schema\/[^/]+)$/;
 // What a browser can't hand the core: secrets, a backend credential or the
 // access it states, or the core's own mark for sockets a credential vouched for.
+// Nor a bearer token: this backend decides who a request is (`authenticate`,
+// backend clients), never the core.
 const STRIPPED_HEADERS = [
+  "authorization",
   "x-jazz-backend-secret",
   "x-jazz-admin-secret",
   "x-jazz-session",
@@ -1125,7 +1128,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       // user's session, as the main backend's own client does.
       if (parsed.admin_secret != null || auth.admin_secret != null) return null;
       if (parsed.backend_secret == null && auth.backend_secret == null) return null;
-      const vouched = { backend_secret: core.backendSecret, jwt_token: null };
+      const vouched = { backend_secret: core.backendSecret };
       const rewritten = { ...parsed, ...vouched, auth: { ...auth, ...vouched } };
       return {
         prelude: new TextEncoder().encode(JSON.stringify(rewritten)),

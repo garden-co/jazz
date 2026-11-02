@@ -1,0 +1,77 @@
+---
+title: Backend Clients
+description: "Machines outside your main backend that sync through it with their platform's OIDC token."
+---
+
+Your **main backend** is the one that runs `createJazz`: it serves `/jazz`, and its `authenticate` decides who your users are. A **backend client** is a machine outside it, such as a CI job, a worker on another cloud, or a partner's service. It syncs through the main backend's `/jazz` like a browser does, but it proves who it is with its platform's OIDC token (GitHub Actions, Vercel, Google Cloud, AWS EKS and Kubernetes service accounts, and others). It needs no shared secret.
+
+## Trusting a backend client
+
+List the workloads you trust in `backendClients`, each with `trustWorkload`:
+
+```ts title="app/jazz/[...path]/route.ts"
+import { createJazz, trustWorkload } from "jazz-tools/backend";
+
+const jazz = await createJazz({
+  app,
+  permissions,
+  store,
+  authenticate,
+  backendClients: [
+    // A trusted machine: it syncs with the main backend's authority.
+    trustWorkload({
+      issuer: "https://token.actions.githubusercontent.com",
+      audience: "https://app.example.com",
+      claims: { repository: "acme/app", ref: "refs/heads/main" },
+      as: "backend",
+    }),
+    // A scoped machine: it acts as the user its claims map to.
+    trustWorkload({
+      issuer: "https://oidc.vercel.com/acme",
+      audience: "https://vercel.com/acme",
+      claims: { sub: "owner:acme:project:importer:environment:production" },
+      as: (claims) => ({ userId: `importer:${claims.sub}` }),
+    }),
+  ],
+});
+```
+
+The main backend verifies each token it receives. The checks are:
+
+- The token must be signed with one of the issuer's published keys, which the main backend finds through the issuer's OpenID discovery document.
+- It must be meant for `audience` and must not have expired.
+- It must carry every claim in `claims` with exactly that value.
+
+An issuer signs tokens for all of its workloads with the same keys, so `claims` must name yours. For example, use the repository and ref on GitHub Actions, or the full `sub` on Vercel. A token from a listed issuer that fails any check is refused. It is never handed to `authenticate`.
+
+`as` decides what the backend client may do:
+
+- **`"backend"`: a trusted machine.** It syncs with the main backend's own authority. Your permissions are not checked, and it may act on behalf of any user. Use this only for machines you would trust with your main backend's code.
+- **A function from the token's claims to a user: a scoped machine.** It acts as that user, with that user's permissions, exactly as if `authenticate` had named the user. The user gets an account on first use, like any other user. Return `null` to refuse the token. API routes see the same user through `jazz.forRequest(request)` and `jazz.accountFor(request)`.
+
+## Connecting from the backend client
+
+In Node, pass the token as `credential` to `createJazzSession`. You can pass a function, which is called for every request and socket so that the token stays fresh:
+
+```ts title="worker.ts"
+import { createJazzSession } from "jazz-tools/backend";
+
+const session = await createJazzSession({
+  appId,
+  app,
+  permissions,
+  serverUrl: "https://app.example.com/jazz",
+  driver: { type: "memory" },
+  credential: () => getOidcToken({ audience: "https://app.example.com" }),
+  // A trusted machine opens as a backend. Its token, not a secret, states its access:
+  initial: { backendSecret: "stated-by-backend-credential" },
+});
+// A scoped machine leaves out `initial` and signs in as its user:
+// await session.loginWithBackend();
+```
+
+A backend client's session ends when its token expires, and the client reconnects with a fresh token.
+
+## When there is no OIDC token
+
+Some machines have no OIDC token, such as a developer's laptop or a plain Cloudflare Worker. Others have a different kind of credential: AWS outside EKS signs requests with SigV4. For these, sign in through your app's own auth: have `authenticate` accept a credential your app issues, such as an API key or a token your backend mints for that machine.

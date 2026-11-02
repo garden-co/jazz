@@ -1,5 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { admitBackendSecret } from "./admission.js";
+import {
+  credentialedTransport,
+  type BackendClientCredential,
+} from "../runtime/credentialed-transport.js";
+import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
 import type { BackendRequestOptions } from "./request-auth.js";
 import { NapiDb } from "jazz-napi";
 import { mintLocalFirstTokenFromSeed } from "../runtime/local-first-token.js";
@@ -53,12 +58,24 @@ export type JazzSessionConfig = Omit<
   | "cookieSession"
   | "adminSecret"
   | "serverUrl"
+  | "webSocket"
 > & {
   app: BackendSchemaInput;
   permissions: NonNullable<BackendContextConfig["permissions"]>;
   serverUrl: string;
   store?: AccountStore;
   initial?: "local-first" | BackendAuth;
+  /**
+   * For a backend client (a machine that syncs through an app's main backend,
+   * not a browser): its workload's OIDC token, or a function that returns a
+   * fresh one. It is sent as `Authorization: Bearer` on every request and
+   * socket to `serverUrl`, and the main backend trusts it with
+   * `trustWorkload` (see `createJazz`'s `backendClients`). A scoped machine
+   * then signs in with `loginWithBackend()`; a trusted machine opens with
+   * `initial: { backendSecret: "stated-by-backend-credential" }`, since its
+   * token, not a secret, states its access.
+   */
+  credential?: BackendClientCredential;
 };
 
 export interface JazzClient extends SharedJazzClient {
@@ -92,7 +109,7 @@ class NodeUserRuntimeSource extends RuntimeSource {
     // Native writes already cross the local durability boundary when committed.
   }
   constructor(
-    private readonly host: JazzSessionConfig,
+    private readonly host: JazzSessionConfig & { webSocket?: WebSocketConstructor },
     private readonly account: AccountHandle,
   ) {
     super();
@@ -142,6 +159,7 @@ class NodeUserRuntimeSource extends RuntimeSource {
           : {}),
         selfSignedClientProof: selfSignedClientProofFromConfig(config, session),
         readAuthorizationHost: "client-local",
+        webSocket: this.host.webSocket,
         slowQueryLog: { appId: this.host.appId, thresholdMs: this.host.slowQueryThresholdMs },
         migrations,
       },
@@ -170,8 +188,17 @@ function memoryAccountStore(): AccountStore {
  * across process restarts; service secrets are never persisted there.
  */
 export async function createJazzSession(
-  config: JazzSessionConfig,
+  input: JazzSessionConfig,
 ): Promise<JazzSession<JazzClient>> {
+  if (Object.hasOwn(input, "webSocket")) throw new Error("Use credential instead of webSocket");
+  const transport =
+    input.credential === undefined
+      ? undefined
+      : credentialedTransport(input.serverUrl, input.credential);
+  const config: JazzSessionConfig & { webSocket?: WebSocketConstructor } = {
+    ...input,
+    webSocket: transport?.WebSocket,
+  };
   for (const key of ["backendSecret", "jwtToken", "cookieSession", "adminSecret"]) {
     if (Object.hasOwn(config, key))
       throw new Error(`Use session account actions instead of ${key}`);
@@ -189,6 +216,7 @@ export async function createJazzSession(
     appId: config.appId,
     registry,
     store: config.store ?? memoryAccountStore(),
+    fetch: transport?.fetch,
     mintToken: (secret, audience) =>
       mintLocalFirstTokenFromSeed(authSecretSeedForMinting(secret), audience, 3600),
     backend: {
@@ -196,6 +224,7 @@ export async function createJazzSession(
         await admitBackendSecret(
           `${registry.slice(0, -"/accounts".length)}/backend/admit`,
           backendSecret,
+          { fetch: transport?.fetch },
         );
         return { nodeId: backendNodeId(config) };
       },
