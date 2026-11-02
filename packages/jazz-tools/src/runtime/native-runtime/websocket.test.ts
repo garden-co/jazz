@@ -6,15 +6,13 @@ import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
   FEATURE_PAYLOAD_ZSTD,
-  MAX_WIRE_PROTOCOL_VERSION,
-  MIN_WIRE_PROTOCOL_VERSION,
   WIRE_PROTOCOL_VERSION,
   WebSocketCarrier,
   decodeWireError,
   decodeWebSocketFrameBatch,
   webSocketUrl,
-  encodeWireClientHello,
-  encodeWebSocketPrelude,
+  webSocketUpgradeOffer,
+  webSocketVersionSubprotocol,
   encodeWebSocketFrameBatch,
   isWireHello,
   isWireError,
@@ -42,7 +40,10 @@ describe("admitted websocket policy claims", () => {
     });
     expect(
       policyClaimsForAdmittedWebSocket(
-        JSON.stringify({ jwt_token, backend_session: { claims: { role: "wrong" } } }),
+        JSON.stringify({
+          jwt_token,
+          backend_session: { claims: { role: "wrong" } },
+        }),
       ),
     ).toEqual({ role: "reader", metadata: { enabled: true } });
     expect(
@@ -168,7 +169,6 @@ describe("websocket frame carrier", () => {
     let socket: RecordingWebSocket | undefined;
     const carrier = new WebSocketCarrier({
       endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
-      peerIdentity: new Uint8Array(16),
       onFrame: () => {},
       WebSocket: class extends RecordingWebSocket {
         constructor(url: string) {
@@ -180,7 +180,6 @@ describe("websocket frame carrier", () => {
     });
 
     await carrier.ready();
-    socket!.sent.length = 0;
     const frames = [0x11, 0x22, 0x33].map((sentinel) => {
       const frame = new Uint8Array(600_000);
       frame[0] = sentinel;
@@ -205,69 +204,6 @@ describe("websocket frame carrier", () => {
     expect(webSocketUrl("http://127.0.0.1:4200", "app-a")).toBe(
       "ws://127.0.0.1:4200/apps/app-a/ws",
     );
-  });
-
-  it("encodes the websocket auth prelude as the server AuthHandshake shape", () => {
-    expect(
-      JSON.parse(
-        encodeWebSocketPrelude('{"admin_secret":"s"}', authorBytes("urn:jazz:system", "system")),
-      ),
-    ).toEqual({
-      peer_identity: '["urn:jazz:system","system"]',
-      auth: { sub: "system", admin_secret: "s" },
-      sub: "system",
-      admin_secret: "s",
-    });
-  });
-
-  it("matches the shared websocket prelude v1 fixture", () => {
-    const fixture = JSON.parse(
-      readFileSync(
-        new URL("../../../../../crates/jazz/fixtures/websocket_prelude_v1.json", import.meta.url),
-        "utf8",
-      ),
-    ) as {
-      fixtures: Array<{
-        name: string;
-        writer: string;
-        peer_identity: string;
-        auth_json?: string;
-        requested_link: string;
-        json: string;
-      }>;
-    };
-
-    for (const entry of fixture.fixtures.filter(
-      (candidate) => candidate.writer === "typescript-native-runtime",
-    )) {
-      expect(
-        encodeWebSocketPrelude(
-          entry.auth_json!,
-          new TextEncoder().encode(entry.peer_identity),
-          entry.requested_link === "scope_isolated_client_relay"
-            ? "scope_isolated_client_relay"
-            : undefined,
-        ),
-      ).toBe(entry.json);
-    }
-  });
-
-  it("uses the JWT subject for the websocket auth prelude when present", () => {
-    const token = `header.${btoa(JSON.stringify({ iss: "https://issuer.example", sub: "user-123" }))}.sig`;
-
-    expect(
-      JSON.parse(
-        encodeWebSocketPrelude(
-          JSON.stringify({ jwt_token: token }),
-          authorBytes("https://issuer.example", "user-123"),
-        ),
-      ),
-    ).toEqual({
-      peer_identity: '["https://issuer.example","user-123"]',
-      auth: { sub: "user-123", jwt_token: token },
-      sub: "user-123",
-      jwt_token: token,
-    });
   });
 
   it("derives websocket peer identity from the full canonical session author", () => {
@@ -301,7 +237,6 @@ describe("websocket frame carrier", () => {
         jwt_token: `header.${btoa(JSON.stringify({ iss: "https://issuer.example", sub }))}.signature`,
       });
     expect(peerIdentityForWebSocketAuth(auth("alice"), identity)).toEqual(identity);
-    expect(JSON.parse(encodeWebSocketPrelude(auth("alice"), identity)).peer_identity).toBe(author);
     expect(() => peerIdentityForWebSocketAuth(auth("bob"), identity)).toThrow(
       "context account identity",
     );
@@ -367,7 +302,10 @@ describe("websocket frame carrier", () => {
 
     const actual = new TextDecoder().decode(
       peerIdentityForWebSocketAuth(
-        JSON.stringify({ backend_secret: "not inspected by the client", jwt_token: jwt }),
+        JSON.stringify({
+          backend_secret: "not inspected by the client",
+          jwt_token: jwt,
+        }),
         fallback,
       ),
     );
@@ -401,13 +339,19 @@ describe("websocket frame carrier", () => {
     const fallback = new TextEncoder().encode('["https://jazz.test","admin-cache"]');
     const system = authorBytes("urn:jazz:system", "system");
     const validJwt = `header.${btoa(
-      JSON.stringify({ iss: "https://issuer.example", sub: "provider-subject" }),
+      JSON.stringify({
+        iss: "https://issuer.example",
+        sub: "provider-subject",
+      }),
     )}.signature`;
 
     for (const jwt_token of [validJwt, "forged.token.payload", "malformed-token"]) {
       expect(
         peerIdentityForWebSocketAuth(
-          JSON.stringify({ admin_secret: "not inspected by the client", jwt_token }),
+          JSON.stringify({
+            admin_secret: "not inspected by the client",
+            jwt_token,
+          }),
           fallback,
         ),
       ).toEqual(system);
@@ -428,52 +372,14 @@ describe("websocket frame carrier", () => {
     ).toEqual(system);
   });
 
-  it("uses validated fallback subjects over whitespace raw auth subjects in both handshake shapes", () => {
-    const jwt = `header.${btoa(JSON.stringify({ sub: "jwt-user" }))}.sig`;
-    const cases = [
-      { auth: { sub: " \t ", jwt_token: jwt }, expected: "jwt-user" },
-      {
-        auth: {
-          sub: " \t ",
-          backend_session: {
-            issuer: "https://issuer.example",
-            user_id: "backend-user",
-          },
-        },
-        expected: "backend-user",
-      },
-    ];
-
-    for (const { auth, expected } of cases) {
-      const prelude = JSON.parse(encodeWebSocketPrelude(JSON.stringify(auth), Uint8Array.of(1)));
-      expect(prelude.sub).toBe(expected);
-      expect(prelude.auth.sub).toBe(expected);
-    }
-  });
-
-  it("encodes the client wire hello as a websocket-negotiation frame", () => {
-    const hello = encodeWireClientHello();
-    const reader = new PostcardReader(hello);
-
-    expect(isWireHello(hello)).toBe(true);
-    expect(reader.u64()).toBe(0);
-    expect(reader.u64()).toBe(MIN_WIRE_PROTOCOL_VERSION);
-    expect(reader.u64()).toBe(MAX_WIRE_PROTOCOL_VERSION);
-    expect(reader.u64()).toBe(CLIENT_WIRE_FEATURES);
-    expect(reader.u64()).toBe(0);
-    expect(reader.option((authority) => authority.bytes(false))).toBeUndefined();
-
-    const suffixed = Uint8Array.from([...hello, 0]);
-    expect(new PostcardReader(suffixed).u64()).toBe(0);
-    expect(() => isWireHello(suffixed)).toThrow("WireFrame::Hello has trailing postcard bytes");
-  });
-
   it("rejects a server codec that this native artifact did not advertise", async () => {
     const localFeatures = CLIENT_WIRE_FEATURES & ~FEATURE_PAYLOAD_ZSTD;
     const { carrier, socket } = carrierForTest({ features: localFeatures });
     socket.emitMessage(
       encodeWebSocketFrameBatch([
-        encodeServerHello(1n, WIRE_PROTOCOL_VERSION, { features: CLIENT_WIRE_FEATURES }),
+        encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+          features: CLIENT_WIRE_FEATURES,
+        }),
       ]),
     );
     await expect(carrier.ready()).rejects.toThrow("server accepted unsupported wire features 0x10");
@@ -494,7 +400,6 @@ describe("websocket frame carrier", () => {
       let socket: MessageWebSocket | undefined;
       const carrier = new WebSocketCarrier({
         endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
-        peerIdentity: new Uint8Array(16),
         onFrame: () => {},
         WebSocket: class extends MessageWebSocket {
           constructor(url: string) {
@@ -535,17 +440,23 @@ describe("websocket frame carrier", () => {
       },
       {
         name: "unsupported low feature bit",
-        frame: encodeServerHello(1n, WIRE_PROTOCOL_VERSION, { features: 1n << 1n }),
+        frame: encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+          features: 1n << 1n,
+        }),
         error: "server accepted unsupported wire features 0x2",
       },
       {
         name: "unsupported bit 32",
-        frame: encodeServerHello(1n, WIRE_PROTOCOL_VERSION, { features: 1n << 32n }),
+        frame: encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+          features: 1n << 32n,
+        }),
         error: "server accepted unsupported wire features 0x100000000",
       },
       {
         name: "unsupported high feature bit",
-        frame: encodeServerHello(1n, WIRE_PROTOCOL_VERSION, { features: 1n << 63n }),
+        frame: encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+          features: 1n << 63n,
+        }),
         error: "server accepted unsupported wire features 0x8000000000000000",
       },
     ];
@@ -564,7 +475,9 @@ describe("websocket frame carrier", () => {
       socket.emitMessage(
         encodeWebSocketFrameBatch([encodeServerHello(1n, WIRE_PROTOCOL_VERSION, { features })]),
       );
-      await expect(carrier.ready()).resolves.toMatchObject({ features: Number(features) });
+      await expect(carrier.ready()).resolves.toMatchObject({
+        features: Number(features),
+      });
       carrier.close();
     }
   });
@@ -635,18 +548,16 @@ describe("websocket frame carrier", () => {
     expect(socket.closed).toBe(true);
   });
 
-  it("sends an authority-unbound hello first on every reconnect", async () => {
+  it("offers its version in the upgrade and sends nothing ahead of the session on every reconnect", async () => {
     const sockets: RecordingWebSocket[] = [];
-    const peerIdentity = Uint8Array.from({ length: 16 }, (_, index) => index + 1);
     const WebSocket = class extends RecordingWebSocket {
-      constructor(url: string) {
-        super(url, (socket) => sockets.push(socket));
+      constructor(url: string, protocols?: unknown) {
+        super(url, (socket) => sockets.push(socket), protocols);
       }
     };
 
     const first = new WebSocketCarrier({
       endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
-      peerIdentity,
       onFrame: () => {},
       WebSocket,
     });
@@ -654,31 +565,80 @@ describe("websocket frame carrier", () => {
     first.close();
     const second = new WebSocketCarrier({
       endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
-      peerIdentity,
       onFrame: () => {},
       WebSocket,
     });
     await second.ready();
 
-    const hello = (socket: RecordingWebSocket) => {
-      expect(socket.sent[0]).toEqual(encodeWebSocketPrelude("{}", peerIdentity));
-      const frame = decodeWebSocketFrameBatch(socket.sent[1] as Uint8Array)[0]!;
-      const reader = new PostcardReader(frame);
-      expect(reader.u64()).toBe(0);
-      reader.u64();
-      reader.u64();
-      reader.u64();
-      reader.u64();
-      return reader.option((authority) => authority.bytes(false));
-    };
-    expect(hello(sockets[0]!)).toBeUndefined();
-    expect(hello(sockets[1]!)).toBeUndefined();
+    for (const socket of sockets) {
+      expect(socket.protocols).toEqual([webSocketVersionSubprotocol(CLIENT_WIRE_FEATURES)]);
+      expect(socket.sent).toEqual([]);
+    }
     const firstNegotiation = await first.ready();
     const secondNegotiation = await second.ready();
     expect(firstNegotiation.authority?.node).toEqual(Uint8Array.from({ length: 16 }, () => 0x5e));
     expect(secondNegotiation.authority?.epoch).toBeGreaterThan(
       firstNegotiation.authority?.epoch ?? 0n,
     );
+  });
+
+  it("puts the credential on the upgrade: a bearer as a subprotocol, secrets as headers", () => {
+    const version = webSocketVersionSubprotocol(CLIENT_WIRE_FEATURES);
+    const jwt = `header.${Buffer.from(JSON.stringify({ sub: "alice" })).toString("base64url")}.sig`;
+    expect(webSocketUpgradeOffer(JSON.stringify({ jwt_token: jwt }))).toEqual({
+      protocols: [version, `jazz.bearer.${jwt}`],
+      headers: {},
+    });
+    expect(
+      webSocketUpgradeOffer(
+        JSON.stringify({ jwt_token: jwt }),
+        CLIENT_WIRE_FEATURES,
+        "scope_isolated_client_relay",
+      ).protocols,
+    ).toEqual([version, "jazz.link.scope_isolated_client_relay", `jazz.bearer.${jwt}`]);
+    expect(webSocketUpgradeOffer(JSON.stringify({ admin_secret: "a" }))).toEqual({
+      protocols: [version],
+      headers: { "x-jazz-admin-secret": "a" },
+    });
+    const session = {
+      issuer: "https://issuer.example",
+      user_id: "alice",
+      claims: {},
+    };
+    const backend = webSocketUpgradeOffer(
+      JSON.stringify({ backend_secret: "b", backend_session: session }),
+    );
+    expect(backend.headers["x-jazz-backend-secret"]).toBe("b");
+    expect(
+      JSON.parse(Buffer.from(backend.headers["x-jazz-session"]!, "base64").toString()),
+    ).toEqual(session);
+    // A browser of a createJazz backend holds its session without the
+    // secret: it names its user for the backend to check, and nothing more.
+    expect(webSocketUpgradeOffer(JSON.stringify({ backend_session: session }))).toEqual({
+      protocols: [version, `jazz.user.${Buffer.from("alice").toString("base64url")}`],
+      headers: {},
+    });
+  });
+
+  it("hands upgrade headers to a constructor as Node's WebSocket takes them", () => {
+    const received: unknown[] = [];
+    new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      authJson: JSON.stringify({ admin_secret: "a" }),
+      onFrame: () => {},
+      WebSocket: class extends MessageWebSocket {
+        constructor(url: string, protocols?: unknown) {
+          super(url);
+          received.push(protocols);
+        }
+      },
+    });
+    expect(received).toEqual([
+      {
+        protocols: [webSocketVersionSubprotocol(CLIENT_WIRE_FEATURES)],
+        headers: { "x-jazz-admin-secret": "a" },
+      },
+    ]);
   });
 
   it("preserves full u64 server authority epochs across stale/current hellos", async () => {
@@ -693,14 +653,12 @@ describe("websocket frame carrier", () => {
     };
     const stale = new WebSocketCarrier({
       endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
-      peerIdentity: new Uint8Array(16),
       onFrame: () => {},
       WebSocket,
     });
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(staleEpoch)]));
     const current = new WebSocketCarrier({
       endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
-      peerIdentity: new Uint8Array(16),
       onFrame: () => {},
       WebSocket,
     });
@@ -722,28 +680,34 @@ describe("websocket frame carrier", () => {
     );
   });
 
-  it("does not send or deliver semantic frames before the server hello", async () => {
-    let socket: MessageWebSocket | undefined;
+  it("sends as soon as the socket opens but delivers nothing before the server hello", async () => {
+    let socket: RecordingWebSocket | undefined;
     const delivered: Uint8Array[] = [];
     const carrier = new WebSocketCarrier({
       endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
-      peerIdentity: new Uint8Array(16),
       onFrame: (frame) => delivered.push(frame),
-      WebSocket: class extends MessageWebSocket {
+      WebSocket: class extends RecordingWebSocket {
         constructor(url: string) {
           super(url, (created) => {
             socket = created;
           });
+          this.autoHello = false;
         }
       },
     });
 
+    await carrier.opened();
+    await carrier.send(Uint8Array.of(7));
+    expect(socket!.sent).toHaveLength(1);
+    expect(decodeWebSocketFrameBatch(socket!.sent[0] as Uint8Array)).toEqual([Uint8Array.of(7)]);
+    expect(carrier.hasNegotiated).toBe(false);
+
     socket!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.of(1, 6, 0, 0)]));
     await expect(carrier.ready()).rejects.toThrow("before server hello");
-    await expect(carrier.send(Uint8Array.of(1))).rejects.toThrow("before server hello");
     expect(delivered).toEqual([]);
     expect(socket!.closed).toBe(true);
   });
+
   it("rejects readiness when intentionally closed before server hello and ignores late socket events", async () => {
     vi.useFakeTimers();
     try {
@@ -752,7 +716,6 @@ describe("websocket frame carrier", () => {
       const terminals: unknown[] = [];
       const carrier = new WebSocketCarrier({
         endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
-        peerIdentity: new Uint8Array(16),
         onFrame: () => {},
         onError: (error) => errors.push(error),
         onTerminal: (error) => terminals.push(error),
@@ -806,7 +769,6 @@ describe("websocket frame carrier", () => {
     const errors: unknown[] = [];
     const carrier = new WebSocketCarrier({
       endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
-      peerIdentity: new Uint8Array(16),
       onFrame: (frame) => frames.push(frame),
       onError: (error) => errors.push(error),
       WebSocket: class extends MessageWebSocket {
@@ -837,7 +799,6 @@ describe("websocket frame carrier", () => {
     const errors: unknown[] = [];
     const carrier = new WebSocketCarrier({
       endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
-      peerIdentity: new Uint8Array(16),
       onFrame: () => {},
       onError: (error) => errors.push(error),
       WebSocket: class extends MessageWebSocket {
@@ -867,7 +828,6 @@ describe("websocket frame carrier", () => {
     const errors: unknown[] = [];
     const carrier = new WebSocketCarrier({
       endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
-      peerIdentity: new Uint8Array(16),
       onFrame: () => {},
       onError: (error) => errors.push(error),
       WebSocket: class extends MessageWebSocket {
@@ -885,7 +845,11 @@ describe("websocket frame carrier", () => {
 
     await expect(carrier.ready()).rejects.toMatchObject({
       name: "PreHelloWireError",
-      wireError: { code: "not_ready", retry: "later", message: "catalogue bootstrapping" },
+      wireError: {
+        code: "not_ready",
+        retry: "later",
+        message: "catalogue bootstrapping",
+      },
     });
     expect(errors).toEqual([
       { code: "not_ready", retry: "later", message: "catalogue bootstrapping" },
@@ -927,7 +891,6 @@ describe("websocket frame carrier", () => {
     const errors: unknown[] = [];
     new WebSocketCarrier({
       endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
-      peerIdentity: new Uint8Array(16),
       onFrame: (frame) => frames.push(frame),
       onError: (error) => errors.push(error),
       WebSocket: class extends MessageWebSocket {
@@ -1075,7 +1038,6 @@ function carrierForTest(options: { features?: number } = {}): {
   let socket: MessageWebSocket | undefined;
   const carrier = new WebSocketCarrier({
     endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
-    peerIdentity: new Uint8Array(16),
     features: options.features,
     onFrame: () => {},
     WebSocket: class extends MessageWebSocket {
@@ -1143,19 +1105,24 @@ class MessageWebSocket {
   }
 }
 
+/** A socket whose server admits the session: its Hello follows the upgrade. */
 class RecordingWebSocket extends MessageWebSocket {
   sent: Array<Uint8Array | string> = [];
+  readonly protocols: unknown;
+  autoHello = true;
 
-  constructor(url: string, onCreate?: (socket: RecordingWebSocket) => void) {
+  constructor(url: string, onCreate?: (socket: RecordingWebSocket) => void, protocols?: unknown) {
     super(url);
+    this.protocols = protocols;
     onCreate?.(this);
+    queueMicrotask(() => {
+      if (!this.autoHello) return;
+      this.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(RecordingWebSocket.epoch++)]));
+    });
   }
 
   override send(data: Uint8Array | string): void {
     this.sent.push(data);
-    if (data instanceof Uint8Array && isWireHello(decodeWebSocketFrameBatch(data)[0]!)) {
-      this.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(RecordingWebSocket.epoch++)]));
-    }
   }
 
   private static epoch = 1n;

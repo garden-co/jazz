@@ -18,8 +18,6 @@ code that defines its format.
 - `snapshot_ref_v1.json`: snapshot reference codec.
 - `sqlite_sync_wire_v1.json`: the sync wire corpus (`sync_wire_corpus.rs`,
   `wire-frame-artifact-corpus.test.ts`).
-- `websocket_prelude_v1.json`: WebSocket v1 admission preludes (the one JSON
-  message before binary wire frames).
 - `wire_frame_artifact_corpus_v6.json`, `wire_hello_frames_v6.json`,
   `wire_message_frames_v6.json`: the wire v6 frame corpora.
 - `sqlite-storage-v1/`: stores written by storage format 1 (see its README).

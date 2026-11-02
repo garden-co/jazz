@@ -92,8 +92,27 @@ async fn serve_stalled_server_hello() -> (
         let (stream, _) = listener.accept().await.expect("accept stalled hello");
         let _ = accepted_tx.send(());
         tokio::time::sleep(Duration::from_secs(3)).await;
-        let _ws = tokio_tungstenite::accept_async(stream)
-            .await
+        // Select the offered version as the server does, so only the
+        // missing Hello is under test.
+        let _ws = tokio_tungstenite::accept_hdr_async(
+            stream,
+            |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+             mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                let offered = request.headers()["sec-websocket-protocol"]
+                    .to_str()
+                    .unwrap()
+                    .split(',')
+                    .next()
+                    .unwrap()
+                    .trim()
+                    .to_owned();
+                response
+                    .headers_mut()
+                    .insert("sec-websocket-protocol", offered.parse().unwrap());
+                Ok(response)
+            },
+        )
+        .await
             .expect("complete delayed websocket upgrade");
         let _ = upgraded_tx.send(());
         std::future::pending::<()>().await;
@@ -106,13 +125,7 @@ async fn stalled_http_upgrade_reports_handshake_timeout() {
     let app_id = AppId::from_name("adapter-stalled-http-upgrade");
     let (url, task, accepted) = serve_stalled_http_upgrade().await;
     let mut connection = tokio::spawn(async move {
-        WebSocketTransport::connect(
-            url,
-            app_id,
-            jazz::ids::AuthorSubject::SYSTEM,
-            transport_auth("secret"),
-        )
-        .await
+        WebSocketTransport::connect(url, app_id, transport_auth("secret")).await
     });
     tokio::time::timeout(Duration::from_secs(1), accepted)
         .await
@@ -140,13 +153,7 @@ async fn stalled_server_hello_uses_the_original_establishment_deadline() {
     let app_id = AppId::from_name("adapter-stalled-server-hello");
     let (url, task, accepted, upgraded) = serve_stalled_server_hello().await;
     let mut connection = tokio::spawn(async move {
-        WebSocketTransport::connect(
-            url,
-            app_id,
-            jazz::ids::AuthorSubject::SYSTEM,
-            transport_auth("secret"),
-        )
-        .await
+        WebSocketTransport::connect(url, app_id, transport_auth("secret")).await
     });
     tokio::time::timeout(Duration::from_secs(1), accepted)
         .await
@@ -189,7 +196,6 @@ async fn refused_tcp_connection_remains_connect_error() {
     let error = WebSocketTransport::connect(
         format!("http://{address}"),
         AppId::from_name("adapter-refused-tcp-connection"),
-        jazz::ids::AuthorSubject::SYSTEM,
         transport_auth("secret"),
     )
     .await
@@ -209,14 +215,9 @@ async fn core_websocket_transport_helper_negotiates_route_hello() {
             .with_auth_config(auth("secret")),
     )
     .await;
-    let client = WebSocketTransport::connect(
-        url,
-        app_id,
-        jazz::ids::AuthorSubject::SYSTEM,
-        transport_auth("secret"),
-    )
-    .await
-    .expect("native transport negotiates public route");
+    let client = WebSocketTransport::connect(url, app_id, transport_auth("secret"))
+        .await
+        .expect("native transport negotiates public route");
     let (protocol_version, _) = client.negotiated_transport_metadata();
     assert_eq!(protocol_version, jazz::wire::WIRE_PROTOCOL_VERSION);
     task.abort();
@@ -320,15 +321,10 @@ async fn websocket_transport_wakes_only_for_inbound_db_work() {
             wakes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         })
     };
-    let mut client = WebSocketTransport::connect_with_wake(
-        url,
-        app_id,
-        jazz::ids::AuthorSubject::SYSTEM,
-        transport_auth("secret"),
-        callback,
-    )
-    .await
-    .expect("connect");
+    let mut client =
+        WebSocketTransport::connect_with_wake(url, app_id, transport_auth("secret"), callback)
+            .await
+            .expect("connect");
     client.send_frame(Vec::new()).expect("queue outbound");
     assert_eq!(
         wakes.load(std::sync::atomic::Ordering::SeqCst),

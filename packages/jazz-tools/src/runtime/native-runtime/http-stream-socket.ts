@@ -1,11 +1,19 @@
 import type { BrowserWebSocket, WebSocketConstructor } from "./websocket.js";
+import {
+  HTTP_STREAM_PROTOCOL_HEADER,
+  upgradeOfferFromInit,
+  type WebSocketInitWithHeaders,
+  type WebSocketUpgradeOffer,
+} from "./upgrade-offer.js";
 
 /**
  * The HTTP stream transport: a WebSocket-shaped session over plain requests,
  * for hosts that can't upgrade a same-origin socket (such as `next dev`).
  *
- * - `POST <base>/apps/<appId>/stream` opens a session. Its response body is a
- *   stream of records; the first carries the session id.
+ * - `POST <base>/apps/<appId>/stream` opens a session. It offers the
+ *   socket's subprotocols in `X-Jazz-Protocol` (a page can't set
+ *   `Sec-WebSocket-Protocol` on a fetch). Its response body is a stream of
+ *   records; the first carries the session id.
  * - `POST <base>/apps/<appId>/stream/<session>` passes messages to the core,
  *   as records in the request body, in order.
  * - `DELETE <base>/apps/<appId>/stream/<session>` ends the session.
@@ -110,10 +118,12 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
   private session: { id: string; key: string } | undefined;
   private queued: Uint8Array[] = [];
   private sending = false;
+  private readonly offer: WebSocketUpgradeOffer;
 
-  constructor(url: string) {
+  constructor(url: string, protocols?: string | string[] | WebSocketInitWithHeaders) {
     super();
     this.streamUrl = streamUrlForSocketUrl(url);
+    this.offer = upgradeOfferFromInit(protocols);
     void this.run();
   }
 
@@ -142,6 +152,12 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
       const response = await fetch(this.streamUrl, {
         method: "POST",
         credentials: "same-origin",
+        headers: {
+          ...this.offer.headers,
+          ...(this.offer.protocols.length > 0
+            ? { [HTTP_STREAM_PROTOCOL_HEADER]: this.offer.protocols.join(", ") }
+            : {}),
+        },
         signal: this.abort.signal,
       });
       if (!response.ok || !response.body) {
@@ -167,7 +183,10 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
 
   private receive(kind: number, payload: Uint8Array): void {
     if (kind === STREAM_RECORD_SESSION) {
-      this.session = JSON.parse(textDecoder.decode(payload)) as { id: string; key: string };
+      this.session = JSON.parse(textDecoder.decode(payload)) as {
+        id: string;
+        key: string;
+      };
       this.readyState = 1;
       this.emit("open");
     } else if (kind === STREAM_RECORD_MESSAGE) {
@@ -262,10 +281,13 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
     /** The native socket failed and we're asking whether to use the stream. */
     private probing = false;
 
-    constructor(private readonly url: string) {
+    constructor(
+      private readonly url: string,
+      private readonly protocols?: string | string[] | WebSocketInitWithHeaders,
+    ) {
       super();
       const stream = streamEndpoints.has(url);
-      this.inner = stream ? new HttpStreamSocket(url) : this.openNative();
+      this.inner = stream ? new HttpStreamSocket(url, protocols) : this.openNative();
       if (stream) this.forward(this.inner);
     }
 
@@ -285,7 +307,7 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
     }
 
     private openNative(): BrowserWebSocket {
-      const socket = new native(this.url);
+      const socket = new native(this.url, this.protocols);
       socket.binaryType = "arraybuffer";
       let opened = false;
       let failure: { error?: unknown; close?: unknown } | undefined;
@@ -303,7 +325,7 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
           this.settled = true;
           if (stream) {
             streamEndpoints.add(this.url);
-            this.inner = new HttpStreamSocket(this.url);
+            this.inner = new HttpStreamSocket(this.url, this.protocols);
             this.forward(this.inner);
             return;
           }

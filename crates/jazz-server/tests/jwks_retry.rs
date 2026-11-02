@@ -7,13 +7,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use base64::Engine;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use jazz::account_registry::AccountId;
-use jazz::ids::AuthorSubject;
 use jazz::tools::public_schema::Schema;
 use jazz::wire::{
-    FEATURE_NONE, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
-    decode_frame, decode_websocket_frame_batch, encode_frame, encode_websocket_frame_batch,
+    WireError, WireErrorCode, WireFrame, WireRetry, decode_frame, decode_websocket_frame_batch,
 };
 use jazz_server::{JazzServer, TEST_JWT_AUDIENCE, TEST_JWT_ISSUER};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -21,7 +19,10 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async,
+    tungstenite::{Message, client::IntoClientRequest as _},
+};
 use uuid::Uuid;
 
 const SIGNING_KEY: &str = "synthetic-jwks-retry-test-signing-key";
@@ -123,32 +124,29 @@ fn token(subject: &str, signing_key: &str) -> String {
     .expect("mint synthetic JWT")
 }
 
-async fn connect(server: &JazzServer, subject: &str, token: &str, account: AccountId) -> Socket {
-    let identity = AuthorSubject::authenticated(TEST_JWT_ISSUER, subject)
-        .expect("synthetic issuer and subject")
-        .with_account(account);
+/// Open a session the way a client does: the version offer and the bearer
+/// token ride on the upgrade. The server derives the peer identity (subject
+/// and account) from the token, so the test only names them for readers.
+async fn connect(server: &JazzServer, _subject: &str, token: &str, _account: AccountId) -> Socket {
     let url = format!(
         "{}/apps/{}/ws",
         server.base_url().replace("http://", "ws://"),
         server.app_id(),
     );
-    let (mut socket, _) = bounded("opening the WebSocket", connect_async(url))
+    let mut request = url.into_client_request().expect("ws request");
+    request.headers_mut().insert(
+        "sec-websocket-protocol",
+        jazz::wire::ws_version_subprotocol(jazz::wire::current_wire_features())
+            .parse()
+            .expect("subprotocol header"),
+    );
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {token}").parse().expect("bearer header"),
+    );
+    let (socket, _) = bounded("opening the WebSocket", connect_async(request))
         .await
         .expect("open WebSocket");
-    bounded(
-        "sending the auth prelude",
-        socket.send(Message::Binary(
-            json!({
-                "peer_identity": identity.canonical(),
-                "auth": { "jwt_token": token },
-            })
-            .to_string()
-            .into_bytes()
-            .into(),
-        )),
-    )
-    .await
-    .expect("send auth prelude");
     socket
 }
 
@@ -243,16 +241,7 @@ async fn rotated_key_outage_is_retryable_without_disabling_cached_keys() {
         StatusCode::SERVICE_UNAVAILABLE,
     );
 
-    let hello = WireFrame::Hello(WireHello::current(WirePeerRole::Client, FEATURE_NONE));
-    let hello_bytes = encode_websocket_frame_batch(&[encode_frame(&hello).expect("encode hello")])
-        .expect("encode hello batch");
     let mut alice = connect(&server, "alice", &alice_token, account).await;
-    bounded(
-        "sending the cached-key client hello",
-        alice.send(Message::Binary(hello_bytes.clone().into())),
-    )
-    .await
-    .expect("send cached-key hello");
     assert!(matches!(receive(&mut alice).await, WireFrame::Hello(_)));
     bounded("closing the cached-key session", alice.close(None))
         .await
@@ -262,12 +251,6 @@ async fn rotated_key_outage_is_retryable_without_disabling_cached_keys() {
     // The public server retains its ten-second forced-refresh cooldown.
     tokio::time::sleep(Duration::from_millis(10_100)).await;
     let mut alice = connect(&server, "alice", &rotated_token, account).await;
-    bounded(
-        "sending the rotated-key client hello",
-        alice.send(Message::Binary(hello_bytes.into())),
-    )
-    .await
-    .expect("send rotated-key hello");
     assert!(matches!(receive(&mut alice).await, WireFrame::Hello(_)));
     bounded("closing the rotated-key session", alice.close(None))
         .await
@@ -389,17 +372,6 @@ async fn jwks_outage_is_retryable_and_recovery_preserves_credential_denials() {
         AccountId(assignment.account),
     )
     .await;
-    let hello = WireFrame::Hello(WireHello::current(WirePeerRole::Client, FEATURE_NONE));
-    bounded(
-        "sending the client hello",
-        alice.send(Message::Binary(
-            encode_websocket_frame_batch(&[encode_frame(&hello).expect("encode client hello")])
-                .expect("encode hello batch")
-                .into(),
-        )),
-    )
-    .await
-    .expect("send client hello");
     assert!(matches!(receive(&mut alice).await, WireFrame::Hello(_)));
     bounded("closing Alice's session", alice.close(None))
         .await

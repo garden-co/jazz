@@ -908,6 +908,126 @@ pub fn decode_hello_frame(bytes: &[u8]) -> Result<WireHello, WireError> {
     }
 }
 
+/// Prefix of every Jazz WebSocket subprotocol token.
+pub const WS_SUBPROTOCOL_PREFIX: &str = "jazz.";
+/// Prefix of the subprotocol token that carries a browser-held bearer token
+/// (a browser cannot set `Authorization` on a WebSocket upgrade).
+pub const WS_SUBPROTOCOL_BEARER_PREFIX: &str = "jazz.bearer.";
+/// Prefix of the subprotocol token that requests a link kind other than an
+/// ordinary session.
+pub const WS_SUBPROTOCOL_LINK_PREFIX: &str = "jazz.link.";
+/// The request header the HTTP stream transport offers the same tokens in:
+/// a browser `fetch` may not set `Sec-` headers.
+pub const HTTP_STREAM_PROTOCOL_HEADER: &str = "x-jazz-protocol";
+
+/// The version token a client offers: `jazz.<protocol version>.<features in hex>`.
+///
+/// A WebSocket negotiates the wire in its upgrade: the client offers this
+/// token, the server selects it in the 101 response, and the client sends
+/// sync frames as soon as the socket opens (SPEC 8 §8.1.1).
+pub fn ws_version_subprotocol(features: WireFeatures) -> String {
+    format!("{WS_SUBPROTOCOL_PREFIX}{WIRE_PROTOCOL_VERSION}.{features:x}")
+}
+
+/// The bearer token a browser offers as a subprotocol.
+pub fn ws_bearer_subprotocol(token: &str) -> String {
+    format!("{WS_SUBPROTOCOL_BEARER_PREFIX}{token}")
+}
+
+/// One offered `jazz.<version>.<features>` token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WsVersionOffer {
+    /// The token exactly as offered; the server selects it unchanged.
+    pub token: String,
+    /// Offered protocol version.
+    pub version: u16,
+    /// Offered optional features.
+    pub features: WireFeatures,
+}
+
+/// What a client offered in `Sec-WebSocket-Protocol` (or, on the HTTP stream
+/// transport, in [`HTTP_STREAM_PROTOCOL_HEADER`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WsSubprotocolOffer {
+    /// The version tokens, in the client's order of preference.
+    pub versions: Vec<WsVersionOffer>,
+    /// A bearer token for the session, from `jazz.bearer.<token>`.
+    pub bearer: Option<String>,
+    /// A requested link kind, from `jazz.link.<name>`.
+    pub link: Option<String>,
+}
+
+impl WsSubprotocolOffer {
+    /// Parse comma-separated header values. Tokens without the `jazz.` prefix
+    /// are ignored; a repeated bearer or link token is refused.
+    pub fn parse<'a>(values: impl IntoIterator<Item = &'a str>) -> Result<Self, WireError> {
+        let mut offer = Self::default();
+        let refuse =
+            |message: String| WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, message);
+        for token in values
+            .into_iter()
+            .flat_map(|value| value.split(','))
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        {
+            if let Some(bearer) = token.strip_prefix(WS_SUBPROTOCOL_BEARER_PREFIX) {
+                if offer.bearer.replace(bearer.to_owned()).is_some() {
+                    return Err(refuse("more than one jazz.bearer subprotocol".to_owned()));
+                }
+            } else if let Some(link) = token.strip_prefix(WS_SUBPROTOCOL_LINK_PREFIX) {
+                if offer.link.replace(link.to_owned()).is_some() {
+                    return Err(refuse("more than one jazz.link subprotocol".to_owned()));
+                }
+            } else if let Some(rest) = token.strip_prefix(WS_SUBPROTOCOL_PREFIX) {
+                let Some((version, features)) = rest.split_once('.') else {
+                    continue;
+                };
+                let (Ok(version), Ok(features)) =
+                    (version.parse::<u16>(), u64::from_str_radix(features, 16))
+                else {
+                    continue;
+                };
+                offer.versions.push(WsVersionOffer {
+                    token: token.to_owned(),
+                    version,
+                    features,
+                });
+            }
+        }
+        Ok(offer)
+    }
+
+    /// The version token the server selects in its 101 response: the first
+    /// offered version this build speaks, else the first offered at all (the
+    /// session then ends with `UnsupportedProtocolVersion`, which a client can
+    /// read only once the socket opened).
+    pub fn selected(&self) -> Option<&WsVersionOffer> {
+        self.versions
+            .iter()
+            .find(|offer| offer.version == WIRE_PROTOCOL_VERSION)
+            .or_else(|| self.versions.first())
+    }
+
+    /// Negotiate from the selected version token.
+    pub fn negotiate(&self, local_features: WireFeatures) -> Result<WireNegotiated, WireError> {
+        let Some(offer) = self.selected() else {
+            return Err(WireError::new(
+                WireErrorCode::UnsupportedProtocolVersion,
+                WireRetry::Never,
+                format!(
+                    "no jazz.<version>.<features> websocket subprotocol offered; this server speaks {}",
+                    ws_version_subprotocol(local_features)
+                ),
+            ));
+        };
+        check_wire_protocol_range(offer.version, offer.version)?;
+        Ok(WireNegotiated {
+            protocol_version: WIRE_PROTOCOL_VERSION,
+            features: offer.features & local_features,
+        })
+    }
+}
+
 /// Negotiate the sole wire version and optional feature intersection.
 pub fn negotiate_wire(
     remote: &WireHello,
@@ -942,6 +1062,38 @@ mod tests {
                 payload,
             },
         })
+    }
+
+    #[test]
+    fn websocket_subprotocol_offer_selects_this_version_and_intersects_features() {
+        let offered = format!(
+            "jazz.7.ff, {}, jazz.bearer.aaa.bbb.ccc, jazz.link.scope_isolated_client_relay, chat",
+            super::ws_version_subprotocol(0x288)
+        );
+        let offer = super::WsSubprotocolOffer::parse([offered.as_str()]).expect("parse");
+        assert_eq!(offer.versions.len(), 2);
+        assert_eq!(offer.selected().expect("selected").token, "jazz.6.288");
+        assert_eq!(offer.bearer.as_deref(), Some("aaa.bbb.ccc"));
+        assert_eq!(offer.link.as_deref(), Some("scope_isolated_client_relay"));
+        let negotiated = offer.negotiate(0x280).expect("negotiate");
+        assert_eq!(negotiated.protocol_version, super::WIRE_PROTOCOL_VERSION);
+        assert_eq!(negotiated.features, 0x280);
+    }
+
+    #[test]
+    fn websocket_subprotocol_offer_refuses_other_versions_and_duplicates() {
+        let other = super::WsSubprotocolOffer::parse(["jazz.7.0"]).expect("parse");
+        assert_eq!(other.selected().expect("selected").token, "jazz.7.0");
+        assert_eq!(
+            other.negotiate(0).unwrap_err().code,
+            super::WireErrorCode::UnsupportedProtocolVersion
+        );
+        let none = super::WsSubprotocolOffer::parse(Vec::<&str>::new()).expect("parse");
+        assert_eq!(
+            none.negotiate(0).unwrap_err().code,
+            super::WireErrorCode::UnsupportedProtocolVersion
+        );
+        assert!(super::WsSubprotocolOffer::parse(["jazz.bearer.a", "jazz.bearer.b"]).is_err());
     }
 
     #[test]

@@ -894,7 +894,10 @@ export class NativeRuntimeAdapter implements Runtime {
   private linkStepping = false;
   /** The attempt the link machine is waiting to hear from. */
   private linkAttemptId: number | null = null;
-  private linkTimer: { token: number; handle: ReturnType<typeof setTimeout> } | null = null;
+  private linkTimer: {
+    token: number;
+    handle: ReturnType<typeof setTimeout>;
+  } | null = null;
   /** Settles `serverCarrierPromise` while the link is not live. */
   private linkConnection: {
     resolve: (carrier: WebSocketCarrier) => void;
@@ -1530,7 +1533,10 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private readSyncStatus(): RuntimeSyncStatus {
-    return { link: this.upstreamLinkStatus(), pendingUploads: this.pendingUploadCount() };
+    return {
+      link: this.upstreamLinkStatus(),
+      pendingUploads: this.pendingUploadCount(),
+    };
   }
 
   private readRemoteLinkState(): RemoteLinkState {
@@ -2790,7 +2796,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverConnectionGeneration += 1;
     const generation = this.serverConnectionGeneration;
     const features = this.nativeWireFeatures();
-    const transportIdentity = peerIdentityForWebSocketAuth(normalizedAuthJson, this.peerIdentity);
     // A published outage stays visible to Global readers until a retry
     // actually reconnects; each failed attempt must not hide it again.
     if (!this.linkStatus?.outagePublished) this.forgetServerTransportError();
@@ -2812,7 +2817,6 @@ export class NativeRuntimeAdapter implements Runtime {
     };
     const carrier = new WebSocketCarrier({
       endpointUrl: url,
-      peerIdentity: transportIdentity,
       features,
       authJson: normalizedAuthJson,
       requestedLink: this.scopeIsolatedRelay ? "scope_isolated_client_relay" : undefined,
@@ -2867,13 +2871,16 @@ export class NativeRuntimeAdapter implements Runtime {
       generation === this.serverConnectionGeneration &&
       carrier === this.serverCarrier &&
       attempt === this.serverConnectionAttempt;
-    const ready = Promise.race([
-      carrier.ready(),
+    // The wire was negotiated in the upgrade, so the session starts as soon
+    // as the socket opens: the first reads and writes ride the same round
+    // trip as admission. The server's Hello then says it admitted them.
+    const opened = Promise.race([
+      carrier.opened(),
       terminal.then((error): never => {
         throw error;
       }),
     ]);
-    void ready
+    void opened
       .then(async (negotiation) => {
         if (!current()) {
           carrier.close();
@@ -2896,7 +2903,10 @@ export class NativeRuntimeAdapter implements Runtime {
         });
         attempt.admission = admission;
         const outcome = await Promise.race([
-          admission.then((transport) => ({ type: "admitted" as const, transport })),
+          admission.then((transport) => ({
+            type: "admitted" as const,
+            transport,
+          })),
           terminal.then((error) => ({ type: "terminal" as const, error })),
         ]);
         // The attempt already ended and reported why.
@@ -2918,6 +2928,13 @@ export class NativeRuntimeAdapter implements Runtime {
         const firstPump = this.pumpServerTransport();
         firstPump.catch((error) => this.handleServerTransportError(error, generation));
         this.pumpSubscriptions();
+        // A refusal (an Error frame where the Hello belongs, or the socket
+        // ending first) already ended the attempt through `end`.
+        const admitted = await carrier.ready().then(
+          () => true,
+          () => false,
+        );
+        if (!admitted || !current()) return;
         this.stepLink({ type: "admitted", attempt: id });
         // Waiters resume once the new link's first pump pass has run, or has
         // yielded to a core tick that other work holds.
@@ -2931,7 +2948,10 @@ export class NativeRuntimeAdapter implements Runtime {
         // A handshake or admission that fails on this side cannot succeed by
         // retrying; a refusal from the server already ended the attempt.
         const failure = error instanceof Error ? error : new Error(errorMessage(error));
-        this.endLinkAttempt(attempt, failure, { kind: "fatal", message: failure.message });
+        this.endLinkAttempt(attempt, failure, {
+          kind: "fatal",
+          message: failure.message,
+        });
       });
   }
 
@@ -3105,7 +3125,9 @@ export class NativeRuntimeAdapter implements Runtime {
     // cancelled native read releases its core waiter.
     const stop = new AbortController();
     const aborted = new Promise<never>((_, reject) => {
-      stop.signal.addEventListener("abort", () => reject(stop.signal.reason), { once: true });
+      stop.signal.addEventListener("abort", () => reject(stop.signal.reason), {
+        once: true,
+      });
     });
     aborted.catch(() => undefined);
     const cancelled = new Promise<void>((resolve) => {
@@ -3505,11 +3527,24 @@ export class NativeRuntimeAdapter implements Runtime {
       const outageOutcome = outage?.promise.catch((error: unknown) =>
         error instanceof Error ? error : new Error(errorMessage(error)),
       );
+      // The current attempt's transport may already be installed (it is as
+      // soon as its socket opens); then its Hello, not a new connection, is
+      // what this read waits for.
+      const current = attempt?.carrier === this.serverCarrier ? attempt : null;
+      const admission =
+        current && this.serverTransport != null && !current.carrier.hasNegotiated
+          ? current.carrier.ready().then(
+              // Admitted, unless the link ended right behind its Hello.
+              () => current.outcome,
+              // A refusal ends the attempt; its terminal says why.
+              () => current.terminal,
+            )
+          : null;
       let terminal: Error | null;
       try {
         terminal = await Promise.race([
-          connectionOutcome,
-          ...(attempt?.carrier === this.serverCarrier ? [attempt.terminal] : []),
+          admission ?? connectionOutcome,
+          ...(current ? [current.terminal] : []),
           ...(outageOutcome ? [outageOutcome] : []),
         ]);
       } finally {
@@ -4025,8 +4060,17 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
+  /**
+   * An upstream the server admitted. A server transport is installed as soon
+   * as its socket opens (its frames ride the admission round trip), so a
+   * strict remote read also waits for the server's Hello: until then a
+   * refusal could still end it.
+   */
   private hasUpstream(): boolean {
-    return this.serverTransport != null || this.peerUpstreamAttached;
+    return (
+      (this.serverTransport != null && (this.serverCarrier?.hasNegotiated ?? true)) ||
+      this.peerUpstreamAttached
+    );
   }
 
   private async pumpServerTransport(): Promise<void> {
@@ -4256,7 +4300,9 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!reconnecting) this.failRemoteSubscriptions(this.serverTransportError);
     this.resolveServerTransportErrorWaiters(this.serverTransportError, reconnecting);
     if (report)
-      this.serverTransportErrorCallback?.(this.serverTransportError, { retrying: reconnecting });
+      this.serverTransportErrorCallback?.(this.serverTransportError, {
+        retrying: reconnecting,
+      });
   }
 
   private finishServerConnectionAttempt(
@@ -5399,7 +5445,10 @@ function errorMessage(error: unknown): string {
 function identityMismatchError(): Error {
   return Object.assign(
     new Error("a store configured as one user serves only its own identity's peers"),
-    { code: "protocol", reason: "identity_mismatch" satisfies NativeCoreErrorReason },
+    {
+      code: "protocol",
+      reason: "identity_mismatch" satisfies NativeCoreErrorReason,
+    },
   );
 }
 
