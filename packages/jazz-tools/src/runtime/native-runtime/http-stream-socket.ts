@@ -217,25 +217,48 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
   }
 }
 
-// Once a native socket failed to open on this page, later sessions go
-// straight to the HTTP stream: the host can't upgrade.
-let nativeUnavailable = false;
+/**
+ * Endpoints on this page known to serve the HTTP stream and not upgrade
+ * sockets: a createJazz backend answered a plain request for the socket
+ * path with 426 and the stream marker. Only that answer switches an
+ * endpoint; a socket that fails for any other reason (a restart, a proxy to
+ * a sync server that has no stream) fails as a socket would.
+ */
+const streamEndpoints = new Set<string>();
+
+/** Header on createJazz's 426 for a socket path (see `createJazz`). */
+const STREAM_AVAILABLE_HEADER = "x-jazz-stream";
+
+async function servesStreamInstead(url: string): Promise<boolean> {
+  try {
+    const response = await fetch(url.replace(/^ws/, "http"), {
+      method: "GET",
+      credentials: "same-origin",
+    });
+    void response.body?.cancel().catch(() => undefined);
+    return response.status === 426 && response.headers.get(STREAM_AVAILABLE_HEADER) === "1";
+  } catch {
+    return false;
+  }
+}
 
 /**
  * A WebSocket constructor for a same-origin Jazz endpoint: a native socket
- * when the host upgrades it, else the HTTP stream transport. The switch
- * happens before the session opens, so the carrier never sees it.
+ * when the host upgrades it, else, on a createJazz backend that can't, the
+ * HTTP stream transport. The switch happens before the session opens, so the
+ * carrier never sees it.
  */
 export function sameOriginWebSocketConstructor(native: WebSocketConstructor): WebSocketConstructor {
   return class SameOriginSocket extends SocketEvents implements BrowserWebSocket {
     binaryType: "arraybuffer" | "blob" = "arraybuffer";
     private inner: BrowserWebSocket;
-    private switched = false;
+    private settled = false;
 
     constructor(private readonly url: string) {
       super();
-      this.inner = nativeUnavailable ? new HttpStreamSocket(url) : this.openNative();
-      if (nativeUnavailable) this.forward(this.inner);
+      const stream = streamEndpoints.has(url);
+      this.inner = stream ? new HttpStreamSocket(url) : this.openNative();
+      if (stream) this.forward(this.inner);
     }
 
     get readyState(): number {
@@ -247,6 +270,7 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
     }
 
     close(): void {
+      this.settled = true;
       this.inner.close();
     }
 
@@ -254,25 +278,40 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
       const socket = new native(this.url);
       socket.binaryType = "arraybuffer";
       let opened = false;
-      const fallBack = () => {
-        if (opened || this.switched) return;
-        this.switched = true;
-        nativeUnavailable = true;
-        this.inner = new HttpStreamSocket(this.url);
-        this.forward(this.inner);
+      let failure: { error?: unknown; close?: unknown } | undefined;
+      const failedBeforeOpen = (kind: "error" | "close", event: unknown) => {
+        if (this.settled) return;
+        if (failure) {
+          failure[kind] ??= event;
+          return;
+        }
+        failure = { [kind]: event };
+        void servesStreamInstead(this.url).then((stream) => {
+          if (this.settled) return;
+          this.settled = true;
+          if (stream) {
+            streamEndpoints.add(this.url);
+            this.inner = new HttpStreamSocket(this.url);
+            this.forward(this.inner);
+            return;
+          }
+          if (failure?.error !== undefined) this.emit("error", failure.error);
+          this.emit("close", failure?.close ?? { code: 1006, reason: "" });
+        });
       };
       socket.addEventListener("open", () => {
         opened = true;
+        this.settled = true;
         this.emit("open");
       });
       socket.addEventListener("message", (event) => this.emit("message", event));
       socket.addEventListener("error", (event) => {
         if (opened) this.emit("error", event);
-        else fallBack();
+        else failedBeforeOpen("error", event);
       });
       socket.addEventListener("close", (event) => {
         if (opened) this.emit("close", event);
-        else fallBack();
+        else failedBeforeOpen("close", event);
       });
       return socket;
     }

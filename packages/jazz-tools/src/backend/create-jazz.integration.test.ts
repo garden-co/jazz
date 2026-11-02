@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
-import { createServer, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -55,6 +55,18 @@ async function serve(jazz: Jazz, options: { sockets: boolean }): Promise<string>
       }),
   );
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+/** A request's status, sent past `signInAs` (as another browser would). */
+function statusOf(url: string, method: string, headers: Record<string, string>): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(url, { method, headers }, (res) => {
+      res.resume();
+      resolve(res.statusCode ?? 0);
+    });
+    req.on("error", reject);
+    req.end();
+  });
 }
 
 /**
@@ -194,6 +206,68 @@ describe("createJazz", () => {
     expect(requestPaths.some((path) => path.includes("/stream"))).toBe(false);
   }, 60_000);
 
+  it("refuses sign-in and sync started by a page on another origin", async () => {
+    const appId = randomUUID();
+    const jazz = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+      // Written as a URL, compared as an origin.
+      allowedOrigins: ["https://app.example.com/"],
+    });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const signIn = (headers: Record<string, string>) =>
+      fetch(`${origin}/jazz/apps/${appId}/accounts/backend-sign-in`, {
+        method: "POST",
+        headers: { "x-test-user": "alice", ...headers },
+      }).then((response) => response.status);
+
+    // The user's cookie rides along, but the page is elsewhere.
+    expect(await signIn({ origin: "https://evil.example" })).toBe(403);
+    expect(await signIn({ origin: "null" })).toBe(403);
+    expect(await signIn({ "sec-fetch-site": "cross-site" })).toBe(403);
+    // The right host, but a plain-http page acting on a backend reached over https.
+    expect(await signIn({ origin, "x-forwarded-proto": "https" })).toBe(403);
+    for (const route of ["accounts/backend-link", "stream"]) {
+      const response = await fetch(`${origin}/jazz/apps/${appId}/${route}`, {
+        method: "POST",
+        headers: { "x-test-user": "alice", origin: "https://evil.example" },
+      });
+      expect(response.status).toBe(403);
+    }
+    // The backend's own origin, an allowed one, and a non-browser client pass.
+    expect(await signIn({ origin })).toBe(200);
+    expect(await signIn({ origin: origin.replace("http:", "https:") })).toBe(200);
+    expect(await signIn({ origin: "https://app.example.com" })).toBe(200);
+    expect(await signIn({})).toBe(200);
+
+    const socketFrom = (from: string) =>
+      new Promise<string>((resolve) => {
+        const socket = new NodeWebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
+          headers: { "x-test-user": "alice", origin: from },
+        } as never);
+        socket.addEventListener("open", () => {
+          socket.send(
+            JSON.stringify({
+              peer_identity: "page",
+              backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
+            }),
+          );
+        });
+        socket.addEventListener("message", () => {
+          socket.close();
+          resolve("admitted");
+        });
+        socket.addEventListener("error", () => resolve("refused"));
+        socket.addEventListener("close", () => resolve("refused"));
+      });
+    expect(await socketFrom("https://evil.example")).toBe("refused");
+    expect(await socketFrom(origin)).toBe("admitted");
+  }, 60_000);
+
   it("links a second identity to the same account", async () => {
     const appId = randomUUID();
     const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });
@@ -301,6 +375,47 @@ describe("createJazz", () => {
     const seen = await jazz.db.all(app.todos.where({ id: row.id }));
     expect(seen.map((todo) => todo.title)).toEqual(["over the stream"]);
     expect(requestPaths.some((path) => path.endsWith(`/apps/${appId}/stream`))).toBe(true);
+
+    // A session id alone (it can end up in logs) doesn't let another user
+    // act in the session, nor end it.
+    const sessionPath = requestPaths.find((path) => /\/stream\/[^/]+$/.test(path))!;
+    for (const method of ["POST", "DELETE"]) {
+      expect(await statusOf(`${origin}${sessionPath}`, method, { "x-test-user": "bob" })).toBe(403);
+    }
+    // A session this process doesn't hold says why.
+    const unknown = await fetch(`${origin}/jazz/apps/${appId}/stream/nope`, { method: "POST" });
+    expect(unknown.status).toBe(404);
+    expect(await unknown.text()).toContain("sticky routing");
+    // Alice's session still works after both attempts.
+    const later = await alice.db
+      .insert(app.todos, { title: "still over the stream", owner: alice.session!.user!.account })
+      .wait({ tier: "global" });
+    expect((await jazz.db.all(app.todos.where({ id: later.id }))).length).toBe(1);
+  }, 60_000);
+
+  it("opens a sqlite directory in one core at a time, and not on serverless hosts", async () => {
+    const appId = randomUUID();
+    const dir = await mkdtemp(join(tmpdir(), "jazz-lock-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const first = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
+    await expect(
+      createJazz({ appId, app, permissions, store: sqlite({ path: dir }) }),
+    ).rejects.toThrow(/already open in this process/);
+    await first.close();
+    // Closed, the directory is free again.
+    const second = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
+    await second.close();
+
+    const previous = process.env.VERCEL;
+    process.env.VERCEL = "1";
+    try {
+      await expect(
+        createJazz({ appId, app, permissions, store: sqlite({ path: dir }) }),
+      ).rejects.toThrow(/Use remote\(/);
+    } finally {
+      if (previous === undefined) delete process.env.VERCEL;
+      else process.env.VERCEL = previous;
+    }
   }, 60_000);
 
   it("keeps data in the sqlite directory across restarts", async () => {
