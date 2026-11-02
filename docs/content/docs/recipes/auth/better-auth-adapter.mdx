@@ -152,7 +152,7 @@ export const auth = betterAuth({
 
 ### Connect Better Auth sessions to Jazz accounts
 
-The adapter stores Better Auth users, password credentials, and application sessions. For browser apps, pass `auth={betterAuth(authClient)}` and `serverUrl="/jazz"` to the framework's `JazzProvider`; vanilla apps can use `createJazzApp` with the same descriptor. Better Auth signup and login then sign in to Jazz through your backend: `authenticate` reads the session cookie, and Jazz creates or resolves the user's account. There is no second enrollment action and no JWT.
+The adapter stores Better Auth users, password credentials, and application sessions. For browser apps, pass `auth={betterAuth(authClient)}` to the framework's `JazzProvider`; vanilla apps can use `createJazzApp` with the same descriptor. Better Auth signup and login then sign in to Jazz through your backend: `authenticate` reads the session cookie, and Jazz creates or resolves the user's account. There is no second enrollment action and no JWT.
 
 In a route handler, act as the signed-in user with `jazz.forRequest(request)`, which runs the same `authenticate`:
 

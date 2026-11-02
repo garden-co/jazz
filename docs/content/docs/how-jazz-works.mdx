@@ -96,7 +96,7 @@ This is useful when iterating on your schema during development.
 
 <Accordion id="offline-only" title="Can I use Jazz without a server?">
 
-Yes. Omit `serverUrl` from your config. Jazz will not try to sync: browser clients keep their data
+Yes. Pass `serverUrl: null`. Jazz will not try to sync: browser clients keep their data
 in local persistent storage, while other runtimes use their configured local driver.
 
 </Accordion>

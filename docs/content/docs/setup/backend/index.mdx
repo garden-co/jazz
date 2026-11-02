@@ -85,13 +85,13 @@ export const jazz = await createJazz({
 
 ## Connect the browser
 
-The browser talks to the same origin, so `serverUrl` is a path, and your app's own session cookie is
-all it needs. It never holds a Jazz credential:
+The browser talks to `/jazz` on the same origin by default, so there's no `serverUrl` to set, and your
+app's own session cookie is all it needs. It never holds a Jazz credential:
 
 ```ts title="src/jazz.ts"
 import { createJazzSession } from "jazz-tools/client";
 
-export const session = await createJazzSession({ serverUrl: "/jazz" });
+export const session = await createJazzSession();
 await session.loginWithBackend();
 ```
 

@@ -73,7 +73,6 @@ With React, pass `backendAuth` to `JazzProvider`:
 import { JazzProvider, backendAuth } from "jazz-tools/react";
 
 <JazzProvider
-  serverUrl="/jazz"
   auth={backendAuth({ key: user?.id ?? null, isPending, logout: () => signOut() })}
   signedOut={<SignIn />}
 >
@@ -90,7 +89,7 @@ Without React, own the session yourself:
 ```ts
 import { createJazzSession } from "jazz-tools/client";
 
-const jazz = await createJazzSession({ serverUrl: "/jazz" });
+const jazz = await createJazzSession();
 await jazz.loginWithBackend(); // after your own sign-in
 // ...
 await jazz.logout(); // before your own sign-out

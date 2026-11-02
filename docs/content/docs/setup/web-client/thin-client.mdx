@@ -22,14 +22,14 @@ The default web client: about 86 KB gzipped, no Wasm, no local storage. The serv
 ## Configure one session
 
 - Import from `jazz-tools/thin`
-- `createAccountManager({ serverUrl })`&hairsp;—&hairsp;the same account API as `jazz-tools`
-- `createDb({ serverUrl, account })`&hairsp;—&hairsp;returns the normal `Db`; queries, `subscribe`, insert/update/upsert/delete and the framework hooks all work
+- `createAccountManager()`&hairsp;—&hairsp;the same account API as `jazz-tools`
+- `createDb({ account })`&hairsp;—&hairsp;returns the normal `Db`; queries, `subscribe`, insert/update/upsert/delete and the framework hooks all work
 - User auth: see [Auth](/docs/setup/auth)
 - Tabs per framework, as on the local-first page
 
 ## Client config options
 
-- `serverUrl` is `/jazz`, the path your backend mounts Jazz under (see [Backend](/docs/setup/backend))
+- `serverUrl` defaults to `/jazz`, the path your backend mounts Jazz under (see [Backend](/docs/setup/backend)). Set it only if you mount Jazz elsewhere
 - No `driver` option: there is no local storage
 
 ## What runs on the server

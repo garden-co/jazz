@@ -26,7 +26,7 @@ The plain Better Auth client is enough:
 
 ## Connecting to Jazz
 
-Pass `auth={betterAuth(authClient)}` to `JazzProvider`, with `serverUrl="/jazz"`. Forms only call
+Pass `auth={betterAuth(authClient)}` to `JazzProvider`. Forms only call
 Better Auth signup or sign-in; Jazz follows the Better Auth session, signs in through your backend,
 and owns startup, account changes and error recovery. Use `useJazzAuth().logout()` to flush Jazz
 before revoking the Better Auth session.

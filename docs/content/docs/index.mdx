@@ -39,17 +39,17 @@ const jazz = await createJazz({
 });
 
 new Hono()
-  // Sync for browsers, on your own origin
-  .all("/jazz/*", (c) => jazz.fetch(c.req.raw))
+  // Runs with backend authority and sees every todo (check admin access in your app first)
+  .get("/admin/todos", async (c) => {
+    return c.json(await jazz.db.all(app.todos));
+  })
   // Runs as the signed-in user: the query only returns their own todos
   .get("/todos", async (c) => {
     const db = await jazz.forRequest(c.req.raw);
     return c.json(await db.all(app.todos.where({ done: false })));
   })
-  // Runs with backend authority and sees every todo (check admin access in your app first)
-  .get("/admin/todos", async (c) => {
-    return c.json(await jazz.db.all(app.todos));
-  });
+  // Sync for browsers, on your own origin
+  .all("/jazz/*", (c) => jazz.fetch(c.req.raw));
 ```
 
 You can also query and write to the database right from your frontend. It is protected by the same auth as your backend, and the same permission policies apply. Pick a thin client (about 86 kB gzipped) or a full local-first client (about 1 MB gzipped, mostly the WASM engine).
@@ -58,7 +58,7 @@ You can also query and write to the database right from your frontend. It is pro
 import { createDb } from "jazz-tools/thin";
 import { app } from "./schema";
 
-const db = createDb({ serverUrl: "/jazz", account });
+const db = createDb({ account }); // syncs with /jazz on this origin by default;
 
 // Live query: updates as soon as the server (or anyone else) changes a todo
 db.subscribe(app.todos.where({ done: false }), (todos) => {
