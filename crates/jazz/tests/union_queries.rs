@@ -571,7 +571,7 @@ fn a_synced_union_ships_every_arms_rows_under_the_readers_policy() {
     );
     let (client_side, server_side) = duplex();
     let _ = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, reader);
+    server.accept_subscriber(server_side, reader).unwrap();
 
     let query = union(
         vec![

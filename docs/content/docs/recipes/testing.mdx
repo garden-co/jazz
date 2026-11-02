@@ -289,7 +289,7 @@ a migration between the current server schema and the new schema. This makes it 
 
 ```typescript custom="noscroll"
 import { createDb, schema as s, migration as m, type Db } from "jazz-tools";
-import { deploy, startLocalJazzServer } from "jazz-tools/testing";
+import { appMigrations, deploy, startLocalJazzServer } from "jazz-tools/testing";
 import { describe, expect, it, vi } from "vitest";
 
 const oldSchema = {
@@ -313,8 +313,22 @@ const newSchema = {
   ),
 };
 
-const oldApp = s.defineApp(oldSchema);
-const newApp = s.defineApp(newSchema);
+const migration = m.defineMigration({
+  from: oldSchema,
+  to: newSchema,
+  migrate: {
+    todos: {
+      tags: m.add.array({ of: s.string(), default: [] }),
+    },
+  },
+});
+
+// In an app these come from the generated `migrations/index.ts`. A test that
+// defines its schemas in code builds the same bundle with `appMigrations`.
+const oldApp = s.defineApp(oldSchema, { migrations: await appMigrations(oldSchema) });
+const newApp = s.defineApp(newSchema, {
+  migrations: await appMigrations(oldSchema, { to: newSchema, migration }),
+});
 
 const oldPermissions = s.definePermissions(oldApp, ({ policy }) => [
   policy.todos.allowRead.always(),
@@ -334,18 +348,6 @@ describe("migrations", () => {
     const { appId, adminSecret, url: serverUrl } = server;
     let oldDb: Db | undefined;
     let newDb: Db | undefined;
-
-    const migration = m.defineMigration({
-      fromHash: await oldApp.schemaHash,
-      toHash: await newApp.schemaHash,
-      from: oldSchema,
-      to: newSchema,
-      migrate: {
-        todos: {
-          tags: m.add.array({ of: s.string(), default: [] }),
-        },
-      },
-    });
 
     await deploy({
       serverUrl,

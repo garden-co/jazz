@@ -142,8 +142,8 @@ fn a_failing_client_is_dropped_without_stalling_the_others() {
     let (b_client, b_server, _) = pipe();
     let _a = block_on(alice.connect_upstream(a_client));
     let _b = block_on(bob.connect_upstream(b_client));
-    server.accept_subscriber(a_server, user(1));
-    server.accept_subscriber(b_server, user(2));
+    server.accept_subscriber(a_server, user(1)).unwrap();
+    server.accept_subscriber(b_server, user(2)).unwrap();
     let all = Query::from("messages");
     let _sa = block_on(alice.subscribe(&alice.prepare_query(&all).unwrap(), ReadOpts::default()))
         .unwrap();
@@ -173,7 +173,7 @@ fn disconnect_releases_the_session_and_reconnect_resumes() {
     let alice = open(1, user(1));
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(alice.connect_upstream(client_side));
-    let session = server.accept_subscriber(server_side, user(1));
+    let session = server.accept_subscriber(server_side, user(1)).unwrap();
     let prepared = alice.prepare_query(&Query::from("messages")).unwrap();
     let _stream = block_on(alice.subscribe(&prepared, ReadOpts::default())).unwrap();
     post(&server, 0);
@@ -190,7 +190,7 @@ fn disconnect_releases_the_session_and_reconnect_resumes() {
 
     let (client_side, server_side, _) = pipe();
     let _upstream = block_on(alice.connect_upstream(client_side));
-    let again = server.accept_subscriber(server_side, user(1));
+    let again = server.accept_subscriber(server_side, user(1)).unwrap();
     assert_eq!(again.slot(), session.slot(), "the released slot is reused");
     pump(&server, &[&alice]);
     assert_eq!(local(&alice), 4, "the resumed subscription catches up");
@@ -204,7 +204,7 @@ fn churn_does_not_grow_the_server() {
     let stay = open(1, user(1));
     let (client_side, server_side, _) = pipe();
     let _keep = block_on(stay.connect_upstream(client_side));
-    server.accept_subscriber(server_side, user(1));
+    server.accept_subscriber(server_side, user(1)).unwrap();
     let _s = block_on(stay.subscribe(
         &stay.prepare_query(&Query::from("messages")).unwrap(),
         ReadOpts::default(),
@@ -214,7 +214,9 @@ fn churn_does_not_grow_the_server() {
         let visitor = open(2, user(2 + (n % 50) as u8));
         let (client_side, server_side, _) = pipe();
         let upstream = block_on(visitor.connect_upstream(client_side));
-        let session = server.accept_subscriber(server_side, user(2 + (n % 50) as u8));
+        let session = server
+            .accept_subscriber(server_side, user(2 + (n % 50) as u8))
+            .unwrap();
         assert_eq!(session.slot(), 1, "every visitor reuses the same slot");
         let _v = block_on(visitor.subscribe(
             &visitor.prepare_query(&Query::from("messages")).unwrap(),

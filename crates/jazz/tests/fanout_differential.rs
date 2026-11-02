@@ -353,7 +353,9 @@ fn synced_results_recheck_written_rows_and_match_one_shot_reads() {
     let client = block_on(Db::open(DbConfig::new(schema, node(2)))).unwrap();
     let (client_side, server_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
-    worker.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    worker
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
     let pump = || {
         for _ in 0..4 {
             block_on(client.tick()).unwrap();

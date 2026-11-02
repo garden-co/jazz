@@ -177,7 +177,8 @@ impl Net {
         let client = &mut self.clients[i];
         client.up = Some(block_on(client.db.connect_upstream(client_side)));
         self.core
-            .accept_subscriber(server_side, author(client.node));
+            .accept_subscriber(server_side, author(client.node))
+            .unwrap();
     }
 
     fn offline(&mut self, i: usize) {

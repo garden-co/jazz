@@ -124,15 +124,18 @@ const TEST_SCHEMA: WasmSchema = {
   },
 };
 
-const publicUnionApp = s.defineApp({
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-    },
-    {},
-  ),
-});
+const publicUnionApp = s.defineApp(
+  {
+    todos: s.table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 const publicUnionPermissions = s.definePermissions(publicUnionApp, ({ policy }) => {
   policy.todos.allowRead.where({ done: false });
@@ -141,15 +144,18 @@ const publicUnionPermissions = s.definePermissions(publicUnionApp, ({ policy }) 
   policy.todos.allowDelete.always();
 });
 
-const publicUnionBigIntApp = s.defineApp({
-  metrics: s.table(
-    {
-      label: s.string(),
-      value: s.bigint(),
-    },
-    {},
-  ),
-});
+const publicUnionBigIntApp = s.defineApp(
+  {
+    metrics: s.table(
+      {
+        label: s.string(),
+        value: s.bigint(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 const TIMESTAMP_SCHEMA: WasmSchema = {
   projects: {
@@ -1605,7 +1611,7 @@ describe("NAPI integration", () => {
           };
 
           type AppSchema = s.Schema<typeof schema>;
-          export const app: s.App<AppSchema> = s.defineApp(schema);
+          export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
         `,
       );
       await writeFile(

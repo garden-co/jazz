@@ -1,3 +1,4 @@
+import type { ClientMigrations } from "./client-migrations.js";
 import { JazzClient, type ConnectRuntimeOptions } from "./client.js";
 import { loadWasmModule, type WasmModule } from "./wasm-loader.js";
 import type { AppContext } from "./context.js";
@@ -41,21 +42,12 @@ import {
   createBrowserWorkerFingerprint,
 } from "./browser-worker-config.js";
 import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
-import { deterministicBytes } from "./deterministic-bytes.js";
+import { randomNodeUuidBytes } from "./runtime-entropy.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
 function setGlobalWasmLogLevel(level?: DbConfig["logLevel"]): void {
   (globalThis as any).__JAZZ_WASM_LOG_LEVEL = level ?? DEFAULT_WASM_LOG_LEVEL;
-}
-
-function randomBytes(): Uint8Array {
-  const bytes = new Uint8Array(16);
-  if (globalThis.crypto?.getRandomValues) {
-    globalThis.crypto.getRandomValues(bytes);
-    return bytes;
-  }
-  return deterministicBytes(`${Date.now()}:${Math.random()}`);
 }
 
 function sessionFromConfig(config: DbConfig) {
@@ -180,6 +172,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
   override createClient({
     config,
     schema,
+    migrations,
     onAuthFailure,
     foregroundNodeLease,
   }: RuntimeClientContext<DbConfig>): JazzClient {
@@ -197,7 +190,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     // identity. Reusing a deterministic node across independently opened tabs
     // would let their fresh HLC registers mint the same TxId before either has
     // observed the other's first commit.
-    const node = foregroundNodeLease?.node.slice() ?? randomBytes();
+    const node = foregroundNodeLease?.node.slice() ?? randomNodeUuidBytes();
     const author = authorBytesForSession(runtimeAuthorFromConfig(config));
     const flushEvery = initialSyncFlushEvery(config);
     const browserMode = isPersistentBrowserConfig(config);
@@ -210,6 +203,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       selfSignedClientProof,
       backendMode,
       { appId: config.appId, thresholdMs: config.slowQueryThresholdMs },
+      migrations,
     );
     if (foregroundNodeLease) {
       mainThreadPeerRuntime.seedForegroundTxTimeHighWater(foregroundNodeLease.confirmedTxTime);
@@ -330,6 +324,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         author,
         selfSignedClientProof,
         initialSyncFlushEvery: initialSyncFlushEvery(config),
+        migrations: runtime.migrations,
         appId: config.appId,
         slowQueryThresholdMs: config.slowQueryThresholdMs,
         storageOwner: createBrowserStorageOwner(config),
@@ -394,6 +389,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     selfSignedClientProof?: NativeSelfSignedClientProof,
     backendMode = false,
     slowQueryLog?: SlowQueryLogOptions,
+    migrations?: ClientMigrations,
   ): NativeRuntimeAdapter {
     if (!this.ownerRuntime || this.ownerRuntime.isClosed()) {
       this.ownerRuntime = new NativeRuntimeAdapter(
@@ -403,13 +399,19 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         author,
         1,
         historyComplete,
-        { initialSyncFlushEvery: flushEvery, selfSignedClientProof, backendMode, slowQueryLog },
+        {
+          initialSyncFlushEvery: flushEvery,
+          selfSignedClientProof,
+          backendMode,
+          slowQueryLog,
+          migrations,
+        },
       );
       return this.ownerRuntime;
     }
     return Object.keys(schema).length === 0
       ? this.ownerRuntime
-      : this.ownerRuntime.registerSchemaView(schema);
+      : this.ownerRuntime.registerSchemaView(schema, migrations);
   }
 
   override installTelemetry({
