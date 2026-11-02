@@ -512,7 +512,15 @@ function openRemoteCore(appId: string, store: Extract<JazzStore, { kind: "remote
  */
 export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   const basePath = (options.basePath ?? DEFAULT_BASE_PATH).replace(/\/+$/, "");
-  const allowedOrigins = new Set(options.allowedOrigins ?? []);
+  const allowedOrigins = new Set(
+    (options.allowedOrigins ?? []).map((origin) => {
+      try {
+        return new URL(origin).origin;
+      } catch {
+        throw new Error(`createJazz: allowedOrigins entry ${JSON.stringify(origin)} is not a URL`);
+      }
+    }),
+  );
   const issuer = `jazz:app:${options.appId}`;
   const store = options.store;
   const core =
@@ -855,9 +863,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       return site === null || site === "same-origin" || site === "none";
     }
     if (allowedOrigins.has(origin)) return true;
-    let host: string;
+    let parsed: URL;
     try {
-      host = new URL(origin).host;
+      parsed = new URL(origin);
     } catch {
       return false; // "null" (a sandboxed or opaque origin) or garbage
     }
@@ -865,7 +873,13 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       request.headers.get("x-forwarded-host")?.split(",")[0]?.trim() ||
       request.headers.get("host") ||
       new URL(request.url).host;
-    return host === requestHost;
+    if (parsed.host !== requestHost) return false;
+    // A page over plain http may not act on a backend reached over https. The
+    // other way round is allowed: a proxy that ends TLS may hand us plain http.
+    const requestScheme =
+      request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase() ||
+      new URL(request.url).protocol.replace(/:$/, "");
+    return !(requestScheme === "https" && parsed.protocol === "http:");
   }
 
   /** The path below `basePath`, or null for a request Jazz doesn't serve. */

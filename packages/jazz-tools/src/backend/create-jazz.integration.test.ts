@@ -198,7 +198,8 @@ describe("createJazz", () => {
       permissions,
       store: memory(),
       authenticate,
-      allowedOrigins: ["https://app.example.com"],
+      // Written as a URL, compared as an origin.
+      allowedOrigins: ["https://app.example.com/"],
     });
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: true });
@@ -212,6 +213,8 @@ describe("createJazz", () => {
     expect(await signIn({ origin: "https://evil.example" })).toBe(403);
     expect(await signIn({ origin: "null" })).toBe(403);
     expect(await signIn({ "sec-fetch-site": "cross-site" })).toBe(403);
+    // The right host, but a plain-http page acting on a backend reached over https.
+    expect(await signIn({ origin, "x-forwarded-proto": "https" })).toBe(403);
     for (const route of ["stream"]) {
       const response = await fetch(`${origin}/jazz/apps/${appId}/${route}`, {
         method: "POST",
@@ -221,6 +224,7 @@ describe("createJazz", () => {
     }
     // The backend's own origin, an allowed one, and a non-browser client pass.
     expect(await signIn({ origin })).toBe(200);
+    expect(await signIn({ origin: origin.replace("http:", "https:") })).toBe(200);
     expect(await signIn({ origin: "https://app.example.com" })).toBe(200);
     expect(await signIn({})).toBe(200);
 
