@@ -194,6 +194,64 @@ describe("createJazz", () => {
     expect(requestPaths.some((path) => path.includes("/stream"))).toBe(false);
   }, 60_000);
 
+  it("refuses sign-in and sync started by a page on another origin", async () => {
+    const appId = randomUUID();
+    const jazz = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+      allowedOrigins: ["https://app.example.com"],
+    });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const signIn = (headers: Record<string, string>) =>
+      fetch(`${origin}/jazz/apps/${appId}/accounts/backend-sign-in`, {
+        method: "POST",
+        headers: { "x-test-user": "alice", ...headers },
+      }).then((response) => response.status);
+
+    // The user's cookie rides along, but the page is elsewhere.
+    expect(await signIn({ origin: "https://evil.example" })).toBe(403);
+    expect(await signIn({ origin: "null" })).toBe(403);
+    expect(await signIn({ "sec-fetch-site": "cross-site" })).toBe(403);
+    for (const route of ["accounts/backend-link", "stream"]) {
+      const response = await fetch(`${origin}/jazz/apps/${appId}/${route}`, {
+        method: "POST",
+        headers: { "x-test-user": "alice", origin: "https://evil.example" },
+      });
+      expect(response.status).toBe(403);
+    }
+    // The backend's own origin, an allowed one, and a non-browser client pass.
+    expect(await signIn({ origin })).toBe(200);
+    expect(await signIn({ origin: "https://app.example.com" })).toBe(200);
+    expect(await signIn({})).toBe(200);
+
+    const socketFrom = (from: string) =>
+      new Promise<string>((resolve) => {
+        const socket = new NodeWebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
+          headers: { "x-test-user": "alice", origin: from },
+        } as never);
+        socket.addEventListener("open", () => {
+          socket.send(
+            JSON.stringify({
+              peer_identity: "page",
+              backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
+            }),
+          );
+        });
+        socket.addEventListener("message", () => {
+          socket.close();
+          resolve("admitted");
+        });
+        socket.addEventListener("error", () => resolve("refused"));
+        socket.addEventListener("close", () => resolve("refused"));
+      });
+    expect(await socketFrom("https://evil.example")).toBe("refused");
+    expect(await socketFrom(origin)).toBe("admitted");
+  }, 60_000);
+
   it("links a second identity to the same account", async () => {
     const appId = randomUUID();
     const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });

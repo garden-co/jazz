@@ -5411,16 +5411,17 @@ impl Inner {
     }
 
     /// Whether `identity` may commit as `node`. A node belongs to the
-    /// writer that first commits as it: commits are deduplicated by
-    /// (node, tx), so another writer committing as that node could claim
-    /// its transactions before it sends them.
+    /// principal that first commits as it: commits are deduplicated by
+    /// (node, tx), so another principal committing as that node could claim
+    /// its transactions before it sends them, and builds on its commits
+    /// under its own claims.
     ///
-    /// The writer is the account, not the exact principal: an account's
-    /// storage (and so its node) outlives a change of how it signs in,
-    /// as when a local-first guest links to the app's backend and keeps
-    /// writing as the same node under the backend's principal. Every
-    /// principal that is admitted as an account is that account. System
-    /// writers share no account, so they stay exact.
+    /// One hand-over is allowed: a local-first guest that signs up keeps its
+    /// account and its store, and so its node, and goes on writing under the
+    /// principal the app's backend names. The first commit as a guest's node
+    /// by another principal of the same account takes the node over, and
+    /// from then on only that principal writes as it; the guest's key no
+    /// longer does.
     fn claim_node(&self, node: [u8; 16], identity: &AuthorSubject) -> Result<bool, Error> {
         let author = self.author_code(&author_key(identity))?;
         let code = self.node_code(node)?;
@@ -5435,7 +5436,41 @@ impl Inner {
                 r.get(0)
             })
             .map_err(storage)?;
-        self.same_writer(Some(owner), author, identity)
+        if owner == author {
+            return Ok(true);
+        }
+        if !self.signs_up_from(owner, identity)? {
+            return Ok(false);
+        }
+        self.exec(
+            "UPDATE _jazz_nodes SET author = ?2 WHERE n = ?1 AND author = ?3",
+            rusqlite::params![code, author, owner],
+        )
+        .map_err(storage)?;
+        Ok(true)
+    }
+
+    /// Whether `identity` is a signed-up guest taking over a node of its
+    /// own account's local-first principal (author code `owner`).
+    fn signs_up_from(&self, owner: i64, identity: &AuthorSubject) -> Result<bool, Error> {
+        let Some(account) = identity.account_id() else {
+            return Ok(false);
+        };
+        if account == jazz_types::account_registry::SYSTEM_ACCOUNT_ID
+            || identity.principal_parts().0 == jazz_types::identity::LOCAL_FIRST_ISSUER
+        {
+            return Ok(false);
+        }
+        match self.conn.cached_row(
+            "SELECT account, issuer FROM _jazz_authors WHERE n = ?1",
+            [owner],
+            |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?)),
+        ) {
+            Ok((stored, issuer)) => Ok(stored.as_slice() == account.0.as_bytes().as_slice()
+                && issuer == jazz_types::identity::LOCAL_FIRST_ISSUER),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(error) => Err(storage(error)),
+        }
     }
 
     /// Whether `node` is one `identity` writes as (see [`Inner::claim_node`]),
@@ -5451,7 +5486,7 @@ impl Inner {
             [node.to_vec()],
             |r| r.get::<_, Option<i64>>(0),
         ) {
-            Ok(owner) => self.same_writer(owner, author, identity),
+            Ok(owner) => Ok(owner == Some(author)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
             Err(error) => Err(storage(error)),
         }
@@ -5467,39 +5502,7 @@ impl Inner {
             [at.n, at.seq as i64],
             |r| r.get::<_, Option<i64>>(0),
         ) {
-            Ok(owner) => self.same_writer(owner, author, identity),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
-            Err(error) => Err(storage(error)),
-        }
-    }
-
-    /// Whether a node's owning author code `owner` is the same writer as
-    /// `identity` (interned as `author`): the same principal, or another
-    /// principal of the same account (see [`Inner::claim_node`]).
-    fn same_writer(
-        &self,
-        owner: Option<i64>,
-        author: i64,
-        identity: &AuthorSubject,
-    ) -> Result<bool, Error> {
-        let Some(owner) = owner else {
-            return Ok(false);
-        };
-        if owner == author {
-            return Ok(true);
-        }
-        let Some(account) = identity.account_id() else {
-            return Ok(false);
-        };
-        if account == jazz_types::account_registry::SYSTEM_ACCOUNT_ID {
-            return Ok(false);
-        }
-        match self.conn.cached_row(
-            "SELECT account FROM _jazz_authors WHERE n = ?1",
-            [owner],
-            |r| r.get::<_, Vec<u8>>(0),
-        ) {
-            Ok(stored) => Ok(stored.as_slice() == account.0.as_bytes().as_slice()),
+            Ok(owner) => Ok(owner == Some(author)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
             Err(error) => Err(storage(error)),
         }

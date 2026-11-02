@@ -106,6 +106,14 @@ export interface CreateJazzOptions {
    * again (the client reconnects on its own). Defaults to one hour.
    */
   sessionTtlSeconds?: number;
+  /**
+   * Browser origins, besides the backend's own, that may open sync sessions
+   * and call sign-in (e.g. `["https://app.example.com"]` when the page is
+   * served from another host than the backend). A request from any other
+   * origin is refused, so a page elsewhere can't act with your users'
+   * cookies.
+   */
+  allowedOrigins?: string[];
 }
 
 /** A WebSocket as the `ws` package (and Vercel's `upgradeWebSocket`) hands it over. */
@@ -151,6 +159,10 @@ export interface Jazz {
    * The backend's own database (backend permissions), with every write
    * stamped as the request's signed-in user: for server actions that do what
    * the user may not do directly, on their behalf.
+   *
+   * **Your permissions are not checked.** It writes with the backend's full
+   * authority; only the attribution is the user's. Check yourself that the
+   * user may do what the action does, and keep it in server-only code.
    */
   withAttribution(request: Request): Promise<Db>;
   /**
@@ -449,6 +461,7 @@ function openRemoteCore(appId: string, store: Extract<JazzStore, { kind: "remote
  */
 export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   const basePath = (options.basePath ?? DEFAULT_BASE_PATH).replace(/\/+$/, "");
+  const allowedOrigins = new Set(options.allowedOrigins ?? []);
   const issuer = `jazz:app:${options.appId}`;
   const store = options.store;
   const core =
@@ -577,10 +590,10 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         from: guest.identity,
         to: identity(user.userId),
       }));
-    } catch (error) {
-      return new Response(error instanceof Error ? error.message : String(error), {
-        status: 409,
-      });
+    } catch {
+      // The core's reason (e.g. the identity already belongs to another
+      // account) stays on the backend.
+      return new Response("link_refused", { status: 409 });
     }
     const expiresAt = Math.floor(Date.now() / 1000) + (options.sessionTtlSeconds ?? 3600);
     return Response.json(
@@ -756,6 +769,10 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
 
   function acceptSocket(request: Request, ws: WsLikeSocket): void {
+    if (!originAllowed(request)) {
+      ws.close(1008, "origin not allowed");
+      return;
+    }
     let socket: ClientSession;
     try {
       socket = openClientSession(request, (error, event) => {
@@ -774,6 +791,34 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     ws.on("error", () => socket.close());
   }
 
+  /**
+   * Whether a browser on the request's origin may act as its user here.
+   * Sign-in and sync ride the app's own session (usually a cookie), which a
+   * browser also attaches to requests that other pages start, so a request
+   * from another origin is refused: one with no Origin (a non-browser
+   * client, which holds no ambient cookie) passes. The backend's own origin
+   * is the host the request was sent to, as a proxy forwards it.
+   */
+  function originAllowed(request: Request): boolean {
+    const origin = request.headers.get("origin");
+    if (origin === null) {
+      const site = request.headers.get("sec-fetch-site");
+      return site === null || site === "same-origin" || site === "none";
+    }
+    if (allowedOrigins.has(origin)) return true;
+    let host: string;
+    try {
+      host = new URL(origin).host;
+    } catch {
+      return false; // "null" (a sandboxed or opaque origin) or garbage
+    }
+    const requestHost =
+      request.headers.get("x-forwarded-host")?.split(",")[0]?.trim() ||
+      request.headers.get("host") ||
+      new URL(request.url).host;
+    return host === requestHost;
+  }
+
   /** The path below `basePath`, or null for a request Jazz doesn't serve. */
   function innerPath(request: Request): string | null {
     const { pathname } = new URL(request.url);
@@ -785,6 +830,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   async function handle(request: Request): Promise<Response> {
     const path = innerPath(request);
     if (path === null) return new Response("Not found", { status: 404 });
+    if (request.method !== "GET" && request.method !== "HEAD" && !originAllowed(request)) {
+      return new Response("origin not allowed", { status: 403 });
+    }
     if (/^\/apps\/[^/]+\/accounts\/backend-sign-in$/.test(path)) {
       return backendSignIn(request);
     }
@@ -836,6 +884,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
       process.env.VERCEL
     ) {
+      if (!originAllowed(request)) return new Response("origin not allowed", { status: 403 });
       const { upgradeWebSocket } = (await import(
         /* @vite-ignore */ "@vercel/functions" as string
       )) as {
@@ -913,6 +962,10 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       const request = nodeRequest(req);
       const path = innerPath(request);
       if (path === null || !/^\/apps\/[^/]+\/ws$/.test(path)) return;
+      if (!originAllowed(request)) {
+        socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+        return;
+      }
       wss.handleUpgrade(req, socket, head, (ws) => acceptSocket(request, ws));
     });
     server.on("close", () => wss.close());
