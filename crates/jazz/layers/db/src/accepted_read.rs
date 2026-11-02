@@ -61,6 +61,30 @@ pub(super) fn check_accepted_shape(prepared: &PreparedQuery, schema: &Schema) ->
     Ok(())
 }
 
+impl Inner {
+    /// Retain the admitted names while applying the authority's current policies.
+    pub(super) fn governed_accepted_query(
+        &self,
+        prepared: &PreparedQuery,
+    ) -> Result<PreparedQuery, Error> {
+        let version = prepared
+            .schema
+            .as_ref()
+            .unwrap_or(&self.owner)
+            .jazz
+            .version_id();
+        let schema = self.governed(version).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Schema,
+                "accepted-read schema is not admitted by the authority",
+            )
+        })?;
+        let mut prepared = prepared.clone();
+        prepared.schema = Some(schema);
+        Ok(prepared)
+    }
+}
+
 impl Db {
     /// Evaluate ordinary, unbranched stored rows on the authority, pairing
     /// each projected body with the origins of its state and retained content.
@@ -80,6 +104,8 @@ impl Db {
                 "accepted row evidence requires the authority's complete history",
             ));
         }
+        let governed = inner.governed_accepted_query(prepared)?;
+        let prepared = &governed;
         let complete = inner.served_through();
         let through = through.unwrap_or(complete);
         if through > complete {
