@@ -28,6 +28,7 @@ describe("release config", () => {
       "jazz-rn-ios",
       "jazz-rn-android",
       "create-jazz",
+      "@garden-co/local-first-auth",
     ];
 
     expect(config.fixed).toContainEqual(jazzFixedGroup);
@@ -49,6 +50,11 @@ describe("release config", () => {
       expect(payload.name).toBe(`jazz-rn-${platform}`);
       expect(payload.version).toBe(createJazzPackage.version);
     }
+    const localFirstAuth = JSON.parse(
+      fs.readFileSync(path.join(repoRoot, "packages", "local-first-auth", "package.json"), "utf8"),
+    ) as { version: string };
+    expect(localFirstAuth.version).toBe(createJazzPackage.version);
+    expect(preState.initialVersions?.["@garden-co/local-first-auth"]).toBe(localFirstAuth.version);
   });
 
   it("binds pkg.pr.new create-jazz packages to the pull request head commit", () => {
