@@ -100,6 +100,14 @@ export interface CreateJazzOptions {
    * again (the client reconnects on its own). Defaults to one hour.
    */
   sessionTtlSeconds?: number;
+  /**
+   * Browser origins, besides the backend's own, that may open sync sessions
+   * and call sign-in (e.g. `["https://app.example.com"]` when the page is
+   * served from another host than the backend). A request from any other
+   * origin is refused, so a page elsewhere can't act with your users'
+   * cookies.
+   */
+  allowedOrigins?: string[];
 }
 
 /** A WebSocket as the `ws` package (and Vercel's `upgradeWebSocket`) hands it over. */
@@ -150,6 +158,10 @@ export interface Jazz {
 const DEFAULT_BASE_PATH = "/jazz";
 // Routes a browser may reach. Everything else (admin, backend admission,
 // shutdown) stays behind this backend.
+/** How long a sync session may take to send its sign-in (its first message). */
+const PRELUDE_DEADLINE_MS = 30_000;
+/** On createJazz's 426 for a socket path: this endpoint serves the HTTP stream. */
+const STREAM_AVAILABLE_HEADER = "x-jazz-stream";
 const PUBLIC_APP_ROUTES = /^\/apps\/[^/]+\/(accounts\/[a-z/-]+|ws|schemas|schema\/[^/]+)$/;
 const STRIPPED_HEADERS = ["x-jazz-backend-secret", "x-jazz-admin-secret", "x-jazz-session"];
 // What a browser's request to a public route carries on to a remote core:
@@ -431,6 +443,7 @@ function openRemoteCore(appId: string, store: Extract<JazzStore, { kind: "remote
  */
 export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   const basePath = (options.basePath ?? DEFAULT_BASE_PATH).replace(/\/+$/, "");
+  const allowedOrigins = new Set(options.allowedOrigins ?? []);
   const issuer = `jazz:app:${options.appId}`;
   const store = options.store;
   const core =
@@ -540,6 +553,8 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   interface ClientSession {
     send(data: Uint8Array): boolean;
     close(): void;
+    /** The user the session was admitted as, once it is. */
+    readonly userId: string | undefined;
   }
 
   function openClientSession(
@@ -548,7 +563,13 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   ): ClientSession {
     const socket = core.openSocket(headerPairs(request.headers), onEvent);
     let ended = false;
-    let expiry: ReturnType<typeof setTimeout> | undefined;
+    let userId: string | undefined;
+    // A session that never sends its prelude ends too.
+    let expiry: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+      onEvent(null, { kind: "close", code: 1008, reason: "no sign-in in time" });
+      end();
+    }, PRELUDE_DEADLINE_MS);
+    (expiry as unknown as { unref?: () => void }).unref?.();
     const end = () => {
       if (ended) return;
       ended = true;
@@ -556,16 +577,18 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       socket.close();
     };
     const admit = async (prelude: Uint8Array): Promise<boolean> => {
-      const rewritten = await admitPrelude(request, prelude);
-      if (!rewritten || ended) {
+      const admitted = await admitPrelude(request, prelude);
+      if (!admitted || ended) {
         onEvent(null, { kind: "close", code: 1008, reason: "not signed in" });
         end();
         return false;
       }
+      userId = admitted.userId;
+      if (expiry) clearTimeout(expiry);
       const ttl = (options.sessionTtlSeconds ?? 3600) * 1000;
       expiry = setTimeout(end, ttl);
       (expiry as unknown as { unref?: () => void }).unref?.();
-      return socket.send(rewritten);
+      return socket.send(admitted.prelude);
     };
     // Messages after the prelude wait for its admission, in order.
     let chain: Promise<boolean> | undefined;
@@ -582,6 +605,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         return true;
       },
       close: end,
+      get userId() {
+        return userId;
+      },
     };
   }
 
@@ -591,7 +617,10 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
    * claims, vouched for with the backend secret. A prelude that brings any
    * credential of its own, or names another user, is refused.
    */
-  async function admitPrelude(request: Request, prelude: Uint8Array): Promise<Uint8Array | null> {
+  async function admitPrelude(
+    request: Request,
+    prelude: Uint8Array,
+  ): Promise<{ prelude: Uint8Array; userId: string } | null> {
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(new TextDecoder().decode(prelude)) as Record<string, unknown>;
@@ -604,14 +633,16 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     >;
     const stated = auth.backend_session as { user_id?: unknown } | undefined;
     if (!stated || typeof stated !== "object") return null;
+    // Browser worker transports send `jwt_token: null` alongside a backend
+    // session; only a real value counts as a credential.
     for (const credential of ["backend_secret", "admin_secret", "jwt_token"]) {
-      if (parsed[credential] !== undefined || auth[credential] !== undefined) return null;
+      if (parsed[credential] != null || auth[credential] != null) return null;
     }
     const user = await authenticate(request);
     if (!user || user.userId !== stated.user_id) return null;
     const vouched = { backend_secret: core.backendSecret, backend_session: await sessionFor(user) };
     const rewritten = { ...parsed, ...vouched, auth: { ...auth, ...vouched } };
-    return new TextEncoder().encode(JSON.stringify(rewritten));
+    return { prelude: new TextEncoder().encode(JSON.stringify(rewritten)), userId: user.userId };
   }
 
   // HTTP stream sessions, by id.
@@ -665,9 +696,29 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     });
   }
 
-  async function streamSend(id: string, request: Request): Promise<Response> {
+  /**
+   * The stream session `id`, when `request` comes from its user: a session
+   * id alone (which can end up in logs) doesn't let anyone else act in it.
+   */
+  async function ownStream(id: string, request: Request): Promise<ClientSession | Response> {
     const socket = streams.get(id);
-    if (!socket) return new Response("unknown stream session", { status: 404 });
+    if (!socket) {
+      // Sessions live in the process that opened them.
+      return new Response(
+        "unknown stream session: HTTP stream sessions need a single backend instance or sticky routing",
+        { status: 404 },
+      );
+    }
+    if (socket.userId !== undefined) {
+      const user = await authenticate(request);
+      if (user?.userId !== socket.userId) return new Response("not signed in", { status: 403 });
+    }
+    return socket;
+  }
+
+  async function streamSend(id: string, request: Request): Promise<Response> {
+    const socket = await ownStream(id, request);
+    if (socket instanceof Response) return socket;
     const reader = new StreamRecordReader();
     const records = reader.push(new Uint8Array(await request.arrayBuffer()));
     if (reader.pending > 0) return new Response("truncated record", { status: 400 });
@@ -685,6 +736,10 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
 
   function acceptSocket(request: Request, ws: WsLikeSocket): void {
+    if (!originAllowed(request)) {
+      ws.close(1008, "origin not allowed");
+      return;
+    }
     let socket: ClientSession;
     try {
       socket = openClientSession(request, (error, event) => {
@@ -703,6 +758,34 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     ws.on("error", () => socket.close());
   }
 
+  /**
+   * Whether a browser on the request's origin may act as its user here.
+   * Sign-in and sync ride the app's own session (usually a cookie), which a
+   * browser also attaches to requests that other pages start, so a request
+   * from another origin is refused: one with no Origin (a non-browser
+   * client, which holds no ambient cookie) passes. The backend's own origin
+   * is the host the request was sent to, as a proxy forwards it.
+   */
+  function originAllowed(request: Request): boolean {
+    const origin = request.headers.get("origin");
+    if (origin === null) {
+      const site = request.headers.get("sec-fetch-site");
+      return site === null || site === "same-origin" || site === "none";
+    }
+    if (allowedOrigins.has(origin)) return true;
+    let host: string;
+    try {
+      host = new URL(origin).host;
+    } catch {
+      return false; // "null" (a sandboxed or opaque origin) or garbage
+    }
+    const requestHost =
+      request.headers.get("x-forwarded-host")?.split(",")[0]?.trim() ||
+      request.headers.get("host") ||
+      new URL(request.url).host;
+    return host === requestHost;
+  }
+
   /** The path below `basePath`, or null for a request Jazz doesn't serve. */
   function innerPath(request: Request): string | null {
     const { pathname } = new URL(request.url);
@@ -714,6 +797,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   async function handle(request: Request): Promise<Response> {
     const path = innerPath(request);
     if (path === null) return new Response("Not found", { status: 404 });
+    if (request.method !== "GET" && request.method !== "HEAD" && !originAllowed(request)) {
+      return new Response("origin not allowed", { status: 403 });
+    }
     if (/^\/apps\/[^/]+\/accounts\/backend-sign-in$/.test(path)) {
       return backendSignIn(request);
     }
@@ -723,7 +809,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       if (!id && request.method === "POST") return openStream(request);
       if (id && request.method === "POST") return streamSend(id, request);
       if (id && request.method === "DELETE") {
-        streams.get(id)?.close();
+        const socket = await ownStream(id, request);
+        if (socket instanceof Response) return socket;
+        socket.close();
         return new Response(null, { status: 204 });
       }
       return new Response(null, { status: 405 });
@@ -731,8 +819,10 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     if (path.endsWith("/ws")) {
       // A socket upgrade this host couldn't perform. The browser client
       // switches to the HTTP stream when it sees this.
+      // The header marks a createJazz endpoint, which serves the stream.
       return new Response("WebSocket upgrade not available here; use the HTTP stream", {
         status: 426,
+        headers: { [STREAM_AVAILABLE_HEADER]: "1" },
       });
     }
     if (!PUBLIC_APP_ROUTES.test(path)) return new Response("Not found", { status: 404 });
@@ -762,6 +852,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
       process.env.VERCEL
     ) {
+      if (!originAllowed(request)) return new Response("origin not allowed", { status: 403 });
       const { upgradeWebSocket } = (await import(
         /* @vite-ignore */ "@vercel/functions" as string
       )) as {
@@ -839,6 +930,10 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       const request = nodeRequest(req);
       const path = innerPath(request);
       if (path === null || !/^\/apps\/[^/]+\/ws$/.test(path)) return;
+      if (!originAllowed(request)) {
+        socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+        return;
+      }
       wss.handleUpgrade(req, socket, head, (ws) => acceptSocket(request, ws));
     });
     server.on("close", () => wss.close());
