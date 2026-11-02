@@ -1279,13 +1279,15 @@ impl WasmDb {
         kind: String,
         author: Option<Vec<u8>>,
         attribution: Option<Vec<u8>>,
+        accepted_evidence: Option<bool>,
     ) -> Result<(), JsValue> {
         self.binding()?
-            .begin_transaction(
+            .begin_transaction_with_capability(
                 &open_transaction_id,
                 &kind,
                 author.as_deref(),
                 attribution.as_deref(),
+                accepted_evidence.unwrap_or(false),
             )
             .map_err(host_error)
     }
@@ -1338,6 +1340,31 @@ impl WasmDb {
                 query,
                 &options(opts),
                 open_transaction_id.as_deref(),
+                author.as_deref(),
+                json(claims)?,
+            )
+            .map_err(host_error)?;
+        wasm_read_or_pending(Box::pin(async move { read.await.map_err(host_error) }))
+    }
+
+    /// Authority evidence in one explicitly admitted serializable transaction.
+    #[wasm_bindgen(js_name = acceptedRead)]
+    pub fn accepted_read(
+        &self,
+        query: Vec<u8>,
+        open_transaction_id: String,
+        include_deleted: bool,
+        timeout_ms: f64,
+        author: Option<Vec<u8>>,
+        claims: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let read = self
+            .binding()?
+            .accepted_read(
+                query,
+                &open_transaction_id,
+                include_deleted,
+                timeout_ms,
                 author.as_deref(),
                 json(claims)?,
             )

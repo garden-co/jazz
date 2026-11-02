@@ -1,3 +1,8 @@
+import {
+  validateAcceptedReadTimeout,
+  type AcceptedRows,
+  type TransactionReadCapability,
+} from "./accepted-read.js";
 import { isHistoryTable, resolveQueryTable } from "./history-relation.js";
 import type { ConnectionRequirement } from "./connection-manager/types.js";
 import type { DbAccessContext } from "./db-access-context.js";
@@ -1643,6 +1648,8 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
 /**
  * Groups a set of writes as either a mergeable or serializable transaction (see {@link TransactionKind}).
  */
+const acceptedRows = Symbol("accepted transaction rows");
+
 export class Transaction<TKind extends TransactionKind = TransactionKind> {
   /** @internal Install the prerequisite before binding the owner. */
   static createWithAdmission<TKind extends TransactionKind>(
@@ -1651,14 +1658,17 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     context: DbAccessContext | null,
     ownerClient: JazzClient | undefined,
     prerequisite: TransactionAdmission | undefined,
+    readCapability?: TransactionReadCapability,
   ): Transaction<TKind> {
     const transaction = new Transaction(kind, resolveClient, context);
     transaction.openingPrerequisite = prerequisite;
+    transaction.openingReadCapability = readCapability;
     if (ownerClient) transaction.bindOwnerClient(ownerClient);
     return transaction;
   }
 
   private openingPrerequisite?: TransactionAdmission;
+  private openingReadCapability?: TransactionReadCapability;
 
   private readonly pendingReads = new Set<Promise<unknown>>();
   private committing = false;
@@ -1699,7 +1709,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const owner = getOwnerPreparation(ownerClient);
     const openTransactionId = owner?.pending
       ? createOpenTransactionId()
-      : this.openingPrerequisite
+      : this.openingPrerequisite || this.openingReadCapability
         ? beginClientTransactionAfter(
             ownerClient,
             this.kind,
@@ -1707,6 +1717,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
             attribution,
             undefined,
             this.openingPrerequisite,
+            this.openingReadCapability,
           )
         : ownerClient.beginTransaction(this.kind, session, attribution);
     const binding: DbTransactionHandleBinding = {
@@ -1722,7 +1733,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       preparation.run(() =>
         owner!.run(() => {
           if (preparation.cancelled) return;
-          if (this.openingPrerequisite)
+          if (this.openingPrerequisite || this.openingReadCapability)
             beginClientTransactionAfter(
               ownerClient,
               this.kind,
@@ -1730,6 +1741,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
               attribution,
               openTransactionId,
               this.openingPrerequisite,
+              this.openingReadCapability,
             );
           else ownerClient.beginTransaction(this.kind, session, attribution, openTransactionId);
           binding.begun = true;
@@ -2093,14 +2105,36 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * Read data is scoped to this transaction.
    */
   all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    const reading = this.readAll(query, options);
+    return this.trackRead(this.readAll(query, options));
+  }
+
+  [acceptedRows]<T>(query: QueryBuilder<T>, timeoutMs: number): Promise<AcceptedRows<T>> {
+    validateAcceptedReadTimeout(timeoutMs);
+    if (this.kind !== "serializable" || this.openingReadCapability !== "accepted-evidence")
+      return Promise.reject(
+        new Error("Accepted evidence was not selected before transaction opening"),
+      );
+    return this.trackRead(this.readAll(query, undefined, timeoutMs));
+  }
+
+  private trackRead<T>(reading: Promise<T>): Promise<T> {
     this.pendingReads.add(reading);
     const settled = () => this.pendingReads.delete(reading);
     reading.then(settled, settled);
     return reading;
   }
 
-  private async readAll<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+  private readAll<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]>;
+  private readAll<T>(
+    query: QueryBuilder<T>,
+    options: undefined,
+    acceptedTimeoutMs: number,
+  ): Promise<AcceptedRows<T>>;
+  private async readAll<T>(
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+    acceptedTimeoutMs?: number,
+  ): Promise<T[] | AcceptedRows<T>> {
     this.bindQuery(query);
     const { preparation, openTransactionId } = this.requireBinding("query");
     if (preparation.pending || preparation.failed) await preparation.drain();
@@ -2110,6 +2144,17 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveQueryOutputTable(planningSchema, builtQuery);
     const prepared = prepareTransformRead(query, builtQuery, outputTable);
+    if (acceptedTimeoutMs !== undefined) {
+      if (prepared.computedState)
+        throw new Error("Accepted evidence does not support computed preparation");
+      const result = await client.queryAcceptedInternal(
+        translateQuery(builderJson, planningSchema, prepared.physical),
+        openTransactionId,
+        acceptedTimeoutMs,
+        this.context?.readSession,
+      );
+      return { ...result, rows: result.rows.map(prepared.transform) };
+    }
     // Transactions accept the same public options surface as Db. Lower before
     // reaching native options so JavaScript callers cannot smuggle runtime
     // controls (for example `localUpdates` or `openTransactionId`) through this
@@ -2157,8 +2202,18 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
 export function beginDbTransactionAfter(
   db: Db,
   prepare: TransactionAdmission,
+  readCapability?: TransactionReadCapability,
 ): Transaction<"serializable"> {
-  return db.createTransaction("serializable", prepare);
+  return db.createTransaction("serializable", prepare, readCapability);
+}
+
+/** @internal Typed read adapter; creation owns capability and preparation. */
+export function readAcceptedTransactionRows<T>(
+  transaction: Transaction<"serializable">,
+  query: QueryBuilder<T>,
+  timeoutMs: number,
+): Promise<AcceptedRows<T>> {
+  return transaction[acceptedRows](query, timeoutMs);
 }
 
 /**
@@ -3274,6 +3329,7 @@ export class Db {
   createTransaction<TKind extends TransactionKind>(
     kind: TKind,
     prerequisite?: TransactionAdmission,
+    readCapability?: TransactionReadCapability,
   ): Transaction<TKind> {
     this.assertOpen();
     notifyLocalWrite(this);
@@ -3290,6 +3346,7 @@ export class Db {
       context,
       ownerClient ?? undefined,
       prerequisite,
+      readCapability,
     );
   }
 

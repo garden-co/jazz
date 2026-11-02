@@ -43,6 +43,74 @@ use crate::db::{
 /// Named cells, as the binding codec decodes them.
 pub type Cells = BTreeMap<String, Value>;
 
+/// Maximum JSON header in `jazz.accepted-read.host.v1`. Row bytes use the
+/// existing binding codec and are outside this header bound.
+pub const ACCEPTED_READ_HEADER_LIMIT: usize = 16 * 1024 * 1024;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AcceptedHostVersion {
+    transaction_id: String,
+    position: String,
+}
+
+impl From<crate::db::AcceptedVersion> for AcceptedHostVersion {
+    fn from(version: crate::db::AcceptedVersion) -> Self {
+        Self {
+            transaction_id: TransactionId::from_committed_tx(version.transaction).to_string(),
+            position: version.sequence.to_string(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AcceptedHostRow {
+    row_id: String,
+    state: AcceptedHostVersion,
+    content: AcceptedHostVersion,
+}
+
+#[derive(Serialize)]
+struct AcceptedHostHeader {
+    format: &'static str,
+    through: String,
+    schema: String,
+    evidence: Vec<AcceptedHostRow>,
+}
+
+fn encode_accepted_read(read: crate::db::EncodedAcceptedRead) -> HostResult<Vec<u8>> {
+    // Every entry needs at least 200 bytes in this named layout. Bound the
+    // header's allocations before constructing the transient JSON values.
+    if read.evidence.len() > ACCEPTED_READ_HEADER_LIMIT / 200 {
+        return Err(not_supported("accepted-read host header above 16 MiB"));
+    }
+    let header = AcceptedHostHeader {
+        format: "jazz.accepted-read.host.v1",
+        through: read.through.to_string(),
+        schema: uuid::Uuid::from_bytes(read.schema).to_string(),
+        evidence: read
+            .evidence
+            .into_iter()
+            .map(|row| AcceptedHostRow {
+                row_id: row.row.0.to_string(),
+                state: row.state.into(),
+                content: row.content.into(),
+            })
+            .collect(),
+    };
+    let header = serde_json::to_vec(&header)
+        .map_err(|error| HostError::Argument(format!("encode accepted-read header: {error}")))?;
+    if header.len() > ACCEPTED_READ_HEADER_LIMIT {
+        return Err(not_supported("accepted-read host header above 16 MiB"));
+    }
+    let mut frame = Vec::with_capacity(4 + header.len() + read.rows.len());
+    frame.extend_from_slice(&(header.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&header);
+    frame.extend_from_slice(&read.rows);
+    Ok(frame)
+}
+
 // ---- errors ---------------------------------------------------------------------
 
 /// Why a binding call failed.
@@ -1060,20 +1128,68 @@ impl Binding {
         author: Option<&[u8]>,
         attribution: Option<&[u8]>,
     ) -> HostResult<()> {
+        self.begin_transaction_with_capability(id, kind, author, attribution, false)
+    }
+
+    /// Opt in before opening, using this binding's actual peer when no session
+    /// is named. The flag never upgrades an existing batch or rewrites claims.
+    pub fn begin_transaction_with_capability(
+        &self,
+        id: &str,
+        kind: &str,
+        author: Option<&[u8]>,
+        attribution: Option<&[u8]>,
+        accepted_evidence: bool,
+    ) -> HostResult<()> {
         let id = open_transaction(id)?;
+        let kind = TransactionKind::parse(kind)?;
         if author.is_some() && attribution.is_some() {
             return Err("transaction identity cannot contain both author and attribution".into());
+        }
+        if accepted_evidence {
+            if !matches!(kind, TransactionKind::Serializable) {
+                return Err("accepted evidence requires a serializable transaction".into());
+            }
+            if attribution.is_some() {
+                return Err("accepted evidence cannot use attribution".into());
+            }
+            if author.is_none()
+                && (self.trusted_backend
+                    || matches!(
+                        self.author,
+                        AuthorSubject::System | AuthorSubject::SystemAt(_)
+                    ))
+            {
+                return Err("accepted evidence on a backend requires an explicit session".into());
+            }
         }
         let identity = match (author, attribution) {
             (Some(author), _) => WriteIdentity::Session(self.author_of(author)?),
             (_, Some(attribution)) => {
                 self.checked(WriteIdentity::Attribution(self.author_of(attribution)?))?
             }
+            (None, None) if accepted_evidence => WriteIdentity::Session(self.author),
             (None, None) => WriteIdentity::Database,
         };
-        match TransactionKind::parse(kind)? {
-            TransactionKind::Mergeable => block_on(self.db.begin_mergeable(id))?,
-            TransactionKind::Serializable => block_on(self.db.begin_serializable(id))?,
+        match (kind, identity) {
+            (TransactionKind::Mergeable, WriteIdentity::Database) => {
+                block_on(self.db.begin_mergeable(id))?
+            }
+            (TransactionKind::Serializable, WriteIdentity::Database) => {
+                block_on(self.db.begin_serializable(id))?
+            }
+            (TransactionKind::Mergeable, WriteIdentity::Session(author)) => {
+                block_on(self.db.begin_mergeable_for_identity(id, author))?
+            }
+            (TransactionKind::Serializable, WriteIdentity::Session(author)) => {
+                block_on(self.db.begin_serializable_for_identity(id, author))?
+            }
+            (TransactionKind::Mergeable, WriteIdentity::Attribution(author)) => {
+                block_on(self.db.begin_mergeable_for_attribution(id, author))?
+            }
+            (TransactionKind::Serializable, WriteIdentity::Attribution(author)) => {
+                block_on(self.db.begin_serializable_for_attribution(id, author))?
+            }
         }
         if identity != WriteIdentity::Database {
             self.bound.borrow_mut().insert(id, identity);
@@ -1371,6 +1487,38 @@ impl Binding {
                 }
             }?)
         })))
+    }
+
+    /// Admit an authority-evidence read synchronously into an identity-bound
+    /// serializable batch. Its future uses the ordinary host read lifetime.
+    pub fn accepted_read(
+        &self,
+        query: Vec<u8>,
+        open_transaction_id: &str,
+        include_deleted: bool,
+        timeout_ms: f64,
+        author: Option<&[u8]>,
+        claims: Option<serde_json::Value>,
+    ) -> HostResult<HostFuture<Vec<u8>>> {
+        let timeout_ms = checked_u64(timeout_ms, "timeoutMs")?;
+        let id = open_transaction(open_transaction_id)?;
+        let bound = self.transaction_reader(id, author)?.ok_or_else(|| {
+            not_supported("accepted evidence without an explicitly bound session")
+        })?;
+        let query: Query = postcard::from_bytes(&query)
+            .map_err(|error| HostError::Argument(format!("undecodable query: {error}")))?;
+        let mut prepared = self.db.prepare_query(&query)?;
+        // Omitted claims mean the registered core claims, including on a
+        // schema view. Do not replace them with an empty JavaScript object.
+        if let Some(claims) = claims {
+            prepared = prepared.with_identity_claims(bound, self::claims(bound, claims)?);
+        }
+        let read = self
+            .db
+            .accepted_transaction_query(id, prepared, include_deleted, timeout_ms)?;
+        Ok(Box::pin(
+            self.parked(async move { encode_accepted_read(read.await?) }),
+        ))
     }
 
     /// Subscribe to a postcard query. A remote attachment goes upstream on
@@ -2012,6 +2160,57 @@ impl Link {
                 }
                 None => false,
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod accepted_host_codec_tests {
+    use super::*;
+
+    /// Alice and Bob's independently assembled host frames pin this boundary's
+    /// bytes. This codec unit test needs constructed origins to exercise u64
+    /// limits that ordinary authority clocks cannot reach in a runtime test.
+    #[test]
+    fn accepted_host_empty_and_paired_bytes_match_independent_fixtures() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/accepted_read_host_v1.json"))
+                .unwrap();
+        let unhex = |hex: &str| {
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect::<Vec<_>>()
+        };
+        for case in fixture["cases"].as_array().unwrap() {
+            let paired = case["name"] == "paired_u64";
+            let evidence = if paired {
+                vec![crate::db::AcceptedRowEvidence {
+                    row: RowUuid::from_bytes([0x11; 16]),
+                    state: crate::db::AcceptedVersion {
+                        transaction: TxId::new(TxTime(2), NodeUuid::from_bytes([2; 16])),
+                        sequence: u64::MAX,
+                    },
+                    content: crate::db::AcceptedVersion {
+                        transaction: TxId::new(TxTime(1), NodeUuid::from_bytes([1; 16])),
+                        sequence: 9_007_199_254_740_993,
+                    },
+                }]
+            } else {
+                vec![]
+            };
+            let frame = encode_accepted_read(crate::db::EncodedAcceptedRead {
+                through: if paired { u64::MAX } else { 0 },
+                schema: [0x22; 16],
+                scope: crate::db::AcceptedReadScope {
+                    author: AuthorSubject::for_test_bytes([7; 16]),
+                    claims: BTreeMap::new(),
+                },
+                evidence,
+                rows: unhex(case["rows_hex"].as_str().unwrap()),
+            })
+            .unwrap();
+            assert_eq!(frame, unhex(case["frame_hex"].as_str().unwrap()));
         }
     }
 }
