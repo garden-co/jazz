@@ -1,4 +1,4 @@
-import { useMemo, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import type { PublicSession } from "../runtime/context.js";
 import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 import { jazzDevPluginActive } from "../dev-tools/auto-attach.js";
@@ -10,7 +10,7 @@ import {
   type CreateJazzClient,
 } from "../react-core/provider.js";
 import { ConfiguredJazzAppProvider, type JazzAppViewProps } from "../react-core/app.js";
-import { backendAuth, type JazzAuth } from "../session/app.js";
+import { authForUser, type JazzAuth } from "../session/app.js";
 import { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
 import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import { DevToolsAutoAttach } from "./devtools-auto-attach.js";
@@ -119,17 +119,7 @@ function ApplicationJazzProvider(props: JazzAppProviderProps) {
     ...config
   } = props;
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
-  // `user={undefined}` (still loading) is not the same as no `user` prop.
-  const followsUser = Object.hasOwn(props, "user");
-  if (followsUser && explicitAuth) throw new Error("Pass JazzProvider either `user` or `auth`");
-  const userAuth = useMemo(
-    () =>
-      followsUser
-        ? backendAuth({ key: user ?? null, isPending: user === undefined, logout: () => {} })
-        : undefined,
-    [followsUser, user],
-  );
-  const auth = explicitAuth ?? userAuth;
+  const auth = authForUser(Object.hasOwn(props, "user"), user, explicitAuth);
   return (
     <ConfiguredJazzAppProvider
       config={{ ...config, initial: config.initial ?? (auth ? undefined : "local-first") }}

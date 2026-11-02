@@ -10,7 +10,11 @@ import {
 } from "../web/create-jazz-client.js";
 import { createJazzSessionOwner, type JazzSession } from "./state.js";
 import { connectAuthProvider, type AuthProviderConnection } from "./auth-provider.js";
-import { DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
+import { clientScope, DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
+import { accountRegistryUrl } from "../accounts/context.js";
+import { AccountAuthError, requestBackendSignIn } from "../accounts/registry-client.js";
+import type { AccountIdentity } from "../accounts/state.js";
+import { browserBackendWatchEvents, watchBackendUser } from "./backend-watch.js";
 
 export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
   AccountManagerConfig & {
@@ -46,6 +50,13 @@ export async function createJazzSession(config: JazzSessionConfig): Promise<Brow
     openClient: (account) => createJazzClient({ ...clientConfig, account }),
   });
   let connection: AuthProviderConnection | undefined;
+  // Without `setUser` (or a provider's `user`), ask the backend who is signed in.
+  const registry = accountRegistryUrl(serverUrl, clientScope({ ...config, serverUrl }));
+  const stopWatch = watchBackendUser(
+    session,
+    () => signedInIdentity(registry),
+    browserBackendWatchEvents(`jazz-account:${registry}`),
+  );
   const close = session.close;
   return Object.assign(session, {
     setUser(user: string | null | undefined) {
@@ -53,9 +64,20 @@ export async function createJazzSession(config: JazzSessionConfig): Promise<Brow
       connection.update({ key: user ?? null, isPending: user === undefined });
     },
     close() {
+      stopWatch();
       connection?.dispose();
       connection = undefined;
       return close();
     },
   });
+}
+
+async function signedInIdentity(registry: string): Promise<AccountIdentity | null> {
+  try {
+    const answer = (await requestBackendSignIn(registry)) as { identity?: AccountIdentity };
+    return answer.identity ?? null;
+  } catch (cause) {
+    if (cause instanceof AccountAuthError && cause.status === 401) return null;
+    throw cause;
+  }
 }
