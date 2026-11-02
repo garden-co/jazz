@@ -38,6 +38,9 @@ import {
   type JazzClient,
 } from "./create-jazz-session.js";
 import type { BackendSchemaInput } from "./create-jazz-context.js";
+import { onVercelDeployment, openVercelCore, type VercelStoreOptions } from "./vercel-store.js";
+
+export type { VercelStoreOptions } from "./vercel-store.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
@@ -48,15 +51,21 @@ export type JazzStore =
       readonly url: string;
       readonly adminSecret: string;
       readonly backendSecret: string;
+    }
+  | {
+      readonly kind: "vercel";
+      readonly options: VercelStoreOptions;
+      /** What runs outside a Vercel deployment, e.g. under `next dev`. */
+      readonly local: Extract<JazzStore, { kind: "sqlite" | "memory" }>;
     };
 
 /** A SQLite core in this process, kept in the directory `path`. */
-export function sqlite(options: { path: string }): JazzStore {
+export function sqlite(options: { path: string }): Extract<JazzStore, { kind: "sqlite" }> {
   return { kind: "sqlite", path: options.path };
 }
 
 /** An in-memory core in this process: for tests and throwaway previews. */
-export function memory(): JazzStore {
+export function memory(): Extract<JazzStore, { kind: "memory" }> {
   return { kind: "memory" };
 }
 
@@ -77,6 +86,26 @@ export function remote(options: {
     adminSecret: options.adminSecret,
     backendSecret: options.backendSecret,
   };
+}
+
+/**
+ * A core in a persistent Vercel Sandbox in your own Vercel project, with its
+ * data on a Drive: one for production and one per Git branch for previews.
+ * It is created on first use, wakes when a request needs it (about a second)
+ * and stops after `idleMs` without requests or sockets. It authenticates with
+ * the function's OIDC token, so it needs no env vars; install
+ * `@vercel/sandbox` next to `jazz-tools`. A deployment of a newer jazz-tools
+ * restarts the core on its version, and an older deployment never moves it
+ * back. Outside a production or preview deployment (`next dev`, `vercel dev`,
+ * tests) it runs `local` instead: by default a SQLite core in `.jazz/local`.
+ * Branch cores are not deleted when a branch merges yet: each keeps its
+ * Sandbox and a Drive of up to `maxDriveBytes` until you remove them.
+ */
+export function vercel(
+  options: VercelStoreOptions & { local?: Extract<JazzStore, { kind: "sqlite" | "memory" }> } = {},
+): JazzStore {
+  const { local, ...rest } = options;
+  return { kind: "vercel", options: rest, local: local ?? sqlite({ path: ".jazz/local" }) };
 }
 
 /** Who the request's user is, as the app's own auth decides. */
@@ -408,7 +437,7 @@ async function openInProcessCore(
  * writable at all), so a sqlite store there loses data silently.
  */
 function refuseServerlessDisk(dir: string): void {
-  const host = process.env.VERCEL
+  const host = onVercelDeployment()
     ? "Vercel"
     : process.env.AWS_LAMBDA_FUNCTION_NAME
       ? "AWS Lambda"
@@ -513,11 +542,19 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     }),
   );
   const issuer = `jazz:app:${options.appId}`;
-  const store = options.store;
+  const store =
+    options.store.kind === "vercel" && !onVercelDeployment() ? options.store.local : options.store;
   const core =
     store.kind === "remote"
       ? openRemoteCore(options.appId, store)
-      : await openInProcessCore(options.appId, store);
+      : store.kind === "vercel"
+        ? await openVercelCore({
+            appId: options.appId,
+            options: store.options,
+            openRemote: ({ appId, ...target }) =>
+              openRemoteCore(appId, { kind: "remote", ...target }),
+          })
+        : await openInProcessCore(options.appId, store);
 
   let session: JazzSession<JazzClient>;
   try {
@@ -1007,7 +1044,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       await core.handle(
         request.method,
         path + url.search,
-        store.kind === "remote"
+        store.kind === "remote" || store.kind === "vercel"
           ? headers.filter(([name]) => REMOTE_FORWARDED_HEADERS.includes(name!.toLowerCase()))
           : headers,
         body,
@@ -1021,7 +1058,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       request.method === "GET" &&
       path?.endsWith("/ws") &&
       request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
-      process.env.VERCEL
+      onVercelDeployment()
     ) {
       if (!originAllowed(request)) return new Response("origin not allowed", { status: 403 });
       const { upgradeWebSocket } = (await import(
@@ -1038,7 +1075,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     }
     // On Vercel this handler upgrades sockets (above); elsewhere (next dev)
     // only if attach() runs on the same server.
-    return handle(request, upgradesSockets || Boolean(process.env.VERCEL));
+    return handle(request, upgradesSockets || onVercelDeployment());
   }
 
   function nodeRequest(req: IncomingMessage): Request {
