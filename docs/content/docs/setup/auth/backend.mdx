@@ -34,29 +34,43 @@ again. There are no JWKS, issuer or audience settings, and no Jazz token in the 
 ## In the browser
 
 ```tsx title="App.tsx"
-import { JazzProvider, backendAuth } from "jazz-tools/react";
+import { JazzProvider } from "jazz-tools/react";
 import { authClient } from "./auth-client";
 
 function Root() {
   const { data, isPending } = authClient.useSession();
   return (
-    <JazzProvider
-      auth={backendAuth({
-        key: data?.user.id ?? null,
-        isPending,
-        logout: () => authClient.signOut(),
-      })}
-      signedOut={<SignIn />}
-    >
+    // undefined while your auth loads, null when signed out, the user's id when signed in
+    <JazzProvider user={isPending ? undefined : (data?.user.id ?? null)} signedOut={<SignIn />}>
       <App />
     </JazzProvider>
   );
 }
 ```
 
-`key` is whatever identifies the signed-in user on the client, or `null`. When it changes, Jazz signs
-in again through your backend; the identity itself always comes from `authenticate`. Without React,
-call `session.loginWithBackend()` after your own sign-in and `session.logout()` on sign-out.
+`user` is whatever your auth library already says about the current user: `undefined` while it's
+loading, `null` when signed out, and a stable id when signed in. When it changes, Jazz signs in again
+through your backend; the identity itself always comes from `authenticate`, never from the prop.
+That's the whole integration, and it works the same with Better Auth, Clerk, Auth.js, Supabase or
+your own sign-in:
+
+- **Sign-out.** When `user` becomes `null`, Jazz closes the account's client. A local-first client's
+  unsynced writes stay in that account's local storage and sync the next time the same user signs
+  in. On shared devices, pass `clearOnSignOut` to wipe them instead.
+- **Sign-out elsewhere.** Another tab, an expired session or a revoked one: your backend re-runs
+  `authenticate` on open connections, and when it returns `null` Jazz ends the connection as
+  signed out. No client code needed.
+- **Without the prop**, Jazz asks your backend on start, when the tab regains focus and when another
+  tab signs in or out. The prop only makes changes instant.
+
+Without a framework, pass the same value from your auth library's own listener:
+
+```ts
+import { createClient } from "jazz-tools/thin";
+
+const db = await createClient();
+supabase.auth.onAuthStateChange((_event, session) => db.setUser(session?.user.id ?? null));
+```
 
 ## Several sign-in methods
 
@@ -68,8 +82,8 @@ was used.
 
 A local-first guest who signs up keeps its account and data: after your sign-up sets its session,
 the client calls `linkWithBackend()`. It proves it owns the guest account with its own local-first
-key; your backend runs `authenticate` and links the new user to that account. In React, call it from
-`useJazzAuth().sessionActions` in your sign-up form.
+key; your backend runs `authenticate` and links the new user to that account. Call it in your sign-up
+handler, right after your auth sets the session; the `user` change that follows is then a no-op.
 
 To link from your own backend code instead, for example a second identity your auth issued, call:
 

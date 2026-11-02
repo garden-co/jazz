@@ -88,18 +88,18 @@ export const jazz = await createJazz({
 The browser talks to `/jazz` on the same origin by default, so there's no `serverUrl` to set, and your
 app's own session cookie is all it needs. It needs no Jazz API key or token:
 
-```ts title="src/jazz.ts"
-import { createJazzSession } from "jazz-tools/client";
+```tsx title="App.tsx"
+const { data, isPending } = authClient.useSession(); // any auth library's current user
 
-export const session = await createJazzSession();
-await session.loginWithBackend();
+<JazzProvider user={isPending ? undefined : (data?.user.id ?? null)}>
+  <App />
+</JazzProvider>;
 ```
 
-`loginWithBackend()` asks your backend who is signed in. `authenticate` answers, and the client gets
-the account, identity and claims (`session.user`, `session.claims`) as plain data. Every sync
-connection asks `authenticate` again, so a sign-out or changed claims apply on the next reconnect.
-Call `loginWithBackend()` again after your own sign-in changes; on sign-out, call
-`session.logout()`.
+When `user` changes, the client signs in through `/jazz`: `authenticate` answers, and the client gets
+the account, identity and claims as plain data. Every sync connection asks `authenticate` again, so
+a sign-out or changed claims apply without client code. See
+[Your Backend Decides](/docs/setup/auth/backend#in-the-browser).
 
 ## Trusted backend use
 

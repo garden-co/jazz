@@ -59,7 +59,8 @@ users' credentials.
 />
 
 1. The user signs in with your auth library, which sets its own session cookie.
-2. The client calls `loginWithBackend()`. Your backend runs `authenticate` and returns the user id.
+2. The client sees the new user (the `user` prop or `setUser`) and signs in through `/jazz`. Your
+   backend runs `authenticate` and returns the user id.
 3. Jazz gives that user an account the first time, and the same account every time after. The
    identity is `{ issuer: "jazz:app:<appId>", subject: userId }`.
 4. Every sync connection asks `authenticate` again, so a sign-out or changed claims apply on the
@@ -67,41 +68,37 @@ users' credentials.
 
 ## In the client
 
-With React, pass `backendAuth` to `JazzProvider`:
+With React, give `JazzProvider` the current user from your auth library:
 
 ```tsx
-import { JazzProvider, backendAuth } from "jazz-tools/react";
+import { JazzProvider } from "jazz-tools/react";
 
-<JazzProvider
-  auth={backendAuth({ key: user?.id ?? null, isPending, logout: () => signOut() })}
-  signedOut={<SignIn />}
->
+<JazzProvider user={isPending ? undefined : (user?.id ?? null)} signedOut={<SignIn />}>
   <App />
 </JazzProvider>;
 ```
 
-`key` is whatever identifies the signed-in user on the client, or `null`; when it changes, Jazz
-signs in again through your backend. `logout` signs out of your auth; your source must then report
-`key: null`. For Better Auth, `betterAuth(authClient)` does all of this for you.
+`undefined` means your auth is still loading, `null` signed out, and an id signed in. When it
+changes, Jazz signs in again through your backend. Sign-outs in other tabs or on the server reach
+Jazz on their own, because your backend re-runs `authenticate` on open connections. See
+[Your Backend Decides](/docs/setup/auth/backend#in-the-browser) for the details.
 
-Without React, own the session yourself:
+Without a framework, call `setUser` from your auth's listener:
 
 ```ts
-import { createJazzSession } from "jazz-tools/client";
+import { createClient } from "jazz-tools/thin";
 
-const jazz = await createJazzSession();
-await jazz.loginWithBackend(); // after your own sign-in
-// ...
-await jazz.logout(); // before your own sign-out
+const db = await createClient();
+onYourAuthChange((user) => db.setUser(user?.id ?? null));
 ```
 
-Svelte, Solid, Vue and React Native expose the same actions through their bindings.
+Svelte, Solid, Vue and React Native take the same `user` value on their providers.
 
 ## Guests who sign up
 
 An app can start every visitor as a [local-first](/docs/setup/auth/local-first) guest
-(`initial: "local-first"`). When the guest signs up, call `linkWithBackend()` instead of
-`loginWithBackend()`:
+(`initial: "local-first"`). When the guest signs up, call `linkWithBackend()` in your sign-up
+handler, before the `user` value changes:
 
 ```ts
 await yourAuth.signUp(email, password); // sets your session cookie
