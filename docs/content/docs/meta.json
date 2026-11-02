@@ -24,7 +24,6 @@
     "recipes/drafts-and-branches",
     "recipes/access-control",
     "recipes/data-patterns",
-    "recipes/auth",
     "recipes/effect",
     "---Reference---",
     "reference/where-operators",

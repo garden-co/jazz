@@ -53,3 +53,195 @@ For a full working example, including Better Auth's tables stored in Jazz, see t
   Auth's sign-up so they keep their data. See [Other /
   Custom](/docs/setup/auth/custom#guests-who-sign-up).
 </Callout>
+
+## Store Better Auth's tables in Jazz
+
+The Jazz Better Auth adapter lets Better Auth keep its users, credentials and sessions in the same
+Jazz app as your own data, so one main backend serves both. For general Better Auth setup (route
+handlers, client, plugins), see the [Better Auth documentation](https://www.better-auth.com/docs).
+
+### Generate the tables
+
+Better Auth tables live in a generated `schema-better-auth/` module that your app schema spreads into its own table map. This keeps Better Auth's tables in the same Jazz app as your own data, so a single backend context handles both.
+
+Start with shared Better Auth options.
+
+```ts title="auth-options.ts"
+export const authOptions = {
+  baseURL: process.env.BETTER_AUTH_URL!,
+  secret: process.env.BETTER_AUTH_SECRET!,
+  emailAndPassword: { enabled: true },
+};
+```
+
+Set `BETTER_AUTH_URL` to your application server's origin and `BETTER_AUTH_SECRET` to a private Better Auth secret. Keep plugins, additional fields, and model customizations in these shared options so generation and runtime use the same configuration.
+
+Create a separate configuration for generation. It does not import your app schema or open a Jazz session, so it works before either the generated file or Jazz exists. The CLI only requests schema generation; the database callback is deliberately unavailable.
+
+```ts title="auth-generate.ts"
+import { betterAuth } from "better-auth";
+import { schema as s } from "jazz-tools";
+import { jazzAdapter } from "jazz-tools/better-auth-adapter";
+import { authOptions } from "./auth-options";
+
+export const auth = betterAuth({
+  ...authOptions,
+  database: jazzAdapter({
+    db: async () => {
+      throw new Error("The generation config cannot query the database");
+    },
+    schema: s.defineApp({}, { migrations: "none" }).wasmSchema,
+  }),
+});
+```
+
+Generate with the current [Better Auth CLI](https://www.better-auth.com/docs/concepts/cli):
+
+```bash
+npx auth@latest generate \
+  --config ./auth-generate.ts \
+  --output ./schema-better-auth/schema.ts \
+  --yes
+```
+
+`--yes` writes the output without an interactive confirmation. Review the generated diff when regenerating an existing module.
+
+Import the generated tables in your app's `schema.ts` and merge them into the app definition:
+
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+import { migrations } from "./migrations";
+import { schema as betterauthSchema } from "./schema-better-auth/schema";
+
+const schema = {
+  ...betterauthSchema,
+  messages: s.table(
+    {
+      author_name: s.string(),
+      chat_id: s.string(),
+      text: s.string(),
+      sent_at: s.timestamp(),
+    },
+    {},
+  ),
+  // ...your own tables
+};
+
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+```
+
+The generated `schema-better-auth/schema.ts` also ships a `permissions` export that denies all operations on the Better Auth tables. Merge it with your own permissions so regular client sessions can't read or write Better Auth rows — the adapter itself uses `jazz.db`, which has backend permissions.
+
+```ts title="permissions.ts"
+import { definePermissions } from "jazz-tools/permissions";
+import { permissions as betterAuthPermissions } from "./schema-better-auth/schema";
+import { app } from "./schema";
+
+const appPermissions = definePermissions(app, ({ policy }) => {
+  // Define policies for your own tables.
+  policy.messages.allowRead.always();
+});
+
+export default {
+  ...betterAuthPermissions,
+  ...appPermissions,
+};
+```
+
+After adding both files, validate the merged schema and permissions:
+
+```bash
+pnpm dlx jazz-tools@alpha validate
+```
+
+### Use Jazz as the database
+
+Create Jazz in your backend ([Backend](/docs/setup/backend)), then pass `jazz.db` to `jazzAdapter(...)` as the `database` in your Better Auth config. Point both `db` and `schema` at the merged `app`, not at the generated module directly, so Better Auth and your own tables share a single Jazz app. `authenticate` asks the same Better Auth instance who a request's session cookie belongs to.
+
+```ts title="auth.ts"
+import { betterAuth } from "better-auth";
+import { createJazz, remote } from "jazz-tools/backend";
+import { jazzAdapter } from "jazz-tools/better-auth-adapter";
+import { app } from "./schema";
+import permissions from "./permissions";
+import { authOptions } from "./auth-options";
+
+export const jazz = await createJazz({
+  app,
+  permissions,
+  store: remote({
+    appId: process.env.JAZZ_APP_ID!,
+    url: process.env.JAZZ_SERVER_URL!,
+    adminSecret: process.env.JAZZ_ADMIN_SECRET!,
+    backendSecret: process.env.BACKEND_SECRET!,
+  }),
+  authenticate: async (request) => {
+    const session = await auth.api.getSession({ headers: request.headers });
+    return session ? { userId: session.user.id } : null;
+  },
+});
+
+export const auth = betterAuth({
+  ...authOptions,
+  database: jazzAdapter({
+    db: async () => jazz.db,
+    schema: app.wasmSchema,
+  }),
+});
+```
+
+| Option      | Description                                                                                          |
+| ----------- | ---------------------------------------------------------------------------------------------------- |
+| `db`        | A function returning `Db` or `Promise<Db>`, such as `jazz.db`. Use the merged app, not `authSchema`. |
+| `schema`    | Typically `app.wasmSchema` from your merged schema. A raw `s.App` is also accepted.                  |
+| `debugLogs` | Better Auth adapter debug logging controls.                                                          |
+| `usePlural` | Whether Better Auth model names should use plural table names.                                       |
+| `prefix`    | Table name prefix (defaults to `"better_auth_"`).                                                    |
+
+<Callout title="Leave Better Auth joins disabled">
+  The Jazz adapter does not support Better Auth experimental joins yet, so do not enable
+  `experimental.joins`.
+</Callout>
+
+### Act as the signed-in user
+
+The adapter stores Better Auth users, password credentials, and application sessions; the client side stays as in [Connecting to Jazz](#connecting-to-jazz). In a route handler, act as the signed-in user with `jazz.forRequest(request)`, which runs the same `authenticate`:
+
+```ts title="messages.ts"
+import { jazz } from "./auth";
+import { app } from "./schema";
+
+export async function messages(request: Request) {
+  const db = await jazz.forRequest(request);
+  return Response.json(await db.all(app.messages, { tier: "remote" }));
+}
+```
+
+These scopes keep the signed-in user's policies and authorship without switching the backend's own identity. For account-owned rows, compare ownership against `session.user.account` in permissions; a Better Auth user ID is not a Jazz account UUID. Never accept a raw account ID from a request as authority.
+
+### Publishing schema and permissions
+
+Because Better Auth tables are merged into your app schema, they travel with everything else: `createJazz` applies the schema, migrations and permissions your backend's code declares when it starts, with no separate push for `schema-better-auth/`. To publish them without starting the backend, use the CLI:
+
+```bash
+pnpm dlx jazz-tools@alpha deploy <appId>
+```
+
+See [Migrations](/docs/schemas/migrations) for the full deploy flow and how schema changes produce migration edges.
+
+### Compatibility
+
+The adapter is currently aligned with Better Auth `1.7.1`.
+
+| Plugin/Feature        | Compatibility |
+| --------------------- | :-----------: |
+| Email & Password auth |      ✅       |
+| Social Provider auth  |      ✅       |
+| Email OTP             |      ✅       |
+
+<Callout title="Compatibility scope">
+  This section reflects the adapter behavior currently covered by this repo's Better Auth
+  integration and tests. If you add plugins that introduce extra tables or custom schema fields,
+  regenerate `schema-better-auth/schema.ts` and re-run the Jazz schema workflow.
+</Callout>

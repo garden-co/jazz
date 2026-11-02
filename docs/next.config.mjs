@@ -88,6 +88,11 @@ const config = {
         permanent: false,
       },
       {
+        source: "/docs/recipes/auth/better-auth-adapter",
+        destination: "/docs/setup/auth/better-auth#store-better-auths-tables-in-jazz",
+        permanent: false,
+      },
+      {
         source: "/docs/setup/backend/install",
         destination: "/docs/setup/backend",
         permanent: false,
