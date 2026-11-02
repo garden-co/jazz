@@ -44,7 +44,12 @@ export type JazzAppViewProps<Client = CoreJazzClient> = {
 type AuthAdmission =
   | { kind: "manual" }
   | { kind: "better-auth"; client: Extract<JazzAuth, { kind: "better-auth" }>["client"] }
-  | { kind: "jwt"; key: string | null; isPending: boolean; error: Error | undefined };
+  | {
+      kind: "jwt" | "backend";
+      key: string | null;
+      isPending: boolean;
+      error: Error | undefined;
+    };
 
 function authAdmission(auth: JazzAuth | undefined): AuthAdmission {
   if (!auth) return { kind: "manual" };
@@ -57,7 +62,7 @@ function sameAdmission(left: AuthAdmission, right: AuthAdmission): boolean {
   if (left.kind === "better-auth")
     return right.kind === "better-auth" && left.client === right.client;
   return (
-    right.kind === "jwt" &&
+    right.kind === left.kind &&
     left.key === right.key &&
     left.isPending === right.isPending &&
     left.error === right.error
