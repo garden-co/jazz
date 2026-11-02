@@ -338,6 +338,49 @@ describe("createJazz", () => {
     expect((await jazz.db.all(app.todos.where({ id: later.id }))).length).toBe(1);
   }, 60_000);
 
+  it("sends a failed socket to the HTTP stream only through handlers that can't upgrade", async () => {
+    const appId = randomUUID();
+    const marker = async (response: Promise<Response>) =>
+      (await response).headers.get("x-jazz-stream");
+    const probe = () => new Request(`http://app.test/jazz/apps/${appId}/ws`);
+
+    const plain = await createJazz({ appId, app, permissions, store: memory(), authenticate });
+    cleanups.push(() => plain.close());
+    const previous = process.env.VERCEL;
+    process.env.VERCEL = "1";
+    try {
+      // On Vercel, only next() upgrades: a Hono or plain fetch handler there
+      // can't, so its clients need the stream.
+      expect(await marker(plain.fetch(probe()))).toBe("1");
+      expect(await marker(plain.next().GET(probe()))).toBeNull();
+    } finally {
+      if (previous === undefined) delete process.env.VERCEL;
+      else process.env.VERCEL = previous;
+    }
+    expect(await marker(plain.next().GET(probe()))).toBe("1"); // next dev
+
+    // A host that upgrades on its own and hands sockets to acceptSocket.
+    const own = await createJazz({
+      appId: randomUUID(),
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+      upgradesSockets: true,
+    });
+    cleanups.push(() => own.close());
+    expect(
+      await marker(own.fetch(new Request(`http://app.test/jazz/apps/${own.appId}/ws`))),
+    ).toBeNull();
+
+    // An entry that isn't an origin (it would parse as the opaque "null").
+    for (const entry of ["localhost:3000", "app.example.com:443", "not a url"]) {
+      await expect(
+        createJazz({ appId, app, permissions, store: memory(), allowedOrigins: [entry] }),
+      ).rejects.toThrow(/is not an origin/);
+    }
+  }, 60_000);
+
   it("opens a sqlite directory in one core at a time, and not on serverless hosts", async () => {
     const appId = randomUUID();
     const dir = await mkdtemp(join(tmpdir(), "jazz-lock-"));
