@@ -61,10 +61,13 @@ describe("installJazzSkills", () => {
         ),
       );
 
+    const docsDir = path.join(repoRoot, "docs", "content", "docs");
     for (const [, slug] of links) {
-      expect(fs.existsSync(path.join(repoRoot, "docs", "content", "docs", `${slug}.mdx`))).toBe(
-        true,
+      // A page is `<slug>.mdx`, or `<slug>/index.mdx` for a section's own page.
+      const page = [`${slug}.mdx`, path.join(slug, "index.mdx")].find((file) =>
+        fs.existsSync(path.join(docsDir, file)),
       );
+      expect(page, slug).toBeDefined();
     }
   });
 });
