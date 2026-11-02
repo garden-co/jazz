@@ -1928,7 +1928,7 @@ pub(crate) struct ReadDeadline {
 }
 
 impl ReadDeadline {
-    fn watch(&self, waker: &Waker) {
+    pub(crate) fn watch(&self, waker: &Waker) {
         let mut slot = self.waker.borrow_mut();
         if slot.as_ref().is_none_or(|prior| !prior.will_wake(waker)) {
             *slot = Some(waker.clone());

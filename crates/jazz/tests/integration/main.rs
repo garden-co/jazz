@@ -214,3 +214,6 @@ mod accepted_rpc_reads;
 
 #[path = "../accepted_evidence_wire.rs"]
 mod accepted_evidence_wire;
+
+#[path = "../accepted_transaction_reads.rs"]
+mod accepted_transaction_reads;

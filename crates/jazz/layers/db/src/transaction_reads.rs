@@ -13,6 +13,7 @@ pub(super) struct ReadState {
     queue: VecDeque<u64>,
     wakers: Vec<Waker>,
     closed: bool,
+    failure: Option<Error>,
 }
 
 fn unfinished() -> Error {
@@ -27,16 +28,37 @@ impl ReadState {
         if self.closed || !self.queue.is_empty() {
             return Err(unfinished());
         }
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
         Ok(())
+    }
+
+    pub(super) fn fail(&mut self, error: Error) {
+        self.failure.get_or_insert(error);
     }
 }
 
 pub(super) struct ReadGuard {
     state: Rc<RefCell<ReadState>>,
     ticket: u64,
+    requires_evidence: bool,
+    finished: bool,
 }
 
 impl ReadGuard {
+    pub(super) fn require_evidence(&mut self) {
+        self.requires_evidence = true;
+        self.finished = false;
+    }
+
+    pub(super) fn finish<T>(&mut self, result: &Result<T, Error>) {
+        if let Err(error) = result {
+            self.state.borrow_mut().fail(error.clone());
+        }
+        self.finished = true;
+    }
+
     pub(super) fn watch(&self, waker: &Waker) {
         let mut state = self.state.borrow_mut();
         if !state.wakers.iter().any(|prior| prior.will_wake(waker)) {
@@ -68,6 +90,12 @@ impl Drop for ReadGuard {
         // Wake after releasing the state borrow: an executor can poll eagerly.
         let wakers = {
             let mut state = self.state.borrow_mut();
+            if self.requires_evidence && !self.finished {
+                state.fail(Error::new(
+                    ErrorCode::NotObserved,
+                    "an accepted transaction read was cancelled",
+                ));
+            }
             state.queue.retain(|ticket| *ticket != self.ticket);
             std::mem::take(&mut state.wakers)
         };
@@ -95,7 +123,12 @@ impl Db {
             state.queue.push_back(ticket);
             ticket
         };
-        Ok(ReadGuard { state, ticket })
+        Ok(ReadGuard {
+            state,
+            ticket,
+            requires_evidence: false,
+            finished: true,
+        })
     }
 
     pub(super) fn check_read_guard(
@@ -111,6 +144,9 @@ impl Db {
                 .is_some_and(|batch| Rc::ptr_eq(&batch.reads_state, &guard.state))
         {
             return Err(unfinished());
+        }
+        if let Some(error) = &guard.state.borrow().failure {
+            return Err(error.clone());
         }
         Ok(())
     }
