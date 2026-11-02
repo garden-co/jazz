@@ -321,7 +321,23 @@ async fn ws_admission(
 ) -> Result<WebSocketAdmission, super::accounts::AdmissionError> {
     let peer_identity = ws_peer_identity(&prelude.peer_identity)?;
     let requested_link = prelude.requested_link;
-    let auth = prelude.auth;
+    let mut auth = prelude.auth;
+    // A server that trusts a workload admits only sessions its workload
+    // vouches for, in either secret field; guests included.
+    if let (Some(verifier), Some(secrets)) = (
+        state.workload_verifier.as_deref(),
+        state.workload_secrets.as_ref(),
+    ) {
+        crate::middleware::workload::exchange(
+            verifier,
+            state.auth_config.clock.now_seconds(),
+            &mut auth.admin_secret,
+            &mut auth.backend_secret,
+            None,
+            secrets,
+        )
+        .await?;
+    }
 
     if let Some(admin_secret) = auth.admin_secret.as_deref() {
         crate::middleware::auth::validate_admin_secret(Some(admin_secret), &state.auth_config)
