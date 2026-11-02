@@ -1,3 +1,4 @@
+import { clientScope } from "../runtime/client-scope.js";
 import { installNativeRuntimeEntropy } from "../runtime/runtime-entropy.js";
 import type { RuntimeClientContext } from "../runtime/runtime-source.js";
 import { RuntimeSource } from "../runtime/runtime-source.js";
@@ -244,7 +245,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
           },
         );
         const appContext: AppContext = {
-          appId: context.config.appId,
+          appId: clientScope(context.config),
           accountId: context.config.accountId,
           schema: context.schema,
           driver: context.config.driver,

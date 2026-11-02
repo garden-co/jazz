@@ -295,12 +295,22 @@ export function createAccountManagerWithRuntime(options: {
         if (!material || material.registry !== registry || !material.localFirstSecret)
           throw new AccountAuthError("local_first_account_required");
         const secret = material.localFirstSecret;
+        // The namespace the guest's account was founded in (its token's
+        // audience: the app id, or the endpoint for an app-less client), so
+        // the backend founds the same account.
+        const audience = material.auth
+          ? parseJwtPayload(await tokenFor(material.auth))?.aud
+          : undefined;
         const linked = await backendAccount(async () => {
           const challenge = await requestBackendLinkChallenge(registry, options.fetch);
           if (credentials.get(account) !== material)
             throw new AccountAuthError("account_logged_out");
           return requestBackendSignIn(registry, options.fetch, {
-            link: { challenge, proof: signChallenge(secret, challenge) },
+            link: {
+              challenge,
+              proof: signChallenge(secret, challenge),
+              ...(typeof audience === "string" ? { audience } : {}),
+            },
           });
         });
         if (linked.id !== account.id) throw new AccountAuthError("linked_account_mismatch");
