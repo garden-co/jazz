@@ -45,6 +45,7 @@ export const JazzProvider = defineComponent({
   props: {
     config: Object as PropType<AccountDbConfig>,
     appId: String,
+    scope: String,
     serverUrl: String,
     auth: Object as PropType<JazzAuth>,
     initial: [String, Object] as PropType<JazzSessionConfig["initial"]>,
@@ -62,10 +63,10 @@ export const JazzProvider = defineComponent({
           },
           slots,
         );
-    if (!props.appId) throw new Error("JazzProvider requires appId or config");
     const config = {
       ...attrs,
       appId: props.appId,
+      scope: props.scope,
       serverUrl: props.serverUrl,
       initial: props.initial ?? (props.auth ? undefined : "local-first"),
       auth: props.auth,

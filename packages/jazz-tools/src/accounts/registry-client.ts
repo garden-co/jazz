@@ -52,7 +52,7 @@ export async function requestAccountRegistry(
 export async function requestBackendSignIn(
   registry: string,
   fetcher: typeof fetch = fetchFor(registry),
-  options: { link?: { challenge: string; proof: string } } = {},
+  options: { link?: { challenge: string; proof: string; audience?: string } } = {},
 ): Promise<unknown> {
   return backendRequest(
     registry,
