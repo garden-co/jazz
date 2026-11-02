@@ -84,9 +84,7 @@ Claims from your backend can add application requirements, such as a verified ro
 
 ## Use it without Jazz
 
-The keys, tokens, recovery phrases and passkey backup come from a standalone package,
-[`@garden-co/local-first-auth`](https://github.com/garden-co/jazz/tree/main/packages/local-first-auth),
-which `jazz-tools/passphrase` and `jazz-tools/passkey-backup` re-export. Use it directly to give any
-app passwordless local-first identities, and verify its tokens on your server with
-`verifyRequest(request, { audience })` from `@garden-co/local-first-auth/server`. See its README
-for the API.
+The keys, tokens, recovery phrases and passkey backup live in a self-contained module inside
+`jazz-tools` (re-exported as `jazz-tools/passphrase` and `jazz-tools/passkey-backup`) that doesn't
+depend on the rest of Jazz. Standalone packaging, so other apps can use it directly, is planned
+after alpha.60.
