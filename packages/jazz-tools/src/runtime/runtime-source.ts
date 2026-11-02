@@ -204,7 +204,7 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
     return null;
   }
 
-  /** Same on every host: minted in TypeScript by `@garden-co/local-first-auth`. */
+  /** Same on every host: minted in TypeScript by `src/local-first-auth`. */
   mintLocalFirstToken(options: RuntimeTokenOptions): string {
     return mintLocalFirstTokenFromSeed(
       options.secret,
