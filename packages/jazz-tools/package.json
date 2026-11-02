@@ -192,6 +192,7 @@
     "pack:dry-run": "npm pack --dry-run"
   },
   "dependencies": {
+    "@garden-co/local-first-auth": "workspace:*",
     "@noble/hashes": "2.0.1",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-logs-otlp-http": "^0.216.0",
@@ -199,7 +200,6 @@
     "@opentelemetry/resources": "^2.7.1",
     "@opentelemetry/sdk-logs": "^0.216.0",
     "@opentelemetry/sdk-trace-base": "^2.7.1",
-    "@scure/bip39": "^2.0.1",
     "@standard-schema/spec": "^1.1.0",
     "esbuild": "^0.27.0",
     "fs-native-extensions": "1.5.0",

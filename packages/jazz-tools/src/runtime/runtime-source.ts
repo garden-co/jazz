@@ -1,3 +1,4 @@
+import { mintLocalFirstTokenFromSeed } from "./local-first-token.js";
 import type { ClientMigrations } from "./client-migrations.js";
 import type { RemoteLinkState } from "./remote-link-state.js";
 import type { LinkStatus } from "./sync-status.js";
@@ -203,8 +204,14 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
     return null;
   }
 
-  mintLocalFirstToken(_options: RuntimeTokenOptions): string {
-    throw new Error("Db runtime source does not support local-first auth");
+  /** Same on every host: minted in TypeScript by `@garden-co/local-first-auth`. */
+  mintLocalFirstToken(options: RuntimeTokenOptions): string {
+    return mintLocalFirstTokenFromSeed(
+      options.secret,
+      options.audience,
+      options.ttlSeconds,
+      Number(options.nowSeconds),
+    );
   }
 
   mintAnonymousToken(_options: RuntimeTokenOptions): string {

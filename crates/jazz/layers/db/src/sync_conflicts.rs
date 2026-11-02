@@ -11,7 +11,7 @@
 //! accepted seq, or where the named commit landed. A write built on a
 //! rejected commit, or on one it never received, is rejected too. It keeps,
 //! in the version the write made (the row table and history alike), `_base`
-//! (what it was built on, [`Built::stored`]) and `_cols`, the columns it
+//! (what it was built on, [`Built::stored`]) and `_touched`, the columns it
 //! authored (a bitmask over the columns' positions in the row table, which
 //! only ever grows by `ADD COLUMN`). From those and the row's history it
 //! derives on demand whether the write overrode a version its writer never
@@ -82,7 +82,7 @@ struct Version {
     seq: u64,
     built: Option<Built>,
     /// Bitmask over the table's column codes; `None` authors every
-    /// column, `_st` included.
+    /// column, `_state` included.
     cols: Option<Vec<u8>>,
 }
 
@@ -124,10 +124,10 @@ impl Knowledge {
 }
 
 /// The authored-column name a deletion or restore writes.
-const DELETION: &str = "_st";
+const DELETION: &str = "_state";
 
 /// Whether two writes' authored-column bitmasks overlap; `None` authors
-/// every column, `_st` included.
+/// every column, `_state` included.
 fn authored_overlap(left: Option<&[u8]>, right: Option<&[u8]>) -> bool {
     match (left, right) {
         (Some(left), Some(right)) => left.iter().zip(right).any(|(l, r)| l & r != 0),
@@ -287,7 +287,24 @@ impl Inner {
         bases
             .into_iter()
             .map(|(op, base)| {
+                // A version this relay shipped the session: one of the
+                // commits it carries, by the writer's id, is its own here.
                 let on = match base.on {
+                    BuiltOn::Commit { node, tx } if node != sender.0 && node != me => match pending
+                        .commits
+                        .iter()
+                        .find(|p| p.id == super::tx_id(node, tx))
+                    {
+                        Some(p) => BuiltOn::Commit { node: me, tx: p.tx },
+                        None => match self.settled(node, tx)? {
+                            Some(Some(at)) if at.accepted() => BuiltOn::Seq(at.seq),
+                            Some(None) => return Err(predecessor_rejected()),
+                            _ => return Err(unknown_base("another node's commit")),
+                        },
+                    },
+                    on => on,
+                };
+                let on = match on {
                     BuiltOn::Seq(seq) => BuiltOn::Seq(seq),
                     BuiltOn::Commit { node, tx } if node == me => {
                         let (table, row) = self.based_row(ops, op)?;
@@ -434,15 +451,27 @@ impl Inner {
         bases: &[(usize, WireBase)],
     ) -> Result<HashMap<RowKey, Pos>, Error> {
         let me = *self.identity.node.as_bytes();
+        // A session commit this relay carries, by its writer's id: its
+        // local tx here.
+        let carried = |node: [u8; 16], tx: u64| {
+            self.client.as_ref().and_then(|client| {
+                client
+                    .pending
+                    .commits
+                    .iter()
+                    .find(|p| p.id == super::tx_id(node, tx))
+                    .map(|p| p.tx)
+            })
+        };
         let mut landed = HashMap::new();
         for (op, base) in bases {
             let (table, row) = self.based_row(ops, *op)?;
             let at = match base.on {
                 BuiltOn::Seq(seq) => Pos::at(seq),
-                BuiltOn::Commit { node, tx } if node == me => Pos {
-                    n: self.me,
-                    seq: tx,
-                },
+                BuiltOn::Commit { node, tx } if node == me => self.own_pos(tx),
+                BuiltOn::Commit { node, tx } if node != sender.0 && carried(node, tx).is_some() => {
+                    self.own_pos(carried(node, tx).expect("carried"))
+                }
                 BuiltOn::Own { back } => {
                     let tx = sender
                         .1
@@ -476,16 +505,15 @@ impl Inner {
                 .map_or(&[][..], Vec::as_slice);
             self.exec(
                 &format!(
-                    "UPDATE {} SET _base = ?1, _cols = ?2 WHERE id = ?3 AND _b = ?4 AND _n = {} AND _seq = ?5",
+                    "UPDATE {} SET _base = ?1, _touched = ?2 WHERE id = ?3 AND _branch = ?4 AND _clock = ?5",
                     quote(table),
-                    self.me
                 ),
                 rusqlite::params![
                     built.get(row_key).map(|built| built.stored()),
                     self.authored(ops, indexes, table)?,
                     row.0.as_bytes().to_vec(),
                     key,
-                    seq as i64
+                    self.own_pos(seq).t()
                 ],
             )
             .map_err(storage)?;
@@ -499,17 +527,11 @@ impl Inner {
         table: &str,
         row: RowUuid,
     ) -> Result<Vec<(Vec<u8>, Pos)>, Error> {
-        let sql = format!("SELECT _b, _n, _seq FROM {} WHERE id = ?1", quote(table));
+        let sql = format!("SELECT _branch, _clock FROM {} WHERE id = ?1", quote(table));
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
         let versions = statement
             .query_map([row.0.as_bytes().to_vec()], |r| {
-                Ok((
-                    r.get::<_, Vec<u8>>(0)?,
-                    Pos {
-                        n: r.get(1)?,
-                        seq: r.get::<_, i64>(2)? as u64,
-                    },
-                ))
+                Ok((r.get::<_, Vec<u8>>(0)?, Pos::from_t(r.get(1)?)))
             })
             .map_err(storage)?
             .collect::<Result<Vec<_>, _>>()
@@ -525,11 +547,12 @@ impl Inner {
         key: &[u8],
     ) -> Result<Vec<Version>, Error> {
         let sql = format!(
-            "SELECT _seq, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 AND _n = 0 \
-             UNION ALL SELECT _seq, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 AND _n = 0 \
-             AND (_st & {STATE_AS_SENT}) = 0 ORDER BY 1",
+            "SELECT _clock, _base, _touched FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock >= 0 AND _clock < {upstream} \
+             UNION ALL SELECT _clock, _base, _touched FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock >= 0 \
+             AND _clock < {upstream} AND (_state & {STATE_AS_SENT}) = 0 ORDER BY 1",
             quote(table),
-            quote(&format!("{table}__h"))
+            quote(&format!("{table}__h")),
+            upstream = super::band_start(super::PENDING),
         );
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
         let versions = statement
@@ -560,7 +583,7 @@ impl Inner {
         let writers: BTreeMap<u64, ([u8; 16], u64)> = self
             .tx_ids(&history.iter().map(|v| v.seq).collect())?
             .into_iter()
-            .map(|(seq, _, node, tx)| (seq, (node, tx)))
+            .map(|(at, node, tx)| (at.seq, (node, tx)))
             .collect();
         let writer = |seq: u64| writers.get(&seq).copied().unwrap_or(([0; 16], seq));
         let mut conflicts = Vec::with_capacity(history.len());
@@ -602,7 +625,7 @@ impl Inner {
     /// landing after `before` was built on, when merging the write needs it
     /// (SPEC 4 §4.6): a version before `before` the writer never saw
     /// authored the column. `None` takes the fast path: nothing to merge
-    /// with, so the write's value stands as sent. Only `_base` and `_cols`
+    /// with, so the write's value stands as sent. Only `_base` and `_touched`
     /// are read to decide; the value is read only when a merge is needed.
     ///
     /// The value is the newest one the writer's chain gave the column: an
@@ -658,7 +681,7 @@ impl Inner {
         let id = row.0.as_bytes().to_vec();
         if let Some(on) = sent {
             let sql = format!(
-                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _n = 0 AND _seq = ?3",
+                "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3",
                 quote(column),
                 quote(&format!("{table}__h")),
             );
@@ -674,8 +697,8 @@ impl Inner {
             }
         }
         let sql = format!(
-            "SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _n = 0 AND _seq = ?3 \
-             UNION ALL SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _n = 0 AND _seq = ?3",
+            "SELECT {column} FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3 \
+             UNION ALL SELECT {column} FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3",
             quote(table),
             quote(&format!("{table}__h")),
             column = quote(column),
@@ -749,6 +772,31 @@ impl Db {
         self.inner().as_sent_versions()
     }
 
+    /// The `(_clock, _writer)` of every history version of `table`'s unbranched row
+    /// `row`, in key order.
+    #[cfg(feature = "testing")]
+    pub fn history_keys_for_test(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Vec<(i64, Vec<u8>)>, Error> {
+        let inner = self.inner();
+        let schema_table = inner.schema.table(table)?;
+        let sql = format!(
+            "SELECT _clock, _writer FROM {} WHERE id = ?1 AND _branch = ?2 ORDER BY _clock, _writer",
+            quote(&format!("{}__h", schema_table.stored)),
+        );
+        let mut statement = inner.conn.prepare_cached(&sql).map_err(storage)?;
+        statement
+            .query_map(
+                rusqlite::params![row.0.as_bytes().to_vec(), Vec::<u8>::new()],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+            )
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)
+    }
+
     /// How many bytes column `column` of `table`'s unbranched row `row`
     /// stores inline now: a chunked value keeps only its descriptor.
     #[cfg(feature = "testing")]
@@ -761,7 +809,7 @@ impl Db {
         let inner = self.inner();
         let schema_table = inner.schema.table(table)?;
         let sql = format!(
-            "SELECT length(CAST({} AS BLOB)) FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT length(CAST({} AS BLOB)) FROM {} WHERE id = ?1 AND _branch = ?2",
             quote(schema_table.stored_name(column)),
             quote(&schema_table.stored),
         );

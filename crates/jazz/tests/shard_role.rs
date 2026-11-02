@@ -370,7 +370,7 @@ fn a_fixed_part_lands_at_its_fixed_position() {
     let Outcome::Accepted { at, .. } = fate(&sent_down) else {
         panic!("refused");
     };
-    assert_eq!(at, vec![(None, held)], "at its fixed position");
+    assert_eq!(at, held, "at its fixed position");
 }
 
 /// The shard's own write (no session's commit, which would wait) to a row
@@ -443,7 +443,7 @@ fn a_hold_makes_other_writers_of_its_rows_wait() {
     let Outcome::Accepted { at, .. } = fate(&sent_down) else {
         panic!("refused");
     };
-    assert!(at[0].1 > held, "above the hold");
+    assert!(at > held, "above the hold");
 }
 
 /// Holds and fixed positions are durable: a shard reopened between a
@@ -473,7 +473,7 @@ fn holds_and_fixes_survive_a_reopen() {
     let Outcome::Accepted { at, .. } = fate(&sent_down) else {
         panic!("refused");
     };
-    assert_eq!(at, vec![(None, held)], "at its fixed position");
+    assert_eq!(at, held, "at its fixed position");
     assert_eq!(db.shard().lowest_hold(), None, "it landed");
     drop(db);
     let db = shard_at(&path, &now);
@@ -515,10 +515,6 @@ fn a_reopened_shard_waits_out_its_offset_bound() {
     let Outcome::Accepted { at, .. } = fate(&sent_down) else {
         panic!("refused");
     };
-    assert_eq!(
-        at,
-        vec![(None, hlc(NOW + HLC_MAX_OFFSET_MS + 1))],
-        "at its clock"
-    );
+    assert_eq!(at, hlc(NOW + HLC_MAX_OFFSET_MS + 1), "at its clock");
     assert!(newest(&db) > closed, "nothing lands at or below the close");
 }

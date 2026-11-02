@@ -15,6 +15,7 @@ use crate::records::Value;
 /// in the row's version at `seq`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireDelta {
+    #[serde(deserialize_with = "super::accepted_seq")]
     pub seq: u64,
     /// How many edits the base value has: a check of the base.
     pub base: u32,
