@@ -506,11 +506,7 @@ describe("createJazz", () => {
     // Two backends on one core: the first links without revoking, as a
     // link whose revoke failed would leave it; the second revokes.
     const backend = async (guestKeyAfterLink: "keep" | "revoke") => {
-      const store = remote({
-        url: core.url,
-        adminSecret: core.adminSecret,
-        backendSecret: core.backendSecret,
-      });
+      const store = remote({ url: core.url, secret: core.adminSecret });
       const jazz = await createJazz({
         appId,
         app,

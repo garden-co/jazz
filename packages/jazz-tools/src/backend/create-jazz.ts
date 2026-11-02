@@ -960,6 +960,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         new TextEncoder().encode(
           JSON.stringify({ approver: identity(user.userId), target: guest }),
         ),
+        "admin",
       );
       if (revoked.status !== 204) {
         console.error(
