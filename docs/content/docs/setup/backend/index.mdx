@@ -30,7 +30,9 @@ export const jazz = await createJazz({
 - `app` and `permissions` are the ones your code imports. The bundle that's running is the bundle
   Jazz enforces, so rolling back your backend rolls back its permissions too.
 - `store` says where the data lives. `sqlite({ path })` keeps it in a directory on this machine,
-  for a server with a lasting disk; one process opens a directory at a time. On serverless hosts
+  for a server with a lasting disk; one process opens a directory at a time (an OS file lock, which
+  holds across containers on one host's volume and on EFS, but not on NFS mounted with `nolock` or
+  `local_lock`). On serverless hosts
   (Vercel, AWS Lambda, Netlify) functions have no lasting disk, so `sqlite()` refuses to start
   there: use `remote({ url, adminSecret, backendSecret })`, a sync server elsewhere such as Jazz
   Cloud. `memory()` is for tests and throwaway previews, and keeps nothing. See [Deployment](/docs/setup/deployment) for
@@ -99,6 +101,10 @@ export const jazz = await createJazz({
 
   </Tab>
 </Tabs>
+
+If your host upgrades sockets itself (Bun, Deno, your own `ws` setup), hand each upgraded socket to
+`jazz.acceptSocket(request, socket)` and pass `upgradesSockets: true` to `createJazz`, so a socket
+that fails to open is retried as a socket rather than switched to the HTTP stream.
 
 ## Connect the browser
 

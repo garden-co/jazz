@@ -140,6 +140,14 @@ export interface CreateJazzOptions {
    * cookies.
    */
   allowedOrigins?: string[];
+  /**
+   * Set when your host upgrades sync sockets itself and hands them to
+   * `acceptSocket` (Bun, Deno, uWebSockets, your own `ws` setup). Then a
+   * socket that fails to open is retried as a socket, instead of the
+   * browser switching to the HTTP stream. `attach()` and `next()` on Vercel
+   * know this on their own.
+   */
+  upgradesSockets?: boolean;
 }
 
 /** A WebSocket as the `ws` package (and Vercel's `upgradeWebSocket`) hands it over. */
@@ -515,11 +523,20 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   const basePath = (options.basePath ?? DEFAULT_BASE_PATH).replace(/\/+$/, "");
   const allowedOrigins = new Set(
     (options.allowedOrigins ?? []).map((origin) => {
+      let parsed: string | undefined;
       try {
-        return new URL(origin).origin;
+        parsed = new URL(origin).origin;
       } catch {
-        throw new Error(`createJazz: allowedOrigins entry ${JSON.stringify(origin)} is not a URL`);
+        // Not a URL: refused below.
       }
+      // "localhost:3000" parses with an opaque "null" origin, which would let
+      // sandboxed iframes and file:// pages through.
+      if (!parsed || parsed === "null") {
+        throw new Error(
+          `createJazz: allowedOrigins entry ${JSON.stringify(origin)} is not an origin like "https://app.example.com"`,
+        );
+      }
+      return parsed;
     }),
   );
   const issuer = `jazz:app:${options.appId}`;
@@ -933,8 +950,8 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
    * client, which holds no ambient cookie) passes. The backend's own origin
    * is the host the request was sent to, as a proxy forwards it.
    */
-  /** Set by attach(): this process upgrades sockets on its own server. */
-  let upgradesSockets = false;
+  /** This process upgrades sockets for fetch() and nodeHandler (set by attach()). */
+  let upgradesSockets = options.upgradesSockets ?? false;
 
   function originAllowed(request: Request): boolean {
     const origin = request.headers.get("origin");
@@ -970,7 +987,12 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     return pathname.slice(basePath.length);
   }
 
-  async function handle(request: Request): Promise<Response> {
+  /**
+   * Answer `request`. `upgrades`: whether the handler it came through
+   * upgrades sockets on this host, which decides what a plain request for
+   * the socket path is told.
+   */
+  async function handle(request: Request, upgrades = upgradesSockets): Promise<Response> {
     const path = innerPath(request);
     if (path === null) return new Response("Not found", { status: 404 });
     if (request.method !== "GET" && request.method !== "HEAD" && !originAllowed(request)) {
@@ -1001,7 +1023,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       // sockets (attach(), or Vercel), that failure was transient (a
       // restart, a draining instance) and the client should retry the
       // socket. Only where it can't does the marker send it to the stream.
-      if (upgradesSockets || process.env.VERCEL) {
+      if (upgrades) {
         return new Response("Upgrade to a WebSocket", { status: 426 });
       }
       return new Response("WebSocket upgrade not available here; use the HTTP stream", {
@@ -1049,7 +1071,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         maxPayload: MAX_STREAM_MESSAGE_BYTES,
       });
     }
-    return handle(request);
+    // On Vercel this handler upgrades sockets (above); elsewhere (next dev)
+    // only if attach() runs on the same server.
+    return handle(request, upgradesSockets || Boolean(process.env.VERCEL));
   }
 
   function nodeRequest(req: IncomingMessage): Request {
@@ -1100,7 +1124,6 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
 
   async function attach(server: Server): Promise<void> {
-    upgradesSockets = true;
     const { WebSocketServer } = (await import("ws" as string)) as {
       WebSocketServer: new (options: { noServer: true; maxPayload: number }) => {
         handleUpgrade(
@@ -1123,6 +1146,8 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       }
       wss.handleUpgrade(req, socket, head, (ws) => acceptSocket(request, ws));
     });
+    // Only now, with `ws` loaded and the listener on: this server upgrades.
+    upgradesSockets = true;
     server.on("close", () => wss.close());
   }
 
@@ -1130,7 +1155,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   return {
     appId: options.appId,
     basePath,
-    fetch: handle,
+    fetch: (request) => handle(request),
     next: () => ({ GET: nextHandler, POST: nextHandler, DELETE: nextHandler }),
     attach,
     nodeHandler,
