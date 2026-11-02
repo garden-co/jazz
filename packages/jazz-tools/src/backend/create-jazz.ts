@@ -7,6 +7,8 @@ import { accountAppId } from "../accounts/local-first.js";
 import { LOCAL_FIRST_JWT_ISSUER, parseJwtPayload } from "../runtime/client-session.js";
 import { verifyLocalFirstToken } from "../runtime/local-first-token.js";
 import { endpointScope } from "../runtime/client-scope.js";
+import { PostcardWriter } from "../runtime/native-runtime/native-codec.js";
+import { encodeWebSocketFrameBatch } from "../runtime/native-runtime/websocket.js";
 import type {
   BrowserWebSocket,
   WebSocketConstructor,
@@ -742,6 +744,14 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     const admit = async (prelude: Uint8Array): Promise<boolean> => {
       const admitted = await admitPrelude(request, prelude);
       if (!admitted || ended) {
+        // An auth failure, not a dropped link: the client stops retrying and
+        // reports `offline: auth`, and its session asks the backend whether
+        // anyone is still signed in.
+        if (!ended)
+          onEvent(null, {
+            kind: "message",
+            data: authFailedBatch("session missing: not signed in"),
+          });
         onEvent(null, { kind: "close", code: 1008, reason: "not signed in" });
         end();
         return false;
@@ -763,7 +773,11 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
             .then(
               (user) => {
                 if (ended || user?.userId === admittedUser) return;
-                onEvent(null, { kind: "close", code: 1008, reason: "signed out" });
+                // The socket's request carries the cookies it opened with, so
+                // this may only mean they expired. The client reconnects with
+                // fresh ones; if no one is signed in, that admission fails as
+                // an auth failure (above).
+                onEvent(null, { kind: "close", code: 1008, reason: "authenticate again" });
                 end();
               },
               // A failing `authenticate` (its database is down) is not a
@@ -1305,4 +1319,14 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       return closing;
     },
   };
+}
+
+/** A WireFrame::Error batch with code AuthFailed and retry Never. */
+function authFailedBatch(message: string): Buffer {
+  const frame = new PostcardWriter();
+  frame.u64(1); // WireFrame::Error
+  frame.u64(3); // WireErrorCode::AuthFailed
+  frame.u64(0); // WireRetry::Never
+  frame.string(message);
+  return Buffer.from(encodeWebSocketFrameBatch([frame.finish()]));
 }

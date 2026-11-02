@@ -1,20 +1,27 @@
-import { expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle, type AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
 import { connectAuthProvider } from "./auth-provider.js";
 import { watchBackendUser } from "./backend-watch.js";
+import { followUser } from "./follow-user.js";
 import { createJazzSessionOwner } from "./state.js";
 
 const handle = (issuer: string, subject: string) =>
-  Object.freeze({ id: subject, identity: { issuer, subject } }) as AccountHandle;
+  Object.freeze({ id: `${issuer}:${subject}`, identity: { issuer, subject } }) as AccountHandle;
 const guest = handle("urn:jazz:local-first", "guest");
 const user = (subject: string) => handle("jazz:app:test", subject);
-const settle = async () => {
+const settle = async (ms = 0) => {
+  await new Promise((resolve) => setTimeout(resolve, ms));
   for (let i = 0; i < 20; i++) await Promise.resolve();
 };
+afterEach(() => vi.useRealTimers());
 
-async function setup(initial: AccountHandle | undefined, noBackend = false) {
+async function setup(
+  initial: AccountHandle | undefined,
+  options: { noBackend?: boolean; clearOnSignOut?: boolean } = {},
+) {
   let backendUser: AccountHandle | null = null;
+  const events: string[] = [];
   const loginWithBackend = vi.fn(async () => {
     if (!backendUser) throw new Error("signed_out");
     return backendUser;
@@ -30,34 +37,48 @@ async function setup(initial: AccountHandle | undefined, noBackend = false) {
   );
   const session = await createJazzSessionOwner({
     accounts,
-    openClient: async () => ({ shutdown: async () => {} }),
+    clearOnSignOut: options.clearOnSignOut,
+    openClient: async (account) => ({
+      db: {
+        deleteClientStorage: async () => void events.push(`wipe:${account.identity.subject}`),
+      },
+      shutdown: async () => void events.push(`close:${account.identity.subject}`),
+    }),
   });
   let focus: (() => void) | undefined;
   const posts = vi.fn();
   let otherTab: (() => void) | undefined;
   const probe = vi.fn(async (): Promise<AccountIdentity | null> => {
-    if (noBackend) throw new AccountAuthError("not_found", 404);
+    if (options.noBackend) throw new AccountAuthError("not_found", 404);
     return backendUser?.identity ?? null;
   });
-  const stop = watchBackendUser(session, probe, {
-    onFocus(check) {
-      focus = check;
-      return () => (focus = undefined);
-    },
-    crossTab: {
-      post: posts,
-      listen(check) {
-        otherTab = check;
-        return () => (otherTab = undefined);
+  const reconnect = vi.fn();
+  const watch = watchBackendUser(
+    session,
+    probe,
+    {
+      onFocus(check) {
+        focus = check;
+        return () => (focus = undefined);
+      },
+      crossTab: {
+        post: posts,
+        listen(check) {
+          otherTab = check;
+          return () => (otherTab = undefined);
+        },
       },
     },
-  });
+    { confirmMs: 10, reconnect },
+  );
   return {
     session,
     probe,
     posts,
+    events,
+    reconnect,
     loginWithBackend,
-    stop,
+    watch,
     signIn: (next: AccountHandle | null) => (backendUser = next),
     focus: () => focus?.(),
     otherTab: () => otherTab?.(),
@@ -82,17 +103,19 @@ it("signs in whoever the backend names on start, then follows focus and other ta
   await settle();
   expect(t.loginWithBackend).toHaveBeenCalledOnce();
 
+  // Another user: the first one is signed out on the way.
   t.signIn(user("bob"));
   t.otherTab();
   await settle();
   expect(t.session.getSnapshot().account?.identity.subject).toBe("bob");
 
+  // Signed out, confirmed by a second answer.
   t.signIn(null);
   t.focus();
-  await settle();
+  await settle(30);
   expect(t.session.getSnapshot().status).toBe("signed-out");
-  expect(t.posts).toHaveBeenCalledTimes(3);
-  t.stop();
+  expect(t.events).toEqual(["close:alice", "close:bob"]);
+  t.watch.stop();
   expect(t.hasListeners()).toBe(false);
   await t.session.close();
 });
@@ -106,28 +129,111 @@ it("keeps a local-first guest when the backend says no one is signed in", async 
   t.focus();
   await settle();
   expect(t.session.getSnapshot().account?.identity.subject).toBe("alice");
-  t.stop();
+  // The guest's storage is kept; only a backend user is signed out on a switch.
+  expect(t.events).toEqual(["close:guest"]);
+  t.watch.stop();
   await t.session.close();
 });
 
-it("stays quiet while a `user` prop or setUser drives the session", async () => {
-  const t = await setup(undefined);
-  await settle();
-  const connection = connectAuthProvider(t.session);
+it("doesn't sign out, or wipe with clearOnSignOut, on one signed-out answer", async () => {
+  const t = await setup(user("alice"), { clearOnSignOut: true });
   t.signIn(user("alice"));
+  await settle();
+  // One refresh failure in `authenticate`, then it recovers.
+  t.probe.mockResolvedValueOnce(null);
+  t.focus();
+  await settle(30);
+  expect(t.session.getSnapshot()).toMatchObject({ status: "ready" });
+  expect(t.events).toEqual([]);
+  // A real sign-out is confirmed and wipes.
+  t.signIn(null);
+  t.focus();
+  await settle(30);
+  expect(t.session.getSnapshot().status).toBe("signed-out");
+  expect(t.events).toEqual(["wipe:alice", "close:alice"]);
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("stays quiet while a `user` prop or setUser drives the session, except for a refused sign-in", async () => {
+  const t = await setup(user("alice"));
+  t.signIn(user("alice"));
+  const connection = connectAuthProvider(t.session);
+  await settle();
+  // The provider attached before the first check.
+  expect(t.probe).not.toHaveBeenCalled();
+  t.signIn(user("bob"));
   t.focus();
   t.otherTab();
   await settle();
-  expect(t.probe).toHaveBeenCalledOnce();
+  expect(t.probe).not.toHaveBeenCalled();
   expect(t.loginWithBackend).not.toHaveBeenCalled();
+
+  // The sync server refused the sign-in and the backend still names her: reconnect.
+  t.signIn(user("alice"));
+  t.watch.authRefused();
+  await settle();
+  expect(t.reconnect).toHaveBeenCalledOnce();
+  // Refused, and no one is signed in: sign out even under the provider.
+  t.signIn(null);
+  t.watch.authRefused();
+  await settle(30);
+  expect(t.session.getSnapshot().status).toBe("signed-out");
   connection.dispose();
-  t.stop();
+  t.watch.stop();
   await t.session.close();
 });
 
 it("stops when there is no backend to ask", async () => {
-  const t = await setup(undefined, true);
+  const t = await setup(undefined, { noBackend: true });
   await settle();
   expect(t.hasListeners()).toBe(false);
   await t.session.close();
+});
+
+it("setUser signs users in and out, and clearOnSignOut wipes on a direct switch", async () => {
+  let backendUser: AccountHandle | null = null;
+  const events: string[] = [];
+  const fetch = vi.fn(async () => new Response("signed_out", { status: 401 }));
+  const following = await createJazzSessionOwner({
+    accounts: new AccountManager({
+      createLocalFirst: () => guest,
+      logout() {},
+      loginWithBackend: async () => backendUser!,
+    }),
+    clearOnSignOut: true,
+    decorate: followUser({
+      registry: "https://app.example.test/jazz/apps/x/accounts",
+      events: { onFocus: () => () => {} },
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    }),
+    openClient: async (account) => ({
+      db: {
+        deleteClientStorage: async () => void events.push(`wipe:${account.identity.subject}`),
+      },
+      shutdown: async () => void events.push(`close:${account.identity.subject}`),
+    }),
+  });
+  following.setUser(undefined);
+  await settle();
+  // setUser took over before the first check.
+  expect(fetch).not.toHaveBeenCalled();
+  expect(following.getSnapshot().status).toBe("signed-out");
+
+  backendUser = user("alice");
+  following.setUser("alice");
+  await settle();
+  expect(following.getSnapshot().account?.identity.subject).toBe("alice");
+
+  backendUser = user("bob");
+  following.setUser("bob");
+  await settle();
+  expect(following.getSnapshot().account?.identity.subject).toBe("bob");
+  expect(events).toEqual(["wipe:alice", "close:alice"]);
+
+  following.setUser(null);
+  await settle();
+  expect(following.getSnapshot().status).toBe("signed-out");
+  expect(events).toEqual(["wipe:alice", "close:alice", "wipe:bob", "close:bob"]);
+  await following.close();
 });

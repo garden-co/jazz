@@ -68,7 +68,10 @@ export function attachJazzSessionConsumer<Client>(
 }
 
 /** @internal Hosts prepare accounts and supply their client adapter once. */
-export async function createJazzSessionOwner<Client extends SessionClient>(options: {
+export async function createJazzSessionOwner<
+  Client extends SessionClient,
+  Extra extends object = {},
+>(options: {
   accounts: AccountManager<JWTAuth>;
   openClient(account: AccountHandle): Promise<Client>;
   initial?: "local-first" | BackendAuth;
@@ -77,7 +80,9 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
    * instead of keeping it for that user's next sign-in (shared devices).
    */
   clearOnSignOut?: boolean;
-}): Promise<JazzSession<Client>> {
+  /** Add host methods (e.g. `setUser`) to the session before it is sealed. */
+  decorate?(session: JazzSession<Client>): Extra;
+}): Promise<JazzSession<Client> & Extra> {
   const { accounts, openClient } = options;
   let selected = accounts.getLoggedIn();
   if (!selected && options.initial === "local-first")
@@ -288,5 +293,6 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
       },
     };
   });
-  return Object.freeze(session);
+  if (options.decorate) Object.assign(session, options.decorate(session));
+  return Object.freeze(session) as JazzSession<Client> & Extra;
 }

@@ -8,13 +8,11 @@ import {
   type JazzClientConfig,
   type JazzClient,
 } from "../web/create-jazz-client.js";
-import { createJazzSessionOwner, type JazzSession } from "./state.js";
-import { connectAuthProvider, type AuthProviderConnection } from "./auth-provider.js";
+import { createJazzSessionOwner } from "./state.js";
 import { clientScope, DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
 import { accountRegistryUrl } from "../accounts/context.js";
-import { AccountAuthError, requestBackendSignIn } from "../accounts/registry-client.js";
-import type { AccountIdentity } from "../accounts/state.js";
-import { browserBackendWatchEvents, watchBackendUser } from "./backend-watch.js";
+import { browserBackendWatchEvents } from "./backend-watch.js";
+import { followUser, type UserFollowingSession } from "./follow-user.js";
 
 export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
   AccountManagerConfig & {
@@ -28,56 +26,23 @@ export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
   };
 
 /** A browser's Jazz session, which follows your auth's signed-in user. */
-export interface BrowserJazzSession extends JazzSession<JazzClient> {
-  /**
-   * Tell Jazz who your auth says is signed in: `undefined` while it loads,
-   * `null` when signed out, and the user's stable id when signed in. Each
-   * change signs in again through your backend, whose `authenticate` decides
-   * who the user is; `null` closes the account's client.
-   */
-  setUser(user: string | null | undefined): void;
-}
+export type BrowserJazzSession = UserFollowingSession<JazzClient>;
 
 /** Own one configured client and serialize its account lifecycle. */
 export async function createJazzSession(config: JazzSessionConfig): Promise<BrowserJazzSession> {
   const serverUrl = config.serverUrl ?? DEFAULT_SERVER_URL;
   const { initial, clearOnSignOut, store: _store, ...clientConfig } = { ...config, serverUrl };
   const accounts = await createAccountManager({ ...config, serverUrl });
-  const session = await createJazzSessionOwner({
+  const registry = accountRegistryUrl(serverUrl, clientScope({ ...config, serverUrl }));
+  return createJazzSessionOwner({
     accounts,
     initial,
-    clearOnSignOut,
+    // A memory-only client has no storage to wipe.
+    clearOnSignOut: clearOnSignOut && (config.driver?.type ?? "persistent") === "persistent",
     openClient: (account) => createJazzClient({ ...clientConfig, account }),
+    decorate: followUser({
+      registry,
+      events: browserBackendWatchEvents(`jazz-account:${registry}`),
+    }),
   });
-  let connection: AuthProviderConnection | undefined;
-  // Without `setUser` (or a provider's `user`), ask the backend who is signed in.
-  const registry = accountRegistryUrl(serverUrl, clientScope({ ...config, serverUrl }));
-  const stopWatch = watchBackendUser(
-    session,
-    () => signedInIdentity(registry),
-    browserBackendWatchEvents(`jazz-account:${registry}`),
-  );
-  const close = session.close;
-  return Object.assign(session, {
-    setUser(user: string | null | undefined) {
-      connection ??= connectAuthProvider(session);
-      connection.update({ key: user ?? null, isPending: user === undefined });
-    },
-    close() {
-      stopWatch();
-      connection?.dispose();
-      connection = undefined;
-      return close();
-    },
-  });
-}
-
-async function signedInIdentity(registry: string): Promise<AccountIdentity | null> {
-  try {
-    const answer = (await requestBackendSignIn(registry)) as { identity?: AccountIdentity };
-    return answer.identity ?? null;
-  } catch (cause) {
-    if (cause instanceof AccountAuthError && cause.status === 401) return null;
-    throw cause;
-  }
 }

@@ -378,6 +378,14 @@ describe("createJazz", () => {
     // are refused.
     signedOut.add("alice");
     await expect.poll(() => upgrades, { timeout: 5_000, interval: 50 }).toBeGreaterThan(opened);
+    // A refused reconnect is an auth failure, so the client stops retrying
+    // and its session can ask the backend whether anyone is signed in.
+    await expect
+      .poll(() => alice.db.getSyncStatus().link, { timeout: 10_000, interval: 50 })
+      .toMatchObject({ state: "offline", reason: "auth" });
+    const refused = upgrades;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(upgrades).toBe(refused);
   }, 30_000);
 
   it("links a second identity to the same account", async () => {
