@@ -49,7 +49,7 @@ new Hono()
     return c.json(await db.all(app.todos.where({ done: false })));
   })
   // Sync for browsers, on your own origin
-  .all("/jazz/*", (c) => jazz.fetch(c.req.raw));
+  .all("/jazz/*", (c) => jazz.handle(c.req.raw));
 ```
 
 You can also query and write to the database right from your frontend. It is protected by the same auth as your backend, and the same permission policies apply. Pick a thin client (about 86 kB gzipped) or a full local-first client (about 1 MB gzipped, mostly the WASM engine).

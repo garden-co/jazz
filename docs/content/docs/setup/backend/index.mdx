@@ -61,7 +61,7 @@ export const jazz = await createJazz({
     import { jazz } from "./jazz.server";
 
     const api = new Hono();
-    api.all("/jazz/*", (c) => jazz.fetch(c.req.raw));
+    api.all("/jazz/*", (c) => jazz.handle(c.req.raw));
 
     const server = serve({ fetch: api.fetch, port: 3000 });
     await jazz.attach(server); // WebSocket upgrades on /jazz (needs `ws`)
