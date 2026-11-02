@@ -197,7 +197,9 @@ fn a_synced_forward_array_relation_ships_the_rows_it_lists() {
     let client = open(1);
     let (client_side, server_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
     let query = Query::from("menus").array_subquery(ArraySubquery::new(
         "featured_rows",
         "categories",

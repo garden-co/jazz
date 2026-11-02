@@ -166,13 +166,13 @@ fn prepared_membership_failure(write_at_core: bool) {
     let edge = open(1, author);
     let (edge_upstream, core_downstream) = duplex();
     let _edge_upstream = block_on(edge.connect_upstream(edge_upstream));
-    core.accept_subscriber(core_downstream, author);
+    core.accept_subscriber(core_downstream, author).unwrap();
 
     let browser = open(2, author);
     browser.set_non_durable_client();
     let (browser_upstream, edge_downstream) = duplex();
     let _browser_upstream = block_on(browser.connect_upstream(browser_upstream));
-    edge.accept_subscriber(edge_downstream, author);
+    edge.accept_subscriber(edge_downstream, author).unwrap();
 
     let membership_query = Query::from("posts").array_subquery(ArraySubquery::new(
         "memberships",
@@ -332,7 +332,7 @@ fn retirement_preserves_permission_boundaries(retirement: Retirement, revoke_bef
     .unwrap();
     let (upstream, downstream) = duplex();
     let _upstream = block_on(alice.connect_upstream(upstream));
-    core.accept_subscriber(downstream, alice_author);
+    core.accept_subscriber(downstream, alice_author).unwrap();
     let pump = || {
         for _ in 0..4 {
             block_on(alice.tick()).unwrap();

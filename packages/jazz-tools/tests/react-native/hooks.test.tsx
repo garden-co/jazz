@@ -15,9 +15,12 @@ import {
 import type { QueryBuilder, QueryOptions } from "../../src/runtime/db.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = schema.defineApp({
-  notes: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
-});
+const app = schema.defineApp(
+  {
+    notes: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
+  },
+  { migrations: "none" },
+);
 type Note = { id: string; title: string; done: boolean };
 
 function Probe({

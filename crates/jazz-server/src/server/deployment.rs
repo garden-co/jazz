@@ -1,12 +1,9 @@
 //! Validate a complete deployment before publishing its artifacts and activating it.
-use super::{
-    ServerRuntimeHandle, ServerState,
-    catalogue::DeploymentResponse,
-    routes::http::{PublishMigrationRequest, lower_migration},
-};
+use super::{ServerRuntimeHandle, ServerState, catalogue::DeploymentResponse};
 use crate::runtime::{CatalogueApplyError, StorageConfig};
 use axum::http::StatusCode;
 use jazz::schema::JazzSchema;
+use jazz::tools::deployment::published::{PublishMigrationRequest, lower_migration};
 use jazz::tools::{
     deployment::{self, DeploymentError},
     public_schema::{Schema, SchemaHash, TableName, TablePolicies},

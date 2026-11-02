@@ -35,10 +35,22 @@ const PUBLIC_AUTH_MODE_SESSION_PATHS: &[&str] = &["authMode", "auth_mode"];
 const RESERVED_AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
 
 /// The columns every stored row table keeps beside the app's: its row key,
-/// branch, seq, state bits (deleted, no content), and what the authority
-/// keeps of an accepted upload (SPEC 4 §4.6). An app column cannot take
+/// branch, position (`_clock`: accepted or pending), a pending version's writer
+/// (`_writer`), state bits (deleted, no content), and what the authority keeps
+/// of an accepted upload (SPEC 4 §4.6), and `_partition`, the partition a sharded
+/// deployment stores each row under (SPEC 15). An app column cannot take
 /// their names.
-pub const RESERVED_ROW_COLUMNS: [&str; 7] = ["id", "rid", "_b", "_seq", "_st", "_base", "_cols"];
+pub const RESERVED_ROW_COLUMNS: [&str; 9] = [
+    "id",
+    "rid",
+    "_branch",
+    "_clock",
+    "_writer",
+    "_state",
+    "_base",
+    "_touched",
+    "_partition",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Error produced while compiling a developer-authored schema for the runtime.
@@ -716,10 +728,20 @@ fn convert_column(
         // deliberately distinct from text.
         converted.large_value_kind = crate::schema::LargeValueSemanticKind::Json;
     }
+    converted.enum_variants = enum_variants(&column.column_type);
     if let Some(default) = &column.default {
         converted.default = Some(convert_column_default(table, column, default)?);
     }
     Ok(converted)
+}
+
+/// The variants of an enum column, or of an array of enum values.
+fn enum_variants(column_type: &ColumnType) -> Option<Vec<String>> {
+    match column_type {
+        ColumnType::Enum { variants } => Some(variants.clone()),
+        ColumnType::Array { element } => enum_variants(element),
+        _ => None,
+    }
 }
 
 fn convert_column_default(
