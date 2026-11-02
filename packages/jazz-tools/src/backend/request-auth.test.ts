@@ -11,8 +11,14 @@ const mocks = vi.hoisted(() => ({
   verifyLocalFirstIdentityProof: vi.fn(),
 }));
 
-vi.mock("jazz-napi", () => ({
-  verifyLocalFirstIdentityProof: mocks.verifyLocalFirstIdentityProof,
+// The verifier itself is covered by local-first-token.test.ts and the
+// @garden-co/local-first-auth vectors; these tests drive its outcome.
+vi.mock("../runtime/local-first-token.js", () => ({
+  verifyLocalFirstToken: (token: string, appId: string) => {
+    const result = mocks.verifyLocalFirstIdentityProof(token, appId);
+    if (!result?.ok) throw new Error("invalid local-first token");
+    return result.id;
+  },
 }));
 
 function base64Url(input: Buffer | string): string {

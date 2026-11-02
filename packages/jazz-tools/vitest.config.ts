@@ -12,6 +12,16 @@ export default defineConfig({
   resolve: {
     alias: [
       { find: /^react-native$/, replacement: resolve(__dirname, "tests/react-native/ui-host.ts") },
+      // Test projects under tmpdir() import jazz-tools from source by absolute
+      // path, so its workspace dependency must resolve without node_modules.
+      {
+        find: /^@garden-co\/local-first-auth$/,
+        replacement: resolve(__dirname, "../local-first-auth/src/index.ts"),
+      },
+      {
+        find: /^@garden-co\/local-first-auth\/(.*)$/,
+        replacement: resolve(__dirname, "../local-first-auth/src/$1.ts"),
+      },
       ...(sealedWasmPackage
         ? [{ find: "jazz-wasm", replacement: resolve(sealedWasmPackage, "jazz_wasm.js") }]
         : []),

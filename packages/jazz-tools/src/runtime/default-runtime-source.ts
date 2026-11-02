@@ -426,15 +426,6 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     });
   }
 
-  override mintLocalFirstToken(options: RuntimeTokenOptions): string {
-    return this.wasmModule.mintLocalFirstToken(
-      options.secret,
-      options.audience,
-      options.ttlSeconds,
-      options.nowSeconds,
-    );
-  }
-
   override mintAnonymousToken(options: RuntimeTokenOptions): string {
     return this.wasmModule.mintAnonymousToken(
       options.secret,
