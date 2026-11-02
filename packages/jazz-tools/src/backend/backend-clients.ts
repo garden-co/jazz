@@ -21,10 +21,13 @@ export interface BackendClientTrust {
  * socket the backend client opens. It is verified against the issuer's
  * published keys (found through its OpenID discovery document), must be
  * meant for `audience`, must not be expired, and must carry every claim in
- * `claims` with exactly that value. Name the workload with claims that only
- * it can have (for GitHub Actions `repository` and `ref`, or a `sub` that
- * includes them; for Vercel `sub`): `claims` must not be empty, since an
- * issuer's other workloads hold tokens from the same keys.
+ * `claims` with exactly that value, and must have at least a minute left.
+ * Name the workload, down to its environment, with claims only it can have
+ * (for GitHub Actions `sub`, e.g. `repo:acme/app:environment:production`,
+ * plus `job_workflow_ref`; for Vercel the full `sub`, since a Vercel team's
+ * tokens all share one audience): `claims` must not be empty, since an
+ * issuer's other workloads hold tokens from the same keys. A token from this
+ * issuer that fails these checks is refused, never passed to `authenticate`.
  *
  * `as` decides what the backend client may do:
  * - `"backend"`: a trusted machine. It syncs with the main backend's own
@@ -97,6 +100,31 @@ const ALGORITHMS = [
   "EdDSA",
 ];
 const CLOCK_TOLERANCE_SECONDS = 30;
+/** A token with less time left than this is refused (see `admit`). */
+const MIN_REMAINING_SECONDS = 60;
+/** jose's codes for a token that fails verification, as opposed to a key outage. */
+const REFUSALS = new Set([
+  "ERR_JWT_CLAIM_VALIDATION_FAILED",
+  "ERR_JWT_EXPIRED",
+  "ERR_JWT_INVALID",
+  "ERR_JWS_INVALID",
+  "ERR_JWS_SIGNATURE_VERIFICATION_FAILED",
+  "ERR_JOSE_ALG_NOT_ALLOWED",
+  "ERR_JWKS_NO_MATCHING_KEY",
+  "ERR_JWKS_MULTIPLE_MATCHING_KEYS",
+]);
+
+/**
+ * A trusted issuer's keys couldn't be had (discovery or key set unreachable,
+ * timed out or malformed), so a backend client's token can't be judged.
+ * createJazz answers 503: the client retries rather than reading a refusal.
+ */
+export class BackendClientsUnavailable extends Error {
+  constructor(issuer: string, cause: unknown) {
+    super(`Jazz: OIDC keys for ${issuer} are unavailable`, { cause });
+    this.name = "BackendClientsUnavailable";
+  }
+}
 
 function isLoopback(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
@@ -128,7 +156,9 @@ export function backendClientVerifier(
   function keysOf(issuer: string): Promise<ReturnType<typeof createRemoteJWKSet>> {
     let keys = keySets.get(issuer);
     if (!keys) {
-      keys = discover(issuer);
+      keys = discover(issuer).catch((error: unknown) => {
+        throw new BackendClientsUnavailable(issuer, error);
+      });
       keySets.set(issuer, keys);
       // A failed discovery is retried on the next request.
       keys.catch(() => keySets.delete(issuer));
@@ -175,10 +205,17 @@ export function backendClientVerifier(
         clockTolerance: CLOCK_TOLERANCE_SECONDS,
       }));
     } catch (error) {
-      // A discovery or key outage is the server's problem, not a refusal.
-      if (error instanceof Error && error.message.startsWith("Jazz: OIDC")) throw error;
-      return null;
+      // Only a token that fails verification is refused. A discovery or key
+      // outage (unreachable, timed out, malformed key set) is the server's
+      // problem: refusing then would read as "not trusted" to the client.
+      if (error instanceof BackendClientsUnavailable) throw error;
+      const code = (error as { code?: unknown }).code;
+      if (typeof code === "string" && REFUSALS.has(code)) return null;
+      throw new BackendClientsUnavailable(trust.issuer, error);
     }
+    // Too close to expiry to be worth a session: it would end at once, and a
+    // client holding only this token would reconnect into the same refusal.
+    if (payload.exp! - Date.now() / 1000 < MIN_REMAINING_SECONDS) return null;
     for (const [name, value] of Object.entries(trust.claims)) {
       if (payload[name] !== value) return null;
     }

@@ -27,7 +27,12 @@ afterEach(async () => {
 
 /** A stand-in OIDC issuer on loopback: discovery, JWKS and token minting. */
 let issuer: string;
-let sign: (claims: JWTPayload, options?: { expiresIn?: string | number }) => Promise<string>;
+let sign: (
+  claims: JWTPayload,
+  options?: { expiresIn?: string | number; audience?: string; issuer?: string },
+) => Promise<string>;
+/** When set, the issuer's key set answers 500 (an outage). */
+let keysDown = false;
 let otherKeySign: (claims: JWTPayload) => Promise<string>;
 let issuerServer: Server;
 beforeAll(async () => {
@@ -38,6 +43,9 @@ beforeAll(async () => {
     res.setHeader("content-type", "application/json");
     if (req.url === "/.well-known/openid-configuration") {
       res.end(JSON.stringify({ issuer, jwks_uri: `${issuer}/jwks` }));
+    } else if (req.url === "/jwks" && keysDown) {
+      res.statusCode = 500;
+      res.end("{}");
     } else if (req.url === "/jwks") {
       res.end(JSON.stringify({ keys: [jwk] }));
     } else {
@@ -47,15 +55,22 @@ beforeAll(async () => {
   });
   await new Promise<void>((resolve) => issuerServer.listen(0, "127.0.0.1", resolve));
   issuer = `http://127.0.0.1:${(issuerServer.address() as AddressInfo).port}`;
-  const mint = (key: CryptoKey, claims: JWTPayload, expiresIn: string | number = "10m") =>
+  const mint = (
+    key: CryptoKey,
+    claims: JWTPayload,
+    expiresIn: string | number = "10m",
+    audience = AUDIENCE,
+    tokenIssuer = issuer,
+  ) =>
     new SignJWT(claims)
       .setProtectedHeader({ alg: "ES256", kid: "k1" })
-      .setIssuer(issuer)
-      .setAudience(AUDIENCE)
+      .setIssuer(tokenIssuer)
+      .setAudience(audience)
       .setIssuedAt()
       .setExpirationTime(expiresIn)
       .sign(key);
-  sign = (claims, options) => mint(privateKey, claims, options?.expiresIn);
+  sign = (claims, options) =>
+    mint(privateKey, claims, options?.expiresIn, options?.audience, options?.issuer);
   otherKeySign = (claims) => mint(other.privateKey, claims);
 });
 afterAll(() => new Promise((resolve) => issuerServer.close(resolve)));
@@ -137,6 +152,13 @@ describe("scoped backend clients", () => {
     });
 
     const refused = [
+      // meant for another audience
+      await sign({ sub: "worker", repository: "acme/app" }, { audience: "https://other.test" }),
+      // too close to expiry for a session (inside the minimum remaining time)
+      await sign(
+        { sub: "worker", repository: "acme/app" },
+        { expiresIn: Math.floor(Date.now() / 1000) + 30 },
+      ),
       // another workload of the same issuer
       await sign({ sub: "worker", repository: "acme/other" }),
       await sign({ sub: "intruder", repository: "acme/app" }),
@@ -157,6 +179,14 @@ describe("scoped backend clients", () => {
       (await signIn(origin, appId, { authorization: `Bearer ${bad}`, "x-test-user": "alice" }))
         .status,
     ).toBe(401);
+    // A token from an issuer no trust names is the app's own auth to judge:
+    // alone it grants nothing, and it doesn't stop the app's own user.
+    const foreign = await sign({ sub: "worker" }, { issuer: "https://elsewhere.test" });
+    expect((await signIn(origin, appId, { authorization: `Bearer ${foreign}` })).status).toBe(401);
+    expect(
+      (await signIn(origin, appId, { authorization: `Bearer ${foreign}`, "x-test-user": "alice" }))
+        .status,
+    ).toBe(200);
     // The app's own users still sign in as before.
     expect((await signIn(origin, appId, { "x-test-user": "alice" })).status).toBe(200);
   });
@@ -276,6 +306,37 @@ describe("trusted backend clients", () => {
         initial: "local-first",
       }),
     ).rejects.toThrow(/leave out initial/);
+  });
+
+  it("are refused on the socket with another workload's token", async () => {
+    const { appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+    ]);
+    const socket = new WebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
+      headers: { authorization: `Bearer ${await sign({ sub: "intruder" })}` },
+    } as never);
+    socket.addEventListener("open", () =>
+      socket.send(JSON.stringify({ peer_identity: "x", backend_secret: "stand-in" })),
+    );
+    const code = await new Promise<number>((resolve) =>
+      socket.addEventListener("close", (event) => resolve(event.code)),
+    );
+    expect(code).toBe(1008);
+  });
+
+  it("a key outage is a 503, never read as a refusal", async () => {
+    const { appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+    ]);
+    keysDown = true;
+    cleanups.push(async () => {
+      keysDown = false;
+    });
+    const response = await fetch(`${origin}/jazz/apps/${appId}/backend/admit`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${await sign({ sub: "ops" })}` },
+    });
+    expect(response.status).toBe(503);
   });
 
   it("can't sync as a backend without its token", async () => {

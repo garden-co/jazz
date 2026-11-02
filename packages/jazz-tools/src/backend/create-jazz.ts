@@ -43,7 +43,11 @@ import {
   type JazzClient,
 } from "./create-jazz-session.js";
 import type { BackendSchemaInput } from "./create-jazz-context.js";
-import { backendClientVerifier, type BackendClientTrust } from "./backend-clients.js";
+import {
+  BackendClientsUnavailable,
+  backendClientVerifier,
+  type BackendClientTrust,
+} from "./backend-clients.js";
 import {
   onVercelDeployment,
   onVercelHost,
@@ -1586,6 +1590,20 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
    * the socket path is told.
    */
   async function handle(request: Request, upgrades = upgradesSockets): Promise<Response> {
+    try {
+      return await route(request, upgrades);
+    } catch (error) {
+      if (!(error instanceof BackendClientsUnavailable)) throw error;
+      // The reason stays in the backend's logs.
+      console.error(error);
+      return new Response("backend client keys unavailable", {
+        status: 503,
+        headers: { "Retry-After": "5" },
+      });
+    }
+  }
+
+  async function route(request: Request, upgrades: boolean): Promise<Response> {
     const path = innerPath(request);
     if (path === null) return new Response("Not found", { status: 404 });
     if (request.method !== "GET" && request.method !== "HEAD" && !originAllowed(request)) {

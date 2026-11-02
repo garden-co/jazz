@@ -22,7 +22,10 @@ const jazz = await createJazz({
     trustWorkload({
       issuer: "https://token.actions.githubusercontent.com",
       audience: "https://app.example.com",
-      claims: { repository: "acme/app", ref: "refs/heads/main" },
+      claims: {
+        sub: "repo:acme/app:environment:production",
+        job_workflow_ref: "acme/app/.github/workflows/sync.yml@refs/heads/main",
+      },
       as: "backend",
     }),
     // A scoped machine: it acts as the user its claims map to.
@@ -42,7 +45,13 @@ The main backend verifies each token it receives. The checks are:
 - It must be meant for `audience` and must not have expired.
 - It must carry every claim in `claims` with exactly that value.
 
-An issuer signs tokens for all of its workloads with the same keys, so `claims` must name yours. For example, use the repository and ref on GitHub Actions, or the full `sub` on Vercel. A token from a listed issuer that fails any check is refused. It is never handed to `authenticate`.
+An issuer signs tokens for all of its workloads with the same keys, so `claims` must name yours, down to the environment:
+
+- **GitHub Actions:** pin `sub`, which names the repository and the deployment environment (`repo:acme/app:environment:production`). Add `job_workflow_ref` to pin the workflow file and branch as well. Request the token with an audience of your own, such as your app's URL, so that tokens minted for other services don't work here.
+- **Vercel:** every token in a team has the same audience (`https://vercel.com/<team>`), so the audience alone names nothing. Pin the full `sub`, which names the project and the environment.
+- **Kubernetes and EKS:** the cluster's service account issuer must be public and served over https, so that the main backend can fetch its keys. Pin `sub` (`system:serviceaccount:<namespace>:<name>`).
+
+A token from a listed issuer that fails any check is refused, as is a token with less than a minute left. It is never handed to `authenticate`. So if your users also sign in with tokens from the same issuer (for example, Google ID tokens alongside Google Cloud workloads), those users are refused too. Use separate issuers, or keep such machines on your own auth (below). A token from an issuer you haven't listed goes to `authenticate` as usual. If the main backend can't fetch an issuer's keys, it answers 503 and the backend client retries.
 
 `as` decides what the backend client may do:
 
@@ -51,7 +60,7 @@ An issuer signs tokens for all of its workloads with the same keys, so `claims` 
 
 ## Connecting from the backend client
 
-In Node, pass the token as `credential` to `createJazzSession`. You can pass a function, which is called for every request and socket so that the token stays fresh:
+In Node, pass the token as `credential` to `createJazzSession`. Pass a function: it is called for every request and socket, so the token stays fresh. A plain token string only works for jobs that finish before it expires. After that the session is refused, and the client reports an auth failure instead of reconnecting.
 
 ```ts title="worker.ts"
 import { createJazzSession } from "jazz-tools/backend";
@@ -62,10 +71,14 @@ const session = await createJazzSession({
   permissions,
   serverUrl: "https://app.example.com/jazz",
   driver: { type: "memory" },
+  // Your platform's way to get a token, e.g. `getVercelOidcToken()` from
+  // `@vercel/functions/oidc`, or the token GitHub Actions hands a job.
   credential: () => getOidcToken({ audience: "https://app.example.com" }),
 });
 const { client } = session.getSnapshot();
 ```
+
+A backend client syncs over a WebSocket. It has no HTTP-stream fallback, so the main backend must accept sockets (with `attach()`, on Vercel, or on a host that upgrades them).
 
 The session opens as whatever the main backend trusts the token as: with backend authority for a trusted machine, or signed in as its user for a scoped one. If the main backend trusts the token as neither, `createJazzSession` fails. A backend client's session ends when its token expires, and the client reconnects with a fresh token.
 

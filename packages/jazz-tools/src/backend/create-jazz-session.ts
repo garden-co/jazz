@@ -421,6 +421,8 @@ export async function createJazzSession(
       await session.loginWithBackend();
     } catch (error) {
       await session.close();
+      // Only a refusal means the credential isn't trusted; an outage stays itself.
+      if ((error as { status?: number }).status !== 401) throw error;
       throw new Error(
         "createJazzSession: the main backend trusts this backend client's credential neither as a trusted machine nor as a user (see trustWorkload in its backendClients)",
         { cause: error },

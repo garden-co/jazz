@@ -56,7 +56,7 @@ function lazySocket(
   tokenFor: (url: string) => Promise<string> | null,
 ): WebSocketConstructor {
   return class LazySocket {
-    binaryType: "arraybuffer" | "blob" = "arraybuffer";
+    private type: "arraybuffer" | "blob" = "arraybuffer";
     private inner: BrowserWebSocket | undefined;
     private closed = false;
     private readonly listeners: Array<[string, Listener]> = [];
@@ -82,8 +82,17 @@ function lazySocket(
       );
     }
 
+    get binaryType(): "arraybuffer" | "blob" {
+      return this.inner?.binaryType ?? this.type;
+    }
+
+    set binaryType(value: "arraybuffer" | "blob") {
+      this.type = value;
+      if (this.inner) this.inner.binaryType = value;
+    }
+
     private attach(inner: BrowserWebSocket) {
-      inner.binaryType = this.binaryType;
+      inner.binaryType = this.type;
       this.inner = inner;
       for (const [type, listener] of this.listeners) {
         inner.addEventListener(type as "open", listener as () => void);
@@ -108,7 +117,8 @@ function lazySocket(
       if (this.inner) return this.inner.close();
       if (this.closed) return;
       this.closed = true;
-      this.emit("close", { code: 1000, reason: "" });
+      // Like a WebSocket's, the close event comes after close() returns.
+      queueMicrotask(() => this.emit("close", { code: 1000, reason: "" }));
     }
 
     addEventListener(type: string, listener: Listener): void {
