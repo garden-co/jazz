@@ -84,6 +84,7 @@ export function connectAuthProvider<Client>(session: JazzSession<Client>): AuthP
     }
     const key = desired.key;
     const token = generation;
+    const leaving = admitted;
     attempted = key;
     admitted = undefined;
     failure = undefined;
@@ -97,6 +98,20 @@ export function connectAuthProvider<Client>(session: JazzSession<Client>): AuthP
       } else {
         if (desired.key !== key || desired.isPending)
           throw new Error("Auth provider session changed");
+        // Switching straight from one signed-in user to another signs the
+        // first one out, so their client closes the way a sign-out does
+        // (and `clearOnSignOut` wipes their storage).
+        const current = session.getSnapshot();
+        const identity = current.account?.identity;
+        const switching =
+          current.status === "ready" &&
+          identity !== undefined &&
+          identity.issuer !== "urn:jazz:local-first" &&
+          identity.issuer !== "urn:jazz:system" &&
+          typeof leaving === "string" &&
+          leaving !== key;
+        if (switching) await session.logout();
+        if (disposed || token !== generation) return;
         await session.loginWithBackend();
       }
       if (!disposed && token === generation) admitted = key;
