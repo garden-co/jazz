@@ -163,3 +163,34 @@ it("reacts to provider keys, conceals children during provider pending, and rele
   expect(owner.getSnapshot().status).toBe("closed");
   expect(events.slice(-2)).toEqual(["detached", "shutdown:b"]);
 });
+
+it("follows the `user` prop: loading, signed in, signed out", async () => {
+  const { owner } = await setup();
+  const [user, setUser] = createSignal<string | null | undefined>(undefined);
+  const node = document.createElement("div");
+  document.body.append(node);
+  dispose = render(
+    () => (
+      <JazzProvider
+        user={user()}
+        signedOut={<p>SIGN IN</p>}
+        loading={<p>WAIT</p>}
+        autoAttachDevTools={false}
+      >
+        <p>PRIVATE</p>
+      </JazzProvider>
+    ),
+    node,
+  );
+  await flush();
+  expect(node.textContent).toBe("WAIT");
+  expect(factory).toHaveBeenCalledWith(expect.objectContaining({ initial: undefined }));
+  backend.user = "a";
+  setUser("a");
+  await flush();
+  expect(node.textContent).toBe("PRIVATE");
+  expect(owner.getSnapshot().account?.identity.subject).toBe("a");
+  setUser(null);
+  await flush();
+  expect(node.textContent).toBe("SIGN IN");
+});

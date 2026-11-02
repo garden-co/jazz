@@ -1,5 +1,6 @@
 import {
   defineComponent,
+  getCurrentInstance,
   h,
   inject,
   nextTick,
@@ -13,7 +14,12 @@ import {
   type PropType,
   type ShallowRef,
 } from "vue";
-import { createJazzAppOwner, type JazzAppSnapshot, type JazzAuth } from "../session/app.js";
+import {
+  authForUser,
+  createJazzAppOwner,
+  type JazzAppSnapshot,
+  type JazzAuth,
+} from "../session/app.js";
 import { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
 import type { JazzSessionActions } from "../session/state.js";
 import type { AccountDbConfig } from "../accounts/context.js";
@@ -23,6 +29,8 @@ import { JazzClientProvider, LegacyJazzProvider } from "./provider.js";
 export type JazzProviderProps = Partial<JazzSessionConfig> & {
   config?: AccountDbConfig;
   auth?: JazzAuth;
+  /** Who your auth says is signed in: `undefined` loading, `null` signed out, else the user's id. */
+  user?: string | null;
   autoAttachDevTools?: boolean;
 };
 export type UseJazzAuth = {
@@ -48,6 +56,7 @@ export const JazzProvider = defineComponent({
     scope: String,
     serverUrl: String,
     auth: Object as PropType<JazzAuth>,
+    user: { type: [String, null] as PropType<string | null>, default: undefined },
     initial: [String, Object] as PropType<JazzSessionConfig["initial"]>,
     autoAttachDevTools: { type: Boolean, default: true },
   },
@@ -63,13 +72,22 @@ export const JazzProvider = defineComponent({
           },
           slots,
         );
+    // `:user="undefined"` (loading) is not the same as no `user` prop.
+    const instance = getCurrentInstance();
+    const currentAuth = () =>
+      authForUser(
+        !!instance?.vnode.props && "user" in instance.vnode.props,
+        props.user,
+        props.auth,
+      );
+    const initialAuth = currentAuth();
     const config = {
       ...attrs,
       appId: props.appId,
       scope: props.scope,
       serverUrl: props.serverUrl,
-      initial: props.initial ?? (props.auth ? undefined : "local-first"),
-      auth: props.auth,
+      initial: props.initial ?? (initialAuth ? undefined : "local-first"),
+      auth: initialAuth,
     } as JazzSessionConfig & { auth?: JazzAuth };
     const app = createJazzAppOwner(config, createJazzSession, { start: false });
     const snapshot = shallowRef(app.getSnapshot());
@@ -88,8 +106,8 @@ export const JazzProvider = defineComponent({
       void nextTick(() => lease.acknowledge(observed));
     });
     watch(
-      () => props.auth,
-      (value) => app.updateAuth(value),
+      () => [props.auth, props.user],
+      () => app.updateAuth(currentAuth()),
     );
     onMounted(() => {
       void app.start().catch(() => {});
