@@ -82,3 +82,12 @@ accounts. See [Other / Custom](/docs/setup/auth/custom#guests-who-sign-up) and
 Use `session.user.account` for stable account ownership. Use the exact issuer and subject when a policy deliberately distinguishes linked identities. A local-first identity is authenticated by its signing key; it is not an unauthenticated guest.
 
 Claims from your backend can add application requirements, such as a verified role. They cannot replace the account assignment. Define those checks in [Permissions](/docs/schemas/policies), alongside ownership policies.
+
+## Use it without Jazz
+
+The keys, tokens, recovery phrases and passkey backup come from a standalone package,
+[`@garden-co/local-first-auth`](https://github.com/garden-co/jazz/tree/main/packages/local-first-auth),
+which `jazz-tools/passphrase` and `jazz-tools/passkey-backup` re-export. Use it directly to give any
+app passwordless local-first identities, and verify its tokens on your server with
+`verifyRequest(request, { audience })` from `@garden-co/local-first-auth/server`. See its README
+for the API.
