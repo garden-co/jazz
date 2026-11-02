@@ -11,7 +11,9 @@ export {
   LocalFirstTokenError,
   identityOf,
   normalizeAudience,
+  signChallenge,
   signToken,
+  verifyChallenge,
   verifyToken,
 } from "./identity.js";
 export type { LocalFirstIdentity, SignTokenOptions, VerifyTokenOptions } from "./identity.js";

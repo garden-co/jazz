@@ -149,6 +149,9 @@ pub struct AuthConfig {
     pub backend_secret: Option<String>,
     /// Secret for admin operations (schema/policy sync).
     pub admin_secret: Option<String>,
+    /// The one workload (an OIDC identity) this server trusts instead of
+    /// shared secrets. When set, nothing else is admitted.
+    pub trusted_workload: Option<super::workload::TrustedWorkload>,
     /// Time source for auth expiry checks. Defaults to the system clock.
     pub clock: AuthClock,
 }
@@ -165,6 +168,7 @@ impl AuthConfig {
             || self.allow_local_first_auth
             || self.backend_secret.is_some()
             || self.admin_secret.is_some()
+            || self.trusted_workload.is_some()
     }
 }
 
