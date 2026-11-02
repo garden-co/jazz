@@ -86,7 +86,10 @@ describe("same-origin socket fallback", () => {
 
   it("fails as a socket when the endpoint is not a createJazz backend", async () => {
     // A same-origin proxy to a sync server: no stream marker on the socket path.
-    const fetchMock = vi.fn(async () => new Response("not found", { status: 404 }));
+    const fetchMock = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        new Response("not found", { status: 404 }),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     const Socket = sameOriginWebSocketConstructor(failingNative());
@@ -94,9 +97,7 @@ describe("same-origin socket fallback", () => {
     expect(await outcome(new Socket(url))).toBe("closed");
     // Not remembered: the next session tries a native socket again.
     expect(await outcome(new Socket(url))).toBe("closed");
-    expect(fetchMock.mock.calls.every(([, init]) => (init as RequestInit)?.method === "GET")).toBe(
-      true,
-    );
+    expect(fetchMock.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
   });
 
   it("fails as a socket when the backend can't be reached at all", async () => {
