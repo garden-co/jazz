@@ -1,0 +1,73 @@
+---
+title: Vercel
+description: "Run Jazz inside your Next.js app on Vercel, with each environment's data in its own Vercel Sandbox."
+---
+
+On Vercel, your Next.js app is the whole deployment. The `vercel()` store keeps each environment's
+data in a persistent [Vercel Sandbox](https://vercel.com/docs/vercel-sandbox) that your functions
+start on demand. There's no separate service to set up and no secrets to copy.
+
+## Set it up
+
+Install the Sandbox SDK next to `jazz-tools`:
+
+```bash title="Terminal"
+pnpm add @vercel/sandbox
+```
+
+Use the `vercel()` store:
+
+```ts title="jazz.server.ts"
+import { createJazz, vercel } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+
+export const jazz = await createJazz({
+  app,
+  permissions,
+  store: vercel(),
+  authenticate: async (request) => {
+    const session = await getSession(request); // your own auth
+    return session ? { userId: session.user.id } : null;
+  },
+});
+```
+
+Mount it like any Next.js backend (see [Backend](/docs/setup/backend#mount-it)):
+
+```ts title="app/jazz/[...path]/route.ts"
+import { jazz } from "@/jazz.server";
+
+export const { GET, POST, DELETE } = jazz.next();
+```
+
+Then deploy as usual with `git push` or `vercel deploy`. Your functions authenticate to Vercel with
+their own OIDC token, and the core's secrets are generated inside the Sandbox, so there are no
+environment variables to set.
+
+## Local development
+
+Outside Vercel, `vercel()` uses a local store instead, by default `sqlite({ path: ".jazz/local" })`.
+`next dev` therefore runs against a SQLite file on your machine, not the Sandbox. Pass `local` to
+choose a different one.
+
+## Options
+
+All options are optional.
+
+| Option             | Default                           | What it does                                        |
+| :----------------- | :-------------------------------- | :-------------------------------------------------- |
+| `name`             | derived from the environment      | The Sandbox and Drive name; one per app environment |
+| `region`           | `iad1`                            | Where the Sandbox runs; put it near your functions  |
+| `vcpus`            | `1`                               | Sandbox size                                        |
+| `maxDriveBytes`    | 10 GiB                            | The most data the environment's Drive holds         |
+| `idleMs`           | 5 minutes                         | How long the Sandbox stays up without traffic       |
+| `serverTarballUrl` | the matching Jazz release         | Which Jazz server build the Sandbox runs            |
+| `local`            | `sqlite({ path: ".jazz/local" })` | The store used outside Vercel                       |
+
+## Limits
+
+- Each app environment (production, preview) gets one persistent Sandbox and its Drive. The
+  smallest size is 2 GB of memory and 1 vCPU.
+- All preview deployments of a project share one preview core, and so the same preview data.
+- The Sandbox stops after 5 minutes without traffic or open sockets. The next request wakes it,
+  which takes about a second.
