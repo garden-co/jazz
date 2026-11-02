@@ -8,7 +8,7 @@ import { isRecord } from "./util.js";
 export interface ClientSessionInput {
   /** @internal Assignment supplied by a validated account handle. */
   accountId?: string;
-  appId: string;
+  appId?: string;
   jwtToken?: string;
   cookieSession?: Session;
   /** @internal Session produced by a first-party reserved-issuer auth flow. */

@@ -1,3 +1,4 @@
+import { accountAppId } from "../accounts/local-first.js";
 import { fetchFor } from "./in-process-transport.js";
 import { PlatformURL } from "./platform-url.js";
 /**
@@ -10,7 +11,10 @@ import { PlatformURL } from "./platform-url.js";
 export function appScopedUrl(serverUrl: string, appId: string, path: string): string {
   const base = normalizeServerUrlBase(serverUrl);
   const normalizedPath = path.trim().replace(/^\/+/, "");
-  const appBase = `${base}/apps/${encodeURIComponent(appId)}`;
+  // A browser client scoped by its endpoint (see `clientScope`) names the app
+  // by that scope's id; its backend knows the app by its own.
+  const segment = appId.includes("://") ? accountAppId(appId) : appId;
+  const appBase = `${base}/apps/${encodeURIComponent(segment)}`;
 
   return normalizedPath ? `${appBase}/${normalizedPath}` : appBase;
 }

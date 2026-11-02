@@ -1,3 +1,4 @@
+import { clientScope } from "./client-scope.js";
 import { browserRuntimeModuleUrl, bundledBrowserWorkerUrl } from "./browser-worker-assets.js";
 import type { RuntimeSourcesConfig } from "./context.js";
 import type { DbConfig } from "./db.js";
@@ -168,7 +169,7 @@ function browserAuthScope(config: DbConfig): BrowserAuthScope {
   if (config.adminSecret) return { kind: "system" };
 
   const session = resolveClientInternalSessionSync({
-    appId: config.appId,
+    appId: clientScope(config),
     accountId: config.accountId,
     jwtToken: config.jwtToken,
     cookieSession: config.cookieSession,
@@ -278,7 +279,7 @@ export function createBrowserPhysicalDatabaseName(config: DbConfig, baseName: st
 function resolveAuthClass(config: DbConfig): string {
   if (config.adminSecret) return "admin";
   const session = resolveClientInternalSessionSync({
-    appId: config.appId,
+    appId: clientScope(config),
     accountId: config.accountId,
     jwtToken: config.jwtToken,
     cookieSession: config.cookieSession,

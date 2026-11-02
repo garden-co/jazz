@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { createJazz, createJazzSession, memory, remote, sqlite, type Jazz } from "./index.js";
+import { localFirstAccountId } from "../accounts/local-first.js";
+import { mintLocalFirstTokenFromSeed } from "../runtime/local-first-token.js";
 
 const app = s.defineApp(
   {
@@ -216,6 +218,29 @@ describe("createJazz", () => {
     expect(probe.headers.get("x-jazz-stream")).toBeNull();
   }, 60_000);
 
+  it("links only a guest whose proof is for this app or this endpoint", async () => {
+    const appId = randomUUID();
+    const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const seed = randomBytes(32).toString("base64url");
+    const link = (audience: string) =>
+      fetch(`${origin}/jazz/apps/${appId}/accounts/backend-link`, {
+        method: "POST",
+        headers: {
+          "x-test-user": `user-for-${audience}`,
+          authorization: `Bearer ${mintLocalFirstTokenFromSeed(seed, audience, 60)}`,
+        },
+      }).then((response) => response.status);
+
+    // Another app's backend replaying a guest's proof here gets nothing.
+    expect(await link("https://elsewhere.example/jazz")).toBe(401);
+    expect(await link(randomUUID())).toBe(401);
+    expect(await link(`${origin}/jazz`)).toBe(200);
+    // The same key, already founded under the endpoint, is not founded again.
+    expect(await link(appId)).toBe(409);
+  });
+
   it("refuses sign-in and sync started by a page on another origin", async () => {
     const appId = randomUUID();
     const jazz = await createJazz({
@@ -302,11 +327,13 @@ describe("createJazz", () => {
   }, 60_000);
 
   it.each([
-    ["memory", "sockets"],
-    ["sqlite", "the HTTP stream"],
+    ["memory", "sockets", "names the app"],
+    ["sqlite", "the HTTP stream", "names the app"],
+    ["memory", "sockets", "is scoped by its endpoint"],
+    ["sqlite", "the HTTP stream", "is scoped by its endpoint"],
   ] as const)(
-    "keeps a local-first guest's account when it signs up (%s store, %s)",
-    async (kind, transport) => {
+    "keeps a local-first guest's account when it signs up (%s store, %s, the client %s)",
+    async (kind, transport, scoping) => {
       const appId = randomUUID();
       const dir = await mkdtemp(join(tmpdir(), "jazz-link-"));
       cleanups.push(() => rm(dir, { recursive: true, force: true }));
@@ -326,8 +353,10 @@ describe("createJazz", () => {
         });
       }
 
+      // A browser client names no app: the backend vouches for the endpoint
+      // its guest's proof is for.
       const session = await createJazzSession({
-        appId,
+        ...(scoping === "names the app" ? { appId } : {}),
         app,
         permissions,
         serverUrl: `${origin}/jazz`,
@@ -337,6 +366,12 @@ describe("createJazz", () => {
       cleanups.push(() => session.close());
       const guest = session.getSnapshot().client!;
       const account = guest.session!.user!.account;
+      expect(account).toBe(
+        localFirstAccountId(
+          scoping === "names the app" ? appId : `${origin}/jazz`,
+          guest.session!.user!.identity.subject,
+        ),
+      );
       const row = await guest.db
         .insert(app.todos, { title: "made as a guest", owner: account })
         .wait({ tier: "global" });
@@ -537,5 +572,23 @@ describe("createJazz", () => {
       new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
     );
     expect(await asBob.all(app.todos)).toEqual([]);
+
+    // A guest whose client names no app: the backend vouches for the
+    // endpoint its proof is for, and the remote core founds its account.
+    const guestSession = await createJazzSession({
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "local-first",
+    });
+    cleanups.push(() => guestSession.close());
+    const guest = guestSession.getSnapshot().client!;
+    const made = await guest.db
+      .insert(app.todos, { title: "as a guest", owner: guest.session!.user!.account })
+      .wait({ tier: "global" });
+    expect((await jazz.db.all(app.todos.where({ id: made.id }))).map((todo) => todo.title)).toEqual(
+      ["as a guest"],
+    );
   }, 60_000);
 });
