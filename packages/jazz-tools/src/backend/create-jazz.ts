@@ -108,9 +108,12 @@ export interface CreateJazzOptions {
    * The URL browsers reach Jazz at, when a proxy in front of this backend
    * changes the host or path (e.g. pages call `https://app.example.com/api/jazz`
    * and the proxy forwards to `/jazz` here). A browser client is scoped by the
-   * URL it uses, so its guests' proofs name that URL. Without this, Jazz
-   * accepts the page's own origin (or an `allowedOrigins` entry) and this
-   * request's Host, each under `basePath`.
+   * URL it uses, so its guests' proofs name that URL. Recommended in
+   * production: without it, Jazz accepts the page's own origin (or an
+   * `allowedOrigins` entry) and this request's Host, each under `basePath`,
+   * and a caller that reaches the backend directly can name any Host. When
+   * set, only these URLs are accepted, so list your dev URL too if a dev
+   * server uses this backend.
    */
   publicUrl?: string | string[];
   /**
@@ -1041,10 +1044,10 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   function endpointAudiences(request: Request): string[] {
     if (publicUrls.length) return publicUrls;
     const audiences = new Set<string>();
-    // Only hosts a forged header can't name: the Host the request reached
-    // (or the platform's request URL) and the configured allowed origins.
-    // X-Forwarded-Host is not trusted here; set `publicUrl` behind a proxy
-    // that rewrites the host or path.
+    // The page origin when it is this Host or an allowed origin, and this
+    // Host. A browser can't forge Host, but a caller reaching this backend
+    // directly can, so production backends should set `publicUrl`.
+    // X-Forwarded-Host is never read here.
     const url = new URL(request.url);
     const host = request.headers.get("host") || url.host;
     const forwardedProto = request.headers
@@ -1072,6 +1075,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
 
   const warnedAudiences = new Set<string>();
+  let warnedHeaderAudience = false;
   /** Say once per audience why a guest's proof was refused, so a proxy mismatch is visible. */
   function warnUnknownAudience(token: string, accepted: string[]) {
     const audience = parseJwtPayload(token)?.aud;
@@ -1099,6 +1103,12 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     for (const endpoint of endpoints) {
       try {
         verifyLocalFirstToken(token, endpoint);
+        if (!publicUrls.length && !warnedHeaderAudience) {
+          warnedHeaderAudience = true;
+          console.warn(
+            `createJazz: vouched for a local-first guest of ${endpoint}, taken from the request's headers. Set publicUrl to the URL browsers use so a caller can't name another host.`,
+          );
+        }
         return { endpoint };
       } catch {
         // Not this one.

@@ -16,6 +16,8 @@ export interface BackendWatchEvents {
 export interface BackendWatch {
   /** The sync server refused this client's sign-in: ask the backend whether it still holds. */
   authRefused(): void;
+  /** The sync link is connected again (resets the reconnect backoff). */
+  connected(): void;
   stop(): void;
 }
 
@@ -30,9 +32,12 @@ export interface BackendWatch {
  *   doesn't sign anyone out (or, with `clearOnSignOut`, wipe their writes).
  * - A local-first guest stays a guest until someone signs in.
  *
- * While a `user` prop or `setUser` drives the session, the watch stays quiet,
- * except that a sync server refusing the sign-in still asks the backend: it
- * reconnects if the same user is still signed in, and signs out if no one is. A probe that reports there is no
+ * While a `user` prop or `setUser` drives the session, the watch stays quiet.
+ *
+ * A sync server refusing the sign-in (`authRefused`) asks the backend too, but
+ * only to reconnect, with backoff, while it still names the same user. It
+ * never signs anyone out: a background tab's cookie may just be stale, so a
+ * sign-out waits for a check after focus returns (or for the provider). A probe that reports there is no
  * backend (404) stops the watch.
  */
 export function watchBackendUser<Client>(
@@ -43,9 +48,17 @@ export function watchBackendUser<Client>(
     confirmMs?: number;
     /** Reconnect the current client, once the backend says its user is still signed in. */
     reconnect?: () => void;
+    /** The first wait before reconnecting after a refusal; it doubles up to a minute. */
+    reconnectBackoffMs?: number;
   } = {},
 ): BackendWatch {
   const confirmMs = options.confirmMs ?? 2000;
+  const firstBackoffMs = options.reconnectBackoffMs ?? 1000;
+  let backoffMs = firstBackoffMs;
+  let reconnectAt = 0;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  // The sync link was refused and hasn't connected since.
+  let refusedPending = false;
   let stopped = false;
   let checking: Promise<void> | undefined;
   let again: { refused: boolean } | undefined;
@@ -75,9 +88,10 @@ export function watchBackendUser<Client>(
     if (signedIn) {
       if (current?.issuer === signedIn.issuer && current.subject === signedIn.subject) {
         // Still signed in: the refusal came from expired cookies on the old socket.
-        if (refused) options.reconnect?.();
+        if (refused || refusedPending) scheduleReconnect();
         return;
       }
+      if (refused) return;
       // A provider's `user` decides who signs in; the watch only signs out.
       if (hasAuthProviderConnection(session)) return;
       if (backendUser) await session.logout().catch(() => {});
@@ -85,12 +99,27 @@ export function watchBackendUser<Client>(
       await session.loginWithBackend().catch(() => {});
       return;
     }
-    if (!backendUser) return;
+    if (!backendUser || refused) return;
     await new Promise((resolve) => setTimeout(resolve, confirmMs));
     if (quiet(refused)) return;
     signedIn = await ask();
     if (signedIn !== null || quiet(refused)) return;
     await session.logout().catch(() => {});
+  }
+  function scheduleReconnect() {
+    if (reconnectTimer || stopped) return;
+    // Back off in case the socket keeps missing a cookie the probe gets
+    // (its Path, Domain or SameSite differ).
+    const wait = reconnectAt - Date.now();
+    const reconnect = () => {
+      reconnectTimer = undefined;
+      if (stopped) return;
+      reconnectAt = Date.now() + backoffMs;
+      backoffMs = Math.min(backoffMs * 2, 60_000);
+      options.reconnect?.();
+    };
+    if (wait <= 0) reconnect();
+    else reconnectTimer = setTimeout(reconnect, wait);
   }
   function check(refused = false) {
     if (stopped) return;
@@ -117,11 +146,20 @@ export function watchBackendUser<Client>(
   // Let a provider that drives the session attach first.
   const start = setTimeout(() => check(), 0);
   const watch: BackendWatch = {
-    authRefused: () => check(true),
+    authRefused() {
+      refusedPending = true;
+      check(true);
+    },
+    connected() {
+      refusedPending = false;
+      backoffMs = firstBackoffMs;
+      reconnectAt = 0;
+    },
     stop() {
       if (stopped) return;
       stopped = true;
       clearTimeout(start);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       unsubscribe();
       stopFocus();
       stopCrossTab?.();

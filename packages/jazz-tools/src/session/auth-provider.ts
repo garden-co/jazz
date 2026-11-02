@@ -108,7 +108,8 @@ export function connectAuthProvider<Client>(session: JazzSession<Client>): AuthP
           identity !== undefined &&
           identity.issuer !== "urn:jazz:local-first" &&
           identity.issuer !== "urn:jazz:system" &&
-          (typeof leaving === "string" ? leaving !== key : identity.subject !== key);
+          typeof leaving === "string" &&
+          leaving !== key;
         if (switching) await session.logout();
         if (disposed || token !== generation) return;
         await session.loginWithBackend();

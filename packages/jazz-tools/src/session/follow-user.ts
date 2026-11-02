@@ -65,6 +65,7 @@ function decorate<Client>(
     stopStatus?.();
     stopStatus = (client as ObservedClient | undefined)?.db?.onSyncStatusChange?.((status) => {
       if (status.link.state === "offline" && status.link.reason === "auth") watch.authRefused();
+      else if (status.link.state === "connected") watch.connected();
     });
   };
   const unsubscribe = session.subscribe(followClient);

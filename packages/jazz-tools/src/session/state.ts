@@ -11,7 +11,12 @@ export interface SessionClient {
   shutdown(options?: { waitForSync?: boolean }): Promise<void>;
 }
 /** A client whose database can wipe its local storage (`clearOnSignOut`). */
-type WipeableClient = { db?: { deleteClientStorage?(): Promise<void> } };
+type WipeableClient = {
+  db?: {
+    waitForSync?(options?: { timeoutMs?: number }): Promise<void>;
+    deleteClientStorage?(): Promise<void>;
+  };
+};
 export type JazzSessionOperation =
   | "createLocalFirst"
   | "restoreLocalFirst"
@@ -138,7 +143,10 @@ export async function createJazzSessionOwner<
     try {
       if (client) {
         if (operation === "logout" && options.clearOnSignOut) {
-          await (client as WipeableClient).db?.deleteClientStorage?.();
+          const db = (client as WipeableClient).db;
+          // Upload what the server still accepts before wiping the rest.
+          await db?.waitForSync?.({ timeoutMs: 5_000 }).catch(() => {});
+          await db?.deleteClientStorage?.();
           await client.shutdown();
         } else {
           await client.shutdown({ waitForSync: true });
