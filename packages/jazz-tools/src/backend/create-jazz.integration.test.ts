@@ -312,6 +312,31 @@ describe("createJazz", () => {
     expect((await jazz.db.all(app.todos.where({ id: later.id }))).length).toBe(1);
   }, 60_000);
 
+  it("opens a sqlite directory in one core at a time, and not on serverless hosts", async () => {
+    const appId = randomUUID();
+    const dir = await mkdtemp(join(tmpdir(), "jazz-lock-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const first = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
+    await expect(
+      createJazz({ appId, app, permissions, store: sqlite({ path: dir }) }),
+    ).rejects.toThrow(/already open in this process/);
+    await first.close();
+    // Closed, the directory is free again.
+    const second = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
+    await second.close();
+
+    const previous = process.env.VERCEL;
+    process.env.VERCEL = "1";
+    try {
+      await expect(
+        createJazz({ appId, app, permissions, store: sqlite({ path: dir }) }),
+      ).rejects.toThrow(/Use remote\(/);
+    } finally {
+      if (previous === undefined) delete process.env.VERCEL;
+      else process.env.VERCEL = previous;
+    }
+  }, 60_000);
+
   it("keeps data in the sqlite directory across restarts", async () => {
     const appId = randomUUID();
     const dir = await mkdtemp(join(tmpdir(), "jazz-embedded-"));

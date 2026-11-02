@@ -163,8 +163,11 @@ pub(super) async fn link_for_admin(
     jazz::ids::AuthorSubject::authenticated(&request.to.issuer, &request.to.subject)
         .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_external_identity"))?;
     let registry = owner(&state)?;
+    // `from` names an account that already exists (a user the backend signed
+    // in, or a local-first guest founded from its own key proof): linking
+    // never creates it.
     registry
-        .login_or_register(request.from.clone())
+        .login(request.from.clone())
         .await
         .map_err(failure)?;
     let now = state.auth_config.clock.now_seconds();
@@ -562,6 +565,31 @@ mod tests {
         assert_eq!(
             alice.json::<AccountResponse>().await.unwrap().account,
             guest
+        );
+        let link = |from: &str, to: &str| {
+            client
+                .post(format!("{admin}/link"))
+                .header("x-jazz-admin-secret", core.admin_secret())
+                .json(&serde_json::json!({ "from": identity(from), "to": identity(to) }))
+                .send()
+        };
+        // Linking never creates `from`.
+        assert_eq!(
+            link("nobody", "carol").await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+        // `to` already has an account (bob's own): no merge.
+        let bob = client
+            .post(format!("{admin}/login-or-register"))
+            .header("x-jazz-admin-secret", core.admin_secret())
+            .json(&serde_json::json!({ "identity": identity("bob") }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bob.status(), StatusCode::OK);
+        assert_eq!(
+            link("guest", "bob").await.unwrap().status(),
+            StatusCode::CONFLICT
         );
         core.shutdown().await;
     }

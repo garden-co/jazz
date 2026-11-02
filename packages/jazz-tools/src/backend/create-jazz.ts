@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
@@ -162,7 +163,11 @@ const DEFAULT_BASE_PATH = "/jazz";
 const PRELUDE_DEADLINE_MS = 30_000;
 /** On createJazz's 426 for a socket path: this endpoint serves the HTTP stream. */
 const STREAM_AVAILABLE_HEADER = "x-jazz-stream";
-const PUBLIC_APP_ROUTES = /^\/apps\/[^/]+\/(accounts\/[a-z/-]+|ws|schemas|schema\/[^/]+)$/;
+// What a browser reaches of the core through the backend: sync, the schemas,
+// and a local-first guest founding its own account (the guest proves a key it
+// holds; the backend's sign-in routes are handled before this). Registering,
+// logging in or linking identities with a core credential isn't.
+const PUBLIC_APP_ROUTES = /^\/apps\/[^/]+\/(accounts\/found-local-first|ws|schemas|schema\/[^/]+)$/;
 const STRIPPED_HEADERS = ["x-jazz-backend-secret", "x-jazz-admin-secret", "x-jazz-session"];
 // What a browser's request to a public route carries on to a remote core:
 // never its cookies or its app session.
@@ -333,7 +338,12 @@ async function openInProcessCore(
 ): Promise<Core> {
   const backendSecret = randomBytes(32).toString("base64url");
   const adminSecret = randomBytes(32).toString("base64url");
-  if (store.kind === "sqlite") await mkdir(store.path, { recursive: true });
+  let releaseLock = async () => {};
+  if (store.kind === "sqlite") {
+    refuseServerlessDisk(store.path);
+    await mkdir(store.path, { recursive: true });
+    releaseLock = await lockDirectory(store.path);
+  }
   const core = await JazzCore.open({
     appId,
     backendSecret,
@@ -367,8 +377,67 @@ async function openInProcessCore(
     async close() {
       unregister();
       await core.close();
+      await releaseLock();
     },
   };
+}
+
+/**
+ * Hold `dir` for this process: two cores on one sqlite directory (a dev
+ * server's hot reload without a cached instance, cluster mode, a rolling
+ * deploy on one disk) would each believe they own its data. A lock left by
+ * a process that has exited is taken over.
+ */
+async function lockDirectory(dir: string): Promise<() => Promise<void>> {
+  const lock = join(dir, "jazz.lock");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await writeFile(lock, String(process.pid), { flag: "wx" });
+      return async () => {
+        await unlink(lock).catch(() => undefined);
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    const holder = Number((await readFile(lock, "utf8").catch(() => "")).trim());
+    if (Number.isInteger(holder) && holder > 0 && processAlive(holder)) {
+      throw new Error(
+        `sqlite(): ${dir} is already open in ${holder === process.pid ? "this process" : `process ${holder}`}. ` +
+          "One core per directory: create Jazz once and reuse it (cache it on globalThis across hot reloads), " +
+          "and give each process its own directory or use remote().",
+      );
+    }
+    await unlink(lock).catch(() => undefined);
+  }
+  throw new Error(`sqlite(): could not lock ${dir}`);
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Serverless functions have no disk that outlives an instance (or none
+ * writable at all), so a sqlite store there loses data silently.
+ */
+function refuseServerlessDisk(dir: string): void {
+  const host = process.env.VERCEL
+    ? "Vercel"
+    : process.env.AWS_LAMBDA_FUNCTION_NAME
+      ? "AWS Lambda"
+      : process.env.NETLIFY
+        ? "Netlify"
+        : undefined;
+  if (!host) return;
+  throw new Error(
+    `sqlite({ path: ${JSON.stringify(dir)} }) can't keep data on ${host}: its functions have no lasting disk. ` +
+      "Use remote({ url, adminSecret, backendSecret }) to a sync server or Jazz Cloud.",
+  );
 }
 
 function openRemoteCore(appId: string, store: Extract<JazzStore, { kind: "remote" }>): Core {
@@ -501,10 +570,25 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   const identity = (userId: string) => ({ issuer, subject: userId });
 
   /** The user's session: their account, created on first sign-in. */
+  // A user's account never changes once assigned (linking only adds
+  // identities to an account), so the core is asked once per user for a
+  // while, not on every sign-in, socket and request.
+  const accounts = new Map<string, { account: string; until: number }>();
+  const ACCOUNT_CACHE_LIMIT = 10_000;
+  async function accountOf(userId: string): Promise<string> {
+    const now = Date.now();
+    const cached = accounts.get(userId);
+    if (cached && cached.until > now) return cached.account;
+    const { account } = await adminAccounts("login-or-register", { identity: identity(userId) });
+    if (accounts.size >= ACCOUNT_CACHE_LIMIT) {
+      accounts.delete(accounts.keys().next().value!);
+    }
+    accounts.set(userId, { account, until: now + (options.sessionTtlSeconds ?? 3600) * 1000 });
+    return account;
+  }
+
   async function sessionFor(user: JazzUser): Promise<Session> {
-    const { account } = await adminAccounts("login-or-register", {
-      identity: identity(user.userId),
-    });
+    const account = await accountOf(user.userId);
     return {
       account_id: account,
       issuer,
@@ -532,9 +616,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     if (request.method !== "POST") return new Response(null, { status: 405 });
     const user = await authenticate(request);
     if (!user) return new Response("signed_out", { status: 401 });
-    const { account } = await adminAccounts("login-or-register", {
-      identity: identity(user.userId),
-    });
+    const account = await accountOf(user.userId);
     const expiresAt = Math.floor(Date.now() / 1000) + (options.sessionTtlSeconds ?? 3600);
     return Response.json(
       { account, identity: identity(user.userId), claims: user.claims ?? {}, expiresAt },
@@ -907,8 +989,10 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         res.end();
       },
       (error) => {
+        // The reason stays in the backend's logs, not in the response.
+        console.error("jazz: request failed", error);
         res.statusCode = 500;
-        res.end(error instanceof Error ? error.message : String(error));
+        res.end("Internal error");
       },
     );
   }
