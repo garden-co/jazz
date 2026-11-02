@@ -1103,7 +1103,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     for (const endpoint of endpoints) {
       try {
         verifyLocalFirstToken(token, endpoint);
-        if (!publicUrls.length && !warnedHeaderAudience) {
+        if (!publicUrls.length && !warnedHeaderAudience && !isLocalEndpoint(endpoint)) {
           warnedHeaderAudience = true;
           console.warn(
             `createJazz: vouched for a local-first guest of ${endpoint}, taken from the request's headers. Set publicUrl to the URL browsers use so a caller can't name another host.`,
@@ -1339,4 +1339,19 @@ function authFailedBatch(message: string): Buffer {
   frame.u64(0); // WireRetry::Never
   frame.string(message);
   return Buffer.from(encodeWebSocketFrameBatch([frame.finish()]));
+}
+
+/** A development endpoint on this machine, where header-derived audiences are fine. */
+function isLocalEndpoint(endpoint: string): boolean {
+  try {
+    const host = new URL(endpoint).hostname;
+    return (
+      host === "localhost" ||
+      host.endsWith(".localhost") ||
+      host === "127.0.0.1" ||
+      host === "[::1]"
+    );
+  } catch {
+    return false;
+  }
 }

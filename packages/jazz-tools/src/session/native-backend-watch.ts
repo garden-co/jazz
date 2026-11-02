@@ -9,4 +9,5 @@ export const nativeBackendWatchEvents: BackendWatchEvents = {
     });
     return () => subscription?.remove();
   },
+  isVisible: () => AppState.currentState === "active",
 };
