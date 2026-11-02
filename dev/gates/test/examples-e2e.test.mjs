@@ -60,6 +60,7 @@ test("the variant environment never inherits a sync server or app secrets", () =
         JAZZ_ADMIN_SECRET: "a",
         BACKEND_SECRET: "b",
         NEXT_PUBLIC_JAZZ_APP_ID: "theirs",
+        PUBLIC_JAZZ_SERVER_URL: "https://v2.sync.jazz.tools",
       },
     },
   );
@@ -68,10 +69,19 @@ test("the variant environment never inherits a sync server or app secrets", () =
   assert.equal(env.JAZZ_ADMIN_SECRET, undefined);
   assert.equal(env.BACKEND_SECRET, undefined);
   assert.notEqual(env.NEXT_PUBLIC_JAZZ_APP_ID, "theirs");
+  assert.equal(env.PUBLIC_JAZZ_SERVER_URL, undefined);
   assert.equal(env.NEXT_PUBLIC_APP_ORIGIN, ORIGIN);
+  assert.equal(env.APP_ORIGIN, ORIGIN);
   assert.equal(env.JAZZ_DATA_PATH, "/d");
   assert.equal(env.PAYMENT_PROVIDER, "sandbox");
   assert.match(env.BETTER_AUTH_SECRET, /^[0-9a-f]{64}$/);
+});
+
+test("a variant's public prefix names its app id variable", () => {
+  const env = variantEnv({ publicPrefix: "PUBLIC_", env: {} }, { dataPath: "/d", baseEnv: {} });
+  assert.match(env.PUBLIC_JAZZ_APP_ID, /^[0-9a-f-]{36}$/);
+  assert.equal(env.NEXT_PUBLIC_JAZZ_APP_ID, undefined);
+  assert.equal(env.APP_ORIGIN, ORIGIN);
 });
 
 test("the workflow matrix lists exactly the registered variants", () => {

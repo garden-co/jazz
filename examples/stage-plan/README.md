@@ -16,9 +16,10 @@ StagePlan is the Jazz example for two things:
 
 ## Apps
 
-| App                                              | Stack                                                         |
-| ------------------------------------------------ | ------------------------------------------------------------- |
-| [`apps/react-localfirst`](apps/react-localfirst) | React, Vite, local-first accounts, Astryx with the Jazz theme |
+| App                                              | Stack                                                          |
+| ------------------------------------------------ | -------------------------------------------------------------- |
+| [`apps/react-localfirst`](apps/react-localfirst) | React, Vite, local-first accounts, Astryx with the Jazz theme  |
+| [`apps/sveltekit-hybrid`](apps/sveltekit-hybrid) | SvelteKit, Jazz in the app, local-first guest then Better Auth |
 
 ## Run it
 
