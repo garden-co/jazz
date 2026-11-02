@@ -794,3 +794,114 @@ fn ordinary_claims_are_checked_when_accepted_mode_is_added() {
     );
     assert!(block_on(server.commit_serializable_handle(id)).is_err());
 }
+
+/// Bob's same-version policy revision applies before Alice first polls, even
+/// when Alice admitted her query through a retained schema handle.
+#[test]
+fn policy_revision_before_first_poll_uses_current_authorization() {
+    for retained in [false, true] {
+        let server = open(9, AuthorSubject::SYSTEM, true, false);
+        seed(&server, 1, alice(), "a");
+        let view = block_on(server.register_schema_view(schema(false))).unwrap();
+        let db = if retained { &view } else { &server };
+        let id = begin(db);
+        let pending = db
+            .accepted_transaction_query(id, query(db), false, 1000)
+            .unwrap();
+        block_on(server.activate_schema(schema(true))).unwrap();
+        let read = block_on(pending).unwrap();
+        assert!(
+            read.evidence.is_empty(),
+            "revoked SELECT returned Alice's note (retained={retained})"
+        );
+        db.abandon_transaction_handle(id).unwrap();
+    }
+}
+
+/// Bob revokes SELECT after Alice reads. Her accepted predicate must conflict
+/// at commit under current policies, including through a retained schema handle.
+#[test]
+fn policy_revision_before_commit_invalidates_accepted_predicate() {
+    for retained in [false, true] {
+        let server = open(9, AuthorSubject::SYSTEM, true, false);
+        seed(&server, 1, alice(), "a");
+        let view = block_on(server.register_schema_view(schema(false))).unwrap();
+        let db = if retained { &view } else { &server };
+        let id = begin(db);
+        let read = block_on(
+            db.accepted_transaction_query(id, query(db), false, 1000)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(read.evidence.len(), 1);
+        block_on(server.activate_schema(schema(true))).unwrap();
+        assert_eq!(
+            block_on(db.commit_serializable_handle(id))
+                .unwrap_err()
+                .code,
+            ErrorCode::TransactionConflict
+        );
+    }
+}
+
+/// Alice's rejected mixed-scope read wakes her pending accepted task immediately.
+/// The waker re-enters a public API to catch notifications under an engine borrow.
+#[test]
+fn mixed_scope_failure_wakes_pending_read_without_traffic() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::task::Wake;
+    thread_local! {
+        static REENTER: std::cell::RefCell<Option<std::rc::Rc<Db>>> = const { std::cell::RefCell::new(None) };
+    }
+    #[derive(Default)]
+    struct ReenterWake(AtomicUsize);
+    impl Wake for ReenterWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            REENTER.with(|db| {
+                db.borrow()
+                    .as_ref()
+                    .unwrap()
+                    .prepare_query(&Query::from("notes"))
+                    .unwrap();
+            });
+        }
+    }
+    let client = std::rc::Rc::new(open(7, alice(), false, false));
+    let id = begin(&client);
+    let mut pending = Box::pin(
+        client
+            .accepted_transaction_query(id, query(&client), false, 60_000)
+            .unwrap(),
+    );
+    let count = Arc::new(ReenterWake::default());
+    let waker = Waker::from(count.clone());
+    assert!(
+        pending
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    REENTER.with(|db| *db.borrow_mut() = Some(client.clone()));
+    let changed = query(&client).with_identity_claims(alice(), claims("different"));
+    let error = block_on(client.tx_ref(id).all_prepared_at(
+        &changed,
+        false,
+        None,
+        ReadTier::LocalOnly,
+    ))
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert!(
+        count.0.load(Ordering::SeqCst) > 0,
+        "failed read left accepted task asleep"
+    );
+    let Poll::Ready(Err(error)) = pending.as_mut().poll(&mut Context::from_waker(&waker)) else {
+        panic!("failed accepted task did not promptly refuse")
+    };
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    REENTER.with(|db| *db.borrow_mut() = None);
+}

@@ -7899,7 +7899,14 @@ impl Db {
                     include_deleted: read.include_deleted,
                     ..ReadSpec::default()
                 };
-                if inner.read_versions(&read.prepared, batch.reader(), &spec)? != read.rows {
+                let governed;
+                let prepared = if read.accepted_evidence {
+                    governed = inner.governed_accepted_query(&read.prepared)?;
+                    &governed
+                } else {
+                    &read.prepared
+                };
+                if inner.read_versions(prepared, batch.reader(), &spec)? != read.rows {
                     return Err(conflict(
                         "a row read by the transaction changed since its snapshot",
                     ));

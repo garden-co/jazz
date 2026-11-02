@@ -298,7 +298,9 @@ impl Db {
             let error = rejected(
                 "ordinary read differs from the accepted transaction schema or claims scope",
             );
-            batch.reads_state.borrow_mut().fail(error.clone());
+            let state = batch.reads_state.clone();
+            drop(inner);
+            transaction_reads::fail_pending_reads(&state, error.clone());
             return Err(error);
         }
         Ok(())

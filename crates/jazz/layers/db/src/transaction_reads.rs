@@ -162,3 +162,15 @@ pub(super) fn close_pending_reads(state: &Rc<RefCell<ReadState>>) {
         waker.wake();
     }
 }
+
+/// Notify failed readers only after the caller has released the engine borrow.
+pub(super) fn fail_pending_reads(state: &Rc<RefCell<ReadState>>, error: Error) {
+    let wakers = {
+        let mut state = state.borrow_mut();
+        state.fail(error);
+        std::mem::take(&mut state.wakers)
+    };
+    for waker in wakers {
+        waker.wake();
+    }
+}
