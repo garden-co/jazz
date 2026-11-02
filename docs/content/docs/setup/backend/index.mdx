@@ -7,6 +7,9 @@ Jazz runs inside your backend. There is no separate Jazz server to start and no 
 `createJazz` opens the database in your backend's process, applies the schema, migrations and
 permissions your code declares, and serves sync on your own origin under `/jazz`.
 
+These docs call that backend your **main backend**. Other trusted machines that reach Jazz through
+it, such as a job runner, a script or a second service, are **backend clients**.
+
 ## Create Jazz once
 
 ```ts title="jazz.server.ts"

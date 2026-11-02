@@ -71,7 +71,7 @@ link or retrying after a transient error won't create duplicate rows.
 
 The route reads and writes as the backend: the invitee has no read access to the chat until they're
 a member, and the `chatMembers.allowInsert` rule only admits the chat's creator, so they can't
-insert their own membership directly. The ready backend client verifies the bearer with `await client.withAttributionForRequest(request)`,
+insert their own membership directly. The main backend verifies the caller with `await client.withAttributionForRequest(request)`,
 which keeps backend permissions while stamping the membership's edit metadata to the verified
 caller. An opaque admitted account handle can instead be passed to `await client.withAttribution(account)`.
 
