@@ -1,4 +1,5 @@
 import { ed25519 } from "@noble/curves/ed25519.js";
+import { sha1 } from "@noble/hashes/legacy.js";
 import { sha512 } from "@noble/hashes/sha2.js";
 import { describe, expect, it } from "vitest";
 import vectors from "../test-vectors.json" with { type: "json" };
@@ -40,6 +41,14 @@ function claimsFor(secret: string, patch: Record<string, unknown> = {}) {
 }
 
 const EDDSA = { alg: "EdDSA", typ: "JWT" };
+
+function uuidV5Test(namespace: Uint8Array, name: Uint8Array): string {
+  const digest = sha1(new Uint8Array([...namespace, ...name])).slice(0, 16);
+  digest[6] = (digest[6]! & 0x0f) | 0x50;
+  digest[8] = (digest[8]! & 0x3f) | 0x80;
+  const hex = Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 describe("shared vectors with Jazz's Rust core", () => {
   it.each(cases)("derives the same subject for $secret", (c) => {
@@ -116,19 +125,26 @@ describe("verifyToken attack cases", () => {
     const unsigned = `${json64({ alg: "none" })}.${json64(claimsFor(alice))}.`;
     expect(() => verifyToken(unsigned, { audience, now })).toThrow(LocalFirstTokenError);
   });
-  it("rejects a small-order public key and a small-order R", () => {
+  it("rejects the identity-point forgery that verifies without strict checks", () => {
+    // A = identity, R = identity, S = 0 satisfies [S]B = R + [k]A for any message.
     const identityPoint = new Uint8Array(32);
     identityPoint[0] = 1;
-    const smallKey = forge(
-      alice,
-      EDDSA,
-      claimsFor(alice, { jazz_pub_key: base64urlEncode(identityPoint) }),
+    const subject = uuidV5Test(utf8("jazz-auth-key-v1"), identityPoint);
+    const body = `${json64(EDDSA)}.${json64(
+      claimsFor(alice, { sub: subject, jazz_pub_key: base64urlEncode(identityPoint) }),
+    )}`;
+    const signature = new Uint8Array(64);
+    signature.set(identityPoint);
+    // A real forgery: lenient (ZIP-215) verification accepts it.
+    expect(ed25519.verify(signature, utf8(body), identityPoint, { zip215: true })).toBe(true);
+    expect(() => verifyToken(`${body}.${base64urlEncode(signature)}`, { audience, now })).toThrow(
+      /signature verification failed/,
     );
-    expect(() => verifyToken(smallKey, { audience, now })).toThrow(/signature/);
-
+  });
+  it("rejects a small-order R under a real key", () => {
     const [h, c] = forge(alice, EDDSA, claimsFor(alice)).split(".");
     const smallR = new Uint8Array(64);
-    smallR.set(identityPoint);
+    smallR[0] = 1;
     expect(() => verifyToken(`${h}.${c}.${base64urlEncode(smallR)}`, { audience, now })).toThrow(
       /signature/,
     );

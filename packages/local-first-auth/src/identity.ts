@@ -46,7 +46,8 @@ const UUID_FORMS = [
   /^([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{12})$/i,
   /^([0-9a-f]{8})([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{12})$/i,
   /^\{([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{12})\}$/i,
-  /^urn:uuid:([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{12})$/i,
+  // Like Rust's uuid parser, the urn prefix is lowercase only; the hex is any case.
+  /^urn:uuid:([0-9a-fA-F]{8})-([0-9a-fA-F]{4})-([0-9a-fA-F]{4})-([0-9a-fA-F]{4})-([0-9a-fA-F]{12})$/,
 ];
 
 /**
@@ -54,10 +55,12 @@ const UUID_FORMS = [
  * it: a UUID (hyphenated, simple, braced or `urn:uuid:`) becomes its lowercase
  * hyphenated form, and any other string becomes UUIDv5(DNS namespace, audience).
  * Signing and verifying both normalize, so either form of an audience matches.
+ * Throws a TypeError for a missing or empty audience: that is a configuration
+ * error, not an invalid token.
  */
 export function normalizeAudience(audience: string): string {
   if (typeof audience !== "string" || audience.length === 0) {
-    throw new LocalFirstTokenError("audience must be a non-empty string");
+    throw new TypeError("audience must be a non-empty string");
   }
   for (const form of UUID_FORMS) {
     const match = form.exec(audience);

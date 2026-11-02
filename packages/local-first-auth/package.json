@@ -39,7 +39,7 @@
   },
   "scripts": {
     "build": "rm -rf dist && tsc",
-    "prepare": "tsc",
+    "prepare": "pnpm build",
     "check": "tsc --noEmit",
     "test": "vitest run"
   },
