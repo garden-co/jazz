@@ -255,7 +255,7 @@ fn timeout_and_identity_validation_precede_read_admission() {
 fn mixed_reads_inherit_live_claims_without_erasing_explicit_overrides() {
     for retained in [false, true] {
         for explicit in [false, true] {
-            for mode in ["stable", "drift", "empty-override"] {
+            for mode in ["stable", "drift", "stale-explicit", "empty-override"] {
                 let alice = open(1, false, false);
                 alice.set_session_claims(json!({"team":"a"})).unwrap();
                 let view = alice
@@ -274,7 +274,7 @@ fn mixed_reads_inherit_live_claims_without_erasing_explicit_overrides() {
                     )
                     .unwrap();
                 read(binding, &id);
-                if mode == "drift" {
+                if mode == "drift" || mode == "stale-explicit" {
                     alice.set_session_claims(json!({"team":"b"})).unwrap();
                 }
                 let rows = block_on(
@@ -284,7 +284,11 @@ fn mixed_reads_inherit_live_claims_without_erasing_explicit_overrides() {
                             &json!({"tier":"local-only"}),
                             Some(&id),
                             None,
-                            (mode == "empty-override").then(|| json!({})),
+                            match mode {
+                                "empty-override" => Some(json!({})),
+                                "stale-explicit" => Some(json!({"team":"a"})),
+                                _ => None,
+                            },
                         )
                         .unwrap(),
                 );

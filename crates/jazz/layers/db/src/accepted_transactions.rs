@@ -294,10 +294,16 @@ impl Db {
             .version_id()
             .as_bytes();
         let scope = inner.accepted_scope_of(prepared, identity.unwrap_or(inner.identity.author));
-        if schema != context.schema || scope != context.scope {
-            let error = rejected(
-                "ordinary read differs from the accepted transaction schema or claims scope",
-            );
+        // An explicit request can repeat the admitted claims even after the
+        // registry changed; it must not preserve a revoked scope for this read.
+        let failure = Self::check_accepted_batch_inner(&inner, batch).err();
+        if let Some(error) = failure.or_else(|| {
+            (schema != context.schema || scope != context.scope).then(|| {
+                rejected(
+                    "ordinary read differs from the accepted transaction schema or claims scope",
+                )
+            })
+        }) {
             let state = batch.reads_state.clone();
             drop(inner);
             transaction_reads::fail_pending_reads(&state, error.clone());

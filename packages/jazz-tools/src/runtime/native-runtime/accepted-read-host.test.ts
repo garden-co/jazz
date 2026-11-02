@@ -671,70 +671,77 @@ for (const host of ["NAPI", "WASM"] as const) {
 for (const host of ["NAPI", "WASM"] as const) {
   for (const retained of [false, true]) {
     for (const explicit of [false, true]) {
-      it(`${host} stable mixed reads inherit live claims (${retained ? "view" : "owner"}/${explicit ? "explicit" : "implicit"})`, async () => {
-        const server = await startLocalJazzServer({
-          inMemory: true,
-          schema: app.wasmSchema,
-          permissions: allowAll(app.wasmSchema),
-        });
-        const owner = await open(
-          host,
-          false,
-          mergePermissionsIntoWasmSchema(app.wasmSchema, allowAll(app.wasmSchema)),
-        );
-        const raw = retained
-          ? owner.registerSchema(
-              encodeSchema(
-                mergePermissionsIntoWasmSchema(app.wasmSchema, allowAll(app.wasmSchema)),
-              ),
-            )
-          : owner;
-        const adapter = runtime(raw);
-        const client = await JazzClient.connectWithRuntime(adapter, {
-          appId: server.appId,
-          schema: app.wasmSchema,
-          serverUrl: server.url,
-        });
-        const [account_id, issuer, user_id] = JSON.parse(new TextDecoder().decode(author));
-        const scope = { account_id, issuer, user_id, claims: { team: "before" } };
-        const id = createOpenTransactionId();
-        try {
-          client.connectTransport(server.url, { admin_secret: server.adminSecret });
-          await client
-            .insert("notes", { body: { type: "Text", value: "settle session" } })
-            .wait({ tier: "global", timeoutMs: 5000 });
-          raw.setSessionClaims({ team: "before", iss: issuer, sub: user_id });
-          adapter.beginTransaction(
-            "serializable",
-            id,
-            explicit ? JSON.stringify(scope) : undefined,
-            "accepted-evidence",
+      for (const readMode of ["omitted", "cached-client", "cached-serving"] as const) {
+        it(`${host} stable mixed reads inherit live claims (${retained ? "view" : "owner"}/${explicit ? "explicit" : "implicit"}/${readMode})`, async () => {
+          const server = await startLocalJazzServer({
+            inMemory: true,
+            schema: app.wasmSchema,
+            permissions: allowAll(app.wasmSchema),
+          });
+          const owner = await open(
+            host,
+            false,
+            mergePermissionsIntoWasmSchema(app.wasmSchema, allowAll(app.wasmSchema)),
           );
-          await adapter.queryAccepted(JSON.stringify({ table: "notes" }), id, undefined, 5000);
-          await expect(
-            adapter.query(
-              JSON.stringify({ table: "notes" }),
-              undefined,
-              "local-only",
-              JSON.stringify({ transaction_id: id }),
-            ),
-          ).resolves.toBeDefined();
-          raw.setSessionClaims({ team: "after", iss: issuer, sub: user_id });
-          await expect(
-            adapter.query(
-              JSON.stringify({ table: "notes" }),
-              undefined,
-              "local-only",
-              JSON.stringify({ transaction_id: id }),
-            ),
-          ).rejects.toThrow(/claims|scope/);
-          expect(() => adapter.commitTransaction(id)).toThrow(/claims|scope/);
-        } finally {
-          await client.shutdown();
-          if (retained) await owner.close();
-          await server.stop();
-        }
-      }, 15000);
+          const raw = retained
+            ? owner.registerSchema(
+                encodeSchema(
+                  mergePermissionsIntoWasmSchema(app.wasmSchema, allowAll(app.wasmSchema)),
+                ),
+              )
+            : owner;
+          const adapter = new NativeRuntimeAdapter(null, app.wasmSchema, node, author, 1, false, {
+            db: raw as never,
+            ...(readMode === "cached-serving"
+              ? { readAuthorizationHost: "trusted-serving" as const }
+              : {}),
+          });
+          const client = await JazzClient.connectWithRuntime(adapter, {
+            appId: server.appId,
+            schema: app.wasmSchema,
+            serverUrl: server.url,
+          });
+          const [account_id, issuer, user_id] = JSON.parse(new TextDecoder().decode(author));
+          const scope = { account_id, issuer, user_id, claims: { team: "before" } };
+          const id = createOpenTransactionId();
+          try {
+            client.connectTransport(server.url, { admin_secret: server.adminSecret });
+            await client
+              .insert("notes", { body: { type: "Text", value: "settle session" } })
+              .wait({ tier: "global", timeoutMs: 5000 });
+            raw.setSessionClaims({ team: "before", iss: issuer, sub: user_id });
+            adapter.beginTransaction(
+              "serializable",
+              id,
+              explicit ? JSON.stringify(scope) : undefined,
+              "accepted-evidence",
+            );
+            await adapter.queryAccepted(JSON.stringify({ table: "notes" }), id, undefined, 5000);
+            await expect(
+              adapter.query(
+                JSON.stringify({ table: "notes" }),
+                readMode === "omitted" ? undefined : JSON.stringify(scope),
+                "local-only",
+                JSON.stringify({ transaction_id: id }),
+              ),
+            ).resolves.toBeDefined();
+            raw.setSessionClaims({ team: "after", iss: issuer, sub: user_id });
+            await expect(
+              adapter.query(
+                JSON.stringify({ table: "notes" }),
+                readMode === "omitted" ? undefined : JSON.stringify(scope),
+                "local-only",
+                JSON.stringify({ transaction_id: id }),
+              ),
+            ).rejects.toThrow(/claims|scope/);
+            expect(() => adapter.commitTransaction(id)).toThrow(/claims|scope/);
+          } finally {
+            await client.shutdown();
+            if (retained) await owner.close();
+            await server.stop();
+          }
+        }, 15000);
+      }
     }
   }
 }

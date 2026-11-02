@@ -2532,7 +2532,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     const readContext = this.nativeReadContext(session, pendingTx);
     const query = nativeQueryInput(coreQueryJson, this.schema);
-    await this.ensureClientSessionClaims(session);
+    await this.ensureClientSessionClaims(session, pendingTx);
     await this.waitForStrictRemoteQueryTransport(tier);
     await this.processPendingPeerActivityBeforeRead();
     if (this.closed || this.ownerRuntime.closed) return [];
@@ -3571,8 +3571,14 @@ export class NativeRuntimeAdapter implements Runtime {
     this.clientSessionClaimsKey = key;
   }
 
-  private ensureClientSessionClaims(session: RuntimeSession | null): void | Promise<void> {
+  private ensureClientSessionClaims(
+    session: RuntimeSession | null,
+    pendingTx?: PendingTx,
+  ): void | Promise<void> {
     if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+    // Accepted admission registered its scope once. Ordinary reads in that
+    // batch must observe live claims, never reinstall their cached session.
+    if (pendingTx?.readCapability === "accepted-evidence") return;
     if (!session || session.backendAuthority || this.readAuthorizationHost === "trusted-serving")
       return;
     if (canonicalJson(session.claims) === this.clientSessionClaimsKey) return;
