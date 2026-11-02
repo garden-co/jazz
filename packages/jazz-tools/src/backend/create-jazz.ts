@@ -1031,8 +1031,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
   ): ClientSession {
     // The core socket opens once the prelude is admitted, with the access
-    // that admission needs: a vouched user's session is the backend's, a
-    // guest's is its own.
+    // that admission needs: a vouched user's session is the backend's, and
+    // so is the endpoint it vouches for on a guest's behalf; a guest signed
+    // for the app itself rides on its own token alone.
     let socket: CoreSocket | undefined;
     let ended = false;
     let userId: string | undefined;
@@ -1060,11 +1061,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       const ttl = (options.sessionTtlSeconds ?? 3600) * 1000;
       expiry = setTimeout(end, ttl);
       (expiry as unknown as { unref?: () => void }).unref?.();
-      socket = core.openSocket(
-        headerPairs(request.headers),
-        onEvent,
-        admitted.userId === undefined ? "session" : "backend",
-      );
+      socket = core.openSocket(headerPairs(request.headers), onEvent, admitted.access);
       return socket.send(admitted.prelude);
     };
     // Messages after the prelude wait for its admission, in order.
@@ -1098,7 +1095,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   async function admitPrelude(
     request: Request,
     prelude: Uint8Array,
-  ): Promise<{ prelude: Uint8Array; userId: string | undefined } | null> {
+  ): Promise<{ prelude: Uint8Array; userId: string | undefined; access: BackendAccess } | null> {
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(new TextDecoder().decode(prelude)) as Record<string, unknown>;
@@ -1121,14 +1118,20 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       // A guest has no user here: its session is bound to its own key.
       const audience = guestAudience(request, token);
       if (!audience) return null;
-      if (audience.endpoint === undefined) return { prelude, userId: undefined };
+      if (audience.endpoint === undefined) return { prelude, userId: undefined, access: "session" };
       // Signed for this endpoint, which the core can't know: vouch for it.
       const vouched = {
         ...parsed,
         local_first_audience: audience.endpoint,
         auth: { ...auth, backend_secret: core.backendSecret },
       };
-      return { prelude: new TextEncoder().encode(JSON.stringify(vouched)), userId: undefined };
+      // The backend's word on the endpoint needs backend access; the
+      // guest's own token still decides who it is.
+      return {
+        prelude: new TextEncoder().encode(JSON.stringify(vouched)),
+        userId: undefined,
+        access: "backend",
+      };
     }
     const stated = auth.backend_session as { user_id?: unknown } | undefined;
     if (!stated || typeof stated !== "object") return null;
@@ -1139,7 +1142,11 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     if (!user || user.userId !== stated.user_id) return null;
     const vouched = { backend_secret: core.backendSecret, backend_session: await sessionFor(user) };
     const rewritten = { ...parsed, ...vouched, auth: { ...auth, ...vouched } };
-    return { prelude: new TextEncoder().encode(JSON.stringify(rewritten)), userId: user.userId };
+    return {
+      prelude: new TextEncoder().encode(JSON.stringify(rewritten)),
+      userId: user.userId,
+      access: "backend",
+    };
   }
 
   // HTTP stream sessions, by id, with the key that proves a request comes
@@ -1248,6 +1255,13 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     return new Response(null, { status: 204 });
   }
 
+  /** Close codes a socket may send: 1005/1006/1015 only describe a close. */
+  function sendableCloseCode(code: number | undefined): number {
+    if (code === undefined || code === 1005) return 1000;
+    if (code === 1006 || code === 1015) return 1011;
+    return code;
+  }
+
   function acceptSocket(request: Request, ws: WsLikeSocket): void {
     if (!originAllowed(request)) {
       ws.close(1008, "origin not allowed");
@@ -1258,7 +1272,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       socket = openClientSession(request, (error, event) => {
         if (error) return ws.close(1011, error.message);
         if (event.kind === "message" && event.data) ws.send(event.data);
-        else if (event.kind === "close") ws.close(event.code ?? 1000, event.reason ?? "");
+        else if (event.kind === "close") {
+          ws.close(sendableCloseCode(event.code), event.reason ?? "");
+        }
       });
     } catch (error) {
       ws.close(1013, error instanceof Error ? error.message : String(error));
