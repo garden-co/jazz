@@ -19,6 +19,8 @@ mod authorization_scope_reentry;
 mod binding_host;
 #[path = "../branch_column_evolution.rs"]
 mod branch_column_evolution;
+#[path = "../branch_view_sync.rs"]
+mod branch_view_sync;
 #[path = "../branch_views.rs"]
 mod branch_views;
 #[path = "../catalogue_rows.rs"]
@@ -37,6 +39,8 @@ mod deleted_rows;
 mod deployment_preparation;
 #[path = "../dynamic_schema_views.rs"]
 mod dynamic_schema_views;
+#[path = "../enum_tags.rs"]
+mod enum_tags;
 #[path = "../error_code_strings.rs"]
 mod error_code_strings;
 #[path = "../existential_joins.rs"]
@@ -69,6 +73,8 @@ mod large_value_sync;
 mod large_value_tx_update;
 #[path = "../large_values.rs"]
 mod large_values;
+#[path = "../link_identities.rs"]
+mod link_identities;
 #[path = "../local_first_first_load_gate.rs"]
 mod local_first_first_load_gate;
 #[path = "../local_first_server_wait.rs"]
@@ -129,6 +135,8 @@ mod serializable_sync;
 mod session_policy_values;
 #[path = "../session_write_checks.rs"]
 mod session_write_checks;
+#[path = "../shard_role.rs"]
+mod shard_role;
 #[path = "../slow_queries.rs"]
 mod slow_queries;
 #[path = "../snapshots.rs"]
@@ -147,6 +155,8 @@ mod structured_result_tree;
 mod sync_access_loss;
 #[path = "../sync_aggregates.rs"]
 mod sync_aggregates;
+#[path = "../sync_connection_settled.rs"]
+mod sync_connection_settled;
 #[path = "../sync_differential.rs"]
 mod sync_differential;
 #[path = "../sync_echo.rs"]
@@ -155,6 +165,8 @@ mod sync_echo;
 mod sync_frame_bounds;
 #[path = "../sync_gather.rs"]
 mod sync_gather;
+#[path = "../sync_join.rs"]
+mod sync_join;
 #[path = "../sync_resume.rs"]
 mod sync_resume;
 #[path = "../sync_sessions.rs"]

@@ -91,7 +91,9 @@ fn connect(client: &Db, server: &Db) {
     let (client_side, server_side) = duplex();
     block_on(client.connect_upstream(client_side));
     client.set_remote_link_hint(RemoteLinkHint::Live);
-    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
 }
 
 fn docs(db: &Db) -> BTreeMap<[u8; 16], (String, String)> {
@@ -360,12 +362,12 @@ fn pending_rows_in_another_layout_are_refused_as_another_format() {
             "UPDATE _jazz_pending_items SET part = 7",
         ),
         (
-            "a row id that is not 16 bytes",
-            "UPDATE _jazz_pending_rows SET id = x'0102'",
+            "a mergeable commit with reads",
+            "UPDATE _jazz_pending_items SET part = 1",
         ),
         (
-            "a schema version that is not 16 bytes",
-            "UPDATE _jazz_pending_versions SET version = x'0102'",
+            "a row id that is not 16 bytes",
+            "UPDATE _jazz_pending_rows SET id = x'0102'",
         ),
         (
             "a header that is not a commit",

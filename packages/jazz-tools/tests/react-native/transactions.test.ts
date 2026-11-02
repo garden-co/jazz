@@ -3,9 +3,12 @@ import { ReadTier } from "../../src/runtime/client.js";
 import { schema } from "../../src/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = schema.defineApp({
-  todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
-});
+const app = schema.defineApp(
+  {
+    todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
+  },
+  { migrations: "none" },
+);
 
 // Browser donor: db.transaction-reads.test.ts, snapshot anchoring, staged
 // insert/update/delete isolation, rollback, and mergeable read-own-writes.

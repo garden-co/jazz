@@ -13,7 +13,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 // #endregion owned-schema
 
 // #region owned-permissions
@@ -67,7 +67,9 @@ const schemaExplicit = {
 };
 
 type ExplicitAppSchema = s.Schema<typeof schemaExplicit>;
-export const explicitApp: s.App<ExplicitAppSchema> = s.defineApp(schemaExplicit);
+export const explicitApp: s.App<ExplicitAppSchema> = s.defineApp(schemaExplicit, {
+  migrations: "none",
+});
 // #endregion owned-schema-explicit
 
 // #region owned-permissions-explicit
