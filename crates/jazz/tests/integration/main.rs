@@ -23,6 +23,8 @@ mod branch_column_evolution;
 mod branch_view_sync;
 #[path = "../branch_views.rs"]
 mod branch_views;
+#[path = "../callback_transaction_cancellation.rs"]
+mod callback_transaction_cancellation;
 #[path = "../catalogue_rows.rs"]
 mod catalogue_rows;
 #[path = "../claims_change.rs"]
