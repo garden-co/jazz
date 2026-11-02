@@ -7,9 +7,12 @@ import { ReadTier } from "../../src/runtime/client.js";
 import { createTransportControl } from "../../src/runtime/testing/transport-control.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = schema.defineApp({
-  todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
-});
+const app = schema.defineApp(
+  {
+    todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
+  },
+  { migrations: "none" },
+);
 
 // These cases intentionally have no authority peer: an ordinary persisted
 // local write is not evidence of Core admission.

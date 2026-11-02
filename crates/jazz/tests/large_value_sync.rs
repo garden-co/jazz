@@ -10,15 +10,21 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    CellDelta, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, RemoteLinkHint,
-    SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError, WireDelta, WireError,
-    WireKind, WireOp, WirePull, WireTarget, block_on, encode_frames,
+    AccessProof, Acting, BuiltOn, CellDelta, Db, DbConfig, DbIdentity, InsertOptions, Outcome,
+    ReadOpts, ReadSpan, ReadTier, RemoteLinkHint, SubscriptionStream, SyncCell, SyncMessage,
+    Transport, TransportError, WireBase, WireChunk, WireDelta, WireError, WireKind, WireOp,
+    WirePull, WireTarget, WireWrite, block_on, encode_frames,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::ReadViewSourceSpec;
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
-use jazz::tools::{ColumnType, Operation, PolicyExpr, SchemaBuilder, TableSchemaBuilder};
+use jazz::time::TxTime;
+use jazz::tools::{
+    CmpOp, ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, PolicyValue, SchemaBuilder,
+    TableName, TableSchemaBuilder,
+};
+use jazz::tx::TxId;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -57,17 +63,40 @@ fn open(node: u8, author: AuthorSubject) -> Db {
     let drafts = TableSchemaBuilder::new("drafts")
         .column("body", ColumnType::Text)
         .policies(allow_all_policies().with_select(PolicyExpr::False));
+    // Readable while `public`: a reader may see some of a row's versions
+    // and not others.
+    let shared = TableSchemaBuilder::new("shared")
+        .column("body", ColumnType::Text)
+        .column("public", ColumnType::Boolean)
+        .policies(allow_all_policies().with_select(PolicyExpr::Cmp {
+            column: "public".to_owned(),
+            op: CmpOp::Eq,
+            value: PolicyValue::Literal(jazz::tools::Value::Boolean(true)),
+        }));
+    // Its `body` merges concurrent text edits (SPEC 4 §4.3).
+    let merged = TableSchemaBuilder::new("merged")
+        .column("body", ColumnType::Text)
+        .policies(allow_all_policies());
+    let mut schema = SchemaBuilder::new()
+        .table(docs)
+        .table(titled)
+        .table(notes)
+        .table(comments)
+        .table(links)
+        .table(drafts)
+        .table(merged)
+        .table(shared)
+        .build();
+    for column in &mut schema
+        .get_mut(&TableName::new("merged"))
+        .unwrap()
+        .columns
+        .columns
+    {
+        *column = column.clone().merge_strategy(ColumnMergeStrategy::Text);
+    }
     let config = DbConfig::new(
-        compile_schema(
-            &SchemaBuilder::new()
-                .table(docs)
-                .table(titled)
-                .table(notes)
-                .table(comments)
-                .table(links)
-                .table(drafts)
-                .build(),
-        ),
+        compile_schema(&schema),
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
             author,
@@ -143,14 +172,16 @@ fn connect_wires(server: &Db, client: &Db, identity: AuthorSubject) -> (Log, Wir
         inbound: down.clone(),
         log: log.clone(),
     })));
-    server.accept_subscriber(
-        Box::new(Pipe {
-            out: down.clone(),
-            inbound: up.clone(),
-            log: log.clone(),
-        }),
-        identity,
-    );
+    server
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down.clone(),
+                inbound: up.clone(),
+                log: log.clone(),
+            }),
+            identity,
+        )
+        .unwrap();
     (log, up, down)
 }
 
@@ -421,6 +452,16 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
     .root
     .object_hash
     .0;
+    // A node this store never held.
+    let unknown = jazz::large_values::prepare(
+        jazz::large_values::LargeValueKind::String,
+        text(9, LARGE).as_bytes(),
+    )
+    .unwrap()
+    .value_ref
+    .root
+    .object_hash
+    .0;
     // The doc's version as shipped to Mallory, read off the wire before
     // her replica takes it.
     for _ in 0..4 {
@@ -430,27 +471,30 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
         .borrow()
         .iter()
         .find_map(|message| match message {
-            SyncMessage::Rows { images } => images.iter().find_map(|image| {
+            SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
-                    SyncCell::Large(descriptor) if name.ends_with("body") => Some(descriptor),
+                    SyncCell::Large(descriptor) if common::unhashed(name).ends_with("body") => {
+                        Some(descriptor)
+                    }
                     _ => None,
                 })?;
                 let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
-                Some((image.seq, image.key.clone(), value.root.object_hash.0))
+                Some((image.at, image.key.clone(), value.root.object_hash.0))
             }),
             _ => None,
         })
         .expect("the doc's image");
     down.borrow_mut().clear();
-    let pull = |table: &str, id: u8, seq: u64, root: [u8; 32], nodes: Vec<[u8; 32]>| WirePull {
-        table: table.to_owned(),
-        id: *row(id).0.as_bytes(),
-        key: key.clone(),
-        seq,
-        root,
-        nodes,
-        span: Some((0, LARGE as u64)),
-    };
+    let pull =
+        |table: &str, id: u8, seq: jazz::db::Pos, root: [u8; 32], nodes: Vec<[u8; 32]>| WirePull {
+            table: table.to_owned(),
+            id: *row(id).0.as_bytes(),
+            key: key.clone(),
+            at: seq,
+            root,
+            nodes,
+            span: Some((0, LARGE as u64)),
+        };
     let mut pulls = vec![
         // The doc's own tree, through its version: answered.
         pull("docs", 1, seq, doc, vec![doc]),
@@ -458,9 +502,14 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
         // a node under the doc's: neither is that version's.
         pull("docs", 1, seq, draft, vec![draft]),
         pull("docs", 1, seq, doc, vec![draft]),
+        pull("docs", 1, seq, doc, vec![unknown]),
     ];
     // Through the draft's own row, at any version: she may read none.
-    pulls.extend((0..seq + 4).map(|seq| pull("drafts", 2, seq, draft, vec![draft])));
+    // Positions are clock times, so the reader guesses those near the doc's.
+    pulls.extend(
+        (seq.seq.saturating_sub(8)..seq.seq + 4)
+            .map(|seq| pull("drafts", 2, jazz::db::Pos::at(seq), draft, vec![draft])),
+    );
     up.borrow_mut()
         .push_back(SyncMessage::ChunkRequests { pulls });
     block_on(server.tick()).unwrap();
@@ -479,16 +528,20 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
     assert!(sent.contains(&doc), "the doc's tree is answered");
     assert!(sent.len() > 1, "with the nodes beneath it the span covers");
     assert!(!sent.contains(&draft), "the draft's tree never is");
+    // Held for a row she cannot read, or never held: answered alike.
     assert!(missing.contains(&draft));
+    assert!(missing.contains(&unknown));
 }
 
+/// A replica orders synced chunked values as the authority does: by cell,
+/// before every inline value (SPEC 19.5), with no chunk read.
 #[test]
-fn indexed_large_values_are_prefetched_before_the_row_is_installed() {
+fn synced_chunked_values_sort_before_inline_ones() {
     let server = open(0, AuthorSubject::SYSTEM);
     let alice = open(1, user(1));
     let _log = connect(&server, &alice, user(1));
     let base = text(2, LARGE);
-    let titles = [format!("{base}b"), format!("{base}a"), "short".to_owned()];
+    let titles = ["short".to_owned(), format!("{base}b"), format!("{base}a")];
     for (n, title) in titles.iter().enumerate() {
         insert(
             &server,
@@ -499,20 +552,22 @@ fn indexed_large_values_are_prefetched_before_the_row_is_installed() {
     }
     let _stream = subscribe(&alice, Query::from("titled"));
     pump(&server, &[&alice]);
-    // Every chunk is local, so ordering through the index never waits.
-    let (nodes, _) = alice.large_value_nodes_for_test().unwrap();
-    assert_eq!(nodes, server.large_value_nodes_for_test().unwrap().0);
-    let query = Query::from("titled").order_by("title", OrderDirection::Asc);
-    let rows = block_on(alice.all(
-        &alice.prepare_query(&query).unwrap(),
-        ReadOpts {
-            tier: ReadTier::LocalOnly,
-            ..ReadOpts::default()
-        },
-    ))
-    .unwrap();
-    let ids: Vec<RowUuid> = rows.iter().map(|r| r.row_uuid()).collect();
-    assert_eq!(ids, vec![row(2), row(1), row(3)]);
+    let query = Query::from("titled")
+        .select(["id"])
+        .order_by("title", OrderDirection::Asc);
+    for db in [&server, &alice] {
+        let rows = block_on(db.all(
+            &db.prepare_query(&query).unwrap(),
+            ReadOpts {
+                tier: ReadTier::LocalOnly,
+                ..ReadOpts::default()
+            },
+        ))
+        .unwrap();
+        let ids: Vec<RowUuid> = rows.iter().map(|r| r.row_uuid()).collect();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids[2], row(1), "the inline title sorts last");
+    }
 }
 
 #[test]
@@ -572,9 +627,11 @@ struct Spy {
 impl Transport for Spy {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         let entry = match &message {
-            SyncMessage::Commit { deltas, .. } => Some(("commit", !deltas.is_empty())),
+            SyncMessage::Commit { ops, .. } => {
+                Some(("commit", ops.iter().any(|op| !op.deltas.is_empty())))
+            }
             SyncMessage::PushChunks { .. } => Some(("push", false)),
-            SyncMessage::Rows { images } => {
+            SyncMessage::Rows { images, .. } => {
                 let mut cells = images.iter().flat_map(|image| image.cells.iter());
                 let large = cells
                     .clone()
@@ -612,14 +669,16 @@ fn connect_spied(server: &Db, client: &Db, identity: AuthorSubject) -> (Sizes, S
         inbound: down.clone(),
         sizes: sent.clone(),
     })));
-    server.accept_subscriber(
-        Box::new(Spy {
-            out: down,
-            inbound: up,
-            sizes: received.clone(),
-        }),
-        identity,
-    );
+    server
+        .accept_subscriber(
+            Box::new(Spy {
+                out: down,
+                inbound: up,
+                sizes: received.clone(),
+            }),
+            identity,
+        )
+        .unwrap();
     (sent, received)
 }
 
@@ -721,19 +780,19 @@ fn writers_get_each_others_edits_as_deltas_over_their_own() {
 
 /// A server-side duplex that names, in its first delta, a version the
 /// replica does not hold (as after it evicted the row unannounced,
-/// INV-SYNC-14), and logs the `Hold`s it receives.
+/// INV-SYNC-14), and logs the `ResendWhole`s it receives.
 struct Spoil {
     out: Wire,
     inbound: Wire,
     spoiled: Rc<RefCell<bool>>,
     holds: Rc<RefCell<Vec<Vec<u64>>>>,
-    /// The `Hold`s are lost on the way, as in a link that drops.
+    /// The `ResendWhole`s are lost on the way, as in a link that drops.
     lose_holds: bool,
 }
 
 impl Transport for Spoil {
     fn send(&mut self, mut message: SyncMessage) -> Result<(), TransportError> {
-        if let SyncMessage::Rows { images } = &mut message
+        if let SyncMessage::Rows { images, .. } = &mut message
             && !*self.spoiled.borrow()
         {
             for (_, cell) in images.iter_mut().flat_map(|image| image.cells.iter_mut()) {
@@ -749,7 +808,7 @@ impl Transport for Spoil {
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
         let message = self.inbound.borrow_mut().pop_front()?;
-        if let SyncMessage::Hold { rows } = &message {
+        if let SyncMessage::ResendWhole { rows } = &message {
             self.holds
                 .borrow_mut()
                 .push(rows.iter().map(|row| row.3).collect());
@@ -775,16 +834,18 @@ fn a_delta_over_a_version_the_replica_lacks_heals_by_asking_for_the_row() {
         inbound: down.clone(),
         log: Log::default(),
     })));
-    server.accept_subscriber(
-        Box::new(Spoil {
-            out: down,
-            inbound: up,
-            spoiled: spoiled.clone(),
-            holds: holds.clone(),
-            lose_holds: false,
-        }),
-        user(2),
-    );
+    server
+        .accept_subscriber(
+            Box::new(Spoil {
+                out: down,
+                inbound: up,
+                spoiled: spoiled.clone(),
+                holds: holds.clone(),
+                lose_holds: false,
+            }),
+            user(2),
+        )
+        .unwrap();
     let _bob_stream = subscribe(&bob, Query::from("docs"));
     let mut expected = text(6, LARGE);
     insert(
@@ -815,7 +876,7 @@ fn a_delta_over_a_version_the_replica_lacks_heals_by_asking_for_the_row() {
     );
 }
 
-/// A replica whose `Hold` is lost (the link drops with it in flight)
+/// A replica whose `ResendWhole` is lost (the link drops with it in flight)
 /// holds a stale version that no resume may count as held: the results it
 /// settled meanwhile are not stored as resume points, and the row is asked
 /// for again on the next connection.
@@ -833,16 +894,18 @@ fn a_row_asked_for_whole_heals_after_its_hold_is_lost() {
         inbound: down.clone(),
         log: Log::default(),
     })));
-    server.accept_subscriber(
-        Box::new(Spoil {
-            out: down,
-            inbound: up,
-            spoiled: spoiled.clone(),
-            holds: holds.clone(),
-            lose_holds: true,
-        }),
-        user(2),
-    );
+    server
+        .accept_subscriber(
+            Box::new(Spoil {
+                out: down,
+                inbound: up,
+                spoiled: spoiled.clone(),
+                holds: holds.clone(),
+                lose_holds: true,
+            }),
+            user(2),
+        )
+        .unwrap();
     let bob_stream = subscribe(&bob, Query::from("docs"));
     let mut expected = text(6, LARGE);
     insert(
@@ -890,23 +953,21 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
     );
     pump(&server, &[&mallory]);
     let update = |tx: u64, body: Value, deltas: Vec<CellDelta>| SyncMessage::Commit {
-        node: [9; 16],
-        tx,
+        clock: 0,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
-        ops: vec![WireOp::Update {
-            table: "drafts".to_owned(),
-            row: *row(1).0.as_bytes(),
-            cells: [("body".to_owned(), body)].into(),
-            target: WireTarget::Root,
-            at: None,
+        ops: vec![WireOp {
+            deltas,
+            ..WireWrite::Update {
+                table: "drafts".to_owned(),
+                row: *row(1).0.as_bytes(),
+                cells: [(common::stored(&server, "drafts", "body"), body)].into(),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into()
         }],
-        author: None,
-        session: None,
-        expect: Vec::new(),
-        deltas,
-        sources: Vec::new(),
-        bases: Vec::new(),
-        origin: None,
+        acting: Acting::Own,
     };
     // Each version the server could have written the draft at, named as a
     // base: rebuilt, the write would carry the draft's hidden body.
@@ -915,8 +976,7 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
             seq,
             Value::Nullable(None),
             vec![CellDelta {
-                op: 0,
-                column: "body".to_owned(),
+                column: common::stored(&server, "drafts", "body"),
                 depth: 0,
                 key: Vec::new(),
                 delta: WireDelta {
@@ -936,11 +996,22 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
         .iter()
         .filter_map(|message| match message {
             SyncMessage::Fate {
-                tx,
-                result: Err(WireError::Rejected { message, .. }),
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
+                outcome:
+                    Outcome::Refused {
+                        error: WireError::Rejected { message, .. },
+                        ..
+                    },
                 ..
             } => Some((*tx, message.contains("large-value delta"))),
-            SyncMessage::Fate { tx, .. } => Some((*tx, false)),
+            SyncMessage::Fate {
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
+                ..
+            } => Some((*tx, false)),
             _ => None,
         })
         .collect();
@@ -978,13 +1049,15 @@ fn pulls_after_read_access_is_lost_are_answered_with_nothing() {
         .borrow()
         .iter()
         .find_map(|message| match message {
-            SyncMessage::Rows { images } => images.iter().find_map(|image| {
+            SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
-                    SyncCell::Large(descriptor) if name.ends_with("text") => Some(descriptor),
+                    SyncCell::Large(descriptor) if common::unhashed(name).ends_with("text") => {
+                        Some(descriptor)
+                    }
                     _ => None,
                 })?;
                 let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
-                Some((image.seq, image.key.clone(), value.root.object_hash.0))
+                Some((image.at, image.key.clone(), value.root.object_hash.0))
             }),
             _ => None,
         })
@@ -997,14 +1070,14 @@ fn pulls_after_read_access_is_lost_are_answered_with_nothing() {
     let evicted = down
         .borrow()
         .iter()
-        .any(|message| matches!(message, SyncMessage::Evict { .. }));
+        .any(|message| matches!(message, SyncMessage::AccessLost { .. }));
     down.borrow_mut().clear();
     up.borrow_mut().push_back(SyncMessage::ChunkRequests {
         pulls: vec![WirePull {
             table: "notes".to_owned(),
             id: *row(5).0.as_bytes(),
             key,
-            seq,
+            at: seq,
             root,
             nodes: vec![root],
             span: Some((0, LARGE as u64)),
@@ -1053,13 +1126,15 @@ fn an_answer_to_many_pulls_is_bounded_and_the_rest_follows() {
         .borrow()
         .iter()
         .find_map(|message| match message {
-            SyncMessage::Rows { images } => images.iter().find_map(|image| {
+            SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
-                    SyncCell::Large(descriptor) if name.ends_with("blob") => Some(descriptor),
+                    SyncCell::Large(descriptor) if common::unhashed(name).ends_with("blob") => {
+                        Some(descriptor)
+                    }
                     _ => None,
                 })?;
                 let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
-                Some((image.seq, image.key.clone(), value.root.object_hash.0))
+                Some((image.at, image.key.clone(), value.root.object_hash.0))
             }),
             _ => None,
         })
@@ -1070,7 +1145,7 @@ fn an_answer_to_many_pulls_is_bounded_and_the_rest_follows() {
         table: "docs".to_owned(),
         id: *row(1).0.as_bytes(),
         key: key.clone(),
-        seq,
+        at: seq,
         root,
         nodes: vec![root],
         span: Some((at * 4 * MB, (at + 1) * 4 * MB)),
@@ -1145,27 +1220,30 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
     // Mallory names the draft's tree (its hashes are no secret) in a doc
     // she may write and read, pushing nothing; and a tree nobody stored.
     let insert = |tx: u64, n: u8, value: &jazz::large_values::LargeValueRef| SyncMessage::Commit {
-        node: [9; 16],
-        tx,
+        clock: 0,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
-        ops: vec![WireOp::Insert {
-            table: "docs".to_owned(),
-            row: *row(n).0.as_bytes(),
-            cells: [
-                ("body".to_owned(), Value::Large(Box::new(value.clone()))),
-                ("blob".to_owned(), Value::Bytes(Vec::new())),
-            ]
+        ops: vec![
+            WireWrite::Insert {
+                table: "docs".to_owned(),
+                row: *row(n).0.as_bytes(),
+                cells: [
+                    (
+                        common::stored(&server, "docs", "body"),
+                        Value::Large(Box::new(value.clone())),
+                    ),
+                    (
+                        common::stored(&server, "docs", "blob"),
+                        Value::Bytes(Vec::new()),
+                    ),
+                ]
+                .into(),
+                target: WireTarget::Root,
+                at: None,
+            }
             .into(),
-            target: WireTarget::Root,
-            at: None,
-        }],
-        author: None,
-        session: None,
-        expect: Vec::new(),
-        deltas: Vec::new(),
-        sources: Vec::new(),
-        bases: Vec::new(),
-        origin: None,
+        ],
+        acting: Acting::Own,
     };
     up.borrow_mut().push_back(insert(1, 1, &hidden));
     up.borrow_mut().push_back(insert(2, 2, &unknown));
@@ -1177,11 +1255,22 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
         .iter()
         .filter_map(|message| match message {
             SyncMessage::Fate {
-                tx,
-                result: Err(WireError::Rejected { message, .. }),
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
+                outcome:
+                    Outcome::Refused {
+                        error: WireError::Rejected { message, .. },
+                        ..
+                    },
                 ..
             } => Some((*tx, message.clone())),
-            SyncMessage::Fate { tx, .. } => Some((*tx, "accepted".to_owned())),
+            SyncMessage::Fate {
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
+                ..
+            } => Some((*tx, "accepted".to_owned())),
             _ => None,
         })
         .collect();
@@ -1190,6 +1279,372 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
     assert_eq!(fates[0].1, fates[1].1, "{fates:?}");
     assert!(fates[0].1.contains("does not hold"), "{fates:?}");
     assert_eq!(local_cell(&server, "docs", 1, "body").unwrap(), None);
+}
+
+/// An access proof names a version of the written row, and proves its trees
+/// only while the writer may read that version: naming a version the writer
+/// may not read, of a row it may read now, proves nothing, and is refused
+/// exactly as a tree nobody stored is (SPEC 19.4, "What possession
+/// prevents").
+#[test]
+fn an_access_proof_the_writer_cannot_read_proves_nothing() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let mallory = open(9, user(9));
+    let (_, up, down) = connect_wires(&server, &mallory, user(9));
+    // The row held a secret body while private, then went public with
+    // another.
+    insert(
+        &server,
+        "shared",
+        1,
+        vec![
+            ("body", Value::String(text(8, LARGE))),
+            ("public", Value::Bool(false)),
+        ],
+    );
+    let secret = server.write_conflicts("shared", row(1), None).unwrap()[0].seq;
+    block_on(
+        server.update(
+            "shared",
+            row(1),
+            [
+                ("body".to_owned(), Value::String("public".into())),
+                ("public".to_owned(), Value::Bool(true)),
+            ]
+            .into(),
+            Default::default(),
+        ),
+    )
+    .unwrap();
+    let hidden = jazz::large_values::prepare(
+        jazz::large_values::LargeValueKind::String,
+        text(8, LARGE).as_bytes(),
+    )
+    .unwrap()
+    .value_ref;
+    let unknown = jazz::large_values::prepare(
+        jazz::large_values::LargeValueKind::String,
+        text(9, LARGE).as_bytes(),
+    )
+    .unwrap()
+    .value_ref;
+    pump(&server, &[&mallory]);
+    // Mallory writes the secret body's tree back into the row, naming the
+    // private version as her proof; then a tree nobody stored.
+    let update = |tx: u64, value: &jazz::large_values::LargeValueRef| SyncMessage::Commit {
+        clock: 0,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
+        kind: WireKind::Mergeable,
+        ops: vec![WireOp {
+            access_proof: Some(AccessProof {
+                key: Vec::new(),
+                seq: secret,
+            }),
+            ..WireWrite::Update {
+                table: "shared".to_owned(),
+                row: *row(1).0.as_bytes(),
+                cells: [(
+                    common::stored(&server, "shared", "body"),
+                    Value::Large(Box::new(value.clone())),
+                )]
+                .into(),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into()
+        }],
+        acting: Acting::Own,
+    };
+    up.borrow_mut().push_back(update(1, &hidden));
+    up.borrow_mut().push_back(update(2, &unknown));
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let fates: Vec<String> = down
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::Fate {
+                outcome:
+                    Outcome::Refused {
+                        error: WireError::Rejected { message, .. },
+                        ..
+                    },
+                ..
+            } => Some(message.clone()),
+            SyncMessage::Fate { .. } => Some("accepted".to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fates.len(), 2, "{fates:?}");
+    assert_eq!(fates[0], fates[1], "{fates:?}");
+    assert!(fates[0].contains("does not hold"), "{fates:?}");
+    assert_eq!(
+        local_cell(&server, "shared", 1, "body").unwrap(),
+        Some(Value::String("public".into()))
+    );
+}
+
+/// Pushed nodes are taken silently: the server answers a push of nodes it
+/// already holds (for a row the pusher cannot read) as it answers a push of
+/// new ones, with nothing (SPEC 19.9, "No existence oracle"). A node held
+/// for someone else proves nothing until the writer pushed it itself
+/// (SPEC 19.4, "What possession prevents").
+#[test]
+fn a_push_is_never_answered() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let mallory = open(9, user(9));
+    let (_, up, down) = connect_wires(&server, &mallory, user(9));
+    insert(
+        &server,
+        "drafts",
+        1,
+        vec![("body", Value::String(text(8, LARGE)))],
+    );
+    pump(&server, &[&mallory]);
+    let prepared = |seed| {
+        jazz::large_values::prepare(
+            jazz::large_values::LargeValueKind::String,
+            text(seed, LARGE).as_bytes(),
+        )
+        .unwrap()
+    };
+    let hidden = prepared(8).value_ref;
+    let insert = |tx: u64, n: u8| SyncMessage::Commit {
+        clock: 0,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
+        kind: WireKind::Mergeable,
+        ops: vec![
+            WireWrite::Insert {
+                table: "docs".to_owned(),
+                row: *row(n).0.as_bytes(),
+                cells: [
+                    (
+                        common::stored(&server, "docs", "body"),
+                        Value::Large(Box::new(hidden.clone())),
+                    ),
+                    (
+                        common::stored(&server, "docs", "blob"),
+                        Value::Bytes(Vec::new()),
+                    ),
+                ]
+                .into(),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into(),
+        ],
+        acting: Acting::Own,
+    };
+    let fates = || -> Vec<bool> {
+        down.borrow()
+            .iter()
+            .filter_map(|message| match message {
+                SyncMessage::Fate { outcome, .. } => Some(outcome.result().is_ok()),
+                _ => None,
+            })
+            .collect()
+    };
+    // Held for the draft only: naming it proves nothing.
+    up.borrow_mut().push_back(insert(1, 1));
+    for _ in 0..2 {
+        block_on(server.tick()).unwrap();
+    }
+    assert_eq!(fates(), [false]);
+    let before = down.borrow().len();
+    for seed in [8, 9] {
+        up.borrow_mut().push_back(SyncMessage::PushChunks {
+            nodes: prepared(seed)
+                .staged_chunks
+                .into_iter()
+                .map(|chunk| WireChunk {
+                    hash: chunk.node_ref.object_hash.0,
+                    bytes: chunk.encoded,
+                })
+                .collect(),
+        });
+        for _ in 0..2 {
+            block_on(server.tick()).unwrap();
+        }
+        assert_eq!(
+            down.borrow().len(),
+            before,
+            "{:?}",
+            down.borrow().iter().skip(before).collect::<Vec<_>>()
+        );
+    }
+    // Pushed by Mallory herself, the same tree is hers to write: she holds
+    // its content, as the push shows.
+    up.borrow_mut().push_back(insert(2, 2));
+    for _ in 0..2 {
+        block_on(server.tick()).unwrap();
+    }
+    assert_eq!(fates(), [false, true]);
+}
+
+/// A delta stands in for its op's NULL cell, once per column: a second
+/// delta for a column, or one over a cell holding a value, refuses the
+/// commit rather than replacing what was sent (SPEC 8.2).
+#[test]
+fn a_delta_that_does_not_stand_in_for_a_null_cell_is_refused() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let mallory = open(9, user(9));
+    let (_, up, down) = connect_wires(&server, &mallory, user(9));
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(text(7, LARGE))),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    pump(&server, &[&mallory]);
+    let delta = || CellDelta {
+        column: common::stored(&server, "docs", "body"),
+        depth: 0,
+        key: Vec::new(),
+        delta: WireDelta {
+            seq: 1,
+            base: 0,
+            edits: Vec::new(),
+        },
+    };
+    let update = |tx: u64, body: Value, deltas: Vec<CellDelta>| SyncMessage::Commit {
+        clock: 0,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
+        kind: WireKind::Mergeable,
+        ops: vec![WireOp {
+            deltas,
+            ..WireWrite::Update {
+                table: "docs".to_owned(),
+                row: *row(1).0.as_bytes(),
+                cells: [(common::stored(&server, "docs", "body"), body)].into(),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into()
+        }],
+        acting: Acting::Own,
+    };
+    up.borrow_mut()
+        .push_back(update(1, Value::Nullable(None), vec![delta(), delta()]));
+    up.borrow_mut()
+        .push_back(update(2, Value::String("sent".into()), vec![delta()]));
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let fates: Vec<String> = down
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::Fate {
+                outcome:
+                    Outcome::Refused {
+                        error: WireError::Rejected { message, .. },
+                        ..
+                    },
+                ..
+            } => Some(message.clone()),
+            SyncMessage::Fate { .. } => Some("accepted".to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fates.len(), 2, "{fates:?}");
+    assert!(
+        fates[0].contains("names a column another delta"),
+        "{fates:?}"
+    );
+    assert!(fates[1].contains("stands in for no NULL cell"), "{fates:?}");
+}
+
+/// A text write the authority merges is checked like any other: its
+/// descriptor naming a hidden tree is refused before the merge reads it,
+/// so neither the merged value nor the write as sent takes in its text.
+#[test]
+fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let mallory = open(9, user(9));
+    let (_, up, down) = connect_wires(&server, &mallory, user(9));
+    insert(
+        &server,
+        "drafts",
+        1,
+        vec![("body", Value::String(text(8, LARGE)))],
+    );
+    let hidden = jazz::large_values::prepare(
+        jazz::large_values::LargeValueKind::String,
+        text(8, LARGE).as_bytes(),
+    )
+    .unwrap()
+    .value_ref;
+    insert(
+        &server,
+        "merged",
+        2,
+        vec![("body", Value::String("hello".into()))],
+    );
+    let seed = server.write_conflicts("merged", row(2), None).unwrap()[0].seq;
+    block_on(server.update(
+        "merged",
+        row(2),
+        [("body".to_owned(), Value::String("hello there".into()))].into(),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &[&mallory]);
+    // Mallory edits the doc over its first version, which the authority
+    // has to merge, naming the draft's tree as her value.
+    up.borrow_mut().push_back(SyncMessage::Commit {
+        clock: 0,
+        id: TxId::new(TxTime(1), NodeUuid::from_bytes([9; 16])),
+        kind: WireKind::Mergeable,
+        ops: vec![WireOp {
+            bases: vec![WireBase {
+                key: Vec::new(),
+                on: BuiltOn::Seq(seed),
+            }],
+            ..WireWrite::Update {
+                table: "merged".to_owned(),
+                row: *row(2).0.as_bytes(),
+                cells: [(
+                    common::stored(&server, "merged", "body"),
+                    Value::Large(Box::new(hidden)),
+                )]
+                .into(),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into()
+        }],
+        acting: Acting::Own,
+    });
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let fates: Vec<String> = down
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::Fate {
+                outcome:
+                    Outcome::Refused {
+                        error: WireError::Rejected { message, .. },
+                        ..
+                    },
+                ..
+            } => Some(message.clone()),
+            SyncMessage::Fate { .. } => Some("accepted".to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fates.len(), 1, "{fates:?}");
+    assert!(fates[0].contains("does not hold"), "{fates:?}");
+    assert_eq!(
+        local_cell(&server, "merged", 2, "body").unwrap(),
+        Some(Value::String("hello there".into()))
+    );
+    assert_eq!(server.as_sent_versions_for_test().unwrap(), 0);
 }
 
 #[test]
@@ -1552,19 +2007,20 @@ fn a_snapshot_read_naming_a_held_commit_waits_for_it() {
     // Alice's own store answers that read itself, so the read goes up as a
     // relay would send it: on the wire, behind the held commit.
     const READ: u64 = 9_999;
-    up.borrow_mut().push_back(SyncMessage::Fetch {
+    up.borrow_mut().push_back(SyncMessage::Read {
         id: READ,
-        query: Query::from("titled"),
+        query: Box::new(Query::from("titled")),
         binding: BTreeMap::new(),
-        at: None,
         include_deleted: false,
         tier: ReadTier::Remote,
         wait: None,
-        view: ReadViewSourceSpec::Snapshot { snapshot },
+        view: Box::new(ReadViewSourceSpec::Snapshot { snapshot }),
+        since: None,
+        span: ReadSpan::Once { at: None },
     });
     let reply = || {
         down.borrow().iter().find_map(|message| match message {
-            SyncMessage::Answer { id: READ, .. } => Some(Ok(())),
+            SyncMessage::Settled { id: READ, .. } => Some(Ok(())),
             SyncMessage::Refused {
                 id: READ, message, ..
             } => Some(Err(message.clone())),
@@ -1627,9 +2083,9 @@ fn requests(log: &Log) -> usize {
 fn a_range_read_through_a_relay_fetches_only_its_path_at_every_hop() {
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
-    let tab = open(6, user(6));
+    let tab = open(6, user(5));
     let upstream = connect(&core, &relay, user(5));
-    let downstream = connect(&relay, &tab, user(6));
+    let downstream = connect(&relay, &tab, user(5));
     let blob: Vec<u8> = (0..LARGE * 16).map(|n| (n * 7 % 251) as u8).collect();
     insert(
         &core,
@@ -1665,8 +2121,8 @@ fn a_range_read_through_a_relay_fetches_only_its_path_at_every_hop() {
     );
     assert_eq!(at_tab, at_relay, "the tab holds the same path");
     // A second tab reading the same range is answered by the relay alone.
-    let other = open(7, user(7));
-    let beside = connect(&relay, &other, user(7));
+    let other = open(7, user(5));
+    let beside = connect(&relay, &other, user(5));
     let _other_stream = subscribe(&other, Query::from("docs").select(["body"]));
     pump_chain(&core, &relay, &other);
     upstream.borrow_mut().clear();
@@ -1682,9 +2138,9 @@ fn a_range_read_through_a_relay_fetches_only_its_path_at_every_hop() {
 fn a_whole_value_reaches_a_tab_through_its_relay() {
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
-    let tab = open(6, user(6));
+    let tab = open(6, user(5));
     connect(&core, &relay, user(5));
-    connect(&relay, &tab, user(6));
+    connect(&relay, &tab, user(5));
     let body = text(3, LARGE);
     insert(
         &core,
@@ -1707,9 +2163,9 @@ fn a_whole_value_reaches_a_tab_through_its_relay() {
 fn a_relay_forwards_no_pull_its_tab_may_not_make() {
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
-    let tab = open(9, user(9));
+    let tab = open(9, user(5));
     let upstream = connect(&core, &relay, user(5));
-    let (_, up, down) = connect_wires(&relay, &tab, user(9));
+    let (_, up, down) = connect_wires(&relay, &tab, user(5));
     let _relay_stream = subscribe(&relay, Query::from("docs").select(["blob"]));
     let _stream = subscribe(&tab, Query::from("docs").select(["blob"]));
     pump_chain(&core, &relay, &tab);
@@ -1745,26 +2201,30 @@ fn a_relay_forwards_no_pull_its_tab_may_not_make() {
         .borrow()
         .iter()
         .find_map(|message| match message {
-            SyncMessage::Rows { images } => images
+            SyncMessage::Rows { images, .. } => images
                 .iter()
                 .find(|image| image.id == *row(1).0.as_bytes())
-                .map(|image| (image.seq, image.key.clone())),
+                .map(|image| (image.at, image.key.clone())),
             _ => None,
         })
         .expect("the doc's image");
     down.borrow_mut().clear();
     upstream.borrow_mut().clear();
-    let pull = |table: &str, id: u8, seq: u64, root: [u8; 32]| WirePull {
+    let pull = |table: &str, id: u8, seq: jazz::db::Pos, root: [u8; 32]| WirePull {
         table: table.to_owned(),
         id: *row(id).0.as_bytes(),
         key: key.clone(),
-        seq,
+        at: seq,
         root,
         nodes: vec![draft],
         span: Some((0, LARGE as u64)),
     };
     let mut pulls = vec![pull("docs", 1, seq, draft)];
-    pulls.extend((0..seq + 4).map(|seq| pull("drafts", 2, seq, draft)));
+    // Positions are clock times, so the tab guesses those near the doc's.
+    pulls.extend(
+        (seq.seq.saturating_sub(8)..seq.seq + 4)
+            .map(|seq| pull("drafts", 2, jazz::db::Pos::at(seq), draft)),
+    );
     up.borrow_mut()
         .push_back(SyncMessage::ChunkRequests { pulls });
     for _ in 0..4 {
@@ -1789,11 +2249,13 @@ fn a_relay_forwards_no_pull_its_tab_may_not_make() {
 
 #[test]
 fn edits_cross_a_relay_as_deltas_both_ways() {
+    // A relay serves one identity's sessions (a shared worker and its
+    // tabs), so the tab writes as the relay's user.
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
-    let tab = open(6, user(6));
+    let tab = open(6, user(5));
     let (relay_up, relay_down) = connect_spied(&core, &relay, user(5));
-    let (tab_up, tab_down) = connect_spied(&relay, &tab, user(6));
+    let (tab_up, tab_down) = connect_spied(&relay, &tab, user(5));
     let _relay_stream = subscribe(&relay, Query::from("docs"));
     let _stream = subscribe(&tab, Query::from("docs"));
     let mut expected = text(4, LARGE);
@@ -1881,9 +2343,9 @@ fn a_partial_select_through_a_relay_fetches_only_its_range_and_follows_edits() {
     use jazz::query::Part;
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
-    let tab = open(6, user(6));
+    let tab = open(6, user(5));
     let upstream = connect(&core, &relay, user(5));
-    let downstream = connect(&relay, &tab, user(6));
+    let downstream = connect(&relay, &tab, user(5));
     let mut blob: Vec<u8> = (0..LARGE * 16).map(|n| (n * 7 % 251) as u8).collect();
     insert(
         &core,
@@ -1959,9 +2421,9 @@ fn a_partial_select_in_an_include_fetches_only_its_range_through_a_relay() {
     use jazz::result_tree::ResultRelation;
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
-    let tab = open(6, user(6));
+    let tab = open(6, user(5));
     let upstream = connect(&core, &relay, user(5));
-    let downstream = connect(&relay, &tab, user(6));
+    let downstream = connect(&relay, &tab, user(5));
     let mut blob: Vec<u8> = (0..LARGE * 16).map(|n| (n * 11 % 251) as u8).collect();
     insert(
         &core,
@@ -2252,7 +2714,7 @@ fn value_delta_turns_one_version_into_another() {
         ),
     )
     .unwrap()
-    .mergeable_tx_id();
+    .version();
     let at = v1_text.char_indices().nth(1_000_000).unwrap().0 as u64;
     let v2 = block_on(db.splice_value(
         "docs",
@@ -2266,10 +2728,10 @@ fn value_delta_turns_one_version_into_another() {
         Default::default(),
     ))
     .unwrap()
-    .mergeable_tx_id();
+    .version();
     let v3 = block_on(db.append_value("docs", row(1), "body", " and appended".into()))
         .unwrap()
-        .mergeable_tx_id();
+        .version();
     let mut v3_text = v1_text.clone();
     v3_text.replace_range(at as usize..at as usize + 4, "spliced é");
     v3_text.push_str(" and appended");
@@ -2295,7 +2757,7 @@ fn value_delta_turns_one_version_into_another() {
         Default::default(),
     ))
     .unwrap()
-    .mergeable_tx_id();
+    .version();
     let rewritten = block_on(db.value_delta("docs", row(1), "body", v3, v4)).unwrap();
     assert_eq!(apply_delta_utf16(&v3_text, &rewritten), v4_text);
     let moved: usize = rewritten
@@ -2311,7 +2773,7 @@ fn value_delta_turns_one_version_into_another() {
         Default::default(),
     ))
     .unwrap()
-    .mergeable_tx_id();
+    .version();
     let to_inline = block_on(db.value_delta("docs", row(1), "body", v4, v5)).unwrap();
     assert_eq!(apply_delta_utf16(&v4_text, &to_inline), "short");
     let from_inline = block_on(db.value_delta("docs", row(1), "body", v5, v1)).unwrap();
@@ -2326,7 +2788,7 @@ fn value_delta_turns_one_version_into_another() {
             Default::default(),
         ))
         .unwrap()
-        .mergeable_tx_id()
+        .version()
     };
     let (v6, v7) = (inline("short é text"), inline("short é text"));
     assert_eq!(
@@ -2354,11 +2816,18 @@ fn value_delta_needs_both_versions_readable() {
         },
     ))
     .unwrap();
-    let seq = handle.mergeable_tx_id();
+    let seq = handle.version();
     let error = block_on(db.value_delta("drafts", row(3), "body", seq, seq)).unwrap_err();
     assert!(error.to_string().contains("not readable"), "{error}");
     let system = open(0, AuthorSubject::SYSTEM);
-    let missing = block_on(system.value_delta("docs", row(4), "body", 1, 2)).unwrap_err();
+    let missing = block_on(system.value_delta(
+        "docs",
+        row(4),
+        "body",
+        jazz::db::Pos::at(1),
+        jazz::db::Pos::at(2),
+    ))
+    .unwrap_err();
     assert!(missing.to_string().contains("not held"), "{missing}");
 }
 
@@ -2525,4 +2994,42 @@ fn a_range_select_takes_its_pages_changes_as_page_splices() {
         let splices = splices.expect("page splices");
         assert_eq!(apply_delta_utf16(&before, &splices), shown(&body));
     }
+}
+
+/// An idle server and its idle client run no large-value reclaim pass per
+/// tick: once a synced large value settled, ticks with nothing to send or
+/// apply do no reclaim work on either side.
+///
+/// White-box on purpose: the pass count is the contract, which no read
+/// observes.
+#[test]
+fn idle_sync_ticks_run_no_reclaim_pass() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    connect(&server, &alice, user(1));
+    let _stream = subscribe(&alice, Query::from("docs"));
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(text(70, LARGE))),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    pump(&server, &[&alice]);
+    assert!(local_cell(&alice, "docs", 1, "body").unwrap().is_some());
+    let passes = (
+        server.large_value_reclaim_passes_for_test(),
+        alice.large_value_reclaim_passes_for_test(),
+    );
+    pump(&server, &[&alice]);
+    assert_eq!(
+        (
+            server.large_value_reclaim_passes_for_test(),
+            alice.large_value_reclaim_passes_for_test(),
+        ),
+        passes,
+        "idle ticks run no reclaim pass"
+    );
 }

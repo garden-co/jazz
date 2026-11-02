@@ -91,14 +91,18 @@ fn relay_reads_inherit_only_absent_connection_claims() {
         // session's claims, rather than an upstream filter, must limit reads.
         let (up, down) = duplex_transport::duplex();
         let _relay_upstream = block_on(relay.connect_upstream(up));
-        authority.accept_subscriber(down, AuthorSubject::SYSTEM);
+        authority
+            .accept_subscriber(down, AuthorSubject::SYSTEM)
+            .unwrap();
         for (node, override_claims, expected) in
             [(2, connection_claims, expected), (3, None, vec!["a"])]
         {
             let foreground = open(node, alice);
             let (up, down) = duplex_transport::duplex();
             let _foreground_upstream = block_on(foreground.connect_upstream(up));
-            relay.accept_subscriber_with_claims(down, alice, override_claims);
+            relay
+                .accept_subscriber_with_claims(down, alice, override_claims)
+                .unwrap();
             let query = postcard::to_allocvec(&Query::from("notes").select(["region"])).unwrap();
             let rows = drive(
                 &[&foreground, &relay, &authority],

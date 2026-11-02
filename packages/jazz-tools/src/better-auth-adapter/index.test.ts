@@ -1136,7 +1136,9 @@ describe("jazzAdapter", () => {
         overwrite: true,
       });
       expect(generated.code).toContain('import { schema as s } from "jazz-tools";');
-      expect(generated.code).toContain("export const app: s.App<AppSchema> = s.defineApp(schema);");
+      expect(generated.code).toContain(
+        'export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });',
+      );
       expect(generated.code).toContain(
         "export const permissions = s.definePermissions(app, ({ policy }) => {",
       );

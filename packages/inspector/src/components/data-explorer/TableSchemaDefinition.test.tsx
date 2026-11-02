@@ -10,14 +10,17 @@ vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => mockUseDevtoolsContext(),
 }));
 
-const bigintDefaultApp = s.defineApp({
-  metrics: s.table(
-    {
-      largeCount: s.bigint().default(9007199254740993n),
-    },
-    {},
-  ),
-});
+const bigintDefaultApp = s.defineApp(
+  {
+    metrics: s.table(
+      {
+        largeCount: s.bigint().default(9007199254740993n),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 describe("TableSchemaDefinition", () => {
   beforeEach(() => {

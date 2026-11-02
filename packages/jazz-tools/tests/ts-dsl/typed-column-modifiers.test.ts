@@ -27,7 +27,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-const app: s.App<AppSchema> = s.defineApp(schema);
+const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 
 describe("typed column modifiers", () => {
   it("preserves specialised row and insert types", () => {

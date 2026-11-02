@@ -1,5 +1,6 @@
 #include "foreground-runtime.h"
 #include "account-store-lock.h"
+#include "foreground-tick-diagnostic.h"
 
 #include <algorithm>
 #include <array>
@@ -372,6 +373,13 @@ class VectorMutableBuffer final : public facebook::jsi::MutableBuffer {
   }
 }
 
+[[noreturn]] void throwTickStatus(Runtime &runtime, jazz_native_relay_status status) {
+  if (const char *message = foregroundTickFailureMessage(status)) {
+    throw JSError(runtime, message);
+  }
+  throwStatus(runtime, status, "tick");
+}
+
 std::array<uint8_t, 32> copyAdmittedCapability(Runtime &runtime,
                                                 const Value &value) {
   // JSI intentionally has no TypedArray wrapper. Verify the observable
@@ -538,7 +546,7 @@ class ForegroundHandle final : public HostObject,
                 self->lease_->nativeLease(), self->handle_);
             lease_lock.unlock();
             if (status != JAZZ_NATIVE_RELAY_OK) {
-              throwStatus(runtime, status, "tick");
+              throwTickStatus(runtime, status);
             }
             return Value::undefined();
           });

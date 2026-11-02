@@ -7,7 +7,7 @@ import { accountRegistryUrl } from "./context.js";
 import { isProvisionalAccount } from "./enrollment.js";
 import { prepareAccountManager } from "./persistence.js";
 
-const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) });
+const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
 const permissions = s.definePermissions(app, ({ policy }) => {
   policy.notes.allowRead.always();
   policy.notes.allowInsert.always();

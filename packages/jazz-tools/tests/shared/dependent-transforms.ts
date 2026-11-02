@@ -20,7 +20,7 @@ const definition = {
     {},
   ),
 };
-const app = s.defineApp(definition);
+const app = s.defineApp(definition, { migrations: "none" });
 
 export function testDependentTransforms(create: () => Promise<Db>) {
   describe("dependency-aware transforms", () => {
@@ -161,21 +161,24 @@ export function testDependentTransforms(create: () => Promise<Db>) {
 
     it("keeps immediate insert results when a conversion starts dependency preparation", async () => {
       let duringConversion = () => {};
-      const models = s.defineApp({
-        ...definition,
-        events: s.table(
-          {
-            value: s.float().transform({
-              from: (value) => value,
-              to: (value: number) => {
-                duringConversion();
-                return value;
-              },
-            }),
-          },
-          {},
-        ),
-      });
+      const models = s.defineApp(
+        {
+          ...definition,
+          events: s.table(
+            {
+              value: s.float().transform({
+                from: (value) => value,
+                to: (value: number) => {
+                  duringConversion();
+                  return value;
+                },
+              }),
+            },
+            {},
+          ),
+        },
+        { migrations: "none" },
+      );
       const db = await open();
       const { value: product } = db.insert(models.products, { price: 1 });
       duringConversion = () => {
@@ -216,32 +219,35 @@ export function testDependentTransforms(create: () => Promise<Db>) {
     it("uses stored read contexts and app-facing write contexts independently of declaration order", async () => {
       const db = await open();
       const contexts: unknown[] = [];
-      const models = s.defineApp({
-        measurements: s.table(
-          {
-            amount: s.float().transform({
-              dependsOn: ["scale"],
-              from(value, context: Readonly<{ scale: number }>) {
-                contexts.push(context);
-                return value / context.scale;
-              },
-              to(value: number, context: Readonly<{ scale: string }>) {
-                expect(Object.isFrozen(context)).toBe(true);
-                expect(Object.keys(context)).toEqual(["scale"]);
-                return value * Number(context.scale.replace("scale:", ""));
-              },
-            }),
-            scale: s
-              .int()
-              .default(100)
-              .transform({
-                from: (value) => `scale:${value}`,
-                to: (value: string) => Number(value.replace("scale:", "")),
+      const models = s.defineApp(
+        {
+          measurements: s.table(
+            {
+              amount: s.float().transform({
+                dependsOn: ["scale"],
+                from(value, context: Readonly<{ scale: number }>) {
+                  contexts.push(context);
+                  return value / context.scale;
+                },
+                to(value: number, context: Readonly<{ scale: string }>) {
+                  expect(Object.isFrozen(context)).toBe(true);
+                  expect(Object.keys(context)).toEqual(["scale"]);
+                  return value * Number(context.scale.replace("scale:", ""));
+                },
               }),
-          },
-          {},
-        ),
-      });
+              scale: s
+                .int()
+                .default(100)
+                .transform({
+                  from: (value) => `scale:${value}`,
+                  to: (value: string) => Number(value.replace("scale:", "")),
+                }),
+            },
+            {},
+          ),
+        },
+        { migrations: "none" },
+      );
       const { value: row } = db.insert(models.measurements, { amount: 2 });
       expect(row).toMatchObject({ amount: 2, scale: "scale:100" });
       await db
@@ -259,19 +265,22 @@ export function testDependentTransforms(create: () => Promise<Db>) {
 
     it("passes full dependency values while preserving public partial selections", async () => {
       const db = await open();
-      const models = s.defineApp({
-        documents: s.table(
-          {
-            preview: s.string().transform({
-              dependsOn: ["text"],
-              from: (value, context: Readonly<{ text: string }>) => `${value}:${context.text}`,
-              to: (value: string, _context: Readonly<{ text: string }>) => value,
-            }),
-            text: s.string(),
-          },
-          {},
-        ),
-      });
+      const models = s.defineApp(
+        {
+          documents: s.table(
+            {
+              preview: s.string().transform({
+                dependsOn: ["text"],
+                from: (value, context: Readonly<{ text: string }>) => `${value}:${context.text}`,
+                to: (value: string, _context: Readonly<{ text: string }>) => value,
+              }),
+              text: s.string(),
+            },
+            {},
+          ),
+        },
+        { migrations: "none" },
+      );
       const { value: row } = db.insert(models.documents, { preview: "abcdef", text: "uvwxyz" });
       await expect(
         db.one(
@@ -285,26 +294,29 @@ export function testDependentTransforms(create: () => Promise<Db>) {
 
     it("preserves explicit null and supplies reserved ids in creation contexts", async () => {
       const db = await open();
-      const models = s.defineApp({
-        rows: s.table(
-          {
-            amount: s.int().transform({
-              dependsOn: ["factor"],
-              from: (value, context: Readonly<{ factor: number | null }>) =>
-                value / (context.factor ?? 1),
-              to: (value: number, context: Readonly<{ factor: number | null }>) =>
-                value * (context.factor ?? 1),
-            }),
-            factor: s.int().optional().default(100),
-            identity: s.string().transform({
-              dependsOn: ["id"],
-              from: (_value, context: Readonly<{ id: string }>) => context.id,
-              to: (value: string, _context: Readonly<{ id: string }>) => value,
-            }),
-          },
-          {},
-        ),
-      });
+      const models = s.defineApp(
+        {
+          rows: s.table(
+            {
+              amount: s.int().transform({
+                dependsOn: ["factor"],
+                from: (value, context: Readonly<{ factor: number | null }>) =>
+                  value / (context.factor ?? 1),
+                to: (value: number, context: Readonly<{ factor: number | null }>) =>
+                  value * (context.factor ?? 1),
+              }),
+              factor: s.int().optional().default(100),
+              identity: s.string().transform({
+                dependsOn: ["id"],
+                from: (_value, context: Readonly<{ id: string }>) => context.id,
+                to: (value: string, _context: Readonly<{ id: string }>) => value,
+              }),
+            },
+            {},
+          ),
+        },
+        { migrations: "none" },
+      );
       const { value: row } = db.insert(models.rows, { amount: 2, factor: null, identity: "seed" });
       expect(row).toMatchObject({ amount: 2, factor: null, identity: row.id });
       await db.update(models.rows, row.id, { amount: 3 }).wait({ tier: "local" });
@@ -316,22 +328,25 @@ export function testDependentTransforms(create: () => Promise<Db>) {
 
     it("propagates callback failures, fails an explicit transaction and recovers independent writes", async () => {
       const db = await open();
-      const models = s.defineApp({
-        rows: s.table(
-          {
-            value: s.int().transform({
-              dependsOn: ["unit"],
-              from: (value, _context: Readonly<{ unit: string }>) => value,
-              to(value: number, _context: Readonly<{ unit: string }>) {
-                if (value < 0) throw new Error("negative conversion");
-                return value;
-              },
-            }),
-            unit: s.string(),
-          },
-          {},
-        ),
-      });
+      const models = s.defineApp(
+        {
+          rows: s.table(
+            {
+              value: s.int().transform({
+                dependsOn: ["unit"],
+                from: (value, _context: Readonly<{ unit: string }>) => value,
+                to(value: number, _context: Readonly<{ unit: string }>) {
+                  if (value < 0) throw new Error("negative conversion");
+                  return value;
+                },
+              }),
+              unit: s.string(),
+            },
+            {},
+          ),
+        },
+        { migrations: "none" },
+      );
       const { value: row } = db.insert(models.rows, { value: 1, unit: "x" });
       const failed = db.update(models.rows, row.id, { value: -1 });
       const following = db.update(models.rows, row.id, { value: 2 });
@@ -361,21 +376,24 @@ export function testDependentTransforms(create: () => Promise<Db>) {
 
     it("rejects mixed streaming or partial dependencies but permits dependency-only edits", async () => {
       const db = await open();
-      const models = s.defineApp({
-        rows: s.table(
-          {
-            price: s.int().transform({
-              dependsOn: ["text"],
-              from: (value, context: Readonly<{ text: string }>) => value + context.text.length,
-              to: (value: number, context: Readonly<{ text: string }>) =>
-                value - context.text.length,
-            }),
-            text: s.string(),
-            other: s.string(),
-          },
-          {},
-        ),
-      });
+      const models = s.defineApp(
+        {
+          rows: s.table(
+            {
+              price: s.int().transform({
+                dependsOn: ["text"],
+                from: (value, context: Readonly<{ text: string }>) => value + context.text.length,
+                to: (value: number, context: Readonly<{ text: string }>) =>
+                  value - context.text.length,
+              }),
+              text: s.string(),
+              other: s.string(),
+            },
+            {},
+          ),
+        },
+        { migrations: "none" },
+      );
       const { value: row } = db.insert(models.rows, { price: 10, text: "abc", other: "unchanged" });
       const source = () =>
         (async function* () {
@@ -409,24 +427,27 @@ export function testDependentTransforms(create: () => Promise<Db>) {
 
     it("uses complete JSON and bytes dependencies with partial public selections", async () => {
       const db = await open();
-      const models = s.defineApp({
-        rows: s.table(
-          {
-            text: s.string().transform({
-              dependsOn: ["json", "bytes"],
-              from: (value, context: Readonly<{ json: { title: string }; bytes: Uint8Array }>) =>
-                `${value}:${context.json.title}:${context.bytes.length}`,
-              to: (
-                value: string,
-                _context: Readonly<{ json: { title: string }; bytes: Uint8Array }>,
-              ) => value,
-            }),
-            json: s.json(z.object({ title: z.string() })),
-            bytes: s.bytes(),
-          },
-          {},
-        ),
-      });
+      const models = s.defineApp(
+        {
+          rows: s.table(
+            {
+              text: s.string().transform({
+                dependsOn: ["json", "bytes"],
+                from: (value, context: Readonly<{ json: { title: string }; bytes: Uint8Array }>) =>
+                  `${value}:${context.json.title}:${context.bytes.length}`,
+                to: (
+                  value: string,
+                  _context: Readonly<{ json: { title: string }; bytes: Uint8Array }>,
+                ) => value,
+              }),
+              json: s.json(z.object({ title: z.string() })),
+              bytes: s.bytes(),
+            },
+            {},
+          ),
+        },
+        { migrations: "none" },
+      );
       const { value: row } = db.insert(models.rows, {
         text: "abcdef",
         json: { title: "full" },
@@ -451,31 +472,35 @@ export function testDependentTransforms(create: () => Promise<Db>) {
     it("resolves transitive write contexts without running hidden read transforms", async () => {
       const db = await open();
       let factorReads = 0;
-      const models = s.defineApp({
-        rows: s.table(
-          {
-            amount: s.int().transform({
-              dependsOn: ["factor"],
-              from: (value, context: Readonly<{ factor: number }>) => `${value}:${context.factor}`,
-              to: (value: string, context: Readonly<{ factor: number }>) =>
-                Number(value) * context.factor,
-            }),
-            factor: s
-              .int()
-              .default(10)
-              .transform({
-                dependsOn: ["base"],
-                from(value, context: Readonly<{ base: number }>) {
-                  factorReads++;
-                  return value * context.base;
-                },
-                to: (value: number, context: Readonly<{ base: number }>) => value / context.base,
+      const models = s.defineApp(
+        {
+          rows: s.table(
+            {
+              amount: s.int().transform({
+                dependsOn: ["factor"],
+                from: (value, context: Readonly<{ factor: number }>) =>
+                  `${value}:${context.factor}`,
+                to: (value: string, context: Readonly<{ factor: number }>) =>
+                  Number(value) * context.factor,
               }),
-            base: s.int().default(2),
-          },
-          {},
-        ),
-      });
+              factor: s
+                .int()
+                .default(10)
+                .transform({
+                  dependsOn: ["base"],
+                  from(value, context: Readonly<{ base: number }>) {
+                    factorReads++;
+                    return value * context.base;
+                  },
+                  to: (value: number, context: Readonly<{ base: number }>) => value / context.base,
+                }),
+              base: s.int().default(2),
+            },
+            {},
+          ),
+        },
+        { migrations: "none" },
+      );
       const { value: row } = db.insert(models.rows, { amount: "2" });
       expect(row.amount).toBe("40:10");
       factorReads = 0;
@@ -494,22 +519,25 @@ export function testDependentTransforms(create: () => Promise<Db>) {
 
     it("fails closed even when a callback throws a falsy value", async () => {
       const db = await open();
-      const models = s.defineApp({
-        rows: s.table(
-          {
-            value: s.int().transform({
-              dependsOn: ["unit"],
-              from: (value, _context: Readonly<{ unit: string }>) => value,
-              to(value: number, _context: Readonly<{ unit: string }>) {
-                if (value < 0) throw undefined;
-                return value;
-              },
-            }),
-            unit: s.string(),
-          },
-          {},
-        ),
-      });
+      const models = s.defineApp(
+        {
+          rows: s.table(
+            {
+              value: s.int().transform({
+                dependsOn: ["unit"],
+                from: (value, _context: Readonly<{ unit: string }>) => value,
+                to(value: number, _context: Readonly<{ unit: string }>) {
+                  if (value < 0) throw undefined;
+                  return value;
+                },
+              }),
+              unit: s.string(),
+            },
+            {},
+          ),
+        },
+        { migrations: "none" },
+      );
       const { value: row } = db.insert(models.rows, { value: 1, unit: "x" });
       const tx = db.beginTransaction();
       tx.update(models.rows, row.id, { value: -1 });
@@ -521,18 +549,21 @@ export function testDependentTransforms(create: () => Promise<Db>) {
 
     it("fetches context from the mutation's branch view", async () => {
       const db = await open();
-      const models = s.defineApp({
-        rows: s
-          .table(
-            {
-              price: definition.products.columns.price,
-              unit: s.string().default("cents"),
-              branch: s.string(),
-            },
-            {},
-          )
-          .branchBy("branch"),
-      });
+      const models = s.defineApp(
+        {
+          rows: s
+            .table(
+              {
+                price: definition.products.columns.price,
+                unit: s.string().default("cents"),
+                branch: s.string(),
+              },
+              {},
+            )
+            .branchBy("branch"),
+        },
+        { migrations: "none" },
+      );
       const { value: row } = db.insert(
         models.rows,
         { price: 1, branch: "main" },
@@ -564,9 +595,12 @@ export function testDependentTransforms(create: () => Promise<Db>) {
     it("does not use defaults for unavailable upsert creation context", async () => {
       const db = await open();
       const id = "00000000-0000-4000-8000-000000000299";
-      const models = s.defineApp({
-        rows: s.table({ price: definition.products.columns.price, unit: s.string() }, {}),
-      });
+      const models = s.defineApp(
+        {
+          rows: s.table({ price: definition.products.columns.price, unit: s.string() }, {}),
+        },
+        { migrations: "none" },
+      );
       await expect(
         db.upsert(models.rows, id, { price: 2 }).wait({ tier: "local" }),
       ).rejects.toThrow(/unavailable/);
