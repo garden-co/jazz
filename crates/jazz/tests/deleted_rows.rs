@@ -581,7 +581,7 @@ impl Synced {
     fn connect(&mut self) {
         let (client_side, server_side) = duplex();
         self.upstream = Some(block_on(self.alice.connect_upstream(client_side)));
-        self.server.accept_subscriber(server_side, alice());
+        self.server.accept_subscriber(server_side, alice()).unwrap();
         self.alice
             .set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
     }
@@ -742,7 +742,7 @@ fn a_row_arriving_with_an_earlier_empty_answer_stays_listed() {
         .unwrap();
     let mut subscription =
         block_on(synced.alice.subscribe(&prepared, ReadOpts::default())).unwrap();
-    // The Subscribe goes out and the server answers it, empty.
+    // The live Read goes out and the server answers it, empty.
     block_on(synced.alice.tick()).unwrap();
     block_on(synced.server.tick()).unwrap();
     // A write lands before Alice reads that answer.

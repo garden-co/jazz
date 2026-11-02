@@ -89,7 +89,7 @@ function record(cell, check, status, detail = {}) {
 }
 
 const FIXTURE_SCHEMA = `import {schema as s} from 'jazz-tools';
-export const app=s.defineApp({docs:s.table({label:s.string(),body:s.string(),author:s.string()},{})});
+export const app=s.defineApp({docs:s.table({label:s.string(),body:s.string(),author:s.string()},{})},{migrations:"none"});
 export default app;
 `;
 const FIXTURE_PERMISSIONS = `import {schema as s} from 'jazz-tools';

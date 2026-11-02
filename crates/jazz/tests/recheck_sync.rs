@@ -84,7 +84,7 @@ fn authority(schema: JazzSchema) -> Db {
 fn connect(db: &Db, server: &Db, author: AuthorSubject) -> Upstream {
     let (client_side, server_side) = duplex_transport::duplex();
     let upstream = block_on(db.connect_upstream(client_side));
-    server.accept_subscriber(server_side, author);
+    server.accept_subscriber(server_side, author).unwrap();
     db.set_remote_link_hint(RemoteLinkHint::Live);
     upstream
 }
@@ -296,14 +296,16 @@ fn each_connection_writes_under_its_own_claims() {
         let db = block_on(Db::open(config(schema(), node, alice()))).unwrap();
         let (client_side, server_side) = duplex_transport::duplex();
         block_on(db.connect_upstream(client_side));
-        server.accept_subscriber_with_claims(
-            server_side,
-            alice(),
-            Some(BTreeMap::from([(
-                jazz::query::provider_claim_key("role"),
-                text(role),
-            )])),
-        );
+        server
+            .accept_subscriber_with_claims(
+                server_side,
+                alice(),
+                Some(BTreeMap::from([(
+                    jazz::query::provider_claim_key("role"),
+                    text(role),
+                )])),
+            )
+            .unwrap();
         db
     };
     let editor = device(0xa1, "editor");

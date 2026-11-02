@@ -158,7 +158,7 @@ fn cancelled_writes_do_not_leak_into_the_next_authority_upload() {
     let bob = open(2, AuthorSubject::SYSTEM);
     let (client, server) = duplex();
     let _upstream = block_on(alice.connect_upstream(client));
-    bob.accept_subscriber(server, author);
+    bob.accept_subscriber(server, author).unwrap();
     let mut transaction = Box::pin(alice.transaction(async |tx| {
         tx.insert("notes", body("cancelled"), Default::default())
             .await?;

@@ -245,7 +245,7 @@ try {
   mkdirSync(fixture);
   writeFileSync(
     join(fixture, "schema.ts"),
-    `import {schema as s} from 'jazz-tools';\nexport const app=s.defineApp({docs:s.table({label:s.string(),body:s.string(),metadata:s.json()},{}),denied:s.table({value:s.string()},{})});\nexport default app;\n`,
+    `import {schema as s} from 'jazz-tools';\nexport const app=s.defineApp({docs:s.table({label:s.string(),body:s.string(),metadata:s.json()},{}),denied:s.table({value:s.string()},{})},{migrations:"none"});\nexport default app;\n`,
   );
   writeFileSync(
     join(fixture, "permissions.ts"),

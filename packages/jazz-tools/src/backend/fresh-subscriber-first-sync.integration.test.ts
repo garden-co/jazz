@@ -7,9 +7,12 @@ import { schema as s } from "../index.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { createJazzSession } from "./index.js";
 
-const app = s.defineApp({
-  docs: s.table({ label: s.string(), body: s.string() }, {}),
-});
+const app = s.defineApp(
+  {
+    docs: s.table({ label: s.string(), body: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const permissions = s.definePermissions(app, ({ policy }) => {
   policy.docs.allowRead.always();
   policy.docs.allowInsert.always();

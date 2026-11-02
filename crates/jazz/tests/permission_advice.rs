@@ -116,7 +116,7 @@ struct RecordingAdvice {
 
 impl jazz::db::Transport for RecordingAdvice {
     fn send(&mut self, message: jazz::db::SyncMessage) -> Result<(), jazz::wire::TransportError> {
-        if let jazz::db::SyncMessage::Advise { id, .. } = &message {
+        if let jazz::db::SyncMessage::CheckAllowed { id, .. } = &message {
             self.sent.borrow_mut().push(*id);
         }
         self.inner.send(message)
@@ -139,14 +139,14 @@ fn connect_recording(
         inner: client_side,
         sent: std::rc::Rc::clone(&sent),
     })));
-    server.accept_subscriber(server_side, author);
+    server.accept_subscriber(server_side, author).unwrap();
     sent
 }
 
 fn connect(client: &Db, server: &Db, author: AuthorSubject) {
     let (client_side, server_side) = duplex();
     block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, author);
+    server.accept_subscriber(server_side, author).unwrap();
 }
 
 fn count(db: &Db, table: &str) -> usize {
@@ -218,7 +218,7 @@ fn the_authority_advises_each_action_under_the_sessions_policies() {
     assert_eq!(ask(&alice_db, &server, pinned.clone()), Allowed);
     assert_eq!(ask(&bob_db, &server, pinned), Denied);
 
-    // Advice never writes.
+    // CheckAllowed never writes.
     assert_eq!(count(&server, "notes"), 1);
     let prepared = server.prepare_query(&Query::from("notes")).unwrap();
     let rows = block_on(server.all(&prepared, ReadOpts::default())).unwrap();
@@ -393,9 +393,9 @@ fn an_answer_resolves_only_the_request_it_was_asked_for() {
     );
 }
 
-/// Advice is a bare verdict: it discloses no rows, no policy reasons and
-/// no hidden facts. Asking to change a row the session cannot see is
-/// `Denied` exactly as for a row that does not exist.
+/// A `CheckAllowedResult` is a bare verdict: it discloses no rows, no
+/// policy reasons and no hidden facts. Asking to change a row the session cannot
+/// see is `Denied` exactly as for a row that does not exist.
 ///
 /// ```text
 /// bob ──advise(update alice's hidden note)──► core ──► Denied
