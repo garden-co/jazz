@@ -12,7 +12,7 @@ description: "Why use a higher-level database, how Jazz compares, and what it ch
 
 Jazz is a real-time, relational database that keeps your data right next to your app. You get tables, auth integration, permissions and a typed client for backend and frontend, with no API layer of your own to write and maintain. What sets it apart:
 
-- **Your backend in front.** Jazz runs inside your backend, which handles auth and talks to Jazz Cloud or your own Jazz server. Browsers never hold a Jazz credential. Unsharded Jazz is MIT and free.
+- **Your backend in front.** Jazz runs inside your backend, which handles auth and talks to Jazz Cloud or your own Jazz server. Browsers sign in with your app's own session, so there's no Jazz API key or token to ship to the client (local-first guests keep only their own device key). Unsharded Jazz is MIT and free.
 - **Live queries, not change feeds.** Every query can be a subscription. The server keeps results up to date as rows change, including rows that start or stop matching.
 - **Permissions as code.** Policies live next to your schema in TypeScript and apply the same way to backend, thin-client and local-first reads and writes. They're verbose, but agents are good at writing and checking them.
 - **Built-in collaboration.** Edit metadata (`$createdBy`, `$updatedAt`, …), history, drafts and branches, mergeable text, and files and streams, without bolting on extra services.

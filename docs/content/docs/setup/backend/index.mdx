@@ -86,7 +86,7 @@ export const jazz = await createJazz({
 ## Connect the browser
 
 The browser talks to `/jazz` on the same origin by default, so there's no `serverUrl` to set, and your
-app's own session cookie is all it needs. It never holds a Jazz credential:
+app's own session cookie is all it needs. It needs no Jazz API key or token:
 
 ```ts title="src/jazz.ts"
 import { createJazzSession } from "jazz-tools/client";
