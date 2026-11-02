@@ -28,7 +28,7 @@ function envBlockFor(bundler: Bundler, app: GeneratedApp): string {
   const prefix = CLIENT_PREFIX[bundler];
   return [
     `${prefix}JAZZ_APP_ID="${app.appId}"`,
-    `${prefix}JAZZ_SERVER_URL="${JAZZ_CLOUD_SYNC_URL}"`,
+    `JAZZ_SERVER_URL="${JAZZ_CLOUD_SYNC_URL}"`,
     `JAZZ_ADMIN_SECRET="${app.adminSecret}"`,
     `BACKEND_SECRET="${app.backendSecret}"`,
   ].join("\n");
@@ -47,7 +47,17 @@ function CredentialsBlock({ app }: { app: GeneratedApp }) {
 }
 
 function ConfigBlock({ app }: { app: GeneratedApp }) {
-  const code = `{\n  appId: "${app.appId}",\n  serverUrl: "https://v2.sync.jazz.tools/",\n}`;
+  const code = [
+    `createJazz({`,
+    `  appId: "${app.appId}",`,
+    `  // app, permissions, authenticate ...`,
+    `  store: remote({`,
+    `    url: process.env.JAZZ_SERVER_URL!,`,
+    `    adminSecret: process.env.JAZZ_ADMIN_SECRET!,`,
+    `    backendSecret: process.env.BACKEND_SECRET!,`,
+    `  }),`,
+    `});`,
+  ].join("\n");
   return <Code language="ts" code={code} />;
 }
 
@@ -109,7 +119,7 @@ export function GenerateAppId() {
       <CredentialsBlock app={app} />
 
       <Text as="p" display="block" color="secondary">
-        Use this config in your app:
+        Use them in your backend:
       </Text>
       <ConfigBlock app={app} />
     </div>

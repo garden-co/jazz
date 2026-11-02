@@ -1,9 +1,11 @@
 import { PlatformURL } from "../runtime/platform-url.js";
+import { resolveServerUrl } from "../runtime/url.js";
 import { admitAccountConfig } from "./config-capability.js";
 import type { AccountHandle } from "./state.js";
 import {
   accountRegistry,
   accountToken,
+  delegatedAccountClaims,
   AccountAuthError,
   isProvisionalAccount,
   onAccountCredentialBound,
@@ -38,7 +40,7 @@ export type AccountDbConfig = Omit<
 
 /** One canonical application endpoint for enrollment and context scope validation. */
 export function accountRegistryUrl(serverUrl: string, appId: string): string {
-  const url = new PlatformURL(serverUrl);
+  const url = new PlatformURL(resolveServerUrl(serverUrl));
   if (url.protocol === "ws:") url.protocol = "http:";
   if (url.protocol === "wss:") url.protocol = "https:";
   if (url.protocol !== "http:" && url.protocol !== "https:")
@@ -91,6 +93,26 @@ export async function resolveAccountRuntimeConfig(config: AccountDbConfig): Prom
     setTrustedReservedSession(retained, retainedAccountSession(account.identity));
     admitAccountConfig(retained, account);
     return retained;
+  }
+  const delegatedClaims = delegatedAccountClaims(account, registry);
+  if (delegatedClaims) {
+    // Signed in through the app's backend: no credential leaves this client.
+    // The backend states the identity on every connection; this mirrored
+    // session only shapes local permission checks.
+    const delegated: DbConfig = {
+      ...runtimeConfig,
+      cookieSession: {
+        account_id: account.id,
+        issuer: account.identity.issuer,
+        user_id: account.identity.subject,
+        claims: { ...delegatedClaims },
+        authMode: "external",
+      },
+      accountId: account.id,
+      accountRegistryAuthority: registry,
+    };
+    admitAccountConfig(delegated, account);
+    return delegated;
   }
   const jwtToken = await accountToken(account, registry);
   const resolved: DbConfig = {

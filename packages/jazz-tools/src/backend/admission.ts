@@ -1,3 +1,4 @@
+import { fetchFor } from "../runtime/in-process-transport.js";
 // A hibernated Jazz Cloud app wakes on its first request: the gateway holds or
 // refuses that request while the core boots, which can take from a few seconds
 // up to a few minutes when a node must be provisioned. Admission is a
@@ -77,7 +78,7 @@ export async function admitBackendSecret(
     throw new Error("Backend admission needs an http(s) serverUrl");
   if (!HEADER_VALUE.test(backendSecret))
     throw new Error("Backend secret contains characters not allowed in an HTTP header");
-  const fetcher = options.fetch ?? globalThis.fetch;
+  const fetcher = options.fetch ?? fetchFor(url);
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((ms) => new Promise<void>((done) => setTimeout(done, ms)));
   const random = options.random ?? Math.random;

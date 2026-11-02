@@ -106,7 +106,7 @@ pnpm dlx jazz-tools@alpha validate
 
 ## Database Adapter
 
-Create a server-side [Jazz session](/docs/getting-started/server-setup#backend-context-setup), then pass it to `jazzAdapter(...)` as the `database` in your Better Auth config. Point both `db` and `schema` at the merged `app` — not at the generated module directly — so Better Auth and your own tables share a single Jazz app.
+Create a server-side [Jazz session](/docs/setup/backend/trusted#backend-context-setup), then pass it to `jazzAdapter(...)` as the `database` in your Better Auth config. Point both `db` and `schema` at the merged `app` — not at the generated module directly — so Better Auth and your own tables share a single Jazz app.
 
 ```ts title="auth.ts"
 import { betterAuth } from "better-auth";
@@ -165,7 +165,7 @@ export const auth = betterAuth({
 
 The adapter stores Better Auth users, password credentials, and application sessions. For browser apps, pass `auth={betterAuth(authClient)}` to the framework's `JazzProvider`; import the descriptor from `jazz-tools/client`. The provider owns the Jazz session, loading and error recovery. Vanilla apps can use `createJazzApp` with the same descriptor. Better Auth signup and login then automatically create or resolve the Jazz account; there is no second enrollment action. The application session cookie is also not a Jazz bearer token: `client.forRequest()` reads an `Authorization: Bearer` header.
 
-Mount `auth.handler` using your framework's [Better Auth integration](https://www.better-auth.com/docs/installation). The [JWT plugin](https://www.better-auth.com/docs/plugins/jwt) exposes `/api/auth/token` for a signed-in user and `/api/auth/jwks` for verification. Configure the Jazz core with that reachable JWKS URL and the same issuer and audience as the backend's `jazzConfig`. For a self-hosted core, use `--jwks-url`, `--jwt-issuer`, and `--jwt-audience`; see [Server Setup](/docs/getting-started/server-setup). Set `BETTER_AUTH_URL` without a trailing slash in this example.
+Mount `auth.handler` using your framework's [Better Auth integration](https://www.better-auth.com/docs/installation). The [JWT plugin](https://www.better-auth.com/docs/plugins/jwt) exposes `/api/auth/token` for a signed-in user and `/api/auth/jwks` for verification. Configure the Jazz core with that reachable JWKS URL and the same issuer and audience as the backend's `jazzConfig`. For a self-hosted core, use `--jwks-url`, `--jwt-issuer`, and `--jwt-audience`; see [Server Setup](/docs/setup/backend/trusted). Set `BETTER_AUTH_URL` without a trailing slash in this example.
 
 For a server-only app, resolve the Better Auth cookie and opt into account creation
 on the immutable request scope. The shared backend client keeps its own identity;
@@ -190,7 +190,7 @@ export async function messages(request: Request) {
 The core atomically resolves an active assignment or creates one for a fresh
 identity. Invalid and revoked credentials are rejected. Use the default strict
 request mode for a hybrid app where signup must link the fresh provider identity
-to an existing guest account first. See [Authentication](/docs/auth/authentication).
+to an existing guest account first. See [Other / Custom](/docs/setup/auth/custom).
 
 Browser clients with an automatic connection can instead send a JWT from
 `/api/auth/token` as a bearer. Data routes then use the default strict scope:
