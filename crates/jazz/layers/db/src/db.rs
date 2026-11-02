@@ -50,11 +50,14 @@ pub use crate::names::LensEffects;
 pub use crate::options::{REMOTE_LINK_ATTEMPT_WINDOW, TickScheduler, TickUrgency};
 use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
+#[path = "accepted_read.rs"]
+mod accepted_read;
 use crate::values::{
     AuthorKey, STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, author_key,
     begin_savepoint, cell_from_sql, column_from_sql, end_savepoint, in_savepoint, quote, storage,
     to_sql, unsupported,
 };
+pub use accepted_read::{AcceptedRead, AcceptedRowEvidence, AcceptedVersion};
 pub use sync::{
     ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
     FrameJoiner, Image, MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction,
