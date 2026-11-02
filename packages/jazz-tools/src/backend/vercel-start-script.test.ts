@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  rmSync,
   readFileSync,
   writeFileSync,
 } from "node:fs";
@@ -103,10 +104,20 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(read("data/trust")).toBe(`${trust.issuer} ${trust.audience} ${trust.subject}`);
     const other = { ...trust, subject: "owner:garden-co:project:app:environment:preview" };
     expect(await start("1.0.0", undefined, other)).toBe(1);
+    // With 2.0.0 already installed, nothing else can stop this start.
+    installFake("2.0.0");
     expect(await start("2.0.0", undefined, other)).toBe(1);
     expect(alive(first)).toBe(true);
     expect(read("data/trust")).toContain(trust.subject);
     expect(read("servers.log")!.split("\n")).toHaveLength(1);
+  });
+
+  it("pins a core that an older script started, on its next start", async () => {
+    installFake("1.0.0");
+    expect(await start("1.0.0")).toBe("running");
+    rmSync(join(root, "data/trust"));
+    expect(await start("1.0.0")).toBe(0);
+    expect(read("data/trust")).toContain(trust.subject);
   });
 
   it("never moves a newer server back", async () => {

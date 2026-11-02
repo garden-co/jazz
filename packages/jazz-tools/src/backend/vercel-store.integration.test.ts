@@ -10,6 +10,7 @@ import {
   newerVersion,
   onVercelDeployment,
   onVercelHost,
+  refuseOtherEnvironment,
   startScript,
   workloadOf,
   type SandboxHandle,
@@ -263,6 +264,26 @@ describe("vercel() store", () => {
     expect(fake.files.get("/data/trust")?.toString()).toBe(pinned);
   }, 60_000);
 
+  it("refuses a stopped core pinned to another workload before waking it up", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const fake = fakeVercel(core);
+    Object.assign(fake.state, { exists: true, drive: true });
+    fake.files.set("/data/trust", Buffer.from(`${core.issuer} ${AUDIENCE} ${SUBJECT}\n`));
+    onVercel({ VERCEL: "1", VERCEL_ENV: "preview", VERCEL_PROJECT_ID: "prj_test" });
+    const preview = () => oidcToken(core.issuer, "owner:garden-co:project:app:environment:preview");
+    const started = Date.now();
+    await expect(
+      createJazz({
+        appId,
+        app,
+        permissions,
+        store: vercel({ sdk: fake.sdk, backendCredential: preview }),
+      }),
+    ).rejects.toThrow(/delete \/data\/trust/);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 60_000);
+
   it("refuses a token for another environment than the deployment's", async () => {
     onVercel({ VERCEL: "1", VERCEL_ENV: "preview", VERCEL_PROJECT_ID: "prj_test" });
     const fake = fakeVercel({ appId: randomUUID(), url: "http://unused.invalid" });
@@ -412,6 +433,18 @@ describe("vercel() store", () => {
     expect(script).toContain("bin=$data/bin/jazz-tools-$version");
     expect(script).toContain(`if [ ! -s "$data/app-id" ]`);
     expect(script).toContain(`app_id='app'\\''1'`);
+  });
+
+  it("lets a custom environment reach its own core", () => {
+    const staging = workloadOf(
+      oidcToken("https://oidc.vercel.com/t", "owner:t:project:app:environment:staging"),
+    );
+    expect(() =>
+      refuseOtherEnvironment(staging, { VERCEL_ENV: "preview", VERCEL_TARGET_ENV: "staging" }),
+    ).not.toThrow();
+    expect(() => refuseOtherEnvironment(staging, { VERCEL_ENV: "preview" })).toThrow(
+      /OIDC token is for/,
+    );
   });
 
   it("reads the trusted workload from the function's token", () => {

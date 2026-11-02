@@ -225,9 +225,10 @@ trust=${q(trustLine)}
 # workload never retargets it.
 pinned=$(cat "$data/trust" 2>/dev/null || true)
 if [ -n "$pinned" ] && [ "$pinned" != "$trust" ]; then
-  echo "jazz: this core trusts $pinned; not retargeting it to $trust" >&2
+  echo "jazz: this core trusts $pinned; not retargeting it to $trust (to re-pin after a rename, delete $data/trust)" >&2
   exit 1
 fi
+[ -n "$pinned" ] || { printf '%s\\n' "$trust" > "$data/trust.tmp" && mv "$data/trust.tmp" "$data/trust"; }
 highest=$(cat "$data/version" 2>/dev/null || true)
 if [ -n "$highest" ] && newer "$highest" "$version"; then
   # A newer deployment owns this Drive: run its server, never ours.
@@ -260,7 +261,6 @@ if [ ! -s "$data/app-id" ]; then
   printf '%s\\n' "$app_id" > "$data/app-id.tmp" && mv "$data/app-id.tmp" "$data/app-id"
 fi
 app_id=$(cat "$data/app-id")
-[ -n "$pinned" ] || { printf '%s\\n' "$trust" > "$data/trust.tmp" && mv "$data/trust.tmp" "$data/trust"; }
 export NODE_ENV=production
 mkdir -p "$data/store"
 printf '%s\\n' "$version" > "$data/version.tmp" && mv "$data/version.tmp" "$data/version"
@@ -331,6 +331,23 @@ async function functionOidcToken(): Promise<string> {
     `vercel(): no current Vercel OIDC token (enable OIDC for the project, or pass backendCredential)` +
       (failure ? `: ${String(failure)}` : ""),
   );
+}
+
+/**
+ * A deployment only ever starts or reaches its own environment's core.
+ * Custom environments run with VERCEL_ENV=preview and their own slug in
+ * VERCEL_TARGET_ENV and in the token's subject.
+ */
+export function refuseOtherEnvironment(
+  trust: TrustedWorkload,
+  env: Record<string, string | undefined>,
+): void {
+  const target = env.VERCEL_TARGET_ENV ?? env.VERCEL_ENV;
+  if (target && !trust.subject.endsWith(`:environment:${target}`)) {
+    throw new Error(
+      `vercel(): this ${target} deployment's OIDC token is for ${trust.subject}; refusing to start its core`,
+    );
+  }
 }
 
 /** Whether this process runs in a Vercel deployment (not `vercel dev` or a pulled env). */
@@ -415,13 +432,9 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   // The core trusts the workload this function's token names, so every
   // instance of this project and environment reaches it, and nothing else.
   const trust = workloadOf(await backendCredential());
-  // A deployment only ever starts or reaches its own environment's core.
-  const target = env.VERCEL_ENV;
-  if (!options.backendCredential && target && !trust.subject.endsWith(`:environment:${target}`)) {
-    throw new Error(
-      `vercel(): this ${target} deployment's OIDC token is for ${trust.subject}; refusing to start its core`,
-    );
-  }
+  // Skipped for a `backendCredential` of your own, which names whatever
+  // workload you chose.
+  if (!options.backendCredential) refuseOtherEnvironment(trust, env);
   const trustLine = `${trust.issuer} ${trust.audience} ${trust.subject}`;
   const script = Buffer.from(startScript(appId, version, tarballUrl, trust));
 
@@ -481,6 +494,18 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     return sbx;
   };
 
+  const refuseForeignPin = async (sbx: SandboxHandle) => {
+    const pinned = (await sbx.readFileToBuffer({ path: "/data/trust" }).catch(() => null))
+      ?.toString("utf8")
+      .trim();
+    if (pinned && pinned !== trustLine) {
+      throw new Error(
+        `vercel(): core ${name} trusts ${pinned.split(" ").at(-1)}, not this deployment (${trust.subject}). ` +
+          "After a team or project rename, or a change of OIDC issuer mode, delete /data/trust in the Sandbox to re-pin it.",
+      );
+    }
+  };
+
   /** Resume (or create) the Sandbox and wait until the server answers. */
   const wake = async (): Promise<{ sbx: SandboxHandle; base: string }> => {
     const t0 = performance.now();
@@ -511,6 +536,9 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           sbx = await getRunning();
         }
       }
+      // A core pinned to another workload never becomes ours: say so now,
+      // not after the health checks time out.
+      await refuseForeignPin(sbx);
       let base = sbx.domain(VERCEL_CORE_PORT);
       let ok = await healthy(base, 300, healthFails);
       if (!ok) await startServer(sbx);
@@ -596,14 +624,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
         if (appId && coreAppId !== appId) {
           throw new Error(`vercel(): core ${name} belongs to app ${coreAppId}, not ${appId}`);
         }
-        const pinned = (await sbx.readFileToBuffer({ path: "/data/trust" }).catch(() => null))
-          ?.toString("utf8")
-          .trim();
-        if (pinned && pinned !== trustLine) {
-          throw new Error(
-            `vercel(): core ${name} trusts ${pinned.split(" ").at(-1)}, not this deployment (${trust.subject})`,
-          );
-        }
+        await refuseForeignPin(sbx);
         if (live?.base === base) {
           live.sbx = sbx;
           live.checkedAt = Date.now();

@@ -116,8 +116,11 @@ export function remote(
  * environment refuses to start or retarget it. All previews share one
  * workload, so preview branches' cores are kept apart, not secured from each
  * other. Anyone with Sandbox access to the project controls its cores. The
- * token comes with each request; work between requests uses the freshest one
- * seen, and open sockets outlive its expiry. Install `@vercel/sandbox` and
+ * token comes with each request (it can't be read at module scope), so call
+ * `createJazz` lazily from a handler; work between requests uses the freshest
+ * one seen, and open sockets outlive its expiry. A team or project rename (or
+ * a change of OIDC issuer mode) changes the workload: delete `/data/trust` in
+ * the Sandbox to re-pin the core. Install `@vercel/sandbox` and
  * `@vercel/functions` next to `jazz-tools`. A deployment of a newer jazz-tools
  * restarts the core on its version, and an older deployment never moves it
  * back. Outside a production or preview deployment (`next dev`, `vercel dev`,

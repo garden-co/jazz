@@ -110,6 +110,9 @@ export async function startLocalJazzServer(
   const dataDir = ownsDataDir ? await createOwnedDataDir() : options.dataDir;
   // A trusted workload replaces the shared secrets.
   const workload = options.trustedWorkload !== undefined;
+  if (workload && (options.adminSecret !== undefined || options.backendSecret !== undefined)) {
+    throw new Error("startLocalJazzServer: trustedWorkload replaces adminSecret and backendSecret");
+  }
   const adminSecret = workload
     ? undefined
     : (options.adminSecret ?? `jazz-test-admin-${randomUUID().slice(0, 8)}`);
