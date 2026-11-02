@@ -11,11 +11,14 @@ product slice, not another generic Todo tutorial.
   components; inline image previews, audio players and downloadable file chips;
   emoji reactions; shared sketches; profiles with names and photos. The UI is
   Astryx with the Jazz theme from `@garden-co/design`, using design tokens only.
-- Better Auth owns the browser session, signs an ES256 JWT, and exposes its
-  JWKS route. Jazz enrolls that JWT into an account handle: sign-up uses
-  `registerJWT`, sign-in uses `loginJWT`, and the provider receives the result.
-- Better Auth's generated tables are persisted through a trusted backend Jazz
-  context and carry explicit deny-all client policies. Read hooks do not create
+- **Jazz runs inside the Next app.** `src/lib/jazz.server.ts` calls
+  `createJazz`, and `app/jazz/[...path]/route.ts` mounts it under `/jazz`, so
+  browsers sync with BandChat's own origin. Better Auth owns the browser
+  session; `authenticate` reads it, and the client follows Better Auth's
+  session with `betterAuth(authClient)`. There are no JWTs, JWKS or token
+  routes. Sign-up and sign-in only call Better Auth.
+- Better Auth's generated tables are persisted through the backend's own Jazz
+  database (`jazz.db`) and carry explicit deny-all client policies. Read hooks do not create
   accounts, profiles, rooms, or memberships: a profile is created on an explicit
   first-run step.
 - **Creator-managed admission.** A room creator bootstraps their own membership
@@ -66,25 +69,21 @@ product slice, not another generic Todo tutorial.
 pnpm dev
 ```
 
-`pnpm dev` needs no configuration. It serves http://127.0.0.1:3000, `withJazz`
-supplies a local Jazz app and sync server, and local `BACKEND_SECRET` and
-`BETTER_AUTH_SECRET` values are generated into the git-ignored
-`.env.development.local`. No secret is checked in. The local sync server keeps
-its data in `node_modules/.cache/jazz-dev-server`; if Better Auth reports that
-it cannot decrypt its private key after the secret changed, delete that
-directory.
+`pnpm dev` needs no configuration. It serves http://127.0.0.1:3000, keeps
+Jazz data in the git-ignored `.jazz/` directory, and generates a local
+`BETTER_AUTH_SECRET` into the git-ignored `.env.development.local`. No secret is
+checked in. If Better Auth reports that it cannot decrypt its private key after
+the secret changed, delete `.jazz/`.
 
 Configuration fails closed. Local defaults apply only to a non-production
 process on a loopback origin; a production build or start must set every value
 listed in `.env.example`, or it refuses to start (`src/lib/config.mjs`,
 `tests/config.test.ts`).
 
-A deployed Jazz server must verify BandChat's tokens the way `withJazz` does
-locally: JWKS at `<NEXT_PUBLIC_APP_ORIGIN>/api/auth/jwks`, JWT issuer equal to
-`NEXT_PUBLIC_APP_ORIGIN`, and JWT audience `band-chat` (`--jwt-issuer` /
-`--jwt-audience`, or `JAZZ_JWT_ISSUER` / `JAZZ_JWT_AUDIENCE`). Otherwise it
-rejects every sign-in with 401. The browser and backend share one Jazz
-environment (`NEXT_PUBLIC_JAZZ_ENV`, else `prod` in production, else `dev`).
+By default the backend stores data in SQLite next to the app. To sync through
+Jazz Cloud or your own sync server instead, set `JAZZ_SERVER_URL`,
+`JAZZ_ADMIN_SECRET` and `BACKEND_SECRET`; the backend then uses `remote()`.
+Browsers still talk only to `/jazz` and never see these values.
 
 ## Checks
 
@@ -106,13 +105,13 @@ deploys the real permissions to a test authority and drives the React UI through
 profile setup, room creation, a guest opening the room link and asking to join,
 the owner admitting the request, guest messaging, and removal. It also covers
 the local create/send/react path and attachment-picker validation. The browser receipt
-uses test-authority JWTs; it does not claim to exercise Better Auth's HTTP
-session/JWKS endpoints.
+enrolls test accounts directly against a test authority; it does not exercise
+Better Auth's HTTP session endpoints.
 
 ## Non-goals
 
-This app intentionally does not restore the retired Todo app, a separate app
-backend, app-local worker/WASM copies, or a compatibility path for pre-canonical
+This app intentionally does not restore the retired Todo app, a separate sync
+server, app-local worker/WASM copies, or a compatibility path for pre-canonical
 author identifiers. The room link is deliberately an "ask to join" link, not a
 bearer capability; secure, revocable invite capabilities belong to
 [#1954](https://github.com/garden-co/jazz/issues/1954).

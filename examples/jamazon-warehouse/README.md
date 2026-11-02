@@ -28,8 +28,9 @@ pnpm install
 pnpm --dir examples/jamazon-warehouse dev
 ```
 
-`pnpm dev` starts a local Jazz server through `withJazz` and pushes `schema.ts` and
-`permissions.ts` to it. Open <http://localhost:3000>, create an operator account and choose a
+Jazz runs inside the Next app (`createJazz` in `src/lib/jazz.server.ts`, mounted at `/jazz`) and
+keeps its data in `.jazz/`; its `authenticate` reads the Better Auth session cookie, so the browser
+signs in through the backend with no token of its own. Open <http://localhost:3000>, create an operator account and choose a
 warehouse. Open a second browser (or a private window) and sign up a second operator to watch the
 queue and stock change live in both.
 
@@ -50,9 +51,10 @@ moment. The authority accepts one order; the other checkout re-reads stock and f
 
 Configuration fails closed (`src/lib/config.ts`). A development run on a loopback origin uses
 local defaults, so `pnpm dev` works without setup. A production process (`pnpm build`,
-`pnpm start`) is always a deployment: it refuses to start without `NEXT_PUBLIC_APP_ORIGIN`,
-`BACKEND_SECRET` and `BETTER_AUTH_SECRET`, and never falls back to localhost or the development
-secrets. A deployment also sets `NEXT_PUBLIC_JAZZ_APP_ID` and `NEXT_PUBLIC_JAZZ_SERVER_URL`.
+`pnpm start`) is always a deployment: it refuses to start without `NEXT_PUBLIC_APP_ORIGIN` and
+`BETTER_AUTH_SECRET`, and never falls back to localhost or the development secret. A deployment
+also sets `NEXT_PUBLIC_JAZZ_APP_ID`, and, to keep the data on a sync server such as Jazz Cloud,
+`JAZZ_SERVER_URL`, `JAZZ_ADMIN_SECRET` and `BACKEND_SECRET`.
 
 ## Two-phase checkout
 

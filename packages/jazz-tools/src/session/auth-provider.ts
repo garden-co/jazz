@@ -1,4 +1,3 @@
-import { isProvisionalAccount } from "../accounts/enrollment.js";
 import type { JazzSession } from "./state.js";
 import { createListeners, toError } from "../runtime/util.js";
 
@@ -32,24 +31,14 @@ export function hasAuthProviderConnection(session: object): boolean {
   return owners.has(session);
 }
 
-/** Reconcile a provider with an externally owned Jazz session.
- * Signup, login and restoration atomically login-or-register. For linking an
- * existing local-first account, use manual session.linkJWT without this connector.
+/**
+ * Reconcile your auth's signed-in user with an externally owned Jazz session:
+ * each change of `key` signs in again through the app's backend
+ * (`session.loginWithBackend()`), and `key: null` logs out. To keep a
+ * local-first guest's account on sign-up, call `session.linkWithBackend()`
+ * without this connector.
  */
-export function connectAuthProvider<Client>(
-  session: JazzSession<Client>,
-  options:
-    | {
-        getToken(): Promise<string>;
-      }
-    | {
-        /**
-         * The app's backend (`createJazz`) names the signed-in user: each
-         * admission is `session.loginWithBackend()`, with no token.
-         */
-        backend: true;
-      },
-): AuthProviderConnection {
+export function connectAuthProvider<Client>(session: JazzSession<Client>): AuthProviderConnection {
   if (owners.has(session)) throw new Error("Jazz session already has an auth provider connection");
   const predecessor = releases.get(session);
   let desired: AuthProviderState = { key: null, isPending: true };
@@ -61,35 +50,17 @@ export function connectAuthProvider<Client>(
   let running: Promise<void> | undefined;
   let signOut: (() => unknown) | undefined;
   let failure: Error | undefined;
-  /** The retained account an in-flight admission is revalidating in place. */
-  let revalidating: object | undefined;
   const listeners = createListeners();
   function publish() {
     if (disposed) return;
     const current = session.getSnapshot();
     const error = failure ?? desired.error ?? current.error;
-    // A retained account opens before the provider has hydrated. Keep it
-    // usable while the provider hydrates and while its first admission
-    // revalidates it in place; a signed-out provider or a different identity
-    // replaces it through an ordinary transition instead.
-    const provisional =
-      !signOut &&
-      !error &&
-      current.status === "ready" &&
-      current.account !== undefined &&
-      (desired.isPending
-        ? isProvisionalAccount(current.account)
-        : desired.key !== null &&
-          !!running &&
-          attempted === desired.key &&
-          revalidating === current.account);
     const ready =
-      provisional ||
-      (!signOut &&
-        !desired.isPending &&
-        !error &&
-        admitted === desired.key &&
-        (desired.key === null ? current.status === "signed-out" : current.status === "ready"));
+      !signOut &&
+      !desired.isPending &&
+      !error &&
+      admitted === desired.key &&
+      (desired.key === null ? current.status === "signed-out" : current.status === "ready");
     const isPending = !!desired.isPending || !!running || (!error && admitted !== desired.key);
     if (
       snapshot.key === desired.key &&
@@ -116,15 +87,6 @@ export function connectAuthProvider<Client>(
     attempted = key;
     admitted = undefined;
     failure = undefined;
-    const opened = session.getSnapshot();
-    revalidating =
-      key !== null &&
-      opened.status === "ready" &&
-      opened.account !== undefined &&
-      isProvisionalAccount(opened.account)
-        ? opened.account
-        : undefined;
-    let established = false;
     const operation = Promise.resolve().then(async () => {
       await predecessor;
       if (disposed || token !== generation) return;
@@ -132,30 +94,11 @@ export function connectAuthProvider<Client>(
         // A delayed provider notification can acknowledge an already completed logout.
         const current = session.getSnapshot();
         if (current.status !== "signed-out" || current.error) await session.logout();
-      } else if ("backend" in options) {
+      } else {
         if (desired.key !== key || desired.isPending)
           throw new Error("Auth provider session changed");
         await session.loginWithBackend();
-      } else
-        await session.loginOrRegisterJWT({
-          async getToken() {
-            if (
-              (!established && (disposed || token !== generation)) ||
-              desired.key !== key ||
-              desired.isPending
-            )
-              throw new Error("Auth provider session changed");
-            const jwt = await options.getToken();
-            if (
-              (!established && (disposed || token !== generation)) ||
-              desired.key !== key ||
-              desired.isPending
-            )
-              throw new Error("Auth provider session changed while fetching a token");
-            return jwt;
-          },
-        });
-      established = true;
+      }
       if (!disposed && token === generation) admitted = key;
     });
     const task = operation
@@ -165,7 +108,6 @@ export function connectAuthProvider<Client>(
       .finally(() => {
         if (running !== task) return;
         running = undefined;
-        revalidating = undefined;
         publish();
         if (!disposed && token !== generation) void reconcile();
       });

@@ -7,24 +7,23 @@ import {
 } from "./src/lib/build-config.mjs";
 
 // Fails closed: a deployment without its origin, secrets and payment provider
-// does not start. `pnpm dev` generates the local secrets first.
+// does not start. `pnpm dev` generates the local secret first.
 const config = assertBuildConfiguration(readBuildConfig());
 
+// Jazz runs inside this app (src/server/backend.ts): no separate sync server.
 export default withJazz(
   {
     reactStrictMode: true,
+    // The local origin is 127.0.0.1, which Next's dev server blocks by default.
+    allowedDevOrigins: ["127.0.0.1"],
     serverExternalPackages: ["jazz-napi", "jazz-tools/backend"],
-    // The browser needs to know which payment UI to show; the server enforces it.
-    env: { NEXT_PUBLIC_PAYMENT_PROVIDER: paymentProvider(config) },
-  } satisfies NextConfig,
-  {
-    server: {
-      backendSecret: config.backendSecret,
-      jwksUrl: `${config.origin}/api/auth/jwks`,
-      // Without an issuer and audience the server rejects every Better Auth
-      // JWT, and sign-up fails with "account_request_failed" (garden-co/jazz#3766).
-      jwtIssuer: config.origin,
-      jwtAudience: config.origin,
+    env: {
+      // The browser and the backend name the same Jazz app (a local default
+      // in development).
+      NEXT_PUBLIC_JAZZ_APP_ID: config.appId,
+      // The browser needs to know which payment UI to show; the server enforces it.
+      NEXT_PUBLIC_PAYMENT_PROVIDER: paymentProvider(config),
     },
-  },
+  } satisfies NextConfig,
+  { server: false },
 );

@@ -33,7 +33,6 @@ export { createJazzApp, type JazzAppConfig } from "../session/create-jazz-app.js
 export {
   backendAuth,
   betterAuth,
-  jwtAuth,
   type JazzAuth,
   type JazzApp,
   type JazzAppSnapshot,
