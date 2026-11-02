@@ -68,7 +68,9 @@ The formats are fixed and versioned, and match Jazz's Rust core byte for byte
 - Audience: both sides normalize it like Jazz's Rust core
   (`normalizeAudience`). A UUID in any common form becomes its lowercase
   hyphenated form; any other string becomes UUIDv5(DNS namespace, audience).
-  The audience is required and must be non-empty.
+  The audience is required and must be non-empty. Because `aud` is always the
+  normalized form, a third-party verifier must compare against
+  `normalizeAudience(expected)`, not the raw string.
 
 ## Threat model
 
@@ -101,6 +103,12 @@ Subscribing to a store (`subscribe`) creates a secret on first use, which is
 the point: users are signed in before they sign up. `clear()` signs out, and
 subscribers then see no secret until the app calls `getOrCreate()` again,
 which creates a new identity.
+
+Operations on one key run one at a time within a JavaScript realm. Two tabs
+opening the app for the very first time at the same moment can each create a
+secret, and the last write wins. Subscribers are notified about saves and
+clears made through their own store instance, not about writes from other
+tabs or other instances.
 
 Jazz passes its app ID as the scope, so a secret saved by any earlier Jazz
 version is found again under the same key and the user keeps their identity.
