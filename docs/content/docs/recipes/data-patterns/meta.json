@@ -1,4 +1,9 @@
 {
   "title": "Data Patterns",
-  "pages": ["real-time-collaborative-list", "collaborative-text-editing", "nested-data"]
+  "pages": [
+    "real-time-collaborative-list",
+    "collaborative-text-editing",
+    "rich-text-editing",
+    "nested-data"
+  ]
 }

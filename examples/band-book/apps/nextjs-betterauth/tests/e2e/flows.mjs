@@ -51,6 +51,15 @@ async function shoot(page, name) {
 
 const sidebarItem = (page, name) => page.getByRole("button", { name, exact: true }).first();
 
+// The title box stays mounted when the page changes and takes the new title a
+// moment later, so wait for the value instead of reading it once.
+const waitForTitle = (page, title) =>
+  page.waitForFunction(
+    (title) => document.querySelector('textarea[aria-label="Page title"]')?.value === title,
+    title,
+    { timeout },
+  );
+
 try {
   const ownerContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   const owner = await signUp(ownerContext, "Ada");
@@ -63,11 +72,7 @@ try {
   // Blocks are editable in place and new ones append at the end.
   await sidebarItem(owner, "Songs").click();
   await sidebarItem(owner, "Harbour lights").click();
-  await owner.getByRole("textbox", { name: "Page title" }).waitFor();
-  assert.equal(
-    await owner.getByRole("textbox", { name: "Page title" }).inputValue(),
-    "Harbour lights",
-  );
+  await waitForTitle(owner, "Harbour lights");
   await owner.getByRole("button", { name: "Add block" }).click();
   await owner.getByRole("menuitem", { name: "Text" }).click();
   await owner.keyboard.type("Bridge: stay on the IV chord");
@@ -78,7 +83,11 @@ try {
   await owner.getByRole("table").waitFor();
   assert.ok(await owner.getByText("Confirm backline with Porto venue").isVisible());
   await shoot(owner, "issues-table");
-  await owner.getByRole("tab", { name: "Board" }).click();
+  // Issue views use the TabList navigation pattern: buttons, not tabs.
+  await owner
+    .getByRole("toolbar", { name: "Issue views" })
+    .getByRole("button", { name: "Board", exact: true })
+    .click();
   await owner.getByRole("region", { name: "In progress" }).waitFor();
   await shoot(owner, "issues-board");
 
@@ -98,17 +107,14 @@ try {
   const guest = await signUp(guestContext, "Bo");
   await guest.goto(inviteUrl);
   await guest.waitForURL(/p=/);
-  await guest.getByRole("textbox", { name: "Page title" }).waitFor();
-  assert.equal(
-    await guest.getByRole("textbox", { name: "Page title" }).inputValue(),
-    "Harbour lights",
-  );
-  await guest
-    .getByText("Bridge: stay on the IV chord")
-    .or(guest.locator("textarea", { hasText: "Bridge" }))
-    .first()
-    .waitFor();
-  const guestNav = await guest.getByRole("navigation", { name: "Pages" }).innerText();
+  await waitForTitle(guest, "Harbour lights");
+  await guest.getByText("Bridge: stay on the IV chord").first().waitFor();
+  // The side nav's landmark keeps the design system's default name; a guest's
+  // page list is its "Shared with you" section.
+  const guestNav = await guest
+    .getByRole("navigation")
+    .filter({ hasText: "Shared with you" })
+    .innerText();
   assert.ok(guestNav.includes("Harbour lights"), "guest sees the shared song");
   assert.ok(!guestNav.includes("Tour notes"), "guest does not see the rest of the band");
   await shoot(guest, "guest");
@@ -122,6 +128,34 @@ try {
     undefined,
     { timeout },
   );
+
+  // Block text is a Markdown merge column: edits both make to the same
+  // paragraph while the guest is offline both survive, and formatting stays.
+  const block = (page, needle) =>
+    page.locator(".bb-rich-text [contenteditable]", { hasText: needle }).first();
+  await guestContext.setOffline(true);
+  await block(guest, "Key of D").click();
+  await guest.keyboard.press("Home");
+  await guest.keyboard.type("Intro: four bars. ");
+  await block(owner, "Key of D").click();
+  await owner.keyboard.press("End");
+  await owner.keyboard.type(" Tuning: drop D.");
+  await owner.waitForTimeout(1_000);
+  await guestContext.setOffline(false);
+  for (const page of [owner, guest]) {
+    await page.waitForFunction(
+      () =>
+        [...document.querySelectorAll(".bb-rich-text [contenteditable]")].some(
+          (element) =>
+            element.textContent.startsWith("Intro: four bars. Key of D") &&
+            element.textContent.endsWith("acoustic. Tuning: drop D."),
+        ),
+      undefined,
+      { timeout },
+    );
+    assert.equal(await block(page, "Key of D").locator("strong").innerText(), "Capo 2");
+  }
+
   console.log("BandBook browser receipt passed");
 } finally {
   await browser.close();

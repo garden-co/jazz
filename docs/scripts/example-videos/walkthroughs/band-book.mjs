@@ -21,14 +21,16 @@ export const server = ({ dir }) =>
 
 const side = (page, name) => page.getByRole("button", { name, exact: true }).first();
 const title = (page) => page.getByRole("textbox", { name: "Page title" });
-// The block editor's text areas, found by what they contain.
-const textareaWith = async (page, needle, timeout = 30_000) => {
+// The block editor's rich text blocks, found by what they contain.
+const blocks = (page) => page.locator(".bb-rich-text [contenteditable]");
+const blockWith = async (page, needle, timeout = 30_000) => {
   const end = Date.now() + timeout;
   for (;;) {
-    const i = await page
-      .locator("textarea")
-      .evaluateAll((els, n) => els.findIndex((e) => e.value.includes(n)), needle);
-    if (i >= 0) return page.locator("textarea").nth(i);
+    const i = await blocks(page).evaluateAll(
+      (els, n) => els.findIndex((e) => e.textContent.includes(n)),
+      needle,
+    );
+    if (i >= 0) return blocks(page).nth(i);
     if (Date.now() > end) throw new Error(`No text block with ${needle}`);
     await sleep(200);
   }
@@ -83,17 +85,24 @@ export const actions = {
   },
   /** Types at the end of the text block that contains `needle`. */
   async append({ page }, needle, text) {
-    await click(page, await textareaWith(page, needle), { after: 200 });
+    await click(page, await blockWith(page, needle), { after: 200 });
     await page.keyboard.press("End");
     await page.keyboard.type(text, { delay: 70 });
   },
+  /** Types at the start of the text block that contains `needle`. */
+  async prepend({ page }, needle, text) {
+    await click(page, await blockWith(page, needle), { after: 200 });
+    await page.keyboard.press("Home");
+    await page.keyboard.type(text, { delay: 70 });
+  },
   async waitForText({ page }, needle) {
-    await textareaWith(page, needle);
+    await blockWith(page, needle);
   },
   async expectNoText({ page }, needle) {
-    const found = await page
-      .locator("textarea")
-      .evaluateAll((els, n) => els.some((e) => e.value.includes(n)), needle);
+    const found = await blocks(page).evaluateAll(
+      (els, n) => els.some((e) => e.textContent.includes(n)),
+      needle,
+    );
     if (found) throw new Error(`"${needle}" arrived while this laptop's Wi-Fi was off`);
   },
 };

@@ -1,0 +1,105 @@
+---
+title: "Rich text with a text merge column"
+description: Store rich text as Markdown in a text merge column and connect it to a TipTap editor, so concurrent and offline edits merge.
+reviewedAt: "e944f728c1"
+---
+
+A rich text editor and a [text merge column](/docs/schemas/column-types#mergeable-text-columns) fit
+together well: the editor shows formatting, the column stores the text as Markdown, and the server
+merges edits two people make at the same time. This recipe follows
+[BandBook](https://github.com/garden-co/jazz/tree/main/examples/band-book), whose page blocks are
+edited this way with [TipTap](https://tiptap.dev/).
+
+For the column itself and the general habits of editing one, see
+[Collaborative text editing](/docs/recipes/data-patterns/collaborative-text-editing).
+
+## Store the text as Markdown
+
+Declare the column with the `markdown` strategy. Its merge keeps Markdown markers such as `**` and
+link targets whole, so a merge never splits them:
+
+```ts title="schema.ts"
+blocks: s.table({
+  // ...
+  text: s.string().merge("markdown"),
+}),
+```
+
+The value is a plain Markdown string, so queries, filters and permissions see the text itself, and
+any client that doesn't use the editor can still read and write it.
+
+## Convert between the editor and Markdown
+
+Install TipTap and its Markdown support:
+
+```sh
+pnpm add @tiptap/core @tiptap/react @tiptap/pm @tiptap/starter-kit @tiptap/markdown @tiptap/extensions
+```
+
+Configure the editor with only the formatting the column should hold, and use one
+`MarkdownManager` for both directions. In BandBook, headings, lists and quotes are kinds of block,
+so a block's text holds inline formatting only. A line that Markdown would read as a heading or a
+list stays text:
+
+<include cwd lang="ts" meta='title="src/lib/rich-text.ts"'>
+  ../examples/band-book/apps/nextjs-betterauth/src/lib/rich-text.ts#rich-text-markdown
+</include>
+
+**Check that a load and save without edits gives back the same string.** If it doesn't, every open
+editor rewrites text nobody touched, and those rewrites compete with real edits. BandBook's
+[round-trip test](https://github.com/garden-co/jazz/blob/main/examples/band-book/apps/nextjs-betterauth/tests/unit/rich-text.test.ts)
+covers formatting, line breaks, escaped characters and the seeded content.
+
+## Write the whole value, at a steady pace
+
+Writes send the whole Markdown value with `db.update(...)`; the server compares it with the version
+the writer started from and merges it with anything that happened meanwhile. You don't need to
+compute or send diffs yourself.
+
+BandBook writes the first edit at once and later ones at most every 300 ms while typing continues,
+and writes whatever is left when the editor loses focus or unmounts. Each write is merged correctly
+on its own; fewer writes just mean less work and less history:
+
+```tsx title="src/components/BlockEditor.tsx"
+<RichText
+  label="Block text"
+  value={block.text}
+  onWrite={(text) => db.update(app.blocks, block.id, { text })}
+/>
+```
+
+## Apply incoming values as a change
+
+When a merged value arrives, don't reset the editor's content: that moves the cursor to the start
+and drops the selection. Parse the value and replace only the part of the document that differs, in
+a transaction marked as coming from Jazz so it isn't written back:
+
+<include cwd lang="ts" meta='title="src/components/RichText.tsx"'>
+  ../examples/band-book/apps/nextjs-betterauth/src/components/RichText.tsx#rich-text-apply
+</include>
+
+If a value arrives while local edits are still waiting to be written, carry them over onto the new
+value first, then write the result straight away. Otherwise the waiting write would be based on the
+newer value but still hold the older text, and undo the other person's edit:
+
+<include cwd lang="ts" meta='title="src/lib/rich-text.ts"'>
+  ../examples/band-book/apps/nextjs-betterauth/src/lib/rich-text.ts#rich-text-rebase
+</include>
+
+<Accordions type="single">
+<Accordion title="The complete editor component">
+
+<include cwd lang="tsx" meta='title="src/components/RichText.tsx"'>
+  ../examples/band-book/apps/nextjs-betterauth/src/components/RichText.tsx
+</include>
+
+</Accordion>
+</Accordions>
+
+## What the merge keeps
+
+Two people editing different parts of a block both keep their edits, online or offline, and the
+formatting around them stays intact. Where both changed the same words, the edit the server
+receives later wins that part. The merge works on the Markdown text, not on the editor's document
+tree, so it keeps markers whole but does not check that the merged Markdown is well formed. See
+[how text merges work](/docs/concepts/how-sync-works#text-merges) for the full rules.

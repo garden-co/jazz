@@ -173,13 +173,14 @@ export const heroExamples: HeroExample[] = [
   {
     id: "band-book",
     title: "BandBook",
-    tagline: "A Notion-style workspace with pages and issues, scoped by row-level policies.",
+    tagline:
+      "A Notion-style workspace with rich text pages and issues, scoped by row-level policies.",
     description:
-      "A band's shared notebook: members write pages, track issues, and belong to workspaces. A member may read their own pages plus those of every workspace they were admitted to. Its benchmarks load the newest 50 pages of a 100,000-page notebook under an explicit allow-all policy, an owner-only policy and the own-or-workspace policy, so the difference is the price of authorization.",
+      "A band's shared notebook: members write pages, track issues, and belong to workspaces. A member may read their own pages plus those of every workspace they were admitted to. Each block's rich text is Markdown in a text merge column, so two people editing the same paragraph, even offline, keep both edits. Its benchmarks load the newest 50 pages of a 100,000-page notebook under an explicit allow-all policy, an owner-only policy and the own-or-workspace policy, so the difference is the price of authorization, and time merging concurrent edits to a block.",
     highlights: [
       "Show my pages, newest first",
       "Show my workspace's pages and issues",
-      "Keep the page list live as pages change",
+      "Edit the same paragraph on two devices, offline too, and keep both edits",
     ],
     sources: [
       { label: "App", path: "examples/band-book" },
@@ -208,6 +209,17 @@ export const heroExamples: HeroExample[] = [
         label: "Live workspace page list",
         interpret: (s) =>
           `Subscribing to the same permissioned list and receiving its first result takes ${t(s)}.`,
+      },
+      {
+        benchmark: "band_book_text_concurrent_paragraph",
+        label: "Merge two offline edits",
+        interpret: (s, lookup) => {
+          const fast = lookup("band_book_text_fast_path");
+          const baseline = fast
+            ? ` Reconnecting with an edit nobody else made takes ${t(fast)}.`
+            : "";
+          return `Two devices edited the same paragraph offline. When the second reconnects, its edit is merged with the first and both devices hold the result in ${t(s)}.${baseline}`;
+        },
       },
     ],
   },

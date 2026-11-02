@@ -1,5 +1,8 @@
 //! Public-API document sharing fixture, adapted from Tobias Lins's #2996.
 //! Query-only timing with a separate reopen/first-read receipt. See the example README.
+//! The block text merge cases live in [`text_merge`].
+pub mod text_merge;
+
 use std::{collections::BTreeMap, path::Path, time::Instant};
 
 use jazz::db::{
