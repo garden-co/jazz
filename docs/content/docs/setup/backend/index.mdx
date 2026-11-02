@@ -15,7 +15,6 @@ import { app, permissions } from "./schema";
 import { getUserFromCookie } from "./auth";
 
 export const jazz = await createJazz({
-  appId: "my-app",
   app,
   permissions,
   store: sqlite({ path: "./data/jazz" }),
@@ -30,8 +29,8 @@ export const jazz = await createJazz({
 - `app` and `permissions` are the ones your code imports. The bundle that's running is the bundle
   Jazz enforces, so rolling back your backend rolls back its permissions too.
 - `store` says where the data lives. `sqlite({ path })` keeps it in a directory on this machine;
-  `remote({ url, adminSecret, backendSecret })` uses a sync server elsewhere, such as Jazz Cloud;
-  `memory()` is for tests and throwaway previews. See [Deployment](/docs/setup/deployment) for
+  `remote({ appId, url, adminSecret, backendSecret })` uses a sync server elsewhere, such as Jazz Cloud,
+  where `appId` names your app there; `memory()` is for tests and throwaway previews. Only `remote()` takes an app ID. See [Deployment](/docs/setup/deployment) for
   where the data can live.
 - `authenticate(request)` reads your own session (a cookie, a header) and returns
   `{ userId, claims? }`, or `null` when signed out. It is the only place that decides who a user
@@ -92,7 +91,7 @@ all it needs. It never holds a Jazz credential:
 ```ts title="src/jazz.ts"
 import { createJazzSession } from "jazz-tools/client";
 
-export const session = await createJazzSession({ appId: "my-app", serverUrl: "/jazz" });
+export const session = await createJazzSession({ serverUrl: "/jazz" });
 await session.loginWithBackend();
 ```
 
@@ -150,7 +149,6 @@ import { createDb, type AccountHandle } from "jazz-tools";
 // The request's account manager prepared this handle before context creation.
 export function openRequestDb(account: AccountHandle, wasmBytes: Uint8Array) {
   return createDb({
-    appId: "my-app",
     account,
     runtimeSources: { wasmSource: wasmBytes },
   });

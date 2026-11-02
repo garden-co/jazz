@@ -11,7 +11,6 @@ import { createJazz, sqlite } from "jazz-tools/backend";
 import { app, permissions } from "./schema";
 
 export const jazz = await createJazz({
-  appId: "my-app",
   app,
   permissions,
   store: sqlite({ path: process.env.JAZZ_DATA_DIR ?? "./data/jazz" }),
@@ -52,10 +51,10 @@ import { createJazz, remote } from "jazz-tools/backend";
 import { app, permissions } from "./schema";
 
 export const jazz = await createJazz({
-  appId: "my-app",
   app,
   permissions,
   store: remote({
+    appId: process.env.JAZZ_APP_ID!,
     url: process.env.JAZZ_SERVER_URL!, // your sync server, or https://v2.sync.jazz.tools
     adminSecret: process.env.JAZZ_ADMIN_SECRET!,
     backendSecret: process.env.BACKEND_SECRET!,

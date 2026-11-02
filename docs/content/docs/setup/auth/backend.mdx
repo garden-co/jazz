@@ -12,7 +12,6 @@ import { auth } from "./auth"; // your Better Auth instance
 import { app, permissions } from "./schema";
 
 export const jazz = await createJazz({
-  appId: "my-app",
   app,
   permissions,
   store: sqlite({ path: "./data/jazz" }),
@@ -42,7 +41,6 @@ function Root() {
   const { data, isPending } = authClient.useSession();
   return (
     <JazzProvider
-      appId="my-app"
       serverUrl="/jazz"
       auth={backendAuth({
         key: data?.user.id ?? null,

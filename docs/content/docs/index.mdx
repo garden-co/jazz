@@ -32,7 +32,6 @@ import { createJazz, sqlite } from "jazz-tools/backend";
 import { app, permissions } from "./schema";
 
 const jazz = await createJazz({
-  appId: "my-app",
   app,
   permissions,
   store: sqlite({ path: "./data/jazz" }),
@@ -59,7 +58,7 @@ You can also query and write to the database right from your frontend. It is pro
 import { createDb } from "jazz-tools/thin";
 import { app } from "./schema";
 
-const db = createDb({ appId, serverUrl: "/jazz", account });
+const db = createDb({ serverUrl: "/jazz", account });
 
 // Live query: updates as soon as the server (or anyone else) changes a todo
 db.subscribe(app.todos.where({ done: false }), (todos) => {

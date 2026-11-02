@@ -42,7 +42,6 @@ import { createJazz, sqlite } from "jazz-tools/backend";
 import { app, permissions } from "./schema";
 
 export const jazz = await createJazz({
-  appId: "my-app",
   app,
   permissions,
   store: sqlite({ path: "./data/jazz" }),

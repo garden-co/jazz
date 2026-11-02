@@ -14,7 +14,7 @@ import { JazzSessionProvider } from "jazz-tools/expo";
 
 function App() {
   return (
-    <JazzSessionProvider config={{ appId, serverUrl, initial: "local-first" }}>
+    <JazzSessionProvider config={{ serverUrl, initial: "local-first" }}>
       <TodoApp />
     </JazzSessionProvider>
   );

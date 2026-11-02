@@ -114,10 +114,10 @@ import permissions from "./permissions";
 import { authOptions } from "./auth-options";
 
 export const jazz = await createJazz({
-  appId: process.env.JAZZ_APP_ID!,
   app,
   permissions,
   store: remote({
+    appId: process.env.JAZZ_APP_ID!,
     url: process.env.JAZZ_SERVER_URL!,
     adminSecret: process.env.JAZZ_ADMIN_SECRET!,
     backendSecret: process.env.BACKEND_SECRET!,

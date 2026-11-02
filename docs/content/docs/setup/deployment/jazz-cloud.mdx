@@ -13,10 +13,10 @@ Your app ID namespaces your data for storage and sync. Click below to generate o
 
 ## Connect your backend
 
-Put the generated values in your backend's environment. Only the app ID is public. The sync URL and both secrets stay server-side, like a database password:
+Put the generated values in your backend's environment. All of them stay server-side; the browser never needs the app ID or the sync URL, and both secrets are like a database password:
 
 ```bash title=".env"
-NEXT_PUBLIC_JAZZ_APP_ID="<your app ID>"
+JAZZ_APP_ID="<your app ID>"
 JAZZ_SERVER_URL="https://v2.sync.jazz.tools/"
 JAZZ_ADMIN_SECRET="<admin secret>"
 BACKEND_SECRET="<backend secret>"
@@ -29,10 +29,10 @@ import { createJazz, remote } from "jazz-tools/backend";
 import { app, permissions } from "./schema";
 
 export const jazz = await createJazz({
-  appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
   app,
   permissions,
   store: remote({
+    appId: process.env.JAZZ_APP_ID!,
     url: process.env.JAZZ_SERVER_URL!,
     adminSecret: process.env.JAZZ_ADMIN_SECRET!,
     backendSecret: process.env.BACKEND_SECRET!,
@@ -46,8 +46,6 @@ export const jazz = await createJazz({
 ```
 
 Mount the handler under `/jazz` and point the client's `serverUrl` at `"/jazz"`. Browsers sync with your backend, never with Jazz Cloud directly. On start, your backend applies its schema, migrations and permissions to the app on Jazz Cloud. For each request it tells Jazz Cloud who the user is, which is why `authenticate` lives in your backend. See [Backend](/docs/setup/backend) for mounting in Next.js, Hono or Express, and [Custom auth](/docs/setup/auth/custom) for `authenticate`.
-
-Use the `.env` name prefix your framework exposes to the client (`VITE_`, `PUBLIC_`, `EXPO_PUBLIC_`) for the app ID only.
 
 ## Coming next
 

@@ -22,8 +22,8 @@ The default web client: about 86 KB gzipped, no Wasm, no local storage. The serv
 ## Configure one session
 
 - Import from `jazz-tools/thin`
-- `createAccountManager({ appId, serverUrl })`&hairsp;—&hairsp;the same account API as `jazz-tools`
-- `createDb({ appId, serverUrl, account })`&hairsp;—&hairsp;returns the normal `Db`; queries, `subscribe`, insert/update/upsert/delete and the framework hooks all work
+- `createAccountManager({ serverUrl })`&hairsp;—&hairsp;the same account API as `jazz-tools`
+- `createDb({ serverUrl, account })`&hairsp;—&hairsp;returns the normal `Db`; queries, `subscribe`, insert/update/upsert/delete and the framework hooks all work
 - User auth: see [Auth](/docs/setup/auth)
 - Tabs per framework, as on the local-first page
 
