@@ -103,8 +103,8 @@ export declare class NapiDb {
   /** Roll back an owner-wide open transaction by id. */
   rollbackTransaction(openTransactionId: string): void
   /**
-   * The host's tick callback: called with `"immediate"` whenever there
-   * is sync work (a local write to upload, frames to apply).
+   * Install the core's progress/deadline hook. The host schedules ticks
+   * and re-polls pending reads, using `"after:<milliseconds>"` for timers.
    */
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   /** Register a callback for rejected writes that no active wait consumed. */
