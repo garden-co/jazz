@@ -11,6 +11,8 @@ export interface BackendWatchEvents {
   onFocus(check: () => void): () => void;
   /** Tell other tabs this one changed account; call `check` when another tab says so. */
   crossTab?: { post(): void; listen(check: () => void): () => void };
+  /** Whether the page or app is in the foreground now (its cookies are fresh). */
+  isVisible?(): boolean;
 }
 
 export interface BackendWatch {
@@ -50,6 +52,12 @@ export function watchBackendUser<Client>(
     reconnect?: () => void;
     /** The first wait before reconnecting after a refusal; it doubles up to a minute. */
     reconnectBackoffMs?: number;
+    /**
+     * After a refusal the backend agrees with (no one signed in) while the
+     * page is visible, wait this long and check again as on focus, so a
+     * revoked user in a tab that stays focused is signed out. Default 30s.
+     */
+    refusedConfirmMs?: number;
   } = {},
 ): BackendWatch {
   const confirmMs = options.confirmMs ?? 2000;
@@ -59,9 +67,22 @@ export function watchBackendUser<Client>(
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   // The sync link was refused and hasn't connected since.
   let refusedPending = false;
+  let refusedConfirm: ReturnType<typeof setTimeout> | undefined;
+  const refusedConfirmMs = options.refusedConfirmMs ?? 30_000;
+  const resetRefusal = () => {
+    refusedPending = false;
+    backoffMs = firstBackoffMs;
+    reconnectAt = 0;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
+    if (refusedConfirm) clearTimeout(refusedConfirm);
+    refusedConfirm = undefined;
+  };
   let stopped = false;
   let checking: Promise<void> | undefined;
-  let again: { refused: boolean } | undefined;
+  // Checks asked for while one runs: a plain one (may sign out) and a
+  // refused one (only reconnects) are kept apart.
+  let again: { plain: boolean; refused: boolean } | undefined;
   let announced = session.getSnapshot().account;
 
   const settled = () => {
@@ -99,7 +120,17 @@ export function watchBackendUser<Client>(
       await session.loginWithBackend().catch(() => {});
       return;
     }
-    if (!backendUser || refused) return;
+    if (!backendUser) return;
+    if (refused) {
+      // Never sign out on a refusal alone (the cookie may be stale), but a
+      // visible page's cookies are fresh: check again shortly as on focus.
+      if (!refusedConfirm && (events.isVisible?.() ?? false))
+        refusedConfirm = setTimeout(() => {
+          refusedConfirm = undefined;
+          check();
+        }, refusedConfirmMs);
+      return;
+    }
     await new Promise((resolve) => setTimeout(resolve, confirmMs));
     if (quiet(refused)) return;
     signedIn = await ask();
@@ -124,14 +155,18 @@ export function watchBackendUser<Client>(
   function check(refused = false) {
     if (stopped) return;
     if (checking) {
-      again = { refused: refused || !!again?.refused };
+      again = {
+        plain: !refused || !!again?.plain,
+        refused: refused || !!again?.refused,
+      };
       return;
     }
     checking = once(refused).finally(() => {
       checking = undefined;
       const next = again;
       again = undefined;
-      if (next) check(next.refused);
+      if (next?.plain) check(false);
+      if (next?.refused) check(true);
     });
   }
   const unsubscribe = session.subscribe(() => {
@@ -139,6 +174,7 @@ export function watchBackendUser<Client>(
     if (snapshot.status !== "ready" && snapshot.status !== "signed-out") return;
     if (snapshot.account === announced) return;
     announced = snapshot.account;
+    resetRefusal();
     events.crossTab?.post();
   });
   const stopFocus = events.onFocus(() => check());
@@ -150,16 +186,12 @@ export function watchBackendUser<Client>(
       refusedPending = true;
       check(true);
     },
-    connected() {
-      refusedPending = false;
-      backoffMs = firstBackoffMs;
-      reconnectAt = 0;
-    },
+    connected: resetRefusal,
     stop() {
       if (stopped) return;
       stopped = true;
       clearTimeout(start);
-      if (reconnectTimer) clearTimeout(reconnectTimer);
+      resetRefusal();
       unsubscribe();
       stopFocus();
       stopCrossTab?.();
@@ -204,5 +236,6 @@ export function browserBackendWatchEvents(channelName: string): BackendWatchEven
       };
     },
     crossTab,
+    isVisible: () => typeof document === "undefined" || document.visibilityState === "visible",
   };
 }

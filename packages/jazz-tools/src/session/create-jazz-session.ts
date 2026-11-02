@@ -12,15 +12,16 @@ import { createJazzSessionOwner } from "./state.js";
 import { clientScope, DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
 import { accountRegistryUrl } from "../accounts/context.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
-import { followUser, type UserFollowingSession } from "./follow-user.js";
+import { browserProviderKeyMemory, followUser, type UserFollowingSession } from "./follow-user.js";
 
 export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
   AccountManagerConfig & {
     initial?: "local-first" | BackendAuth;
     /**
-     * On sign-out, wipe the account's local storage, unsynced writes
-     * included, instead of keeping it for that user's next sign-in. For
-     * shared devices.
+     * On sign-out (or a switch to another user), wipe the account's local
+     * storage instead of keeping it for that user's next sign-in. For shared
+     * devices. Jazz first waits up to 5 seconds for pending writes to upload;
+     * writes still unsynced then are lost.
      */
     clearOnSignOut?: boolean;
   };
@@ -43,6 +44,7 @@ export async function createJazzSession(config: JazzSessionConfig): Promise<Brow
     decorate: followUser({
       registry,
       events: browserBackendWatchEvents(`jazz-account:${registry}`),
+      providerKeys: browserProviderKeyMemory(registry),
     }),
   });
 }

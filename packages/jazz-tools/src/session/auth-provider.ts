@@ -25,6 +25,16 @@ export interface AuthProviderConnection {
   dispose(): void;
 }
 const owners = new WeakMap<object, AuthProviderConnection>();
+/** Where a session keeps the provider key it last admitted, across reloads. */
+export interface ProviderKeyMemory {
+  get(): string | null | undefined;
+  set(key: string | null): void;
+}
+const memories = new WeakMap<object, ProviderKeyMemory>();
+/** @internal Hosts give a session durable memory of its last admitted provider key. */
+export function rememberProviderKeys(session: object, memory: ProviderKeyMemory): void {
+  memories.set(session, memory);
+}
 const releases = new WeakMap<object, Promise<void>>();
 /** @internal Whether an auth provider connection currently drives this session's logins. */
 export function hasAuthProviderConnection(session: object): boolean {
@@ -44,6 +54,18 @@ export function connectAuthProvider<Client>(session: JazzSession<Client>): AuthP
   let desired: AuthProviderState = { key: null, isPending: true };
   let snapshot: AuthProviderSnapshot = { ready: false, isPending: true };
   let admitted: string | null | undefined;
+  // The provider key last admitted, even before a reload: a change from it
+  // to another key is a user switch.
+  const memory = memories.get(session);
+  let lastKey: string | null | undefined = memory?.get();
+  const remember = (key: string | null) => {
+    lastKey = key;
+    try {
+      memory?.set(key);
+    } catch {
+      // Storage unavailable; the in-memory key still works.
+    }
+  };
   let attempted: string | null | undefined;
   let generation = 0;
   let disposed = false;
@@ -84,7 +106,6 @@ export function connectAuthProvider<Client>(session: JazzSession<Client>): AuthP
     }
     const key = desired.key;
     const token = generation;
-    const leaving = admitted;
     attempted = key;
     admitted = undefined;
     failure = undefined;
@@ -108,13 +129,16 @@ export function connectAuthProvider<Client>(session: JazzSession<Client>): AuthP
           identity !== undefined &&
           identity.issuer !== "urn:jazz:local-first" &&
           identity.issuer !== "urn:jazz:system" &&
-          typeof leaving === "string" &&
-          leaving !== key;
+          typeof lastKey === "string" &&
+          lastKey !== key;
         if (switching) await session.logout();
         if (disposed || token !== generation) return;
         await session.loginWithBackend();
       }
-      if (!disposed && token === generation) admitted = key;
+      if (!disposed && token === generation) {
+        admitted = key;
+        remember(key);
+      }
     });
     const task = operation
       .catch((cause) => {
@@ -183,7 +207,10 @@ export function connectAuthProvider<Client>(session: JazzSession<Client>): AuthP
         signOut = undefined;
         // Providers may emit null after signOut resolves. Do not re-admit stale state.
         attempted = desired.key === leavingKey || desired.key === null ? desired.key : undefined;
-        if (desired.key === null) admitted = null;
+        if (desired.key === null) {
+          admitted = null;
+          remember(null);
+        }
       });
       running = operation
         .catch((cause) => {
