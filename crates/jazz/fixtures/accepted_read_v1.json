@@ -1,0 +1,8 @@
+{
+  "format": "jazz.sqlite.accepted-read.v1",
+  "request_hex": "0001056e6f74657300000000000000000000000000000000000100000002004444444444444444444444444444444400",
+  "empty_reply_hex": "140100444444444444444444444444444444441c5b2275726e3a6a617a7a3a73797374656d222c2273797374656d225d00000100",
+  "paired_reply_hex": "140109444444444444444444444444444444441c5b2275726e3a6a617a7a3a73797374656d222c2273797374656d225d0001101111111111111111111111111111111103102222222222222222222222222222222209021033333333333333333333333333333333071c01056e6f746573000110111111111111111111111111111111110000",
+  "paired_rows_hex": "01056e6f746573000110111111111111111111111111111111110000",
+  "assembly": "Independent field concatenation, not encoder output. Read=0 and Accepted=20; AcceptedOnce=2. Response: id, through, fixed schema UUID, canonical author string, empty claims map, evidence count; each evidence is row UUID bytes, state (tx time, node UUID bytes, sequence), content (tx time, node UUID bytes, sequence); length-prefixed ordinary row frame. Nonempty row frame: one notes batch, zero columns, one row 0x11 repeated, deleted=false, empty packed record."
+}

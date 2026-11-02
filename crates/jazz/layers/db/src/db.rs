@@ -44,14 +44,21 @@ pub(crate) mod sync;
 
 #[path = "shard.rs"]
 pub mod shard;
+#[path = "transaction_reads.rs"]
+mod transaction_reads;
 pub use crate::names::LensEffects;
-pub use crate::options::REMOTE_LINK_ATTEMPT_WINDOW;
+pub use crate::options::{REMOTE_LINK_ATTEMPT_WINDOW, TickScheduler, TickUrgency};
 use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
+#[path = "accepted_read.rs"]
+mod accepted_read;
 use crate::values::{
     AuthorKey, STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, author_key,
     begin_savepoint, cell_from_sql, column_from_sql, end_savepoint, in_savepoint, quote, storage,
     to_sql, unsupported,
+};
+pub use accepted_read::{
+    AcceptedRead, AcceptedReadScope, AcceptedRowEvidence, AcceptedVersion, EncodedAcceptedRead,
 };
 pub use sync::{
     ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
@@ -454,6 +461,8 @@ pub struct SchemaPublication {
 
 struct Inner {
     conn: Connection,
+    scheduler: Option<Rc<dyn TickScheduler>>,
+    read_deadlines: Vec<Weak<sync::ReadDeadline>>,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
     /// Errors the next ticks fail with, for tests of a tick driver.
@@ -1366,6 +1375,8 @@ impl Db {
             view: None,
             inner: Rc::new(Store::new(Inner {
                 conn,
+                scheduler: None,
+                read_deadlines: Vec::new(),
                 mutation_admission_closed: false,
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),
@@ -1638,7 +1649,11 @@ impl Db {
             inner.fan.collect();
             inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
         }
-        self.pump_chunk_store().await
+        let result = self.pump_chunk_store().await;
+        self.schedule_read_deadlines();
+        self.wake_read_deadlines();
+        self.flush_pending_tick();
+        result
     }
 
     /// Fetch the offloaded nodes reads wait on, move settled leaves to the
@@ -3302,6 +3317,15 @@ impl Drop for Inner {
 }
 
 impl Inner {
+    fn require_attribution_backend(&self) -> Result<(), Error> {
+        if self.identity.author != AuthorSubject::SYSTEM {
+            return Err(unsupported(
+                "backend-attributed transactions outside a SYSTEM backend",
+            ));
+        }
+        Ok(())
+    }
+
     fn require_mutation_admission(&self) -> Result<(), Error> {
         if self.mutation_admission_closed {
             return Err(Error::new(
@@ -7000,15 +7024,48 @@ struct Overlay {
 /// The store behind its one gate: every borrow first undoes a transaction
 /// handle's overlay, so nothing but that handle's next stage or read sees
 /// it.
-struct Store(RefCell<Inner>);
+struct Store(
+    RefCell<Inner>,
+    RefCell<Vec<u64>>,
+    // A host wake requested while Inner is borrowed by a callback.
+    std::cell::Cell<bool>,
+);
 
 impl Store {
     fn new(inner: Inner) -> Self {
-        Self(RefCell::new(inner))
+        Self(
+            RefCell::new(inner),
+            RefCell::new(Vec::new()),
+            std::cell::Cell::new(false),
+        )
+    }
+
+    /// A callback can drop a read while the store is borrowed. Keep that
+    /// cleanup outside Inner until the next exclusive borrow can apply it.
+    fn cancel_fetch(&self, id: u64) -> bool {
+        if let Ok(mut inner) = self.0.try_borrow_mut() {
+            inner
+                .client
+                .as_mut()
+                .is_some_and(|client| client.forget_once(id))
+        } else {
+            self.1.borrow_mut().push(id);
+            true
+        }
+    }
+
+    fn flush_cancelled_fetches(&self, inner: &mut Inner) {
+        let cancelled = std::mem::take(&mut *self.1.borrow_mut());
+        if let Some(client) = inner.client.as_mut() {
+            for id in cancelled {
+                client.forget_once(id);
+            }
+        }
     }
 
     fn borrow_mut(&self) -> std::cell::RefMut<'_, Inner> {
         let mut inner = self.0.borrow_mut();
+        self.flush_cancelled_fetches(&mut inner);
         inner.settle_overlay();
         inner
     }
@@ -7017,6 +7074,7 @@ impl Store {
         // A borrow already held means the overlay was undone when it was
         // taken.
         if let Ok(mut inner) = self.0.try_borrow_mut() {
+            self.flush_cancelled_fetches(&mut inner);
             inner.settle_overlay();
         }
         self.0.borrow()
@@ -7024,17 +7082,31 @@ impl Store {
 
     /// The store with a handle's overlay kept for its next stage.
     fn staging(&self) -> std::cell::RefMut<'_, Inner> {
-        self.0.borrow_mut()
+        let mut inner = self.0.borrow_mut();
+        self.flush_cancelled_fetches(&mut inner);
+        inner
     }
 }
 
 struct Batch {
     kind: BatchKind,
+    reads_state: Rc<RefCell<transaction_reads::ReadState>>,
+    /// None retains the ordinary per-operation identity contract.
+    identity: Option<WriteIdentity>,
     ops: Vec<(Rc<Schema>, StagedOp)>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
     edits: LargeEdits,
+}
+
+impl Batch {
+    fn reader(&self) -> Option<AuthorSubject> {
+        match self.identity.map(who) {
+            Some(Who::Session(author)) => Some(author),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -7522,6 +7594,82 @@ impl Db {
         )
     }
 
+    /// Open an owner-wide mergeable batch for an authenticated session.
+    /// Reads and writes through every schema view retain this identity.
+    /// Delegated replica reads require LocalOnly until scoped remote coverage
+    /// is available. The authority authenticates every uploaded commit.
+    pub async fn begin_mergeable_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.begin_mergeable(id).await?;
+        self.bind_transaction_identity(id, WriteIdentity::Session(author));
+        Ok(())
+    }
+
+    /// Open an owner-wide serializable batch for an authenticated session.
+    /// A replica may read remotely as its own identity; delegated remote reads
+    /// require scoped coverage and currently return an unsupported-shape error.
+    pub async fn begin_serializable_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.begin_serializable(id).await?;
+        self.bind_transaction_identity(id, WriteIdentity::Session(author));
+        Ok(())
+    }
+
+    /// Open a SYSTEM backend mergeable batch with separate row provenance.
+    /// Attribution does not apply the named author's session read policies.
+    pub async fn begin_mergeable_for_attribution(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.inner().require_attribution_backend()?;
+        self.begin_mergeable(id).await?;
+        self.bind_transaction_identity(id, WriteIdentity::Attribution(author));
+        Ok(())
+    }
+
+    /// Open a SYSTEM backend serializable batch with separate row provenance.
+    /// The authority still authenticates the connection receiving a replica's
+    /// commit; selecting an attribution is not an upstream credential.
+    pub async fn begin_serializable_for_attribution(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.inner().require_attribution_backend()?;
+        self.begin_serializable(id).await?;
+        self.bind_transaction_identity(id, WriteIdentity::Attribution(author));
+        Ok(())
+    }
+
+    fn bind_transaction_identity(&self, id: OpenTransactionId, identity: WriteIdentity) {
+        self.inner().batches.get_mut(&id).expect("opened").identity = Some(identity);
+    }
+
+    /// Resolve a staged operation before it reads or chunks any cell.
+    pub(crate) fn transaction_write_identity(
+        &self,
+        id: OpenTransactionId,
+        requested: WriteIdentity,
+    ) -> Result<WriteIdentity, Error> {
+        let inner = self.inner.staging();
+        let batch = inner
+            .batches
+            .get(&id)
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        match batch.identity {
+            None => Ok(requested),
+            Some(bound) if requested == WriteIdentity::Database || requested == bound => Ok(bound),
+            Some(_) => Err(rejected("write identity differs from its transaction")),
+        }
+    }
+
     fn begin(&self, id: OpenTransactionId, kind: BatchKind) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         inner.require_mutation_admission()?;
@@ -7532,6 +7680,8 @@ impl Db {
             id,
             Batch {
                 kind,
+                reads_state: Rc::new(RefCell::new(transaction_reads::ReadState::default())),
+                identity: None,
                 ops: Vec::new(),
                 edits: LargeEdits::default(),
             },
@@ -7550,25 +7700,31 @@ impl Db {
     }
 
     pub fn abandon_transaction_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
-        self.inner
+        // Abandonment remains available after the mutation-admission fence.
+        self.remove_batch(id).map(drop)
+    }
+
+    fn remove_batch(&self, id: OpenTransactionId) -> Result<Batch, Error> {
+        let batch = self
+            .inner
             .borrow_mut()
             .batches
             .remove(&id)
-            .map(drop)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        transaction_reads::close_pending_reads(&batch.reads_state);
+        Ok(batch)
     }
 
     fn take_batch(&self, id: OpenTransactionId) -> Result<Batch, Error> {
         self.inner().require_mutation_admission()?;
-        self.inner
-            .borrow_mut()
-            .batches
-            .remove(&id)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
+        self.remove_batch(id)
     }
 
+    /// Commit a mergeable batch, consuming its handle. An unfinished read
+    /// refuses the commit with `NotObserved` before any write is published.
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
+        batch.reads_state.borrow().check_commit()?;
         if !matches!(batch.kind, BatchKind::Mergeable) {
             return Err(rejected(format!("transaction {id:?} is not mergeable")));
         }
@@ -7580,12 +7736,14 @@ impl Db {
     /// same rows at the same versions now as it did at the snapshot (this
     /// catches phantoms: rows that entered or left a predicate or window).
     /// The check and the apply run under one store borrow, so nothing can
-    /// commit in between.
+    /// commit in between. An unfinished read refuses the commit with
+    /// `NotObserved` and consumes the handle before publishing any write.
     pub async fn commit_serializable_handle(
         &self,
         id: OpenTransactionId,
     ) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
+        batch.reads_state.borrow().check_commit()?;
         let BatchKind::Serializable {
             snapshot,
             reads,
@@ -7652,7 +7810,7 @@ impl Db {
                         include_deleted: read.include_deleted,
                         ..ReadSpec::default()
                     };
-                    let now = inner.read_versions(&read.prepared, None, &spec)?;
+                    let now = inner.read_versions(&read.prepared, batch.reader(), &spec)?;
                     let changed = now.len() != read.rows.len()
                         || now.iter().zip(&read.rows).any(|(now, then)| {
                             now.0 != then.0
@@ -7726,7 +7884,7 @@ impl Db {
                     include_deleted: read.include_deleted,
                     ..ReadSpec::default()
                 };
-                if inner.read_versions(&read.prepared, None, &spec)? != read.rows {
+                if inner.read_versions(&read.prepared, batch.reader(), &spec)? != read.rows {
                     return Err(conflict(
                         "a row read by the transaction changed since its snapshot",
                     ));
@@ -7749,8 +7907,15 @@ impl Db {
             begin_savepoint(&inner.conn, "commit_batch")?;
             let mark = inner.changed.borrow().len();
             inner.defer_checks();
+            // Session-bound batches recheck current permissions at commit.
+            // Ordinary unbound batches keep their existing replay contract.
+            let checked = if batch.reader().is_some() {
+                0
+            } else {
+                ops.len()
+            };
             let applied = inner
-                .apply_with_edits(ops, &batch.edits, ops.len(), seq)
+                .apply_with_edits(ops, &batch.edits, checked, seq)
                 .and_then(|()| inner.finish_checks(seq));
             if let Err(error) = applied {
                 inner.abandon_checks();
@@ -7773,7 +7938,9 @@ impl Db {
             .iter()
             .map(|(schema, op)| self.inner().stored_op(op.clone(), schema))
             .collect::<Result<Vec<_>, _>>()
-            .and_then(|ops| self.record_stored_upload(ops, seq, kind, None));
+            .and_then(|ops| {
+                self.record_stored_upload_with_identity(ops, seq, kind, None, batch.identity)
+            });
         if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
@@ -8008,6 +8175,13 @@ impl Db {
         mut op: StagedOp,
         mut edits: LargeEdits,
     ) -> Result<(), Error> {
+        if let Some(requested) = op.identity() {
+            match self.transaction_write_identity(id, requested)? {
+                WriteIdentity::Session(author) => op.attribute(author, true),
+                WriteIdentity::Attribution(author) => op.attribute(author, false),
+                WriteIdentity::Database => {}
+            }
+        }
         let marks = {
             let mut inner = self.inner.staging();
             inner.require_mutation_admission()?;
@@ -8051,19 +8225,22 @@ impl Db {
             return Ok(());
         }
         let mut inner = self.inner();
-        let Some(Batch {
-            kind: BatchKind::Serializable { snapshot, own, .. },
-            ..
-        }) = inner.batches.get(&id)
+        let Some(
+            batch @ Batch {
+                kind: BatchKind::Serializable { snapshot, own, .. },
+                ..
+            },
+        ) = inner.batches.get(&id)
         else {
             return Ok(());
         };
+        let identity = batch.reader();
         let read = ReadSpec {
             include_deleted,
             cut: Some(inner.serializable_cut(*snapshot, own)?),
             ..ReadSpec::default()
         };
-        let rows = inner.read_versions(prepared, None, &read)?;
+        let rows = inner.read_versions(prepared, identity, &read)?;
         if let Some(Batch {
             kind: BatchKind::Serializable { reads, pinned, .. },
             ..
@@ -8198,7 +8375,9 @@ impl TxRef<'_> {
     }
 
     /// As [`Self::all_prepared_with`], seeing only what `identity`'s read
-    /// policies let it see (`None`: everything).
+    /// policies let it see. In a bound batch, `None` inherits the batch's
+    /// identity and a different explicit identity is rejected. In an unbound
+    /// batch, `None` retains the unrestricted read contract.
     pub async fn all_prepared_as(
         &self,
         prepared: &PreparedQuery,
@@ -8213,6 +8392,8 @@ impl TxRef<'_> {
     /// the authority's answer, offline too. `LocalOnly` never asks the
     /// authority; `LocalFirst` can answer offline from the replica's known cut.
     /// The first successful serializable read fixes its snapshot for later reads.
+    /// Concurrent reads run in first-poll order, retaining the staging prefix
+    /// each saw on admission. Cancelling an ordinary read releases its place.
     pub async fn all_prepared_at(
         &self,
         prepared: &PreparedQuery,
@@ -8220,8 +8401,44 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
     ) -> Result<Vec<CurrentRow>, Error> {
-        // Capture before hydration: later writes must not leak into an
-        // already admitted read, including when another read is cancelled.
+        let identity = {
+            let inner = self.db.inner.staging();
+            let batch = inner
+                .batches
+                .get(&self.id)
+                .ok_or_else(|| rejected("transaction is not open"))?;
+            if batch.identity.is_some() {
+                let reader = batch.reader();
+                let author = reader.unwrap_or(AuthorSubject::SYSTEM);
+                if identity.is_some_and(|requested| requested != author)
+                    || prepared
+                        .request_claims
+                        .as_ref()
+                        .is_some_and(|(requested, _)| *requested != author)
+                {
+                    return Err(rejected(
+                        "transaction read identity differs from its bound identity",
+                    ));
+                }
+                if inner.client.is_some() && tier != ReadTier::LocalOnly {
+                    let changed_claims =
+                        prepared.request_claims.as_ref().is_some_and(|(_, claims)| {
+                            *claims != inner.claims.get(&author).cloned().unwrap_or_default()
+                        });
+                    if author != inner.identity.author || changed_claims {
+                        return Err(unsupported(
+                            "delegated remote transaction reads without scoped coverage",
+                        ));
+                    }
+                }
+                reader
+            } else {
+                identity
+            }
+        };
+        let guard = self.db.transaction_read_guard(self.id)?;
+        // Capture before waiting: later writes must not leak into this read's
+        // admitted prefix while an earlier read selects the shared snapshot.
         // Peeks skip the store gate, which would undo the cached overlay.
         let prefix = self
             .db
@@ -8231,6 +8448,21 @@ impl TxRef<'_> {
             .get(&self.id)
             .ok_or_else(|| rejected("transaction is not open"))?
             .prefix();
+        guard.wait().await?;
+        self.db.check_read_guard(self.id, &guard)?;
+        self.all_prepared_guarded(prepared, include_deleted, identity, tier, &guard, prefix)
+            .await
+    }
+
+    async fn all_prepared_guarded(
+        &self,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+        identity: Option<AuthorSubject>,
+        tier: ReadTier,
+        guard: &transaction_reads::ReadGuard,
+        prefix: BatchPrefix,
+    ) -> Result<Vec<CurrentRow>, Error> {
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
         // the replica when the link cannot answer.
@@ -8285,23 +8517,30 @@ impl TxRef<'_> {
         {
             let at = pinned.then_some(snapshot);
             self.db.remote_shape(&prepared.query)?;
-            let through = self
-                .db
-                .fetch(
-                    prepared,
-                    at,
-                    include_deleted,
-                    if tier == ReadTier::Remote {
-                        sync::RemoteReach::REMOTE
-                    } else {
-                        sync::RemoteReach::BEST_EFFORT
-                    },
-                    None,
-                    None,
-                    tier == ReadTier::Remote,
-                    &ReadViewSourceSpec::Current,
-                )
-                .await?;
+            let fetch = self.db.fetch(
+                prepared,
+                at,
+                include_deleted,
+                if tier == ReadTier::Remote {
+                    sync::RemoteReach::REMOTE
+                } else {
+                    sync::RemoteReach::BEST_EFFORT
+                },
+                None,
+                None,
+                tier == ReadTier::Remote,
+                &ReadViewSourceSpec::Current,
+            );
+            let mut fetch = std::pin::pin!(fetch);
+            let through = std::future::poll_fn(|cx| {
+                guard.watch(cx.waker());
+                if let Err(error) = self.db.check_read_guard(self.id, guard) {
+                    return std::task::Poll::Ready(Err(error));
+                }
+                fetch.as_mut().poll(cx)
+            })
+            .await?;
+            self.db.check_read_guard(self.id, guard)?;
             if let Some(Batch {
                 kind:
                     BatchKind::Serializable {
