@@ -2047,10 +2047,13 @@ name = "jazz-example-doc-shelf-benchmark"
 version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
+ "futures-util",
  "jazz",
  "jazz-benchmark-guard",
+ "postcard",
  "serde_json",
  "tempfile",
+ "tungstenite",
 ]
 
 [[package]]

@@ -29,10 +29,12 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::future_to_promise;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
 mod browser;
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
 pub mod browser_bench;
+#[cfg(all(target_arch = "wasm32", feature = "durable-object"))]
+mod durable_object;
 mod identity;
 
 #[cfg(feature = "bench-probes")]
@@ -408,7 +410,7 @@ struct Host {
     tick_scheduler: RefCell<Option<js_sys::Function>>,
     /// Told of a write rejected at apply time that no wait claimed.
     mutation_errors: RefCell<Option<js_sys::Function>>,
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
     store: RefCell<Option<browser::Store>>,
 }
 
@@ -416,7 +418,7 @@ impl Host {
     /// Resolve once every commit so far is in the browser store's backing
     /// storage (a no-op without one).
     async fn flush(&self) -> Result<(), JsValue> {
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", feature = "browser"))]
         {
             let store = self.store.borrow().clone();
             if let Some(store) = store {
@@ -1144,7 +1146,7 @@ impl WasmDb {
     /// SQLite VFS: `{ backend: "indexeddb" | "opfs", path?: string }`
     /// (IndexedDB when omitted; see [`browser`]). The default file is named
     /// after `database`, the physical database name the worker admitted.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
     #[wasm_bindgen(js_name = openBrowser)]
     pub async fn open_browser(
         storage: JsValue,
@@ -1155,7 +1157,7 @@ impl WasmDb {
         Self::open_browser_as(storage, schema, config, database, OpenAs::Untrusted).await
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
     #[wasm_bindgen(js_name = openBrowserWithSelfSignedProof)]
     pub async fn open_browser_with_self_signed_proof(
         storage: JsValue,
@@ -1174,7 +1176,7 @@ impl WasmDb {
         Self::open_browser_as(storage, schema, config, database, how).await
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
     async fn open_browser_as(
         storage: JsValue,
         schema: Vec<u8>,
@@ -1203,7 +1205,7 @@ impl WasmDb {
 
     /// Delete a durable browser store (`{ backend, path }`, as for
     /// `openBrowser`). No database may have it open.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
     #[wasm_bindgen(js_name = destroyBrowserStorage)]
     pub async fn destroy_browser_storage(
         storage: JsValue,
@@ -1718,7 +1720,7 @@ impl WasmDb {
             if owns_runtime {
                 inner.binding.close().await.map_err(host_error)?;
                 inner.host.flush().await?;
-                #[cfg(target_arch = "wasm32")]
+                #[cfg(all(target_arch = "wasm32", feature = "browser"))]
                 inner.host.store.borrow_mut().take();
             }
             Ok(JsValue::TRUE)

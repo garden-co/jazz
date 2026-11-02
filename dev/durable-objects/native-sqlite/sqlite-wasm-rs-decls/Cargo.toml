@@ -1,0 +1,19 @@
+# sqlite-wasm-rs 0.5.5's declarations without its SQLite: rusqlite links
+# against whatever defines the `sqlite3_*` symbols, which in this build is
+# jazz-wasm's Durable Object shim over `ctx.storage.sql`. Patched in by the
+# workspace one level up; never published.
+[package]
+name = "sqlite-wasm-rs"
+version = "0.5.5"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[features]
+# rusqlite names these; they select nothing here.
+bindgen = []
+sqlite3mc = []
+
+[lib]
+name = "sqlite_wasm_rs"
+path = "src/lib.rs"

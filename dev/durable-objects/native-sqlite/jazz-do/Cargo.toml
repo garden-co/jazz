@@ -1,0 +1,19 @@
+[package]
+name = "jazz-do"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "jazz-wasm for Cloudflare Durable Objects, on ctx.storage.sql"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+jazz-wasm = { path = "../../../../crates/jazz-wasm", default-features = false, features = [
+  "durable-object",
+  "console_error_panic_hook",
+  "transport-compression-ruzstd",
+] }
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O", "-g", "--low-memory-unused"]
