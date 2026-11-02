@@ -22,14 +22,19 @@ afterEach(async () => {
  * `@vercel/sandbox` standing in for Vercel: one Sandbox whose port routes to a
  * local jazz-tools server, and whose Drive holds that server's secrets.
  */
-function fakeVercel(core: { url: string; adminSecret: string; backendSecret: string }) {
+function fakeVercel(core: {
+  appId: string;
+  url: string;
+  adminSecret: string;
+  backendSecret: string;
+}) {
   const calls: string[] = [];
   const state = { exists: false, status: "stopped", drive: false };
   const files = new Map<string, Buffer>([
     [
       "/data/secrets.env",
       Buffer.from(
-        `JAZZ_ADMIN_SECRET=${core.adminSecret}\nJAZZ_BACKEND_SECRET=${core.backendSecret}\n`,
+        `JAZZ_APP_ID=${core.appId}\nJAZZ_ADMIN_SECRET=${core.adminSecret}\nJAZZ_BACKEND_SECRET=${core.backendSecret}\n`,
       ),
     ],
   ]);
@@ -85,7 +90,11 @@ function fakeVercel(core: { url: string; adminSecret: string; backendSecret: str
 }
 
 function onVercel(env: Record<string, string>) {
-  const before = { VERCEL: process.env.VERCEL, VERCEL_ENV: process.env.VERCEL_ENV };
+  const before = {
+    VERCEL: process.env.VERCEL,
+    VERCEL_ENV: process.env.VERCEL_ENV,
+    VERCEL_PROJECT_ID: process.env.VERCEL_PROJECT_ID,
+  };
   Object.assign(process.env, env);
   cleanups.push(async () => {
     for (const [key, value] of Object.entries(before)) {
@@ -100,18 +109,18 @@ describe("vercel() store", () => {
     const appId = randomUUID();
     const core = await startLocalJazzServer({ appId, inMemory: true });
     cleanups.push(() => core.stop());
-    const fake = fakeVercel(core);
-    onVercel({ VERCEL: "1", VERCEL_ENV: "preview" });
+    const fake = fakeVercel({ ...core, appId });
+    onVercel({ VERCEL: "1", VERCEL_ENV: "preview", VERCEL_PROJECT_ID: "prj_test" });
 
     const jazz = await createJazz({ appId, app, permissions, store: vercel({ sdk: fake.sdk }) });
     cleanups.push(() => jazz.close());
-    const name = `jazz-${appId}-preview`;
+    const name = "jazz-prj_test-preview";
     expect(fake.calls.slice(0, 3)).toEqual([
       `drive ${name}-data`,
       `create ${name}`,
       "run exec flock -n /tmp/jazz.lock bash /data/start.sh >>/data/server.log 2>&1",
     ]);
-    expect(fake.files.get("/data/start.sh")?.toString()).toContain(`server '${appId}'`);
+    expect(fake.files.get("/data/start.sh")?.toString()).toContain(`app_id='${appId}'`);
 
     // The backend's own database reaches the core in the Sandbox.
     const row = await jazz.db.insert(app.notes, { text: "on vercel" }).wait({ tier: "global" });
@@ -125,20 +134,25 @@ describe("vercel() store", () => {
     const appId = randomUUID();
     const core = await startLocalJazzServer({ appId, inMemory: true });
     cleanups.push(() => core.stop());
-    const fake = fakeVercel(core);
+    const fake = fakeVercel({ ...core, appId });
     fake.state.exists = true;
     fake.state.drive = true;
-    onVercel({ VERCEL: "1", VERCEL_ENV: "production" });
+    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
 
     const jazz = await createJazz({ appId, app, permissions, store: vercel({ sdk: fake.sdk }) });
     cleanups.push(() => jazz.close());
-    expect(fake.calls).toContain(`resume jazz-${appId}-production`);
+    expect(fake.calls).toContain("resume jazz-prj_test-production");
     expect(fake.calls.some((call) => call.startsWith("create"))).toBe(false);
   }, 60_000);
 
   it("runs its local store outside a Vercel deployment", async () => {
     const appId = randomUUID();
-    const fake = fakeVercel({ url: "http://unused.invalid", adminSecret: "a", backendSecret: "b" });
+    const fake = fakeVercel({
+      appId,
+      url: "http://unused.invalid",
+      adminSecret: "a",
+      backendSecret: "b",
+    });
     const before = process.env.VERCEL;
     delete process.env.VERCEL;
     cleanups.push(async () => {
@@ -156,6 +170,25 @@ describe("vercel() store", () => {
     expect(fake.calls).toEqual([]);
   }, 60_000);
 
+  it("refuses a Sandbox that holds another app's core", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const fake = fakeVercel({ ...core, appId: randomUUID() });
+    fake.state.exists = true;
+    fake.state.drive = true;
+    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
+    await expect(
+      createJazz({ appId, app, permissions, store: vercel({ sdk: fake.sdk }) }),
+    ).rejects.toThrow(/belongs to app/);
+  }, 60_000);
+
+  it("generates the app id on the Drive unless one is given", () => {
+    const script = startScript(undefined, "2.0.0-alpha.60", "https://example.invalid/t.tgz");
+    expect(script).toContain("app_id=$(cat /proc/sys/kernel/random/uuid)");
+    expect(script).toContain(`server "$JAZZ_APP_ID" --port 1625`);
+  });
+
   it("installs the server binary for the running version once, and generates secrets once", () => {
     const script = startScript(
       "app'1",
@@ -164,6 +197,6 @@ describe("vercel() store", () => {
     );
     expect(script).toContain("bin=/data/bin/jazz-tools-2.0.0-alpha.60");
     expect(script).toContain("if [ ! -f /data/secrets.env ]");
-    expect(script).toContain(`server 'app'\\''1' --port 1625 --data-dir /data/store`);
+    expect(script).toContain(`app_id='app'\\''1'`);
   });
 });

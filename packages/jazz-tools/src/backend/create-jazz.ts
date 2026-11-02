@@ -574,7 +574,8 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         ? await openVercelCore({
             appId: options.appId,
             options: store.options,
-            openRemote: (target) => openRemoteCore(options.appId, { kind: "remote", ...target }),
+            openRemote: ({ appId, ...target }) =>
+              openRemoteCore(appId, { kind: "remote", ...target }),
           })
         : await openInProcessCore(options.appId, store);
 

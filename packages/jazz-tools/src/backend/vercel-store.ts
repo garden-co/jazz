@@ -18,8 +18,17 @@ import type {
 export const VERCEL_CORE_PORT = 1625;
 
 export interface VercelStoreOptions {
-  /** Sandbox name. Defaults to `jazz-<appId>-<VERCEL_ENV>`, so previews share one core. */
+  /**
+   * Sandbox name. Defaults to `jazz-<VERCEL_PROJECT_ID>-<VERCEL_ENV>`, so each
+   * project has one production and one preview core.
+   */
   name?: string;
+  /**
+   * The core's app id. Defaults to one the core generates on its Drive at
+   * first start and keeps, like its secrets. Set it only to keep the id of
+   * an existing app.
+   */
+  appId?: string;
   /** Sandbox region. Defaults to `iad1`. Fixed when the Sandbox is created. */
   region?: string;
   /** vCPUs for the core (2 GB of memory each). Defaults to 1. Fixed at creation. */
@@ -67,6 +76,8 @@ export interface SandboxHandle {
 
 /** The shape `createJazz` drives a core through (see `Core` in create-jazz.ts). */
 export interface VercelCore {
+  /** The app id the core runs as (see `VercelStoreOptions.appId`). */
+  readonly appId?: string;
   readonly serverUrl: string;
   readonly adminSecret: string;
   readonly backendSecret: string;
@@ -85,6 +96,7 @@ export interface VercelCore {
 
 /** A core reached at `url` with these secrets: `remote()`'s core. */
 export type OpenRemote = (target: {
+  appId: string;
   url: string;
   adminSecret: string;
   backendSecret: string;
@@ -128,7 +140,11 @@ async function healthy(base: string, timeoutMs: number, diag: Record<string, num
 }
 
 /** Install the server binary for `version` on the Drive, generate secrets once, run. */
-export function startScript(appId: string, version: string, tarballUrl: string): string {
+export function startScript(
+  appId: string | undefined,
+  version: string,
+  tarballUrl: string,
+): string {
   const q = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
   return `#!/bin/bash
 # Written by jazz-tools' vercel() store before each server start.
@@ -144,17 +160,19 @@ fi
 if [ ! -f /data/secrets.env ]; then
   umask 077
   secret() { head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='; }
-  printf 'JAZZ_ADMIN_SECRET=%s\\nJAZZ_BACKEND_SECRET=%s\\n' "$(secret)" "$(secret)" > /data/secrets.env.tmp
+  app_id=${appId ? q(appId) : "$(cat /proc/sys/kernel/random/uuid)"}
+  printf 'JAZZ_APP_ID=%s\\nJAZZ_ADMIN_SECRET=%s\\nJAZZ_BACKEND_SECRET=%s\\n' "$app_id" "$(secret)" "$(secret)" > /data/secrets.env.tmp
   mv /data/secrets.env.tmp /data/secrets.env
 fi
 set -a; . /data/secrets.env; set +a
 export NODE_ENV=production
 mkdir -p /data/store
-exec "$bin" server ${q(appId)} --port ${VERCEL_CORE_PORT} --data-dir /data/store
+exec "$bin" server "$JAZZ_APP_ID" --port ${VERCEL_CORE_PORT} --data-dir /data/store
 `;
 }
 
 function parseSecrets(text: string): {
+  appId: string;
   adminSecret: string;
   backendSecret: string;
 } {
@@ -166,8 +184,11 @@ function parseSecrets(text: string): {
   );
   const adminSecret = values.get("JAZZ_ADMIN_SECRET");
   const backendSecret = values.get("JAZZ_BACKEND_SECRET");
-  if (!adminSecret || !backendSecret) throw new Error("vercel(): the core's secrets are missing");
-  return { adminSecret, backendSecret };
+  const appId = values.get("JAZZ_APP_ID");
+  if (!appId || !adminSecret || !backendSecret) {
+    throw new Error("vercel(): the core's secrets are missing");
+  }
+  return { appId, adminSecret, backendSecret };
 }
 
 async function installedVersion(): Promise<string> {
@@ -178,7 +199,8 @@ async function installedVersion(): Promise<string> {
 }
 
 export interface OpenVercelCoreOptions {
-  appId: string;
+  /** Used when the store has no `appId` of its own. */
+  appId?: string;
   options: VercelStoreOptions;
   openRemote: OpenRemote;
   sdk?: SandboxSdk;
@@ -187,7 +209,8 @@ export interface OpenVercelCoreOptions {
 }
 
 export async function openVercelCore(params: OpenVercelCoreOptions): Promise<VercelCore> {
-  const { appId, options, openRemote } = params;
+  const { options, openRemote } = params;
+  const appId = options.appId ?? params.appId;
   const env = params.env ?? process.env;
   const sdk =
     params.sdk ??
@@ -198,7 +221,13 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   const version = params.version ?? (await installedVersion());
   const tarballUrl =
     options.serverTarballUrl ?? `https://registry.npmjs.org/jazz-tools/-/jazz-tools-${version}.tgz`;
-  const name = options.name ?? `jazz-${appId}-${env.VERCEL_ENV ?? "development"}`;
+  const project = options.credentials?.projectId ?? env.VERCEL_PROJECT_ID;
+  if (!options.name && !project) {
+    throw new Error(
+      "vercel(): VERCEL_PROJECT_ID is not set; enable system environment variables or pass a name",
+    );
+  }
+  const name = options.name ?? `jazz-${project}-${env.VERCEL_ENV ?? "development"}`;
   const creds = options.credentials ?? {};
   const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
   const script = Buffer.from(startScript(appId, version, tarballUrl));
@@ -317,7 +346,9 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     }
   };
 
-  let live: { sbx: SandboxHandle; base: string; core: VercelCore; checkedAt: number } | undefined;
+  let live:
+    | { sbx: SandboxHandle; base: string; appId: string; core: VercelCore; checkedAt: number }
+    | undefined;
   let pending: Promise<NonNullable<typeof live>> | undefined;
   let lastActivity = Date.now();
   let sockets = 0;
@@ -335,16 +366,26 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
         const secrets =
           live?.base === base
             ? {
+                appId: live.appId,
                 adminSecret: live.core.adminSecret,
                 backendSecret: live.core.backendSecret,
               }
             : parseSecrets(
                 (await sbx.readFileToBuffer({ path: "/data/secrets.env" }))?.toString("utf8") ?? "",
               );
+        if (appId && secrets.appId !== appId) {
+          throw new Error(`vercel(): core ${name} belongs to app ${secrets.appId}, not ${appId}`);
+        }
         live = {
           sbx,
           base,
-          core: openRemote({ url: base, ...secrets }),
+          appId: secrets.appId,
+          core: openRemote({
+            appId: secrets.appId,
+            url: base,
+            adminSecret: secrets.adminSecret,
+            backendSecret: secrets.backendSecret,
+          }),
           checkedAt: Date.now(),
         };
         return live;
@@ -381,6 +422,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   });
 
   return {
+    appId: first.appId,
     serverUrl,
     adminSecret: first.core.adminSecret,
     backendSecret: first.core.backendSecret,
