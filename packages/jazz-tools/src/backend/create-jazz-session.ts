@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { clientScope } from "../runtime/client-scope.js";
 import { admitBackendSecret } from "./admission.js";
 import {
   credentialedTransport,
@@ -59,7 +60,12 @@ export type JazzSessionConfig = Omit<
   | "adminSecret"
   | "serverUrl"
   | "webSocket"
+  | "appId"
 > & {
+  /** Leave out to act as a browser client, scoped by `serverUrl`. */
+  appId?: string;
+  /** The app id an existing local-first app's users were created under. */
+  scope?: string;
   app: BackendSchemaInput;
   permissions: NonNullable<BackendContextConfig["permissions"]>;
   serverUrl: string;
@@ -97,7 +103,9 @@ function backendNodeId(config: JazzSessionConfig): string {
   if (config.driver.type === "memory") return randomUUID();
   // Preserve the existing persistent backend node identity across this API migration.
   return formatUuidAt(
-    deterministicBytes(`${config.appId}:${config.env ?? "dev"}:${config.driver.dataPath}:node`),
+    deterministicBytes(
+      `${clientScope(config)}:${config.env ?? "dev"}:${config.driver.dataPath}:node`,
+    ),
     0,
   );
 }
@@ -147,7 +155,7 @@ class NodeUserRuntimeSource extends RuntimeSource {
       runtimeSchema,
       this.host.driver.type === "persistent"
         ? deterministicBytes(
-            `${this.host.appId}:${this.host.env ?? "dev"}:${this.host.driver.dataPath}.accounts/${scope}:node`,
+            `${clientScope(this.host)}:${this.host.env ?? "dev"}:${this.host.driver.dataPath}.accounts/${scope}:node`,
           )
         : uuidBytes(randomUUID()),
       authorBytesForSession(session),
@@ -164,7 +172,7 @@ class NodeUserRuntimeSource extends RuntimeSource {
         migrations,
       },
     );
-    const context: AppContext = { ...config, schema: runtimeSchema };
+    const context: AppContext = { ...config, appId: clientScope(config), schema: runtimeSchema };
     setTrustedReservedSession(context, trustedReservedSession);
     return RuntimeClient.connectWithRuntime(runtime, context, { onAuthFailure });
   }
@@ -217,11 +225,11 @@ export async function createJazzSession(
       "createJazzSession requires an explicit permissions bundle. Pass {} to deny all access.",
     );
   }
-  const registry = accountRegistryUrl(config.serverUrl, config.appId);
+  const registry = accountRegistryUrl(config.serverUrl, clientScope(config));
   // A memory backend handle's pooled node and, after a clean handoff, its clock.
   const memoryClocks = new WeakMap<AccountHandle, { node: Uint8Array; highWater?: bigint }>();
   const accounts = await prepareAccountManager({
-    appId: config.appId,
+    appId: clientScope(config),
     registry,
     store: config.store ?? memoryAccountStore(),
     fetch: transport?.fetch,
@@ -265,7 +273,7 @@ export async function createJazzSession(
         const source = new NodeUserRuntimeSource(config, account);
         const db = await createAccountDbWithRuntimeSource(
           {
-            appId: config.appId,
+            appId: clientScope(config),
             serverUrl: config.serverUrl,
             env: config.env,
             driver: { type: config.driver.type },

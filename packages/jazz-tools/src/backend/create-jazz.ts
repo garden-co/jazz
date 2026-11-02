@@ -6,6 +6,8 @@ import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
 import { registerInProcessTransport } from "../runtime/in-process-transport.js";
 import { accountAppId, localFirstAccountId } from "../accounts/local-first.js";
 import { LOCAL_FIRST_JWT_ISSUER, parseJwtPayload } from "../runtime/client-session.js";
+import { verifyLocalFirstToken } from "../runtime/local-first-token.js";
+import { endpointScope } from "../runtime/client-scope.js";
 import type {
   BrowserWebSocket,
   WebSocketConstructor,
@@ -163,6 +165,15 @@ export interface CreateJazzOptions {
   authenticate?: (request: Request) => JazzUser | null | Promise<JazzUser | null>;
   /** The path Jazz is mounted under. Defaults to `/jazz`. */
   basePath?: string;
+  /**
+   * The URL browsers reach Jazz at, when a proxy in front of this backend
+   * changes the host or path (e.g. pages call `https://app.example.com/api/jazz`
+   * and the proxy forwards to `/jazz` here). A browser client is scoped by the
+   * URL it uses, so its guests' proofs name that URL. Without this, Jazz
+   * accepts the page's own origin (or an `allowedOrigins` entry) and this
+   * request's Host, each under `basePath`.
+   */
+  publicUrl?: string | string[];
   /**
    * How long a browser's sync session lasts before `authenticate` is asked
    * again (the client reconnects on its own). Defaults to one hour.
@@ -713,6 +724,17 @@ function openRemoteCore(
  */
 export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   const basePath = (options.basePath ?? DEFAULT_BASE_PATH).replace(/\/+$/, "");
+  const publicUrls = [options.publicUrl ?? []].flat().map((value) => {
+    try {
+      // The same form a browser client scopes itself by (`clientScope`).
+      if (!/^(https?|wss?):\/\//.test(value)) throw new Error("relative");
+      return endpointScope(value);
+    } catch {
+      throw new Error(
+        `createJazz: publicUrl ${JSON.stringify(value)} is not an absolute URL like "https://app.example.com/jazz"`,
+      );
+    }
+  });
   const allowedOrigins = new Set(
     (options.allowedOrigins ?? []).map((origin) => {
       let parsed: string | undefined;
@@ -934,7 +956,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     if (request.method !== "POST") return new Response(null, { status: 405 });
     const user = await authenticate(request);
     if (!user) return new Response("signed_out", { status: 401 });
-    let body: { challenge?: unknown; proof?: unknown };
+    let body: { challenge?: unknown; proof?: unknown; audience?: unknown };
     try {
       body = (await request.json()) as typeof body;
     } catch {
@@ -949,14 +971,21 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     } catch {
       return new Response("invalid_local_first_proof", { status: 401 });
     }
-    // The guest's account follows from its key alone, as the core founds it.
-    const account = localFirstAccountId(options.appId, guest.subject);
+    // The guest's account follows from its key and the namespace it was
+    // founded in: this app's id, or one of this endpoint's URLs for an
+    // app-less client. Any other namespace is another app's guest.
+    const founding = linkAudience(request, body.audience);
+    if (!founding) return new Response("invalid_local_first_proof", { status: 401 });
+    const account = localFirstAccountId(founding.endpoint ?? options.appId, guest.subject);
     const userIs = async (expected: string) =>
       (await adminAccounts("resolve", { identity: identity(user.userId) })).account === expected;
     let guestRevoked = false;
     try {
       try {
-        await adminAccounts("found-local-first", { identity: guest });
+        await adminAccounts("found-local-first", {
+          identity: guest,
+          ...(founding.endpoint !== undefined ? { audience: founding.endpoint } : {}),
+        });
       } catch (error) {
         // A guest key an earlier link retired: only that link's own user
         // gets an answer (the retry of a link whose response was lost).
@@ -1033,8 +1062,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
   ): ClientSession {
     // The core socket opens once the prelude is admitted, with the access
-    // that admission needs: a vouched user's session is the backend's, a
-    // guest's is its own.
+    // that admission needs: a vouched user's session is the backend's, and
+    // so is the endpoint it vouches for on a guest's behalf; a guest signed
+    // for the app itself rides on its own token alone.
     let socket: CoreSocket | undefined;
     let ended = false;
     let userId: string | undefined;
@@ -1069,11 +1099,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       );
       expiry = setTimeout(end, Math.max(ttl, 0));
       (expiry as unknown as { unref?: () => void }).unref?.();
-      socket = core.openSocket(
-        headerPairs(request.headers),
-        onEvent,
-        admitted.userId === undefined && !admitted.trusted ? "session" : "backend",
-      );
+      socket = core.openSocket(headerPairs(request.headers), onEvent, admitted.access);
       return socket.send(admitted.prelude);
     };
     // Messages after the prelude wait for its admission, in order.
@@ -1113,6 +1139,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   ): Promise<{
     prelude: Uint8Array;
     userId: string | undefined;
+    access: BackendAccess;
     trusted: boolean;
     expiresAt?: number;
   } | null> {
@@ -1139,6 +1166,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       return {
         prelude: new TextEncoder().encode(JSON.stringify(rewritten)),
         userId: undefined,
+        access: "backend",
         trusted: true,
         expiresAt: client.expiresAt,
       };
@@ -1151,8 +1179,28 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       const localFirst =
         typeof token === "string" && parseJwtPayload(token)?.iss === LOCAL_FIRST_JWT_ISSUER;
       const alone = others.every((key) => parsed[key] == null && auth[key] == null);
+      if (!localFirst || !alone || parsed.local_first_audience != null) return null;
       // A guest has no user here: its session is bound to its own key.
-      return localFirst && alone && !client ? { prelude, userId: undefined, trusted: false } : null;
+      if (client) return null;
+      const audience = guestAudience(request, token);
+      if (!audience) return null;
+      if (audience.endpoint === undefined) {
+        return { prelude, userId: undefined, access: "session", trusted: false };
+      }
+      // Signed for this endpoint, which the core can't know: vouch for it.
+      const vouched = {
+        ...parsed,
+        local_first_audience: audience.endpoint,
+        auth: { ...auth, backend_secret: core.backendSecret },
+      };
+      // The backend's word on the endpoint needs backend access; the
+      // guest's own token still decides who it is.
+      return {
+        prelude: new TextEncoder().encode(JSON.stringify(vouched)),
+        userId: undefined,
+        access: "backend",
+        trusted: false,
+      };
     }
     const stated = auth.backend_session as { user_id?: unknown } | undefined;
     if (!stated || typeof stated !== "object") return null;
@@ -1166,6 +1214,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     return {
       prelude: new TextEncoder().encode(JSON.stringify(rewritten)),
       userId: user.userId,
+      access: "backend",
       trusted: false,
       expiresAt: client?.expiresAt,
     };
@@ -1282,6 +1331,13 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     return new Response(null, { status: 204 });
   }
 
+  /** Close codes a socket may send: 1005/1006/1015 only describe a close. */
+  function sendableCloseCode(code: number | undefined): number {
+    if (code === undefined || code === 1005) return 1000;
+    if (code === 1006 || code === 1015) return 1011;
+    return code;
+  }
+
   function acceptSocket(request: Request, ws: WsLikeSocket): void {
     if (!originAllowed(request)) {
       ws.close(1008, "origin not allowed");
@@ -1292,7 +1348,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       socket = openClientSession(request, (error, event) => {
         if (error) return ws.close(1011, error.message);
         if (event.kind === "message" && event.data) ws.send(event.data);
-        else if (event.kind === "close") ws.close(event.code ?? 1000, event.reason ?? "");
+        else if (event.kind === "close") {
+          ws.close(sendableCloseCode(event.code), event.reason ?? "");
+        }
       });
     } catch (error) {
       ws.close(1013, error instanceof Error ? error.message : String(error));
@@ -1365,6 +1423,97 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     return new Response(null, { status: response.status === 204 ? 204 : 502 });
   }
 
+  /**
+   * The endpoint URLs a browser may have named this backend by, as its client
+   * scope (see `clientScope`): the page's origin when it is one this backend
+   * serves, and this request's own host, each with `basePath`.
+   */
+  function endpointAudiences(request: Request): string[] {
+    if (publicUrls.length) return publicUrls;
+    const audiences = new Set<string>();
+    // Only hosts a forged header can't name: the Host the request reached
+    // (or the platform's request URL) and the configured allowed origins.
+    // X-Forwarded-Host is not trusted here; set `publicUrl` behind a proxy
+    // that rewrites the host or path.
+    const url = new URL(request.url);
+    const host = request.headers.get("host") || url.host;
+    const forwardedProto = request.headers
+      .get("x-forwarded-proto")
+      ?.split(",")[0]
+      ?.trim()
+      .toLowerCase();
+    const scheme = forwardedProto === "https" || url.protocol === "https:" ? "https" : "http";
+    const origin = request.headers.get("origin");
+    if (origin) {
+      try {
+        const parsed = new URL(origin);
+        if (allowedOrigins.has(parsed.origin) || parsed.host === host)
+          audiences.add(`${parsed.origin}${basePath}`);
+      } catch {
+        // Not an origin a page has.
+      }
+    }
+    try {
+      audiences.add(`${new URL(`${scheme}://${host}`).origin}${basePath}`);
+    } catch {
+      // A host header no URL takes.
+    }
+    return [...audiences];
+  }
+
+  const warnedAudiences = new Set<string>();
+  /** Say once per audience why a guest's proof was refused, so a proxy mismatch is visible. */
+  function warnUnknownAudience(token: string, accepted: string[], isAudience = false) {
+    const audience = isAudience ? token : parseJwtPayload(token)?.aud;
+    const named = typeof audience === "string" ? audience : JSON.stringify(audience);
+    if (warnedAudiences.has(named) || warnedAudiences.size > 100) return;
+    warnedAudiences.add(named);
+    console.warn(
+      `createJazz: refused a local-first guest whose proof is for ${named}; this endpoint accepts ${JSON.stringify([options.appId, ...accepted])}. If browsers reach Jazz through a proxy that changes the host or path, set publicUrl to the URL they use.`,
+    );
+  }
+
+  /**
+   * What a guest's local-first proof is for: this app (an app whose browser
+   * clients still name its id, or carry it as their `scope`), one of this
+   * endpoint's URLs, or neither (null).
+   */
+  function guestAudience(request: Request, token: string): { endpoint?: string } | null {
+    try {
+      verifyLocalFirstToken(token, options.appId);
+      return {};
+    } catch {
+      // Not this app's id; try the endpoint.
+    }
+    const endpoints = endpointAudiences(request);
+    for (const endpoint of endpoints) {
+      try {
+        verifyLocalFirstToken(token, endpoint);
+        return { endpoint };
+      } catch {
+        // Not this one.
+      }
+    }
+    warnUnknownAudience(token, endpoints);
+    return null;
+  }
+
+  /**
+   * The namespace a linking guest names for its account: this app (no
+   * audience, or the app's id), one of this endpoint's URLs, or neither (null).
+   */
+  function linkAudience(request: Request, audience: unknown): { endpoint?: string } | null {
+    // Tokens name their audience as given or as its app id (a UUID).
+    const names = (value: string) => audience === value || audience === accountAppId(value);
+    if (audience === undefined || (typeof audience === "string" && names(options.appId))) return {};
+    if (typeof audience !== "string") return null;
+    const endpoints = endpointAudiences(request);
+    const endpoint = endpoints.find(names);
+    if (endpoint !== undefined) return { endpoint };
+    warnUnknownAudience(audience, endpoints, true);
+    return null;
+  }
+
   /** The path below `basePath`, or null for a request Jazz doesn't serve. */
   function innerPath(request: Request): string | null {
     const { pathname } = new URL(request.url);
@@ -1430,10 +1579,12 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         ? Buffer.alloc(0)
         : Buffer.from(await request.arrayBuffer());
     const headers = headerPairs(request.headers);
+    // A browser names the app however its scope does; the core knows it by id.
+    const corePath = path.replace(/^\/apps\/[^/]+/, `/apps/${encodeURIComponent(options.appId)}`);
     return coreResponse(
       await core.handle(
         request.method,
-        path + url.search,
+        corePath + url.search,
         store.kind === "remote" || store.kind === "vercel"
           ? headers.filter(([name]) => REMOTE_FORWARDED_HEADERS.includes(name!.toLowerCase()))
           : headers,

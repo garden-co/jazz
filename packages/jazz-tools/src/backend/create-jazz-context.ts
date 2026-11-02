@@ -1,4 +1,5 @@
 import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
+import { clientScope } from "../runtime/client-scope.js";
 import { accountRegistryUrl } from "../accounts/context.js";
 import { NapiDb } from "jazz-napi";
 import type { JWK } from "jose";
@@ -252,7 +253,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     this.client = JazzClient.connectWithRuntime(
       this.runtime,
       {
-        appId: config.appId,
+        appId: clientScope(config),
         schema,
         serverUrl: config.serverUrl,
         env: config.env,

@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { createJazz, createJazzSession, memory, remote, sqlite, type Jazz } from "./index.js";
+import { localFirstAccountId } from "../accounts/local-first.js";
 
 const app = s.defineApp(
   {
@@ -220,6 +221,79 @@ describe("createJazz", () => {
     expect(probe.headers.get("x-jazz-stream")).toBeNull();
   }, 60_000);
 
+  it("links only a guest whose proof is for this app or this endpoint", async () => {
+    const appId = randomUUID();
+    const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const secret = generateSecret();
+    const link = async (audience: string, headers: Record<string, string> = {}) => {
+      const accounts = `${origin}/jazz/apps/${appId}/accounts`;
+      const user = { "x-test-user": `user-for-${audience}`, "content-type": "application/json" };
+      const { challenge } = (await (
+        await fetch(`${accounts}/backend-link/challenge`, { method: "POST", headers: user })
+      ).json()) as { challenge: string };
+      const response = await fetch(`${accounts}/backend-link`, {
+        method: "POST",
+        headers: { ...user, ...headers },
+        body: JSON.stringify({ challenge, proof: signChallenge(secret, challenge), audience }),
+      });
+      return response.status;
+    };
+
+    // Another app's backend replaying a guest's proof here gets nothing.
+    expect(await link("https://elsewhere.example/jazz")).toBe(401);
+    // Nor does naming that other endpoint in headers a client can forge.
+    const forged = { "x-forwarded-host": "elsewhere.example", "x-forwarded-proto": "https" };
+    expect(await link("https://elsewhere.example/jazz", forged)).toBe(401);
+    expect(
+      await link("https://elsewhere.example/jazz", {
+        ...forged,
+        origin: "https://elsewhere.example",
+      }),
+    ).toBe(401);
+    // This host over https is not the plain-http endpoint the test serves.
+    expect(await link(`${origin.replace("http:", "https:")}/jazz`)).toBe(401);
+    expect(await link(randomUUID())).toBe(401);
+    expect(await link(`${origin}/jazz`)).toBe(200);
+    // The same key, already founded under the endpoint, is not founded again.
+    expect(await link(appId)).toBe(409);
+  });
+
+  it("accepts guests of the public URL a proxy serves this endpoint at", async () => {
+    const appId = randomUUID();
+    const jazz = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+      publicUrl: "https://app.example.com/api/jazz/",
+    });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const secret = generateSecret();
+    const link = async (audience: string) => {
+      const accounts = `${origin}/jazz/apps/${appId}/accounts`;
+      const user = { "x-test-user": `user-for-${audience}`, "content-type": "application/json" };
+      const { challenge } = (await (
+        await fetch(`${accounts}/backend-link/challenge`, { method: "POST", headers: user })
+      ).json()) as { challenge: string };
+      return (
+        await fetch(`${accounts}/backend-link`, {
+          method: "POST",
+          headers: user,
+          body: JSON.stringify({ challenge, proof: signChallenge(secret, challenge), audience }),
+        })
+      ).status;
+    };
+    expect(await link(`${origin}/jazz`)).toBe(401);
+    expect(await link("https://app.example.com/api/jazz")).toBe(200);
+    await expect(
+      createJazz({ appId, app, permissions, store: memory(), authenticate, publicUrl: "/jazz" }),
+    ).rejects.toThrow("not an absolute URL");
+  });
+
   it("refuses sign-in and sync started by a page on another origin", async () => {
     const appId = randomUUID();
     const jazz = await createJazz({
@@ -306,11 +380,13 @@ describe("createJazz", () => {
   }, 60_000);
 
   it.each([
-    ["memory", "sockets"],
-    ["sqlite", "the HTTP stream"],
+    ["memory", "sockets", "names the app"],
+    ["sqlite", "the HTTP stream", "names the app"],
+    ["memory", "sockets", "is scoped by its endpoint"],
+    ["sqlite", "the HTTP stream", "is scoped by its endpoint"],
   ] as const)(
-    "keeps a local-first guest's account when it signs up (%s store, %s)",
-    async (kind, transport) => {
+    "keeps a local-first guest's account when it signs up (%s store, %s, the client %s)",
+    async (kind, transport, scoping) => {
       const appId = randomUUID();
       const dir = await mkdtemp(join(tmpdir(), "jazz-link-"));
       cleanups.push(() => rm(dir, { recursive: true, force: true }));
@@ -330,8 +406,10 @@ describe("createJazz", () => {
         });
       }
 
+      // A browser client names no app: the backend vouches for the endpoint
+      // its guest's proof is for.
       const session = await createJazzSession({
-        appId,
+        ...(scoping === "names the app" ? { appId } : {}),
         app,
         permissions,
         serverUrl: `${origin}/jazz`,
@@ -341,6 +419,12 @@ describe("createJazz", () => {
       cleanups.push(() => session.close());
       const guest = session.getSnapshot().client!;
       const account = guest.session!.user!.account;
+      expect(account).toBe(
+        localFirstAccountId(
+          scoping === "names the app" ? appId : `${origin}/jazz`,
+          guest.session!.user!.identity.subject,
+        ),
+      );
       const row = await guest.db
         .insert(app.todos, { title: "made as a guest", owner: account })
         .wait({ tier: "global" });
@@ -720,6 +804,24 @@ describe("createJazz", () => {
       new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
     );
     expect(await asBob.all(app.todos)).toEqual([]);
+
+    // A guest whose client names no app: the backend vouches for the
+    // endpoint its proof is for, and the remote core founds its account.
+    const guestSession = await createJazzSession({
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "local-first",
+    });
+    cleanups.push(() => guestSession.close());
+    const guest = guestSession.getSnapshot().client!;
+    const made = await guest.db
+      .insert(app.todos, { title: "as a guest", owner: guest.session!.user!.account })
+      .wait({ tier: "global" });
+    expect((await jazz.db.all(app.todos.where({ id: made.id }))).map((todo) => todo.title)).toEqual(
+      ["as a guest"],
+    );
   }, 60_000);
 
   it("presents the backend credential on every request and socket to a remote core", async () => {
