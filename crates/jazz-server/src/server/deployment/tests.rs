@@ -698,3 +698,82 @@ async fn deploy_revert_then_new_branch_reopens_and_rejects_stored_sibling() {
     deploy_ok(&router, request(&b, &[], vec![])).await;
     reopened.shutdown().await;
 }
+
+/// A deployment that activates nothing publishes its permissions as a
+/// bundle, by content: the same bundle again (a rollback) changes nothing,
+/// and the current permissions stay as they were.
+#[tokio::test]
+async fn publish_only_deployments_publish_content_addressed_bundles() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let base = schema(&[]);
+    let next = schema(&["body"]);
+    let with = |mut request: Value, read: PolicyExpr| {
+        request["activate"] = json!(false);
+        request["permissions"] = serde_json::to_value(HashMap::from([(
+            TableName::new("notes"),
+            TablePolicies::new().with_select(read),
+        )]))
+        .unwrap();
+        request
+    };
+    let (open, closed) = {
+        let server = builder(Some(&path)).build().await.unwrap();
+        let router = create_router(server.state.clone());
+        let first = deploy_ok(
+            &router,
+            with(request(&base, &[&base], vec![]), PolicyExpr::True),
+        )
+        .await;
+        assert_eq!(first["changed"], true);
+        let open = first["bundle"].as_str().unwrap().to_owned();
+        let again = deploy_ok(&router, with(request(&base, &[], vec![]), PolicyExpr::True)).await;
+        assert_eq!(again["changed"], false);
+        assert_eq!(again["bundle"], json!(open));
+
+        // A newer deployment with another schema and policies.
+        let upgraded = deploy_ok(
+            &router,
+            with(
+                request(&next, &[&next], vec![migration(&base, &next, &["body"])]),
+                PolicyExpr::False,
+            ),
+        )
+        .await;
+        assert_eq!(upgraded["changed"], true);
+        let closed = upgraded["bundle"].as_str().unwrap().to_owned();
+        assert_ne!(closed, open);
+
+        // Rolling back to the first deployment publishes its bundle again.
+        let rollback =
+            deploy_ok(&router, with(request(&base, &[], vec![]), PolicyExpr::True)).await;
+        assert_eq!(rollback["changed"], false, "{rollback}");
+        assert_eq!(rollback["bundle"], json!(open));
+
+        let head = http(&router, "GET", "/permissions", Value::Null).await.1;
+        assert_eq!(head["head"], Value::Null, "nothing was activated: {head}");
+        server.shutdown().await;
+        (open, closed)
+    };
+    // Both bundles, and both write schemas, outlive a restart.
+    let server = builder(Some(&path)).build().await.unwrap();
+    let rows = server.state.runtime().unwrap().catalogue().await.unwrap();
+    let mut bundles = rows
+        .bundles
+        .iter()
+        .map(|bundle| bundle.id.to_hex())
+        .collect::<Vec<_>>();
+    bundles.sort();
+    let mut expected = vec![open, closed];
+    expected.sort();
+    assert_eq!(bundles, expected);
+    assert!(
+        rows.schemas
+            .iter()
+            .filter(|schema| schema.version.is_some())
+            .count()
+            >= 2,
+        "the upgraded write schema is admitted"
+    );
+    server.shutdown().await;
+}

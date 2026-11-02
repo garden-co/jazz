@@ -268,7 +268,7 @@ impl Inner {
         let mut cells = Vec::with_capacity(2);
         for at in [from, to] {
             if let Some(author) = reader
-                && !self.check_version(t, row, &[], at, author, Operation::Select)?
+                && !self.check_version(&self.schema, t, row, &[], at, author, Operation::Select)?
             {
                 return Err(Error::new(
                     ErrorCode::NotObserved,

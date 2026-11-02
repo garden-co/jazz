@@ -824,6 +824,63 @@ describe("createJazz", () => {
     );
   }, 60_000);
 
+  it("serves each deployment's sessions by its own permissions, side by side", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const store = remote({ url: core.url, secret: core.adminSecret });
+    const noInserts = s.definePermissions(app, ({ policy, session }) => {
+      policy.todos.allowRead.where({ owner: session.user.account });
+      policy.todos.allowInsert.never();
+      policy.todos.allowUpdate.never();
+      policy.todos.allowDelete.never();
+    });
+    // The current deployment, then a newer one that boots last: neither
+    // takes over the other's sessions.
+    const current = await createJazz({ appId, app, permissions, store, authenticate });
+    cleanups.push(() => current.close());
+    const newer = await createJazz({ appId, app, permissions: noInserts, store, authenticate });
+    cleanups.push(() => newer.close());
+    const [onCurrent, onNewer] = [
+      await serve(current, { sockets: true }),
+      await serve(newer, { sockets: true }),
+    ];
+
+    const alice = await userSession(appId, onCurrent, "alice");
+    const row = await alice.db
+      .insert(app.todos, {
+        title: "by the current deployment",
+        owner: alice.session!.user!.account,
+      })
+      .wait({ tier: "global" });
+    // The browser's own permissions allow the insert; the core refuses it
+    // by the newer deployment's.
+    const bob = await userSession(appId, onNewer, "bob");
+    await expect(
+      bob.db
+        .insert(app.todos, { title: "by the newer deployment", owner: bob.session!.user!.account })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
+    // The backend's own scoped writes too.
+    const asBob = await newer.forRequest(
+      new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
+    );
+    expect(await asBob.all(app.todos)).toEqual([]);
+
+    // Rolling back: the current deployment boots again, and serves as before.
+    const rolledBack = await createJazz({ appId, app, permissions, store, authenticate });
+    cleanups.push(() => rolledBack.close());
+    const asAlice = await rolledBack.forRequest(
+      new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
+    );
+    const again = await asAlice
+      .insert(app.todos, { title: "after the rollback", owner: alice.session!.user!.account })
+      .wait({ tier: "global" });
+    expect((await rolledBack.db.all(app.todos)).map((todo) => todo.id).sort()).toEqual(
+      [row.id, again.id].sort(),
+    );
+  }, 60_000);
+
   it("presents the backend credential on every request and socket to a remote core", async () => {
     const appId = randomUUID();
     const core = await startLocalJazzServer({ appId, inMemory: true });

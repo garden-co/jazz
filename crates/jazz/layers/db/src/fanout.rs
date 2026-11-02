@@ -503,10 +503,14 @@ impl Inner {
             }
         }
         if let Some(author) = identity {
+            let policies = prepared
+                .schema
+                .as_ref()
+                .map_or(&*self.owner, |schema| schema.policy_schema());
             for table in tables.clone() {
                 // Internal tables (history, branches) carry no policy.
-                if self.owner.by_stored(&table).is_some() {
-                    tables.extend(self.read_policy_tables(&table, author)?);
+                if policies.by_stored(&table).is_some() {
+                    tables.extend(self.read_policy_tables(policies, &table, author)?);
                 }
             }
         }

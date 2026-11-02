@@ -242,6 +242,11 @@ export interface DeploymentArtifacts {
   schemas: Array<{ hash: string; schema: WasmSchema }>;
   migrations: Array<{ fromHash: string; toHash: string; forward: PublishedTableLens[] }>;
   permissions: CompiledPermissionsMap;
+  /**
+   * Make the target and its permissions current (the default), or only
+   * publish them as a bundle that sessions are pinned to (createJazz).
+   */
+  activate?: boolean;
 }
 
 export interface DeploymentRequest extends Omit<DeploymentArtifacts, "schemas"> {
@@ -254,6 +259,8 @@ export interface DeploymentResponse {
     schemas: string[];
     migrations: Array<{ fromHash: string; toHash: string }>;
   };
+  /** The published bundle's id, for a deployment that activates nothing. */
+  bundle?: string;
 }
 
 export class DeploymentError extends Error {
@@ -285,6 +292,7 @@ export async function publishDeployment(
         schemas: options.schemas.map(({ hash, schema }) => ({ hash, schema: { tables: schema } })),
         migrations: options.migrations,
         permissions: normalizePermissionsForWasm(options.permissions),
+        ...(options.activate === false ? { activate: false } : {}),
       },
       runtimeSchemaJsonReplacer,
     ),
