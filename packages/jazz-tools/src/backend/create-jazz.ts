@@ -1,6 +1,4 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
@@ -356,12 +354,8 @@ async function openInProcessCore(
 ): Promise<Core> {
   const backendSecret = randomBytes(32).toString("base64url");
   const adminSecret = randomBytes(32).toString("base64url");
-  let releaseLock = async () => {};
-  if (store.kind === "sqlite") {
-    refuseServerlessDisk(store.path);
-    await mkdir(store.path, { recursive: true });
-    releaseLock = await lockDirectory(store.path);
-  }
+  // The core holds `<path>/jazz.lock` with an OS lock while it's open.
+  if (store.kind === "sqlite") refuseServerlessDisk(store.path);
   const core = await JazzCore.open({
     appId,
     backendSecret,
@@ -395,48 +389,8 @@ async function openInProcessCore(
     async close() {
       unregister();
       await core.close();
-      await releaseLock();
     },
   };
-}
-
-/**
- * Hold `dir` for this process: two cores on one sqlite directory (a dev
- * server's hot reload without a cached instance, cluster mode, a rolling
- * deploy on one disk) would each believe they own its data. A lock left by
- * a process that has exited is taken over.
- */
-async function lockDirectory(dir: string): Promise<() => Promise<void>> {
-  const lock = join(dir, "jazz.lock");
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      await writeFile(lock, String(process.pid), { flag: "wx" });
-      return async () => {
-        await unlink(lock).catch(() => undefined);
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-    const holder = Number((await readFile(lock, "utf8").catch(() => "")).trim());
-    if (Number.isInteger(holder) && holder > 0 && processAlive(holder)) {
-      throw new Error(
-        `sqlite(): ${dir} is already open in ${holder === process.pid ? "this process" : `process ${holder}`}. ` +
-          "One core per directory: create Jazz once and reuse it (cache it on globalThis across hot reloads), " +
-          "and give each process its own directory or use remote().",
-      );
-    }
-    await unlink(lock).catch(() => undefined);
-  }
-  throw new Error(`sqlite(): could not lock ${dir}`);
-}
-
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
 }
 
 /**
@@ -926,6 +880,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
    * client, which holds no ambient cookie) passes. The backend's own origin
    * is the host the request was sent to, as a proxy forwards it.
    */
+  /** Set by attach(): this process upgrades sockets on its own server. */
+  let upgradesSockets = false;
+
   function originAllowed(request: Request): boolean {
     const origin = request.headers.get("origin");
     if (origin === null) {
@@ -986,9 +943,14 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       return new Response(null, { status: 405 });
     }
     if (path.endsWith("/ws")) {
-      // A socket upgrade this host couldn't perform. The browser client
-      // switches to the HTTP stream when it sees this.
-      // The header marks a createJazz endpoint, which serves the stream.
+      // A plain request for the socket path: the browser client asks this
+      // after a socket failed before it opened. Where this host upgrades
+      // sockets (attach(), or Vercel), that failure was transient (a
+      // restart, a draining instance) and the client should retry the
+      // socket. Only where it can't does the marker send it to the stream.
+      if (upgradesSockets || process.env.VERCEL) {
+        return new Response("Upgrade to a WebSocket", { status: 426 });
+      }
       return new Response("WebSocket upgrade not available here; use the HTTP stream", {
         status: 426,
         headers: { [STREAM_AVAILABLE_HEADER]: "1" },
@@ -1085,6 +1047,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
 
   async function attach(server: Server): Promise<void> {
+    upgradesSockets = true;
     const { WebSocketServer } = (await import("ws" as string)) as {
       WebSocketServer: new (options: { noServer: true; maxPayload: number }) => {
         handleUpgrade(

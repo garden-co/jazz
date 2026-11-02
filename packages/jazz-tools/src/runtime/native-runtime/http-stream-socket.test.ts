@@ -98,10 +98,16 @@ describe("same-origin socket fallback", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
         throw new TypeError("network down");
       }),
     );
     const Socket = sameOriginWebSocketConstructor(failingNative());
-    expect(await outcome(new Socket("ws://down.test/jazz/apps/a1/ws"))).toBe("closed");
+    const socket = new Socket("ws://down.test/jazz/apps/a1/ws");
+    const result = outcome(socket);
+    // The native socket has failed, but while the probe runs it's still connecting.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(socket.readyState).toBe(0);
+    expect(await result).toBe("closed");
   });
 });
