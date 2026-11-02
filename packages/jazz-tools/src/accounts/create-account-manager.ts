@@ -3,7 +3,6 @@ import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
 import type { RuntimeSourcesConfig } from "../runtime/context.js";
 import { accountRegistryUrl } from "./context.js";
 import { prepareAccountManager, type AccountStore } from "./persistence.js";
-import { isBrowserHostRuntime } from "./browser-host.js";
 
 export interface AccountManagerConfig {
   appId: string;
@@ -21,7 +20,6 @@ export interface AccountManagerConfig {
 /** Prepare crypto and restore selection; createLocalFirst() is synchronous afterward. */
 export async function createAccountManager(config: AccountManagerConfig) {
   const registry = accountRegistryUrl(config.serverUrl, config.appId);
-  const browserHost = isBrowserHostRuntime();
   const source = new DefaultRuntimeSource();
   await source.load({ appId: config.appId, runtimeSources: config.runtimeSources });
   const store = config.store ?? browserAccountStore(registry, config.env ?? "dev");
@@ -29,11 +27,6 @@ export async function createAccountManager(config: AccountManagerConfig) {
     appId: config.appId,
     registry,
     store,
-    // Only the browser's own selection store, in an actual browser, reopens a
-    // retained account before the provider answers. A host-supplied store
-    // (Node, SSR, tests) or a non-browser runtime with browser-like globals
-    // keeps the ordinary per-login transition.
-    retainAccountAssignment: config.store === undefined && browserHost,
     mintToken(secret, audience) {
       return source.mintLocalFirstToken({
         secret: authSecretSeedForMinting(secret),

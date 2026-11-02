@@ -8,8 +8,7 @@ import { jazzTheme } from "@garden-co/design/jazz";
 import { betterAuth, JazzProvider } from "jazz-tools/react";
 import type { ReactNode } from "react";
 import { authClient } from "@/src/lib/auth-client";
-import { jazzAppId, jazzServerUrl } from "@/src/lib/config";
-import { jazzEnv } from "@/src/lib/jazz-env";
+import { jazzAppId } from "@/src/lib/config";
 import { Console } from "./console";
 import { Loading } from "./loading";
 import { SignIn } from "./sign-in";
@@ -21,8 +20,7 @@ export function Providers({ children }: { children: ReactNode }) {
     <Theme theme={jazzTheme} mode="system">
       <JazzProvider
         appId={jazzAppId}
-        serverUrl={jazzServerUrl}
-        env={jazzEnv}
+        serverUrl="/jazz"
         auth={jazzAuth}
         signedOut={<SignIn />}
         loading={<Loading />}

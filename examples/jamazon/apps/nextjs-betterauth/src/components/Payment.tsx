@@ -14,7 +14,6 @@ import type { Stripe } from "@stripe/stripe-js";
 import { loadStripe } from "@stripe/stripe-js/pure";
 import { useState } from "react";
 import type { Order, Payment as PaymentRow } from "@/schema";
-import { requireBetterAuthToken } from "@/src/lib/auth-client";
 import { formatMoney } from "@/src/store/pricing";
 
 let stripePromise: Promise<Stripe | null> | undefined;
@@ -65,7 +64,6 @@ async function settle(orderId: string, body: object): Promise<void> {
     credentials: "same-origin",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${await requireBetterAuthToken()}`,
     },
     body: JSON.stringify(body),
   });

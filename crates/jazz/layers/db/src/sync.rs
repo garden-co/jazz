@@ -5411,9 +5411,17 @@ impl Inner {
     }
 
     /// Whether `identity` may commit as `node`. A node belongs to the
-    /// identity that first commits as it: commits are deduplicated by
-    /// (node, tx), so another identity writing as that node could claim its
-    /// transactions before it sends them.
+    /// principal that first commits as it: commits are deduplicated by
+    /// (node, tx), so another principal committing as that node could claim
+    /// its transactions before it sends them, and builds on its commits
+    /// under its own claims.
+    ///
+    /// One hand-over is allowed: a local-first guest that signs up keeps its
+    /// account and its store, and so its node, and goes on writing under the
+    /// principal the app's backend names. The first commit as a guest's node
+    /// by another principal of the same account takes the node over, and
+    /// from then on only that principal writes as it; the guest's key no
+    /// longer does.
     fn claim_node(&self, node: [u8; 16], identity: &AuthorSubject) -> Result<bool, Error> {
         let author = self.author_code(&author_key(identity))?;
         let code = self.node_code(node)?;
@@ -5428,7 +5436,44 @@ impl Inner {
                 r.get(0)
             })
             .map_err(storage)?;
-        Ok(owner == author)
+        if owner == author {
+            return Ok(true);
+        }
+        if !self.signs_up_from(owner, identity)? {
+            return Ok(false);
+        }
+        // Only the owner we read is handed over: if the node changed hands in
+        // between, nothing is updated and the caller doesn't get it.
+        let handed_over = self
+            .exec(
+                "UPDATE _jazz_nodes SET author = ?2 WHERE n = ?1 AND author = ?3",
+                rusqlite::params![code, author, owner],
+            )
+            .map_err(storage)?;
+        Ok(handed_over == 1)
+    }
+
+    /// Whether `identity` is a signed-up guest taking over a node of its
+    /// own account's local-first principal (author code `owner`).
+    fn signs_up_from(&self, owner: i64, identity: &AuthorSubject) -> Result<bool, Error> {
+        let Some(account) = identity.account_id() else {
+            return Ok(false);
+        };
+        if account == jazz_types::account_registry::SYSTEM_ACCOUNT_ID
+            || identity.principal_parts().0 == jazz_types::identity::LOCAL_FIRST_ISSUER
+        {
+            return Ok(false);
+        }
+        match self.conn.cached_row(
+            "SELECT account, issuer FROM _jazz_authors WHERE n = ?1",
+            [owner],
+            |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?)),
+        ) {
+            Ok((stored, issuer)) => Ok(stored.as_slice() == account.0.as_bytes().as_slice()
+                && issuer == jazz_types::identity::LOCAL_FIRST_ISSUER),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(error) => Err(storage(error)),
+        }
     }
 
     /// Whether `node` is one `identity` writes as (see [`Inner::claim_node`]),

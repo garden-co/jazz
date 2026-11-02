@@ -2,75 +2,25 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
+// A Better Auth client with no session: the real JazzProvider and its Better
+// Auth bridge run against it. Signing in is through the backend, so a
+// signed-in listener is covered by the live app and the SDK's own tests.
 const auth = vi.hoisted(() => ({
-  session: {
-    data: { session: { id: "better-auth-session" }, user: { id: "better-auth-user" } },
-    isPending: false,
-  },
-  token: vi.fn(
-    async () =>
-      `header.${btoa(JSON.stringify({ iss: "https://auth.example", sub: "better-auth-user" }))}.signature`,
-  ),
   signIn: vi.fn(),
-  accounts: undefined as { logout(): void } | undefined,
-  prepareError: undefined as Error | undefined,
+  signUp: vi.fn(),
 }));
 
-vi.mock("../../src/lib/auth-client", () => ({
-  authClient: {
-    useSession: () => auth.session,
-    signIn: { email: auth.signIn },
-    signUp: { email: vi.fn() },
-  },
-  getJwtFromBetterAuth: auth.token,
-}));
-
-vi.mock("../../src/lib/accounts", async () => {
-  const { createAccountManagerWithRuntime } =
-    await import("../../../../../../packages/jazz-tools/src/accounts/enrollment.js");
-  const { accountRegistryUrl } =
-    await import("../../../../../../packages/jazz-tools/src/accounts/context.js");
+vi.mock("../../src/lib/auth-client", () => {
+  const state = { data: null, isPending: false };
   return {
-    prepareAccounts: async (appId: string, serverUrl: string) => {
-      if (auth.prepareError) throw auth.prepareError;
-      return (auth.accounts ??= createAccountManagerWithRuntime({
-        registry: accountRegistryUrl(
-          serverUrl || "https://core.example",
-          appId || "record-player-test",
-        ),
-        localFirst: {
-          create: () => {
-            throw new Error("not used");
-          },
-        },
-        fetch: (async () =>
-          new Response(
-            JSON.stringify({
-              account: "00000000-0000-4000-8000-000000000001",
-              identity: { issuer: "https://auth.example", subject: "better-auth-user" },
-            }),
-          ) as Response) as typeof fetch,
-      }));
+    authClient: {
+      $store: { atoms: { session: { get: () => state, subscribe: () => () => {} } } },
+      signOut: async () => ({}),
+      signIn: { email: auth.signIn },
+      signUp: { email: auth.signUp },
     },
   };
 });
-
-vi.mock("jazz-tools/react", () => ({
-  createJazzClient: async ({ account }: { account: { id: string } }) => ({
-    account,
-    shutdown: vi.fn(),
-  }),
-  JazzClientProvider: ({
-    children,
-    client,
-  }: {
-    children: React.ReactNode;
-    client: { account: { id: string } };
-  }) => <div data-jazz-account={client.account.id}>{children}</div>,
-  useDb: () => ({ insert: vi.fn() }),
-  useAll: () => ({ data: [] }),
-  useSession: () => ({ user: { account: "00000000-0000-4000-8000-000000000001" } }),
-}));
 
 import { RecordPlayerClient } from "../../app/record-player-client";
 import { RecordPlayerProvider } from "../../app/record-player-provider";
@@ -84,15 +34,11 @@ async function waitFor(check: () => boolean, message: string): Promise<void> {
   throw new Error(message);
 }
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
-    resolve = next;
-  });
-  return { promise, resolve };
-}
+const frame = (content: React.ReactNode, signedIn: boolean) => (
+  <div data-signed-in={String(signedIn)}>{content}</div>
+);
 
-describe("RecordPlayer Better Auth bridge", () => {
+describe("RecordPlayer sign-in", () => {
   let root: Root | undefined;
   let container: HTMLDivElement | undefined;
 
@@ -101,161 +47,54 @@ describe("RecordPlayer Better Auth bridge", () => {
     container?.remove();
     root = undefined;
     container = undefined;
-    auth.session = {
-      data: { session: { id: "better-auth-session" }, user: { id: "better-auth-user" } },
-      isPending: false,
-    };
-    auth.token.mockClear();
     auth.signIn.mockReset();
-    auth.prepareError = undefined;
-    auth.accounts?.logout();
-    auth.accounts = undefined;
-    vi.unstubAllGlobals();
+    auth.signUp.mockReset();
   });
 
-  it("mounts the Jazz query surface after Better Auth supplies a token", async () => {
+  async function render() {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
-
     await act(async () => {
       root?.render(
-        <RecordPlayerProvider>
+        <RecordPlayerProvider frame={frame}>
           <RecordPlayerClient />
         </RecordPlayerProvider>,
       );
     });
-
     await waitFor(
-      () =>
-        container?.querySelector("[data-jazz-account='00000000-0000-4000-8000-000000000001']") !==
-        null,
-      "expected the authenticated Jazz provider to mount",
+      () => container?.textContent?.includes("Sign in to RecordPlayer") ?? false,
+      "expected the sign-in form",
     );
-    expect(container.querySelector("[data-testid='record-player']")).not.toBeNull();
+    return container;
+  }
+
+  it("shows sign-in, not the library, before Better Auth has a session", async () => {
+    const view = await render();
+    expect(view.querySelector("[data-testid='record-player']")).toBeNull();
+    expect(view.querySelector("[data-signed-in='false']")).not.toBeNull();
   });
 
-  it("keeps Jazz and its query surface unmounted until Better Auth supplies a token", async () => {
-    const token = deferred<string>();
-    auth.token.mockImplementationOnce(() => token.promise);
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-
-    await act(async () => {
-      root?.render(
-        <RecordPlayerProvider>
-          <RecordPlayerClient />
-        </RecordPlayerProvider>,
-      );
-    });
-
-    await waitFor(() => auth.token.mock.calls.length === 1, "expected token request to start");
-    expect(container.querySelector("[data-jazz-account]")).toBeNull();
-    expect(container.querySelector("button")).toBeNull();
-    expect(container.textContent).toContain("Connecting RecordPlayer");
-
-    await act(async () => {
-      token.resolve(
-        `header.${btoa(JSON.stringify({ iss: "https://auth.example", sub: "better-auth-user" }))}.signature`,
-      );
-      await token.promise;
-    });
-
-    await waitFor(
-      () =>
-        container?.querySelector("[data-jazz-account='00000000-0000-4000-8000-000000000001']") !==
-        null,
-      "expected Jazz to mount after token acquisition",
+  it("signs up and in only through Better Auth: Jazz asks the backend afterwards", async () => {
+    auth.signUp.mockResolvedValueOnce({ data: {} });
+    const view = await render();
+    const create = [...view.querySelectorAll("button")].find(
+      (button) => button.textContent === "Create account",
+    )!;
+    await act(async () => create.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(auth.signUp).toHaveBeenCalledWith(
+      expect.objectContaining({ email: "listener@example.com" }),
     );
-    expect(container.querySelector("[data-testid='record-player']")).not.toBeNull();
-  });
-
-  it("does not mount the Jazz query surface before Better Auth has a session", async () => {
-    auth.session = { data: null, isPending: false };
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-
-    await act(async () => {
-      root?.render(
-        <RecordPlayerProvider>
-          <RecordPlayerClient />
-        </RecordPlayerProvider>,
-      );
-    });
-
-    expect(container.querySelector("[data-jazz-account]")).toBeNull();
-    expect(container.textContent).toContain("Sign in to RecordPlayer");
-  });
-
-  it("surfaces a missing token and retries rather than connecting forever", async () => {
-    auth.token
-      .mockImplementationOnce(async () => null)
-      .mockImplementationOnce(
-        async () =>
-          `header.${btoa(JSON.stringify({ iss: "https://auth.example", sub: "better-auth-user" }))}.signature`,
-      );
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-
-    await act(async () => {
-      root?.render(
-        <RecordPlayerProvider>
-          <RecordPlayerClient />
-        </RecordPlayerProvider>,
-      );
-    });
-
-    await waitFor(
-      () =>
-        container?.textContent?.includes("Better Auth did not provide a Jazz session token.") ??
-        false,
-      "expected a missing-token error instead of a permanent connecting state",
-    );
-    await act(async () => {
-      container?.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    await waitFor(
-      () =>
-        container?.querySelector("[data-jazz-account='00000000-0000-4000-8000-000000000001']") !==
-        null,
-      "expected retry to mount Jazz after a token becomes available",
-    );
-  });
-
-  it("surfaces an account-manager startup failure and retries it", async () => {
-    auth.prepareError = new Error("registry unavailable");
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-    await act(async () => root?.render(<RecordPlayerProvider>rooms</RecordPlayerProvider>));
-    await waitFor(
-      () => container?.textContent?.includes("registry unavailable") ?? false,
-      "expected startup error",
-    );
-    auth.prepareError = undefined;
-    await act(async () =>
-      container?.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
-    );
-    await waitFor(
-      () => container?.querySelector("[data-jazz-account]") !== null,
-      "expected startup retry to connect",
-    );
+    expect(auth.signIn).not.toHaveBeenCalled();
   });
 
   it("clears sign-in pending state when Better Auth rejects", async () => {
-    auth.session = { data: null, isPending: false };
     auth.signIn.mockRejectedValueOnce(new Error("auth offline"));
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-    await act(async () => root?.render(<RecordPlayerProvider>rooms</RecordPlayerProvider>));
-    const signIn = container.querySelector("button") as HTMLButtonElement;
+    const view = await render();
+    const signIn = view.querySelector("button[type='submit']") as HTMLButtonElement;
     await act(async () => signIn.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     await waitFor(
-      () => container?.textContent?.includes("auth offline") ?? false,
+      () => view.textContent?.includes("auth offline") ?? false,
       "expected auth rejection",
     );
     expect(signIn.disabled).toBe(false);

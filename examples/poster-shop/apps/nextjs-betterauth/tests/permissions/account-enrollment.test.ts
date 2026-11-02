@@ -10,14 +10,14 @@ import {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("PosterShop studio preparation", () => {
-  it("passes the admitted bearer to bootstrap", async () => {
+  it("bootstraps with the session cookie only, carrying no token", async () => {
     const request = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
     vi.stubGlobal("fetch", request);
-    await bootstrapPersonalCanvas("admitted-jwt");
-    expect(request).toHaveBeenCalledWith(
-      "/api/bootstrap",
-      expect.objectContaining({ headers: { authorization: "Bearer admitted-jwt" } }),
-    );
+    await bootstrapPersonalCanvas();
+    expect(request).toHaveBeenCalledWith("/api/bootstrap", {
+      method: "POST",
+      credentials: "same-origin",
+    });
   });
 
   it("keeps invite tokens in the fragment and the request body only", async () => {
@@ -30,7 +30,7 @@ describe("PosterShop studio preparation", () => {
 
     const request = vi.fn().mockResolvedValue(Response.json({ ok: true }));
     vi.stubGlobal("fetch", request);
-    await joinCanvasWithInvite("jwt", invite);
+    await joinCanvasWithInvite(invite);
     const [url, init] = request.mock.calls[0]!;
     expect(url).toBe("/api/join");
     expect(JSON.parse(init.body)).toEqual(invite);
@@ -39,10 +39,9 @@ describe("PosterShop studio preparation", () => {
   it("shares one in-flight preparation between StrictMode mounts", async () => {
     const request = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
     vi.stubGlobal("fetch", request);
-    const getToken = vi.fn().mockResolvedValue("jwt");
     const [first, second] = await Promise.all([
-      prepareStudio("user-1", getToken, null),
-      prepareStudio("user-1", getToken, null),
+      prepareStudio("user-1", null),
+      prepareStudio("user-1", null),
     ]);
     expect(first).toEqual({ ok: true, joinedCanvasId: null, inviteRejected: false });
     expect(second).toBe(first);
@@ -57,7 +56,7 @@ describe("PosterShop studio preparation", () => {
         : Response.json({ ok: true }),
     );
     vi.stubGlobal("fetch", request);
-    const result = await prepareStudio("user-2", async () => "jwt", invite);
+    const result = await prepareStudio("user-2", invite);
     expect(result).toEqual({ ok: true, joinedCanvasId: null, inviteRejected: true });
   });
 
@@ -71,6 +70,6 @@ describe("PosterShop studio preparation", () => {
           : Response.json({ ok: true }),
       ),
     );
-    expect(await prepareStudio("user-3", async () => "jwt", invite)).toEqual({ ok: false });
+    expect(await prepareStudio("user-3", invite)).toEqual({ ok: false });
   });
 });

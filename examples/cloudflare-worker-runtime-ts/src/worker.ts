@@ -14,7 +14,7 @@ function json(body: unknown, status = 200): Response {
 }
 
 // This smoke example deliberately has one disposable account per request.
-// Production request handlers should loginJWT against their core registry.
+// Production request handlers use createJazz and jazz.forRequest(request).
 async function openRequestDb(origin: string): Promise<Db> {
   let stored: string | null = null;
   const store: AccountStore = {

@@ -191,6 +191,22 @@ describe("createJazz", () => {
       new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
     );
     expect(await asBob.all(app.todos)).toEqual([]);
+    // API routes can name the request's account without a client credential.
+    await expect(
+      jazz.accountFor(new Request("http://app/x", { headers: { "x-test-user": "alice" } })),
+    ).resolves.toBe(alice.session!.user!.account);
+    await expect(jazz.accountFor(new Request("http://app/x"))).resolves.toBeNull();
+    // Server actions: backend authority, writes stamped as the request's user.
+    const onBehalf = await jazz.withAttribution(
+      new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
+    );
+    const stamped = await onBehalf
+      .insert(app.todos, { title: "on alice's behalf", owner: randomUUID() })
+      .wait({ tier: "global" });
+    const [withProvenance] = await jazz.db.all(
+      app.todos.where({ id: stamped.id }).select("title", "$createdBy"),
+    );
+    expect(withProvenance?.$createdBy).toMatchObject({ account: alice.session!.user!.account });
     // The user synced over a socket, not the stream fallback.
     expect(requestPaths.some((path) => path.includes("/stream"))).toBe(false);
     // This host upgrades sockets, so a failed socket isn't sent to the stream:
@@ -225,7 +241,7 @@ describe("createJazz", () => {
     expect(await signIn({ "sec-fetch-site": "cross-site" })).toBe(403);
     // The right host, but a plain-http page acting on a backend reached over https.
     expect(await signIn({ origin, "x-forwarded-proto": "https" })).toBe(403);
-    for (const route of ["stream"]) {
+    for (const route of ["accounts/backend-link", "stream"]) {
       const response = await fetch(`${origin}/jazz/apps/${appId}/${route}`, {
         method: "POST",
         headers: { "x-test-user": "alice", origin: "https://evil.example" },
@@ -284,6 +300,67 @@ describe("createJazz", () => {
     const seen = await alice.db.all(app.todos.where({ id: row.id }));
     expect(seen.map((todo) => todo.title)).toEqual(["made as a guest"]);
   }, 60_000);
+
+  it.each([
+    ["memory", "sockets"],
+    ["sqlite", "the HTTP stream"],
+  ] as const)(
+    "keeps a local-first guest's account when it signs up (%s store, %s)",
+    async (kind, transport) => {
+      const appId = randomUUID();
+      const dir = await mkdtemp(join(tmpdir(), "jazz-link-"));
+      cleanups.push(() => rm(dir, { recursive: true, force: true }));
+      const store = kind === "memory" ? memory() : sqlite({ path: dir });
+      const jazz = await createJazz({ appId, app, permissions, store, authenticate });
+      cleanups.push(() => jazz.close());
+      const origin = await serve(jazz, { sockets: transport === "sockets" });
+      if (transport !== "sockets") {
+        // A page on this origin: the client treats /jazz as same-origin.
+        const previous = (globalThis as { location?: unknown }).location;
+        (globalThis as { location?: unknown }).location = {
+          host: new URL(origin).host,
+          href: `${origin}/`,
+        };
+        cleanups.push(async () => {
+          (globalThis as { location?: unknown }).location = previous;
+        });
+      }
+
+      const session = await createJazzSession({
+        appId,
+        app,
+        permissions,
+        serverUrl: `${origin}/jazz`,
+        driver: { type: "memory" },
+        initial: "local-first",
+      });
+      cleanups.push(() => session.close());
+      const guest = session.getSnapshot().client!;
+      const account = guest.session!.user!.account;
+      const row = await guest.db
+        .insert(app.todos, { title: "made as a guest", owner: account })
+        .wait({ tier: "global" });
+
+      // The app's sign-up created "alice"; the backend now names her.
+      signInAs(origin, "alice");
+      await session.linkWithBackend();
+      const alice = session.getSnapshot().client!;
+      expect(alice.session!.user!.account).toBe(account);
+      expect(alice.session!.user!.identity).toEqual({
+        issuer: `jazz:app:${appId}`,
+        subject: "alice",
+      });
+      const seen = await alice.db.all(app.todos.where({ id: row.id }));
+      expect(seen.map((todo) => todo.title)).toEqual(["made as a guest"]);
+      // The linked account syncs as the signed-in user.
+      const after = await alice.db
+        .insert(app.todos, { title: "made after signing up", owner: account })
+        .wait({ tier: "global" });
+      const stored = await jazz.db.all(app.todos.where({ id: after.id }));
+      expect(stored.map((todo) => todo.title)).toEqual(["made after signing up"]);
+    },
+    60_000,
+  );
 
   it("syncs over the HTTP stream when the host can't upgrade sockets", async () => {
     const appId = randomUUID();

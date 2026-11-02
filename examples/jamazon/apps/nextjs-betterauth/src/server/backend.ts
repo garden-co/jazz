@@ -1,53 +1,45 @@
-import type { JazzClient } from "jazz-tools/backend";
+import type { Jazz } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
 import { app } from "@/schema";
 import permissions from "@/permissions";
-import { jazzEnv } from "@/src/lib/jazz-env";
 import { serverConfig } from "./config";
 
 // Load the native backend at runtime rather than through the Next bundler.
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-const { createJazzSession } = createRequire(import.meta.url)(
+const { createJazz, remote, sqlite } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
-type BackendSession = Awaited<ReturnType<typeof createJazzSession>>;
-
 declare global {
-  var __jamazonBackend: Promise<BackendSession> | undefined;
+  var __jamazonJazz: Promise<Jazz> | undefined;
 }
 
 /**
- * The store's single backend client. It holds backend authority: it seeds the
- * catalogue, places orders, records payments and ships. Better Auth also
+ * The store's Jazz, inside this Next app, mounted under `/jazz` (see
+ * app/jazz/[...path]/route.ts). Its `db` holds backend authority: it seeds the
+ * catalogue, places orders, records payments and ships, and Better Auth
  * persists its rows through it. Shared across concurrent requests and Next
  * hot reloads.
  */
-export async function backend(): Promise<JazzClient> {
-  const pending = (globalThis.__jamazonBackend ??= createJazzSession({
+export function backend(): Promise<Jazz> {
+  const { remote: sync } = serverConfig;
+  const pending = (globalThis.__jamazonJazz ??= createJazz({
+    appId: serverConfig.appId,
     app,
     permissions,
-    appId: serverConfig.appId,
-    driver: { type: "memory" },
-    serverUrl: serverConfig.serverUrl,
-    initial: {
-      backendSecret: serverConfig.backendSecret,
+    store: sync ? remote(sync) : sqlite({ path: serverConfig.dataPath }),
+    // Better Auth's session cookie decides who the shopper is. Guests have
+    // no Better Auth session: they stay on their local-first account.
+    authenticate: async (request) => {
+      const { auth } = await import("./auth");
+      const session = await auth.api.getSession({ headers: request.headers });
+      return session ? { userId: session.user.id } : null;
     },
-    env: jazzEnv,
-    jwtAudience: serverConfig.origin,
   }));
-  try {
-    const session = await pending;
-    const snapshot = session.getSnapshot();
-    if (snapshot.status !== "ready" || !snapshot.client) {
-      await session.close();
-      throw snapshot.error ?? new Error("Backend session is not ready");
-    }
-    return snapshot.client;
-  } catch (error) {
-    // A failed admission must not poison later requests.
-    if (globalThis.__jamazonBackend === pending) globalThis.__jamazonBackend = undefined;
-    throw error;
-  }
+  // A failed start must not poison later requests.
+  pending.catch(() => {
+    if (globalThis.__jamazonJazz === pending) globalThis.__jamazonJazz = undefined;
+  });
+  return pending;
 }

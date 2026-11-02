@@ -1,18 +1,18 @@
 import { betterAuth } from "better-auth";
 import { nextCookies } from "better-auth/next-js";
-import { admin, bearer, jwt } from "better-auth/plugins";
+import { admin } from "better-auth/plugins";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
-import { authJazzClient } from "./auth-jazz-client";
+import { jazz } from "./jazz.server";
 import { app } from "../../schema";
 
 const BETTER_AUTH_SECRET = "auth-betterauth-chat-development-secret";
 const APP_ORIGIN = process.env.NEXT_PUBLIC_APP_ORIGIN!;
 
-async function createBetterAuth(issuer: string = APP_ORIGIN) {
+async function createBetterAuth() {
   const auth = betterAuth({
-    baseURL: issuer,
+    baseURL: APP_ORIGIN,
     database: jazzAdapter({
-      db: async () => (await authJazzClient()).db,
+      db: async () => (await jazz()).db,
       schema: app.wasmSchema,
     }),
     secret: BETTER_AUTH_SECRET,
@@ -27,25 +27,6 @@ async function createBetterAuth(issuer: string = APP_ORIGIN) {
       admin({
         adminRoles: ["admin"],
         defaultRole: "member",
-      }),
-      bearer(),
-      jwt({
-        jwks: {
-          keyPairConfig: { alg: "ES256" },
-        },
-        jwt: {
-          expirationTime: "1h",
-          issuer,
-          definePayload: ({
-            user,
-          }: {
-            user: { id: string; name: string; role?: string | string[] };
-          }) => ({
-            role: Array.isArray(user.role) ? user.role[0] : (user.role ?? ""),
-            username: user.name,
-          }),
-          getSubject: ({ user }: { user: { id: string } }) => user.id,
-        },
       }),
       nextCookies(),
     ],

@@ -34,17 +34,14 @@ function forgetHomeWorkspace(account: string): void {
   }
 }
 
-/**
- * The account's home workspace. `principal` is the signed-in Jazz session's
- * subject, which the server call authenticates as.
- */
-export function ensureHomeWorkspace(account: string, principal: string): Promise<string> {
+/** The account's home workspace, set up by the server on first use. */
+export function ensureHomeWorkspace(account: string): Promise<string> {
   const remembered = rememberedHomeWorkspace(account);
   if (remembered) return Promise.resolve(remembered);
   let request = requests.get(account);
   if (!request) {
     request = (async () => {
-      const response = await bootstrapWorkspace(principal);
+      const response = await bootstrapWorkspace();
       if (!response.ok) throw new Error(`The server answered ${response.status}.`);
       const { workspaceId } = (await response.json()) as { workspaceId: string };
       try {

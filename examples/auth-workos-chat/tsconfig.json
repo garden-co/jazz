@@ -14,6 +14,7 @@
     "constants.ts",
     "schema.ts",
     "permissions.ts",
+    "server",
     "src",
     "tests",
     "vite.config.ts",

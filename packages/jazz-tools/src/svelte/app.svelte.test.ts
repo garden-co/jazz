@@ -6,8 +6,8 @@ import { attachSubscriptionStore } from "../subscription-store-internal.js";
 import JazzProvider from "./JazzProvider.svelte";
 import type { JazzAuthState } from "./auth-state.js";
 import { writable } from "svelte/store";
-import { jwtAuth, type JazzAuth } from "../session/app.js";
-import JwtApp from "../../tests/svelte/JwtApp.svelte";
+import { backendAuth, type JazzAuth } from "../session/app.js";
+import BackendAuthApp from "../../tests/svelte/BackendAuthApp.svelte";
 import AuthStatus from "../../tests/svelte/AuthStatus.svelte";
 const factory = vi.hoisted(() => vi.fn());
 vi.mock("../session/create-jazz-session.js", () => ({ createJazzSession: factory }));
@@ -143,13 +143,15 @@ it("renders custom startup loading and error snippets with the provider retry", 
   await settle();
 });
 
-it("updates JWT descriptors reactively and never mounts private children while pending", async () => {
+it("updates backend auth descriptors reactively and never mounts private children while pending", async () => {
   const events: string[] = [];
+  // The backend names whoever the provider's latest key says is signed in.
+  let backendUser = "";
   const handle = (id: string) =>
     ({ id, identity: { issuer: "test", subject: id } }) as AccountHandle;
   const accounts = new AccountManager({
     logout: () => {},
-    loginOrRegisterJWT: async (auth: any) => handle(await auth.getToken()),
+    loginWithBackend: async () => handle(backendUser),
   } as any);
   const owner = await createJazzSessionOwner({
     accounts,
@@ -166,18 +168,20 @@ it("updates JWT descriptors reactively and never mounts private children while p
       ) as any,
   });
   factory.mockResolvedValue(owner);
-  const descriptor = (key: string | null, isPending = false) =>
-    jwtAuth({ key, isPending, getToken: async () => key!, logout: async () => {} });
+  const descriptor = (key: string | null, isPending = false) => {
+    if (key) backendUser = key;
+    return backendAuth({ key, isPending, logout: async () => {} });
+  };
   const auth = writable(descriptor(null));
   const seen: boolean[] = [];
   let mounts = 0;
   const target = document.createElement("div");
-  component = mount(JwtApp, {
+  component = mount(BackendAuthApp, {
     target,
     props: {
       auth,
       observe: (value: JazzAuth) => {
-        seen.push(value.kind === "jwt" && value.isPending === true);
+        seen.push(value.kind === "backend" && value.isPending === true);
         return "";
       },
       children: createRawSnippet(() => ({

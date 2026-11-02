@@ -4,6 +4,7 @@ import type { Duplex } from "node:stream";
 import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
 import { registerInProcessTransport } from "../runtime/in-process-transport.js";
 import { accountAppId } from "../accounts/local-first.js";
+import { LOCAL_FIRST_JWT_ISSUER, parseJwtPayload } from "../runtime/client-session.js";
 import type {
   BrowserWebSocket,
   WebSocketConstructor,
@@ -30,7 +31,12 @@ import type { WasmSchema } from "../drivers/types.js";
 import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
 import type { JazzSession } from "../session/state.js";
-import { backendDbForSession, createJazzSession, type JazzClient } from "./create-jazz-session.js";
+import {
+  backendDbAttributedTo,
+  backendDbForSession,
+  createJazzSession,
+  type JazzClient,
+} from "./create-jazz-session.js";
 import type { BackendSchemaInput } from "./create-jazz-context.js";
 
 /** Where the core keeps its data. */
@@ -151,6 +157,22 @@ export interface Jazz {
   /** The database as the request's user, judged by your permissions. */
   forRequest(request: Request): Promise<Db>;
   /**
+   * The Jazz account of the request's signed-in user (created on first use),
+   * or null when `authenticate` names no user. For API routes that act on
+   * the user's data with the backend's own `db`.
+   */
+  accountFor(request: Request): Promise<string | null>;
+  /**
+   * The backend's own database (backend permissions), with every write
+   * stamped as the request's signed-in user: for server actions that do what
+   * the user may not do directly, on their behalf.
+   *
+   * **Your permissions are not checked.** It writes with the backend's full
+   * authority; only the attribution is the user's. Check yourself that the
+   * user may do what the action does, and keep it in server-only code.
+   */
+  withAttribution(request: Request): Promise<Db>;
+  /**
    * Make `to` another identity of the account `from` already uses: after
    * this, `authenticate` returning `to` opens that same account and its data.
    * Call it once your own auth has verified both, as when an anonymous or
@@ -171,11 +193,7 @@ const PRELUDE_DEADLINE_MS = 30_000;
 const STREAM_AVAILABLE_HEADER = "x-jazz-stream";
 /** The stream session's key, on each send and close (see `openStream`). */
 const STREAM_KEY_HEADER = "x-jazz-stream-key";
-// What a browser reaches of the core through the backend: sync, the schemas,
-// and a local-first guest founding its own account (the guest proves a key it
-// holds; the backend's sign-in routes are handled before this). Registering,
-// logging in or linking identities with a core credential isn't.
-const PUBLIC_APP_ROUTES = /^\/apps\/[^/]+\/(accounts\/found-local-first|schemas|schema\/[^/]+)$/;
+const PUBLIC_APP_ROUTES = /^\/apps\/[^/]+\/(schemas|schema\/[^/]+)$/;
 const STRIPPED_HEADERS = ["x-jazz-backend-secret", "x-jazz-admin-secret", "x-jazz-session"];
 // What a browser's request to a public route carries on to a remote core:
 // never its cookies or its app session.
@@ -606,6 +624,48 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
 
   /**
+   * A local-first guest who just signed up: link the guest's identity to the
+   * user `authenticate` now names, so the account and its data carry over.
+   * The guest proves itself with its local-first token, which the core
+   * verifies while founding the guest's account.
+   */
+  async function backendLink(request: Request): Promise<Response> {
+    if (request.method !== "POST") return new Response(null, { status: 405 });
+    const user = await authenticate(request);
+    if (!user) return new Response("signed_out", { status: 401 });
+    const bearer = /^Bearer (.+)$/.exec(request.headers.get("authorization") ?? "")?.[1];
+    if (!bearer || parseJwtPayload(bearer)?.iss !== LOCAL_FIRST_JWT_ISSUER) {
+      return new Response("local_first_proof_required", { status: 400 });
+    }
+    const founded = await core.handle(
+      "POST",
+      `/apps/${encodeURIComponent(accountAppId(options.appId))}/accounts/found-local-first`,
+      [["authorization", `Bearer ${bearer}`]],
+      new Uint8Array(),
+    );
+    if (founded.status !== 200) return coreResponse(founded);
+    const guest = JSON.parse(new TextDecoder().decode(founded.body)) as {
+      identity: { issuer: string; subject: string };
+    };
+    let account: string;
+    try {
+      ({ account } = await adminAccounts("link", {
+        from: guest.identity,
+        to: identity(user.userId),
+      }));
+    } catch {
+      // The core's reason (e.g. the identity already belongs to another
+      // account) stays on the backend.
+      return new Response("link_refused", { status: 409 });
+    }
+    const expiresAt = Math.floor(Date.now() / 1000) + (options.sessionTtlSeconds ?? 3600);
+    return Response.json(
+      { account, identity: identity(user.userId), claims: user.claims ?? {}, expiresAt },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
+  /**
    * A browser's sync session. The browser presents no credential: its first
    * message (the auth prelude) names the user it means to act as, and the
    * backend's own `authenticate` decides whether this request is that user.
@@ -677,13 +737,14 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   /**
    * Turn a browser prelude into one the core admits on this backend's word:
    * the user `authenticate` finds on this request, with their account and
-   * claims, vouched for with the backend secret. A prelude that brings any
-   * credential of its own, or names another user, is refused.
+   * claims, vouched for with the backend secret. A local-first guest's
+   * prelude passes through: the core verifies its self-signed token. Any
+   * other credential, or a prelude naming another user, is refused.
    */
   async function admitPrelude(
     request: Request,
     prelude: Uint8Array,
-  ): Promise<{ prelude: Uint8Array; userId: string } | null> {
+  ): Promise<{ prelude: Uint8Array; userId: string | undefined } | null> {
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(new TextDecoder().decode(prelude)) as Record<string, unknown>;
@@ -694,11 +755,20 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       string,
       unknown
     >;
+    const others = ["backend_secret", "admin_secret", "backend_session"];
+    // Browser worker transports send `jwt_token: null` alongside a backend
+    // session; only a real token counts as one.
+    const token = auth.jwt_token ?? parsed.jwt_token;
+    if (token !== undefined && token !== null) {
+      const localFirst =
+        typeof token === "string" && parseJwtPayload(token)?.iss === LOCAL_FIRST_JWT_ISSUER;
+      const alone = others.every((key) => parsed[key] == null && auth[key] == null);
+      // A guest has no user here: its session is bound to its own key.
+      return localFirst && alone ? { prelude, userId: undefined } : null;
+    }
     const stated = auth.backend_session as { user_id?: unknown } | undefined;
     if (!stated || typeof stated !== "object") return null;
-    // Browser worker transports send `jwt_token: null` alongside a backend
-    // session; only a real value counts as a credential.
-    for (const credential of ["backend_secret", "admin_secret", "jwt_token"]) {
+    for (const credential of ["backend_secret", "admin_secret"]) {
       if (parsed[credential] != null || auth[credential] != null) return null;
     }
     const user = await authenticate(request);
@@ -896,6 +966,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     if (/^\/apps\/[^/]+\/accounts\/backend-sign-in$/.test(path)) {
       return backendSignIn(request);
     }
+    if (/^\/apps\/[^/]+\/accounts\/backend-link$/.test(path)) {
+      return backendLink(request);
+    }
     const stream = /^\/apps\/[^/]+\/stream(?:\/([^/]+))?$/.exec(path);
     if (stream) {
       const id = stream[1] && decodeURIComponent(stream[1]);
@@ -1060,6 +1133,15 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       const user = await authenticate(request);
       if (!user) throw new Error("forRequest: the request has no signed-in user");
       return backendDbForSession(backend, await sessionFor(user));
+    },
+    async withAttribution(request) {
+      const user = await authenticate(request);
+      if (!user) throw new Error("withAttribution: the request has no signed-in user");
+      return backendDbAttributedTo(backend, await sessionFor(user));
+    },
+    async accountFor(request) {
+      const user = await authenticate(request);
+      return user ? ((await sessionFor(user)).account_id ?? null) : null;
     },
     close() {
       closing ??= (async () => {

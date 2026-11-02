@@ -1,4 +1,4 @@
-import { authJazzClient } from "../../../src/lib/auth-jazz-client";
+import { jazz } from "../../../src/lib/jazz.server";
 import { isDemoProfile, loadDemoData } from "../../../src/lib/demo-data";
 import { requestAccount } from "../../../src/lib/request-account";
 
@@ -10,6 +10,6 @@ export async function POST(request: Request) {
   if (!account) return Response.json({ error: "account required" }, { status: 401 });
   const { profile } = (await request.json().catch(() => ({}))) as { profile?: unknown };
   if (!isDemoProfile(profile)) return Response.json({ error: "unknown profile" }, { status: 400 });
-  const db = (await authJazzClient()).db;
+  const db = (await jazz()).db;
   return Response.json(await loadDemoData(db, account.accountId, profile));
 }

@@ -4,7 +4,7 @@ import * as React from "react";
 import { JazzProvider, useJazzAuth, useAuthState } from "jazz-tools/react";
 import { ChatPanel } from "../src/ChatPanel";
 import { AuthCard } from "../src/AuthCard";
-import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
+import { authClient } from "../src/lib/auth-client";
 
 type Credentials = (email: string, password: string) => Promise<void>;
 
@@ -56,16 +56,11 @@ function ChatShell({
   );
 }
 
+// Jazz runs inside this app's backend (src/lib/jazz.server.ts), on its own origin.
 const config = {
   appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
-  serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
+  serverUrl: "/jazz",
 };
-
-async function getToken(): Promise<string> {
-  const token = await getJwtFromBetterAuth();
-  if (!token) throw new Error("Better Auth did not provide a token");
-  return token;
-}
 
 export default function Page() {
   const [providerError, setProviderError] = React.useState<Error>();
@@ -108,8 +103,8 @@ function SessionScreen({
     if (restored.current || session.status !== "ready") return;
     restored.current = true;
     void perform(async () => {
-      const token = await getJwtFromBetterAuth();
-      if (token) await actions.loginOrRegisterJWT({ getToken });
+      const { data } = await authClient.getSession();
+      if (data) await actions.loginWithBackend();
     }).catch(() => {});
   }, [session.status]);
   // This is the manual hybrid escape hatch: no automatic enrollment connector
@@ -127,12 +122,14 @@ function SessionScreen({
   async function signIn(email: string, password: string) {
     const result = await authClient.signIn.email({ email, password });
     if (result.error) throw new Error(result.error.message);
-    await perform(() => actions.loginOrRegisterJWT({ getToken: getToken }));
+    await perform(() => actions.loginWithBackend());
   }
   async function signUp(email: string, password: string) {
     const result = await authClient.signUp.email({ email, name: email, password });
     if (result.error) throw new Error(result.error.message);
-    await perform(() => actions.linkJWT({ getToken: getToken }));
+    // The backend links this browser's local-first account to the new user,
+    // so everything written as a guest stays theirs.
+    await perform(() => actions.linkWithBackend());
   }
   async function signOut() {
     await perform(async () => {
@@ -153,8 +150,7 @@ function SessionScreen({
               void perform(
                 session.error
                   ? session.retry
-                  : (recovery.current ??
-                      (() => actions.loginOrRegisterJWT({ getToken: getToken }))),
+                  : (recovery.current ?? (() => actions.loginWithBackend())),
               ).catch(() => {})
             }
           >

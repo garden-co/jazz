@@ -21,10 +21,8 @@ async function setup() {
     createLocalFirst: vi.fn(() => old),
     restoreLocalFirst: vi.fn(() => old),
     logout: vi.fn(),
-    registerJWT: vi.fn(async (_auth: JWTAuth) => next),
-    loginJWT: vi.fn(async (_auth: JWTAuth) => next),
-    loginOrRegisterJWT: vi.fn(async (_auth: JWTAuth) => next),
-    linkJWT: vi.fn(async (_account: AccountHandle, _auth: JWTAuth) => next),
+    loginWithBackend: vi.fn(async () => next),
+    linkWithBackend: vi.fn(async (_account: AccountHandle) => next),
   };
   const accounts = new AccountManager(enrollment, old);
   const clients: { account: AccountHandle; shutdown: ReturnType<typeof vi.fn> }[] = [];
@@ -52,10 +50,6 @@ describe("Jazz session lifecycle", () => {
     const accounts = new AccountManager<JWTAuth>(
       {
         createLocalFirst: () => selected,
-        registerJWT: async () => selected,
-        loginJWT: async () => selected,
-        loginOrRegisterJWT: async () => selected,
-        linkJWT: async () => selected,
       },
       undefined,
       { selectionChanged, settle },
@@ -91,19 +85,18 @@ describe("Jazz session lifecycle", () => {
     await session.close();
   });
 
-  it("login-or-register waits for shutdown and uses the shared selection lifecycle", async () => {
+  it("backend sign-in waits for shutdown and uses the shared selection lifecycle", async () => {
     const { session, clients, enrollment, next } = await setup();
     const pending = deferred();
     clients[0]!.shutdown.mockReturnValueOnce(pending.promise);
-    const command = session.loginOrRegisterJWT("token");
+    const command = session.loginWithBackend();
     await tick();
-    expect(session.getSnapshot().pending).toBe("loginOrRegisterJWT");
-    expect(enrollment.loginOrRegisterJWT).not.toHaveBeenCalled();
+    expect(session.getSnapshot().pending).toBe("loginWithBackend");
+    expect(enrollment.loginWithBackend).not.toHaveBeenCalled();
     pending.resolve();
     await command;
-    expect(enrollment.loginOrRegisterJWT).toHaveBeenCalledWith("token");
-    expect(enrollment.registerJWT).not.toHaveBeenCalled();
-    expect(enrollment.loginJWT).not.toHaveBeenCalled();
+    expect(enrollment.loginWithBackend).toHaveBeenCalledOnce();
+    expect(enrollment.linkWithBackend).not.toHaveBeenCalled();
     expect(session.getSnapshot()).toMatchObject({ status: "ready", account: next });
     await session.close();
   });
@@ -112,14 +105,14 @@ describe("Jazz session lifecycle", () => {
     const { session, clients, enrollment, next } = await setup();
     const lease = attachJazzSessionConsumer(session),
       previous = session.getSnapshot();
-    const command = session.linkJWT("token");
+    const command = session.linkWithBackend();
     await tick();
     expect(session.getSnapshot().status).toBe("transitioning");
     expect(session.getSnapshot().client).toBeUndefined();
     lease.acknowledge(previous);
     await tick();
     expect(clients[0]!.shutdown).not.toHaveBeenCalled();
-    expect(enrollment.linkJWT).not.toHaveBeenCalled();
+    expect(enrollment.linkWithBackend).not.toHaveBeenCalled();
     lease.acknowledge(session.getSnapshot());
     await command;
     expect(clients[0]!.shutdown).toHaveBeenCalledWith({ waitForSync: true });
@@ -132,8 +125,8 @@ describe("Jazz session lifecycle", () => {
     const { session, clients, enrollment, old } = await setup();
     const failure = new GracefulShutdownSyncError(new Error("sync failed"));
     clients[0]!.shutdown.mockRejectedValueOnce(failure);
-    await expect(session.registerJWT("token")).rejects.toBe(failure);
-    expect(enrollment.registerJWT).not.toHaveBeenCalled();
+    await expect(session.loginWithBackend()).rejects.toBe(failure);
+    expect(enrollment.loginWithBackend).not.toHaveBeenCalled();
     expect(session.getSnapshot()).toMatchObject({
       status: "ready",
       account: old,
@@ -145,8 +138,8 @@ describe("Jazz session lifecycle", () => {
   it("failed link reopens old selection and preserves primary error", async () => {
     const { session, clients, enrollment, old } = await setup();
     const failure = new Error("link failed");
-    enrollment.linkJWT.mockRejectedValueOnce(failure);
-    await expect(session.linkJWT("token")).rejects.toBe(failure);
+    enrollment.linkWithBackend.mockRejectedValueOnce(failure);
+    await expect(session.linkWithBackend()).rejects.toBe(failure);
     expect(session.getSnapshot()).toMatchObject({
       status: "ready",
       account: old,
@@ -160,9 +153,9 @@ describe("Jazz session lifecycle", () => {
     const { session, enrollment, openClient, old } = await setup();
     const primary = new Error("link failed"),
       startup = new Error("reopen failed");
-    enrollment.linkJWT.mockRejectedValueOnce(primary);
+    enrollment.linkWithBackend.mockRejectedValueOnce(primary);
     openClient.mockRejectedValueOnce(startup);
-    await expect(session.linkJWT("token")).rejects.toBe(primary);
+    await expect(session.linkWithBackend()).rejects.toBe(primary);
     expect(session.getSnapshot()).toMatchObject({ status: "error", account: old, error: startup });
     await session.retry();
     expect(session.getSnapshot().status).toBe("ready");
@@ -171,17 +164,17 @@ describe("Jazz session lifecycle", () => {
   it("successful registry action with failed open retains new selection for retry", async () => {
     const { session, enrollment, openClient, next } = await setup();
     openClient.mockRejectedValueOnce(new Error("open failed"));
-    await expect(session.linkJWT("token")).rejects.toThrow("open failed");
+    await expect(session.linkWithBackend()).rejects.toThrow("open failed");
     expect(session.getSnapshot()).toMatchObject({ status: "error", account: next });
     expect(session.getSnapshot().client).toBeUndefined();
     await session.retry();
-    expect(enrollment.linkJWT).toHaveBeenCalledTimes(1);
+    expect(enrollment.linkWithBackend).toHaveBeenCalledTimes(1);
     expect(session.getSnapshot().client?.account).toBe(next);
     await session.close();
   });
   it("rejects overlapping commands without queuing mutations", async () => {
     const { session, enrollment } = await setup();
-    const first = session.loginJWT("token");
+    const first = session.loginWithBackend();
     await expect(session.createLocalFirst()).rejects.toThrow("already pending");
     await first;
     expect(enrollment.createLocalFirst).not.toHaveBeenCalled();
@@ -190,8 +183,8 @@ describe("Jazz session lifecycle", () => {
   it("logout fences pending enrollment and stays signed-out", async () => {
     const { session, enrollment, next, openClient, accounts } = await setup();
     const pending = deferred<AccountHandle>();
-    enrollment.loginJWT.mockReturnValueOnce(pending.promise);
-    const command = session.loginJWT("token"),
+    enrollment.loginWithBackend.mockReturnValueOnce(pending.promise);
+    const command = session.loginWithBackend(),
       rejected = expect(command).rejects.toThrow("superseded");
     await tick();
     const logout = session.logout();
@@ -208,7 +201,7 @@ describe("Jazz session lifecycle", () => {
     const { session, openClient, next } = await setup();
     const pending = deferred<Awaited<ReturnType<typeof openClient>>>();
     openClient.mockReturnValueOnce(pending.promise);
-    const command = session.loginJWT("token"),
+    const command = session.loginWithBackend(),
       rejected = expect(command).rejects.toThrow("superseded");
     await tick();
     const close = session.close();
@@ -217,40 +210,36 @@ describe("Jazz session lifecycle", () => {
     await rejected;
     await close;
     expect(late.shutdown).toHaveBeenCalledOnce();
-    expect(session.getSnapshot()).toEqual({ status: "closed", needsLogin: false });
+    expect(session.getSnapshot()).toEqual({ status: "closed" });
     await expect(session.retry()).rejects.toThrow("closed");
   });
   it("release unblocks close while transition awaits detach", async () => {
     const { session, enrollment, clients } = await setup();
     const lease = attachJazzSessionConsumer(session);
-    const command = session.loginJWT("token"),
+    const command = session.loginWithBackend(),
       rejected = expect(command).rejects.toThrow("superseded");
     await tick();
     const close = session.close();
     lease.release();
     await rejected;
     await close;
-    expect(enrollment.loginJWT).not.toHaveBeenCalled();
+    expect(enrollment.loginWithBackend).not.toHaveBeenCalled();
     expect(clients[0]!.shutdown).toHaveBeenCalledWith();
   });
   it("close before command starts never republishes a transition", async () => {
     const { session, enrollment } = await setup();
-    const command = session.loginJWT("token"),
+    const command = session.loginWithBackend(),
       rejected = expect(command).rejects.toThrow("superseded");
     await session.close();
     await rejected;
     expect(session.getSnapshot().status).toBe("closed");
-    expect(enrollment.loginJWT).not.toHaveBeenCalled();
+    expect(enrollment.loginWithBackend).not.toHaveBeenCalled();
   });
   it("defaults signed-out and binds commands", async () => {
     const account = handle("local"),
       create = vi.fn(() => account);
     const accounts = new AccountManager<JWTAuth>({
       createLocalFirst: create,
-      registerJWT: async () => account,
-      loginJWT: async () => account,
-      loginOrRegisterJWT: async () => account,
-      linkJWT: async () => account,
     });
     const session = await createJazzSessionOwner({
       accounts,
@@ -269,11 +258,11 @@ describe("Jazz session lifecycle", () => {
     const { session, clients, enrollment } = await setup();
     const failure = new Error("cleanup failed");
     clients[0]!.shutdown.mockRejectedValue(failure);
-    await expect(session.linkJWT("token")).rejects.toBe(failure);
+    await expect(session.linkWithBackend()).rejects.toBe(failure);
     expect(session.getSnapshot().status).toBe("error");
     expect(session.getSnapshot().client).toBeUndefined();
     await expect(session.retry()).rejects.toBe(failure);
-    expect(enrollment.linkJWT).not.toHaveBeenCalled();
+    expect(enrollment.linkWithBackend).not.toHaveBeenCalled();
     await expect(session.close()).rejects.toBe(failure);
     expect(session.getSnapshot().status).toBe("closed");
   });
@@ -282,12 +271,12 @@ describe("Jazz session lifecycle", () => {
     let attempted: Promise<void> | undefined;
     const stop = session.subscribe(() => {
       if (!attempted)
-        attempted = expect(session.loginJWT("token")).rejects.toThrow("already pending");
+        attempted = expect(session.loginWithBackend()).rejects.toThrow("already pending");
     });
     await session.logout();
     await attempted;
     stop();
-    expect(enrollment.loginJWT).not.toHaveBeenCalled();
+    expect(enrollment.loginWithBackend).not.toHaveBeenCalled();
     expect(session.getSnapshot().status).toBe("signed-out");
     await session.close();
   });
@@ -308,9 +297,9 @@ describe("Jazz session lifecycle", () => {
     session.subscribe(() => {
       if (session.getSnapshot().status === "transitioning") closing = session.close();
     });
-    await expect(session.loginJWT("token")).rejects.toThrow("superseded");
+    await expect(session.loginWithBackend()).rejects.toThrow("superseded");
     await closing;
-    expect(enrollment.loginJWT).not.toHaveBeenCalled();
+    expect(enrollment.loginWithBackend).not.toHaveBeenCalled();
     expect(session.getSnapshot().status).toBe("closed");
   });
 });

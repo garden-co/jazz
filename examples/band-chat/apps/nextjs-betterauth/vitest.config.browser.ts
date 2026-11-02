@@ -33,7 +33,6 @@ export default defineConfig({
   },
   define: {
     "process.env.NEXT_PUBLIC_JAZZ_APP_ID": JSON.stringify("band-chat-browser-tests"),
-    "process.env.NEXT_PUBLIC_JAZZ_SERVER_URL": JSON.stringify("ws://band-chat.test"),
   },
   plugins: [wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },

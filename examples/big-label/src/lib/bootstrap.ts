@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { app } from "../../schema";
-import { authJazzClient } from "./auth-jazz-client";
+import { jazz } from "./jazz.server";
 import { planPersonalBootstrap } from "./bootstrap-state";
 import { normalizeEmail } from "./emails";
 import { isSerializationConflict } from "./write-errors";
@@ -16,7 +16,7 @@ export async function ensurePersonalOrganization(
   name: string,
   email: string | null = null,
 ) {
-  const db = (await authJazzClient()).db;
+  const db = (await jazz()).db;
   const slug = `personal-${userId}`;
   // Both the initial read and every retry happen inside the serializable
   // transaction. A concurrent bootstrap can therefore only either commit the

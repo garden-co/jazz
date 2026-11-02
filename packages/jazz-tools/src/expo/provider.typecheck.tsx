@@ -1,4 +1,4 @@
-import { JazzProvider, jwtAuth, useJazzAuth, useDb } from "./index.js";
+import { JazzProvider, backendAuth, useJazzAuth, useDb } from "./index.js";
 function Data() {
   useDb();
   const { logout, retry, status } = useJazzAuth();
@@ -10,7 +10,7 @@ export const expoApplication = (
   <JazzProvider
     appId="expo-app"
     serverUrl="https://sync.example.test"
-    auth={jwtAuth({ key: null, getToken: async () => "token", logout: async () => {} })}
+    auth={backendAuth({ key: null, logout: async () => {} })}
     signedOut={null}
     error={({ retry }) => {
       void retry;

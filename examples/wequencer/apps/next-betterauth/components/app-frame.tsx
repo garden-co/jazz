@@ -37,7 +37,7 @@ function AccountMenu({ name }: { name: string }) {
       await gracefulSignOut();
       window.location.assign("/");
     } catch {
-      // The owner-held lifecycle reopens the selected client and renders the error.
+      // Jazz keeps the account open and shows the error with a retry.
     }
   }
 
