@@ -47,6 +47,9 @@ pub struct JazzCoreSocketEvent {
 #[napi]
 pub struct JazzCore {
     server: Arc<EmbeddedServer>,
+    /// The OS lock on `<dataDir>/jazz.lock`, held while the core is open.
+    /// The kernel drops it when the process exits, however it exits.
+    dir_lock: Mutex<Option<std::fs::File>>,
 }
 
 #[napi]
@@ -73,12 +76,14 @@ impl JazzCore {
             admin_secret: Some(opts.admin_secret),
             ..Default::default()
         };
+        let mut dir_lock = None;
         let storage = if opts.in_memory.unwrap_or(false) {
             StorageBackend::InMemory
         } else {
             let data_dir = opts.data_dir.ok_or_else(|| {
                 napi::Error::from_reason("JazzCore needs dataDir unless inMemory is set")
             })?;
+            dir_lock = Some(lock_data_dir(std::path::Path::new(&data_dir))?);
             StorageBackend::Persistent {
                 path: data_dir.into(),
             }
@@ -91,6 +96,7 @@ impl JazzCore {
             .map_err(napi::Error::from_reason)?;
         Ok(Self {
             server: Arc::new(EmbeddedServer::new(built)),
+            dir_lock: Mutex::new(dir_lock),
         })
     }
 
@@ -186,6 +192,7 @@ impl JazzCore {
     pub async fn close(&self) -> napi::Result<()> {
         let phase = self.server.shutdown().await;
         if phase == jazz_server::ShutdownPhase::StorageClosed {
+            self.dir_lock.lock().expect("dir lock").take();
             Ok(())
         } else {
             Err(napi::Error::from_reason(format!(
@@ -217,6 +224,56 @@ impl JazzCoreSocket {
             peer.close();
         }
     }
+}
+
+/// Hold `dir` for this core with an OS file lock: two cores on one sqlite
+/// directory (a hot reload without a cached instance, cluster mode, a
+/// rolling deploy on one volume) would each believe they own its data. The
+/// lock is per open file, so a second core in the same process is refused
+/// too, and it goes away with the process, so a crash or `docker stop`
+/// never leaves the directory locked.
+fn lock_data_dir(dir: &std::path::Path) -> napi::Result<std::fs::File> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir).map_err(|error| {
+        napi::Error::from_reason(format!("sqlite(): {}: {error}", dir.display()))
+    })?;
+    let path = dir.join("jazz.lock");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| {
+            napi::Error::from_reason(format!("sqlite(): {}: {error}", path.display()))
+        })?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let holder = std::fs::read_to_string(&path).unwrap_or_default();
+            let holder = holder.trim();
+            return Err(napi::Error::from_reason(format!(
+                "sqlite(): {} is already open{}. One core per directory: create Jazz once and reuse it \
+                 (cache it on globalThis across hot reloads), and give each process its own directory or use remote().",
+                dir.display(),
+                if holder.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({holder})")
+                },
+            )));
+        }
+        Err(std::fs::TryLockError::Error(error)) => {
+            return Err(napi::Error::from_reason(format!(
+                "sqlite(): could not lock {}: {error}",
+                path.display()
+            )));
+        }
+    }
+    // Who holds it, for the message above; the lock itself is what counts.
+    let _ = file.set_len(0);
+    let _ = write!(file, "process {}", std::process::id());
+    Ok(file)
 }
 
 fn pairs(headers: &[Vec<String>]) -> Vec<(String, String)> {

@@ -42,12 +42,9 @@ export async function requestAccountRegistry(
 }
 
 /**
- * Ask the app's own backend (`createJazz`) who is signed in. Same-origin with
- * the app's cookies: the backend's `authenticate` decides, and the answer
- * carries the account, identity and claims but no credential.
- */
-/**
- * Sign in through the app's backend (`createJazz`). With `link`, a local-first
+ * Sign in through the app's backend (`createJazz`), same-origin with the app's
+ * cookies: the backend's `authenticate` decides, and the answer carries the
+ * account, identity and claims but no credential. With `link`, a local-first
  * guest's token: the backend links that guest to the user it names.
  */
 export async function requestBackendSignIn(
