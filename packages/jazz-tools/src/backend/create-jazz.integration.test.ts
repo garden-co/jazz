@@ -40,7 +40,10 @@ const requestPaths: string[] = [];
 /** The stream key each request carried, by request path. */
 const streamKeys = new Map<string, string>();
 
-async function serve(jazz: Jazz, options: { sockets: boolean }): Promise<string> {
+async function serve(
+  jazz: Jazz,
+  options: { sockets: boolean; onUpgrade?: () => void },
+): Promise<string> {
   requestPaths.length = 0;
   streamKeys.clear();
   const server: Server = createServer((req, res) => {
@@ -52,6 +55,7 @@ async function serve(jazz: Jazz, options: { sockets: boolean }): Promise<string>
       res.end("app route");
     });
   });
+  if (options.onUpgrade) server.on("upgrade", options.onUpgrade);
   if (options.sockets) await jazz.attach(server);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   cleanups.push(
@@ -355,6 +359,81 @@ describe("createJazz", () => {
     expect(await socketFrom("https://evil.example")).toBe("refused");
     expect(await socketFrom(origin)).toBe("admitted");
   }, 60_000);
+
+  it("ends a user's open sync session once authenticate no longer names them", async () => {
+    const appId = randomUUID();
+    const signedOut = new Set<string>();
+    const jazz = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        const user = authenticate(request);
+        return user && !signedOut.has(user.userId) ? user : null;
+      },
+      recheckSeconds: 0.05,
+    });
+    cleanups.push(() => jazz.close());
+    let upgrades = 0;
+    const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
+    const alice = await userSession(appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "signed in", owner: alice.session!.user!.account })
+      .wait({ tier: "global" });
+
+    // Checks that still name her leave her session open.
+    const opened = upgrades;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(upgrades).toBe(opened);
+
+    // She signs out elsewhere: the session ends, and the client's reconnects
+    // are refused.
+    signedOut.add("alice");
+    await expect.poll(() => upgrades, { timeout: 5_000, interval: 50 }).toBeGreaterThan(opened);
+    // A refused reconnect is an auth failure, so the client stops retrying
+    // and its session can ask the backend whether anyone is signed in.
+    await expect
+      .poll(() => alice.db.getSyncStatus().link, { timeout: 10_000, interval: 50 })
+      .toMatchObject({ state: "offline", reason: "auth" });
+    const refused = upgrades;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(upgrades).toBe(refused);
+  }, 30_000);
+
+  it("reconnects a user whose socket's cookies expired but who is still signed in", async () => {
+    const appId = randomUUID();
+    // Requests seen before `expiredBefore` carry cookies that have since expired.
+    const firstSeen = new WeakMap<Request, number>();
+    let expiredBefore = 0;
+    const jazz = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        if (!firstSeen.has(request)) firstSeen.set(request, Date.now());
+        return firstSeen.get(request)! < expiredBefore ? null : authenticate(request);
+      },
+      recheckSeconds: 0.05,
+    });
+    cleanups.push(() => jazz.close());
+    let upgrades = 0;
+    const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
+    const alice = await userSession(appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "before", owner: alice.session!.user!.account })
+      .wait({ tier: "global" });
+    const opened = upgrades;
+    expiredBefore = Date.now() + 1;
+    // The re-check on the old socket fails; the client reconnects with fresh
+    // cookies and keeps syncing.
+    await expect.poll(() => upgrades, { timeout: 5_000, interval: 50 }).toBeGreaterThan(opened);
+    await alice.db
+      .insert(app.todos, { title: "after", owner: alice.session!.user!.account })
+      .wait({ tier: "global" });
+    expect(alice.db.getSyncStatus().link).toEqual({ state: "connected" });
+  }, 30_000);
 
   it("links a second identity to the same account", async () => {
     const appId = randomUUID();
@@ -876,7 +955,8 @@ describe("createJazz", () => {
     expect(forged.status).toBe(401);
 
     // Nor on a sync socket: claiming the system identity with a forged
-    // credential and no secret of its own fails admission.
+    // credential and no secret of its own fails admission (after an auth
+    // failure frame, the socket closes).
     const socket = new WebSocket(`${origin.replace(/^http/, "ws")}/jazz/apps/${appId}/ws`, {
       headers: {
         "X-Jazz-Backend-Credential": core.adminSecret,
@@ -887,9 +967,6 @@ describe("createJazz", () => {
     const outcome = await new Promise<string>((resolve) => {
       socket.addEventListener("open", () =>
         socket.send(JSON.stringify({ peer_identity: `["urn:jazz:system","system"]`, auth: {} })),
-      );
-      socket.addEventListener("message", (event) =>
-        resolve(`message ${new Uint8Array(event.data as ArrayBuffer).length}`),
       );
       socket.addEventListener("close", (event) => resolve(`close ${event.code} ${event.reason}`));
     });
