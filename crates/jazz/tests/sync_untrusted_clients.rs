@@ -387,7 +387,7 @@ fn commit_as(
 /// so its node: the signed-in principal takes the node over, and from then
 /// on the guest's key no longer writes as it.
 #[test]
-fn a_signed_up_guest_takes_over_its_node_once() {
+fn a_signed_up_guest_takes_over_its_node() {
     let server = server();
     let (_store, id, kind) = owned_node(&server, guest_of(1));
     let tx = id.time.0;
@@ -402,16 +402,8 @@ fn a_signed_up_guest_takes_over_its_node_once() {
         tx + 1,
         &kind
     ));
-    // The guest's key (still unexpired, or leaked) no longer writes as it,
-    // nor does a second backend principal of the account.
+    // The guest's key (still unexpired, or leaked) no longer writes as it.
     assert!(!commit_as(&server, guest_of(1), id.node, tx + 2, &kind));
-    assert!(!commit_as(
-        &server,
-        signed_in_as(1, "urn:jazz:other"),
-        id.node,
-        tx + 2,
-        &kind
-    ));
     assert!(commit_as(
         &server,
         signed_in_as(1, "urn:jazz:backend"),
@@ -421,10 +413,30 @@ fn a_signed_up_guest_takes_over_its_node_once() {
     ));
 }
 
-/// Two principals of the account race for the guest's node in one tick:
-/// the first takes it, the second finds it handed over and is refused.
+/// The account later signs in another way on the same device (another
+/// issuer, or an identity the backend linked): that principal takes the
+/// node over, and the earlier one takes it back when it signs in again.
+/// The guest's key never gets it back.
 #[test]
-fn a_guest_node_is_handed_over_to_one_racing_principal() {
+fn a_later_sign_in_method_of_the_account_takes_over_its_node() {
+    let server = server();
+    let (_store, id, kind) = owned_node(&server, guest_of(1));
+    let tx = id.time.0;
+    let backend = signed_in_as(1, "urn:jazz:backend");
+    let other = signed_in_as(1, "urn:jazz:other");
+
+    assert!(commit_as(&server, backend, id.node, tx + 1, &kind));
+    assert!(commit_as(&server, other, id.node, tx + 2, &kind));
+    assert!(commit_as(&server, backend, id.node, tx + 4, &kind));
+    assert!(!commit_as(&server, guest_of(1), id.node, tx + 5, &kind));
+    assert!(!commit_as(&server, user(9), id.node, tx + 5, &kind));
+    assert!(commit_as(&server, backend, id.node, tx + 5, &kind));
+}
+
+/// Two signed-in principals of the account race for the guest's node in
+/// one tick: each takes it over in turn, and the guest's key is refused.
+#[test]
+fn racing_principals_of_the_account_each_take_over_the_guest_node() {
     let server = server();
     let (_store, id, kind) = owned_node(&server, guest_of(1));
     let tx = id.time.0;
@@ -444,7 +456,7 @@ fn a_guest_node_is_handed_over_to_one_racing_principal() {
     let (_b, second) = send(signed_in_as(1, "urn:jazz:other"), tx + 2);
     block_on(server.tick()).unwrap();
     assert_eq!(fates(&first), vec![(tx + 1, true)]);
-    assert_eq!(fates(&second), vec![(tx + 2, false)]);
+    assert_eq!(fates(&second), vec![(tx + 2, true)]);
     assert!(!commit_as(&server, guest_of(1), id.node, tx + 3, &kind));
 }
 
@@ -489,27 +501,28 @@ fn a_handed_over_node_stays_handed_over_after_a_restart() {
     ));
 }
 
-/// The hand-over runs one way only, from the account's local-first guest.
+/// A signed-in principal's node goes only to another signed-in principal
+/// of the same account: never to the account's guest key, another account,
+/// or a principal with no account.
 #[test]
-fn a_node_of_a_signed_in_principal_is_not_handed_over() {
+fn a_node_of_a_signed_in_principal_goes_only_to_its_account() {
     let server = server();
     let owner = signed_in_as(1, "urn:jazz:backend");
     let (_store, id, kind) = owned_node(&server, owner);
     let tx = id.time.0;
 
-    // Neither the account's guest key, another of its principals, nor a
-    // principal with no account writes as the node; none of them claims it.
     assert!(!commit_as(&server, guest_of(1), id.node, tx + 1, &kind));
-    assert!(!commit_as(
-        &server,
-        signed_in_as(1, "urn:jazz:other"),
-        id.node,
-        tx + 1,
-        &kind
-    ));
+    assert!(!commit_as(&server, user(9), id.node, tx + 1, &kind));
     let accountless = AuthorSubject::authenticated("urn:jazz:backend", "user-1").unwrap();
     assert!(!commit_as(&server, accountless, id.node, tx + 1, &kind));
     assert!(commit_as(&server, owner, id.node, tx + 1, &kind));
+    assert!(commit_as(
+        &server,
+        signed_in_as(1, "urn:jazz:other"),
+        id.node,
+        tx + 2,
+        &kind
+    ));
 }
 
 /// A base on another identity's commit tells its sender nothing: whether
