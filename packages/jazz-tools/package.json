@@ -245,6 +245,7 @@
   },
   "peerDependencies": {
     "@vercel/functions": ">=3.10.0",
+    "@vercel/sandbox": ">=3.9.0",
     "better-auth": "1.7.1",
     "effect": "^4.0.0-rc.118",
     "expo": ">=54",
@@ -296,6 +297,9 @@
       "optional": true
     },
     "@vercel/functions": {
+      "optional": true
+    },
+    "@vercel/sandbox": {
       "optional": true
     }
   },

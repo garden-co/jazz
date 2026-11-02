@@ -32,9 +32,11 @@ export {
   memory,
   remote,
   sqlite,
+  vercel,
   type CreateJazzOptions,
   type Jazz,
   type JazzStore,
   type JazzUser,
+  type VercelStoreOptions,
   type WsLikeSocket,
 } from "./create-jazz.js";
