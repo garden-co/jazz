@@ -87,8 +87,11 @@ function signInAs(origin: string, userId: string) {
     return realFetch(request);
   }) as typeof fetch;
   globalThis.WebSocket = class extends RealWebSocket {
-    constructor(url: string | URL) {
-      super(url, { headers: { "x-test-user": userId } } as never);
+    constructor(url: string | URL, options?: { headers?: Record<string, string> }) {
+      // Sockets to the app's origin carry the session; a backend's own
+      // sockets to its core keep their headers.
+      const headers = new URL(url).host === new URL(origin).host ? { "x-test-user": userId } : {};
+      super(url, { ...options, headers: { ...options?.headers, ...headers } } as never);
     }
   } as typeof WebSocket;
   cleanups.push(async () => {
@@ -507,11 +510,8 @@ describe("createJazz", () => {
     const appId = randomUUID();
     const core = await startLocalJazzServer({ appId, inMemory: true });
     cleanups.push(() => core.stop());
-    const store = remote({
-      url: core.url,
-      adminSecret: core.adminSecret,
-      backendSecret: core.backendSecret,
-    });
+    // The app's one secret: the core's admin secret.
+    const store = remote({ url: core.url, secret: core.adminSecret });
     const jazz = await createJazz({ appId, app, permissions, store, authenticate });
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: true });
@@ -537,5 +537,50 @@ describe("createJazz", () => {
       new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
     );
     expect(await asBob.all(app.todos)).toEqual([]);
+  }, 60_000);
+
+  it("presents the backend credential on every request and socket to a remote core", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+
+    // Not the admin secret (the backend secret included): nothing opens.
+    for (const secret of ["not-the-secret", core.backendSecret]) {
+      await expect(
+        createJazz({ appId, app, permissions, store: remote({ url: core.url, secret }) }),
+      ).rejects.toThrow();
+    }
+    expect(() => remote({ url: core.url, secret: "" })).toThrow(/admin secret/);
+
+    // A credential hook is asked fresh for each request and socket.
+    let asked = 0;
+    const store = remote({
+      url: core.url,
+      backendCredential: async () => {
+        asked++;
+        return core.adminSecret;
+      },
+    });
+    const jazz = await createJazz({ appId, app, permissions, store, authenticate });
+    cleanups.push(() => jazz.close());
+    const opened = asked;
+    expect(opened).toBeGreaterThan(1);
+    const origin = await serve(jazz, { sockets: true });
+
+    const alice = await userSession(appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "vouched", owner: alice.session!.user!.account })
+      .wait({ tier: "global" });
+    expect(asked).toBeGreaterThan(opened);
+
+    // A browser can't state an access of its own: the schema list needs
+    // admin, and the backend relays public routes with no access.
+    const forged = await fetch(`${origin}/jazz/apps/${appId}/schemas`, {
+      headers: {
+        "X-Jazz-Backend-Credential": core.adminSecret,
+        "X-Jazz-Backend-Access": "admin",
+      },
+    });
+    expect(forged.status).toBe(401);
   }, 60_000);
 });

@@ -322,19 +322,27 @@ async fn ws_admission(
     let peer_identity = ws_peer_identity(&prelude.peer_identity)?;
     let requested_link = prelude.requested_link;
     let mut auth = prelude.auth;
-    // A server that trusts a workload admits only sockets its workload
-    // opened (the HTTP gate checked the upgrade's token), guests included.
-    // The prelude's own secret slots never count: the access the backend
-    // stated on the upgrade decides which internal secrets the socket gets.
-    if let Some(secrets) = state.workload_secrets.as_ref() {
-        let Some(access) = crate::middleware::workload::vouched(request_headers, secrets) else {
-            return Err("this server admits only sockets its trusted workload opens"
-                .to_owned()
-                .into());
-        };
-        let (admin, backend) = access.secrets(secrets);
-        auth.admin_secret = admin;
-        auth.backend_secret = backend;
+    // On a socket whose upgrade carried a backend credential (the HTTP gate
+    // checked it), the prelude's own secret slots never count: the access
+    // the backend stated decides which secrets the socket gets. A server
+    // that trusts a workload admits only such sockets, guests included.
+    if let (Some(check), Some(secrets)) = (
+        state.backend_credential.as_deref(),
+        state.workload_secrets.as_ref(),
+    ) {
+        match crate::middleware::workload::vouched(request_headers, secrets) {
+            Some(access) => {
+                let (admin, backend) = access.secrets(secrets);
+                auth.admin_secret = admin;
+                auth.backend_secret = backend;
+            }
+            None if check.required() => {
+                return Err("this server admits only sockets its trusted workload opens"
+                    .to_owned()
+                    .into());
+            }
+            None => {}
+        }
     }
 
     if let Some(admin_secret) = auth.admin_secret.as_deref() {
@@ -2210,6 +2218,34 @@ mod tests {
             .is_err(),
             "unknown requested_link is an authority request, not an ignored extension"
         );
+    }
+
+    /// A backend that presents the admin secret as its credential and states
+    /// backend access gets a backend session whatever its prelude's secret
+    /// slot says.
+    #[tokio::test]
+    async fn websocket_backend_credential_grants_the_stated_access() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let prelude = serde_json::json!({
+            "peer_identity": AuthorSubject::SYSTEM.canonical(),
+            "auth": { "backend_secret": "a stand-in" },
+        })
+        .to_string();
+        let mut open = Vec::new();
+        for _ in 0..3 {
+            let mut request = ws_url(addr, state.app_id).into_client_request().unwrap();
+            let headers = request.headers_mut();
+            headers.insert("X-Jazz-Backend-Credential", "admin-secret".parse().unwrap());
+            headers.insert("X-Jazz-Backend-Access", "backend".parse().unwrap());
+            let (mut ws, _) = connect_async(request).await.expect("connect websocket");
+            ws.send(WsMessage::Text(prelude.clone().into()))
+                .await
+                .expect("send prelude");
+            expect_ws_server_hello(&mut ws, 0).await;
+            open.push(ws);
+        }
     }
 
     #[tokio::test]

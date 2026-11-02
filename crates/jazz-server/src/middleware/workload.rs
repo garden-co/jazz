@@ -1,14 +1,20 @@
-//! Trusted workloads: a backend proves who it is with its platform's OIDC
-//! token (for example a Vercel function's `VERCEL_OIDC_TOKEN`) instead of a
-//! shared secret.
+//! Backend credentials: a backend presents one credential in
+//! `X-Jazz-Backend-Credential` and states the access it wants (`backend` or
+//! `admin`) in `X-Jazz-Backend-Access` next to it. The server then hands the
+//! request the matching admin or backend secret, so the existing secret
+//! checks apply unchanged. Secrets a request or prelude offers itself are
+//! ignored once a credential verifies.
 //!
-//! When a server trusts a workload it admits nothing else: every request and
-//! every WebSocket session must carry a token whose issuer, audience and
-//! subject match. The backend states the access it wants (`backend` or
-//! `admin`) in `X-Jazz-Backend-Access` next to its token; the server then
-//! hands the request the matching admin or backend secret, which it holds
-//! only internally (random, per process), so the existing secret checks apply
-//! unchanged. Secrets a request or prelude offers itself are ignored.
+//! Two kinds of credential:
+//!
+//! - A trusted workload's OIDC token (for example a Vercel function's
+//!   `VERCEL_OIDC_TOKEN`). Such a server admits nothing else: every request
+//!   and every WebSocket session must carry a token whose issuer, audience
+//!   and subject match, and it holds its secrets only internally (random, per
+//!   process).
+//! - The admin secret itself, on a server configured with one: a backend
+//!   (`remote()` in jazz-tools) then needs only that one secret. Requests
+//!   without a credential are admitted as before.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -161,6 +167,34 @@ impl WorkloadVerifier {
     }
 }
 
+/// How a server checks the backend credential.
+pub enum BackendCredential {
+    /// The trusted workload's OIDC token; nothing else is admitted.
+    Workload(Box<WorkloadVerifier>),
+    /// The server's admin secret; requests without a credential pass as before.
+    AdminSecret(String),
+}
+
+impl BackendCredential {
+    /// Whether every request and socket must carry the credential.
+    pub fn required(&self) -> bool {
+        matches!(self, Self::Workload(_))
+    }
+
+    async fn verify(&self, credential: &str, now_seconds: u64) -> Result<(), String> {
+        match self {
+            Self::Workload(verifier) => verifier.verify(credential, now_seconds).await,
+            Self::AdminSecret(secret) if constant_time_eq(credential, secret) => Ok(()),
+            Self::AdminSecret(_) => Err("backend credential rejected".to_owned()),
+        }
+    }
+}
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 /// The secrets a verified workload stands in for, held only by this process.
 #[derive(Clone)]
 pub struct InternalSecrets {
@@ -229,7 +263,7 @@ impl BackendAccess {
 /// request offers itself never count: a backend that forwards a client's
 /// headers can't hand that client more than the access it states.
 pub async fn admit(
-    verifier: &WorkloadVerifier,
+    check: &BackendCredential,
     now_seconds: u64,
     credential: Option<&str>,
     access: Option<&str>,
@@ -239,7 +273,7 @@ pub async fn admit(
             "this server admits only its trusted workload; send its token in {WORKLOAD_TOKEN_HEADER}"
         ));
     };
-    verifier.verify(token, now_seconds).await?;
+    check.verify(token, now_seconds).await?;
     BackendAccess::parse(access)
 }
 
@@ -266,28 +300,34 @@ pub(crate) fn vouched(headers: &HeaderMap, secrets: &InternalSecrets) -> Option<
     .find(|access| value == vouched_value(secrets, *access).as_bytes())
 }
 
-/// The gate for servers that trust a workload: every request (WebSocket
-/// upgrades included) must carry the workload's token. The secret headers a
-/// request carries are replaced by the ones its stated access grants; on a
-/// WebSocket, `ws_admission` does the same for the prelude.
+/// The backend credential gate. A request (WebSocket upgrades included) that
+/// carries a credential must verify, and its secret headers are replaced by
+/// the ones its stated access grants; on a WebSocket, `ws_admission` does the
+/// same for the prelude. A server that trusts a workload refuses requests
+/// without one.
 pub async fn workload_gate(
     State(state): State<Arc<ServerState>>,
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    let (Some(verifier), Some(secrets)) = (
-        state.workload_verifier.as_deref(),
+    let (Some(check), Some(secrets)) = (
+        state.backend_credential.as_deref(),
         state.workload_secrets.as_ref(),
     ) else {
         return next.run(request).await;
     };
     let headers = request.headers_mut();
-    for name in [VOUCHED_HEADER, ADMIN_SECRET_HEADER, BACKEND_SECRET_HEADER] {
+    headers.remove(VOUCHED_HEADER);
+    if !check.required() && !headers.contains_key(WORKLOAD_TOKEN_HEADER) {
+        headers.remove(ACCESS_HEADER);
+        return next.run(request).await;
+    }
+    for name in [ADMIN_SECRET_HEADER, BACKEND_SECRET_HEADER] {
         headers.remove(name);
     }
     let now = state.auth_config.clock.now_seconds();
     let access = match admit(
-        verifier,
+        check,
         now,
         header(headers, WORKLOAD_TOKEN_HEADER).as_deref(),
         header(headers, ACCESS_HEADER).as_deref(),
@@ -296,7 +336,7 @@ pub async fn workload_gate(
     {
         Ok(access) => access,
         Err(error) => {
-            warn!(%error, "refused a request without a valid workload token");
+            warn!(%error, "refused a request without a valid backend credential");
             return (StatusCode::UNAUTHORIZED, error).into_response();
         }
     };
@@ -426,7 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn admit_grants_only_the_stated_access() {
-        let v = verifier();
+        let v = BackendCredential::Workload(Box::new(verifier()));
         let secrets = InternalSecrets::generate();
         let good = token(|_| {});
 
@@ -457,7 +497,7 @@ mod tests {
 
     #[tokio::test]
     async fn admit_refuses_missing_and_bad_credentials() {
-        let v = verifier();
+        let v = BackendCredential::Workload(Box::new(verifier()));
         let secrets = InternalSecrets::generate();
         assert!(admit(&v, NOW, None, Some("admin")).await.is_err());
         // Not even the server's own internal secret stands in for a token.
@@ -466,6 +506,28 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn the_admin_secret_is_a_credential_too() {
+        let check = BackendCredential::AdminSecret("admin-secret-0123".to_owned());
+        assert!(!check.required());
+        assert_eq!(
+            admit(&check, NOW, Some("admin-secret-0123"), Some("admin")).await,
+            Ok(BackendAccess::Admin)
+        );
+        assert_eq!(
+            admit(&check, NOW, Some("admin-secret-0123"), None).await,
+            Ok(BackendAccess::Session)
+        );
+        for wrong in ["admin-secret-0124", "admin-secret-012", ""] {
+            assert!(
+                admit(&check, NOW, Some(wrong), Some("backend"))
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(BackendCredential::Workload(Box::new(verifier())).required());
     }
 
     #[tokio::test]
