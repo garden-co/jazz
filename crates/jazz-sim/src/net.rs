@@ -675,13 +675,16 @@ mod tests {
                 .build(),
         )
         .unwrap();
-        block_on(Db::open(DbConfig::new(
-            schema,
-            DbIdentity {
-                node: NodeUuid::from_bytes([node; 16]),
-                author,
-            },
-        )))
+        block_on(Db::open(
+            DbConfig::new(
+                schema,
+                DbIdentity {
+                    node: NodeUuid::from_bytes([node; 16]),
+                    author,
+                },
+            )
+            .with_clock(|| jazz::db::shard::HLC_EPOCH_MS),
+        ))
         .unwrap()
     }
 

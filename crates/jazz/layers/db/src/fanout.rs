@@ -13,6 +13,7 @@
 
 use super::*;
 use crate::schema::history::{history_source_table, is_history_table};
+use std::borrow::Cow;
 
 pub(super) type Queue = Rc<RefCell<VecDeque<SubscriptionEvent>>>;
 
@@ -43,6 +44,9 @@ struct GroupKey {
     partial: String,
     /// The columns whose changes updated rows carry as splices.
     splices: Vec<String>,
+    /// The position the result reads as of: results of different upstream
+    /// reads settle apart.
+    position: String,
 }
 
 struct Member {
@@ -94,6 +98,13 @@ pub(super) struct Group {
     /// Under a branch view over a base (live or frozen), what the head
     /// rows of each branched table it reads mask (see [`ViewMask`]).
     masks: Vec<ViewMask>,
+    /// The stored tables the query reads: a cut is taken only while the
+    /// store holds others' versions of them past the result's position.
+    tables: BTreeSet<String>,
+    /// The cut the last run read through (see [`Inner::visible_read`]):
+    /// its position and the own commits past it, or `None` for the
+    /// current state.
+    applied: Option<(sync::Pos, usize)>,
 }
 
 type SortKey = Vec<(Sql, bool)>;
@@ -311,6 +322,7 @@ impl Inner {
             relations: format!("{:?}", prepared.query.array_subqueries),
             partial: format!("{:?}", compiled.partial),
             splices: read.splices.clone(),
+            position: format!("{:?}", read.position),
         };
         let now = settled.get();
         let member = |queue: &Queue| Member {
@@ -349,15 +361,23 @@ impl Inner {
             self.fan.stats.shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
         }
-        // A replica missing chunks the result needs opens it once they arrive.
-        let (rows, awaiting) = match self
-            .execute(&compiled, &prepared.query.table)
-            .and_then(|rows| self.nest_relations(prepared, identity, &read, rows))
-        {
-            Ok(rows) => (rows, false),
-            Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
-            Err(error) => return Err(error),
+        // A replica missing chunks the result needs opens it once they
+        // arrive. Its cut is decided over its relations' tables too.
+        let tables = self.with_relation_tables(prepared, &compiled.tables)?;
+        let visible = self.visible_read(&read, &tables);
+        let applied = cut_of(&visible);
+        let run = match &visible {
+            Cow::Borrowed(_) => self.execute(&compiled, &prepared.query.table),
+            Cow::Owned(visible) => self
+                .compile(prepared, identity, visible)
+                .and_then(|compiled| self.execute(&compiled, &prepared.query.table)),
         };
+        let (rows, awaiting) =
+            match run.and_then(|rows| self.nest_relations(prepared, identity, &visible, rows)) {
+                Ok(rows) => (rows, false),
+                Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
+                Err(error) => return Err(error),
+            };
         let watches = self.watches(prepared, identity, &read, &compiled)?;
         let root = prepared
             .schema
@@ -409,6 +429,8 @@ impl Inner {
             opened: !awaiting,
             branches,
             masks,
+            tables,
+            applied,
         }));
         self.read_keys(&mut handle.borrow_mut());
         let weak = Rc::downgrade(&handle);
@@ -822,25 +844,28 @@ impl Inner {
     ) -> Vec<Vec<(String, String)>> {
         let read = |sql: String,
                     params: &[&dyn rusqlite::ToSql]|
-         -> Vec<((i64, i64), Vec<u8>, Vec<(String, String)>)> {
+         -> Vec<(i64, Vec<u8>, Vec<(String, String)>)> {
             let Ok(mut statement) = self.conn.prepare_cached(&sql) else {
                 return Vec::new();
             };
-            let names: Vec<String> = statement
-                .column_names()
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect();
+            // Names from the first row: a cached `SELECT *` prepared before
+            // its table gained a column names the old columns until a step
+            // re-prepares it.
+            let mut names: Vec<String> = Vec::new();
             let rows = statement.query_map(params, |r| {
-                let mut seq = (0, 0);
+                if names.is_empty() {
+                    let statement = r.as_ref();
+                    names = (0..statement.column_count())
+                        .map(|i| statement.column_name(i).map(str::to_owned))
+                        .collect::<Result<_, _>>()?;
+                }
+                let mut seq = 0i64;
                 let mut branch = Vec::new();
                 let mut out = Vec::new();
                 for (i, name) in names.iter().enumerate() {
-                    if name == "_n" {
-                        seq.0 = r.get(i)?;
-                    } else if name == "_seq" {
-                        seq.1 = r.get(i)?;
-                    } else if name == "_b" {
+                    if name == "_clock" {
+                        seq = r.get(i)?;
+                    } else if name == "_branch" {
                         branch = r.get(i)?;
                     } else if columns.contains(name) {
                         out.push((name.clone(), canon(&r.get::<_, Sql>(i)?)));
@@ -859,15 +884,15 @@ impl Inner {
         let seq = current
             .iter()
             .find(|(_, branch, _)| branch.as_slice() == key)
-            .map_or((i64::MAX, i64::MAX), |(seq, _, _)| *seq);
+            .map_or(i64::MAX, |(seq, _, _)| *seq);
         let old = read(
             format!(
-                "SELECT * FROM {} WHERE id = ?1 AND _b = ?2 AND (_n, _seq) < (?3, ?4) \
-                 AND (_st & {}) = 0 ORDER BY _n DESC, _seq DESC LIMIT 1",
+                "SELECT * FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock < ?3 \
+                 AND (_state & {}) = 0 ORDER BY _clock DESC LIMIT 1",
                 quote(&format!("{table}__h")),
                 crate::values::STATE_AS_SENT
             ),
-            &[&id, &key, &seq.0, &seq.1],
+            &[&id, &key, &seq],
         );
         current
             .into_iter()
@@ -911,7 +936,14 @@ impl Inner {
         ));
         prepared.query.order_by.clear();
         prepared.query.limit = None;
-        let narrowed = match self.compile(&prepared, group.identity, &group.read) {
+        // Under a cut, a row changed past it still reads as it was. The
+        // other rows were read through the cut the last run applied: under
+        // another, only a full run (which records it) keeps them one state.
+        let read = self.visible_read(&group.read, &group.tables);
+        if cut_of(&read) != group.applied {
+            return None;
+        }
+        let narrowed = match self.compile(&prepared, group.identity, &read) {
             Ok(compiled) => compiled,
             Err(error) => return Some(Err(error)),
         };
@@ -1202,9 +1234,28 @@ impl Inner {
     }
 
     /// A group's rows, with array relations nested in their cells.
-    fn group_rows(&self, group: &Group) -> Result<Vec<CurrentRow>, Error> {
-        let rows = self.run(&group.prepared, group.identity, &group.read)?;
-        self.nest_relations(&group.prepared, group.identity, &group.read, rows)
+    fn group_rows(&self, group: &mut Group) -> Result<Vec<CurrentRow>, Error> {
+        let read = self.visible_read(&group.read, &group.tables);
+        group.applied = cut_of(&read);
+        let rows = self.run(&group.prepared, group.identity, &read)?;
+        self.nest_relations(&group.prepared, group.identity, &read, rows)
+    }
+
+    /// Re-run the live results whose cut moved: their read's settle rose,
+    /// the connection's position did, or an own commit was accepted past
+    /// them.
+    pub(super) fn refresh_visibility(&mut self) -> Result<(), Error> {
+        let groups: Vec<Rc<RefCell<Group>>> = self.fan.groups.values().cloned().collect();
+        for group in groups {
+            let mut group = group.borrow_mut();
+            if group.read.position == Position::Current
+                || cut_of(&self.visible_read(&group.read, &group.tables)) == group.applied
+            {
+                continue;
+            }
+            self.refresh_group(&mut group, None);
+        }
+        Ok(())
     }
 
     fn reset_group(&self, group: &mut Group) {
@@ -1292,8 +1343,15 @@ impl Inner {
             let Some(before) = prior.get(&out.row.id) else {
                 continue;
             };
-            let from = before.seq;
-            if from == out.row.seq {
+            // Two writers' pending versions can share a position.
+            let rank = |row: &CurrentRow| {
+                (
+                    row.seq,
+                    row.writer.as_deref().and_then(sync::writer_of_bytes),
+                )
+            };
+            let (from, to) = (rank(before), rank(&out.row));
+            if from == to {
                 continue;
             }
             for column in &group.key.splices {
@@ -1320,7 +1378,7 @@ impl Inner {
                     &group.prepared.query.table,
                     out.row.id,
                     column,
-                    (from, out.row.seq),
+                    (from, to),
                     group.identity,
                 ) {
                     out.splices.push((column.clone(), splices));
@@ -1540,6 +1598,7 @@ pub(crate) fn view_masks<'t>(
         .then(|| schema.stored_table(&query.table).ok().map(str::to_owned))
         .flatten();
     let base_read = ReadSpec {
+        position: Position::Current,
         include_deleted: read.include_deleted,
         settled_only: read.settled_only,
         view: Some(View {
@@ -1935,4 +1994,12 @@ fn row_pin(policy: &PolicyExpr, session: &Session) -> Option<(String, String)> {
         PolicyExpr::And(list) => list.iter().find_map(|p| row_pin(p, session)),
         _ => None,
     }
+}
+
+/// The cut a run read through, as [`Group::applied`] keeps it.
+fn cut_of(read: &ReadSpec) -> Option<(sync::Pos, usize)> {
+    (read.position != Position::Current)
+        .then_some(read.cut.as_ref())
+        .flatten()
+        .map(|cut| (cut.seq, cut.extra.len()))
 }

@@ -20,7 +20,7 @@ durable-object-limits = ["rusqlite/limits"]
 jazz-types.workspace = true
 jazz-model.workspace = true
 jazz-protocol.workspace = true
-rusqlite = { version = "0.40", features = ["bundled", "functions", "hooks"] }
+rusqlite = { version = "0.40", features = ["bundled", "functions", "hooks", "limits"] }
 uuid = { version = "1.18.1", features = ["serde", "v4", "v5", "v7"] }
 web-time = "1.1"
 blake3 = "1"

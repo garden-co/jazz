@@ -168,6 +168,14 @@ export interface Runtime {
   ): Promise<void>;
   /** @internal Close mutation admission and report the foreground TxTime high-water. */
   quiesceForegroundTxTimeHighWater?(): Promise<bigint>;
+  beginTransaction(
+    transactionKind: TransactionKind,
+    id: OpenTransactionId,
+    sessionJson?: string | null,
+  ): OpenTransactionId;
+  /** Completion may include asynchronous preparation before physical submission. */
+  commitTransaction(id: OpenTransactionId): TxId | Promise<TxId>;
+  rollbackTransaction(id: OpenTransactionId): Promise<boolean>;
   /** Capture behind earlier owner operations without waiting for server acceptance. */
   captureSnapshot?(): Promise<SnapshotRef>;
   readonly preparationOwner?: object;
@@ -313,17 +321,6 @@ export interface Runtime {
  */
 export type PermissionAdvice = "allowed" | "denied" | "unknown";
 
-export interface TransactionalRuntime extends Runtime {
-  beginTransaction(
-    transactionKind: TransactionKind,
-    id: OpenTransactionId,
-    sessionJson?: string | null,
-  ): OpenTransactionId;
-  /** Completion may include asynchronous preparation before physical submission. */
-  commitTransaction(id: OpenTransactionId): TxId | Promise<TxId>;
-  rollbackTransaction(id: OpenTransactionId): Promise<boolean>;
-}
-
 declare const openTransactionIdBrand: unique symbol;
 declare const txIdBrand: unique symbol;
 
@@ -391,17 +388,26 @@ export const ReadTier = {
 export type ReadTier = (typeof ReadTier)[keyof typeof ReadTier];
 
 /**
- * @internal A local-first read's server wait, or `undefined` for none.
- * Throws for a value that is not a non-negative number of milliseconds.
+ * @internal A local-first read's server wait in whole milliseconds, or
+ * `undefined` when the caller gave none. An explicit `0` stays `0`: it opts
+ * out of the client default wait. Throws for a value that is not a
+ * non-negative number of milliseconds.
  */
 export function normalizeFirstLoadRemoteWaitMs(value: unknown): number | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     throw new Error("firstLoadRemoteWaitMs must be a non-negative number of milliseconds.");
   }
-  const ms = Math.floor(value);
-  return ms > 0 ? ms : undefined;
+  return Math.floor(value);
 }
+
+/**
+ * How long a read that names no tier waits for the server on its first load
+ * in browsers and React Native, when a server is configured. It never waits
+ * offline or after `db.disconnect()`; pass `firstLoadRemoteWaitMs: 0` to show
+ * local data at once.
+ */
+export const DEFAULT_CLIENT_FIRST_LOAD_REMOTE_WAIT_MS = 5_000;
 
 // Keep removed names here solely to provide migration guidance at the public API boundary.
 const REMOVED_READ_TIERS: Readonly<Record<string, string>> = {
@@ -467,13 +473,17 @@ export type ReadTierOptions =
       /**
        * Read tier: {@link ReadTier.LocalFirst} or {@link ReadTier.Remote}.
        *
-       * Reads default to local-first in browsers and React Native, and without a
+       * Reads default to local-first in browsers and React Native (with a brief
+       * first-load server wait when a server is configured), and without a
        * configured server; other environments with a server default to remote.
        */
       tier?: typeof ReadTier.LocalFirst;
       /**
        * How long the initial load may wait for the server's answer, in
-       * milliseconds. Defaults to `0`, which shows local data at once.
+       * milliseconds. A read that names no tier in a browser or React Native
+       * with a server defaults to {@link DEFAULT_CLIENT_FIRST_LOAD_REMOTE_WAIT_MS};
+       * an explicit `tier: "local-first"` defaults to `0`. `0` shows local
+       * data at once.
        *
        * While the client is online (connected, or its connection attempt is still
        * young), a subscription's first callback, or a one-shot read, waits up to
@@ -676,16 +686,22 @@ export function resolveEffectiveQueryExecutionOptions(
   context: QueryExecutionDefaultsContext,
   options?: InternalQueryExecutionOptions,
 ): ResolvedQueryExecutionOptions {
+  const clientRuntime = isBrowserRuntime() || isReactNativeRuntime();
   const tier =
-    options?.tier ??
-    (context.serverUrl && !isBrowserRuntime() && !isReactNativeRuntime()
-      ? ReadTier.Remote
-      : ReadTier.LocalFirst);
+    options?.tier ?? (context.serverUrl && !clientRuntime ? ReadTier.Remote : ReadTier.LocalFirst);
   if (tier !== "local-only") rejectRemovedReadTier(tier);
-  const firstLoadRemoteWaitMs =
-    tier === ReadTier.LocalFirst
-      ? normalizeFirstLoadRemoteWaitMs(options?.firstLoadRemoteWaitMs)
+  // A client read that names no tier is local first, but its first load
+  // waits briefly for the server so it does not show a stale or empty cache.
+  const defaultWaitMs =
+    options?.tier === undefined && context.serverUrl && clientRuntime
+      ? DEFAULT_CLIENT_FIRST_LOAD_REMOTE_WAIT_MS
       : undefined;
+  const requestedWaitMs =
+    tier === ReadTier.LocalFirst
+      ? (normalizeFirstLoadRemoteWaitMs(options?.firstLoadRemoteWaitMs) ?? defaultWaitMs)
+      : undefined;
+  const firstLoadRemoteWaitMs =
+    requestedWaitMs !== undefined && requestedWaitMs > 0 ? requestedWaitMs : undefined;
   return {
     tier,
     ...(firstLoadRemoteWaitMs !== undefined ? { firstLoadRemoteWaitMs } : {}),
@@ -765,18 +781,6 @@ function encodeQueryExecutionOptions(
   }
 
   return JSON.stringify(payload);
-}
-
-function requireTransactionalRuntime(runtime: Runtime): TransactionalRuntime {
-  if (
-    typeof (runtime as Partial<TransactionalRuntime>).beginTransaction === "function" &&
-    typeof (runtime as Partial<TransactionalRuntime>).commitTransaction === "function" &&
-    typeof (runtime as Partial<TransactionalRuntime>).rollbackTransaction === "function"
-  ) {
-    return runtime as TransactionalRuntime;
-  }
-
-  throw new Error("This Jazz runtime does not support transactions");
 }
 
 function committedTxId(result: WriteReceipt): TxId | Promise<TxId> {
@@ -1226,17 +1230,13 @@ export class JazzClient {
         assertCurrent();
         await prerequisite();
         assertCurrent();
-        requireTransactionalRuntime(this.runtime).beginTransaction(kind, id, context);
+        this.runtime.beginTransaction(kind, id, context);
         state.unopened = false;
       });
       state.pending.catch(() => {});
       return id;
     }
-    const opened = requireTransactionalRuntime(this.runtime).beginTransaction(
-      kind,
-      id,
-      this.writeContext(session, attribution),
-    );
+    const opened = this.runtime.beginTransaction(kind, id, this.writeContext(session, attribution));
     this.transactionPreparations.set(opened, { committing: false });
     return opened;
   }
@@ -1373,7 +1373,7 @@ export class JazzClient {
   commitTransaction(id: OpenTransactionId): WriteHandle {
     const state = this.transactionPreparations.get(id);
     if (state?.committing) throw new Error("Transaction is already committing");
-    const runtime = requireTransactionalRuntime(this.runtime);
+    const runtime = this.runtime;
     const submitted = state?.pending
       ? state.pending.then(() => runtime.commitTransaction(id))
       : runtime.commitTransaction(id);
@@ -1399,7 +1399,7 @@ export class JazzClient {
     const unopened = this.transactionPreparations.get(id)?.unopened;
     this.transactionPreparations.delete(id);
     if (unopened) return Promise.resolve(true);
-    return requireTransactionalRuntime(this.runtime).rollbackTransaction(id);
+    return this.runtime.rollbackTransaction(id);
   }
 
   /**

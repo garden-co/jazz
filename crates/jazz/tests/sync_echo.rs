@@ -299,11 +299,17 @@ fn one_keystroke_sends_only_fate_and_settled() {
                 ..
             } if as_written.len() == 1 => "fate+as_written",
             SyncMessage::Settled { .. } => "settled",
+            SyncMessage::ConnectionSettled { .. } => "connection",
             _ => "other",
         })
         .collect();
     assert_eq!(kinds[0], "fate+as_written", "{kinds:?}");
-    assert!(kinds[1..].iter().all(|k| *k == "settled"), "{kinds:?}");
+    // Then the reads' settles, and the connection's position after them.
+    assert_eq!(kinds.last(), Some(&"connection"), "{kinds:?}");
+    assert!(
+        kinds[1..kinds.len() - 1].iter().all(|k| *k == "settled"),
+        "{kinds:?}"
+    );
     let typed = snapshot(&client);
     assert_eq!(typed, snapshot(&server), "the replica holds the version");
     assert_ne!(typed, created);
@@ -984,8 +990,12 @@ fn a_resent_commit_ships_its_rows_though_superseded() {
 fn a_whole_ask_names_only_versions_the_sessions_own_commits_produced() {
     // Version 1 of the row is user 7's and secret; version 2 is user 2's.
     // User 2 asking for an earlier version by its seq gets the row as it is now,
-    // not the version it could not read.
-    let server = block_on(Db::open_history_complete(config(0, AuthorSubject::SYSTEM))).unwrap();
+    // not the version it could not read. A clock stopped at the hybrid-clock
+    // epoch numbers 1, 2, 3, so the reader can name every earlier seq.
+    let server = block_on(Db::open_history_complete(
+        config(0, AuthorSubject::SYSTEM).with_clock(|| jazz::db::shard::HLC_EPOCH_MS),
+    ))
+    .unwrap();
     let owner = |n: u8| Value::String(user(n).principal_parts().1);
     let mut secret = cells(&[("title", "T"), ("body", "SECRET")]);
     secret.insert("owner".to_owned(), owner(7));
@@ -1019,7 +1029,7 @@ fn a_whole_ask_names_only_versions_the_sessions_own_commits_produced() {
     };
     let current = shipped(&down).expect("the row ships");
     down.borrow_mut().clear();
-    for seq in 1..current.seq {
+    for seq in 1..current.at.seq {
         up.borrow_mut().push_back(SyncMessage::ResendWhole {
             rows: vec![(current.table.clone(), current.id, current.key.clone(), seq)],
         });
@@ -1027,8 +1037,8 @@ fn a_whole_ask_names_only_versions_the_sessions_own_commits_produced() {
     block_on(server.tick()).unwrap();
     let leaked = down.borrow().iter().any(|message| {
         matches!(message, SyncMessage::Rows { images, .. }
-            if images.iter().any(|image| image.id == current.id && image.seq < current.seq))
+            if images.iter().any(|image| image.id == current.id && image.at < current.at))
     });
     assert!(!leaked, "an unreadable version shipped");
-    assert_eq!(shipped(&down).map(|image| image.seq), Some(current.seq));
+    assert_eq!(shipped(&down).map(|image| image.at), Some(current.at));
 }

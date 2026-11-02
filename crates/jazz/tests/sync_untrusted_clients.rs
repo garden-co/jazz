@@ -7,6 +7,8 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
+use crate::common::stored;
+
 use jazz::db::{
     Acting, BuiltOn, Db, DbConfig, DbIdentity, DeleteOptions, ErrorCode, FileOptions,
     InsertOptions, ReadOpts, ReadTier, SyncMessage, Transport, TransportError, WireBase, WireKind,
@@ -295,6 +297,7 @@ fn a_commit_as_another_identitys_node_is_refused_and_claims_nothing() {
 
     // Mallory, another user, writes as alice's node at alice's next tx.
     m_up.borrow_mut().push_back(SyncMessage::Commit {
+        clock: 0,
         id: TxId::new(TxTime(tx + 1), id.node),
         kind,
         ops: Vec::new(),
@@ -319,13 +322,18 @@ fn a_commit_as_another_identitys_node_is_refused_and_claims_nothing() {
 fn a_base_on_another_identitys_commit_is_refused_whether_or_not_it_exists() {
     let server = server();
     let write = |node: u8, tx: u64, op: WireWrite, bases: Vec<WireBase>| SyncMessage::Commit {
+        clock: 0,
         id: TxId::new(TxTime(tx), NodeUuid::from_bytes([node; 16])),
         kind: WireKind::Mergeable,
         ops: vec![WireOp { bases, ..op.into() }],
         acting: Acting::Own,
     };
     let body = |text: &str| -> BTreeMap<String, Value> {
-        [("body".to_owned(), Value::String(text.into()))].into()
+        [(
+            stored(&server, "messages", "body"),
+            Value::String(text.into()),
+        )]
+        .into()
     };
     let (_a_client, a_server, a_up, a_down) = pipe();
     server.accept_subscriber(a_server, user(1)).unwrap();
@@ -424,6 +432,7 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
     let (_m_client, m_server, m_up, m_down) = pipe();
     server.accept_subscriber(m_server, user(1)).unwrap();
     m_up.borrow_mut().push_back(SyncMessage::Commit {
+        clock: 0,
         id: TxId::new(TxTime(1), NodeUuid::from_bytes([1; 16])),
         kind: WireKind::Mergeable,
         ops: vec![
@@ -437,7 +446,12 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
             WireWrite::Upsert {
                 table: "messages".to_owned(),
                 row: [7; 16],
-                cells: [("body".to_owned(), Value::String("rewritten".into()))].into(),
+                cells: [(
+                    stored(&server, "messages", "body"),
+                    Value::String("rewritten".into()),
+                )]
+                .into(),
+                created: Default::default(),
                 target: WireTarget::Root,
                 at: None,
             }
@@ -460,13 +474,14 @@ fn the_authority_refuses_cells_that_are_not_of_their_columns_type() {
         .enumerate()
     {
         m_up.borrow_mut().push_back(SyncMessage::Commit {
+            clock: 0,
             id: TxId::new(TxTime(1 + i as u64), NodeUuid::from_bytes([2; 16])),
             kind: WireKind::Mergeable,
             ops: vec![
                 WireWrite::Insert {
                     table: "messages".to_owned(),
                     row: [10 + i as u8; 16],
-                    cells: [("body".to_owned(), value)].into(),
+                    cells: [(stored(&server, "messages", "body"), value)].into(),
                     target: WireTarget::Root,
                     at: None,
                 }
@@ -506,6 +521,7 @@ fn a_reopened_authority_continues_after_the_seq_of_a_rowless_commit() {
     let (_r, r_server, r_up, r_down) = pipe();
     server.accept_subscriber(r_server, user(2)).unwrap();
     r_up.borrow_mut().push_back(SyncMessage::Commit {
+        clock: 0,
         id: TxId::new(TxTime(1), NodeUuid::from_bytes([2; 16])),
         kind: WireKind::Mergeable,
         ops: Vec::new(),
@@ -593,13 +609,18 @@ fn the_authority_refuses_misplaced_bases() {
         ..WireWrite::Update {
             table: "messages".to_owned(),
             row: [7; 16],
-            cells: [("body".to_owned(), Value::String(body.into()))].into(),
+            cells: [(
+                stored(&server, "messages", "body"),
+                Value::String(body.into()),
+            )]
+            .into(),
             target: WireTarget::Root,
             at: None,
         }
         .into()
     };
     let commit = |n: u64, ops: Vec<WireOp>| SyncMessage::Commit {
+        clock: 0,
         id: TxId::new(TxTime(n), NodeUuid::from_bytes([1; 16])),
         kind: WireKind::Mergeable,
         ops,
@@ -678,13 +699,18 @@ fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
     let (_m_client, m_server, m_up, m_down) = pipe();
     server.accept_subscriber(m_server, user(2)).unwrap();
     let insert = |tx: u64, row: u8, body: &str, acting: Acting| SyncMessage::Commit {
+        clock: 0,
         id: TxId::new(TxTime(tx), NodeUuid::from_bytes([2; 16])),
         kind: WireKind::Mergeable,
         ops: vec![
             WireWrite::Insert {
                 table: "messages".to_owned(),
                 row: [row; 16],
-                cells: [("body".to_owned(), Value::String(body.to_owned()))].into(),
+                cells: [(
+                    stored(&server, "messages", "body"),
+                    Value::String(body.to_owned()),
+                )]
+                .into(),
                 target: WireTarget::Root,
                 at: None,
             }

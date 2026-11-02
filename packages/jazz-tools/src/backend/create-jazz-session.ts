@@ -36,8 +36,10 @@ import {
 import {
   JazzContext,
   type BackendContextConfig,
+  type BackendNodeClock,
   type BackendSchemaInput,
 } from "./create-jazz-context.js";
+import { randomNodeUuidBytes } from "../runtime/runtime-entropy.js";
 import { deterministicBytes } from "../runtime/deterministic-bytes.js";
 import { formatUuidAt } from "../runtime/hex.js";
 
@@ -180,7 +182,8 @@ export async function createJazzSession(
     );
   }
   const registry = accountRegistryUrl(config.serverUrl, config.appId);
-  const memoryClocks = new WeakMap<AccountHandle, bigint | undefined>();
+  // A memory backend handle's pooled node and, after a clean handoff, its clock.
+  const memoryClocks = new WeakMap<AccountHandle, { node: Uint8Array; highWater?: bigint }>();
   const accounts = await prepareAccountManager({
     appId: config.appId,
     registry,
@@ -239,23 +242,25 @@ export async function createJazzSession(
           },
         });
       }
-      const memoryClock =
-        config.driver.type === "memory"
-          ? {
-              initialHighWater: memoryClocks.get(account),
-              closed(highWater: bigint) {
-                memoryClocks.set(account, highWater);
-              },
-            }
-          : undefined;
-      if (memoryClock) {
-        if (memoryClocks.has(account) && memoryClock.initialHighWater === undefined) {
+      let memoryClock: BackendNodeClock | undefined;
+      if (config.driver.type === "memory") {
+        const pooled = memoryClocks.get(account);
+        if (pooled && pooled.highWater === undefined) {
           throw new Error("Backend memory node cannot reopen without its completed clock handoff");
         }
+        const node = pooled?.node ?? randomNodeUuidBytes();
+        memoryClock = {
+          node,
+          initialHighWater: pooled?.highWater,
+          closed(highWater: bigint) {
+            memoryClocks.set(account, { node, highWater });
+          },
+        };
         // A failed/partial close must never reuse a stale earlier high-water.
-        memoryClocks.set(account, undefined);
+        memoryClocks.set(account, { node });
       }
       // The class remains internal; only a validated opaque account can reach it.
+      // Its SYSTEM provenance names the backend's node.
       const context = new JazzContext(
         { ...config, backendSecret: backend.backendSecret } as BackendContextConfig,
         uuidBytes(backend.nodeId),

@@ -208,7 +208,7 @@ impl Inner {
             .prepare_cached(&compiled.sql)
             .and_then(|mut statement| {
                 statement
-                    .query_row(params_from_iter(compiled.params.iter()), |r| r.get(4))
+                    .query_row(params_from_iter(compiled.params.iter()), |r| r.get(3))
                     .optional()
             })
             .map_err(storage)?;
@@ -244,7 +244,7 @@ impl Inner {
         table: &str,
         row: RowUuid,
         column: &str,
-        (from, to): (Pos, Pos),
+        (from, to): (sync::Rank, sync::Rank),
         reader: Option<AuthorSubject>,
     ) -> Result<Vec<LargeValueDeltaSplice>, Error> {
         let t = self.schema.table(table)?;
@@ -272,7 +272,7 @@ impl Inner {
             {
                 return Err(Error::new(
                     ErrorCode::NotObserved,
-                    format!("version {} of the row is not readable", at.seq),
+                    format!("version {} of the row is not readable", at.0.seq),
                 ));
             }
             cells.push(self.version_cell(t, row, &col.stored, at)?);
@@ -317,35 +317,48 @@ impl Inner {
     }
 
     /// The stored cell `stored` of `row`'s version at `at`, current or in
-    /// history.
-    fn version_cell(&self, t: &Table, row: RowUuid, stored: &str, at: Pos) -> Result<Sql, Error> {
+    /// history: a pending one by its writer too, when given, as two
+    /// writers' can share a position.
+    fn version_cell(
+        &self,
+        t: &Table,
+        row: RowUuid,
+        stored: &str,
+        at: sync::Rank,
+    ) -> Result<Sql, Error> {
+        let writer = at.1.filter(|_| !at.0.accepted());
         for table in [t.stored.clone(), format!("{}__h", t.stored)] {
-            let sql = format!(
-                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _n = ?3 AND _seq = ?4",
-                quote(stored),
-                quote(&table)
-            );
-            let cell: Option<Sql> = self
-                .conn
-                .cached_row(
-                    &sql,
-                    rusqlite::params![
-                        row.0.as_bytes().to_vec(),
-                        Vec::<u8>::new(),
-                        at.n,
-                        at.seq as i64
-                    ],
+            let id = row.0.as_bytes().to_vec();
+            let cell: Option<Sql> = match writer {
+                Some((node, tx)) => self.conn.cached_row(
+                    &format!(
+                        "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3 AND _writer = ?4",
+                        quote(stored),
+                        quote(&table)
+                    ),
+                    rusqlite::params![id, Vec::<u8>::new(), at.0.t(), sync::writer_bytes(node, tx)],
                     |r| r.get(0),
-                )
-                .optional()
-                .map_err(storage)?;
+                ),
+                None => self.conn.cached_row(
+                    &format!(
+                        "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3 \
+                         ORDER BY _writer DESC LIMIT 1",
+                        quote(stored),
+                        quote(&table)
+                    ),
+                    rusqlite::params![id, Vec::<u8>::new(), at.0.t()],
+                    |r| r.get(0),
+                ),
+            }
+            .optional()
+            .map_err(storage)?;
             if let Some(cell) = cell {
                 return Ok(cell);
             }
         }
         Err(Error::new(
             ErrorCode::NotObserved,
-            format!("version {} of the row is not held", at.seq),
+            format!("version {} of the row is not held", at.0.seq),
         ))
     }
 
@@ -617,7 +630,13 @@ impl Db {
     ) -> Result<Vec<LargeValueDeltaSplice>, Error> {
         self.fetching(|| {
             let inner = self.inner();
-            inner.value_delta(table, row, column, (from, to), inner.reader())
+            inner.value_delta(
+                table,
+                row,
+                column,
+                ((from, None), (to, None)),
+                inner.reader(),
+            )
         })
         .await
     }
@@ -1596,6 +1615,7 @@ impl TxRef<'_> {
         Ok(WriteHandle {
             row,
             seq: Pos::default(),
+            tx: 0,
         })
     }
 }
