@@ -94,6 +94,11 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             post(accounts::login_or_register_for_admin),
         )
         .route("/accounts/link", post(accounts::link_for_admin))
+        .route(
+            "/accounts/found-local-first",
+            post(accounts::found_local_first_for_admin),
+        )
+        .route("/accounts/revoke", post(accounts::revoke_for_admin))
         .route("/permissions", get(permissions_handler))
         .route("/migrations/graph", get(migration_graph_handler))
         .route(

@@ -237,3 +237,60 @@ export function verifyToken(token: string, options: VerifyTokenOptions): LocalFi
   }
   return { issuer: LOCAL_FIRST_ISSUER, subject, publicKey };
 }
+
+const CHALLENGE_DOMAIN = "local-first-auth-challenge-v1\0";
+
+function challengeMessage(challenge: string): Uint8Array {
+  if (typeof challenge !== "string" || challenge.length === 0) {
+    throw new TypeError("challenge must be a non-empty string");
+  }
+  return utf8(CHALLENGE_DOMAIN + challenge);
+}
+
+/**
+ * Sign a challenge a server issued, proving control of the secret's identity
+ * for that one challenge. Unlike a token, the proof is only good for the
+ * challenge it signs, so a server that issues each challenge once (and binds
+ * it to what it is for) gets a single-use proof. Returns
+ * `<public key>.<signature>`, both base64url.
+ */
+export function signChallenge(secret: string, challenge: string): string {
+  const message = challengeMessage(challenge);
+  const key = signingKey(secret);
+  const publicKey = ed25519.getPublicKey(key);
+  const signature = ed25519.sign(message, key);
+  return `${base64urlEncode(publicKey)}.${base64urlEncode(signature)}`;
+}
+
+/**
+ * Verify a {@link signChallenge} proof for `challenge` and return the identity
+ * it proves. Throws {@link LocalFirstTokenError} for anything else. Checking
+ * that the challenge itself is genuine, fresh and unused is the caller's job.
+ */
+export function verifyChallenge(proof: string, challenge: string): LocalFirstIdentity {
+  const message = challengeMessage(challenge);
+  if (typeof proof !== "string") throw new LocalFirstTokenError("proof must be a string");
+  const parts = proof.split(".");
+  if (parts.length !== 2) throw new LocalFirstTokenError("invalid proof: expected 2 parts");
+  let publicKey: Uint8Array;
+  let signature: Uint8Array;
+  try {
+    publicKey = base64urlDecode(parts[0]!);
+    signature = base64urlDecode(parts[1]!);
+  } catch {
+    throw new LocalFirstTokenError("invalid key or signature encoding");
+  }
+  if (publicKey.length !== 32) throw new LocalFirstTokenError("public key must be 32 bytes");
+  if (signature.length !== 64) throw new LocalFirstTokenError("signature must be 64 bytes");
+  if (isSmallOrder(publicKey) || isSmallOrder(signature.subarray(0, 32))) {
+    throw new LocalFirstTokenError("signature verification failed");
+  }
+  let valid = false;
+  try {
+    valid = ed25519.verify(signature, message, publicKey, { zip215: false });
+  } catch {
+    valid = false;
+  }
+  if (!valid) throw new LocalFirstTokenError("signature verification failed");
+  return { issuer: LOCAL_FIRST_ISSUER, subject: subjectOf(publicKey), publicKey };
+}
