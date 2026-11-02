@@ -107,6 +107,13 @@ export interface CreateJazzOptions {
    */
   sessionTtlSeconds?: number;
   /**
+   * How often `authenticate` is asked again for each open sync session of a
+   * signed-in user. When it no longer names that user (they signed out, in
+   * another tab or anywhere else, or their session expired or was revoked),
+   * the session ends as signed out. Defaults to 60 seconds; 0 turns it off.
+   */
+  recheckSeconds?: number;
+  /**
    * Browser origins, besides the backend's own, that may open sync sessions
    * and call sign-in (e.g. `["https://app.example.com"]` when the page is
    * served from another host than the backend). A request from any other
@@ -697,6 +704,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     const socket = core.openSocket(headerPairs(request.headers), onEvent);
     let ended = false;
     let userId: string | undefined;
+    let recheck: ReturnType<typeof setInterval> | undefined;
     // A session that never sends its prelude ends too.
     let expiry: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
       onEvent(null, { kind: "close", code: 1008, reason: "no sign-in in time" });
@@ -707,6 +715,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       if (ended) return;
       ended = true;
       if (expiry) clearTimeout(expiry);
+      if (recheck) clearInterval(recheck);
       socket.close();
     };
     const admit = async (prelude: Uint8Array): Promise<boolean> => {
@@ -721,6 +730,31 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       const ttl = (options.sessionTtlSeconds ?? 3600) * 1000;
       expiry = setTimeout(end, ttl);
       (expiry as unknown as { unref?: () => void }).unref?.();
+      const every = (options.recheckSeconds ?? 60) * 1000;
+      if (userId !== undefined && every > 0) {
+        const admittedUser = userId;
+        let checking = false;
+        recheck = setInterval(() => {
+          if (checking || ended) return;
+          checking = true;
+          void Promise.resolve()
+            .then(() => authenticate(request))
+            .then(
+              (user) => {
+                if (ended || user?.userId === admittedUser) return;
+                onEvent(null, { kind: "close", code: 1008, reason: "signed out" });
+                end();
+              },
+              // A failing `authenticate` (its database is down) is not a
+              // sign-out; the next check asks again.
+              () => {},
+            )
+            .finally(() => {
+              checking = false;
+            });
+        }, every);
+        (recheck as unknown as { unref?: () => void }).unref?.();
+      }
       return socket.send(admitted.prelude);
     };
     // Messages after the prelude wait for its admission, in order.

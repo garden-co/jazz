@@ -10,6 +10,8 @@ import { createListeners, toError } from "../runtime/util.js";
 export interface SessionClient {
   shutdown(options?: { waitForSync?: boolean }): Promise<void>;
 }
+/** A client whose database can wipe its local storage (`clearOnSignOut`). */
+type WipeableClient = { db?: { deleteClientStorage?(): Promise<void> } };
 export type JazzSessionOperation =
   | "createLocalFirst"
   | "restoreLocalFirst"
@@ -70,6 +72,11 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
   accounts: AccountManager<JWTAuth>;
   openClient(account: AccountHandle): Promise<Client>;
   initial?: "local-first" | BackendAuth;
+  /**
+   * Wipe the signed-out account's local storage, unsynced writes included,
+   * instead of keeping it for that user's next sign-in (shared devices).
+   */
+  clearOnSignOut?: boolean;
 }): Promise<JazzSession<Client>> {
   const { accounts, openClient } = options;
   let selected = accounts.getLoggedIn();
@@ -125,7 +132,12 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
     if (token !== generation) throw superseded();
     try {
       if (client) {
-        await client.shutdown({ waitForSync: true });
+        if (operation === "logout" && options.clearOnSignOut) {
+          await (client as WipeableClient).db?.deleteClientStorage?.();
+          await client.shutdown();
+        } else {
+          await client.shutdown({ waitForSync: true });
+        }
         client = undefined;
       }
     } catch (cause) {

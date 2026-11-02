@@ -40,7 +40,10 @@ const requestPaths: string[] = [];
 /** The stream key each request carried, by request path. */
 const streamKeys = new Map<string, string>();
 
-async function serve(jazz: Jazz, options: { sockets: boolean }): Promise<string> {
+async function serve(
+  jazz: Jazz,
+  options: { sockets: boolean; onUpgrade?: () => void },
+): Promise<string> {
   requestPaths.length = 0;
   streamKeys.clear();
   const server: Server = createServer((req, res) => {
@@ -52,6 +55,7 @@ async function serve(jazz: Jazz, options: { sockets: boolean }): Promise<string>
       res.end("app route");
     });
   });
+  if (options.onUpgrade) server.on("upgrade", options.onUpgrade);
   if (options.sockets) await jazz.attach(server);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   cleanups.push(
@@ -302,6 +306,39 @@ describe("createJazz", () => {
     expect(await socketFrom("https://evil.example")).toBe("refused");
     expect(await socketFrom(origin)).toBe("admitted");
   }, 60_000);
+
+  it("ends a user's open sync session once authenticate no longer names them", async () => {
+    const appId = randomUUID();
+    const signedOut = new Set<string>();
+    const jazz = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        const user = authenticate(request);
+        return user && !signedOut.has(user.userId) ? user : null;
+      },
+      recheckSeconds: 0.05,
+    });
+    cleanups.push(() => jazz.close());
+    let upgrades = 0;
+    const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
+    const alice = await userSession(appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "signed in", owner: alice.session!.user!.account })
+      .wait({ tier: "global" });
+
+    // Checks that still name her leave her session open.
+    const opened = upgrades;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(upgrades).toBe(opened);
+
+    // She signs out elsewhere: the session ends, and the client's reconnects
+    // are refused.
+    signedOut.add("alice");
+    await expect.poll(() => upgrades, { timeout: 5_000, interval: 50 }).toBeGreaterThan(opened);
+  }, 30_000);
 
   it("links a second identity to the same account", async () => {
     const appId = randomUUID();
