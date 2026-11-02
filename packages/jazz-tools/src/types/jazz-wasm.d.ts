@@ -150,6 +150,11 @@ declare module "jazz-wasm" {
     flush(): Promise<void>;
 
     /** Authority UUID bytes (empty for an unknown name); throws before catalogue admission. */
+    coverCatalogue(
+      timeoutMs: number,
+      author?: Uint8Array,
+      claims?: unknown,
+    ): Uint8Array | PendingNativeRead;
     tableIdentity(table: string): Uint8Array;
     columnIdentity(table: string, column: string): Uint8Array;
 

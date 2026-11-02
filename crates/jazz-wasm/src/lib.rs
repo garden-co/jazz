@@ -1249,6 +1249,21 @@ impl WasmDb {
         })
     }
 
+    /// Fresh schema/session catalogue coverage on the ordinary pending-read route.
+    #[wasm_bindgen(js_name = coverCatalogue)]
+    pub fn cover_catalogue(
+        &self,
+        timeout_ms: f64,
+        author: Option<Vec<u8>>,
+        claims: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let read = self
+            .binding()?
+            .cover_catalogue(timeout_ms, author.as_deref(), json(claims)?)
+            .map_err(host_error)?;
+        wasm_read_or_pending(Box::pin(async move { read.await.map_err(host_error) }))
+    }
+
     /// Authority table UUID as 16 canonical bytes, or empty for an unknown name.
     /// Refuses with NotObserved until the authority confirms this schema.
     #[wasm_bindgen(js_name = tableIdentity)]

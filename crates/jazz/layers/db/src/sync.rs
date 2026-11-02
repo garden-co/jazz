@@ -59,7 +59,10 @@ use std::task::{Poll, Waker};
 
 #[path = "accepted_transport.rs"]
 mod accepted_transport;
+#[path = "catalogue_coverage.rs"]
+mod catalogue_coverage;
 use crate::db::{AcceptedReadScope, EncodedAcceptedRead};
+pub use catalogue_coverage::CatalogueCoverage;
 use web_time::Instant;
 
 use crate::protocol::SnapshotRef;
@@ -1398,6 +1401,11 @@ pub enum SyncMessage {
         id: u64,
         read: EncodedAcceptedRead,
     },
+    /// Fresh authority catalogue admission on the existing one-shot read route.
+    CatalogueCovered {
+        id: u64,
+        coverage: CatalogueCoverage,
+    },
 }
 
 /// The catalogue entries a [`SyncMessage::Catalogue`] or
@@ -1435,6 +1443,11 @@ pub enum ReadSpan {
         at: Option<u64>,
         schema: [u8; 16],
         scope: Option<AcceptedReadScope>,
+    },
+    /// Metadata admission only: never evaluates a row or supplies a row cut.
+    CatalogueOnce {
+        schema: [u8; 16],
+        scope: AcceptedReadScope,
     },
 }
 
@@ -1483,6 +1496,7 @@ impl SyncMessage {
             Self::Welcome { .. } => "Welcome",
             Self::ConnectionSettled { .. } => "ConnectionSettled",
             Self::Accepted { .. } => "Accepted",
+            Self::CatalogueCovered { .. } => "CatalogueCovered",
         }
     }
 }
@@ -1913,10 +1927,11 @@ type RelayedAnswer = (
     u64,
 );
 
-/// Both result modes share the same one-shot slot, request lifetime and relay.
+/// All result modes share the same one-shot slot, request lifetime and relay.
 enum OnceAnswer {
     Coverage(Pos, Vec<[u8; 16]>),
     Evidence(EncodedAcceptedRead),
+    Catalogue(CatalogueCoverage),
 }
 
 /// A scheduled read retains its task waker until the next drive turn. The
@@ -6478,7 +6493,7 @@ impl Client {
         let pending = self.answers.remove(&id).is_some();
         self.reads.remove(&id);
         self.outbox.retain(|message| {
-            !matches!(message, SyncMessage::Read { id: read, span: ReadSpan::Once { .. } | ReadSpan::AcceptedOnce { .. }, .. } if *read == id)
+            !matches!(message, SyncMessage::Read { id: read, span: ReadSpan::Once { .. } | ReadSpan::AcceptedOnce { .. } | ReadSpan::CatalogueOnce { .. }, .. } if *read == id)
         });
         if pending {
             self.outbox.push(SyncMessage::Unsubscribe { id });
@@ -6495,7 +6510,9 @@ impl Client {
             !matches!(
                 message,
                 SyncMessage::Read {
-                    span: ReadSpan::Once { .. } | ReadSpan::AcceptedOnce { .. },
+                    span: ReadSpan::Once { .. }
+                        | ReadSpan::AcceptedOnce { .. }
+                        | ReadSpan::CatalogueOnce { .. },
                     ..
                 }
             )
@@ -6742,7 +6759,7 @@ impl Db {
                 query,
                 binding,
                 include_deleted,
-                span: ReadSpan::AcceptedOnce { .. },
+                span: ReadSpan::AcceptedOnce { .. } | ReadSpan::CatalogueOnce { .. },
                 ..
             } = &ask
             {
@@ -7477,7 +7494,8 @@ impl Db {
     ) -> Result<Option<Pos>, Error> {
         match self
             .fetch_once(
-                prepared,
+                &prepared.query,
+                &prepared.binding,
                 at,
                 include_deleted,
                 reach,
@@ -7491,7 +7509,7 @@ impl Db {
         {
             Some(OnceAnswer::Coverage(through, _)) => Ok(Some(through)),
             None => Ok(None),
-            Some(OnceAnswer::Evidence(_)) => Err(Error::new(
+            Some(OnceAnswer::Evidence(_) | OnceAnswer::Catalogue(_)) => Err(Error::new(
                 ErrorCode::Protocol,
                 "evidence cannot replace ordinary read coverage",
             )),
@@ -7501,7 +7519,8 @@ impl Db {
     #[allow(clippy::too_many_arguments)]
     async fn fetch_once(
         &self,
-        prepared: &PreparedQuery,
+        query: &Query,
+        binding: &BTreeMap<String, Value>,
         at: Option<Pos>,
         include_deleted: bool,
         reach: RemoteReach,
@@ -7509,7 +7528,7 @@ impl Db {
         coverage: Option<&dyn Fn() -> bool>,
         strict: bool,
         view: &ReadViewSourceSpec,
-        evidence: Option<([u8; 16], Option<AcceptedReadScope>)>,
+        mode: Option<ReadSpan>,
     ) -> Result<Option<OnceAnswer>, Error> {
         let deadline_guard = self.read_deadline(deadline);
         let _attempt = self.read_attempt_deadline();
@@ -7548,25 +7567,18 @@ impl Db {
         };
         let message = |id: u64, since: Option<u64>| SyncMessage::Read {
             id,
-            query: Box::new(if evidence.is_some() {
-                prepared.query.clone()
+            query: Box::new(if mode.is_some() {
+                query.clone()
             } else {
-                remote_query(&prepared.query).into_owned()
+                remote_query(query).into_owned()
             }),
-            binding: prepared.binding.clone(),
+            binding: binding.clone(),
             include_deleted,
             tier,
             wait: reach.wait,
             view: Box::new(view.clone()),
             since,
-            span: match &evidence {
-                Some((schema, scope)) => ReadSpan::AcceptedOnce {
-                    at,
-                    schema: *schema,
-                    scope: scope.clone(),
-                },
-                None => ReadSpan::Once { at },
-            },
+            span: mode.clone().unwrap_or(ReadSpan::Once { at }),
         };
         // The request in flight, and the connection it went out on.
         let mut request = PendingFetch {
@@ -7580,7 +7592,7 @@ impl Db {
             let mut inner = self.inner.borrow_mut();
             let answerable = answerable(&inner);
             let client = inner.client.as_mut().expect("client");
-            if evidence.is_some() && deadline.is_some_and(|at| Instant::now() >= at) {
+            if mode.is_some() && deadline.is_some_and(|at| Instant::now() >= at) {
                 return Poll::Ready(Ok(None));
             }
             if let Some((id, _)) = request.asked
@@ -7615,20 +7627,20 @@ impl Db {
                 client.answers.insert(id, None);
                 // Asked while detached, it goes out on the next connection.
                 let connection = client.connection + u64::from(client.transport.is_none());
-                let query = if evidence.is_some() {
-                    prepared.query.clone()
+                let query = if mode.is_some() {
+                    query.clone()
                 } else {
-                    remote_query(&prepared.query).into_owned()
+                    remote_query(query).into_owned()
                 };
                 let since = inner.register_once_read(
                     id,
                     &query,
-                    &prepared.binding,
+                    binding,
                     include_deleted,
                     view,
-                    evidence.is_none() && at.is_none(),
+                    mode.is_none() && at.is_none(),
                 );
-                let since = if evidence.is_some() { None } else { since };
+                let since = if mode.is_some() { None } else { since };
                 inner
                     .client
                     .as_mut()
@@ -7641,7 +7653,7 @@ impl Db {
             if (!strict && !answerable) || deadline.is_some_and(|d| Instant::now() >= d) {
                 return Poll::Ready(Ok(None));
             }
-            if client.unadmitted && (coverage.is_some() || evidence.is_some()) {
+            if client.unadmitted && (coverage.is_some() || mode.is_some()) {
                 return Poll::Ready(Err(Error::new(
                     ErrorCode::Schema,
                     "schema version is awaiting published catalogue admission; deploy it to the server",
@@ -7800,7 +7812,9 @@ impl Db {
                     matches!(
                         message,
                         SyncMessage::Read {
-                            span: ReadSpan::Once { .. } | ReadSpan::AcceptedOnce { .. },
+                            span: ReadSpan::Once { .. }
+                                | ReadSpan::AcceptedOnce { .. }
+                                | ReadSpan::CatalogueOnce { .. },
                             ..
                         }
                     )
@@ -8294,6 +8308,16 @@ impl Db {
                     }
                     SyncMessage::SchemaAdmission { admitted } => {
                         inner.client.as_mut().expect("client").unadmitted = !admitted;
+                    }
+                    SyncMessage::CatalogueCovered { id, coverage } => {
+                        let result = inner.check_catalogue_coverage(&coverage);
+                        let client = inner.client.as_mut().expect("client");
+                        if let Some(slot @ None) = client.answers.get_mut(&id) {
+                            *slot = Some(result.map(|()| OnceAnswer::Catalogue(coverage)));
+                            client.reads.remove(&id);
+                            client.relay_ready |=
+                                client.relayed_fetches.iter().any(|f| f.upstream == id);
+                        }
                     }
                     SyncMessage::Accepted { id, read } => {
                         let client = inner.client.as_mut().expect("client");
@@ -8998,15 +9022,22 @@ impl Inner {
         let mut kept = Vec::new();
         for fetch in std::mem::take(&mut client.relayed_fetches) {
             let answered = matches!(client.answers.get(&fetch.upstream), Some(Some(_)));
-            let evidence = matches!(
+            let scoped = matches!(
                 &fetch.ask,
                 SyncMessage::Read {
-                    span: ReadSpan::AcceptedOnce { .. },
+                    span: ReadSpan::AcceptedOnce { .. } | ReadSpan::CatalogueOnce { .. },
+                    ..
+                }
+            );
+            let catalogue = matches!(
+                &fetch.ask,
+                SyncMessage::Read {
+                    span: ReadSpan::CatalogueOnce { .. },
                     ..
                 }
             );
             let expired = fetch.until.is_some_and(|until| now >= until);
-            let given_up = (evidence && expired) || (!fetch.strict && (!can_wait || expired));
+            let given_up = (scoped && expired) || (!fetch.strict && (!can_wait || expired));
             if fetch.session != index || !answered && !given_up {
                 kept.push(fetch);
                 continue;
@@ -9023,12 +9054,25 @@ impl Inner {
                     .push(SyncMessage::Unsubscribe { id: fetch.upstream });
             }
             match answer {
-                _ if evidence && expired => refused.push(SyncMessage::Refused {
+                _ if scoped && expired => refused.push(SyncMessage::Refused {
                     id: *id,
                     code: ErrorCode::NotObserved,
-                    message: "timed out waiting for authority accepted evidence".into(),
+                    message: if catalogue {
+                        "timed out waiting for authority catalogue coverage"
+                    } else {
+                        "timed out waiting for authority accepted evidence"
+                    }
+                    .into(),
                 }),
-                Some(Ok(OnceAnswer::Evidence(read))) if evidence => {
+                Some(Ok(OnceAnswer::Catalogue(coverage))) if catalogue => {
+                    refused.push(SyncMessage::CatalogueCovered { id: *id, coverage })
+                }
+                Some(Ok(OnceAnswer::Catalogue(_))) => refused.push(SyncMessage::Refused {
+                    id: *id,
+                    code: ErrorCode::Protocol,
+                    message: "unexpected catalogue coverage for row read".into(),
+                }),
+                Some(Ok(OnceAnswer::Evidence(read))) if scoped && !catalogue => {
                     refused.push(SyncMessage::Accepted { id: *id, read })
                 }
                 Some(Ok(OnceAnswer::Evidence(_))) => refused.push(SyncMessage::Refused {
@@ -9036,17 +9080,22 @@ impl Inner {
                     code: ErrorCode::Protocol,
                     message: "unexpected evidence for ordinary coverage".into(),
                 }),
-                None if evidence => refused.push(SyncMessage::Refused {
+                None if scoped => refused.push(SyncMessage::Refused {
                     id: *id,
                     code: ErrorCode::NotObserved,
-                    message: "timed out waiting for authority accepted evidence".into(),
+                    message: if catalogue {
+                        "timed out waiting for authority catalogue coverage"
+                    } else {
+                        "timed out waiting for authority accepted evidence"
+                    }
+                    .into(),
                 }),
                 Some(Err(error)) => refused.push(SyncMessage::Refused {
                     id: *id,
                     code: error.code,
                     message: error.message,
                 }),
-                Some(Ok(OnceAnswer::Coverage(_, _))) if evidence => {
+                Some(Ok(OnceAnswer::Coverage(_, _))) if scoped => {
                     refused.push(SyncMessage::Refused {
                         id: *id,
                         code: ErrorCode::Protocol,
@@ -9805,7 +9854,9 @@ impl Db {
             let fetch = matches!(
                 message,
                 SyncMessage::Read {
-                    span: ReadSpan::Once { .. } | ReadSpan::AcceptedOnce { .. },
+                    span: ReadSpan::Once { .. }
+                        | ReadSpan::AcceptedOnce { .. }
+                        | ReadSpan::CatalogueOnce { .. },
                     ..
                 }
             )
@@ -9875,6 +9926,12 @@ impl Db {
         match message {
             SyncMessage::Unsubscribe { id } => !barrier.reads.contains(id),
             SyncMessage::CheckAllowed { .. } => true,
+            // Catalogue admission observes no rows or held writes. It has
+            // the same independence as permission advice above.
+            SyncMessage::Read {
+                span: ReadSpan::CatalogueOnce { .. },
+                ..
+            } => true,
             // A read frozen at a snapshot may name the held commits
             // themselves, which the server cannot resolve until they apply.
             SyncMessage::Read {
@@ -11074,6 +11131,30 @@ impl Db {
         // schema version does; commits by stored names (see below).
         let db = self.session_db(index);
         match message {
+            SyncMessage::Read {
+                id,
+                query,
+                binding,
+                include_deleted,
+                tier,
+                wait,
+                view,
+                since,
+                span: ReadSpan::CatalogueOnce { schema, scope },
+            } => {
+                if *query != catalogue_coverage::carrier()
+                    || !binding.is_empty()
+                    || include_deleted
+                    || tier != ReadTier::Remote
+                    || since.is_some()
+                    || !matches!(*view, ReadViewSourceSpec::Current)
+                {
+                    return Err(unsupported(
+                        "catalogue coverage outside its canonical Remote Current carrier",
+                    ));
+                }
+                self.serve_catalogue_coverage(index, id, schema, scope, claims, wait)?;
+            }
             SyncMessage::Read {
                 id,
                 query,

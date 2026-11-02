@@ -216,3 +216,6 @@ mod accepted_rpc_reads;
 
 #[path = "../accepted_evidence_wire.rs"]
 mod accepted_evidence_wire;
+
+#[path = "../catalogue_coverage.rs"]
+mod catalogue_coverage;

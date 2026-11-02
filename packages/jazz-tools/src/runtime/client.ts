@@ -1,3 +1,8 @@
+import {
+  validateCatalogueTimeout,
+  type CatalogueIdentityRequest,
+  type PreparedCatalogueIdentities,
+} from "./catalogue-identities.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import { UnsupportedSnapshotError, type SnapshotRef } from "./snapshot-ref.js";
 /**
@@ -268,6 +273,12 @@ export interface Runtime {
     tier?: string | null,
     options_json?: string | null,
   ): Promise<any>;
+  /** @internal One fresh coverage operation followed by same-handle lookups. */
+  prepareCatalogueIdentities?(
+    requests: readonly CatalogueIdentityRequest[],
+    sessionJson?: string,
+    timeoutMs?: number,
+  ): Promise<readonly PreparedCatalogueIdentities[]>;
   createSubscription(
     query_json: string,
     session_json?: string | null,
@@ -1751,6 +1762,22 @@ export class JazzClient {
     const writeContext = this.writeContext(session, attribution, openTransactionId, options);
     return this.stageMutation(openTransactionId, values, (prepared) =>
       this.runtime.upsert(table, objectId, prepared, writeContext),
+    );
+  }
+
+  /** @internal Resolve all preparation names through this schema runtime once. */
+  prepareCatalogueIdentitiesInternal(
+    requests: readonly CatalogueIdentityRequest[],
+    session?: Session,
+    timeoutMs = 15_000,
+  ): Promise<readonly PreparedCatalogueIdentities[]> {
+    validateCatalogueTimeout(timeoutMs);
+    if (!this.runtime.prepareCatalogueIdentities)
+      throw new Error("Runtime does not expose fresh catalogue identity preparation");
+    return this.runtime.prepareCatalogueIdentities(
+      requests,
+      session ? JSON.stringify(serializeRuntimeSession(session)) : undefined,
+      timeoutMs,
     );
   }
 

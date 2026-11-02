@@ -84,6 +84,8 @@ export declare class NapiDb {
    */
   static openPersistentAsBackend(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
   static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
+  /** Fresh schema/session catalogue coverage on the ordinary pending-read route. */
+  coverCatalogue(timeoutMs: number, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
   /**
    * Authority table UUID as 16 canonical bytes, or empty for an unknown name.
    * Refuses with NotObserved until the authority confirms this schema.

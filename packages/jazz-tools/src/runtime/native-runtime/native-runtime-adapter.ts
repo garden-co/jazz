@@ -1,3 +1,8 @@
+import {
+  validateCatalogueTimeout,
+  type CatalogueIdentityRequest,
+  type PreparedCatalogueIdentities,
+} from "../catalogue-identities.js";
 import type { ClientMigrations } from "../client-migrations.js";
 import { streamingChunks } from "../streaming-source.js";
 import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
@@ -237,6 +242,13 @@ type NativeRestoreOptions = NativeWriteOptions & {
 };
 
 type NativeDb = {
+  coverCatalogue?(
+    timeoutMs: number,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): NativeReadResult;
+  tableIdentity?(table: string): Uint8Array;
+  columnIdentity?(table: string, column: string): Uint8Array;
   captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
   /** WASM settles its promise-shaped wait early once `cancelled` settles. */
   waitForPendingWrites?(
@@ -857,6 +869,42 @@ export class NativeRuntimeAdapter implements Runtime {
   private slowQueryApp: string | undefined;
   get preparationOwner(): object {
     return this.ownerRuntime;
+  }
+
+  /** @internal One request per operation; no cross-operation coverage cache. */
+  async prepareCatalogueIdentities(
+    requests: readonly CatalogueIdentityRequest[],
+    sessionJson?: string,
+    timeoutMs = 15_000,
+  ): Promise<readonly PreparedCatalogueIdentities[]> {
+    validateCatalogueTimeout(timeoutMs);
+    if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+    const db = this.db;
+    if (!db.coverCatalogue || !db.tableIdentity || !db.columnIdentity)
+      throw new Error("Native runtime does not expose catalogue coverage and identities");
+    // Snapshot caller-owned name arrays before the first await. Implicit
+    // identity/claims come exclusively from the opened core, never JS state.
+    const names = requests.map(({ table, columns }) => ({ table, columns: [...(columns ?? [])] }));
+    const session = readSession(sessionJson);
+    await this.awaitNativeRead(
+      db.coverCatalogue(timeoutMs, session?.identity, session?.claims),
+      "remote",
+    );
+    if (this.closed || this.ownerRuntime.closed || this.db !== db)
+      throw new Error("Catalogue preparation owner changed");
+    const identity = (bytes: Uint8Array): string | null => {
+      if (bytes.byteLength === 0) return null;
+      if (bytes.byteLength !== 16) throw new Error("Invalid catalogue UUID bytes");
+      return formatUuid(bytes);
+    };
+    // Raw identity lookups are synchronous, all on this same schema handle.
+    return names.map(({ table, columns }) => ({
+      table,
+      identity: identity(db.tableIdentity!(table)),
+      columns: Object.fromEntries(
+        columns.map((column) => [column, identity(db.columnIdentity!(table, column))]),
+      ),
+    }));
   }
 
   readCanEstablishAbsence(sessionJson?: string, transaction?: OpenTransactionId): boolean {
