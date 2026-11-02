@@ -94,9 +94,9 @@ definePermissions(app, ({ policy, raw }) => {
 });
 ```
 
-### JWT session claims
+### Session claims
 
-When external auth JWTs carry claims, `session.where(...)` lets you check them directly in permissions without mapping them onto row columns first.
+When your backend's `authenticate` returns claims, `session.where(...)` lets you check them directly in permissions without mapping them onto row columns first.
 
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
@@ -265,7 +265,7 @@ You can use these edit metadata magic columns directly in `permissions.ts`. This
 
 Compare `$createdBy` with `session.user` to scope a rule to the row's creator. `session.user` is the
 structured `{ account, identity: { issuer, subject } }` author. Public `session.claims` also exposes the complete verified
-JWT payload, including the raw `iss` and `sub`, but those inspectable fields never replace the
+claims, including the raw `iss` and `sub`, but those inspectable fields never replace the
 canonical author identity. To share ownership across linked identities, compare `$createdBy.account` with `session.user.account` instead; whole-author equality distinguishes the identities.
 
 <include cwd lang="ts" meta='title="permissions.ts"'>
