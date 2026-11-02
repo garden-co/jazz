@@ -35,11 +35,16 @@ function authenticate(request: Request) {
 }
 
 const requestPaths: string[] = [];
+/** The stream key each request carried, by request path. */
+const streamKeys = new Map<string, string>();
 
 async function serve(jazz: Jazz, options: { sockets: boolean }): Promise<string> {
   requestPaths.length = 0;
+  streamKeys.clear();
   const server: Server = createServer((req, res) => {
     requestPaths.push(req.url ?? "");
+    const key = req.headers["x-jazz-stream-key"];
+    if (typeof key === "string") streamKeys.set(req.url ?? "", key);
     jazz.nodeHandler(req, res, () => {
       res.statusCode = 404;
       res.end("app route");
@@ -381,11 +386,23 @@ describe("createJazz", () => {
     expect(seen.map((todo) => todo.title)).toEqual(["over the stream"]);
     expect(requestPaths.some((path) => path.endsWith(`/apps/${appId}/stream`))).toBe(true);
 
-    // A session id alone (it can end up in logs) doesn't let another user
-    // act in the session, nor end it.
+    // A session id alone (it can end up in logs) doesn't let anyone act in
+    // the session, nor end it, not even with alice's cookie; and the key
+    // with another user's cookie doesn't either.
     const sessionPath = requestPaths.find((path) => /\/stream\/[^/]+$/.test(path))!;
+    const key = streamKeys.get(sessionPath)!;
+    expect(key).toBeTruthy();
     for (const method of ["POST", "DELETE"]) {
       expect(await statusOf(`${origin}${sessionPath}`, method, { "x-test-user": "bob" })).toBe(403);
+      expect(await statusOf(`${origin}${sessionPath}`, method, { "x-test-user": "alice" })).toBe(
+        403,
+      );
+      expect(
+        await statusOf(`${origin}${sessionPath}`, method, {
+          "x-test-user": "bob",
+          "x-jazz-stream-key": key,
+        }),
+      ).toBe(403);
     }
     // A session this process doesn't hold says why.
     const unknown = await fetch(`${origin}/jazz/apps/${appId}/stream/nope`, { method: "POST" });

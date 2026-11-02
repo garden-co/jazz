@@ -43,7 +43,12 @@ function openStreamResponse(id: string): Response {
   return new Response(
     new ReadableStream({
       start(controller) {
-        controller.enqueue(encodeStreamRecord(STREAM_RECORD_SESSION, new TextEncoder().encode(id)));
+        controller.enqueue(
+          encodeStreamRecord(
+            STREAM_RECORD_SESSION,
+            new TextEncoder().encode(JSON.stringify({ id, key: "k" })),
+          ),
+        );
       },
     }),
   );

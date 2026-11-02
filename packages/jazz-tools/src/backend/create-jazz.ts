@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
@@ -183,7 +183,9 @@ const DEFAULT_BASE_PATH = "/jazz";
 const PRELUDE_DEADLINE_MS = 30_000;
 /** On createJazz's 426 for a socket path: this endpoint serves the HTTP stream. */
 const STREAM_AVAILABLE_HEADER = "x-jazz-stream";
-const PUBLIC_APP_ROUTES = /^\/apps\/[^/]+\/(ws|schemas|schema\/[^/]+)$/;
+/** The stream session's key, on each send and close (see `openStream`). */
+const STREAM_KEY_HEADER = "x-jazz-stream-key";
+const PUBLIC_APP_ROUTES = /^\/apps\/[^/]+\/(schemas|schema\/[^/]+)$/;
 const STRIPPED_HEADERS = ["x-jazz-backend-secret", "x-jazz-admin-secret", "x-jazz-session"];
 // What a browser's request to a public route carries on to a remote core:
 // never its cookies or its app session.
@@ -759,11 +761,14 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     return { prelude: new TextEncoder().encode(JSON.stringify(rewritten)), userId: user.userId };
   }
 
-  // HTTP stream sessions, by id.
-  const streams = new Map<string, ClientSession>();
+  // HTTP stream sessions, by id, with the key that proves a request comes
+  // from the client that opened them.
+  const streams = new Map<string, { session: ClientSession; key: Buffer }>();
 
   function openStream(request: Request): Response {
     const id = randomUUID();
+    // The id goes in URLs (and so in logs); the key only in a header.
+    const key = randomBytes(32);
     let controller!: ReadableStreamDefaultController<Uint8Array>;
     let closed = false;
     const end = (code: number, reason: string) => {
@@ -782,7 +787,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         controller = c;
       },
       cancel() {
-        streams.get(id)?.close();
+        streams.get(id)?.session.close();
         end(1001, "client went away");
       },
     });
@@ -799,8 +804,13 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     } catch (error) {
       return new Response(error instanceof Error ? error.message : String(error), { status: 503 });
     }
-    streams.set(id, socket);
-    controller.enqueue(encodeStreamRecord(STREAM_RECORD_SESSION, new TextEncoder().encode(id)));
+    streams.set(id, { session: socket, key });
+    controller.enqueue(
+      encodeStreamRecord(
+        STREAM_RECORD_SESSION,
+        new TextEncoder().encode(JSON.stringify({ id, key: key.toString("base64url") })),
+      ),
+    );
     return new Response(body, {
       headers: {
         "Content-Type": "application/octet-stream",
@@ -811,18 +821,26 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
 
   /**
-   * The stream session `id`, when `request` comes from its user: a session
-   * id alone (which can end up in logs) doesn't let anyone else act in it.
+   * The stream session `id`, when `request` comes from the client that
+   * opened it (it carries the session's key) and, once the session is
+   * admitted as a user, from that user still: a session id alone (which
+   * can end up in logs) doesn't let anyone act in it, before admission or
+   * for a guest either.
    */
   async function ownStream(id: string, request: Request): Promise<ClientSession | Response> {
-    const socket = streams.get(id);
-    if (!socket) {
+    const entry = streams.get(id);
+    if (!entry) {
       // Sessions live in the process that opened them.
       return new Response(
         "unknown stream session: HTTP stream sessions need a single backend instance or sticky routing",
         { status: 404 },
       );
     }
+    const given = Buffer.from(request.headers.get(STREAM_KEY_HEADER) ?? "", "base64url");
+    if (given.length !== entry.key.length || !timingSafeEqual(given, entry.key)) {
+      return new Response("not this stream's client", { status: 403 });
+    }
+    const socket = entry.session;
     if (socket.userId !== undefined) {
       const user = await authenticate(request);
       if (user?.userId !== socket.userId) return new Response("not signed in", { status: 403 });
@@ -1102,7 +1120,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     },
     close() {
       closing ??= (async () => {
-        for (const socket of streams.values()) socket.close();
+        for (const { session: stream } of streams.values()) stream.close();
         streams.clear();
         await session.close();
         await core.close();
