@@ -54,37 +54,126 @@ new Hono()
 
 You can also query and write to the database right from your frontend. It is protected by the same auth as your backend, and the same permission policies apply. Pick a thin client (about 86 kB gzipped) or a full local-first client (about 1 MB gzipped, mostly the WASM engine).
 
-```ts title="client.ts"
-import { createClient } from "jazz-tools/thin";
-import { app } from "./schema";
+<Tabs groupId="client-framework" items={["JavaScript", "React", "Vue", "Svelte", "Solid", "Effect"]} persist updateAnchor>
+  <Tab value="JavaScript">
+    ```ts title="client.ts"
+    import { createClient } from "jazz-tools/thin";
+    import { app } from "./schema";
 
-// Signs in through your backend's /jazz route, with your app's own session cookie
-const db = await createClient();
+    // Signs in through your backend's /jazz route, with your app's own session cookie
+    const db = await createClient();
 
-// Live query: updates as soon as the server (or anyone else) changes a todo
-db.subscribe(app.todos.where({ done: false }), (todos) => {
-  console.log(todos);
-});
-```
+    // Live query: updates as soon as the server (or anyone else) changes a todo
+    db.subscribe(app.todos.where({ done: false }), (todos) => {
+      console.log(todos);
+    });
+    ```
 
-Or with React:
+  </Tab>
+  <Tab value="React">
+    ```tsx title="Todos.tsx"
+    import { useAll, useDb } from "jazz-tools/react";
+    import { app } from "./schema";
 
-```tsx title="Todos.tsx"
-import { useAll, useDb } from "jazz-tools/react";
-import { app } from "./schema";
+    export function Todos() {
+      const db = useDb();
+      const { data: todos = [] } = useAll(app.todos.where({ done: false }));
 
-export function Todos() {
-  const db = useDb();
-  const { data: todos = [] } = useAll(app.todos.where({ done: false }));
+      return todos.map((todo) => (
+        <label key={todo.id}>
+          <input type="checkbox" onChange={() => db.update(app.todos, todo.id, { done: true })} />
+          {todo.title}
+        </label>
+      ));
+    }
+    ```
 
-  return todos.map((todo) => (
-    <label key={todo.id}>
-      <input type="checkbox" onChange={() => db.update(app.todos, todo.id, { done: true })} />
-      {todo.title}
-    </label>
-  ));
-}
-```
+  </Tab>
+  <Tab value="Vue">
+    ```vue title="Todos.vue"
+    <script setup lang="ts">
+    import { useAll, useDb } from "jazz-tools/vue";
+    import { app } from "./schema";
+
+    const db = useDb();
+    const { data: todos } = useAll(app.todos.where({ done: false }));
+    </script>
+
+    <template>
+      <label v-for="todo in todos ?? []" :key="todo.id">
+        <input type="checkbox" @change="db.update(app.todos, todo.id, { done: true })" />
+        {{ todo.title }}
+      </label>
+    </template>
+    ```
+
+  </Tab>
+  <Tab value="Svelte">
+    ```svelte title="Todos.svelte"
+    <script lang="ts">
+      import { getDb, QuerySubscription } from "jazz-tools/svelte";
+      import { app } from "./schema";
+
+      const db = getDb();
+      const todos = new QuerySubscription(app.todos.where({ done: false }));
+    </script>
+
+    {#each todos.current ?? [] as todo (todo.id)}
+      <label>
+        <input type="checkbox" onchange={() => db.update(app.todos, todo.id, { done: true })} />
+        {todo.title}
+      </label>
+    {/each}
+    ```
+
+  </Tab>
+  <Tab value="Solid">
+    ```tsx title="Todos.tsx"
+    import { For } from "solid-js";
+    import { useAll, useDb } from "jazz-tools/solid";
+    import { app } from "./schema";
+
+    export function Todos() {
+      const db = useDb();
+      const todos = useAll(() => ({ query: app.todos.where({ done: false }) }));
+
+      return (
+        <For each={todos.data ?? []}>
+          {(todo) => (
+            <label>
+              <input type="checkbox" onChange={() => db().update(app.todos, todo.id, { done: true })} />
+              {todo.title}
+            </label>
+          )}
+        </For>
+      );
+    }
+    ```
+
+  </Tab>
+  <Tab value="Effect">
+    ```ts title="todos.ts"
+    import { Effect, Stream } from "effect";
+    import { Jazz } from "jazz-tools/effect";
+    import { app } from "./schema";
+
+    const program = Effect.gen(function* () {
+      const jazz = yield* Jazz;
+
+      // Live query as a Stream: a full snapshot on start and on every change
+      yield* jazz
+        .stream(app.todos.where({ done: false }))
+        .pipe(Stream.runForEach((todos) => Effect.log(todos)));
+    });
+
+    // Same config as createClient(): signs in through /jazz with your session cookie
+    program.pipe(Effect.provide(Jazz.layer()), Effect.runPromise);
+    ```
+
+  </Tab>
+</Tabs>
+
+The React, Vue, Svelte and Solid components run inside `JazzProvider`; see [Thin Client](/docs/setup/web-client/thin-client) for the setup.
 
 ## Start here
 
