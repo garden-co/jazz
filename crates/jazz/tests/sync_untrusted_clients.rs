@@ -371,6 +371,7 @@ fn commit_as(
     let (_c, s, up, down) = pipe();
     server.accept_subscriber(s, identity).unwrap();
     up.borrow_mut().push_back(SyncMessage::Commit {
+        clock: 0,
         id: TxId::new(TxTime(tx), node),
         kind: kind.clone(),
         ops: Vec::new(),
@@ -431,6 +432,7 @@ fn a_guest_node_is_handed_over_to_one_racing_principal() {
         let (c, s, up, down) = pipe();
         server.accept_subscriber(s, identity).unwrap();
         up.borrow_mut().push_back(SyncMessage::Commit {
+            clock: 0,
             id: TxId::new(TxTime(tx), id.node),
             kind: kind.clone(),
             ops: Vec::new(),
