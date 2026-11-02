@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { admitBackendSecret } from "./admission.js";
 import type { BackendRequestOptions } from "./request-auth.js";
-import { NapiDb, mintLocalFirstToken } from "jazz-napi";
+import { NapiDb } from "jazz-napi";
+import { mintLocalFirstTokenFromSeed } from "../runtime/local-first-token.js";
 import { accountRegistryUrl, createAccountDbWithRuntimeSource } from "../accounts/context.js";
 import {
   accountRegistry,
@@ -189,7 +190,7 @@ export async function createJazzSession(
     registry,
     store: config.store ?? memoryAccountStore(),
     mintToken: (secret, audience) =>
-      mintLocalFirstToken(authSecretSeedForMinting(secret), audience, 3600),
+      mintLocalFirstTokenFromSeed(authSecretSeedForMinting(secret), audience, 3600),
     backend: {
       async admitBackend({ backendSecret }) {
         await admitBackendSecret(
