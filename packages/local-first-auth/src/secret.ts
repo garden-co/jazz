@@ -50,8 +50,14 @@ export function parseSecret(secret: string): Uint8Array {
 
 /** A new secret from the platform CSPRNG (`crypto.getRandomValues`). */
 export function generateSecret(): string {
+  const random = globalThis.crypto;
+  if (typeof random?.getRandomValues !== "function") {
+    throw new Error(
+      "generateSecret needs crypto.getRandomValues. On React Native, install a polyfill such as react-native-get-random-values.",
+    );
+  }
   const bytes = new Uint8Array(SECRET_BYTES);
-  crypto.getRandomValues(bytes);
+  random.getRandomValues(bytes);
   return formatSecret(bytes);
 }
 

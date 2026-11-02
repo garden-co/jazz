@@ -39,6 +39,33 @@ function uuidV5(namespace: Uint8Array, name: Uint8Array): string {
   return formatUuid(digest);
 }
 
+const DNS_NAMESPACE = Uint8Array.from([
+  0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
+]);
+const UUID_FORMS = [
+  /^([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{12})$/i,
+  /^([0-9a-f]{8})([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{12})$/i,
+  /^\{([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{12})\}$/i,
+  /^urn:uuid:([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{12})$/i,
+];
+
+/**
+ * The `aud` a token carries for `audience`, the same way Jazz's Rust core does
+ * it: a UUID (hyphenated, simple, braced or `urn:uuid:`) becomes its lowercase
+ * hyphenated form, and any other string becomes UUIDv5(DNS namespace, audience).
+ * Signing and verifying both normalize, so either form of an audience matches.
+ */
+export function normalizeAudience(audience: string): string {
+  if (typeof audience !== "string" || audience.length === 0) {
+    throw new LocalFirstTokenError("audience must be a non-empty string");
+  }
+  for (const form of UUID_FORMS) {
+    const match = form.exec(audience);
+    if (match) return match.slice(1).join("-").toLowerCase();
+  }
+  return uuidV5(DNS_NAMESPACE, utf8(audience));
+}
+
 function signingKey(secret: string): Uint8Array {
   const seed = parseSecret(secret);
   // SHA-512(domain || seed)[..32] is the Ed25519 secret key, as in Jazz's Rust core.
@@ -60,9 +87,15 @@ export function identityOf(secret: string): LocalFirstIdentity {
 }
 
 export interface SignTokenOptions {
-  /** Who the token is for, e.g. `https://app.example/jazz`. Compared verbatim. */
+  /**
+   * Who the token is for, e.g. `https://app.example/jazz` or an app ID.
+   * Required and non-empty; normalized by {@link normalizeAudience}.
+   */
   audience: string;
-  /** Lifetime in seconds. Defaults to 3600, which is also the verifier's default maximum. */
+  /**
+   * Lifetime in seconds, a positive integer. Defaults to 3600, which is also the
+   * verifier's default maximum.
+   */
   ttlSeconds?: number;
   /** Override the clock, in Unix seconds. */
   now?: number;
@@ -75,19 +108,27 @@ const nowSeconds = () => Math.floor(Date.now() / 1000);
  * `{ iss, sub, aud, jazz_pub_key, iat, exp }`.
  */
 export function signToken(secret: string, options: SignTokenOptions): string {
+  const aud = normalizeAudience(options.audience);
+  const ttl = options.ttlSeconds ?? DEFAULT_TTL_SECONDS;
+  if (!Number.isSafeInteger(ttl) || ttl <= 0) {
+    throw new LocalFirstTokenError("ttlSeconds must be a positive integer");
+  }
+  const iat = options.now ?? nowSeconds();
+  if (!Number.isSafeInteger(iat) || iat < 0) {
+    throw new LocalFirstTokenError("now must be a non-negative integer");
+  }
   const key = signingKey(secret);
   const publicKey = ed25519.getPublicKey(key);
-  const iat = options.now ?? nowSeconds();
   const header = base64urlEncode(utf8(JSON.stringify({ alg: "EdDSA", typ: "JWT" })));
   const claims = base64urlEncode(
     utf8(
       JSON.stringify({
         iss: LOCAL_FIRST_ISSUER,
         sub: subjectOf(publicKey),
-        aud: options.audience,
+        aud,
         jazz_pub_key: base64urlEncode(publicKey),
         iat,
-        exp: iat + (options.ttlSeconds ?? DEFAULT_TTL_SECONDS),
+        exp: iat + ttl,
       }),
     ),
   );
@@ -96,7 +137,7 @@ export function signToken(secret: string, options: SignTokenOptions): string {
 }
 
 export interface VerifyTokenOptions {
-  /** The audience this verifier accepts. Compared verbatim. */
+  /** The audience this verifier accepts. Required; normalized like {@link SignTokenOptions.audience}. */
   audience: string;
   /** The longest lifetime (`exp - iat`) accepted. Defaults to 3600. */
   maxTtlSeconds?: number;
@@ -129,10 +170,12 @@ function isSmallOrder(bytes: Uint8Array): boolean {
 
 /**
  * Verify a local-first token and return the identity it proves. Throws
- * {@link LocalFirstTokenError} for anything else. Accepts exactly what the
- * Rust verifier in Jazz accepts.
+ * {@link LocalFirstTokenError} for anything else. Follows the rules of Jazz's
+ * Rust verifier for local-first tokens (`iss` = {@link LOCAL_FIRST_ISSUER}
+ * only; Jazz's anonymous issuer is not accepted here).
  */
 export function verifyToken(token: string, options: VerifyTokenOptions): LocalFirstIdentity {
+  const expectedAudience = normalizeAudience(options.audience);
   if (typeof token !== "string") throw new LocalFirstTokenError("token must be a string");
   const parts = token.split(".");
   if (parts.length !== 3) throw new LocalFirstTokenError("invalid token: expected 3 parts");
@@ -146,7 +189,8 @@ export function verifyToken(token: string, options: VerifyTokenOptions): LocalFi
     if (!CLAIMS.has(name)) throw new LocalFirstTokenError(`unknown claim ${name}`);
   }
   if (claims.iss !== LOCAL_FIRST_ISSUER) throw new LocalFirstTokenError("invalid issuer");
-  if (claims.aud !== options.audience) throw new LocalFirstTokenError("audience mismatch");
+  if (typeof claims.aud !== "string" || claims.aud !== expectedAudience)
+    throw new LocalFirstTokenError("audience mismatch");
 
   let publicKey: Uint8Array;
   let signature: Uint8Array;

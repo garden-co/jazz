@@ -53,7 +53,7 @@ export const RecoveryPhrase = {
       if (!WORDSET.has(word)) {
         throw new RecoveryPhraseError(
           "invalid-word",
-          `Word ${i + 1} ("${word}") is not in the recovery word list`,
+          `Word ${i + 1} is not in the recovery word list`,
         );
       }
     }
