@@ -322,21 +322,21 @@ async fn ws_admission(
     let peer_identity = ws_peer_identity(&prelude.peer_identity)?;
     let requested_link = prelude.requested_link;
     let mut auth = prelude.auth;
-    // A server that trusts a workload admits only sessions its workload
-    // vouches for, in either secret field; guests included.
-    if let (Some(verifier), Some(secrets)) = (
-        state.workload_verifier.as_deref(),
-        state.workload_secrets.as_ref(),
-    ) {
-        crate::middleware::workload::exchange(
-            verifier,
-            state.auth_config.clock.now_seconds(),
-            &mut auth.admin_secret,
-            &mut auth.backend_secret,
-            None,
-            secrets,
-        )
-        .await?;
+    // A server that trusts a workload admits only sockets its workload
+    // opened (the HTTP gate checked the upgrade's token), guests included.
+    // On those, the prelude's secret slots stand for the internal secrets.
+    if let Some(secrets) = state.workload_secrets.as_ref() {
+        if !crate::middleware::workload::vouched(request_headers, secrets) {
+            return Err("this server admits only sockets its trusted workload opens"
+                .to_owned()
+                .into());
+        }
+        if auth.admin_secret.is_some() {
+            auth.admin_secret = Some(secrets.admin.clone());
+        }
+        if auth.backend_secret.is_some() {
+            auth.backend_secret = Some(secrets.backend.clone());
+        }
     }
 
     if let Some(admin_secret) = auth.admin_secret.as_deref() {

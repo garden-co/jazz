@@ -114,3 +114,47 @@ async fn admits_only_the_trusted_workload() {
         .unwrap();
     assert_eq!(admin.status(), 200, "{}", admin.text().await.unwrap());
 }
+
+#[tokio::test]
+async fn opens_sockets_only_for_the_trusted_workload() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let issuer = start_issuer().await;
+    let server = JazzServer::builder()
+        .with_trusted_workload(TrustedWorkload {
+            issuer: issuer.clone(),
+            audience: "https://vercel.com/garden-co".to_owned(),
+            subject: SUBJECT.to_owned(),
+        })
+        .start()
+        .await
+        .expect("server starts");
+    let url = format!(
+        "{}/apps/{}/ws",
+        server.base_url().replacen("http", "ws", 1),
+        server.app_id()
+    );
+
+    let refused = tokio_tungstenite::connect_async(url.as_str()).await;
+    assert!(
+        refused.is_err(),
+        "a socket without the workload's token is refused"
+    );
+
+    // A client can't claim the gate's own vouching either.
+    let mut forged = url.as_str().into_client_request().unwrap();
+    forged.headers_mut().insert(
+        "X-Jazz-Internal-Workload-Vouched",
+        "anything".parse().unwrap(),
+    );
+    assert!(tokio_tungstenite::connect_async(forged).await.is_err());
+
+    let mut request = url.as_str().into_client_request().unwrap();
+    request.headers_mut().insert(
+        "X-Jazz-Workload-Token",
+        token(&issuer, SUBJECT).parse().unwrap(),
+    );
+    let (_socket, response) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("the workload opens a socket");
+    assert_eq!(response.status(), 101);
+}

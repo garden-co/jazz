@@ -28,6 +28,9 @@ use crate::server::ServerState;
 pub const WORKLOAD_TOKEN_HEADER: &str = "X-Jazz-Workload-Token";
 pub const ADMIN_SECRET_HEADER: &str = "X-Jazz-Admin-Secret";
 pub const BACKEND_SECRET_HEADER: &str = "X-Jazz-Backend-Secret";
+/// Set by the gate (and stripped from what clients send) on a WebSocket
+/// upgrade its workload vouched for; its value is the internal backend secret.
+pub(crate) const VOUCHED_HEADER: &str = "X-Jazz-Internal-Workload-Vouched";
 
 /// The one workload this server trusts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,8 +194,16 @@ fn header(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// HTTP gate for servers that trust a workload. WebSocket upgrades pass:
-/// their sessions are admitted on their prelude.
+/// Whether the gate vouched for this WebSocket upgrade.
+pub(crate) fn vouched(headers: &HeaderMap, secrets: &InternalSecrets) -> bool {
+    headers
+        .get(VOUCHED_HEADER)
+        .is_some_and(|value| value.as_bytes() == secrets.backend.as_bytes())
+}
+
+/// The gate for servers that trust a workload: every request (WebSocket
+/// upgrades included) must carry the workload's token. Prelude secrets on a
+/// vouched WebSocket are honoured in `ws_admission`.
 pub async fn workload_gate(
     State(state): State<Arc<ServerState>>,
     mut request: Request<Body>,
@@ -204,10 +215,8 @@ pub async fn workload_gate(
     ) else {
         return next.run(request).await;
     };
-    if request.uri().path().ends_with("/ws") {
-        return next.run(request).await;
-    }
     let headers = request.headers_mut();
+    headers.remove(VOUCHED_HEADER);
     let mut admin = header(headers, ADMIN_SECRET_HEADER);
     let mut backend = header(headers, BACKEND_SECRET_HEADER);
     let token = header(headers, WORKLOAD_TOKEN_HEADER);
@@ -226,6 +235,9 @@ pub async fn workload_gate(
         return (StatusCode::UNAUTHORIZED, error).into_response();
     }
     headers.remove(WORKLOAD_TOKEN_HEADER);
+    if let Ok(value) = HeaderValue::from_str(&secrets.backend) {
+        headers.insert(VOUCHED_HEADER, value);
+    }
     for (name, value) in [
         (ADMIN_SECRET_HEADER, admin),
         (BACKEND_SECRET_HEADER, backend),
