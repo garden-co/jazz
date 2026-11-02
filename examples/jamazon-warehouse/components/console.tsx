@@ -14,7 +14,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import type { District, Warehouse } from "@/schema";
-import { authClient, operatorToken } from "@/src/lib/auth-client";
+import { authClient } from "@/src/lib/auth-client";
 import { consoleQueries } from "@/src/warehouse";
 import { JoinWarehouse } from "./join-warehouse";
 import { Loading } from "./loading";
@@ -53,10 +53,8 @@ export async function bootstrap(warehouseId?: string): Promise<void> {
   const response = await fetch("/api/bootstrap", {
     method: "POST",
     credentials: "same-origin",
-    headers: {
-      authorization: `Bearer ${await operatorToken()}`,
-      "content-type": "application/json",
-    },
+    // The session cookie is the only credential the route needs.
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(warehouseId ? { warehouseId } : {}),
   });
   if (!response.ok) throw new Error("The warehouse could not be prepared. Try again.");

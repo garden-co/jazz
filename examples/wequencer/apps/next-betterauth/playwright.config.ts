@@ -22,7 +22,13 @@ export default defineConfig({
   ],
   webServer: {
     command: PROD ? "pnpm exec next start" : "pnpm dev",
-    env: PROD ? {} : { BETTER_AUTH_SECRET: "test-secret-do-not-use-in-production" },
+    env: PROD
+      ? {}
+      : {
+          BETTER_AUTH_SECRET: "test-secret-do-not-use-in-production",
+          // Better Auth only trusts its own origin.
+          NEXT_PUBLIC_APP_ORIGIN: BASE_URL,
+        },
     url: BASE_URL,
     reuseExistingServer: false,
     timeout: PROD ? 120_000 : 60_000,

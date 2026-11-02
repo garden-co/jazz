@@ -1,27 +1,18 @@
-import { accountRegistryUrl } from "jazz-tools";
-import { resolveRequestSession } from "@/lib/auth-jazz-client";
+import { auth } from "@/lib/auth";
 import { ensureProfile } from "@/lib/bootstrap";
-import { APP_ORIGIN } from "@/lib/app-origin";
+import { jazz } from "@/lib/jazz.server";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
-  const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
-  const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
-  const session = await resolveRequestSession(request, {
-    appId,
-    accountRegistry: accountRegistryUrl(serverUrl, appId),
-    jwksUrl: `${APP_ORIGIN}/api/auth/jwks`,
-    jwtIssuer: APP_ORIGIN,
-    jwtAudience: APP_ORIGIN,
-  });
-  if (!session.account_id) return Response.json({ error: "account required" }, { status: 401 });
-  // Better Auth's JWT carries the user's name; it becomes the display name
-  // bandmates see beside the presence avatars.
-  const name = (session.claims as Record<string, unknown> | undefined)?.name;
-  const profile = await ensureProfile(
-    session.account_id,
-    typeof name === "string" && name.trim() ? name.trim() : "Bandmate",
-  );
+  // The Better Auth session cookie names the caller (see `authenticate` in
+  // lib/jazz.server.ts); a signed-out request has no account.
+  const accountId = await (await jazz()).accountFor(request);
+  if (!accountId) return Response.json({ error: "account required" }, { status: 401 });
+  // The Better Auth display name becomes the name bandmates see beside the
+  // presence avatars.
+  const session = await auth.api.getSession({ headers: request.headers });
+  const name = session?.user.name.trim();
+  const profile = await ensureProfile(accountId, name || "Bandmate");
   return Response.json({ profileId: profile.id });
 }

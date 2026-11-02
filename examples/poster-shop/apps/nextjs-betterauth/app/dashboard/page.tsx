@@ -10,7 +10,7 @@ import {
   prepareStudio,
   type InviteLink,
 } from "@/src/lib/account-enrollment";
-import { authClient, getJwtFromBetterAuth } from "@/src/lib/auth-client";
+import { authClient } from "@/src/lib/auth-client";
 
 type Preparation = "pending" | "ready" | "failed";
 
@@ -35,7 +35,7 @@ export default function Dashboard() {
       return;
     }
     setPreparation("pending");
-    void prepareStudio(userId, getJwtFromBetterAuth, invite).then((result) => {
+    void prepareStudio(userId, invite).then((result) => {
       if (cancelled) return;
       if (result.ok && invite) {
         setInviteRejected(result.inviteRejected);

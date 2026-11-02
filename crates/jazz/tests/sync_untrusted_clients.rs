@@ -315,6 +315,65 @@ fn a_commit_as_another_identitys_node_is_refused_and_claims_nothing() {
     assert_eq!(count(&server), 2, "alice's second write landed");
 }
 
+/// A node belongs to its account, not to the exact principal: a local-first
+/// guest that links to the app's backend keeps its account and its store
+/// (and so its node), and goes on writing as that node under the backend's
+/// principal.
+#[test]
+fn another_principal_of_the_same_account_writes_as_its_node() {
+    let server = server();
+    let guest = user(1);
+    let account = guest.account_id().expect("a test user has an account");
+    let alice = client(1, guest);
+    let (a_client, a_server, a_up, _a_down) = pipe();
+    let _a = block_on(alice.connect_upstream(a_client));
+    server.accept_subscriber(a_server, guest).unwrap();
+
+    post(&alice, "as a guest");
+    block_on(alice.tick()).unwrap();
+    let Some(SyncMessage::Commit { id, kind, .. }) = a_up
+        .borrow()
+        .iter()
+        .find(|m| matches!(m, SyncMessage::Commit { .. }))
+        .cloned()
+    else {
+        panic!("the guest's commit");
+    };
+    let tx = id.time.0;
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+        block_on(alice.tick()).unwrap();
+    }
+    assert_eq!(count(&server), 1);
+
+    // Signed in through the backend: another principal, the same account.
+    let signed_in = AuthorSubject::authenticated("urn:jazz:backend", "alice")
+        .unwrap()
+        .with_account(account);
+    let (_s_client, s_server, s_up, s_down) = pipe();
+    server.accept_subscriber(s_server, signed_in).unwrap();
+    s_up.borrow_mut().push_back(SyncMessage::Commit {
+        id: TxId::new(TxTime(tx + 1), id.node),
+        kind: kind.clone(),
+        ops: Vec::new(),
+        acting: Acting::Own,
+    });
+    block_on(server.tick()).unwrap();
+    assert_eq!(fates(&s_down), vec![(tx + 1, true)]);
+
+    // Another account's principal still may not.
+    let (_m_client, m_server, m_up, m_down) = pipe();
+    server.accept_subscriber(m_server, user(9)).unwrap();
+    m_up.borrow_mut().push_back(SyncMessage::Commit {
+        id: TxId::new(TxTime(tx + 2), id.node),
+        kind,
+        ops: Vec::new(),
+        acting: Acting::Own,
+    });
+    block_on(server.tick()).unwrap();
+    assert_eq!(fates(&m_down), vec![(tx + 2, false)]);
+}
+
 /// A base on another identity's commit tells its sender nothing: whether
 /// the commit exists, was accepted or was rejected, the write is refused
 /// alike.

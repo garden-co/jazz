@@ -74,9 +74,10 @@ the live poster is a follow-up.
 
 ## First open
 
-`/api/bootstrap` verifies the caller with `client.forRequest(request)` and
-writes through `client.withAttributionForRequest(request)`, so it keeps
-backend authority while stamping the verified user as author. One serializable
+`/api/bootstrap` finds the caller's account with `jazz.accountFor(request)`
+and writes through `jazz.withAttribution(request)`, so it keeps backend
+authority while stamping the signed-in user as author. Both read the Better
+Auth session cookie through `authenticate` in `src/lib/jazz.server.ts`. One serializable
 transaction checks for an existing membership and otherwise creates the
 canvas, the admin membership and a deterministic demo poster (see
 `src/lib/demo-poster.ts`) with a "First draft" checkpoint. Conflicting
@@ -98,9 +99,12 @@ request between React StrictMode's double mount.
 
 ## Running the Next/Better Auth example
 
-Copy `apps/nextjs-betterauth/.env.example` to `.env.local`, then replace the
-local Jazz app id and server URL when connecting to a deployed backend. The
-checked-in defaults deliberately let `pnpm --dir apps/nextjs-betterauth build`
-evaluate auth routes without an unset configuration; they do not start a Jazz
-server for you. Memberships and cursor identity use the canonical Jazz account
+Jazz runs inside the Next app (`createJazz` in `src/lib/jazz.server.ts`,
+mounted at `/jazz`), so `pnpm --dir apps/nextjs-betterauth dev` is all it
+takes: the data lives in a local SQLite directory, `.jazz/`. The browser signs
+in through that backend with its Better Auth session; it holds no token of its
+own. To deploy, copy `apps/nextjs-betterauth/.env.example` to `.env.local` and
+set your origin, app id and Better Auth secret. To keep the data on a sync
+server such as Jazz Cloud, also set `JAZZ_SERVER_URL`, `JAZZ_ADMIN_SECRET` and
+`BACKEND_SECRET`. Memberships and cursor identity use the canonical Jazz account
 id, so equal provider subjects from different issuers cannot share access.

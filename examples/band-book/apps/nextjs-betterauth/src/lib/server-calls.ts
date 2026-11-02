@@ -1,29 +1,20 @@
-import { getJwtFromBetterAuth } from "./auth-client";
-
-/**
- * Server routes read the caller from a Better Auth JWT sent as a bearer.
- * `principal` is the signed-in Jazz session's subject (the Better Auth user id).
- */
-async function postWithBearer(principal: string, path: string, body?: unknown): Promise<Response> {
-  const jwt = await getJwtFromBetterAuth(principal);
-  if (!jwt) throw new Error("Your session has no Jazz token. Sign in again.");
+// Server routes read the caller from the Better Auth session cookie, so these
+// calls carry no token.
+async function post(path: string, body?: unknown): Promise<Response> {
   return await fetch(path, {
     method: "POST",
     credentials: "same-origin",
-    headers: {
-      authorization: `Bearer ${jwt}`,
-      ...(body === undefined ? {} : { "content-type": "application/json" }),
-    },
+    headers: body === undefined ? {} : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 }
 
 /** Ask the server to create the demo workspace. Idempotent, so safe to retry. */
-export function bootstrapWorkspace(principal: string): Promise<Response> {
-  return postWithBearer(principal, "/api/bootstrap");
+export function bootstrapWorkspace(): Promise<Response> {
+  return post("/api/bootstrap");
 }
 
 /** Ask the server to redeem an invite link for the signed-in account. */
-export function redeemInviteLink(principal: string, token: string): Promise<Response> {
-  return postWithBearer(principal, "/api/invites/redeem", { token });
+export function redeemInviteLink(token: string): Promise<Response> {
+  return post("/api/invites/redeem", { token });
 }

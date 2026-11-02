@@ -5625,9 +5625,16 @@ impl Inner {
     }
 
     /// Whether `identity` may commit as `node`. A node belongs to the
-    /// identity that first commits as it: commits are deduplicated by
-    /// (node, tx), so another identity writing as that node could claim its
-    /// transactions before it sends them.
+    /// writer that first commits as it: commits are deduplicated by
+    /// (node, tx), so another writer committing as that node could claim
+    /// its transactions before it sends them.
+    ///
+    /// The writer is the account, not the exact principal: an account's
+    /// storage (and so its node) outlives a change of how it signs in,
+    /// as when a local-first guest links to the app's backend and keeps
+    /// writing as the same node under the backend's principal. Every
+    /// principal that is admitted as an account is that account. System
+    /// writers share no account, so they stay exact.
     fn claim_node(&self, node: [u8; 16], identity: &AuthorSubject) -> Result<bool, Error> {
         let author = self.author_code(&author_key(identity))?;
         let code = self.node_code(node)?;
@@ -5642,7 +5649,7 @@ impl Inner {
                 r.get(0)
             })
             .map_err(storage)?;
-        Ok(owner == author)
+        self.same_writer(Some(owner), author, identity)
     }
 
     /// Whether `node` is one `identity` writes as (see [`Inner::claim_node`]),
@@ -5658,7 +5665,7 @@ impl Inner {
             [node.to_vec()],
             |r| r.get::<_, Option<i64>>(0),
         ) {
-            Ok(owner) => Ok(owner == Some(author)),
+            Ok(owner) => self.same_writer(owner, author, identity),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
             Err(error) => Err(storage(error)),
         }
@@ -5674,7 +5681,39 @@ impl Inner {
             [at.t()],
             |r| r.get::<_, Option<i64>>(0),
         ) {
-            Ok(owner) => Ok(owner == Some(author)),
+            Ok(owner) => self.same_writer(owner, author, identity),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(error) => Err(storage(error)),
+        }
+    }
+
+    /// Whether a node's owning author code `owner` is the same writer as
+    /// `identity` (interned as `author`): the same principal, or another
+    /// principal of the same account (see [`Inner::claim_node`]).
+    fn same_writer(
+        &self,
+        owner: Option<i64>,
+        author: i64,
+        identity: &AuthorSubject,
+    ) -> Result<bool, Error> {
+        let Some(owner) = owner else {
+            return Ok(false);
+        };
+        if owner == author {
+            return Ok(true);
+        }
+        let Some(account) = identity.account_id() else {
+            return Ok(false);
+        };
+        if account == jazz_types::account_registry::SYSTEM_ACCOUNT_ID {
+            return Ok(false);
+        }
+        match self.conn.cached_row(
+            "SELECT account FROM _jazz_authors WHERE n = ?1",
+            [owner],
+            |r| r.get::<_, Vec<u8>>(0),
+        ) {
+            Ok(stored) => Ok(stored.as_slice() == account.0.as_bytes().as_slice()),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
             Err(error) => Err(storage(error)),
         }

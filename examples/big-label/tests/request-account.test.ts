@@ -13,6 +13,8 @@ describe("BigLabel API authentication", () => {
     ["members", members],
   ])("answers an unauthenticated %s request with 401", async (_route, handler) => {
     expect((await handler(post())).status).toBe(401);
+    // A bearer token is not a credential: only the Better Auth session cookie is.
     expect((await handler(post({ authorization: "Bearer not-a-jwt" }))).status).toBe(401);
+    expect((await handler(post({ cookie: "better-auth.session_token=forged" }))).status).toBe(401);
   });
 });
