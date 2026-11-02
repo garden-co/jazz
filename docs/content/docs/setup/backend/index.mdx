@@ -39,6 +39,10 @@ export const jazz = await createJazz({
   `{ userId, claims? }`, or `null` when signed out. It is the only place that decides who a user
   is: sign-ins, sync connections and `forRequest` all ask it. No JWKS, issuer or audience to
   configure, and no Jazz token in the browser.
+- Sync and sign-in only accept requests from your backend's own origin. A page served from another
+  origin must be listed in `allowedOrigins: ["https://app.example.com"]`. Don't put a permissive
+  credentialed CORS rule (any origin, with cookies) in front of `/jazz`: it lets other sites act
+  with your users' cookies again.
 - Admin and backend routes never leave the process: from outside, only sync and sign-in are
   reachable under `/jazz`.
 

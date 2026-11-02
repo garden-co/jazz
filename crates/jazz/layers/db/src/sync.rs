@@ -5442,12 +5442,15 @@ impl Inner {
         if !self.signs_up_from(owner, identity)? {
             return Ok(false);
         }
-        self.exec(
-            "UPDATE _jazz_nodes SET author = ?2 WHERE n = ?1 AND author = ?3",
-            rusqlite::params![code, author, owner],
-        )
-        .map_err(storage)?;
-        Ok(true)
+        // Only the owner we read is handed over: if the node changed hands in
+        // between, nothing is updated and the caller doesn't get it.
+        let handed_over = self
+            .exec(
+                "UPDATE _jazz_nodes SET author = ?2 WHERE n = ?1 AND author = ?3",
+                rusqlite::params![code, author, owner],
+            )
+            .map_err(storage)?;
+        Ok(handed_over == 1)
     }
 
     /// Whether `identity` is a signed-up guest taking over a node of its

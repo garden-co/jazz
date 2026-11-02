@@ -420,6 +420,73 @@ fn a_signed_up_guest_takes_over_its_node_once() {
     ));
 }
 
+/// Two principals of the account race for the guest's node in one tick:
+/// the first takes it, the second finds it handed over and is refused.
+#[test]
+fn a_guest_node_is_handed_over_to_one_racing_principal() {
+    let server = server();
+    let (_store, id, kind) = owned_node(&server, guest_of(1));
+    let tx = id.time.0;
+    let send = |identity: AuthorSubject, tx: u64| {
+        let (c, s, up, down) = pipe();
+        server.accept_subscriber(s, identity).unwrap();
+        up.borrow_mut().push_back(SyncMessage::Commit {
+            id: TxId::new(TxTime(tx), id.node),
+            kind: kind.clone(),
+            ops: Vec::new(),
+            acting: Acting::Own,
+        });
+        (c, down)
+    };
+    let (_a, first) = send(signed_in_as(1, "urn:jazz:backend"), tx + 1);
+    let (_b, second) = send(signed_in_as(1, "urn:jazz:other"), tx + 2);
+    block_on(server.tick()).unwrap();
+    assert_eq!(fates(&first), vec![(tx + 1, true)]);
+    assert_eq!(fates(&second), vec![(tx + 2, false)]);
+    assert!(!commit_as(&server, guest_of(1), id.node, tx + 3, &kind));
+}
+
+/// The hand-over is stored: after a restart the guest's key still doesn't
+/// write as the node, and the principal that took it over still does.
+#[test]
+fn a_handed_over_node_stays_handed_over_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("jazz.sqlite");
+    let open = || {
+        let server = block_on(Db::open_at(
+            config(0, AuthorSubject::SYSTEM),
+            &path,
+            jazz::db::FileOptions::default(),
+        ))
+        .unwrap();
+        server.set_authority();
+        server.track_closed_subscribers();
+        server
+    };
+    let (id, kind) = {
+        let server = open();
+        let (_store, id, kind) = owned_node(&server, guest_of(1));
+        assert!(commit_as(
+            &server,
+            signed_in_as(1, "urn:jazz:backend"),
+            id.node,
+            id.time.0 + 1,
+            &kind
+        ));
+        (id, kind)
+    };
+    let server = open();
+    let tx = id.time.0;
+    assert!(!commit_as(&server, guest_of(1), id.node, tx + 2, &kind));
+    assert!(commit_as(
+        &server,
+        signed_in_as(1, "urn:jazz:backend"),
+        id.node,
+        tx + 2,
+        &kind
+    ));
+}
+
 /// The hand-over runs one way only, from the account's local-first guest.
 #[test]
 fn a_node_of_a_signed_in_principal_is_not_handed_over() {
