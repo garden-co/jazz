@@ -351,7 +351,7 @@ describe("createJazz", () => {
     try {
       // On Vercel, only next() upgrades: a Hono or plain fetch handler there
       // can't, so its clients need the stream.
-      expect(await marker(plain.fetch(probe()))).toBe("1");
+      expect(await marker(plain.handle(probe()))).toBe("1");
       expect(await marker(plain.next().GET(probe()))).toBeNull();
     } finally {
       if (previous === undefined) delete process.env.VERCEL;
@@ -370,7 +370,7 @@ describe("createJazz", () => {
     });
     cleanups.push(() => own.close());
     expect(
-      await marker(own.fetch(new Request(`http://app.test/jazz/apps/${own.appId}/ws`))),
+      await marker(own.handle(new Request(`http://app.test/jazz/apps/${own.appId}/ws`))),
     ).toBeNull();
 
     // An entry that isn't an origin (it would parse as the opaque "null").
