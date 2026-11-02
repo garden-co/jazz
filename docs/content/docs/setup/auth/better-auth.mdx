@@ -220,16 +220,6 @@ export const auth = betterAuth({
   `experimental.joins`.
 </Callout>
 
-### Publishing schema and permissions
-
-Because Better Auth tables are merged into your app schema, they travel with everything else: `createJazz` applies the schema, migrations and permissions your backend's code declares when it starts, with no separate push for `schema-better-auth/`. To publish them without starting the backend, use the CLI:
-
-```bash
-pnpm dlx jazz-tools@alpha deploy <appId>
-```
-
-See [Migrations](/docs/schemas/migrations) for the full deploy flow and how schema changes produce migration edges.
-
 ### Compatibility
 
 The adapter is currently aligned with Better Auth `1.7.1`.
