@@ -1,4 +1,4 @@
-import { generateSecret, identityOf, verifyChallenge } from "@garden-co/local-first-auth";
+import { generateSecret, identityOf, verifyChallenge } from "../local-first-auth/index.js";
 import { generateAuthSecret } from "../runtime/auth-secret-store.js";
 import { describe, expect, it, vi } from "vitest";
 import {

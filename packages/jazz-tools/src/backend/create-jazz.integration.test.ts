@@ -4,7 +4,7 @@ import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generateSecret, identityOf, signChallenge, signToken } from "@garden-co/local-first-auth";
+import { generateSecret, identityOf, signChallenge, signToken } from "../local-first-auth/index.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
@@ -734,6 +734,13 @@ describe("createJazz", () => {
       ).rejects.toThrow();
     }
     expect(() => remote({ url: core.url, secret: "" })).toThrow(/admin secret/);
+    // Untyped callers of the old shape hear about the rename.
+    expect(() =>
+      remote({ url: core.url, adminSecret: core.adminSecret } as unknown as {
+        url: string;
+        secret: string;
+      }),
+    ).toThrow(/replaced by one `secret`/);
 
     // A credential hook is asked fresh for each request and socket.
     let asked = 0;
@@ -765,5 +772,26 @@ describe("createJazz", () => {
       },
     });
     expect(forged.status).toBe(401);
+
+    // Nor on a sync socket: claiming the system identity with a forged
+    // credential and no secret of its own fails admission.
+    const socket = new WebSocket(`${origin.replace(/^http/, "ws")}/jazz/apps/${appId}/ws`, {
+      headers: {
+        "X-Jazz-Backend-Credential": core.adminSecret,
+        "X-Jazz-Backend-Access": "admin",
+      },
+    } as unknown as string[]);
+    socket.binaryType = "arraybuffer";
+    const outcome = await new Promise<string>((resolve) => {
+      socket.addEventListener("open", () =>
+        socket.send(JSON.stringify({ peer_identity: `["urn:jazz:system","system"]`, auth: {} })),
+      );
+      socket.addEventListener("message", (event) =>
+        resolve(`message ${new Uint8Array(event.data as ArrayBuffer).length}`),
+      );
+      socket.addEventListener("close", (event) => resolve(`close ${event.code} ${event.reason}`));
+    });
+    expect(outcome).toBe("close 1008 not signed in");
+    socket.close();
   }, 60_000);
 });

@@ -1,2 +1,2 @@
-export { RecoveryPhrase, RecoveryPhraseError } from "@garden-co/local-first-auth/recovery-phrase";
-export type { RecoveryPhraseErrorCode } from "@garden-co/local-first-auth/recovery-phrase";
+export { RecoveryPhrase, RecoveryPhraseError } from "../local-first-auth/recovery-phrase.js";
+export type { RecoveryPhraseErrorCode } from "../local-first-auth/recovery-phrase.js";

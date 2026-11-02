@@ -1,4 +1,10 @@
-# @garden-co/local-first-auth
+# Local-first auth
+
+A self-contained module inside jazz-tools. It is functionally a separate
+library: nothing here imports from the rest of jazz-tools (a test enforces it),
+and jazz-tools uses it like any other dependency. Its name and how it is
+packaged are deliberately left open until after alpha.60; for now it is not a
+public entry point of its own. Imports below are relative to this directory.
 
 Sign users in before they sign up. The device keeps a random secret; the secret
 derives an Ed25519 key and a stable user ID (the _subject_); the client signs a
@@ -6,11 +12,11 @@ short-lived token that any backend can verify with no auth server, no JWKS and
 no network call. Works offline, and the same secret restores the same identity
 on another device through a recovery phrase or a passkey.
 
-Jazz uses this package for its guests, but nothing in it depends on Jazz.
+Jazz uses this module for its guests, but nothing in it depends on Jazz.
 
 ```ts
-import { identityOf, signToken } from "@garden-co/local-first-auth";
-import { browserSecretStore } from "@garden-co/local-first-auth/browser";
+import { identityOf, signToken } from "./index.js";
+import { browserSecretStore } from "./browser.js";
 
 const store = browserSecretStore({ scope: "my-app" });
 const secret = await store.getOrCreate();
@@ -27,7 +33,7 @@ await fetch("/api/notes", {
 On the server:
 
 ```ts
-import { verifyRequest } from "@garden-co/local-first-auth/server";
+import { verifyRequest } from "./server.js";
 
 const who = verifyRequest(request, { audience: "https://app.example" });
 // null: no local-first bearer, try your other sign-in methods
@@ -41,13 +47,13 @@ header yourself and call `verifyToken`.
 
 ## Entry points
 
-| Import                        | What                                                                                                               |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `@garden-co/local-first-auth` | `generateSecret`, `parseSecret`, `identityOf`, `signToken`, `verifyToken`, `createSecretStore`, `secretStorageKey` |
-| `/browser`                    | `browserSecretStore({ scope?, profile? })` on localStorage                                                         |
-| `/server`                     | `verifyRequest(request, { audience })`                                                                             |
-| `/recovery-phrase`            | `RecoveryPhrase.fromSecret` / `toSecret` (24-word BIP39)                                                           |
-| `/passkey`                    | `BrowserPasskeyBackup`: wrap the secret in a passkey                                                               |
+| Import               | What                                                                                                               |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `index.ts`           | `generateSecret`, `parseSecret`, `identityOf`, `signToken`, `verifyToken`, `createSecretStore`, `secretStorageKey` |
+| `browser.ts`         | `browserSecretStore({ scope?, profile? })` on localStorage                                                         |
+| `server.ts`          | `verifyRequest(request, { audience })`                                                                             |
+| `recovery-phrase.ts` | `RecoveryPhrase.fromSecret` / `toSecret` (24-word BIP39)                                                           |
+| `passkey.ts`         | `BrowserPasskeyBackup`: wrap the secret in a passkey                                                               |
 
 `createSecretStore` takes any `{ getItem, setItem, removeItem }` storage, sync
 or async, so React Native and Expo apps pass their secure store.
