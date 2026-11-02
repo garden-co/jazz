@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
 import { schema as s } from "../../index.js";
 import { JazzClient, createOpenTransactionId } from "../client.js";
 import { startLocalJazzServer } from "../../testing/index.js";
@@ -44,11 +45,15 @@ const author = testAuthorBytes("accepted-read-host:alice");
 const node = new Uint8Array(16).fill(7);
 const query = queryFromTable("notes");
 
-async function open(host: "NAPI" | "WASM", backend = false): Promise<RawDb> {
+async function open(
+  host: "NAPI" | "WASM",
+  backend = false,
+  schema = app.wasmSchema,
+): Promise<RawDb> {
   const ctor =
     host === "NAPI" ? (await loadNapiModule()).NapiDb : (await loadWasmModuleForTest()).WasmDb;
   return ctor[backend ? "openMemoryAsBackend" : "openMemory"](
-    encodeSchema(app.wasmSchema),
+    encodeSchema(schema),
     openConfig(node, author, 1, false),
   );
 }
@@ -543,4 +548,161 @@ for (const host of ["NAPI", "WASM"] as const) {
       await server.stop();
     }
   }, 15000);
+}
+
+for (const host of ["NAPI", "WASM"] as const) {
+  for (const operation of ["insert", "restore", "update", "upsert", "delete", "partial"] as const) {
+    for (const mode of ["same-peer", "drift", "empty-drift"] as const) {
+      it(`${host} accepted ${operation} preserves ${mode} identity and live claims`, async () => {
+        const server = await startLocalJazzServer({
+          inMemory: true,
+          schema: app.wasmSchema,
+          permissions: allowAll(app.wasmSchema),
+        });
+        const raw = await open(
+          host,
+          false,
+          mergePermissionsIntoWasmSchema(app.wasmSchema, allowAll(app.wasmSchema)),
+        );
+        let registrations = 0;
+        const tracked = observe(raw, {
+          setIdentityClaims: (identity, claims) => {
+            registrations++;
+            raw.setIdentityClaims(identity, claims);
+          },
+        });
+        const adapter = new NativeRuntimeAdapter(null, app.wasmSchema, node, author, 1, false, {
+          db: tracked as never,
+          ...(mode !== "same-peer" ? { readAuthorizationHost: "trusted-serving" as const } : {}),
+        });
+        const client = await JazzClient.connectWithRuntime(adapter, {
+          appId: server.appId,
+          schema: app.wasmSchema,
+          serverUrl: server.url,
+        });
+        const [account_id, issuer, user_id] = JSON.parse(new TextDecoder().decode(author));
+        const scope = { account_id, issuer, user_id, claims: { team: "before" } };
+        const id = createOpenTransactionId();
+        try {
+          client.connectTransport(server.url, { admin_secret: server.adminSecret });
+          const row = await client
+            .insert("notes", { body: { type: "Text", value: "seed" } })
+            .wait({ tier: "global", timeoutMs: 5000 });
+          if (operation === "restore")
+            await client.delete("notes", row.id).wait({ tier: "global", timeoutMs: 5000 });
+          adapter.beginTransaction("serializable", id, JSON.stringify(scope), "accepted-evidence");
+          // Hydrate ordinary write coverage under the same admitted claims.
+          // Accepted evidence deliberately does not populate that cache.
+          await adapter.query(JSON.stringify({ table: "notes" }), JSON.stringify(scope), "remote");
+          await adapter.queryAccepted(
+            JSON.stringify({ table: "notes", ...(mode === "empty-drift" ? { limit: 0 } : {}) }),
+            id,
+            undefined,
+            5000,
+          );
+          if (mode === "same-peer")
+            await adapter.query(
+              JSON.stringify({ table: "notes" }),
+              undefined,
+              "local-only",
+              JSON.stringify({ transaction_id: id }),
+            );
+          const registered = registrations;
+          if (mode !== "same-peer")
+            raw.setSessionClaims({ team: "after", iss: issuer, sub: user_id });
+          const context = JSON.stringify({ ...scope, transaction_id: id });
+          const cells = { body: { type: "Text" as const, value: "changed" } };
+          // All shared mutation entry points must preserve the admitted identity
+          // without reinstating claims from this stale write context.
+          if (operation === "insert") adapter.insert("notes", cells, context);
+          else if (operation === "restore") adapter.restore("notes", row.id, cells, context);
+          else if (operation === "update") adapter.update("notes", row.id, cells, context);
+          else if (operation === "upsert") adapter.upsert("notes", row.id, cells, context);
+          else if (operation === "delete") adapter.delete("notes", row.id, context);
+          else adapter.updateLargeValues("notes", row.id, cells, [], context);
+          expect(registrations).toBe(registered);
+          if (mode === "same-peer") {
+            const tx = adapter.commitTransaction(id);
+            await adapter.waitForTransaction(tx, "global");
+          } else {
+            expect(() => adapter.commitTransaction(id)).toThrow(/claims changed/);
+          }
+        } finally {
+          await client.shutdown();
+          await server.stop();
+        }
+      }, 15000);
+    }
+  }
+}
+
+for (const host of ["NAPI", "WASM"] as const) {
+  for (const retained of [false, true]) {
+    for (const explicit of [false, true]) {
+      it(`${host} stable mixed reads inherit live claims (${retained ? "view" : "owner"}/${explicit ? "explicit" : "implicit"})`, async () => {
+        const server = await startLocalJazzServer({
+          inMemory: true,
+          schema: app.wasmSchema,
+          permissions: allowAll(app.wasmSchema),
+        });
+        const owner = await open(
+          host,
+          false,
+          mergePermissionsIntoWasmSchema(app.wasmSchema, allowAll(app.wasmSchema)),
+        );
+        const raw = retained
+          ? owner.registerSchema(
+              encodeSchema(
+                mergePermissionsIntoWasmSchema(app.wasmSchema, allowAll(app.wasmSchema)),
+              ),
+            )
+          : owner;
+        const adapter = runtime(raw);
+        const client = await JazzClient.connectWithRuntime(adapter, {
+          appId: server.appId,
+          schema: app.wasmSchema,
+          serverUrl: server.url,
+        });
+        const [account_id, issuer, user_id] = JSON.parse(new TextDecoder().decode(author));
+        const scope = { account_id, issuer, user_id, claims: { team: "before" } };
+        const id = createOpenTransactionId();
+        try {
+          client.connectTransport(server.url, { admin_secret: server.adminSecret });
+          await client
+            .insert("notes", { body: { type: "Text", value: "settle session" } })
+            .wait({ tier: "global", timeoutMs: 5000 });
+          raw.setSessionClaims({ team: "before", iss: issuer, sub: user_id });
+          adapter.beginTransaction(
+            "serializable",
+            id,
+            explicit ? JSON.stringify(scope) : undefined,
+            "accepted-evidence",
+          );
+          await adapter.queryAccepted(JSON.stringify({ table: "notes" }), id, undefined, 5000);
+          await expect(
+            adapter.query(
+              JSON.stringify({ table: "notes" }),
+              undefined,
+              "local-only",
+              JSON.stringify({ transaction_id: id }),
+            ),
+          ).resolves.toBeDefined();
+          raw.setSessionClaims({ team: "after", iss: issuer, sub: user_id });
+          await expect(
+            adapter.query(
+              JSON.stringify({ table: "notes" }),
+              undefined,
+              "local-only",
+              JSON.stringify({ transaction_id: id }),
+            ),
+          ).rejects.toThrow(/claims|scope/);
+          expect(() => adapter.commitTransaction(id)).toThrow(/claims|scope/);
+        } finally {
+          await client.shutdown();
+          if (retained) await owner.close();
+          await server.stop();
+        }
+      }, 15000);
+    }
+  }
 }

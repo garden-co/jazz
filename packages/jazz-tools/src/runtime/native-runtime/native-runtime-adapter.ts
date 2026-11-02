@@ -1721,8 +1721,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.assertMutationAdmission("Insert");
     const suppliedRowId = objectId ? parseUuid(objectId) : undefined;
     const writeSession = sessionFromWriteContext(_writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, _writeContext);
     const attribution = this.backendAttribution(_writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(_writeContext);
     const branchView = branchViewFromWriteContext(_writeContext);
@@ -1780,8 +1779,7 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error("Streaming mutations are not supported inside a transaction");
     }
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
@@ -1883,8 +1881,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.assertMutationAdmission("Restore");
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -1929,8 +1926,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.assertMutationAdmission("Update");
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -1990,8 +1986,7 @@ export class NativeRuntimeAdapter implements Runtime {
       // splices against the transaction's own view of the row, so a session
       // or attributed transaction authors them like any other staged write.
       const writeSession = sessionFromWriteContext(writeContext);
-      this.applySessionClaims(writeSession);
-      const writeIdentity = this.trustedWriteIdentity(writeSession);
+      const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
       const attribution = this.backendAttribution(writeContext);
       this.assertTransactionAttribution(tx, attribution);
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
@@ -2044,8 +2039,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const rowId = parseUuid(objectId);
     const definition = this.table(table);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -2092,8 +2086,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.table(table);
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -3440,6 +3433,23 @@ export class NativeRuntimeAdapter implements Runtime {
    * client's own session is the runtime itself, so it writes as the runtime.
    * A trusted-serving host writes as its peer when no session is given.
    */
+  private mutationWriteIdentity(
+    session: RuntimeSession | null | undefined,
+    writeContext: string | null | undefined,
+  ): Uint8Array | undefined {
+    const id = txIdFromContext(writeContext);
+    const pending = id ? this.pendingTxs.get(id) : undefined;
+    if (pending?.readCapability === "accepted-evidence") {
+      // Admission registered the explicit scope once. A staged write must not
+      // restore its cached claims over a revocation observed by the core.
+      const identity = session?.identity ?? this.peerIdentity;
+      this.assertTransactionWriteIdentity(pending, identity);
+      return identity;
+    }
+    this.applySessionClaims(session);
+    return this.trustedWriteIdentity(session);
+  }
+
   private trustedWriteIdentity(session: RuntimeSession | null | undefined): Uint8Array | undefined {
     const serving = this.readAuthorizationHost === "trusted-serving";
     if (!session) return serving && !this.trustedBackend ? this.peerIdentity : undefined;
@@ -3728,6 +3738,14 @@ export class NativeRuntimeAdapter implements Runtime {
     pending: PendingTx,
     identity: Uint8Array | undefined,
   ): void {
+    if (pending.readCapability === "accepted-evidence") {
+      const bound = pending.identity ?? this.peerIdentity;
+      const effective = identity ?? this.peerIdentity;
+      if (!sameBytes(bound, effective)) {
+        throw new Error("Native runtime serializable transaction cannot mix write identities");
+      }
+      return;
+    }
     if (pending.kind === "serializable") {
       if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
         throw new Error("Native runtime serializable transaction cannot mix write identities");
