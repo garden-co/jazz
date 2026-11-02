@@ -11,6 +11,8 @@ The family is split by concern:
 
 - `apps/nextjs/` is the full app: Next.js, Better Auth and the Astryx chat
   components with the Jazz theme.
+- `apps/ts-hono/` is the same app without a UI framework: plain TypeScript and
+  DOM in the browser, with Jazz, Better Auth and the agent in a Hono server.
 - `apps/ts-localfirst/` is a small headless TypeScript library with the same
   transcript shape and a provider-free agent, tested against a real Jazz
   runtime.
