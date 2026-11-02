@@ -17,6 +17,8 @@ mod array_columns;
 mod authority_accepted_content;
 #[path = "../authorization_scope_reentry.rs"]
 mod authorization_scope_reentry;
+#[path = "../binding_accepted_reads.rs"]
+mod binding_accepted_reads;
 #[path = "../binding_host.rs"]
 mod binding_host;
 #[path = "../binding_identities.rs"]

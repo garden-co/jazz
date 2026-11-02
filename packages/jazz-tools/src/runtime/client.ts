@@ -1,3 +1,8 @@
+import {
+  validateAcceptedReadTimeout,
+  type AcceptedRows,
+  type TransactionReadCapability,
+} from "./accepted-read.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import { UnsupportedSnapshotError, type SnapshotRef } from "./snapshot-ref.js";
 /**
@@ -172,7 +177,15 @@ export interface Runtime {
     transactionKind: TransactionKind,
     id: OpenTransactionId,
     sessionJson?: string | null,
+    readCapability?: TransactionReadCapability,
   ): OpenTransactionId;
+  /** @internal Authority evidence in an opted-in existing serializable batch. */
+  queryAccepted?(
+    queryJson: string,
+    openTransactionId: OpenTransactionId,
+    sessionJson: string | null | undefined,
+    timeoutMs: number,
+  ): Promise<AcceptedRows<Row>>;
   /** Completion may include asynchronous preparation before physical submission. */
   commitTransaction(id: OpenTransactionId): TxId | Promise<TxId>;
   rollbackTransaction(id: OpenTransactionId): Promise<boolean>;
@@ -1015,15 +1028,17 @@ export class WriteResult<T> extends WriteHandle<T, T> {
  */
 export class SerializableWriteHandle extends WriteHandle<void> {
   /**
-   * Wait for the serializable transaction to be accepted or rejected by the authority.
+   * Wait for the selected durability tier. Without options, use global with an
+   * upstream or local otherwise. Explicit global waits never fall back to local.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected,
    * or a {@link WriteWaitTimeoutError} once `timeoutMs` passes. Without
    * `timeoutMs`, the wait lasts through network outages and reconnects.
    */
-  override async wait(options: { timeoutMs?: number } = {}): Promise<void> {
+  override async wait(options: Partial<WriteWaitOptions> = {}): Promise<void> {
+    const tier = options.tier === undefined ? undefined : resolveWriteWaitTier(options.tier);
     validateWriteWaitTimeout(options.timeoutMs);
-    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs);
+    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs, tier);
   }
 }
 
@@ -1032,15 +1047,17 @@ export class SerializableWriteHandle extends WriteHandle<void> {
  */
 export class SerializableWriteResult<T> extends WriteResult<T> {
   /**
-   * Wait for the serializable transaction to be accepted or rejected by the authority.
+   * Wait for the selected durability tier. Without options, use global with an
+   * upstream or local otherwise. Explicit global waits never fall back to local.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected,
    * or a {@link WriteWaitTimeoutError} once `timeoutMs` passes.
    * @returns the callback result.
    */
-  override async wait(options: { timeoutMs?: number } = {}): Promise<T> {
+  override async wait(options: Partial<WriteWaitOptions> = {}): Promise<T> {
+    const tier = options.tier === undefined ? undefined : resolveWriteWaitTier(options.tier);
     validateWriteWaitTimeout(options.timeoutMs);
-    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs);
+    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs, tier);
     return this.value;
   }
 
@@ -1081,8 +1098,16 @@ export function beginClientTransactionAfter(
   attribution: string | undefined,
   reservedId: OpenTransactionId | undefined,
   prerequisite: TransactionAdmission | undefined,
+  readCapability?: TransactionReadCapability,
 ): OpenTransactionId {
-  return client.openTransaction(kind, session, attribution, reservedId, prerequisite);
+  return client.openTransaction(
+    kind,
+    session,
+    attribution,
+    reservedId,
+    prerequisite,
+    readCapability,
+  );
 }
 
 /** High-level Jazz client. */
@@ -1210,10 +1235,24 @@ export class JazzClient {
     attribution: string | undefined,
     reservedId: OpenTransactionId | undefined,
     prerequisite?: TransactionAdmission,
+    readCapability?: TransactionReadCapability,
   ): OpenTransactionId {
+    if (
+      readCapability !== undefined &&
+      (readCapability !== "accepted-evidence" ||
+        kind !== "serializable" ||
+        attribution !== undefined ||
+        !this.runtime.queryAccepted)
+    )
+      throw new Error(
+        "Accepted evidence requires a supported session-bound serializable transaction",
+      );
     const id = reservedId ?? createOpenTransactionId();
     if (prerequisite) {
-      const context = this.writeContext(session, attribution);
+      const context =
+        readCapability && session === undefined
+          ? undefined
+          : this.writeContext(session, attribution);
       const state: { pending?: Promise<void>; committing: boolean; unopened?: boolean } = {
         committing: false,
         unopened: true,
@@ -1230,13 +1269,18 @@ export class JazzClient {
         assertCurrent();
         await prerequisite();
         assertCurrent();
-        this.runtime.beginTransaction(kind, id, context);
+        if (readCapability) this.runtime.beginTransaction(kind, id, context, readCapability);
+        else this.runtime.beginTransaction(kind, id, context);
         state.unopened = false;
       });
       state.pending.catch(() => {});
       return id;
     }
-    const opened = this.runtime.beginTransaction(kind, id, this.writeContext(session, attribution));
+    const context =
+      readCapability && session === undefined ? undefined : this.writeContext(session, attribution);
+    const opened = readCapability
+      ? this.runtime.beginTransaction(kind, id, context, readCapability)
+      : this.runtime.beginTransaction(kind, id, context);
     this.transactionPreparations.set(opened, { committing: false });
     return opened;
   }
@@ -1867,6 +1911,26 @@ export class JazzClient {
     return results as Row[];
   }
 
+  /** @internal Reuse the existing admission chain before the native read. */
+  async queryAcceptedInternal(
+    query: string,
+    openTransactionId: OpenTransactionId,
+    timeoutMs: number,
+    session?: Session,
+  ): Promise<AcceptedRows<Row>> {
+    validateAcceptedReadTimeout(timeoutMs);
+    if (!this.runtime.queryAccepted) throw new Error("Runtime does not expose accepted reads");
+    const state = this.transactionPreparations.get(openTransactionId);
+    if (!state || state.committing) throw new Error("Accepted read requires an open transaction");
+    if (state.pending) await state.pending;
+    return this.runtime.queryAccepted(
+      query,
+      openTransactionId,
+      session ? JSON.stringify(serializeRuntimeSession(session)) : undefined,
+      timeoutMs,
+    );
+  }
+
   /**
    * Update a row by ID without waiting for durability.
    */
@@ -2298,11 +2362,18 @@ export class JazzClient {
   async waitForSerializableTransaction(
     txId: TxId | Promise<TxId>,
     timeoutMs?: number,
+    requiredTier?: DurabilityTier,
   ): Promise<void> {
-    txId = await txId;
     const hasAuthority =
       Boolean(this.context.serverUrl) || this.runtime.nativeUpstreamConfigured?.() === true;
-    await this.waitForTransaction(txId, hasAuthority ? "global" : "local", undefined, timeoutMs);
+    // Keep the unresolved identity inside the runtime wait so one timeout
+    // budget also covers a commit that has not returned its ID yet.
+    await this.waitForTransaction(
+      txId,
+      requiredTier ?? (hasAuthority ? "global" : "local"),
+      undefined,
+      timeoutMs,
+    );
   }
 
   private normalizeTransactionWaitError(error: unknown): Error {
