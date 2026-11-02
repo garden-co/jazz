@@ -91,9 +91,12 @@ describe("jazz-tools/shared", () => {
     const manager = new SubscriptionsOrchestrator({ appId }, getDbSubscriptionSource(db));
 
     // Schema + query via the real builder API (no JSON-shaped literals).
-    const app = s.defineApp({
-      todos: s.table({ title: s.string(), done: s.boolean() }, {}),
-    });
+    const app = s.defineApp(
+      {
+        todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+      },
+      { migrations: "none" },
+    );
     const query = app.todos.where({ done: { eq: false } });
 
     const binding = useAllVanilla(manager, query);

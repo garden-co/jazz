@@ -49,13 +49,13 @@ fn device(core: &Db, node: u8, author: AuthorSubject) -> (Db, Db) {
     worker.set_remote_link_hint(RemoteLinkHint::Live);
     let (client_side, server_side) = duplex();
     block_on(worker.connect_upstream(client_side));
-    core.accept_subscriber(server_side, author.clone());
+    core.accept_subscriber(server_side, author.clone()).unwrap();
     let tab = open(node + 1, author.clone());
     tab.set_non_durable_client();
     tab.set_remote_link_hint(RemoteLinkHint::Live);
     let (client_side, server_side) = duplex();
     block_on(tab.connect_upstream(client_side));
-    worker.accept_subscriber(server_side, author);
+    worker.accept_subscriber(server_side, author).unwrap();
     (worker, tab)
 }
 

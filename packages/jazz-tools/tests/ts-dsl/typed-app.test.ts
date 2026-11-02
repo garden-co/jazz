@@ -47,7 +47,7 @@ const schema = {
     .indexOnly(["done"]),
 };
 type AppSchema = s.Schema<typeof schema>;
-const app: s.App<AppSchema> = s.defineApp(schema);
+const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 const defaultedSchema = {
   users: s.table(
     {
@@ -81,7 +81,9 @@ const defaultedSchema = {
   ),
 };
 type DefaultedAppSchema = s.Schema<typeof defaultedSchema>;
-const defaultedApp: s.App<DefaultedAppSchema> = s.defineApp(defaultedSchema);
+const defaultedApp: s.App<DefaultedAppSchema> = s.defineApp(defaultedSchema, {
+  migrations: "none",
+});
 const payloadEnumSchema = {
   events: s.table(
     {
@@ -106,7 +108,9 @@ const payloadEnumSchema = {
   ),
 };
 type PayloadEnumAppSchema = s.Schema<typeof payloadEnumSchema>;
-const payloadEnumApp: s.App<PayloadEnumAppSchema> = s.defineApp(payloadEnumSchema);
+const payloadEnumApp: s.App<PayloadEnumAppSchema> = s.defineApp(payloadEnumSchema, {
+  migrations: "none",
+});
 
 type Urgency = "low" | "high";
 
@@ -123,8 +127,10 @@ const transformedColumnSchema = {
   ),
 };
 type TransformedColumnAppSchema = s.Schema<typeof transformedColumnSchema>;
-const transformedColumnApp: s.App<TransformedColumnAppSchema> =
-  s.defineApp(transformedColumnSchema);
+const transformedColumnApp: s.App<TransformedColumnAppSchema> = s.defineApp(
+  transformedColumnSchema,
+  { migrations: "none" },
+);
 
 const graphSchema = {
   teams: s.table(
@@ -148,7 +154,7 @@ const graphSchema = {
   ),
 };
 type GraphAppSchema = s.Schema<typeof graphSchema>;
-const graphApp: s.App<GraphAppSchema> = s.defineApp(graphSchema);
+const graphApp: s.App<GraphAppSchema> = s.defineApp(graphSchema, { migrations: "none" });
 
 const largeValueUpdateSchema = {
   documents: s.table(
@@ -162,7 +168,9 @@ const largeValueUpdateSchema = {
   ),
 };
 type LargeValueUpdateAppSchema = s.Schema<typeof largeValueUpdateSchema>;
-const largeValueUpdateApp: s.App<LargeValueUpdateAppSchema> = s.defineApp(largeValueUpdateSchema);
+const largeValueUpdateApp: s.App<LargeValueUpdateAppSchema> = s.defineApp(largeValueUpdateSchema, {
+  migrations: "none",
+});
 
 const largeSchema = {
   accounts: s.table(
@@ -231,7 +239,10 @@ const largeSchema = {
 
 describe("typed app prototype", () => {
   it("exposes history queries without reserving the table name history", () => {
-    const historyApp = s.defineApp({ history: s.table({ title: s.string() }, {}) });
+    const historyApp = s.defineApp(
+      { history: s.table({ title: s.string() }, {}) },
+      { migrations: "none" },
+    );
 
     expect(historyApp.history._table).toBe("history");
     expect(historyApp.$history.history._table).toBe("history.history");
@@ -241,27 +252,33 @@ describe("typed app prototype", () => {
   });
 
   it("reserves $history for the history namespace", () => {
-    expect(() => s.defineApp({ $history: s.table({ title: s.string() }, {}) })).toThrow(
-      'Schema name "$history" is reserved for Jazz schema controls.',
-    );
+    expect(() =>
+      s.defineApp({ $history: s.table({ title: s.string() }, {}) }, { migrations: "none" }),
+    ).toThrow('Schema name "$history" is reserved for Jazz schema controls.');
   });
 
   it.each(["union", "wasmSchema", "schemaAst"])(
     "rejects a table named %s instead of masking an app control",
     (tableName) => {
       expect(() =>
-        s.defineApp({
-          [tableName]: s.table({ value: s.string() }, {}),
-        } as never),
+        s.defineApp(
+          {
+            [tableName]: s.table({ value: s.string() }, {}),
+          } as never,
+          { migrations: "none" },
+        ),
       ).toThrow(/reserved/i);
     },
   );
 
   it("rejects a table named exists instead of masking the policy control", () => {
     expect(() => {
-      const reservedApp = s.defineApp({
-        exists: s.table({ value: s.string() }, {}),
-      } as never);
+      const reservedApp = s.defineApp(
+        {
+          exists: s.table({ value: s.string() }, {}),
+        } as never,
+        { migrations: "none" },
+      );
       s.definePermissions(reservedApp, ({ policy }) => {
         const existsPolicy = policy.exists as unknown as {
           where(input: unknown): unknown;
@@ -391,12 +408,15 @@ describe("typed app prototype", () => {
   });
 
   it("emits ordered composite indexes through the TypeScript schema", () => {
-    const indexed = s.defineApp({
-      documents: s
-        .table({ ownerId: s.uuid(), updatedAt: s.timestamp() }, {})
-        .indexOnly(["ownerId"])
-        .compositeIndex(["ownerId", "updatedAt"]),
-    });
+    const indexed = s.defineApp(
+      {
+        documents: s
+          .table({ ownerId: s.uuid(), updatedAt: s.timestamp() }, {})
+          .indexOnly(["ownerId"])
+          .compositeIndex(["ownerId", "updatedAt"]),
+      },
+      { migrations: "none" },
+    );
     expect(indexed.wasmSchema.documents?.indexed_columns).toEqual(["ownerId"]);
     expect(indexed.wasmSchema.documents?.composite_indexes).toEqual([["ownerId", "updatedAt"]]);
   });
@@ -659,7 +679,7 @@ describe("typed app prototype", () => {
       };
 
       // @ts-expect-error invalid ref target table name
-      s.defineApp(invalidScalarRefSchema);
+      s.defineApp(invalidScalarRefSchema, { migrations: "none" });
 
       const invalidArrayRefSchema = {
         users: s.table(
@@ -677,7 +697,7 @@ describe("typed app prototype", () => {
       };
 
       // @ts-expect-error invalid ref target table name inside array ref
-      s.defineApp(invalidArrayRefSchema);
+      s.defineApp(invalidArrayRefSchema, { migrations: "none" });
     }
   });
 
@@ -922,7 +942,7 @@ describe("typed app prototype", () => {
   });
 
   it("creates typed app slices over one full runtime schema", () => {
-    const sliceableApp = s.defineSliceableApp(largeSchema);
+    const sliceableApp = s.defineSliceableApp(largeSchema, { migrations: "none" });
     const commerceApp = sliceableApp.slice(
       "accounts",
       "workspaces",

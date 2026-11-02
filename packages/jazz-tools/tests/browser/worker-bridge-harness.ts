@@ -22,6 +22,7 @@ import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
 import { closeRemoteBrowserDb, waitForRemoteBrowserDbTitle } from "./remote-browser-db.js";
 import { CompiledPermissions, schema as s, migration as m } from "../../src/";
 import { computeSchemaHash, deploy } from "../../src/dev/catalogue.js";
+import { appMigrations } from "../../src/testing/client-migrations.js";
 import {
   deserializeBrowserRelayError,
   type BrowserInspectorContext,
@@ -128,7 +129,7 @@ export const schema = {
 };
 
 export type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 export const { projects, todos } = app;
 export type Todo = s.RowOf<typeof todos>;
 
@@ -153,8 +154,10 @@ export const maintainedIndexedSchema = {
     .indexOnly(["title", "done"]),
 };
 export type MaintainedIndexedSchema = s.Schema<typeof maintainedIndexedSchema>;
-export const maintainedIndexedApp: s.App<MaintainedIndexedSchema> =
-  s.defineApp(maintainedIndexedSchema);
+export const maintainedIndexedApp: s.App<MaintainedIndexedSchema> = s.defineApp(
+  maintainedIndexedSchema,
+  { migrations: "none" },
+);
 export const { todos: maintainedIndexedTodos } = maintainedIndexedApp;
 export type MaintainedIndexedTodo = s.RowOf<typeof maintainedIndexedTodos>;
 
@@ -177,7 +180,9 @@ export const transactionIdentitySchema = {
     )
     .branchBy("branch"),
 };
-export const transactionIdentityApp = s.defineApp(transactionIdentitySchema);
+export const transactionIdentityApp = s.defineApp(transactionIdentitySchema, {
+  migrations: "none",
+});
 export const transactionIdentityPermissions = s.definePermissions(
   transactionIdentityApp,
   ({ policy }) => [
@@ -252,7 +257,9 @@ export const nullableSchema = {
 };
 
 export type NullableSchema = s.Schema<typeof nullableSchema>;
-export const nullableApp: s.App<NullableSchema> = s.defineApp(nullableSchema);
+export const nullableApp: s.App<NullableSchema> = s.defineApp(nullableSchema, {
+  migrations: "none",
+});
 export const nullablePermissions = s.definePermissions(nullableApp, ({ policy }) => [
   policy.todos.allowRead.always(),
   policy.todos.allowInsert.always(),
@@ -287,8 +294,22 @@ export const catalogueSchemaV2 = {
   ),
 };
 
-export const catalogueAppV1 = s.defineApp(catalogueSchemaV1);
-export const catalogueAppV2 = s.defineApp(catalogueSchemaV2);
+const catalogueMigrate = {
+  todos: {
+    description: m.add.string({ default: null }),
+  },
+};
+// Both versions ship the family's lens, as the app's generated module holds it.
+const catalogueMigrations = await appMigrations(catalogueSchemaV1, {
+  to: catalogueSchemaV2,
+  migration: m.defineMigration({
+    from: catalogueSchemaV1,
+    to: catalogueSchemaV2,
+    migrate: catalogueMigrate,
+  }),
+});
+export const catalogueAppV1 = s.defineApp(catalogueSchemaV1, { migrations: catalogueMigrations });
+export const catalogueAppV2 = s.defineApp(catalogueSchemaV2, { migrations: catalogueMigrations });
 export const { todos: catalogueTodos } = catalogueAppV2;
 export type CatalogueTodo = s.RowOf<typeof catalogueTodos>;
 export const allCatalogueTodos: QueryBuilder<CatalogueTodo> = catalogueAppV2.todos;
@@ -443,11 +464,7 @@ export async function publishCatalogueSchemaFamily(scope: string): Promise<JazzS
     toHash: await computeSchemaHash(catalogueAppV2.wasmSchema),
     from: catalogueSchemaV1,
     to: catalogueSchemaV2,
-    migrate: {
-      todos: {
-        description: m.add.string({ default: null }),
-      },
-    },
+    migrate: catalogueMigrate,
   });
 
   await deploy({

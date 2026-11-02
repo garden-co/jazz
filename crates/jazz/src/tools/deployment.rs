@@ -5,8 +5,9 @@
 mod compatible;
 pub use compatible::schemas_are_compatible;
 mod migration_validation;
+pub mod published;
 mod runtime;
-pub use runtime::prepare_runtime_snapshot;
+pub use runtime::prepare_catalogue_change;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

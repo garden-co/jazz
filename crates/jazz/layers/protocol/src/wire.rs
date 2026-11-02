@@ -842,6 +842,15 @@ pub enum TransportError {
     Failed(String),
 }
 
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Backpressure => f.write_str("backpressure"),
+            Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
 fn check_wire_protocol_range(min: u16, max: u16) -> Result<(), WireError> {
     if min == WIRE_PROTOCOL_VERSION && max == WIRE_PROTOCOL_VERSION {
         return Ok(());
