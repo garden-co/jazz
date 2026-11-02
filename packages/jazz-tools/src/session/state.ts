@@ -1,19 +1,11 @@
 import { ensureAutomaticLocalFirst } from "../accounts/persistence.js";
 import type { AccountHandle, AccountManager } from "../accounts/state.js";
-import { isProvisionalAccount, type JWTAuth, type BackendAuth } from "../accounts/enrollment.js";
-import { hasAuthProviderConnection } from "./auth-provider.js";
-import { watchNeedsLogin } from "./needs-login-warning.js";
+import type { JWTAuth, BackendAuth } from "../accounts/enrollment.js";
 import {
   GracefulShutdownSyncError,
   SharedClientShutdownError,
 } from "../runtime/graceful-shutdown-error.js";
 import { createListeners, toError } from "../runtime/util.js";
-
-/** Re-admit the selected account in place, or decline for an ordinary transition. */
-interface InPlaceRevalidation {
-  check(isCurrent: () => boolean): Promise<AccountHandle | undefined>;
-  retry(): Promise<void>;
-}
 
 export interface SessionClient {
   shutdown(options?: { waitForSync?: boolean }): Promise<void>;
@@ -23,30 +15,10 @@ export type JazzSessionOperation =
   | "restoreLocalFirst"
   | "becomeBackend"
   | "loginWithBackend"
-  | "registerJWT"
-  | "loginJWT"
-  | "loginOrRegisterJWT"
-  | "linkJWT"
+  | "linkWithBackend"
   | "logout"
   | "retry";
-/**
- * Whether the open account still has to log in before it syncs.
- *
- * True while the selected account is a retained external-JWT account that a
- * reload reopened before any provider credential: it reads and writes local
- * data, but nothing leaves the device until `loginJWT` or
- * `loginOrRegisterJWT` (or managed auth's revalidation) re-admits it. Its
- * identity is already the signed-in identity, so check this flag rather than
- * the identity to decide whether to log in again.
- */
-export interface NeedsLoginState {
-  readonly needsLogin: boolean;
-}
-/** @internal The one place that decides {@link NeedsLoginState.needsLogin}. */
-export function accountNeedsLogin(account: AccountHandle | undefined): boolean {
-  return account !== undefined && isProvisionalAccount(account);
-}
-export interface JazzSessionSnapshot<Client> extends Partial<NeedsLoginState> {
+export interface JazzSessionSnapshot<Client> {
   readonly status: "ready" | "signed-out" | "transitioning" | "error" | "closed";
   readonly account?: AccountHandle;
   readonly client?: Client;
@@ -65,10 +37,12 @@ export interface JazzSessionActions {
    * the app's own session cookie. The client holds no Jazz credential.
    */
   loginWithBackend(): Promise<void>;
-  registerJWT(auth: JWTAuth): Promise<void>;
-  loginJWT(auth: JWTAuth): Promise<void>;
-  loginOrRegisterJWT(auth: JWTAuth): Promise<void>;
-  linkJWT(auth: JWTAuth): Promise<void>;
+  /**
+   * Keep a local-first guest's account and data when they sign up: after your
+   * own sign-up, the backend links this guest to the user it now names, and
+   * the session continues as that user.
+   */
+  linkWithBackend(): Promise<void>;
   logout(): Promise<void>;
   retry(): Promise<void>;
   close(): Promise<void>;
@@ -108,17 +82,9 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
     status: client ? "ready" : "signed-out",
     account: selected,
     client,
-    needsLogin: accountNeedsLogin(selected),
   });
   const listeners = createListeners("Jazz session observer failed");
   const leases = new Set<{ waiting?: () => void }>();
-  // Development builds only: warn an app that drives logins itself when it
-  // keeps writing to an account that still needs one.
-  const needsLoginWarning = watchNeedsLogin({
-    current: () => snapshot,
-    isManaged: () => hasAuthProviderConnection(session),
-    isBusy: () => busy !== undefined || loggingOut !== undefined,
-  });
   const versions = new WeakMap<object, number>();
   let version = 0;
   versions.set(snapshot, version);
@@ -126,17 +92,13 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
   let busy: Promise<void> | undefined;
   let closing: Promise<void> | undefined;
   let loggingOut: Promise<void> | undefined;
-  // A same-identity login whose in-place revalidation failed. retry() runs it
-  // again: reopening the still-unconfirmed account would hide the failure.
-  let failedRevalidation: (() => Promise<void>) | undefined;
   let closed = false;
-  const publish = (next: Omit<JazzSessionSnapshot<Client>, "needsLogin">) => {
-    snapshot = Object.freeze({ ...next, needsLogin: accountNeedsLogin(next.account) });
+  const publish = (next: JazzSessionSnapshot<Client>) => {
+    snapshot = Object.freeze({ ...next });
     versions.set(snapshot, ++version);
-    needsLoginWarning.update();
     listeners.notify();
   };
-  const detach = (next: Omit<JazzSessionSnapshot<Client>, "needsLogin">) => {
+  const detach = (next: JazzSessionSnapshot<Client>) => {
     const waits = [...leases].map(
       (lease) =>
         new Promise<void>((resolve) => {
@@ -156,55 +118,14 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
     operation: JazzSessionOperation,
     mutate: () => AccountHandle | undefined | Promise<AccountHandle | undefined>,
     token: number,
-    revalidate?: InPlaceRevalidation,
   ) => {
     if (token !== generation) throw superseded();
-    if (revalidate && client && selected) {
-      // Logging in again as the selected identity re-admits it in place: the
-      // open client and its subscriptions stay. A changed provider identity
-      // or registry assignment falls through to the ordinary transition.
-      const current = client;
-      const account = selected;
-      let same: AccountHandle | undefined;
-      try {
-        same = await revalidate.check(() => token === generation);
-      } catch (cause) {
-        if (token === generation) failedRevalidation = revalidate.retry;
-        if (token === generation)
-          publish({
-            status: "ready",
-            account,
-            client: current,
-            error: toError(cause),
-            recovery: "action",
-          });
-        throw cause;
-      }
-      if (token !== generation) throw superseded();
-      if (same === account && selected === account && client === current) {
-        // Clear an earlier failure and the pending login; an unchanged ready
-        // snapshot stays as is.
-        if (
-          snapshot.error ||
-          snapshot.status !== "ready" ||
-          snapshot.client !== current ||
-          snapshot.needsLogin !== accountNeedsLogin(account)
-        )
-          publish({ status: "ready", account, client: current });
-        return;
-      }
-    }
     const previous = selected;
     await detach({ status: "transitioning", account: selected, pending: operation }).done;
     if (token !== generation) throw superseded();
     try {
       if (client) {
-        // A retained account that never received a credential cannot reach
-        // the core; its unsynchronized writes stay durable in its own local
-        // store and sync the next time that identity signs in.
-        await client.shutdown(
-          selected && isProvisionalAccount(selected) ? {} : { waitForSync: true },
-        );
+        await client.shutdown({ waitForSync: true });
         client = undefined;
       }
     } catch (cause) {
@@ -269,14 +190,12 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
   const run = (
     operation: JazzSessionOperation,
     mutate: () => AccountHandle | undefined | Promise<AccountHandle | undefined>,
-    revalidate?: InPlaceRevalidation,
   ): Promise<void> => {
     if (closed) return Promise.reject(new Error("Jazz session is closed"));
     if (busy || loggingOut)
       return Promise.reject(new Error("A Jazz session operation is already pending"));
-    failedRevalidation = undefined;
     const token = ++generation;
-    const task = Promise.resolve().then(() => perform(operation, mutate, token, revalidate));
+    const task = Promise.resolve().then(() => perform(operation, mutate, token));
     busy = task;
     void task
       .finally(() => {
@@ -284,18 +203,6 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
       })
       .catch(() => {});
     return task;
-  };
-  const login = (operation: "loginJWT" | "loginOrRegisterJWT", auth: JWTAuth): Promise<void> => {
-    // Hosts that retain the selected account re-admit the same identity in
-    // place. Anything else is an ordinary transition; the enrollment reuses
-    // the provider token the revalidation already fetched.
-    const revalidate: InPlaceRevalidation | undefined = accounts.revalidatesInPlace
-      ? {
-          check: (isCurrent) => accounts.revalidateJWT(operation, auth, isCurrent),
-          retry: () => login(operation, auth),
-        }
-      : undefined;
-    return run(operation, () => accounts.enrollJWT(operation, auth), revalidate);
   };
   const session: JazzSession<Client> = {
     getSnapshot: () => snapshot,
@@ -305,18 +212,11 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
       run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret)),
     becomeBackend: (auth) => run("becomeBackend", () => accounts.becomeBackend(auth)),
     loginWithBackend: () => run("loginWithBackend", () => accounts.loginWithBackend()),
-    registerJWT: (auth) => run("registerJWT", () => accounts.registerJWT(auth)),
-    loginJWT: (auth) => login("loginJWT", auth),
-    loginOrRegisterJWT: (auth) => login("loginOrRegisterJWT", auth),
-    linkJWT: (auth) => run("linkJWT", () => accounts.linkJWT(auth)),
-    retry: () => {
-      const again = failedRevalidation;
-      return again ? again() : run("retry", () => selected);
-    },
+    linkWithBackend: () => run("linkWithBackend", () => accounts.linkWithBackend()),
+    retry: () => run("retry", () => selected),
     logout: () => {
       if (closed) return Promise.reject(new Error("Jazz session is closed"));
       if (loggingOut) return loggingOut;
-      failedRevalidation = undefined;
       const token = ++generation;
       const pending = busy;
       const task = Promise.resolve().then(async () => {
@@ -359,7 +259,6 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
       return closing;
     },
   };
-  needsLoginWarning.update();
   consumers.set(session, () => {
     const lease: { waiting?: () => void } = {};
     leases.add(lease);

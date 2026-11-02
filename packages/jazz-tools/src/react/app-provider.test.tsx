@@ -4,7 +4,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { makeFakeAccount, makeFakeClient } from "../react-core/test-utils.js";
-import { jwtAuth } from "../session/app.js";
+import { backendAuth } from "../session/app.js";
 import { useJazzAuth } from "../react-core/app.js";
 const host = vi.hoisted(() => ({ create: vi.fn() }));
 vi.mock("../session/create-jazz-session.js", () => ({ createJazzSession: host.create }));
@@ -34,10 +34,7 @@ it("provides logout in the data tree without an application auth context", async
     {
       createLocalFirst: () => account,
       restoreLocalFirst: () => account,
-      registerJWT: async () => account,
-      loginJWT: async () => account,
-      loginOrRegisterJWT: async () => account,
-      linkJWT: async () => account,
+      loginWithBackend: async () => account,
       logout() {},
     },
     account,
@@ -82,10 +79,7 @@ it("opens an authenticated provider client with cloneable host options after enr
       accounts: new AccountManager({
         createLocalFirst: () => account,
         restoreLocalFirst: () => account,
-        registerJWT: async () => account,
-        loginJWT: async () => account,
-        loginOrRegisterJWT: async () => account,
-        linkJWT: async () => account,
+        loginWithBackend: async () => account,
         logout() {},
       }),
       openClient: async () => {
@@ -101,7 +95,7 @@ it("opens an authenticated provider client with cloneable host options after enr
       appId="app"
       serverUrl="https://sync.example.test"
       autoAttachDevTools={false}
-      auth={jwtAuth({ key, getToken: async () => "token", logout: async () => {} })}
+      auth={backendAuth({ key, logout: async () => {} })}
       signedOut={<p>signed out</p>}
     >
       <p>private data</p>

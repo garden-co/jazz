@@ -5,6 +5,7 @@ import {
   exportLocalFirstSecret,
   createAccountManagerWithRuntime,
   onAccountInvalidated,
+  type JWTAuth,
 } from "./enrollment.js";
 
 import {
@@ -23,11 +24,12 @@ function setup(
   fetcher: typeof fetch = vi.fn(
     async () => new Response(JSON.stringify({ account: id, identity })),
   ),
+  auth: JWTAuth = token(),
 ) {
   return createAccountManagerWithRuntime({
     registry,
     fetch: fetcher,
-    localFirst: { create: () => ({ accountId: id, identity, auth: token() }) },
+    localFirst: { create: () => ({ accountId: id, identity, auth }) },
   });
 }
 
@@ -49,9 +51,9 @@ it("retains the supplied recovery root independently of a factory echo", () => {
   expect(exportLocalFirstSecret(manager.restoreLocalFirst(secret))).toBe(secret);
 });
 
-it("does not export provider credentials as a local recovery root", async () => {
+it("does not export a backend sign-in as a local recovery root", async () => {
   const manager = setup();
-  const account = await manager.registerJWT(token());
+  const account = await manager.loginWithBackend();
   expect(() => exportLocalFirstSecret(account)).toThrow(/recovery_unavailable/);
 });
 
@@ -121,7 +123,7 @@ describe("opaque account credentials", () => {
         }),
     );
     const manager = setup(fetcher);
-    const pending = manager.loginJWT(token());
+    const pending = manager.loginWithBackend();
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
     manager.logout();
     finish(new Response(JSON.stringify({ account: id, identity })));
@@ -143,8 +145,9 @@ describe("opaque account credentials", () => {
             }),
         )
         .mockResolvedValueOnce(token());
-      const manager = setup();
-      const handle = await manager.loginJWT({ getToken });
+      const manager = setup(undefined, { getToken });
+      const handle = manager.createLocalFirst();
+      await expect(accountToken(handle, registry)).resolves.toBe(token());
       const timedOut = expect(accountToken(handle, registry)).rejects.toMatchObject({
         code: "credential_refresh_timeout",
       });
@@ -161,8 +164,8 @@ describe("opaque account credentials", () => {
 
   it("rejects a refreshed token with a different identity", async () => {
     let current = token();
-    const manager = setup();
-    const handle = await manager.loginJWT({ getToken: async () => current });
+    const manager = setup(undefined, { getToken: async () => current });
+    const handle = manager.createLocalFirst();
     current = token("bob");
     await expect(accountToken(handle, registry)).rejects.toMatchObject({
       code: "credential_identity_changed",
@@ -190,7 +193,7 @@ it("keeps backend authority opaque, scoped, and revocable", async () => {
   await expect(accountToken(backend, registry)).rejects.toThrow(
     /backend_account_requires_backend_host/,
   );
-  await expect(manager.linkJWT(token())).rejects.toThrow(/backend_account_requires_backend_host/);
+  await expect(manager.linkWithBackend()).rejects.toThrow(/local_first_account_required/);
   const invalidated = vi.fn();
   onAccountInvalidated(backend, invalidated);
   manager.createLocalFirst();
@@ -221,33 +224,41 @@ it("rejects unsupported backend hosts and fences late backend admission on logou
   expect(manager.getLoggedIn()).toBeUndefined();
 });
 
-it("rejects SYSTEM identities through every ordinary JWT enrollment path", async () => {
-  const fetcher = vi.fn(async () => new Response(null, { status: 500 }));
-  const manager = setup(fetcher);
-  const forged = `e30.${btoa(JSON.stringify({ iss: "urn:jazz:system", sub: id }))}.signature`;
-  await expect(manager.registerJWT(forged)).rejects.toThrow(/external_identity_required/);
-  await expect(manager.loginJWT(forged)).rejects.toThrow(/external_identity_required/);
-  manager.createLocalFirst();
-  await expect(manager.linkJWT(forged)).rejects.toThrow(/external_identity_required/);
-  expect(fetcher).not.toHaveBeenCalled();
+it("rejects a backend sign-in that names a SYSTEM identity", async () => {
+  const fetcher = vi.fn(
+    async () =>
+      new Response(
+        JSON.stringify({ account: id, identity: { issuer: "urn:jazz:system", subject: id } }),
+      ),
+  );
+  await expect(setup(fetcher).loginWithBackend()).rejects.toThrow(/invalid_account_response/);
 });
 
-it("login-or-register uses one core operation and preserves selection on denial", async () => {
-  // Accept every fetch overload while retaining a recorded input for the URL assertion.
+it("signs in through the backend and links a local-first guest with its own token", async () => {
+  const guest = { issuer: "urn:jazz:local-first", subject: "guest" };
+  const guestToken = `e30.${btoa(JSON.stringify({ iss: guest.issuer, sub: guest.subject }))}.signature`;
+  // Accept every fetch overload while retaining the recorded request.
   const fetcher = vi.fn(
-    async (_input: unknown) => new Response(JSON.stringify({ account: id, identity })),
+    async (_input: unknown, _init?: RequestInit) =>
+      new Response(JSON.stringify({ account: id, identity, claims: { role: "admin" } })),
   );
-  const manager = setup(fetcher);
-  const auth = { getToken: vi.fn(async () => token()) };
-  const account = await manager.loginOrRegisterJWT(auth);
-  expect(account.id).toBe(id);
-  expect(fetcher).toHaveBeenCalledTimes(1);
-  expect(fetcher.mock.calls[0]?.[0]).toBe(`${registry}/login-or-register`);
-  fetcher.mockResolvedValueOnce(new Response("identity_not_authorized", { status: 403 }));
-  await expect(manager.loginOrRegisterJWT(auth)).rejects.toThrow("identity_not_authorized");
-  expect(manager.getLoggedIn()).toBe(account);
-  expect(fetcher).toHaveBeenCalledTimes(2);
-  const reserved = `e30.${btoa(JSON.stringify({ iss: "urn:jazz:system", sub: "node" }))}.signature`;
-  await expect(manager.loginOrRegisterJWT(reserved)).rejects.toThrow("external_identity_required");
-  expect(fetcher).toHaveBeenCalledTimes(2);
+  const manager = createAccountManagerWithRuntime({
+    registry,
+    fetch: fetcher as typeof fetch,
+    localFirst: { create: () => ({ accountId: id, identity: guest, auth: guestToken }) },
+  });
+  manager.createLocalFirst();
+  const linked = await manager.linkWithBackend();
+  expect(linked).toMatchObject({ id, identity });
+  expect(fetcher.mock.calls[0]?.[0]).toBe(`${registry}/backend-link`);
+  expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
+    `Bearer ${guestToken}`,
+  );
+  // A delegated account has no token of its own.
+  await expect(accountToken(linked, registry)).rejects.toThrow(/has_no_token/);
+
+  fetcher.mockResolvedValueOnce(new Response("signed_out", { status: 401 }));
+  await expect(manager.loginWithBackend()).rejects.toThrow("signed_out");
+  expect(manager.getLoggedIn()).toBe(linked);
+  expect(fetcher.mock.calls[1]?.[0]).toBe(`${registry}/backend-sign-in`);
 });

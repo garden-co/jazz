@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { createJazzSessionOwner } from "./state.js";
-import { betterAuth, createJazzAppOwner, jwtAuth } from "./app.js";
+import { backendAuth, betterAuth, createJazzAppOwner } from "./app.js";
 import type { BetterAuthClient } from "./better-auth.js";
-import type { JWTAuth } from "../accounts/enrollment.js";
 import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 const tick = async () => {
   for (let i = 0; i < 60; i++) await Promise.resolve();
@@ -31,9 +30,12 @@ async function setup() {
     }
     return result;
   };
-  const token = async (auth: JWTAuth) => (typeof auth === "string" ? auth : auth.getToken());
-  const enroll = async (auth: JWTAuth) => {
-    const id = await token(auth);
+  // Who the app's backend says is signed in; a test can hold the answer back.
+  const backend: { user: string; next?: Promise<string> } = { user: "one" };
+  const signIn = async () => {
+    const pending = backend.next;
+    backend.next = undefined;
+    const id = await (pending ?? backend.user);
     events.push(`admit:${id}`);
     if (admissionFailure) throw new Error("registry offline");
     return account(id);
@@ -44,13 +46,10 @@ async function setup() {
     logout() {
       events.push("logout");
     },
-    registerJWT: enroll,
-    loginJWT: enroll,
-    loginOrRegisterJWT: enroll,
-    async linkJWT(_account: AccountHandle, auth: JWTAuth) {
+    loginWithBackend: signIn,
+    async linkWithBackend() {
       events.push("link");
       if (linkFailure) throw new Error("link unavailable");
-      await token(auth);
       return account("local");
     },
   });
@@ -71,6 +70,7 @@ async function setup() {
   return {
     session,
     events,
+    backend,
     failUnknownShutdown(value: boolean) {
       unknownShutdownFailure = value;
     },
@@ -118,25 +118,22 @@ describe("shared Jazz application lifecycle", () => {
     await f.session.createLocalFirst();
     const app = createJazzAppOwner(
       {
-        auth: jwtAuth({
+        auth: backendAuth({
           logout: async () => {},
           key: null,
           isPending: true,
-          getToken: async () => "one",
         }),
       },
       async () => f.session,
     );
     await tick();
     expect(app.getSnapshot().client).toBeUndefined();
-    app.updateAuth(jwtAuth({ logout: async () => {}, key: "one", getToken: async () => "one" }));
+    app.updateAuth(backendAuth({ logout: async () => {}, key: "one" }));
     await tick();
     expect(app.getSnapshot().status).toBe("ready");
     const client = app.getSnapshot().client;
     expect(client).toBeDefined();
-    app.updateAuth(
-      jwtAuth({ logout: async () => {}, key: "one", getToken: async () => "refreshed" }),
-    );
+    app.updateAuth(backendAuth({ logout: async () => {}, key: "one" }));
     await tick();
     expect(app.getSnapshot().client).toBe(client);
     expect(f.events.filter((e) => e.startsWith("admit"))).toEqual(["admit:one"]);
@@ -145,13 +142,14 @@ describe("shared Jazz application lifecycle", () => {
   it("waits for committed detachment before flushing on account switch", async () => {
     const f = await setup();
     const app = createJazzAppOwner(
-      { auth: jwtAuth({ logout: async () => {}, key: "one", getToken: async () => "one" }) },
+      { auth: backendAuth({ logout: async () => {}, key: "one" }) },
       async () => f.session,
     );
     await tick();
     const consumer = app.attachConsumer();
     const ready = app.getSnapshot();
-    app.updateAuth(jwtAuth({ logout: async () => {}, key: "two", getToken: async () => "two" }));
+    f.backend.user = "two";
+    app.updateAuth(backendAuth({ logout: async () => {}, key: "two" }));
     await tick();
     expect(app.getSnapshot().client).toBeUndefined();
     expect(f.events).not.toContain("flush:one");
@@ -188,9 +186,8 @@ describe("shared Jazz application lifecycle", () => {
     const f = await setup();
     const app = createJazzAppOwner(
       {
-        auth: jwtAuth({
+        auth: backendAuth({
           key: "one",
-          getToken: async () => "one",
           logout: () => {
             f.events.push("revoke");
           },
@@ -207,32 +204,31 @@ describe("shared Jazz application lifecycle", () => {
     f.failShutdown(false);
     await app.retry();
     expect(f.events.slice(-3)).toEqual(["flush:one", "logout", "revoke"]);
-    app.updateAuth(jwtAuth({ logout: async () => {}, key: null, getToken: async () => "none" }));
+    app.updateAuth(backendAuth({ logout: async () => {}, key: null }));
     await tick();
     expect(app.getSnapshot().status).toBe("signed-out");
     await app.dispose();
   });
-  it("retries admission and fences ABA token promises", async () => {
+  it("retries admission and signs in again after an ABA provider transition", async () => {
     const f = await setup();
-    const token = deferred<string>();
+    const stale = deferred<string>();
+    f.backend.next = stale.promise;
+    f.backend.user = "fresh-one";
     const app = createJazzAppOwner(
-      { auth: jwtAuth({ logout: async () => {}, key: "one", getToken: () => token.promise }) },
+      { auth: backendAuth({ logout: async () => {}, key: "one" }) },
       async () => f.session,
     );
     await tick();
-    app.updateAuth(jwtAuth({ logout: async () => {}, key: "two", getToken: async () => "two" }));
-    app.updateAuth(
-      jwtAuth({ logout: async () => {}, key: "one", getToken: async () => "fresh-one" }),
-    );
-    token.resolve("stale-one");
+    app.updateAuth(backendAuth({ logout: async () => {}, key: "two" }));
+    app.updateAuth(backendAuth({ logout: async () => {}, key: "one" }));
+    stale.resolve("stale-one");
     await tick();
-    expect(f.events).not.toContain("admit:stale-one");
     expect(f.events).toContain("open:fresh-one");
+    expect(f.session.getSnapshot().account?.id).toBe("fresh-one");
     expect(app.getSnapshot().status).toBe("ready");
     f.failAdmission(true);
-    app.updateAuth(
-      jwtAuth({ logout: async () => {}, key: "three", getToken: async () => "three" }),
-    );
+    f.backend.user = "three";
+    app.updateAuth(backendAuth({ logout: async () => {}, key: "three" }));
     await tick();
     expect(app.getSnapshot().status).toBe("error");
     expect(app.getSnapshot().client).toBeUndefined();
@@ -277,7 +273,7 @@ describe("shared Jazz application lifecycle", () => {
     consumer.acknowledge(app.getSnapshot());
     await creating;
     expect(app.getSnapshot().status).toBe("ready");
-    const linking = app.sessionActions.linkJWT({ getToken: async () => "linked" });
+    const linking = app.sessionActions.linkWithBackend();
     await tick();
     consumer.acknowledge(app.getSnapshot());
     await linking;
@@ -292,17 +288,13 @@ describe("shared Jazz application lifecycle", () => {
     await tick();
     await app.sessionActions.createLocalFirst();
     f.failLink(true);
-    await expect(app.sessionActions.linkJWT({ getToken: async () => "linked" })).rejects.toThrow(
-      "link unavailable",
-    );
+    await expect(app.sessionActions.linkWithBackend()).rejects.toThrow("link unavailable");
     expect(app.getSnapshot()).toMatchObject({ status: "error", recovery: "action" });
     f.failLink(false);
     await Promise.all([app.retry(), app.retry()]);
     expect(f.events.filter((event) => event === "link")).toHaveLength(2);
     f.failOpen(true);
-    await expect(
-      app.sessionActions.linkJWT({ getToken: async () => "linked-again" }),
-    ).rejects.toThrow("open unavailable");
+    await expect(app.sessionActions.linkWithBackend()).rejects.toThrow("open unavailable");
     expect(app.getSnapshot()).toMatchObject({ status: "error", recovery: "session" });
     f.failOpen(false);
     await app.retry();
@@ -359,7 +351,6 @@ describe("shared Jazz application lifecycle", () => {
           },
         },
       },
-      $fetch: async () => ({ data: { token: "one" } }),
       signOut: async () => {
         f.events.push("revoke");
         return {};
@@ -384,8 +375,8 @@ it("rejected overlapping action does not erase failed action retry", async () =>
   await tick();
   await app.sessionActions.createLocalFirst();
   f.failLink(true);
-  const first = app.sessionActions.linkJWT({ getToken: async () => "linked" });
-  const second = app.sessionActions.linkJWT({ getToken: async () => "linked" });
+  const first = app.sessionActions.linkWithBackend();
+  const second = app.sessionActions.linkWithBackend();
   await expect(second).rejects.toThrow("already pending");
   await expect(first).rejects.toThrow("link unavailable");
   expect(app.getSnapshot().recovery).toBe("action");
@@ -401,9 +392,7 @@ it("rejected manual action during logout preserves logout retry", async () => {
   await app.sessionActions.createLocalFirst();
   f.failShutdown(true);
   const logout = app.logout();
-  await expect(app.sessionActions.linkJWT({ getToken: async () => "linked" })).rejects.toThrow(
-    "already pending",
-  );
+  await expect(app.sessionActions.linkWithBackend()).rejects.toThrow("already pending");
   await expect(logout).rejects.toThrow();
   f.failShutdown(false);
   await app.retry();
@@ -412,7 +401,7 @@ it("rejected manual action during logout preserves logout retry", async () => {
   await app.dispose();
 });
 
-it.each(["jwt", "better-auth"] as const)(
+it.each(["backend", "better-auth"] as const)(
   "keeps %s callbacks out of structured-cloned host configuration",
   async (kind) => {
     const f = await setup();
@@ -428,13 +417,10 @@ it.each(["jwt", "better-auth"] as const)(
           },
         },
       },
-      $fetch: async () => ({ data: { token: "one" } }),
       signOut: async () => ({}),
     };
     const auth =
-      kind === "jwt"
-        ? jwtAuth({ key: "one", getToken: async () => "one", logout: async () => {} })
-        : betterAuth(client);
+      kind === "backend" ? backendAuth({ key: "one", logout: async () => {} }) : betterAuth(client);
     const host = {
       appId: "app",
       serverUrl: "https://sync.example.test",

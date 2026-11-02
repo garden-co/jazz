@@ -48,7 +48,7 @@
     createLocalFirst: unavailable, restoreLocalFirst: unavailable,
       becomeBackend: unavailable,
       loginWithBackend: unavailable,
-    registerJWT: unavailable, loginJWT: unavailable, loginOrRegisterJWT: unavailable, linkJWT: unavailable,
+      linkWithBackend: unavailable,
     logout: unavailable, retry: start,
     close: async () => { cancelled = true; publish({ status: 'closed' }); await created?.close(); },
   });

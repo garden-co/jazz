@@ -12,31 +12,30 @@ import { createJazzSession } from "jazz-tools/client";
 
 const jazz = await createJazzSession({
   appId: "my-app",
-  serverUrl: "https://core.example",
+  serverUrl: "/jazz",
   initial: "local-first",
 });
 const { client, account } = jazz.getSnapshot();
 ```
 
-`initial: "local-first"` restores usable saved selection or creates a local-first account when none exists. Without it, an empty selection stays signed out. External identities are never registered implicitly. Browser account storage retains local signing roots and selection; provider JWTs are not persisted.
+`initial: "local-first"` restores usable saved selection or creates a local-first account when none exists. Without it, an empty selection stays signed out. Signed-in users are never registered implicitly: they sign in through your backend. Browser account storage keeps local-first signing roots and the local-first selection; a signed-in user's account is asked for again from your backend on the next startup.
 
 ## Linking and switching accounts
 
 ```ts
-await jazz.linkJWT({ getToken }); // Add an identity to this account.
-await jazz.loginJWT({ getToken }); // Select an already registered identity.
-await jazz.registerJWT({ getToken }); // Explicitly register a fresh identity.
+await jazz.loginWithBackend(); // Select the user your backend's authenticate names.
+await jazz.linkWithBackend(); // Upgrade this local-first guest to that user, keeping its data.
 ```
 
 For each transition Jazz hides the old client, waits for framework consumers to detach, then performs ordinary graceful shutdown with `waitForSync: true`. Only afterward does it perform the account operation, outside any context, and open the replacement client. Earlier rows retain their original issuer and subject. Linking preserves the stable account ID and its data.
 
-A sync-barrier failure leaves the old client usable and prevents the account operation. If enrollment fails after shutdown, Jazz reopens the previous selection when possible. If enrollment succeeds but client startup fails, the new selection remains and `await jazz.retry()` retries startup without repeating enrollment. A teardown failure after sync is reported with no usable client; Jazz does not pretend a stopped context is ready.
+A sync-barrier failure leaves the old client usable and prevents the account operation. If the sign-in fails after shutdown, Jazz reopens the previous selection when possible. If it succeeds but client startup fails, the new selection remains and `await jazz.retry()` retries startup without asking your backend again. A teardown failure after sync is reported with no usable client; Jazz does not pretend a stopped context is ready.
 
-Overlapping account-changing commands reject with a busy error instead of silently applying to a later account. Logout and close supersede in-flight work and prevent late completions from publishing a client. A remote link that already succeeded remains discoverable by a later explicit login.
+Overlapping account-changing commands reject with a busy error instead of silently applying to a later account. Logout and close supersede in-flight work and prevent late completions from publishing a client.
 
 ## Reactive state
 
-`getSnapshot()` and `subscribe(listener)` expose stable snapshots. Status is `ready`, `signed-out`, `transitioning`, `error`, or `closed`. A client is available only in `ready`. A recoverable operation error may accompany `ready`, so the app can show it while the previous account remains usable. `needsLogin` is `true` while a browser reload has reopened an external-JWT account that has not logged in again: it is `ready` and works locally, but does not sync until `loginJWT` or `loginOrRegisterJWT` re-admits it (see [Logging in again after a reload](/docs/setup/auth/custom#logging-in-again-after-a-reload)). On session snapshots the field is optional (`boolean | undefined`): a session always sets it, but a placeholder snapshot shown before the session exists (such as the startup state of the Svelte `JazzSessionProvider`) leaves it out, so treat a missing value as `false`. `useJazzAuth()` always reports it as a boolean.
+`getSnapshot()` and `subscribe(listener)` expose stable snapshots. Status is `ready`, `signed-out`, `transitioning`, `error`, or `closed`. A client is available only in `ready`. A recoverable operation error may accompany `ready`, so the app can show it while the previous account remains usable.
 
 ```tsx
 import { JazzSessionProvider, useJazzSession } from "jazz-tools/react";
@@ -62,7 +61,7 @@ function AccountStatus() {
 }
 ```
 
-The hook is available in children and fallback. Data consumers unmount during a transition; Jazz handles the shutdown/replacement sequence. An app can put sign-in UI in the signed-out fallback and invoke `loginJWT` or `registerJWT` there. Config is captured at mount; use a React key to replace an application's configuration. Passing an existing `session` instead of `config` leaves ownership with its caller: unmounting the provider does not close it.
+The hook is available in children and fallback. Data consumers unmount during a transition; Jazz handles the shutdown/replacement sequence. An app can put sign-in UI in the signed-out fallback and call `loginWithBackend()` there once its own sign-in has finished. Config is captured at mount; use a React key to replace an application's configuration. Passing an existing `session` instead of `config` leaves ownership with its caller: unmounting the provider does not close it.
 
 For authentication coordination that must remain mounted while the data UI changes, `useJazzSessionOwner(config)` returns `{ session, error, retry }`. It owns initialization and cleanup with the same lifecycle as the configured provider. Pass the resulting session to `JazzSessionProvider`; keep provider-specific login/sign-out state above that provider. No app-owned shutdown queue or unmount timer is needed.
 
@@ -77,7 +76,7 @@ await signOutFromYourProvider();
 await jazz.createLocalFirst();
 ```
 
-Logout stays signed out until the app chooses another account. It does not erase the local database or revoke an identity at core. Provider cookies remain the provider's responsibility. Local-first signing roots remain available for recovery.
+Logout stays signed out until the app chooses another account. It does not erase the local database or revoke an identity at core. Your auth's own session cookie remains its responsibility. Local-first signing roots remain available for recovery.
 
 Call `await jazz.close()` when retiring an imperatively owned session. Ordinary close preserves local durability and works offline; it does not promise remote sync completed. Account-changing commands use the stronger sync barrier automatically.
 
