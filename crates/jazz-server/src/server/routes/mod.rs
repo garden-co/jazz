@@ -155,12 +155,11 @@ mod tests {
     use crate::server::{
         MAX_CATALOGUE_REQUEST_BODY_BYTES, ServerBuilder, ServerState, StorageBackend,
     };
-    use jazz::wire::{WireFrame, WireHello, WirePeerRole, decode_frame, encode_frame};
+    use jazz::wire::{WireFrame, WirePeerRole, decode_frame};
 
     use crate::server::catalogue::ConnectionSchemaDiagnostics;
     use axum::body;
-    use futures::{SinkExt as _, StreamExt as _};
-    use jazz::ids::AuthorSubject;
+    use futures::StreamExt as _;
     use serde_json::Value;
 
     #[tokio::test]
@@ -1489,57 +1488,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn shutdown_closes_upgraded_websocket_before_handshake() {
-        let state = make_sync_test_state("test-backend-secret").await;
-        let app = create_router(state.clone());
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind ws listener");
-        let addr = listener.local_addr().expect("ws local addr");
-        let server_task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve ws app");
-        });
-
-        let ws_url = format!("ws://{addr}{}", test_app_route("/ws"));
-        let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
-
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while state.shutdown.active_websockets() != 1 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("upgraded websocket should be tracked before handshake");
-
-        assert!(state.shutdown.request_shutdown());
-
-        let close_frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
-            .await
-            .expect("wait for close")
-            .expect("ws frame")
-            .expect("ws result");
-        let WsMessage::Close(Some(close)) = close_frame else {
-            panic!("expected close frame, got {close_frame:?}");
-        };
-        assert_eq!(
-            close.code,
-            tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Restart
-        );
-        assert_eq!(close.reason.as_str(), "server shutting down");
-
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while state.shutdown.active_websockets() != 0 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("websocket cleanup");
-
-        server_task.abort();
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn ws_negotiates_against_fixed_schema_core_route() {
         let state = make_state_with_schema(Schema::new()).await;
         let app = create_router(state);
@@ -1552,29 +1500,25 @@ mod tests {
             axum::serve(listener, app).await.expect("serve ws app");
         });
 
-        let ws_url = format!("ws://{addr}{}", test_app_route("/ws"));
-        let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
-        ws.send(WsMessage::Binary(
-            serde_json::json!({
-                "peer_identity": AuthorSubject::for_test_bytes([
-                    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
-                ]).canonical(),
-                "auth": {
-                    "admin_secret": "admin-secret",
-                },
-            })
-            .to_string()
-            .into_bytes()
-            .into(),
-        ))
-        .await
-        .expect("send ws auth prelude");
-        let hello = WireFrame::Hello(WireHello::current(WirePeerRole::Client, 0));
-        let encoded = vec![encode_frame(&hello).expect("encode hello")];
-        let batch = postcard::to_allocvec(&encoded).expect("encode ws batch");
-        ws.send(WsMessage::Binary(batch.into()))
-            .await
-            .expect("send ws hello");
+        // The upgrade carries the whole client handshake: the version offer
+        // (no optional features) and the admin credential.
+        let mut request =
+            tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
+                format!("ws://{addr}{}", test_app_route("/ws")),
+            )
+            .expect("ws request");
+        request.headers_mut().insert(
+            "sec-websocket-protocol",
+            jazz::wire::ws_version_subprotocol(0).parse().unwrap(),
+        );
+        request
+            .headers_mut()
+            .insert("x-jazz-admin-secret", "admin-secret".parse().unwrap());
+        let (mut ws, upgraded) = connect_async(request).await.expect("connect ws");
+        assert_eq!(
+            upgraded.headers()["sec-websocket-protocol"],
+            jazz::wire::ws_version_subprotocol(0).as_str()
+        );
 
         let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await

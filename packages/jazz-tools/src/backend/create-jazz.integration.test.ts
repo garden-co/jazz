@@ -22,6 +22,10 @@ const permissions = s.definePermissions(app, ({ policy, session }) => {
   policy.todos.allowDelete.never();
 });
 
+import {
+  upgradeOfferFromInit,
+  webSocketUpgradeOffer,
+} from "../runtime/native-runtime/websocket.js";
 const NodeWebSocket = globalThis.WebSocket;
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -87,8 +91,12 @@ function signInAs(origin: string, userId: string) {
     return realFetch(request);
   }) as typeof fetch;
   globalThis.WebSocket = class extends RealWebSocket {
-    constructor(url: string | URL) {
-      super(url, { headers: { "x-test-user": userId } } as never);
+    constructor(url: string | URL, init?: unknown) {
+      const offer = upgradeOfferFromInit(init as never);
+      super(url, {
+        protocols: offer.protocols,
+        headers: { ...offer.headers, "x-test-user": userId },
+      } as never);
     }
   } as typeof WebSocket;
   cleanups.push(async () => {
@@ -116,7 +124,13 @@ async function userSession(appId: string, origin: string, userId: string) {
 describe("createJazz", () => {
   it("serves sync and sign-in from the app's backend with permissions from code", async () => {
     const appId = randomUUID();
-    const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });
+    const jazz = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+    });
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: true });
 
@@ -143,37 +157,30 @@ describe("createJazz", () => {
       subject: "alice",
     });
 
-    // A socket that claims to be alice while the backend says bob is refused.
+    // A browser whose local data is alice's, while the backend says bob, is
+    // refused rather than re-homed.
+    const aliceSession = JSON.stringify({
+      backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
+    });
     const forged = new NodeWebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
+      protocols: webSocketUpgradeOffer(aliceSession).protocols,
       headers: { "x-test-user": "bob" },
     } as never);
-    forged.addEventListener("open", () =>
-      forged.send(
-        JSON.stringify({
-          peer_identity: "forged",
-          backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
-        }),
-      ),
-    );
     const closed = await new Promise<number>((resolve) =>
       forged.addEventListener("close", (event) => resolve(event.code)),
     );
     expect(closed).toBe(1008);
-    // Browser worker transports send `jwt_token: null` next to the session the
+    // Browser worker transports hold `jwt_token: null` next to the session the
     // backend vouches for: that is no token, and the socket is admitted.
     const fromWorker = new NodeWebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
-      headers: { "x-test-user": "alice" },
-    } as never);
-    fromWorker.addEventListener("open", () =>
-      fromWorker.send(
+      protocols: webSocketUpgradeOffer(
         JSON.stringify({
-          peer_identity: "worker",
           jwt_token: null,
           backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
-          auth: { jwt_token: null, backend_session: { user_id: "alice" } },
         }),
-      ),
-    );
+      ).protocols,
+      headers: { "x-test-user": "alice" },
+    } as never);
     const answered = await new Promise<string>((resolve) => {
       fromWorker.addEventListener("message", () => resolve("message"));
       fromWorker.addEventListener("close", (event) => resolve(`closed ${event.code}`));
@@ -181,7 +188,10 @@ describe("createJazz", () => {
     fromWorker.close();
     expect(answered).toBe("message");
     const row = await alice.db
-      .insert(app.todos, { title: "from alice", owner: alice.session!.user!.account })
+      .insert(app.todos, {
+        title: "from alice",
+        owner: alice.session!.user!.account,
+      })
       .wait({ tier: "global" });
 
     // The backend's own db sees the row; a request scope sees only its user's rows.
@@ -206,7 +216,9 @@ describe("createJazz", () => {
     const [withProvenance] = await jazz.db.all(
       app.todos.where({ id: stamped.id }).select("title", "$createdBy"),
     );
-    expect(withProvenance?.$createdBy).toMatchObject({ account: alice.session!.user!.account });
+    expect(withProvenance?.$createdBy).toMatchObject({
+      account: alice.session!.user!.account,
+    });
     // The user synced over a socket, not the stream fallback.
     expect(requestPaths.some((path) => path.includes("/stream"))).toBe(false);
     // This host upgrades sockets, so a failed socket isn't sent to the stream:
@@ -257,16 +269,16 @@ describe("createJazz", () => {
     const socketFrom = (from: string) =>
       new Promise<string>((resolve) => {
         const socket = new NodeWebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
+          protocols: webSocketUpgradeOffer(
+            JSON.stringify({
+              backend_session: {
+                issuer: `jazz:app:${appId}`,
+                user_id: "alice",
+              },
+            }),
+          ).protocols,
           headers: { "x-test-user": "alice", origin: from },
         } as never);
-        socket.addEventListener("open", () => {
-          socket.send(
-            JSON.stringify({
-              peer_identity: "page",
-              backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
-            }),
-          );
-        });
         socket.addEventListener("message", () => {
           socket.close();
           resolve("admitted");
@@ -280,7 +292,13 @@ describe("createJazz", () => {
 
   it("links a second identity to the same account", async () => {
     const appId = randomUUID();
-    const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });
+    const jazz = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+    });
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: true });
 
@@ -311,7 +329,13 @@ describe("createJazz", () => {
       const dir = await mkdtemp(join(tmpdir(), "jazz-link-"));
       cleanups.push(() => rm(dir, { recursive: true, force: true }));
       const store = kind === "memory" ? memory() : sqlite({ path: dir });
-      const jazz = await createJazz({ appId, app, permissions, store, authenticate });
+      const jazz = await createJazz({
+        appId,
+        app,
+        permissions,
+        store,
+        authenticate,
+      });
       cleanups.push(() => jazz.close());
       const origin = await serve(jazz, { sockets: transport === "sockets" });
       if (transport !== "sockets") {
@@ -364,7 +388,13 @@ describe("createJazz", () => {
 
   it("syncs over the HTTP stream when the host can't upgrade sockets", async () => {
     const appId = randomUUID();
-    const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });
+    const jazz = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+    });
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: false });
 
@@ -380,7 +410,10 @@ describe("createJazz", () => {
 
     const alice = await userSession(appId, origin, "alice");
     const row = await alice.db
-      .insert(app.todos, { title: "over the stream", owner: alice.session!.user!.account })
+      .insert(app.todos, {
+        title: "over the stream",
+        owner: alice.session!.user!.account,
+      })
       .wait({ tier: "global" });
     const seen = await jazz.db.all(app.todos.where({ id: row.id }));
     expect(seen.map((todo) => todo.title)).toEqual(["over the stream"]);
@@ -393,10 +426,16 @@ describe("createJazz", () => {
     const key = streamKeys.get(sessionPath)!;
     expect(key).toBeTruthy();
     for (const method of ["POST", "DELETE"]) {
-      expect(await statusOf(`${origin}${sessionPath}`, method, { "x-test-user": "bob" })).toBe(403);
-      expect(await statusOf(`${origin}${sessionPath}`, method, { "x-test-user": "alice" })).toBe(
-        403,
-      );
+      expect(
+        await statusOf(`${origin}${sessionPath}`, method, {
+          "x-test-user": "bob",
+        }),
+      ).toBe(403);
+      expect(
+        await statusOf(`${origin}${sessionPath}`, method, {
+          "x-test-user": "alice",
+        }),
+      ).toBe(403);
       expect(
         await statusOf(`${origin}${sessionPath}`, method, {
           "x-test-user": "bob",
@@ -405,12 +444,17 @@ describe("createJazz", () => {
       ).toBe(403);
     }
     // A session this process doesn't hold says why.
-    const unknown = await fetch(`${origin}/jazz/apps/${appId}/stream/nope`, { method: "POST" });
+    const unknown = await fetch(`${origin}/jazz/apps/${appId}/stream/nope`, {
+      method: "POST",
+    });
     expect(unknown.status).toBe(404);
     expect(await unknown.text()).toContain("sticky routing");
     // Alice's session still works after both attempts.
     const later = await alice.db
-      .insert(app.todos, { title: "still over the stream", owner: alice.session!.user!.account })
+      .insert(app.todos, {
+        title: "still over the stream",
+        owner: alice.session!.user!.account,
+      })
       .wait({ tier: "global" });
     expect((await jazz.db.all(app.todos.where({ id: later.id }))).length).toBe(1);
   }, 60_000);
@@ -421,7 +465,13 @@ describe("createJazz", () => {
       (await response).headers.get("x-jazz-stream");
     const probe = () => new Request(`http://app.test/jazz/apps/${appId}/ws`);
 
-    const plain = await createJazz({ appId, app, permissions, store: memory(), authenticate });
+    const plain = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+    });
     cleanups.push(() => plain.close());
     const previous = process.env.VERCEL;
     process.env.VERCEL = "1";
@@ -453,7 +503,13 @@ describe("createJazz", () => {
     // An entry that isn't an origin (it would parse as the opaque "null").
     for (const entry of ["localhost:3000", "app.example.com:443", "not a url"]) {
       await expect(
-        createJazz({ appId, app, permissions, store: memory(), allowedOrigins: [entry] }),
+        createJazz({
+          appId,
+          app,
+          permissions,
+          store: memory(),
+          allowedOrigins: [entry],
+        }),
       ).rejects.toThrow(/is not an origin/);
     }
   }, 60_000);
@@ -465,13 +521,23 @@ describe("createJazz", () => {
     // A lock file left by a process that died (under Docker often our own
     // pid, back after a restart) holds nothing: only the OS lock counts.
     await writeFile(join(dir, "jazz.lock"), `process ${process.pid}`);
-    const first = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
+    const first = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: sqlite({ path: dir }),
+    });
     await expect(
       createJazz({ appId, app, permissions, store: sqlite({ path: dir }) }),
     ).rejects.toThrow(/is already open/);
     await first.close();
     // Closed, the directory is free again.
-    const second = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
+    const second = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: sqlite({ path: dir }),
+    });
     await second.close();
 
     const previous = process.env.VERCEL;
@@ -491,13 +557,23 @@ describe("createJazz", () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-embedded-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
 
-    const first = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
+    const first = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: sqlite({ path: dir }),
+    });
     const inserted = await first.db
       .insert(app.todos, { title: "kept", owner: randomUUID() })
       .wait({ tier: "global" });
     await first.close();
 
-    const second = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
+    const second = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: sqlite({ path: dir }),
+    });
     cleanups.push(() => second.close());
     const rows = await second.db.all(app.todos.where({ id: inserted.id }));
     expect(rows.map((todo) => todo.title)).toEqual(["kept"]);
@@ -512,18 +588,33 @@ describe("createJazz", () => {
       adminSecret: core.adminSecret,
       backendSecret: core.backendSecret,
     });
-    const jazz = await createJazz({ appId, app, permissions, store, authenticate });
+    const jazz = await createJazz({
+      appId,
+      app,
+      permissions,
+      store,
+      authenticate,
+    });
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: true });
 
     const alice = await userSession(appId, origin, "alice");
     const row = await alice.db
-      .insert(app.todos, { title: "through the backend", owner: alice.session!.user!.account })
+      .insert(app.todos, {
+        title: "through the backend",
+        owner: alice.session!.user!.account,
+      })
       .wait({ tier: "global" });
 
     // A second backend on the same core (another instance, after a restart)
     // sees the same data and the same accounts.
-    const other = await createJazz({ appId, app, permissions, store, authenticate });
+    const other = await createJazz({
+      appId,
+      app,
+      permissions,
+      store,
+      authenticate,
+    });
     cleanups.push(() => other.close());
     const seen = await other.db.all(app.todos.where({ id: row.id }));
     expect(seen.map((todo) => todo.title)).toEqual(["through the backend"]);

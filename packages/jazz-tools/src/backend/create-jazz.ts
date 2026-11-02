@@ -10,6 +10,11 @@ import type {
   WebSocketConstructor,
 } from "../runtime/native-runtime/websocket.js";
 import {
+  HTTP_STREAM_PROTOCOL_HEADER,
+  upgradeOfferFromInit,
+  type WebSocketInitWithHeaders,
+} from "../runtime/native-runtime/upgrade-offer.js";
+import {
   STREAM_RECORD_MESSAGE,
   STREAM_RECORD_SESSION,
   StreamRecordReader,
@@ -187,14 +192,57 @@ export interface Jazz {
 const DEFAULT_BASE_PATH = "/jazz";
 // Routes a browser may reach. Everything else (admin, backend admission,
 // shutdown) stays behind this backend.
-/** How long a sync session may take to send its sign-in (its first message). */
-const PRELUDE_DEADLINE_MS = 30_000;
 /** On createJazz's 426 for a socket path: this endpoint serves the HTTP stream. */
 const STREAM_AVAILABLE_HEADER = "x-jazz-stream";
 /** The stream session's key, on each send and close (see `openStream`). */
 const STREAM_KEY_HEADER = "x-jazz-stream-key";
 const PUBLIC_APP_ROUTES = /^\/apps\/[^/]+\/(schemas|schema\/[^/]+)$/;
 const STRIPPED_HEADERS = ["x-jazz-backend-secret", "x-jazz-admin-secret", "x-jazz-session"];
+/** A wire version offer: `jazz.<version>.<features hex>` (SPEC 8 §8.1.1). */
+const VERSION_SUBPROTOCOL = /^jazz\.\d+\.[0-9a-f]+$/;
+const BEARER_SUBPROTOCOL_PREFIX = "jazz.bearer.";
+const USER_SUBPROTOCOL_PREFIX = "jazz.user.";
+
+/** What a browser offered on its upgrade (or, on the HTTP stream, in `X-Jazz-Protocol`). */
+interface ClientOffer {
+  /** Version tokens, in the browser's order. */
+  versions: string[];
+  /** A self-held token (a local-first guest's). */
+  bearer?: string;
+  /** The user the browser's local data belongs to. */
+  userId?: string;
+  /** Anything else under `jazz.`: a link request a browser may not make here. */
+  unexpected: boolean;
+}
+
+function clientOffer(headers: Headers): ClientOffer {
+  const offer: ClientOffer = { versions: [], unexpected: false };
+  const values = [headers.get("sec-websocket-protocol"), headers.get(HTTP_STREAM_PROTOCOL_HEADER)];
+  for (const token of values.flatMap((value) => (value ?? "").split(","))) {
+    const trimmed = token.trim();
+    if (VERSION_SUBPROTOCOL.test(trimmed)) offer.versions.push(trimmed);
+    else if (trimmed.startsWith(BEARER_SUBPROTOCOL_PREFIX)) {
+      if (offer.bearer !== undefined) offer.unexpected = true;
+      offer.bearer = trimmed.slice(BEARER_SUBPROTOCOL_PREFIX.length);
+    } else if (trimmed.startsWith(USER_SUBPROTOCOL_PREFIX)) {
+      if (offer.userId !== undefined) offer.unexpected = true;
+      offer.userId = Buffer.from(
+        trimmed.slice(USER_SUBPROTOCOL_PREFIX.length),
+        "base64url",
+      ).toString("utf8");
+    } else if (trimmed.startsWith("jazz.")) offer.unexpected = true;
+  }
+  return offer;
+}
+
+/**
+ * The subprotocol an upgrade selects: the browser's first version token.
+ * The core reads the full offer and refuses a version it doesn't speak.
+ */
+export function selectJazzSubprotocol(protocols: Iterable<string>): string | false {
+  for (const protocol of protocols) if (VERSION_SUBPROTOCOL.test(protocol)) return protocol;
+  return false;
+}
 // What a browser's request to a public route carries on to a remote core:
 // never its cookies or its app session.
 const REMOTE_FORWARDED_HEADERS = ["accept", "content-type", "if-none-match"];
@@ -269,11 +317,17 @@ function inProcessWebSocket(core: JazzCore): WebSocketConstructor {
     private readonly listeners = new Map<string, Array<(event?: any) => void>>();
     private session: ReturnType<JazzCore["openSocket"]> | undefined;
 
-    constructor(_url: string) {
+    constructor(_url: string, protocols?: string | string[] | WebSocketInitWithHeaders) {
+      // The upgrade this socket stands in for: its offer and credential.
+      const offer = upgradeOfferFromInit(protocols);
+      const headers = [
+        ["sec-websocket-protocol", offer.protocols.join(", ")],
+        ...Object.entries(offer.headers),
+      ];
       queueMicrotask(() => {
         if (this.readyState !== 0) return;
         try {
-          this.session = core.openSocket([], (error, event) => this.onCoreEvent(error, event));
+          this.session = core.openSocket(headers, (error, event) => this.onCoreEvent(error, event));
         } catch (error) {
           this.emit("error", error);
           this.finish(1011, error instanceof Error ? error.message : String(error));
@@ -344,7 +398,11 @@ async function applyBundle(
     schemas.set(version.hash, (version.schema as { tables: WasmSchema }).tables);
   }
   schemas.set(targetSchemaHash, schema);
-  const server = { appId: options.appId, serverUrl: origin, adminSecret: options.adminSecret };
+  const server = {
+    appId: options.appId,
+    serverUrl: origin,
+    adminSecret: options.adminSecret,
+  };
   const graph = await fetchMigrationGraph(server);
   await deployArtifacts(server, graph, {
     targetSchemaHash,
@@ -449,8 +507,22 @@ function openRemoteCore(appId: string, store: Extract<JazzStore, { kind: "remote
         body: new Uint8Array(await response.arrayBuffer()),
       };
     },
-    openSocket(_headers, onEvent) {
-      const ws = new NativeWebSocket(socketUrl);
+    openSocket(headers, onEvent) {
+      // `headers` are the upgrade createJazz makes for the session: its
+      // subprotocol offer and the credential it vouches with.
+      const protocols: string[] = [];
+      const upgradeHeaders: Record<string, string> = {};
+      for (const [name, value] of headers) {
+        if (name!.toLowerCase() === "sec-websocket-protocol") {
+          protocols.push(...value!.split(",").map((token) => token.trim()));
+        } else {
+          upgradeHeaders[name!] = value!;
+        }
+      }
+      const ws = new (NativeWebSocket as unknown as new (
+        url: string,
+        init: { protocols: string[]; headers: Record<string, string> },
+      ) => WebSocket)(socketUrl, { protocols, headers: upgradeHeaders });
       ws.binaryType = "arraybuffer";
       const queued: Uint8Array[] = [];
       let ended = false;
@@ -467,7 +539,11 @@ function openRemoteCore(appId: string, store: Extract<JazzStore, { kind: "remote
       ws.addEventListener("close", (event) => {
         if (ended) return;
         ended = true;
-        onEvent(null, { kind: "close", code: event.code, reason: event.reason });
+        onEvent(null, {
+          kind: "close",
+          code: event.code,
+          reason: event.reason,
+        });
       });
       return {
         send(data) {
@@ -521,7 +597,10 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
 
   let session: JazzSession<JazzClient>;
   try {
-    await applyBundle(core.serverUrl, { ...options, adminSecret: core.adminSecret });
+    await applyBundle(core.serverUrl, {
+      ...options,
+      adminSecret: core.adminSecret,
+    });
     session = await createJazzSession({
       appId: options.appId,
       app: options.app,
@@ -578,11 +657,16 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     const now = Date.now();
     const cached = accounts.get(userId);
     if (cached && cached.until > now) return cached.account;
-    const { account } = await adminAccounts("login-or-register", { identity: identity(userId) });
+    const { account } = await adminAccounts("login-or-register", {
+      identity: identity(userId),
+    });
     if (accounts.size >= ACCOUNT_CACHE_LIMIT) {
       accounts.delete(accounts.keys().next().value!);
     }
-    accounts.set(userId, { account, until: now + (options.sessionTtlSeconds ?? 3600) * 1000 });
+    accounts.set(userId, {
+      account,
+      until: now + (options.sessionTtlSeconds ?? 3600) * 1000,
+    });
     return account;
   }
 
@@ -618,7 +702,12 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     const account = await accountOf(user.userId);
     const expiresAt = Math.floor(Date.now() / 1000) + (options.sessionTtlSeconds ?? 3600);
     return Response.json(
-      { account, identity: identity(user.userId), claims: user.claims ?? {}, expiresAt },
+      {
+        account,
+        identity: identity(user.userId),
+        claims: user.claims ?? {},
+        expiresAt,
+      },
       { headers: { "Cache-Control": "no-store" } },
     );
   }
@@ -660,18 +749,26 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     }
     const expiresAt = Math.floor(Date.now() / 1000) + (options.sessionTtlSeconds ?? 3600);
     return Response.json(
-      { account, identity: identity(user.userId), claims: user.claims ?? {}, expiresAt },
+      {
+        account,
+        identity: identity(user.userId),
+        claims: user.claims ?? {},
+        expiresAt,
+      },
       { headers: { "Cache-Control": "no-store" } },
     );
   }
 
   /**
-   * A browser's sync session. The browser presents no credential: its first
-   * message (the auth prelude) names the user it means to act as, and the
-   * backend's own `authenticate` decides whether this request is that user.
-   * The core then admits the session on the backend's word, with the user's
-   * permissions. It ends after `sessionTtlSeconds`, and the client
-   * reconnects and is asked again.
+   * A browser's sync session. The browser presents no Jazz credential: the
+   * backend's own `authenticate` decides who this request is, and the core
+   * admits the session on the backend's word (the backend secret, with the
+   * user's session in `X-Jazz-Session`), with the user's permissions. A
+   * local-first guest offers its self-signed token as a subprotocol, which
+   * passes through for the core to verify. Messages the browser sends while
+   * this runs wait, in order: the browser doesn't wait for admission. The
+   * session ends after `sessionTtlSeconds`, and the client reconnects and is
+   * asked again.
    */
   interface ClientSession {
     send(data: Uint8Array): boolean;
@@ -684,48 +781,49 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     request: Request,
     onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
   ): ClientSession {
-    const socket = core.openSocket(headerPairs(request.headers), onEvent);
+    let socket: CoreSocket | undefined;
     let ended = false;
     let userId: string | undefined;
-    // A session that never sends its prelude ends too.
-    let expiry: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
-      onEvent(null, { kind: "close", code: 1008, reason: "no sign-in in time" });
-      end();
-    }, PRELUDE_DEADLINE_MS);
-    (expiry as unknown as { unref?: () => void }).unref?.();
+    let expiry: ReturnType<typeof setTimeout> | undefined;
+    const queued: Uint8Array[] = [];
     const end = () => {
       if (ended) return;
       ended = true;
       if (expiry) clearTimeout(expiry);
-      socket.close();
+      socket?.close();
     };
-    const admit = async (prelude: Uint8Array): Promise<boolean> => {
-      const admitted = await admitPrelude(request, prelude);
-      if (!admitted || ended) {
-        onEvent(null, { kind: "close", code: 1008, reason: "not signed in" });
-        end();
-        return false;
-      }
-      userId = admitted.userId;
-      if (expiry) clearTimeout(expiry);
-      const ttl = (options.sessionTtlSeconds ?? 3600) * 1000;
-      expiry = setTimeout(end, ttl);
-      (expiry as unknown as { unref?: () => void }).unref?.();
-      return socket.send(admitted.prelude);
+    const refuse = (code: number, reason: string) => {
+      if (ended) return;
+      onEvent(null, { kind: "close", code, reason });
+      end();
     };
-    // Messages after the prelude wait for its admission, in order.
-    let chain: Promise<boolean> | undefined;
+    void coreUpgradeFor(request).then(
+      (admitted) => {
+        if (ended) return;
+        if (!admitted) return refuse(1008, "not signed in");
+        userId = admitted.userId;
+        try {
+          socket = core.openSocket(admitted.headers, onEvent);
+        } catch (error) {
+          return refuse(1013, error instanceof Error ? error.message : String(error));
+        }
+        const ttl = (options.sessionTtlSeconds ?? 3600) * 1000;
+        expiry = setTimeout(end, ttl);
+        (expiry as unknown as { unref?: () => void }).unref?.();
+        for (const data of queued.splice(0)) {
+          if (!socket.send(data)) return end();
+        }
+      },
+      () => refuse(1011, "admission failed"),
+    );
     return {
       send(data) {
         if (ended) return false;
-        chain = chain
-          ? chain.then((ok) => ok && !ended && socket.send(data))
-          : admit(data).catch(() => {
-              onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
-              end();
-              return false;
-            });
-        return true;
+        if (!socket) {
+          queued.push(data);
+          return true;
+        }
+        return socket.send(data);
       },
       close: end,
       get userId() {
@@ -735,47 +833,42 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
 
   /**
-   * Turn a browser prelude into one the core admits on this backend's word:
-   * the user `authenticate` finds on this request, with their account and
-   * claims, vouched for with the backend secret. A local-first guest's
-   * prelude passes through: the core verifies its self-signed token. Any
-   * other credential, or a prelude naming another user, is refused.
+   * The upgrade this backend makes to the core for a browser's session: the
+   * browser's version offer, and either the user `authenticate` finds on
+   * this request, vouched for with the backend secret, or a local-first
+   * guest's own token (the core verifies it). Any other credential, or a
+   * browser whose local data belongs to another user, is refused.
    */
-  async function admitPrelude(
+  async function coreUpgradeFor(
     request: Request,
-    prelude: Uint8Array,
-  ): Promise<{ prelude: Uint8Array; userId: string | undefined } | null> {
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(new TextDecoder().decode(prelude)) as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-    const auth = (parsed.auth && typeof parsed.auth === "object" ? parsed.auth : parsed) as Record<
-      string,
-      unknown
-    >;
-    const others = ["backend_secret", "admin_secret", "backend_session"];
-    // Browser worker transports send `jwt_token: null` alongside a backend
-    // session; only a real token counts as one.
-    const token = auth.jwt_token ?? parsed.jwt_token;
-    if (token !== undefined && token !== null) {
-      const localFirst =
-        typeof token === "string" && parseJwtPayload(token)?.iss === LOCAL_FIRST_JWT_ISSUER;
-      const alone = others.every((key) => parsed[key] == null && auth[key] == null);
+  ): Promise<{ headers: string[][]; userId: string | undefined } | null> {
+    const offer = clientOffer(request.headers);
+    if (offer.unexpected) return null;
+    const protocols = [...offer.versions];
+    if (offer.bearer !== undefined) {
       // A guest has no user here: its session is bound to its own key.
-      return localFirst && alone ? { prelude, userId: undefined } : null;
-    }
-    const stated = auth.backend_session as { user_id?: unknown } | undefined;
-    if (!stated || typeof stated !== "object") return null;
-    for (const credential of ["backend_secret", "admin_secret"]) {
-      if (parsed[credential] != null || auth[credential] != null) return null;
+      if (offer.userId !== undefined) return null;
+      if (parseJwtPayload(offer.bearer)?.iss !== LOCAL_FIRST_JWT_ISSUER) return null;
+      protocols.push(`${BEARER_SUBPROTOCOL_PREFIX}${offer.bearer}`);
+      return {
+        headers: [["sec-websocket-protocol", protocols.join(", ")]],
+        userId: undefined,
+      };
     }
     const user = await authenticate(request);
-    if (!user || user.userId !== stated.user_id) return null;
-    const vouched = { backend_secret: core.backendSecret, backend_session: await sessionFor(user) };
-    const rewritten = { ...parsed, ...vouched, auth: { ...auth, ...vouched } };
-    return { prelude: new TextEncoder().encode(JSON.stringify(rewritten)), userId: user.userId };
+    if (!user) return null;
+    // The browser's local data is this user's: a session that signed in as
+    // someone else since doesn't take it over.
+    if (offer.userId !== undefined && offer.userId !== user.userId) return null;
+    const session = Buffer.from(JSON.stringify(await sessionFor(user))).toString("base64");
+    return {
+      headers: [
+        ["sec-websocket-protocol", protocols.join(", ")],
+        ["x-jazz-backend-secret", core.backendSecret],
+        ["x-jazz-session", session],
+      ],
+      userId: user.userId,
+    };
   }
 
   // HTTP stream sessions, by id, with the key that proves a request comes
@@ -1032,6 +1125,8 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
           options?: { maxPayload?: number },
         ): Response;
       };
+      // It upgrades with `ws`'s default, which selects the first offered
+      // subprotocol: the client's version token, which it offers first.
       return upgradeWebSocket((ws) => acceptSocket(request, ws), {
         maxPayload: MAX_STREAM_MESSAGE_BYTES,
       });
@@ -1090,7 +1185,11 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
 
   async function attach(server: Server): Promise<void> {
     const { WebSocketServer } = (await import("ws" as string)) as {
-      WebSocketServer: new (options: { noServer: true; maxPayload: number }) => {
+      WebSocketServer: new (options: {
+        noServer: true;
+        maxPayload: number;
+        handleProtocols: (protocols: Set<string>) => string | false;
+      }) => {
         handleUpgrade(
           req: IncomingMessage,
           socket: Duplex,
@@ -1100,7 +1199,11 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         close(): void;
       };
     };
-    const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_STREAM_MESSAGE_BYTES });
+    const wss = new WebSocketServer({
+      noServer: true,
+      maxPayload: MAX_STREAM_MESSAGE_BYTES,
+      handleProtocols: selectJazzSubprotocol,
+    });
     server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
       const request = nodeRequest(req);
       const path = innerPath(request);

@@ -165,8 +165,9 @@ its first byte.
 #### 8.1.1 Frames, batches and wire versions
 
 A WebSocket binary message is one postcard `Vec<Vec<u8>>` batch of frames.
-The first frame each way is a `WireFrame::Hello`; the server may send a
-`WireFrame::Error` and close. Every other frame is a sync frame: a postcard
+The server's first frame is a `WireFrame::Hello`, or a `WireFrame::Error`
+before it closes; a client sends no Hello, since its upgrade already carried
+the offer (§8.1.2). Every other frame is a sync frame: a postcard
 `SyncMessage`, or a part of one (§8.8). Each whole message, unsplit or
 joined from its parts, is exactly one complete postcard value: a decoder
 rejects trailing bytes (`INV-WIRE-1`).
@@ -187,30 +188,48 @@ In-process links (a worker and its tab, tests) carry `SyncMessage` values
 directly (`sync::duplex`); a byte link frames them with postcard
 (`WireTransportAdapter`).
 
-#### 8.1.2 WebSocket admission prelude
+#### 8.1.2 WebSocket upgrade and admission
 
-Before the binary carrier begins, a client sends exactly one UTF-8 JSON object
-as its first WebSocket message (text, or binary with the same bytes). The
-server then requires one binary message that decodes to exactly one
-`WireFrame::Hello`. The prelude and that Hello each have the two-second
-handshake read deadline. Only the first message is a prelude.
+The upgrade request is the whole client handshake; nothing precedes the
+session's own frames. The client offers, in `Sec-WebSocket-Protocol`:
 
-The prelude object has these server-owned fields:
+- `jazz.<version>.<features>`: the wire version (decimal) and the features
+  it supports (lowercase hex), first. Its features intersected with the
+  server's are the session's.
+- `jazz.link.scope_isolated_client_relay`: optional; admitted only for an
+  authenticated session whose features include
+  `FEATURE_SCOPE_ISOLATED_CLIENT_RELAY`. Absent means an ordinary session.
+- `jazz.bearer.<jwt>`: optional, a bearer token where the client can't set
+  headers (a browser). A compact JWT is valid token text as it is.
 
-- `peer_identity`: required canonical `AuthorSubject` JSON string.
-- `auth`: required `AuthConfig` object (`jwt_token`, `backend_secret`,
-  `admin_secret`, `backend_session`).
-- `bootstrap_catalogue`: decode-only legacy boolean; `true` is rejected with
-  `UnsupportedFeature/Never`.
-- `requested_link`: optional, `ordinary_session` (the default) or
-  `scope_isolated_client_relay`, which is admitted only for an authenticated
-  session that negotiated `FEATURE_SCOPE_ISOLATED_CLIENT_RELAY`.
+The server selects the first version token it speaks, else the first
+offered, in its `101` response. Credentials travel as headers:
+`X-Jazz-Admin-Secret` (SYSTEM, trusted authority), `X-Jazz-Backend-Secret`
+alone (SYSTEM, trusted backend) or with `X-Jazz-Session` (base64 of a
+`Session` JSON: a backend acting for that user), `Authorization: Bearer`
+(a user session; a bearer subprotocol counts as this, and both together are
+refused), or the auth cookie, which also needs an allowed `Origin`. The server
+derives the peer identity from the credential (a user session's account
+from the account registry); a client never asserts one. The HTTP stream
+transport, which a page can't give `Sec-` headers, offers the same tokens in
+`X-Jazz-Protocol`.
 
-Unknown fields are ignored; an unknown `requested_link` is rejected; missing
-required fields, malformed JSON or a trailing suffix are rejected before
-admission. `crates/jazz/fixtures/websocket_prelude_v1.json` pins the writer
-strings and the server's parse. Axum caps inbound WebSocket frames and
-messages at 2 MiB, the prelude included.
+A missing or foreign version still upgrades, and the session ends with
+`UnsupportedProtocolVersion`/`Never`, which a client can read only once the
+socket is open; a refused credential ends it with `AuthFailed`. Otherwise the
+server sends its Hello (the negotiated features and its authority), which is
+the admission. A client sends its first sync frames as soon as the socket
+opens, without waiting for the Hello; the server reads none of them before it
+admitted the session, so a refused session never sees them applied. A client
+treats an `Error` where the Hello belongs as a refusal of the link. Axum caps
+inbound WebSocket frames and messages at 2 MiB.
+
+A backend that runs Jazz in front of a core (createJazz) authenticates the
+browser's request itself and makes its own upgrade to the core with the
+backend secret and the user's `X-Jazz-Session`. A browser of such a backend
+may offer `jazz.user.<base64url user id>`, the user its local data belongs
+to: the backend refuses a session signed in as someone else instead of
+re-homing it. A sync server ignores the token.
 
 ### 8.2 Upstream: commits
 

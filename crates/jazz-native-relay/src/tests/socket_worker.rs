@@ -95,6 +95,7 @@ impl NativeTransportConnector for ScriptedConnector {
                 transport: Box::new(IdleWire),
                 protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
                 features: jazz::wire::current_wire_features(),
+                admitted: Box::pin(async { Ok(()) }),
                 terminal,
             };
             match step {

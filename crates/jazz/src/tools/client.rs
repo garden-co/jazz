@@ -51,8 +51,9 @@ use crate::query::Query;
 use crate::records::Value as CoreValue;
 use crate::schema::history;
 use crate::tools::native_transport_connector::{
-    NativeTransportConnector, NativeTransportError, NativeTransportFuture, NativeTransportLink,
-    NativeTransportRequest, NativeTransportTerminal, NativeTransportTerminalFuture,
+    NativeTransportAdmittedFuture, NativeTransportConnector, NativeTransportError,
+    NativeTransportFuture, NativeTransportLink, NativeTransportRequest, NativeTransportTerminal,
+    NativeTransportTerminalFuture,
 };
 use crate::tools::sync::{DurabilityTier, ReadTier};
 use crate::tools::websocket_prelude_auth::AuthConfig;
@@ -505,6 +506,13 @@ async fn keep_upstream(
     mut credentials: watch::Receiver<AuthConfig>,
 ) {
     let mut connecting: Option<(AttemptId, NativeTransportFuture)> = None;
+    // An open link whose transport is attached (so queued work is already
+    // going out) but which the server has not admitted yet.
+    let mut admitting: Option<(
+        AttemptId,
+        NativeTransportAdmittedFuture,
+        NativeTransportTerminalFuture,
+    )> = None;
     let mut timer: Option<(TimerToken, std::pin::Pin<Box<tokio::time::Sleep>>)> = None;
     loop {
         for action in std::mem::take(&mut keeper.actions) {
@@ -518,6 +526,15 @@ async fn keep_upstream(
                         .is_some_and(|(open, _)| *open == attempt)
                     {
                         connecting = None;
+                    }
+                    if admitting
+                        .as_ref()
+                        .is_some_and(|(open, _, _)| *open == attempt)
+                    {
+                        admitting = None;
+                        if let Some(shared) = shared.upgrade() {
+                            detach(&shared);
+                        }
                     }
                     if keeper
                         .live
@@ -559,17 +576,26 @@ async fn keep_upstream(
                             return;
                         };
                         attach(&shared, link.transport).await;
-                        keeper.live = Some((attempt, link.terminal));
+                        admitting = Some((attempt, link.admitted, link.terminal));
+                        continue;
+                    }
+                    Err(error) => connect_failed(&shared, attempt, error),
+                }
+            }
+            result = async { admitting.as_mut().expect("guarded").1.as_mut().await },
+                if admitting.is_some() =>
+            {
+                let (attempt, _, terminal) = admitting.take().expect("guarded");
+                match result {
+                    Ok(()) => {
+                        keeper.live = Some((attempt, terminal));
                         LinkInput::Admitted(attempt)
                     }
                     Err(error) => {
-                        tracing::debug!(%error, "jazz client upstream connect failed");
                         if let Some(shared) = shared.upgrade() {
-                            let mut state = shared.state();
-                            let failures = state.connect_failures.0 + 1;
-                            state.connect_failures = (failures, Some(error.to_string()));
+                            detach(&shared);
                         }
-                        LinkInput::Ended(attempt, link_failure(error))
+                        connect_failed(&shared, attempt, error)
                     }
                 }
             }
@@ -605,6 +631,21 @@ async fn keep_upstream(
         };
         keeper.handle(input);
     }
+}
+
+/// Count a failed connect or admission and turn it into the link input.
+fn connect_failed(
+    shared: &Weak<Shared>,
+    attempt: AttemptId,
+    error: NativeTransportError,
+) -> LinkInput {
+    tracing::debug!(%error, "jazz client upstream connect failed");
+    if let Some(shared) = shared.upgrade() {
+        let mut state = shared.state();
+        let failures = state.connect_failures.0 + 1;
+        state.connect_failures = (failures, Some(error.to_string()));
+    }
+    LinkInput::Ended(attempt, link_failure(error))
 }
 
 /// The client's [`UpstreamLink`] with the clock it is driven by, the actions
@@ -811,10 +852,24 @@ impl JazzClient {
             let mut keeper = LinkKeeper::new();
             keeper.publish(&shared);
             let attempt = keeper.take_connect().expect("a configured link connects");
-            match connector.connect(request.clone()).await {
+            let connected = match connector.connect(request.clone()).await {
                 Ok(link) => {
+                    // Attach before the server's Hello so the first reads
+                    // and writes ride the same round trip as admission.
                     attach(&shared, link.transport).await;
-                    keeper.live = Some((attempt, link.terminal));
+                    match link.admitted.await {
+                        Ok(()) => Ok(link.terminal),
+                        Err(error) => {
+                            detach(&shared);
+                            Err(error)
+                        }
+                    }
+                }
+                Err(error) => Err(error),
+            };
+            match connected {
+                Ok(terminal) => {
+                    keeper.live = Some((attempt, terminal));
                     keeper.handle(LinkInput::Admitted(attempt));
                 }
                 Err(

@@ -35,6 +35,8 @@ pub struct NativeTransportRequest {
     pub requested_link: NativeTransportLink,
     pub server_url: String,
     pub app_id: AppId,
+    /// The local identity this link is opened for. It is not sent: the
+    /// server derives the peer identity from the upgrade's credentials.
     pub peer_identity: AuthorSubject,
     pub auth: AuthConfig,
     pub wake: Arc<dyn Fn() + Send + Sync>,
@@ -56,18 +58,28 @@ impl std::fmt::Debug for NativeTransportRequest {
     }
 }
 
-/// A negotiated byte transport returned by a target-specific connector.
+/// An open byte transport returned by a target-specific connector.
 ///
-/// The server authenticates the link during the adapter handshake, so no
-/// identity travels in semantic messages. `terminal` observes the adapter's
-/// actual socket pump rather than semantic queue activity.
+/// The server authenticates the link from the upgrade request, so no identity
+/// travels in semantic messages. The transport is usable as soon as the
+/// connector returns: frames sent before the server's Hello are held by the
+/// server until it admits the link, which saves the handshake round trip.
+/// `admitted` says whether it did. `terminal` observes the adapter's actual
+/// socket pump rather than semantic queue activity.
 pub struct ConnectedNativeTransport {
     pub transport: Box<dyn WireTransport + Send>,
     pub protocol_version: u16,
     pub features: u64,
+    /// Resolves once the server's Hello arrives (`Ok`) or the link fails
+    /// before it does (`Err`, classified like a connect failure).
+    pub admitted: NativeTransportAdmittedFuture,
     /// Resolves exactly once when the established adapter pump stops.
     pub terminal: NativeTransportTerminalFuture,
 }
+
+/// Future that resolves when the server admits (or refuses) an open link.
+pub type NativeTransportAdmittedFuture =
+    Pin<Box<dyn Future<Output = Result<(), NativeTransportError>> + Send + 'static>>;
 
 /// Future returned by a target-specific native connector.
 pub type NativeTransportFuture = Pin<
@@ -151,6 +163,7 @@ mod tests {
                     transport: Box::new(NoopTransport),
                     protocol_version: 1,
                     features: 0,
+                    admitted: Box::pin(async { Ok(()) }),
                     terminal: Box::pin(std::future::pending()),
                 })
             })

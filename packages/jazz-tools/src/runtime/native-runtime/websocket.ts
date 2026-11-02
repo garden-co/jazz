@@ -11,6 +11,14 @@ import {
 } from "../author-id.js";
 import { parseJwtPayload, policyClaimsFromJwtPayload } from "../client-session.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
+import type { WebSocketInitWithHeaders, WebSocketUpgradeOffer } from "./upgrade-offer.js";
+
+export {
+  HTTP_STREAM_PROTOCOL_HEADER,
+  upgradeOfferFromInit,
+  type WebSocketInitWithHeaders,
+  type WebSocketUpgradeOffer,
+} from "./upgrade-offer.js";
 
 export type WebSocketFrameHandler = (frame: Uint8Array) => void;
 export type WebSocketErrorHandler = (error: WireError) => void;
@@ -56,9 +64,13 @@ export type WebSocketNegotiation = {
 
 export type WebSocketCarrierOptions = {
   endpointUrl: string;
-  peerIdentity: Uint8Array;
   /** Features supported by the native runtime that will receive this link. */
   features?: number;
+  /**
+   * The credential, as the runtime holds it. It rides on the upgrade
+   * request (see `webSocketUpgradeOffer`); nothing is sent inside the socket
+   * before the session's own frames.
+   */
   authJson?: string;
   /** Requested only by the durable, scope-admitted browser relay host. */
   requestedLink?: "scope_isolated_client_relay";
@@ -68,7 +80,15 @@ export type WebSocketCarrierOptions = {
   WebSocket?: WebSocketConstructor;
 };
 
-export type WebSocketConstructor = new (url: string) => BrowserWebSocket;
+/**
+ * A WebSocket constructor. The second argument is the standard subprotocol
+ * list, or, where the runtime can set upgrade headers (Node 22+, Bun, Deno;
+ * never a browser), `{ protocols, headers }` as their WebSockets take it.
+ */
+export type WebSocketConstructor = new (
+  url: string,
+  protocols?: string | string[] | WebSocketInitWithHeaders,
+) => BrowserWebSocket;
 
 export type BrowserWebSocket = {
   binaryType: "arraybuffer" | "blob";
@@ -108,6 +128,97 @@ const POSTCARD_BATCH_LENGTH_RESERVE = 5;
 // them out beside the matching postcard carrier decoder.
 const MAX_WIRE_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_WIRE_BATCH_FRAMES = 4_096;
+
+/** Subprotocol prefixes (SPEC 8 §8.1.1). */
+const SUBPROTOCOL_PREFIX = "jazz.";
+const BEARER_SUBPROTOCOL_PREFIX = "jazz.bearer.";
+const LINK_SUBPROTOCOL_PREFIX = "jazz.link.";
+/**
+ * The user a browser's local data belongs to, for a backend that signs its
+ * sessions in (createJazz): it checks this against its own sign-in rather
+ * than re-homing the session. A sync server ignores it.
+ */
+export const USER_SUBPROTOCOL_PREFIX = "jazz.user.";
+
+/** The version token: `jazz.<wire version>.<features, lowercase hex>`. */
+export function webSocketVersionSubprotocol(features = CLIENT_WIRE_FEATURES): string {
+  assertWireFeatures(features, "client wire features");
+  return `${SUBPROTOCOL_PREFIX}${WIRE_PROTOCOL_VERSION}.${features.toString(16)}`;
+}
+
+/**
+ * Put everything the handshake needs on the upgrade request: the wire
+ * version and features, the link request, and the credential. A bearer
+ * token is offered as a subprotocol, which works in browsers too (its
+ * base64url and dots are valid token characters). Admin and backend
+ * credentials travel as headers, so they need a runtime that can set them.
+ */
+export function webSocketUpgradeOffer(
+  authJson: string,
+  features = CLIENT_WIRE_FEATURES,
+  requestedLink?: "scope_isolated_client_relay",
+): WebSocketUpgradeOffer {
+  const auth = JSON.parse(authJson) as Record<string, unknown>;
+  const protocols = [webSocketVersionSubprotocol(features)];
+  const headers: Record<string, string> = {};
+  if (requestedLink) protocols.push(`${LINK_SUBPROTOCOL_PREFIX}${requestedLink}`);
+  if (typeof auth.admin_secret === "string") headers["x-jazz-admin-secret"] = auth.admin_secret;
+  if (typeof auth.backend_secret === "string") {
+    headers["x-jazz-backend-secret"] = auth.backend_secret;
+  }
+  const session = auth.backend_session;
+  if (session && typeof session === "object") {
+    if (typeof auth.backend_secret === "string") {
+      headers["x-jazz-session"] = base64Encode(new TextEncoder().encode(JSON.stringify(session)));
+    } else {
+      const userId = (session as { user_id?: unknown }).user_id;
+      if (typeof userId === "string" && isUsableSubject(userId)) {
+        protocols.push(`${USER_SUBPROTOCOL_PREFIX}${base64UrlEncode(userId)}`);
+      }
+    }
+  }
+  if (typeof auth.jwt_token === "string" && auth.jwt_token.length > 0) {
+    if (!/^[A-Za-z0-9._~+/=-]+$/.test(auth.jwt_token)) {
+      throw new Error("jwt_token is not a compact JWT");
+    }
+    protocols.push(`${BEARER_SUBPROTOCOL_PREFIX}${auth.jwt_token}`);
+  }
+  return { protocols, headers };
+}
+
+/** Open `url` with `offer`, as the constructor's runtime takes it. */
+export function openWebSocket(
+  WebSocketCtor: WebSocketConstructor,
+  url: string,
+  offer: WebSocketUpgradeOffer,
+): BrowserWebSocket {
+  if (Object.keys(offer.headers).length === 0) return new WebSocketCtor(url, offer.protocols);
+  try {
+    return new WebSocketCtor(url, {
+      protocols: offer.protocols,
+      headers: offer.headers,
+    });
+  } catch (error) {
+    throw new Error(
+      "admin and backend credentials travel as upgrade headers, which this runtime's WebSocket can't send (use Node 22+, Bun or Deno)",
+      { cause: error },
+    );
+  }
+}
+
+function base64UrlEncode(value: string): string {
+  return base64Encode(new TextEncoder().encode(value))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+function base64Encode(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  if (typeof btoa === "function") return btoa(binary);
+  return Buffer.from(binary, "binary").toString("base64");
+}
 
 export function webSocketUrl(serverUrl: string, appId: string): string {
   return httpUrlToWs(serverUrl, appId);
@@ -157,21 +268,6 @@ function assertWebSocketFrameBatch(frames: readonly Uint8Array[]): void {
       throw new Error(`websocket frame exceeds maximum length of ${MAX_WIRE_FRAME_BYTES} bytes`);
     }
   }
-}
-
-export function encodeWireClientHello(features = CLIENT_WIRE_FEATURES): Uint8Array {
-  assertWireFeatures(features, "client wire features");
-  const writer = new PostcardWriter();
-  writer.u64(0); // WireFrame::Hello
-  writer.u64(MIN_WIRE_PROTOCOL_VERSION); // min_protocol_version
-  writer.u64(MAX_WIRE_PROTOCOL_VERSION); // max_protocol_version
-  writer.u64(features);
-  writer.u64(0); // WirePeerRole::Client
-  // A client is not an authority. The server still binds its authenticated
-  // identity and a fresh server epoch, which the client uses to validate
-  // current-row receipts without asserting an authority of its own.
-  writer.none(); // WireHello::authority
-  return writer.finish();
 }
 
 /**
@@ -226,7 +322,12 @@ export class WebSocketCarrier {
   private readonly onError?: WebSocketErrorHandler;
   private readonly onTerminal?: WebSocketTerminalHandler;
   private readonly localFeatures: number;
-  private readonly opened: Promise<WebSocketNegotiation>;
+  /** The socket is open: the wire was negotiated in the upgrade. */
+  private readonly openedPromise: Promise<WebSocketNegotiation>;
+  private resolveOpened!: (value: WebSocketNegotiation) => void;
+  private rejectOpened!: (reason: unknown) => void;
+  /** The server's Hello: it admitted the session. */
+  private readonly admittedPromise: Promise<WebSocketNegotiation>;
   private resolveNegotiation!: (value: WebSocketNegotiation) => void;
   private rejectNegotiation!: (reason: unknown) => void;
   private negotiated = false;
@@ -242,23 +343,32 @@ export class WebSocketCarrier {
     this.onTerminal = options.onTerminal;
     this.localFeatures = options.features ?? CLIENT_WIRE_FEATURES;
     assertWireFeatures(this.localFeatures, "client wire features");
-    this.socket = new WebSocketCtor(this.url);
+    this.socket = openWebSocket(
+      WebSocketCtor,
+      this.url,
+      webSocketUpgradeOffer(options.authJson ?? "{}", this.localFeatures, options.requestedLink),
+    );
     this.socket.binaryType = "arraybuffer";
-    this.opened = new Promise<WebSocketNegotiation>((resolve, reject) => {
+    this.openedPromise = new Promise<WebSocketNegotiation>((resolve, reject) => {
+      this.resolveOpened = resolve;
+      this.rejectOpened = reject;
+    });
+    this.admittedPromise = new Promise<WebSocketNegotiation>((resolve, reject) => {
       this.resolveNegotiation = resolve;
       this.rejectNegotiation = reject;
     });
+    // Callers may wait on either; an attempt that ends early rejects both.
+    this.openedPromise.catch(() => undefined);
+    this.admittedPromise.catch(() => undefined);
     void waitForOpen(this.socket).then(
       () => {
         if (this.closing) return;
-        this.socket.send(
-          encodeWebSocketPrelude(
-            options.authJson ?? "{}",
-            options.peerIdentity,
-            options.requestedLink,
-          ),
-        );
-        this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello(this.localFeatures)]));
+        // Nothing to send first: the session may start at once. The
+        // server holds these frames until it has admitted the session.
+        this.resolveOpened({
+          protocolVersion: WIRE_PROTOCOL_VERSION,
+          features: this.localFeatures,
+        });
       },
       (error) => {
         this.reportTerminal({
@@ -305,7 +415,7 @@ export class WebSocketCarrier {
   }
 
   async sendBatch(frames: readonly Uint8Array[]): Promise<void> {
-    await this.ready();
+    await this.opened();
     let batch: Uint8Array[] = [];
     let batchBytes = POSTCARD_BATCH_LENGTH_RESERVE;
     for (const frame of frames) {
@@ -327,8 +437,17 @@ export class WebSocketCarrier {
     }
   }
 
+  /**
+   * Resolves once the socket is open and frames may be sent. The wire was
+   * negotiated in the upgrade, so this does not wait for the server.
+   */
+  opened(): Promise<WebSocketNegotiation> {
+    return this.openedPromise;
+  }
+
+  /** Resolves on the server's Hello: it admitted the session. */
   ready(): Promise<WebSocketNegotiation> {
-    return this.opened;
+    return this.admittedPromise;
   }
 
   get hasNegotiated(): boolean {
@@ -364,6 +483,7 @@ export class WebSocketCarrier {
   ): void {
     if (this.terminated) return;
     this.terminated = true;
+    this.rejectOpened(negotiationError);
     this.rejectNegotiation(negotiationError);
     if (notifyError) this.onError?.(error);
     if (notifyTerminal) this.onTerminal?.(error);
@@ -442,7 +562,11 @@ function decodeServerHello(
     );
   }
   if (role !== 1) throw new Error("expected WirePeerRole::Core server hello");
-  return { protocolVersion: WIRE_PROTOCOL_VERSION, features: Number(features), authority };
+  return {
+    protocolVersion: WIRE_PROTOCOL_VERSION,
+    features: Number(features),
+    authority,
+  };
 }
 
 function assertWireFeatures(features: number, label: string): void {
@@ -451,7 +575,10 @@ function assertWireFeatures(features: number, label: string): void {
   }
 }
 
-function readWireHelloVersionRange(reader: PostcardReader): { min: number; max: number } {
+function readWireHelloVersionRange(reader: PostcardReader): {
+  min: number;
+  max: number;
+} {
   return { min: reader.u64(), max: reader.u64() };
 }
 
@@ -477,30 +604,16 @@ function assertReaderDone(reader: PostcardReader, payload: string): void {
   if (!reader.done()) throw new Error(`${payload} has trailing postcard bytes`);
 }
 
-function websocketCloseDetails(event: unknown): { code?: number; reason?: string } {
+function websocketCloseDetails(event: unknown): {
+  code?: number;
+  reason?: string;
+} {
   if (!event || typeof event !== "object") return {};
   const close = event as { code?: unknown; reason?: unknown };
   return {
     code: typeof close.code === "number" ? close.code : undefined,
     reason: typeof close.reason === "string" ? close.reason : undefined,
   };
-}
-
-export function encodeWebSocketPrelude(
-  authJson: string,
-  peerIdentity: Uint8Array,
-  requestedLink?: "scope_isolated_client_relay",
-): string {
-  const auth = JSON.parse(authJson) as Record<string, unknown>;
-  const peerAuthor = new Utf8Decoder().decode(peerIdentity);
-  const sub = authSub(auth) ?? canonicalAuthorSubjectPart(peerAuthor) ?? peerAuthor;
-  return JSON.stringify({
-    peer_identity: peerAuthor,
-    ...auth,
-    auth: { ...auth, sub },
-    sub,
-    ...(requestedLink ? { requested_link: requestedLink } : {}),
-  });
 }
 
 /** Project only policy metadata after the server has admitted this credential.
@@ -600,7 +713,10 @@ export function normalizeBackendWebSocketAuth(authJson: string): string {
 }
 
 function hasUsableBackendSession(auth: Record<string, unknown>): boolean {
-  const session = auth.backend_session as { issuer?: unknown; user_id?: unknown } | null;
+  const session = auth.backend_session as {
+    issuer?: unknown;
+    user_id?: unknown;
+  } | null;
   return (
     session !== null &&
     typeof session === "object" &&
@@ -646,10 +762,6 @@ function canonicalAuthorForWebSocketAuth(auth: Record<string, unknown>): string 
   }
 
   return null;
-}
-
-function canonicalAuthorSubjectPart(author: string): string | null {
-  return parseCanonicalAuthorSubject(author)?.user_id ?? null;
 }
 
 export async function bytesFromWebSocketMessage(data: unknown): Promise<Uint8Array> {
@@ -739,38 +851,4 @@ function waitForOpen(socket: BrowserWebSocket): Promise<void> {
       settle(() => reject(new Error("websocket closed before open"))),
     );
   });
-}
-
-function authSub(auth: Record<string, unknown>): string | null {
-  const directSub = auth.sub;
-  if (typeof directSub === "string" && isUsableSubject(directSub)) return directSub;
-  const jwtToken = auth.jwt_token;
-  if (typeof jwtToken === "string") {
-    const jwtSub = jwtSubject(jwtToken);
-    if (jwtSub) return jwtSub;
-  }
-  const session = auth.backend_session;
-  if (session && typeof session === "object") {
-    const userId = (session as { user_id?: unknown }).user_id;
-    if (typeof userId === "string" && isUsableSubject(userId)) return userId;
-  }
-  return null;
-}
-
-function jwtSubject(jwtToken: string): string | null {
-  const parts = jwtToken.split(".");
-  if (parts.length < 2) return null;
-  try {
-    const payload = JSON.parse(base64UrlDecode(parts[1]!)) as { sub?: unknown };
-    return typeof payload.sub === "string" && isUsableSubject(payload.sub) ? payload.sub : null;
-  } catch {
-    return null;
-  }
-}
-
-function base64UrlDecode(value: string): string {
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-  if (typeof atob === "function") return atob(padded);
-  return Buffer.from(padded, "base64").toString("binary");
 }

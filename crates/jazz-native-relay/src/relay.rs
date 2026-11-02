@@ -2125,7 +2125,14 @@ async fn connect_and_bridge(
         auth: config.auth.clone(),
         wake: Arc::new(move || inbound_wake.notify_one()),
     };
+    // The relay installs only admitted links: its upstream state treats an
+    // installed link as one the server accepted.
     let connecting = connector.connect(request);
+    let connecting = async move {
+        let mut connected = connecting.await?;
+        (&mut connected.admitted).await?;
+        Ok::<_, NativeTransportError>(connected)
+    };
     tokio::pin!(connecting);
     let connected = loop {
         tokio::select! {

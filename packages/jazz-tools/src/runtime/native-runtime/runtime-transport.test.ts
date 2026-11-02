@@ -1,13 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../../drivers/types.js";
-import { PostcardReader, PostcardWriter } from "./native-codec.js";
+import { PostcardWriter } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
   decodeWebSocketFrameBatch,
-  encodeWireClientHello,
-  encodeWebSocketPrelude,
   encodeWebSocketFrameBatch,
-  isWireHello,
   WIRE_PROTOCOL_VERSION,
 } from "./websocket.js";
 import { BrowserWorkerTransportPump } from "./browser-worker-transport.js";
@@ -148,7 +145,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     ],
     [
       "schema",
-      Object.assign(new Error("Schema: invalid authored branch value"), { code: "schema" }),
+      Object.assign(new Error("Schema: invalid authored branch value"), {
+        code: "schema",
+      }),
     ],
     ["cancellation", Object.assign(new Error("operation cancelled"), { name: "AbortError" })],
     ["unknown", new Error("unknown lifecycle failure")],
@@ -270,7 +269,10 @@ describe("NativeRuntimeAdapter server transport", () => {
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
-          fakeDb({ commitTransaction: () => conflictedWrite, tick: () => undefined }),
+          fakeDb({
+            commitTransaction: () => conflictedWrite,
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -313,8 +315,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("connects the native upstream transport to the scoped websocket endpoint", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -344,11 +346,11 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(sockets).toHaveLength(1);
     expect(sockets[0]!.url).toBe("ws://127.0.0.1:4200/apps/app-a/ws");
-    expect(sockets[0]!.sent[0]).toEqual(encodeWebSocketPrelude("{}", runtimeAuthor));
-    const helloBatch = decodeWebSocketFrameBatch(sockets[0]!.sent[1]! as Uint8Array);
-    expect(helloBatch).toHaveLength(1);
-    expect(isWireHello(helloBatch[0]!)).toBe(true);
-    expect(decodeWebSocketFrameBatch(sockets[0]!.sent[2]! as Uint8Array)).toEqual([
+    // Nothing precedes the session's own frames: the offer rode the upgrade.
+    expect(sockets[0]!.protocols).toEqual([
+      expect.stringMatching(new RegExp(`^jazz\\.${WIRE_PROTOCOL_VERSION}\\.[0-9a-f]+$`)),
+    ]);
+    expect(decodeWebSocketFrameBatch(sockets[0]!.sent[0]! as Uint8Array)).toEqual([
       Uint8Array.from([2, 2, 3]),
     ]);
     expect(transport.closed).toBe(false);
@@ -359,15 +361,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(sockets).toHaveLength(2);
     expect(sockets[0]!.closed).toBe(true);
-    expect(JSON.parse(sockets[1]!.sent[0] as string)).toEqual({
-      peer_identity: '["urn:jazz:test","runtime-user"]',
-      auth: {
-        sub: "runtime-user",
-        jwt_token: "fresh.jwt",
-      },
-      sub: "runtime-user",
-      jwt_token: "fresh.jwt",
-    });
+    expect(sockets[1]!.protocols).toContain("jazz.bearer.fresh.jwt");
 
     runtime.disconnect();
 
@@ -377,8 +371,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("reconnects an established upstream after a retryable server restart without publishing a terminal error", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -429,8 +423,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     async (_case, failure) => {
       const sockets: FakeWebSocket[] = [];
       globalThis.WebSocket = class extends FakeWebSocket {
-        constructor(url: string) {
-          super(url);
+        constructor(url: string, protocols?: unknown) {
+          super(url, protocols);
           sockets.push(this);
         }
       } as unknown as typeof WebSocket;
@@ -493,8 +487,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("retries a first connection that fails before negotiation, as a client opened offline", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
         // The first attempt fails at the network layer before any server hello.
         if (sockets.length === 1) queueMicrotask(() => this.emitServerClose());
@@ -536,8 +530,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("drops inbound frames a dropped connection left unpumped instead of feeding them to its reconnect", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -594,8 +588,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("drops outbound frames a dropped connection produced instead of sending them on its reconnect", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -719,8 +713,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     async ({ code, message }) => {
       const sockets: FakeWebSocket[] = [];
       globalThis.WebSocket = class extends FakeWebSocket {
-        constructor(url: string) {
-          super(url);
+        constructor(url: string, protocols?: unknown) {
+          super(url, protocols);
           sockets.push(this);
         }
       } as unknown as typeof WebSocket;
@@ -774,15 +768,18 @@ describe("NativeRuntimeAdapter server transport", () => {
     async (action) => {
       const sockets: FakeWebSocket[] = [];
       globalThis.WebSocket = class extends FakeWebSocket {
-        constructor(url: string) {
-          super(url);
+        constructor(url: string, protocols?: unknown) {
+          super(url, protocols);
           sockets.push(this);
         }
       } as unknown as typeof WebSocket;
       const runtime = new NativeRuntimeAdapter(
         {
           openMemory: () =>
-            fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+            fakeDb({
+              connectUpstream: () => new FakeTransport([]),
+              tick: () => undefined,
+            }),
           openBrowser: async () => {
             throw new Error("not used");
           },
@@ -811,8 +808,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     const sockets: FakeWebSocket[] = [];
     let serverDown = false;
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
         if (serverDown) queueMicrotask(() => this.emitServerClose());
       }
@@ -884,7 +881,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       // write waits stay pending instead of rejecting.
       await readRejected;
       expect(terminal).toHaveBeenCalledTimes(1);
-      expect(terminal).toHaveBeenCalledWith(expect.any(Error), { retrying: true });
+      expect(terminal).toHaveBeenCalledWith(expect.any(Error), {
+        retrying: true,
+      });
       expect(sockets.length).toBeGreaterThan(11);
       expect(runtime.remoteLinkState()).toBe("unavailable");
       expect(beforeOutage.value).toBe("pending");
@@ -927,8 +926,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     let serverDown = false;
     let refuseNextConnection = false;
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
         if (serverDown) queueMicrotask(() => this.emitServerClose());
         else if (refuseNextConnection)
@@ -989,7 +988,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       expect(outcome).toBeInstanceOf(Error);
       // The retrying outage turned terminal, so the app hears about it again.
       expect(terminal).toHaveBeenCalledTimes(2);
-      expect(terminal).toHaveBeenLastCalledWith(expect.any(Error), { retrying: false });
+      expect(terminal).toHaveBeenLastCalledWith(expect.any(Error), {
+        retrying: false,
+      });
     } finally {
       settlement.resolve();
       await runtime.close();
@@ -1004,8 +1005,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       const sockets: FakeWebSocket[] = [];
       let serverDown = false;
       globalThis.WebSocket = class extends FakeWebSocket {
-        constructor(url: string) {
-          super(url);
+        constructor(url: string, protocols?: unknown) {
+          super(url, protocols);
           sockets.push(this);
           if (serverDown) queueMicrotask(() => this.emitServerClose());
         }
@@ -1118,8 +1119,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("ends waits and remote subscriptions held for a credential nothing renews, until auth is updated", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -1164,7 +1165,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       });
       const transportStates: Array<{ message: string; retrying: boolean }> = [];
       runtime.onServerTransportError((error, state) =>
-        transportStates.push({ message: error.message, retrying: state.retrying }),
+        transportStates.push({
+          message: error.message,
+          retrying: state.retrying,
+        }),
       );
       runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
       await runtime.waitForUpstreamServerConnection();
@@ -1229,8 +1233,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     let serverDown = false;
     let refuseNextConnection = false;
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
         if (serverDown) queueMicrotask(() => this.emitServerClose());
         // A frame the client cannot decode is a protocol error, which is never retried.
@@ -1299,8 +1303,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     const sockets: FakeWebSocket[] = [];
     let serverDown = false;
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
         if (serverDown) queueMicrotask(() => this.emitServerClose());
       }
@@ -1376,15 +1380,18 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("does not resurrect the previous account transport after replacement", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
-          fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+          fakeDb({
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -1411,8 +1418,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("holds replacement admission until predecessor raw retirement closes", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -1487,8 +1494,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("explicit replacement joins retirement owned by network retry", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -1564,8 +1571,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("retry retirement failure blocks successor admission", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -1638,8 +1645,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     async (action) => {
       const sockets: FakeWebSocket[] = [];
       globalThis.WebSocket = class extends FakeWebSocket {
-        constructor(url: string) {
-          super(url);
+        constructor(url: string, protocols?: unknown) {
+          super(url, protocols);
           sockets.push(this);
         }
       } as unknown as typeof WebSocket;
@@ -1727,8 +1734,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("consumes a newer replacement after superseding an active native admission", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -1805,8 +1812,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("waits for unresolved superseded admission before successor", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -1886,8 +1893,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("waits for an admitted predecessor retirement before admitting its successor", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -1981,8 +1988,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("reports predecessor retirement failure once without admitting its successor", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -2070,8 +2077,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("failed retirement continues to block later successors", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -2172,8 +2179,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   ] as const)("settles a strict remote query begun during backoff after %s", async (action) => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -2246,15 +2253,18 @@ describe("NativeRuntimeAdapter server transport", () => {
     async (code, retry, message) => {
       const sockets: FakeWebSocket[] = [];
       globalThis.WebSocket = class extends FakeWebSocket {
-        constructor(url: string) {
-          super(url);
+        constructor(url: string, protocols?: unknown) {
+          super(url, protocols);
           sockets.push(this);
         }
       } as unknown as typeof WebSocket;
       const runtime = new NativeRuntimeAdapter(
         {
           openMemory: () =>
-            fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+            fakeDb({
+              connectUpstream: () => new FakeTransport([]),
+              tick: () => undefined,
+            }),
           openBrowser: async () => {
             throw new Error("not used");
           },
@@ -2294,8 +2304,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     async (message, expected) => {
       const sockets: FakeWebSocket[] = [];
       globalThis.WebSocket = class extends FakeWebSocket {
-        constructor(url: string) {
-          super(url);
+        constructor(url: string, protocols?: unknown) {
+          super(url, protocols);
           sockets.push(this);
         }
       } as unknown as typeof WebSocket;
@@ -2388,15 +2398,18 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("uses the canonical credential author for websocket identity, not the raw runtime host", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
-          fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+          fakeDb({
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -2417,18 +2430,17 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", JSON.stringify({ jwt_token: jwt }));
     await waitForFakeWebSocketNegotiation();
 
-    expect(JSON.parse(sockets[0]!.sent[0] as string)).toMatchObject({
-      peer_identity: '["urn:jazz:local-first","provider-subject"]',
-      auth: { jwt_token: jwt, sub: "provider-subject" },
-    });
+    // The server derives the identity from the token; the client only
+    // offers it.
+    expect(sockets[0]!.protocols).toContain(`jazz.bearer.${jwt}`);
     runtime.disconnect();
   });
 
   it("routes auxiliary frames and drains their output without semantic delivery", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -2472,8 +2484,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("marks server carrier ingress as requiring a distinct peer pass", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -2511,26 +2523,6 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.close();
   });
 
-  it("does not emit the fake server hello before the client prelude and hello", async () => {
-    const socket = new FakeWebSocket("ws://127.0.0.1:4200/apps/app-a/ws");
-    const received: Uint8Array[] = [];
-    socket.addEventListener("message", (event) => received.push(event.data as Uint8Array));
-
-    socket.send(encodeWebSocketFrameBatch([Uint8Array.from([2, 42])]));
-    await Promise.resolve();
-    expect(received).toEqual([]);
-
-    socket.send(encodeWebSocketPrelude("{}", new Uint8Array(16)));
-    await Promise.resolve();
-    expect(received).toEqual([]);
-
-    socket.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
-    await Promise.resolve();
-
-    expect(received).toHaveLength(1);
-    expect(isWireHello(decodeWebSocketFrameBatch(received[0]!)[0]!)).toBe(true);
-  });
-
   it("settles an existing remote wait when a websocket frame arrives without a native callback", async () => {
     let settle!: () => void;
     const settlement = new Promise<void>((resolve) => {
@@ -2539,8 +2531,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     let transportTicks = 0;
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -2865,8 +2857,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     let transportTicks = 0;
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -2929,8 +2921,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("uses the binding scheduler to drive native db ticks outside server pumps", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -3430,8 +3422,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("expires silent auxiliary ingress and closes its carrier while a core tick is held", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -3496,8 +3488,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("stages an already-arrived websocket frame group before one native transport tick", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -3536,8 +3528,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("discards a suspended transport tick after reconnect", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -3589,8 +3581,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("coalesces separate websocket messages that arrive before the server pump timer", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
+      constructor(url: string, protocols?: unknown) {
+        super(url, protocols);
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
@@ -3728,23 +3720,23 @@ class FakeWebSocket {
   private readonly messageListeners: Array<(event: { data: unknown }) => void> = [];
   closed = false;
 
-  private sawClientPrelude = false;
-  private serverHelloScheduled = false;
+  /** What the client offered on its upgrade. */
+  readonly protocols: unknown;
 
-  constructor(readonly url: string) {}
-
-  send(data: Uint8Array | string): void {
-    this.sent.push(data);
-    if (typeof data === "string") {
-      this.sawClientPrelude = isClientPrelude(data);
-      return;
-    }
-    if (!this.sawClientPrelude || this.serverHelloScheduled) return;
-    if (!isClientHelloBatch(data)) return;
-    this.serverHelloScheduled = true;
+  // The server admits the session from its upgrade alone: its Hello
+  // follows the upgrade, whatever the client sends meanwhile.
+  constructor(
+    readonly url: string,
+    protocols?: unknown,
+  ) {
+    this.protocols = protocols;
     queueMicrotask(() => {
       if (!this.closed) this.emitMessage(encodeWebSocketFrameBatch([encodeWireServerHello()]));
     });
+  }
+
+  send(data: Uint8Array | string): void {
+    this.sent.push(data);
   }
 
   close(): void {
@@ -3781,33 +3773,6 @@ function encodeWireServerHello(epoch: bigint = 1n): Uint8Array {
   return writer.finish();
 }
 
-function isClientPrelude(data: string): boolean {
-  try {
-    const prelude = JSON.parse(data) as { peer_identity?: unknown; auth?: unknown };
-    return (
-      typeof prelude.peer_identity === "string" &&
-      prelude.auth !== null &&
-      typeof prelude.auth === "object"
-    );
-  } catch {
-    return false;
-  }
-}
-
-function isClientHelloBatch(data: Uint8Array): boolean {
-  try {
-    const frames = decodeWebSocketFrameBatch(data);
-    if (frames.length !== 1 || !isWireHello(frames[0]!)) return false;
-    const hello = new PostcardReader(frames[0]!);
-    hello.u64(); // WireFrame::Hello
-    hello.u64(); // min_protocol_version
-    hello.u64(); // max_protocol_version
-    hello.u64(); // features
-    return hello.u64() === 0; // WirePeerRole::Client
-  } catch {
-    return false;
-  }
-}
 function emptyRows(): Uint8Array {
   const writer = new PostcardWriter();
   writer.vec(() => undefined, 0);
@@ -3816,7 +3781,9 @@ function emptyRows(): Uint8Array {
 
 function fakeDb<T extends object>(
   db: T,
-): T & { setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void } {
+): T & {
+  setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
+} {
   type FakeOpenBatch = {
     kind: "mergeable" | "serializable";
     author?: Uint8Array;

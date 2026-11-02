@@ -21,17 +21,15 @@ use futures::{SinkExt as _, StreamExt as _};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
 use jazz::records::Value as CoreValue;
-use jazz::tools::Session;
 use jazz::wire::{
     WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
-    current_wire_features, encode_frame, negotiate_wire,
+    WsSubprotocolOffer, current_wire_features, encode_frame,
 };
 use tokio::sync::mpsc;
 
 use crate::server::shutdown::ActiveWebSocketGuard;
 use crate::server::{ServerState, WebSocketEntryRefused};
 
-const WS_HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_CLIENT_CONNECTION_CAP;
 const WS_MAX_FRAME_BYTES: usize = MAX_WIRE_FRAME_BYTES;
 const WS_MAX_MESSAGE_BYTES: usize = WS_MAX_FRAME_BYTES;
@@ -124,8 +122,16 @@ pub(super) async fn ws_handler(
         }
     };
 
+    // The wire is negotiated in the upgrade: select the client's version
+    // token, so it may send sync frames as soon as the socket opens. A bad or
+    // missing offer still upgrades, and the session ends with a typed error
+    // the client can read.
+    let selected = ws_subprotocol_offer(&headers)
+        .ok()
+        .and_then(|offer| offer.selected().map(|version| version.token.clone()));
     ws.max_frame_size(WS_MAX_FRAME_BYTES)
         .max_message_size(WS_MAX_MESSAGE_BYTES)
+        .protocols(selected)
         .on_upgrade(move |socket| handle_ws_connection(socket, state, headers, websocket_guard))
 }
 
@@ -255,30 +261,41 @@ fn ws_live_admissions_for(state: &ServerState, key: WebSocketAdmissionKey) -> us
         .map_or(0, VecDeque::len)
 }
 
-#[derive(serde::Deserialize)]
-struct WebSocketPrelude {
-    peer_identity: String,
-    auth: jazz::tools::websocket_prelude_auth::AuthConfig,
-    /// A one-shot authenticated authority-catalogue transfer. This is not a
-    /// subscriber session and never admits application frames.
-    #[serde(default)]
-    bootstrap_catalogue: bool,
-    /// Requested before any wire frame.  It is only a request: after JWT/cookie
-    /// authentication and feature negotiation the server either creates its
-    /// own immutable admitted relay capability or rejects the connection.
-    #[serde(default)]
-    requested_link: RequestedWebSocketLink,
+/// What the client offered in its upgrade: `Sec-WebSocket-Protocol`, or the
+/// HTTP stream transport's `X-Jazz-Protocol`.
+fn ws_subprotocol_offer(headers: &HeaderMap) -> Result<WsSubprotocolOffer, WireError> {
+    WsSubprotocolOffer::parse(
+        headers
+            .get_all(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
+            .iter()
+            .chain(
+                headers
+                    .get_all(jazz::wire::HTTP_STREAM_PROTOCOL_HEADER)
+                    .iter(),
+            )
+            .filter_map(|value| value.to_str().ok()),
+    )
 }
 
 /// The only client-selectable *request* at the WebSocket boundary.  This is
 /// intentionally separate from `WirePeerRole`: a wire hello says what a peer
 /// implements, not what authority it receives.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum RequestedWebSocketLink {
     #[default]
     OrdinarySession,
     ScopeIsolatedClientRelay,
+}
+
+impl RequestedWebSocketLink {
+    /// From the `jazz.link.<name>` subprotocol, when one was offered.
+    fn from_offer(link: Option<&str>) -> Result<Self, String> {
+        match link {
+            None | Some("ordinary_session") => Ok(Self::OrdinarySession),
+            Some("scope_isolated_client_relay") => Ok(Self::ScopeIsolatedClientRelay),
+            Some(other) => Err(format!("unknown websocket link request jazz.link.{other}")),
+        }
+    }
 }
 
 /// Select the server-owned link capability after credential admission and wire
@@ -314,23 +331,30 @@ fn ws_link_admission(
     }
 }
 
+/// Admit a WebSocket from its upgrade request alone. Credentials arrive as
+/// they do on HTTP: `X-Jazz-Admin-Secret`, `X-Jazz-Backend-Secret` (with an
+/// optional `X-Jazz-Session` it vouches for), `Authorization`, or the auth
+/// cookie. A browser, which cannot set `Authorization` on an upgrade, offers
+/// its token as a `jazz.bearer.<token>` subprotocol. The peer identity is
+/// derived from the credential, never stated by the client.
 async fn ws_admission(
-    prelude: WebSocketPrelude,
+    offer: &WsSubprotocolOffer,
     request_headers: &HeaderMap,
     state: &Arc<ServerState>,
 ) -> Result<WebSocketAdmission, super::accounts::AdmissionError> {
-    let peer_identity = ws_peer_identity(&prelude.peer_identity)?;
-    let requested_link = prelude.requested_link;
-    let auth = prelude.auth;
+    let requested_link = RequestedWebSocketLink::from_offer(offer.link.as_deref())?;
 
-    if let Some(admin_secret) = auth.admin_secret.as_deref() {
+    if let Some(admin_secret) = request_headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|value| value.to_str().ok())
+    {
         crate::middleware::auth::validate_admin_secret(Some(admin_secret), &state.auth_config)
             .map_err(|(_, message)| message.to_owned())?;
         // Forwarded commits keep their own permission subjects. Admin
         // authentication is not a substitute for per-transaction authorization.
         let trust = CommitUnitTrust::TrustedAuthority;
         return Ok(WebSocketAdmission {
-            identity: peer_identity,
+            identity: AuthorSubject::SYSTEM,
             claims: BTreeMap::new(),
             trust,
             credential: WebSocketCredential::Admin,
@@ -339,24 +363,13 @@ async fn ws_admission(
     }
 
     let mut headers = request_headers.clone();
-    if let Some(jwt) = auth.jwt_token.as_deref() {
-        let value = axum::http::HeaderValue::from_str(&format!("Bearer {jwt}"))
-            .map_err(|error| format!("invalid jwt_token header value: {error}"))?;
+    if let Some(token) = offer.bearer.as_deref() {
+        if headers.contains_key(axum::http::header::AUTHORIZATION) {
+            return Err("offer a credential in Authorization or jazz.bearer, not both".into());
+        }
+        let value = axum::http::HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|error| format!("invalid jazz.bearer subprotocol: {error}"))?;
         headers.insert(axum::http::header::AUTHORIZATION, value);
-    }
-    if let Some(secret) = auth.backend_secret.as_deref() {
-        let value = axum::http::HeaderValue::from_str(secret)
-            .map_err(|error| format!("invalid backend_secret header value: {error}"))?;
-        headers.insert("X-Jazz-Backend-Secret", value);
-    }
-    if let Some(session_value) = auth.backend_session.as_ref() {
-        use base64::Engine as _;
-        let json = serde_json::to_string(session_value)
-            .map_err(|error| format!("failed to serialise backend_session: {error}"))?;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
-        let value = axum::http::HeaderValue::from_str(&b64)
-            .map_err(|error| format!("invalid backend_session header value: {error}"))?;
-        headers.insert("X-Jazz-Session", value);
     }
 
     let has_jwt = headers.get(axum::http::header::AUTHORIZATION).is_some();
@@ -376,7 +389,7 @@ async fn ws_admission(
         crate::middleware::auth::validate_backend_secret(backend_secret, &state.auth_config)
             .map_err(|(_, message)| message.to_owned())?;
         return Ok(WebSocketAdmission {
-            identity: peer_identity,
+            identity: AuthorSubject::SYSTEM,
             claims: BTreeMap::new(),
             trust: CommitUnitTrust::TrustedBackend,
             credential: WebSocketCredential::Backend,
@@ -407,9 +420,6 @@ async fn ws_admission(
     // A backend-authenticated impersonation remains policy-scoped, but its
     // authority is the backend credential, not a public account bearer.
     if !has_authenticated_backend_session {
-        let account = peer_identity
-            .account_id()
-            .ok_or("public sessions require an enrolled account identity")?;
         let principal = jazz::account_registry::Principal {
             issuer: session.issuer.clone(),
             subject: session.user_id.clone(),
@@ -417,15 +427,16 @@ async fn ws_admission(
         if session.issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER {
             super::accounts::admit_local_founder(state, &principal, &headers).await?;
         }
-        let assignment = super::accounts::resolve_assignment(state, principal).await?;
-        if assignment != account {
-            return Err("account does not match authenticated identity assignment".into());
-        }
-        session.account_id = Some(account);
+        session.account_id = Some(super::accounts::resolve_assignment(state, principal).await?);
     }
-    ws_validate_session_identity(&session, peer_identity)?;
+    let identity = session
+        .author_subject()
+        .map_err(|error| error.to_string())?;
+    if !has_authenticated_backend_session && identity.account_id().is_none() {
+        return Err("public sessions require an enrolled account identity".into());
+    }
     Ok(WebSocketAdmission {
-        identity: peer_identity,
+        identity,
         claims: session_claims(session)?,
         trust: CommitUnitTrust::Session,
         credential: if has_authenticated_backend_session {
@@ -518,23 +529,6 @@ fn session_claims(
         author,
         provider_claims,
     ))
-}
-
-fn ws_peer_identity(identity: &str) -> Result<AuthorSubject, String> {
-    AuthorSubject::from_canonical(identity).map_err(|error| error.to_string())
-}
-
-fn ws_validate_session_identity(
-    session: &Session,
-    peer_identity: AuthorSubject,
-) -> Result<(), String> {
-    let session_identity = session
-        .author_subject()
-        .map_err(|error| error.to_string())?;
-    if session_identity != peer_identity {
-        return Err("websocket peer_identity must match authenticated session author".to_owned());
-    }
-    Ok(())
 }
 
 fn ws_has_auth_cookie(headers: &HeaderMap, cookie_name: Option<&str>) -> bool {
@@ -634,53 +628,6 @@ fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|addr| addr.is_loopback())
 }
 
-async fn read_ws_auth_prelude<S: SyncSocket>(
-    socket: &mut S,
-    shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
-    state: &ServerState,
-) -> Option<Vec<u8>> {
-    tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, async {
-        tokio::select! {
-            msg = socket.next() => match msg {
-                Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
-                Some(Ok(Message::Text(text))) => Some(text.as_bytes().to_vec()),
-                _ => None,
-            },
-            changed = shutdown_rx.changed() => {
-                if changed.is_ok() && state.shutdown.is_shutting_down() {
-                    close_ws_for_shutdown(socket).await;
-                }
-                None
-            }
-        }
-    })
-    .await
-    .unwrap_or_default()
-}
-
-async fn read_ws_frame_batch<S: SyncSocket>(
-    socket: &mut S,
-    shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
-    state: &ServerState,
-) -> Option<Vec<u8>> {
-    tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, async {
-        tokio::select! {
-            msg = socket.next() => match msg {
-                Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
-                _ => None,
-            },
-            changed = shutdown_rx.changed() => {
-                if changed.is_ok() && state.shutdown.is_shutting_down() {
-                    close_ws_for_shutdown(socket).await;
-                }
-                None
-            }
-        }
-    })
-    .await
-    .unwrap_or_default()
-}
-
 pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     mut socket: S,
     state: Arc<ServerState>,
@@ -693,25 +640,22 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         return;
     }
 
-    let Some(auth_bytes) = read_ws_auth_prelude(&mut socket, &mut shutdown_rx, &state).await else {
-        return;
-    };
-    let prelude = match serde_json::from_slice::<WebSocketPrelude>(&auth_bytes)
-        .map_err(|error| format!("invalid websocket prelude: {error}"))
-    {
-        Ok(prelude) => prelude,
+    // Everything the handshake needs came with the upgrade request: the
+    // offered subprotocols and the credential. The client sends no handshake
+    // frame; its first frames are already sync messages.
+    let negotiated = match ws_subprotocol_offer(&request_headers).and_then(|offer| {
+        let negotiated = offer.negotiate(current_wire_features())?;
+        Ok((offer, negotiated))
+    }) {
+        Ok(negotiated) => negotiated,
         Err(error) => {
-            send_ws_error(
-                &mut socket,
-                WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, error),
-            )
-            .await;
+            send_ws_error(&mut socket, error).await;
             let _ = socket.close().await;
             return;
         }
     };
-    let bootstrap_catalogue = prelude.bootstrap_catalogue;
-    let admission = match ws_admission(prelude, &request_headers, &state).await {
+    let (offer, negotiated) = negotiated;
+    let admission = match ws_admission(&offer, &request_headers, &state).await {
         Ok(admission) => admission,
         Err(error) => {
             send_ws_error(&mut socket, error.into_wire()).await;
@@ -729,47 +673,6 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         },
         admission.trust == CommitUnitTrust::Session,
     );
-
-    let Some(first) = read_ws_frame_batch(&mut socket, &mut shutdown_rx, &state).await else {
-        return;
-    };
-
-    let remote_hello = match decode_ws_hello(&first) {
-        Ok(hello) => hello,
-        Err(error) => {
-            send_ws_error(&mut socket, error).await;
-            let _ = socket.close().await;
-            return;
-        }
-    };
-
-    let negotiated = match negotiate_wire(&remote_hello, current_wire_features()) {
-        Ok(negotiated) => negotiated,
-        Err(error) => {
-            send_ws_error(&mut socket, error).await;
-            let _ = socket.close().await;
-            return;
-        }
-    };
-    // A downstream browser may be authority-unbound while still accepting the
-    // server's authenticated authority in its response Hello.  The server
-    // never installs scoped authority semantics without an admitted remote
-    // endpoint (below), so this directional capability advertisement does not
-    // turn a client self-assertion into authority proof.
-
-    if bootstrap_catalogue {
-        send_ws_error(
-            &mut socket,
-            WireError::new(
-                WireErrorCode::UnsupportedFeature,
-                WireRetry::Never,
-                "edge catalogue bootstrap is no longer supported; open an ordinary client session",
-            ),
-        )
-        .await;
-        let _ = socket.close().await;
-        return;
-    }
 
     let Some(core_server_shell) = state.runtime_for_client() else {
         let message = if state.shutdown.is_shutting_down() {
@@ -801,7 +704,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
             // independently of whether it advertises a remote authority endpoint.
             Some(ConnectionSessionContext {
                 local: server_endpoint,
-                remote: remote_hello.authority,
+                remote: None,
                 link_identity: admission.identity,
                 negotiated_features: negotiated.features,
             })
@@ -1076,28 +979,6 @@ fn queue_ws_error(writer: &mpsc::Sender<Vec<Message>>, error: WireError) {
     }
 }
 
-/// Decode the opening `Hello`, which arrives as a one-frame batch or a bare
-/// frame. A peer on another wire version gets `UnsupportedProtocolVersion`
-/// even when the rest of its `Hello` uses that version's layout.
-fn decode_ws_hello(bytes: &[u8]) -> Result<WireHello, WireError> {
-    let not_hello = || {
-        WireError::new(
-            WireErrorCode::MalformedFrame,
-            WireRetry::Never,
-            "websocket expects first wire frame to be WireFrame::Hello",
-        )
-    };
-    let frame = match decode_ws_encoded_frame_batch(bytes) {
-        Ok(mut frames) if frames.len() == 1 => frames.remove(0),
-        Ok(_) => return Err(not_hello()),
-        Err(_) => bytes.to_vec(),
-    };
-    jazz::wire::decode_hello_frame(&frame).map_err(|error| match error.code {
-        WireErrorCode::UnsupportedProtocolVersion => error,
-        _ => not_hello(),
-    })
-}
-
 #[cfg(test)]
 fn decode_ws_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error> {
     let encoded_frames = decode_ws_encoded_frame_batch(bytes)?;
@@ -1175,6 +1056,7 @@ async fn close_ws_for_shutdown<S: SyncSocket>(socket: &mut S) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jazz::tools::Session;
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -1196,26 +1078,112 @@ mod tests {
 
     use crate::middleware::AuthConfig;
     use crate::server::{ServerBuilder, StorageBackend};
+    use jazz::tools::AppId;
     use jazz::tools::public_schema::{
         ColumnType, PolicyExpr, Schema, SchemaBuilder, TablePolicies,
         TableSchema as PublicTableSchema,
     };
-    use jazz::tools::{AppId, AuthMode};
 
     const WS_STORM_SIZE: usize = 24;
-
-    fn session_for(identity: AuthorSubject) -> Session {
-        let (issuer, subject) = identity.principal_parts();
-        let mut session = Session::new(issuer, subject);
-        session.account_id = identity.account_id();
-        session
-    }
 
     fn issuer_and_subject(identity: AuthorSubject) -> (String, String) {
         identity.principal_parts()
     }
     const WS_SETTLE_DEADLINE: Duration = Duration::from_secs(5);
     const WS_PUMP_DEADLINE: Duration = Duration::from_secs(5);
+
+    /// An upgrade request's admission inputs, carrying `credentials` (fields
+    /// `admin_secret`, `backend_secret`, `backend_session`, `jwt_token`) the
+    /// way clients send them: secrets and sessions in headers, a browser-held
+    /// token as the `jazz.bearer` subprotocol.
+    fn ws_test_upgrade(
+        credentials: serde_json::Value,
+        link: Option<&str>,
+    ) -> (WsSubprotocolOffer, HeaderMap) {
+        let mut headers = HeaderMap::new();
+        for (name, value) in ws_upgrade_headers(&credentials, link, 0) {
+            headers.append(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+        let offer = ws_subprotocol_offer(&headers).expect("test subprotocol offer");
+        (offer, headers)
+    }
+
+    /// The headers of a client upgrade request carrying `credentials`.
+    fn ws_upgrade_headers(
+        credentials: &serde_json::Value,
+        link: Option<&str>,
+        features: u64,
+    ) -> Vec<(String, String)> {
+        use base64::Engine as _;
+        let credentials = credentials.get("auth").unwrap_or(credentials);
+        let mut headers = Vec::new();
+        let mut protocols = vec![jazz::wire::ws_version_subprotocol(features)];
+        if let Some(secret) = credentials["admin_secret"].as_str() {
+            headers.push(("X-Jazz-Admin-Secret".to_owned(), secret.to_owned()));
+        }
+        if let Some(secret) = credentials["backend_secret"].as_str() {
+            headers.push(("X-Jazz-Backend-Secret".to_owned(), secret.to_owned()));
+        }
+        if let Some(session) = credentials.get("backend_session").filter(|v| !v.is_null()) {
+            headers.push((
+                "X-Jazz-Session".to_owned(),
+                base64::engine::general_purpose::STANDARD.encode(session.to_string()),
+            ));
+        }
+        if let Some(token) = credentials["jwt_token"].as_str() {
+            protocols.push(jazz::wire::ws_bearer_subprotocol(token));
+        }
+        if let Some(link) = link {
+            protocols.push(format!("{}{link}", jazz::wire::WS_SUBPROTOCOL_LINK_PREFIX));
+        }
+        headers.push(("Sec-WebSocket-Protocol".to_owned(), protocols.join(", ")));
+        headers
+    }
+
+    async fn ws_admission_for(
+        (offer, mut headers): (WsSubprotocolOffer, HeaderMap),
+        extra: &HeaderMap,
+        state: &Arc<ServerState>,
+    ) -> Result<WebSocketAdmission, super::super::accounts::AdmissionError> {
+        for (name, value) in extra {
+            headers.append(name, value.clone());
+        }
+        ws_admission(&offer, &headers, state).await
+    }
+
+    /// Open a socket the way a client does: `credentials` (as in
+    /// [`ws_test_upgrade`]) in the upgrade request, then nothing until the
+    /// first sync frame.
+    async fn connect_ws(
+        url: String,
+        credentials: impl AsRef<[u8]>,
+        features: u64,
+    ) -> Result<
+        (
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            tokio_tungstenite::tungstenite::handshake::client::Response,
+        ),
+        tokio_tungstenite::tungstenite::Error,
+    > {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+        let credentials: serde_json::Value =
+            serde_json::from_slice(credentials.as_ref()).expect("test credentials JSON");
+        let link = credentials["requested_link"].as_str().map(str::to_owned);
+        let mut request = url.into_client_request()?;
+        for (name, value) in ws_upgrade_headers(&credentials, link.as_deref(), features) {
+            request.headers_mut().append(
+                tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(name.as_bytes())
+                    .unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+        connect_async(request).await
+    }
 
     #[test]
     fn ws_frame_batch_round_trips_wire_frames() {
@@ -1231,88 +1199,6 @@ mod tests {
         let batch = postcard::to_allocvec(&encoded).unwrap();
 
         assert_eq!(decode_ws_frame_batch(&batch).unwrap(), frames);
-    }
-
-    #[test]
-    fn raw_handshake_frame_consumes_the_complete_carrier() {
-        let frame = WireFrame::Hello(WireHello::current(
-            WirePeerRole::Client,
-            current_wire_features(),
-        ));
-        let WireFrame::Hello(hello) = &frame else {
-            unreachable!()
-        };
-        let raw = encode_frame(&frame).expect("encode raw handshake frame");
-        assert_eq!(&decode_ws_hello(&raw).unwrap(), hello);
-
-        let mut suffixed = raw;
-        suffixed.push(0);
-        assert_eq!(
-            decode_ws_hello(&suffixed).unwrap_err().code,
-            WireErrorCode::MalformedFrame,
-            "a raw frame plus a suffix must not acquire a second handshake interpretation"
-        );
-    }
-
-    /// Bob runs a later wire version whose `Hello` body has a different
-    /// layout. Alice's server reads only the shared version prefix and answers
-    /// with the frozen `UnsupportedProtocolVersion` error Bob can decode,
-    /// rather than `MalformedFrame` (SPEC 8 §8.1.1, #2468).
-    #[test]
-    fn later_wire_version_hello_gets_unsupported_version_not_malformed() {
-        let next = WIRE_PROTOCOL_VERSION + 1;
-        let mut later_hello = postcard::to_allocvec(&(0u32, next, next)).unwrap();
-        // A body this version cannot parse: an unknown role and extra fields.
-        later_hello.extend_from_slice(&[0x7f, 0xff, 0xff, 0x03, 0x2a]);
-        let batch = postcard::to_allocvec(&vec![later_hello.clone()]).unwrap();
-
-        for bytes in [later_hello, batch] {
-            let error = decode_ws_hello(&bytes).unwrap_err();
-            assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
-            assert_eq!(error.retry, WireRetry::Never);
-        }
-    }
-
-    #[test]
-    fn ws_peer_identity_requires_canonical_author_subject() {
-        let identity =
-            AuthorSubject::for_test_bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
-        assert_eq!(ws_peer_identity(identity.canonical()).unwrap(), identity);
-
-        assert!(ws_peer_identity("not-hex").is_err());
-    }
-
-    #[test]
-    fn ws_session_identity_must_match_peer_identity() {
-        let peer = AuthorSubject::for_test_bytes([1; 16]);
-        let matching = session_for(peer);
-        let mismatching = session_for(AuthorSubject::for_test_bytes([2; 16]));
-        let external_subject = "better-auth-user";
-        let external_peer =
-            AuthorSubject::authenticated("https://auth.example", external_subject).unwrap();
-        let external_session = Session::new("https://auth.example", external_subject);
-
-        assert!(ws_validate_session_identity(&matching, peer).is_ok());
-        assert!(ws_validate_session_identity(&mismatching, peer).is_err());
-        assert!(ws_validate_session_identity(&external_session, external_peer).is_ok());
-        assert!(ws_validate_session_identity(&external_session, peer).is_err());
-        assert!(ws_validate_session_identity(&external_session, AuthorSubject::SYSTEM).is_err());
-        let same_subject_other_issuer =
-            AuthorSubject::authenticated("https://other-auth.example", external_subject).unwrap();
-        assert!(
-            ws_validate_session_identity(&external_session, same_subject_other_issuer).is_err(),
-            "a shared provider subject must not bridge issuer domains"
-        );
-        let local_first = Session::new(AuthorSubject::LOCAL_FIRST_ISSUER, "local-user")
-            .with_auth_mode(AuthMode::LocalFirst);
-        let local_first_peer =
-            AuthorSubject::from_canonical(r#"["urn:jazz:local-first","local-user"]"#).unwrap();
-        assert!(ws_validate_session_identity(&local_first, local_first_peer).is_ok());
-        let anonymous = Session::new(AuthorSubject::ANONYMOUS_ISSUER, "anonymous-user")
-            .with_auth_mode(AuthMode::Anonymous);
-        let anonymous_peer =
-            AuthorSubject::from_canonical(r#"["urn:jazz:anonymous","anonymous-user"]"#).unwrap();
-        assert!(ws_validate_session_identity(&anonymous, anonymous_peer).is_ok());
     }
 
     #[test]
@@ -1486,21 +1372,12 @@ mod tests {
             3_600,
         )
         .expect("mint local-first cookie token");
-        let user_id = jazz::tools::identity::derive_user_id(&seed).to_string();
-        let peer_identity = AuthorSubject::from_canonical(
-            &serde_json::to_string(&(jazz::tools::identity::LOCAL_FIRST_ISSUER, user_id))
-                .expect("encode local-first author"),
-        )
-        .expect("local-first peer identity");
-        let prelude = WebSocketPrelude {
-            peer_identity: peer_identity.canonical().to_owned(),
-            bootstrap_catalogue: false,
-            requested_link: RequestedWebSocketLink::OrdinarySession,
-            auth: jazz::tools::websocket_prelude_auth::AuthConfig {
-                backend_session: Some(serde_json::json!({ "attacker": true })),
-                ..Default::default()
-            },
-        };
+        let prelude = ws_test_upgrade(
+            serde_json::json!({
+            "backend_session": { "attacker": true },
+            }),
+            None,
+        );
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::COOKIE,
@@ -1512,7 +1389,7 @@ mod tests {
         );
         headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
 
-        let error = ws_admission(prelude, &headers, &state)
+        let error = ws_admission_for(prelude, &headers, &state)
             .await
             .expect_err("orphan backend session must not suppress cookie origin enforcement");
         assert!(
@@ -1628,23 +1505,20 @@ mod tests {
         let state = make_ws_test_state().await;
         let identity = AuthorSubject::for_test_bytes([0x72; 16]);
         let (issuer, user_id) = issuer_and_subject(identity);
-        let scoped_session = ws_admission(
-            WebSocketPrelude {
-                peer_identity: identity.canonical().to_owned(),
-                bootstrap_catalogue: false,
-                requested_link: RequestedWebSocketLink::ScopeIsolatedClientRelay,
-                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
-                    backend_secret: Some("backend-secret".to_owned()),
-                    backend_session: Some(serde_json::json!({
-                        "account_id": identity.account_id(),
-                        "issuer": issuer,
-                        "user_id": user_id,
-                        "claims": {},
-                        "authMode": "external",
-                    })),
-                    ..Default::default()
+        let scoped_session = ws_admission_for(
+            ws_test_upgrade(
+                serde_json::json!({
+                "backend_secret": "backend-secret",
+                "backend_session": {
+                    "account_id": identity.account_id(),
+                    "issuer": issuer,
+                    "user_id": user_id,
+                    "claims": {},
+                    "authMode": "external",
                 },
-            },
+                }),
+                Some("scope_isolated_client_relay"),
+            ),
             &HeaderMap::new(),
             &state,
         )
@@ -1677,16 +1551,13 @@ mod tests {
             })
         ));
 
-        let backend_scope_request = ws_admission(
-            WebSocketPrelude {
-                peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
-                bootstrap_catalogue: false,
-                requested_link: RequestedWebSocketLink::ScopeIsolatedClientRelay,
-                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
-                    backend_secret: Some("backend-secret".to_owned()),
-                    ..Default::default()
-                },
-            },
+        let backend_scope_request = ws_admission_for(
+            ws_test_upgrade(
+                serde_json::json!({
+                "backend_secret": "backend-secret",
+                }),
+                Some("scope_isolated_client_relay"),
+            ),
             &HeaderMap::new(),
             &state,
         )
@@ -1715,16 +1586,13 @@ mod tests {
     #[tokio::test]
     async fn ws_admin_authority_capability_is_distinct_from_backend_attribution() {
         let state = make_ws_test_state().await;
-        let relay = ws_admission(
-            WebSocketPrelude {
-                peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
-                bootstrap_catalogue: false,
-                requested_link: RequestedWebSocketLink::OrdinarySession,
-                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
-                    admin_secret: Some("admin-secret".to_owned()),
-                    ..Default::default()
-                },
-            },
+        let relay = ws_admission_for(
+            ws_test_upgrade(
+                serde_json::json!({
+                "admin_secret": "admin-secret",
+                }),
+                None,
+            ),
             &HeaderMap::new(),
             &state,
         )
@@ -1737,16 +1605,13 @@ mod tests {
             ServerLinkAdmission::AuthorityQueryDelegate
         );
 
-        let admin_scope_request = ws_admission(
-            WebSocketPrelude {
-                peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
-                bootstrap_catalogue: false,
-                requested_link: RequestedWebSocketLink::ScopeIsolatedClientRelay,
-                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
-                    admin_secret: Some("admin-secret".to_owned()),
-                    ..Default::default()
-                },
-            },
+        let admin_scope_request = ws_admission_for(
+            ws_test_upgrade(
+                serde_json::json!({
+                "admin_secret": "admin-secret",
+                }),
+                Some("scope_isolated_client_relay"),
+            ),
             &HeaderMap::new(),
             &state,
         )
@@ -1758,16 +1623,13 @@ mod tests {
             "admin credentials must not select scope-isolated client admission"
         );
 
-        let backend = ws_admission(
-            WebSocketPrelude {
-                peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
-                bootstrap_catalogue: false,
-                requested_link: RequestedWebSocketLink::OrdinarySession,
-                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
-                    backend_secret: Some("backend-secret".to_owned()),
-                    ..Default::default()
-                },
-            },
+        let backend = ws_admission_for(
+            ws_test_upgrade(
+                serde_json::json!({
+                "backend_secret": "backend-secret",
+                }),
+                None,
+            ),
             &HeaderMap::new(),
             &state,
         )
@@ -1780,41 +1642,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn ws_backend_session_must_match_peer_identity() {
-        let state = make_ws_test_state().await;
-        let authenticated = AuthorSubject::for_test_bytes([0x51; 16]);
-        let forged_peer = AuthorSubject::for_test_bytes([0x52; 16]);
-        let (issuer, user_id) = issuer_and_subject(authenticated);
-        let prelude = WebSocketPrelude {
-            peer_identity: forged_peer.canonical().to_owned(),
-            bootstrap_catalogue: false,
-            requested_link: RequestedWebSocketLink::OrdinarySession,
-            auth: jazz::tools::websocket_prelude_auth::AuthConfig {
-                backend_secret: Some("backend-secret".to_owned()),
-                backend_session: Some(serde_json::json!({
-                    "account_id": authenticated.account_id(),
-                    "issuer": issuer,
-                    "user_id": user_id,
-                    "claims": {},
-                    "authMode": "external",
-                })),
-                ..Default::default()
-            },
-        };
-
-        let error = ws_admission(prelude, &HeaderMap::new(), &state)
-            .await
-            .expect_err("mismatched authenticated session and peer_identity must be rejected");
-
-        assert!(
-            error
-                .to_string()
-                .contains("peer_identity must match authenticated session author"),
-            "unexpected websocket admission error: {error}"
-        );
-    }
-
     // Internal admission-boundary test: server-shell policy reads are not yet
     // observable through a public websocket client helper, so this pins
     // the security invariant at the route admission point that feeds
@@ -1824,29 +1651,26 @@ mod tests {
         let state = make_ws_test_state().await;
         let identity = AuthorSubject::for_test_bytes([0x61; 16]);
         let (issuer, user_id) = issuer_and_subject(identity);
-        let prelude = WebSocketPrelude {
-            peer_identity: identity.canonical().to_owned(),
-            bootstrap_catalogue: false,
-            requested_link: RequestedWebSocketLink::OrdinarySession,
-            auth: jazz::tools::websocket_prelude_auth::AuthConfig {
-                backend_secret: Some("backend-secret".to_owned()),
-                backend_session: Some(serde_json::json!({
-                    "account_id": identity.account_id(),
-                    "issuer": issuer,
-                    "user_id": user_id,
-                    "claims": {
-                        "role": "reader",
-                        "teams": ["eng", "ops"],
-                        "beta": true,
-                        "login_count": 7,
-                    },
-                    "authMode": "external",
-                })),
-                ..Default::default()
+        let prelude = ws_test_upgrade(
+            serde_json::json!({
+            "backend_secret": "backend-secret",
+            "backend_session": {
+                "account_id": identity.account_id(),
+                "issuer": issuer,
+                "user_id": user_id,
+                "claims": {
+                    "role": "reader",
+                    "teams": ["eng", "ops"],
+                    "beta": true,
+                    "login_count": 7,
+                },
+                "authMode": "external",
             },
-        };
+            }),
+            None,
+        );
 
-        let admission = ws_admission(prelude, &HeaderMap::new(), &state)
+        let admission = ws_admission_for(prelude, &HeaderMap::new(), &state)
             .await
             .expect("backend session websocket admission");
 
@@ -1929,19 +1753,13 @@ mod tests {
         let server = builder.build().await.expect("build blank server");
         let state = server.state;
         let addr = start_ws_test_server(state.clone()).await;
-        let (mut alice, _) = connect_async(ws_url(addr, state.app_id))
-            .await
-            .expect("connect Alice");
-        alice
-            .send(WsMessage::Binary(ws_prelude(AuthorSubject::SYSTEM).into()))
-            .await
-            .expect("send Alice prelude");
-        alice
-            .send(WsMessage::Binary(
-                ws_client_hello_batch_with_features(0).into(),
-            ))
-            .await
-            .expect("send Alice hello");
+        let (mut alice, _) = connect_ws(
+            ws_url(addr, state.app_id),
+            ws_prelude(AuthorSubject::SYSTEM),
+            0,
+        )
+        .await
+        .expect("connect websocket");
         let response = tokio::time::timeout(Duration::from_secs(5), alice.next())
             .await
             .expect("wait for readiness error")
@@ -2016,243 +1834,18 @@ mod tests {
         (identity, prelude)
     }
 
-    fn websocket_prelude_v1_fixture() -> serde_json::Value {
-        serde_json::from_str(include_str!(
-            "../../../../jazz/fixtures/websocket_prelude_v1.json",
-        ))
-        .expect("parse websocket prelude fixture")
-    }
-
-    fn padded_ws_prelude(identity: AuthorSubject, byte_len: usize) -> String {
-        let prefix = format!(
-            r##"{{"peer_identity":{},"auth":{{"admin_secret":"admin-secret"}},"future_top_level":""##,
-            serde_json::to_string(identity.canonical()).expect("encode identity"),
-        );
-        let suffix = "\"}";
-        assert!(byte_len >= prefix.len() + suffix.len());
-        let prelude = format!(
-            "{prefix}{}{suffix}",
-            "x".repeat(byte_len - prefix.len() - suffix.len())
-        );
-        assert_eq!(
-            prelude.len(),
-            byte_len,
-            "test prelude must hit the physical boundary"
-        );
-        prelude
-    }
-
-    async fn expect_ws_server_hello(
-        ws: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        features: u64,
-    ) {
-        ws.send(WsMessage::Binary(
-            ws_client_hello_batch_with_features(features).into(),
-        ))
-        .await
-        .expect("send client wire hello");
-        let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
-            .await
-            .expect("wait for server hello")
-            .expect("server response")
-            .expect("server websocket result");
-        let WsMessage::Binary(response) = response else {
-            panic!("expected binary server hello, got {response:?}");
-        };
-        let frames: Vec<Vec<u8>> =
-            postcard::from_bytes(&response).expect("decode server hello batch");
-        assert_eq!(frames.len(), 1);
-        let server_hello = match decode_frame(&frames[0]).expect("decode server hello") {
-            WireFrame::Hello(hello) => hello,
-            other => panic!("expected server WireFrame::Hello, got {other:?}"),
-        };
-        assert_eq!(
-            server_hello.features, features,
-            "server Hello must retain every negotiated client feature"
-        );
-    }
-
-    async fn oversized_ws_prelude_never_reaches_admission(message: WsMessage, url: String) {
-        let (mut ws, _) = connect_async(url).await.expect("connect websocket");
-        // The server may enforce the cap before the oversized send finishes.
-        if let Err(error) = ws.send(message).await {
-            assert!(
-                matches!(
-                    &error,
-                    tokio_tungstenite::tungstenite::Error::Io(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
-                        )
-                ),
-                "unexpected oversized-prelude send error: {error:?}"
-            );
-        }
-        // If the physical cap is accidentally raised, this valid follow-up
-        // reaches normal handshake admission and produces a server Hello.
-        let _ = ws
-            .send(WsMessage::Binary(
-                ws_client_hello_batch_with_features(0).into(),
-            ))
-            .await;
-        let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
-            .await
-            .expect("oversized prelude must resolve by close or error");
-        let admitted = matches!(
-            response,
-            Some(Ok(WsMessage::Binary(bytes)))
-                if postcard::from_bytes::<Vec<Vec<u8>>>(&bytes)
-                    .ok()
-                    .and_then(|frames| frames.first().cloned())
-                    .and_then(|frame| decode_frame(&frame).ok())
-                    .is_some_and(|frame| matches!(frame, WireFrame::Hello(_)))
-        );
-        assert!(
-            !admitted,
-            "a prelude larger than the Axum message cap must not reach admission"
-        );
-    }
-
-    fn ws_client_hello_batch_with_features(features: u64) -> Vec<u8> {
-        let hello = WireFrame::Hello(WireHello::current(WirePeerRole::Client, features));
-        let encoded = vec![encode_frame(&hello).expect("encode client hello")];
-        postcard::to_allocvec(&encoded).expect("encode websocket hello batch")
-    }
-
-    // Prelude parsing is an internal protocol-boundary test: no Db exists
-    // until after this first JSON message has been accepted. The shared corpus
-    // also pins both native writers without introducing another serializer.
-    #[test]
-    fn websocket_prelude_v1_fixture_parses_with_documented_evolution_rules() {
-        let fixture = websocket_prelude_v1_fixture();
-        for entry in fixture["fixtures"].as_array().expect("fixture entries") {
-            let parsed: WebSocketPrelude =
-                serde_json::from_str(entry["json"].as_str().expect("fixture JSON"))
-                    .expect("writer prelude accepted by server");
-            assert_eq!(
-                parsed.peer_identity,
-                entry["peer_identity"]
-                    .as_str()
-                    .expect("fixture peer identity"),
-            );
-            assert_eq!(
-                parsed.bootstrap_catalogue,
-                entry["bootstrap_catalogue"]
-                    .as_bool()
-                    .expect("fixture bootstrap flag")
-            );
-            assert_eq!(
-                parsed.requested_link,
-                match entry["requested_link"]
-                    .as_str()
-                    .expect("fixture requested link")
-                {
-                    "ordinary_session" => RequestedWebSocketLink::OrdinarySession,
-                    "scope_isolated_client_relay" => {
-                        RequestedWebSocketLink::ScopeIsolatedClientRelay
-                    }
-                    other => panic!("unsupported fixture requested_link {other}"),
-                }
-            );
-        }
-
-        let peer_identity = serde_json::to_string(AuthorSubject::SYSTEM.canonical())
-            .expect("encode fixture peer identity");
-        let defaults: WebSocketPrelude = serde_json::from_str(
-            &serde_json::json!({
-                "peer_identity": AuthorSubject::SYSTEM.canonical(),
-                "auth": {
-                    "admin_secret": "admin-secret",
-                    "future_auth_field": true,
-                },
-                "future_top_level_field": "ignored",
-            })
-            .to_string(),
-        )
-        .expect("unknown top-level and AuthConfig fields remain forward-compatible");
-        assert!(!defaults.bootstrap_catalogue);
-        assert_eq!(
-            defaults.requested_link,
-            RequestedWebSocketLink::OrdinarySession
-        );
-        assert_eq!(defaults.auth.admin_secret.as_deref(), Some("admin-secret"));
-
-        for malformed in [
-            "not-json".to_owned(),
-            format!(r#"{{"peer_identity":{peer_identity}}}"#),
-            format!(r#"{{"peer_identity":{peer_identity},"auth":{{}}}} trailing"#),
-        ] {
-            assert!(
-                serde_json::from_str::<WebSocketPrelude>(&malformed).is_err(),
-                "malformed prelude must reject: {malformed}"
-            );
-        }
-        assert!(
-            serde_json::from_str::<WebSocketPrelude>(&format!(
-                r#"{{"peer_identity":{peer_identity},"auth":{{}},"requested_link":"future_link"}}"#,
-            ))
-            .is_err(),
-            "unknown requested_link is an authority request, not an ignored extension"
-        );
-    }
-
     #[tokio::test]
-    async fn websocket_prelude_v1_fixture_writers_reach_server_handshake() {
+    async fn websocket_scope_isolated_request_requires_negotiated_scope_feature() {
         let state = make_ws_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
-        for entry in websocket_prelude_v1_fixture()["fixtures"]
-            .as_array()
-            .expect("fixture entries")
-        {
-            let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
-                .await
-                .expect("connect websocket");
-            let json = entry["json"].as_str().expect("fixture JSON").to_owned();
-            let message = if entry["writer"] == "typescript-native-runtime" {
-                WsMessage::Text(json.into())
-            } else {
-                WsMessage::Binary(json.into_bytes().into())
-            };
-            ws.send(message).await.expect("send writer prelude");
-            let features = if entry["requested_link"] == "scope_isolated_client_relay" {
-                jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
-            } else {
-                0
-            };
-            expect_ws_server_hello(&mut ws, features).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn websocket_scope_isolated_prelude_requires_negotiated_scope_feature() {
-        let state = make_ws_test_state().await;
-        let addr = start_ws_test_server(state.clone()).await;
-        let fixture = websocket_prelude_v1_fixture();
-        let scope_fixture = fixture["fixtures"]
-            .as_array()
-            .expect("fixture entries")
-            .iter()
-            .find(|entry| entry["name"] == "typescript_scope_isolated_session")
-            .expect("scope-isolated TypeScript fixture");
-        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+        let identity = AuthorSubject::for_test_bytes([0x73; 16]);
+        let mut credentials: serde_json::Value =
+            serde_json::from_slice(&ws_session_prelude(identity)).unwrap();
+        credentials["requested_link"] = "scope_isolated_client_relay".into();
+        // The relay asks for a scope-isolated link but offers no scope feature.
+        let (mut ws, _) = connect_ws(ws_url(addr, state.app_id), credentials.to_string(), 0)
             .await
             .expect("connect websocket");
-        ws.send(WsMessage::Text(
-            scope_fixture["json"]
-                .as_str()
-                .expect("scope fixture JSON")
-                .to_owned()
-                .into(),
-        ))
-        .await
-        .expect("send scope-isolated prelude");
-        ws.send(WsMessage::Binary(
-            ws_client_hello_batch_with_features(0).into(),
-        ))
-        .await
-        .expect("send client hello without scope feature");
         let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
             .expect("server must reject unnegotiated scope request")
@@ -2271,37 +1864,6 @@ mod tests {
                 ..
             })
         ));
-    }
-
-    #[tokio::test]
-    async fn websocket_prelude_message_cap_admits_exact_and_rejects_oversize_text_and_binary() {
-        let state = make_ws_test_state().await;
-        let addr = start_ws_test_server(state.clone()).await;
-        let identity = AuthorSubject::SYSTEM;
-        let exact = padded_ws_prelude(identity, WS_MAX_MESSAGE_BYTES);
-
-        for message in [
-            WsMessage::Text(exact.clone().into()),
-            WsMessage::Binary(exact.clone().into_bytes().into()),
-        ] {
-            let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
-                .await
-                .expect("connect websocket");
-            ws.send(message).await.expect("send exact-cap prelude");
-            expect_ws_server_hello(&mut ws, 0).await;
-        }
-
-        let oversized = padded_ws_prelude(identity, WS_MAX_MESSAGE_BYTES + 1);
-        oversized_ws_prelude_never_reaches_admission(
-            WsMessage::Text(oversized.clone().into()),
-            ws_url(addr, state.app_id),
-        )
-        .await;
-        oversized_ws_prelude_never_reaches_admission(
-            WsMessage::Binary(oversized.into_bytes().into()),
-            ws_url(addr, state.app_id),
-        )
-        .await;
     }
 
     #[tokio::test]
@@ -2625,17 +2187,9 @@ mod tests {
         features: u64,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
-        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+        let (mut ws, _) = connect_ws(ws_url(addr, state.app_id), prelude, features)
             .await
             .expect("connect websocket");
-        ws.send(WsMessage::Binary(prelude.into()))
-            .await
-            .expect("send websocket prelude");
-        ws.send(WsMessage::Binary(
-            ws_client_hello_batch_with_features(features).into(),
-        ))
-        .await
-        .expect("send websocket hello");
 
         let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
@@ -3124,58 +2678,15 @@ mod tests {
             "the receiving client must materialize the row through the websocket route"
         );
     }
-    // Admission precedes context creation, so this exercises the raw public wire.
-    // A retired edge request must fail even with a valid admin credential.
-    #[tokio::test]
-    async fn retired_catalogue_bootstrap_is_rejected_before_server_hello() {
-        let state = make_ws_test_state().await;
-        let addr = start_ws_test_server(state.clone()).await;
-        for identity in [
-            AuthorSubject::SYSTEM,
-            AuthorSubject::for_test_bytes([0x77; 16]),
-        ] {
-            let (mut ws, _) = connect_async(ws_url(addr, state.app_id)).await.unwrap();
-            let prelude = serde_json::to_vec(&serde_json::json!({
-                "peer_identity": identity.canonical(),
-                "auth": { "admin_secret": "admin-secret" },
-                "bootstrap_catalogue": true,
-            }))
-            .unwrap();
-            ws.send(WsMessage::Binary(prelude.into())).await.unwrap();
-            ws.send(WsMessage::Binary(
-                ws_client_hello_batch_with_features(current_wire_features()).into(),
-            ))
-            .await
-            .unwrap();
-            let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
-                .await
-                .expect("rejection deadline")
-                .expect("response")
-                .expect("wire response");
-            let WsMessage::Binary(bytes) = response else {
-                panic!("expected rejection");
-            };
-            let frames = decode_ws_frame_batch(&bytes).unwrap();
-            assert_eq!(frames.len(), 1);
-            assert!(matches!(&frames[0], WireFrame::Error(error)
-            if error.code == WireErrorCode::UnsupportedFeature
-                && error.retry == WireRetry::Never
-                && error.message.contains("edge catalogue bootstrap is no longer supported")));
-            let _ = ws.close(None).await;
-        }
-    }
 
     #[tokio::test]
     async fn accountless_anonymous_proof_cannot_open_public_websocket() {
         let state = make_ws_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
         let (_, prelude) = ws_anonymous_prelude(state.app_id, [0xb3; 32]);
-        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+        let (mut ws, _) = connect_ws(ws_url(addr, state.app_id), prelude, 0)
             .await
-            .expect("connect");
-        ws.send(WsMessage::Binary(prelude.into()))
-            .await
-            .expect("send proof");
+            .expect("connect websocket");
         let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
             .expect("admission resolves")
@@ -3237,25 +2748,17 @@ mod tests {
             .expect("Alice's principal")
             .with_account(account);
 
-        let (mut ws, _) = connect_async(format!(
-            "ws://127.0.0.1:{}/apps/{}/ws",
-            core.port(),
-            core.app_id()
-        ))
+        let (mut ws, _) = connect_ws(
+            format!("ws://127.0.0.1:{}/apps/{}/ws", core.port(), core.app_id()),
+            serde_json::json!({
+                "peer_identity": identity.canonical(),
+                "auth": { "jwt_token": alice },
+            })
+            .to_string(),
+            current_wire_features(),
+        )
         .await
         .expect("connect Alice");
-        let prelude = serde_json::json!({
-            "peer_identity": identity.canonical(),
-            "auth": { "jwt_token": alice },
-        });
-        ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
-            .await
-            .expect("send prelude");
-        ws.send(WsMessage::Binary(
-            ws_client_hello_batch_with_features(current_wire_features()).into(),
-        ))
-        .await
-        .expect("send hello");
         let first = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
             .expect("server hello deadline")
@@ -3378,22 +2881,17 @@ mod tests {
         let identity = AuthorSubject::authenticated(TEST_JWT_ISSUER, "alice")
             .expect("principal")
             .with_account(account);
-        let (mut ws, _) = connect_async(format!(
+        let (mut ws, _) = connect_ws(
+            format!(
             "ws://127.0.0.1:{}/apps/{}/ws",
             core.port(),
             core.app_id()
-        ))
+        ),
+            serde_json::json!({ "peer_identity": identity.canonical(), "auth": { "jwt_token": alice } }).to_string(),
+            current_wire_features(),
+        )
         .await
         .expect("connect Alice");
-        let prelude = serde_json::json!({ "peer_identity": identity.canonical(), "auth": { "jwt_token": alice } });
-        ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
-            .await
-            .expect("prelude");
-        ws.send(WsMessage::Binary(
-            ws_client_hello_batch_with_features(current_wire_features()).into(),
-        ))
-        .await
-        .expect("hello");
         let first = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
             .expect("hello deadline")
@@ -3609,12 +3107,9 @@ mod tests {
             })
             .to_string()
             .into_bytes();
-            let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+            let (mut ws, _) = connect_ws(ws_url(addr, state.app_id), prelude, 0)
                 .await
-                .expect("connect");
-            ws.send(WsMessage::Binary(prelude.into()))
-                .await
-                .expect("send forged SYSTEM claim");
+                .expect("connect websocket");
             let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
                 .await
                 .expect("admission resolves")
@@ -4552,36 +4047,92 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn idle_ws_upgrade_is_not_held_open_indefinitely() {
+    async fn upgrade_without_a_version_offer_ends_with_a_typed_error() {
         let state = make_ws_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
         let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
             .await
-            .expect("connect idle websocket");
-
-        tokio::time::sleep(WS_HANDSHAKE_READ_TIMEOUT + Duration::from_millis(500)).await;
-        let outcome = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+            .expect("connect websocket without subprotocols");
+        let response = tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .expect("a socket with no offer must not be held open")
+            .expect("server error frame")
+            .expect("server websocket result");
+        let frames = decode_ws_message(&response);
         assert!(
             matches!(
-                outcome,
-                Ok(Some(Ok(WsMessage::Close(_)))) | Ok(Some(Err(_))) | Ok(None)
+                frames.as_slice(),
+                [WireFrame::Error(WireError {
+                    code: WireErrorCode::UnsupportedProtocolVersion,
+                    retry: WireRetry::Never,
+                    ..
+                })]
             ),
-            "idle websocket upgrade must close after handshake timeout; observed {outcome:?}"
+            "{frames:?}"
         );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn idle_ws_upgrade_during_shutdown_closes_cleanly() {
+    async fn upgrade_selects_the_offered_version_and_admits_a_bearer_subprotocol() {
         let state = make_ws_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
-        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+        let (ws, response) = connect_ws(
+            ws_url(addr, state.app_id),
+            ws_prelude(AuthorSubject::SYSTEM),
+            0,
+        )
+        .await
+        .expect("connect websocket");
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
+                .and_then(|value| value.to_str().ok()),
+            Some(jazz::wire::ws_version_subprotocol(0).as_str()),
+            "the 101 must select the client's version token"
+        );
+        drop(ws);
+
+        // Another version is selected too, so the client can read why it ends.
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+        let mut request = ws_url(addr, state.app_id).into_client_request().unwrap();
+        request.headers_mut().insert(
+            axum::http::header::SEC_WEBSOCKET_PROTOCOL,
+            "jazz.99.0".parse().unwrap(),
+        );
+        request
+            .headers_mut()
+            .insert("X-Jazz-Admin-Secret", "admin-secret".parse().unwrap());
+        let (mut ws, _) = connect_async(request).await.expect("connect other version");
+        let response = tokio::time::timeout(Duration::from_secs(2), ws.next())
             .await
-            .expect("connect idle websocket");
+            .expect("version error deadline")
+            .expect("server error frame")
+            .expect("server websocket result");
+        assert!(matches!(
+            decode_ws_message(&response).as_slice(),
+            [WireFrame::Error(WireError {
+                code: WireErrorCode::UnsupportedProtocolVersion,
+                ..
+            })]
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn idle_ws_during_shutdown_closes_cleanly() {
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let mut ws = open_negotiated_ws(addr, &state, AuthorSubject::SYSTEM).await;
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(state.shutdown.request_shutdown());
 
-        let outcome = tokio::time::timeout(Duration::from_secs(3), ws.next()).await;
+        let outcome = loop {
+            match tokio::time::timeout(Duration::from_secs(3), ws.next()).await {
+                Ok(Some(Ok(WsMessage::Binary(_) | WsMessage::Ping(_)))) => continue,
+                outcome => break outcome,
+            }
+        };
         assert!(
             matches!(
                 outcome,
