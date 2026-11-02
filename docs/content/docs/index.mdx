@@ -88,6 +88,15 @@ You can also query and write to the database right from your frontend. It is pro
     }
     ```
 
+    ```tsx title="App.tsx"
+    import { JazzProvider } from "jazz-tools/react";
+
+    // Connects to /jazz on your backend by default, signed in as your app's current user
+    <JazzProvider user={session?.user.id ?? null}>
+      <Todos />
+    </JazzProvider>;
+    ```
+
   </Tab>
   <Tab value="Vue">
     ```vue title="Todos.vue"
@@ -104,6 +113,19 @@ You can also query and write to the database right from your frontend. It is pro
         <input type="checkbox" @change="db.update(app.todos, todo.id, { done: true })" />
         {{ todo.title }}
       </label>
+    </template>
+    ```
+
+    ```vue title="App.vue"
+    <script setup lang="ts">
+    import { JazzProvider } from "jazz-tools/vue";
+    </script>
+
+    <template>
+      <!-- Connects to /jazz on your backend by default, signed in as your app's current user -->
+      <JazzProvider :user="session?.user.id ?? null">
+        <Todos />
+      </JazzProvider>
     </template>
     ```
 
@@ -124,6 +146,17 @@ You can also query and write to the database right from your frontend. It is pro
         {todo.title}
       </label>
     {/each}
+    ```
+
+    ```svelte title="App.svelte"
+    <script lang="ts">
+      import { JazzProvider } from "jazz-tools/svelte";
+    </script>
+
+    <!-- Connects to /jazz on your backend by default, signed in as your app's current user -->
+    <JazzProvider user={session?.user.id ?? null}>
+      <Todos />
+    </JazzProvider>
     ```
 
   </Tab>
@@ -150,6 +183,15 @@ You can also query and write to the database right from your frontend. It is pro
     }
     ```
 
+    ```tsx title="App.tsx"
+    import { JazzProvider } from "jazz-tools/solid";
+
+    // Connects to /jazz on your backend by default, signed in as your app's current user
+    <JazzProvider user={session()?.user.id ?? null}>
+      <Todos />
+    </JazzProvider>;
+    ```
+
   </Tab>
   <Tab value="Effect">
     ```ts title="todos.ts"
@@ -173,7 +215,7 @@ You can also query and write to the database right from your frontend. It is pro
   </Tab>
 </Tabs>
 
-The React, Vue, Svelte and Solid components run inside `JazzProvider`; see [Thin Client](/docs/setup/web-client/thin-client) for the setup.
+Set up the client: [Thin Client](/docs/setup/web-client/thin-client) (the default) or [Local-First Client](/docs/setup/web-client/local-first-client) (offline, instant UI).
 
 ## Start here
 
