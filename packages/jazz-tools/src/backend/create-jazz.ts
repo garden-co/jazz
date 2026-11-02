@@ -98,6 +98,8 @@ export function remote(options: {
  * restarts the core on its version, and an older deployment never moves it
  * back. Outside a production or preview deployment (`next dev`, `vercel dev`,
  * tests) it runs `local` instead: by default a SQLite core in `.jazz/local`.
+ * Branch cores are not deleted when a branch merges yet: each keeps its
+ * Sandbox and a Drive of up to `maxDriveBytes` until you remove them.
  */
 export function vercel(
   options: VercelStoreOptions & { local?: Extract<JazzStore, { kind: "sqlite" | "memory" }> } = {},
@@ -435,7 +437,7 @@ async function openInProcessCore(
  * writable at all), so a sqlite store there loses data silently.
  */
 function refuseServerlessDisk(dir: string): void {
-  const host = process.env.VERCEL
+  const host = onVercelDeployment()
     ? "Vercel"
     : process.env.AWS_LAMBDA_FUNCTION_NAME
       ? "AWS Lambda"
@@ -1056,7 +1058,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       request.method === "GET" &&
       path?.endsWith("/ws") &&
       request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
-      process.env.VERCEL
+      onVercelDeployment()
     ) {
       if (!originAllowed(request)) return new Response("origin not allowed", { status: 403 });
       const { upgradeWebSocket } = (await import(
@@ -1073,7 +1075,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     }
     // On Vercel this handler upgrades sockets (above); elsewhere (next dev)
     // only if attach() runs on the same server.
-    return handle(request, upgradesSockets || Boolean(process.env.VERCEL));
+    return handle(request, upgradesSockets || onVercelDeployment());
   }
 
   function nodeRequest(req: IncomingMessage): Request {

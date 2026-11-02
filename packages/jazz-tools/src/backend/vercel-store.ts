@@ -179,55 +179,68 @@ export function startScript(
   appId: string | undefined,
   version: string,
   tarballUrl: string,
+  /** @internal Prefix for /data and /tmp, for tests. */
+  root = "",
 ): string {
   const q = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
   return `#!/bin/bash
 # Written by jazz-tools' vercel() store for each server start.
 set -euo pipefail
+rm -f "$0"
+data=${q(`${root}/data`)}
+run=${q(`${root}/tmp`)}
 # Starts are serialized; the server itself runs without the lock.
-exec 9>/tmp/jazz.lock
+exec 9>"$run/jazz.lock"
 flock 9
 # Semver order: GNU sort -V with "~" sorts a prerelease before its release.
 newer() {
   [ "$1" != "$2" ] && [ "$(printf '%s\\n%s\\n' "\${1/-/\\~}" "\${2/-/\\~}" | sort -V | tail -1)" = "\${1/-/\\~}" ]
 }
 version=${q(version)}
-highest=$(cat /data/version 2>/dev/null || true)
-if [ -n "$highest" ] && [ -x "/data/bin/jazz-tools-$highest" ] && newer "$highest" "$version"; then
+highest=$(cat "$data/version" 2>/dev/null || true)
+if [ -n "$highest" ] && newer "$highest" "$version"; then
+  # A newer deployment owns this Drive: run its server, never ours.
+  if [ ! -x "$data/bin/jazz-tools-$highest" ]; then
+    echo "jazz: $highest owns this Drive but its server is missing; not starting $version" >&2
+    exit 1
+  fi
   version=$highest
 fi
-if [ -f /tmp/jazz.pid ] && kill -0 "$(cat /tmp/jazz.pid)" 2>/dev/null; then
-  [ "$(cat /tmp/jazz.version 2>/dev/null)" = "$version" ] && exit 0
-  pid=$(cat /tmp/jazz.pid)
-  kill -TERM "$pid" 2>/dev/null || true
-  for _ in $(seq 150); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
-  kill -KILL "$pid" 2>/dev/null || true
-fi
-bin=/data/bin/jazz-tools-$version
+bin=$data/bin/jazz-tools-$version
+# Fetch before stopping anything, so a failed download leaves the old server up.
 if [ ! -x "$bin" ]; then
-  mkdir -p /data/bin
+  mkdir -p "$data/bin"
   # The Sandbox image has node but no curl.
   node -e 'fetch(process.argv[1]).then(async (r) => { if (!r.ok) throw new Error(r.status); process.stdout.write(Buffer.from(await r.arrayBuffer())); })' ${q(tarballUrl)} \\
     | tar xz -O package/bin/native/jazz-tools-linux-x64 > "$bin.tmp"
   chmod 755 "$bin.tmp" && mv "$bin.tmp" "$bin"
 fi
-if [ ! -f /data/secrets.env ]; then
+# The pid file may be stale (a resumed snapshot): trust it only if that
+# process runs one of our server binaries.
+pid=$(cat "$run/jazz.pid" 2>/dev/null || true)
+if [ -n "$pid" ] && [[ "$(tr '\\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" == *"$data/bin/jazz-tools-"* ]]; then
+  [ "$(cat "$run/jazz.version" 2>/dev/null)" = "$version" ] && exit 0
+  kill -TERM "$pid" 2>/dev/null || true
+  for _ in $(seq 150); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+  kill -KILL "$pid" 2>/dev/null || true
+fi
+if [ ! -f "$data/secrets.env" ]; then
   umask 077
   secret() { head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='; }
   app_id=${appId ? q(appId) : "$(cat /proc/sys/kernel/random/uuid)"}
-  printf 'JAZZ_APP_ID=%s\\nJAZZ_ADMIN_SECRET=%s\\nJAZZ_BACKEND_SECRET=%s\\n' "$app_id" "$(secret)" "$(secret)" > /data/secrets.env.tmp
-  mv /data/secrets.env.tmp /data/secrets.env
+  printf 'JAZZ_APP_ID=%s\\nJAZZ_ADMIN_SECRET=%s\\nJAZZ_BACKEND_SECRET=%s\\n' "$app_id" "$(secret)" "$(secret)" > "$data/secrets.env.tmp"
+  mv "$data/secrets.env.tmp" "$data/secrets.env"
 fi
-set -a; . /data/secrets.env; set +a
+set -a; . "$data/secrets.env"; set +a
 export NODE_ENV=production
-mkdir -p /data/store
-printf '%s\n' "$version" > /data/version.tmp && mv /data/version.tmp /data/version
+mkdir -p "$data/store"
+printf '%s\\n' "$version" > "$data/version.tmp" && mv "$data/version.tmp" "$data/version"
 # Older servers are never started again (see above).
-find /data/bin -name 'jazz-tools-*' ! -name "jazz-tools-$version" -delete
-printf '%s\n' "$version" > /tmp/jazz.version
-echo $$ > /tmp/jazz.pid
+find "$data/bin" -name 'jazz-tools-*' ! -name "jazz-tools-$version" -delete
+printf '%s\\n' "$version" > "$run/jazz.version"
+echo $$ > "$run/jazz.pid"
 exec 9>&-
-exec "$bin" server "$JAZZ_APP_ID" --port ${VERCEL_CORE_PORT} --data-dir /data/store
+exec "$bin" server "$JAZZ_APP_ID" --port ${VERCEL_CORE_PORT} --data-dir "$data/store"
 `;
 }
 
@@ -263,15 +276,18 @@ export function onVercelDeployment(env: Record<string, string | undefined> = pro
  */
 export function defaultCoreName(project: string, env: Record<string, string | undefined>): string {
   const target = env.VERCEL_ENV ?? "development";
-  if (target !== "preview") return `jazz-${project}-${target}`;
-  const branch = env.VERCEL_GIT_COMMIT_REF ?? env.VERCEL_DEPLOYMENT_ID ?? "unknown";
+  // Project ids are mixed case with an underscore; names stay [a-z0-9-].
+  const safe = (part: string) => part.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  if (target !== "preview") return `jazz-${safe(project)}-${safe(target)}`;
+  // CLI deploys have no branch; they share one preview core.
+  const branch = env.VERCEL_GIT_COMMIT_REF ?? "cli";
   const slug = branch
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 24);
   const hash = createHash("sha256").update(branch).digest("hex").slice(0, 8);
-  return `jazz-${project}-preview-${slug}-${hash}`;
+  return `jazz-${safe(project)}-preview-${slug}-${hash}`;
 }
 
 async function installedVersion(): Promise<string> {

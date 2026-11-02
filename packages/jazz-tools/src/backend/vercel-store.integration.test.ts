@@ -167,7 +167,7 @@ describe("vercel() store", () => {
 
     const jazz = await createJazz({ appId, app, permissions, store: vercel({ sdk: fake.sdk }) });
     cleanups.push(() => jazz.close());
-    expect(fake.calls).toContain("resume jazz-prj_test-production");
+    expect(fake.calls).toContain("resume jazz-prj-test-production");
     expect(fake.calls.some((call) => call.startsWith("create"))).toBe(false);
   }, 60_000);
 
@@ -226,8 +226,8 @@ describe("vercel() store", () => {
     const main = defaultCoreName("prj_1", { VERCEL_ENV: "production" });
     const a = defaultCoreName("prj_1", { VERCEL_ENV: "preview", VERCEL_GIT_COMMIT_REF: "feat/A" });
     const b = defaultCoreName("prj_1", { VERCEL_ENV: "preview", VERCEL_GIT_COMMIT_REF: "feat-a" });
-    expect(main).toBe("jazz-prj_1-production");
-    expect(a).toMatch(/^jazz-prj_1-preview-feat-a-[0-9a-f]{8}$/);
+    expect(main).toBe("jazz-prj-1-production");
+    expect(a).toMatch(/^jazz-prj-1-preview-feat-a-[0-9a-f]{8}$/);
     expect(new Set([main, a, b]).size).toBe(3);
   });
 
@@ -272,8 +272,8 @@ describe("vercel() store", () => {
       "https://registry.npmjs.org/jazz-tools/-/jazz-tools-2.0.0-alpha.60.tgz",
     );
     expect(script).toContain("version='2.0.0-alpha.60'");
-    expect(script).toContain("bin=/data/bin/jazz-tools-$version");
-    expect(script).toContain("if [ ! -f /data/secrets.env ]");
+    expect(script).toContain("bin=$data/bin/jazz-tools-$version");
+    expect(script).toContain(`if [ ! -f "$data/secrets.env" ]`);
     expect(script).toContain(`app_id='app'\\''1'`);
   });
 });
