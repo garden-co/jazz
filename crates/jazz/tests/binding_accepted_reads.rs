@@ -248,3 +248,60 @@ fn timeout_and_identity_validation_precede_read_admission() {
     read(&alice, &id);
     alice.commit_transaction(&id, Some("serializable")).unwrap();
 }
+
+/// Alice's bound ordinary reads inherit registered claims when omitted, through
+/// owner and retained handles. Explicit empty overrides and real drift refuse.
+#[test]
+fn mixed_reads_inherit_live_claims_without_erasing_explicit_overrides() {
+    for retained in [false, true] {
+        for explicit in [false, true] {
+            for mode in ["stable", "drift", "empty-override"] {
+                let alice = open(1, false, false);
+                alice.set_session_claims(json!({"team":"a"})).unwrap();
+                let view = alice
+                    .register_schema(&serde_json::to_vec(&schema()).unwrap())
+                    .unwrap();
+                let binding = if retained { &view } else { &alice };
+                let author = binding.author().canonical().to_string();
+                let id = OpenTransactionId::new().to_string();
+                binding
+                    .begin_transaction_with_capability(
+                        &id,
+                        "serializable",
+                        explicit.then_some(author.as_bytes()),
+                        None,
+                        true,
+                    )
+                    .unwrap();
+                read(binding, &id);
+                if mode == "drift" {
+                    alice.set_session_claims(json!({"team":"b"})).unwrap();
+                }
+                let rows = block_on(
+                    binding
+                        .all(
+                            query(),
+                            &json!({"tier":"local-only"}),
+                            Some(&id),
+                            None,
+                            (mode == "empty-override").then(|| json!({})),
+                        )
+                        .unwrap(),
+                );
+                if mode == "stable" {
+                    assert_eq!(rows.unwrap(), vec![0]);
+                    binding
+                        .commit_transaction(&id, Some("serializable"))
+                        .unwrap();
+                } else {
+                    assert!(rows.is_err(), "scope mismatch was ignored: {mode}");
+                    assert!(
+                        binding
+                            .commit_transaction(&id, Some("serializable"))
+                            .is_err()
+                    );
+                }
+            }
+        }
+    }
+}

@@ -1459,8 +1459,12 @@ impl Binding {
             Some(bound) => Some(bound),
             None => self.read_author(author)?,
         };
-        let admission = match (explicit, author) {
-            (true, Some(author)) => Some((
+        let admission = match (explicit, author, claims) {
+            // A bound batch already supplies its reader. Omitted claims inherit
+            // the current core registration, just like accepted_read; explicit
+            // claims (including an empty map) remain authoritative overrides.
+            (true, Some(_), None) if bound.is_some() => None,
+            (true, Some(author), claims) => Some((
                 author,
                 self::claims(author, claims.unwrap_or(serde_json::Value::Null))?,
             )),
