@@ -1,5 +1,5 @@
 //! Pins the local-first auth wire format shared with the TypeScript package
-//! `@garden-co/local-first-auth` (packages/local-first-auth). Both sides test
+//! `src/local-first-auth` in jazz-tools. Both sides test
 //! against the same vector file, so neither can drift on its own. Ed25519 is
 //! deterministic, so the TypeScript side mints byte-identical tokens.
 //!
@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 const VECTORS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../../../packages/local-first-auth/test-vectors.json"
+    "/../../../../packages/jazz-tools/src/local-first-auth/test-vectors.json"
 );
 const NOW: u64 = 1_800_000_000;
 const APP: &str = "6b0c3f8e-2d9a-4f61-9a57-1c2e3d4f5a6b";

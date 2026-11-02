@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 // The verifier itself is covered by local-first-token.test.ts and the
-// @garden-co/local-first-auth vectors; these tests drive its outcome.
+// src/local-first-auth vectors; these tests drive its outcome.
 vi.mock("../runtime/local-first-token.js", () => ({
   verifyLocalFirstToken: (token: string, appId: string) => {
     const result = mocks.verifyLocalFirstIdentityProof(token, appId);
