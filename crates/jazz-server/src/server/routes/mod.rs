@@ -121,6 +121,10 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             state.clone(),
             app_shutdown_gate,
         ))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::workload::workload_gate,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), app_id_gate))
         .layer(TraceLayer::new_for_http());
 
