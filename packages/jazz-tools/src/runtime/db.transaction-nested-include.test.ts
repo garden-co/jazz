@@ -8,13 +8,19 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 it.each(["inline", "large"])(
   "reads a nested reference inside a transaction without encryption (%s)",
   async (size) => {
-    const app = s.defineApp({
-      projects: s.table({ title: s.string() }, { notesViaProject: s.reverse("notes", "project") }),
-      notes: s.table(
-        { projectId: s.uuid(), title: s.string() },
-        { project: s.rel("projects", "projectId") },
-      ),
-    });
+    const app = s.defineApp(
+      {
+        projects: s.table(
+          { title: s.string() },
+          { notesViaProject: s.reverse("notes", "project") },
+        ),
+        notes: s.table(
+          { projectId: s.uuid(), title: s.string() },
+          { project: s.rel("projects", "projectId") },
+        ),
+      },
+      { migrations: "none" },
+    );
     const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     try {
@@ -63,13 +69,16 @@ it.each(["inline", "large"])(
 it.each(["local-first", "remote"] as const)(
   "reads a reverse include of a JSON child inside a serializable transaction (%s)",
   async (tier) => {
-    const app = s.defineApp({
-      parent: s.table({ name: s.string() }, { childViaParent: s.reverse("child", "parent") }),
-      child: s.table(
-        { parentId: s.uuid(), name: s.string(), metadata: s.json() },
-        { parent: s.rel("parent", "parentId") },
-      ),
-    });
+    const app = s.defineApp(
+      {
+        parent: s.table({ name: s.string() }, { childViaParent: s.reverse("child", "parent") }),
+        child: s.table(
+          { parentId: s.uuid(), name: s.string(), metadata: s.json() },
+          { parent: s.rel("parent", "parentId") },
+        ),
+      },
+      { migrations: "none" },
+    );
     const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     try {

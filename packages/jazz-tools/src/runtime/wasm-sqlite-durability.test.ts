@@ -14,7 +14,7 @@ import { testAuthorBytes } from "./testing/account-fixtures.js";
 import { allowAll } from "./testing/allow-all.js";
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "./testing/wasm-runtime-test-utils.js";
 
-const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) });
+const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
 
 beforeAll(() => {
   for (const [name, value] of Object.entries(idb)) {

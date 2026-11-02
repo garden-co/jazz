@@ -2,55 +2,61 @@ import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { translateQuery } from "./query-adapter.js";
 
-const app = s.defineApp({
-  users: s.table(
-    {
-      name: s.string(),
-    },
-    { todosViaOwner: s.reverse("todos", "owner") },
-  ),
-  projects: s.table(
-    {
-      name: s.string(),
-    },
-    { todosViaProject: s.reverse("todos", "project") },
-  ),
-  todos: s.table(
-    {
-      title: s.string(),
-      body: s.string(),
-      rank: s.bigint(),
-      attachment: s.bytes(),
-      metadata: s.json(),
-      done: s.boolean(),
-      projectId: s.uuid(),
-      ownerId: s.uuid().optional(),
-    },
-    { project: s.rel("projects", "projectId"), owner: s.rel("users", "ownerId") },
-  ),
-  events: s.table(
-    {
-      event: s.enum({
-        message: { text: s.string(), level: s.int() },
-        closed: { code: s.int() },
-      }),
-    },
-    {},
-  ),
-});
-const scalarApp = s.defineApp({
-  filters: s.table(
-    {
-      timestamp: s.timestamp(),
-      bytes: s.bytes(),
-      nullableBytes: s.bytes().optional(),
-      metadata: s.json(),
-      tags: s.array(s.string()),
-      nullableTags: s.array(s.string()).optional(),
-    },
-    {},
-  ),
-});
+const app = s.defineApp(
+  {
+    users: s.table(
+      {
+        name: s.string(),
+      },
+      { todosViaOwner: s.reverse("todos", "owner") },
+    ),
+    projects: s.table(
+      {
+        name: s.string(),
+      },
+      { todosViaProject: s.reverse("todos", "project") },
+    ),
+    todos: s.table(
+      {
+        title: s.string(),
+        body: s.string(),
+        rank: s.bigint(),
+        attachment: s.bytes(),
+        metadata: s.json(),
+        done: s.boolean(),
+        projectId: s.uuid(),
+        ownerId: s.uuid().optional(),
+      },
+      { project: s.rel("projects", "projectId"), owner: s.rel("users", "ownerId") },
+    ),
+    events: s.table(
+      {
+        event: s.enum({
+          message: { text: s.string(), level: s.int() },
+          closed: { code: s.int() },
+        }),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
+const scalarApp = s.defineApp(
+  {
+    filters: s.table(
+      {
+        timestamp: s.timestamp(),
+        bytes: s.bytes(),
+        nullableBytes: s.bytes().optional(),
+        metadata: s.json(),
+        tags: s.array(s.string()),
+        nullableTags: s.array(s.string()).optional(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 function translatedConditions(query: { _build(): string }) {
   return JSON.parse(translateQuery(query._build(), scalarApp.wasmSchema)).conditions;
@@ -215,68 +221,80 @@ describe("translateQuery", () => {
 
   it("rejects a forward relation that would shadow a stored output column", () => {
     expect(() =>
-      s.defineApp({
-        users: s.table({ name: s.string() }, {
-          todosViaOwner: s.reverse("todos", "owner"),
-        } as never),
-        todos: s.table(
-          {
-            owner: s.string(),
-            ownerId: s.uuid(),
-          },
-          { owner: s.rel("users", "ownerId") } as never,
-        ),
-      }),
+      s.defineApp(
+        {
+          users: s.table({ name: s.string() }, {
+            todosViaOwner: s.reverse("todos", "owner"),
+          } as never),
+          todos: s.table(
+            {
+              owner: s.string(),
+              ownerId: s.uuid(),
+            },
+            { owner: s.rel("users", "ownerId") } as never,
+          ),
+        },
+        { migrations: "none" },
+      ),
     ).toThrow(/Relationship "owner" collides with a column/);
   });
 
   it("rejects a generated relation that would shadow the implicit public id", () => {
     expect(() =>
-      s.defineApp({
-        users: s.table({ name: s.string() }, { todosViaId: s.reverse("todos", "id") }),
-        todos: s.table(
-          {
-            idId: s.uuid(),
-          },
-          { id: s.rel("users", "idId") } as never,
-        ),
-      }),
+      s.defineApp(
+        {
+          users: s.table({ name: s.string() }, { todosViaId: s.reverse("todos", "id") }),
+          todos: s.table(
+            {
+              idId: s.uuid(),
+            },
+            { id: s.rel("users", "idId") } as never,
+          ),
+        },
+        { migrations: "none" },
+      ),
     ).toThrow(/Relationship "id" collides with a column/);
   });
 
   it("rejects a nested reverse relation that would shadow a stored output column", () => {
     expect(() =>
-      s.defineApp({
-        users: s.table(
-          {
-            todosViaOwner: s.string(),
-          },
-          { todosViaOwner: s.reverse("todos", "owner") } as never,
-        ),
-        todos: s.table(
-          {
-            ownerId: s.uuid(),
-          },
-          { owner: s.rel("users", "ownerId") } as never,
-        ),
-      }),
+      s.defineApp(
+        {
+          users: s.table(
+            {
+              todosViaOwner: s.string(),
+            },
+            { todosViaOwner: s.reverse("todos", "owner") } as never,
+          ),
+          todos: s.table(
+            {
+              ownerId: s.uuid(),
+            },
+            { owner: s.rel("users", "ownerId") } as never,
+          ),
+        },
+        { migrations: "none" },
+      ),
     ).toThrow(/Relationship "todosViaOwner" collides with a column/);
   });
 
   it("uses a distinct declared alias for an unsuffixed UUID column", () => {
     expect(() =>
-      s.defineApp({
-        users: s.table(
-          { name: s.string() },
-          { todosViaOwner: s.reverse("todos", "ownerRelation") },
-        ),
-        todos: s.table(
-          {
-            owner: s.uuid(),
-          },
-          { ownerRelation: s.rel("users", "owner") },
-        ),
-      }),
+      s.defineApp(
+        {
+          users: s.table(
+            { name: s.string() },
+            { todosViaOwner: s.reverse("todos", "ownerRelation") },
+          ),
+          todos: s.table(
+            {
+              owner: s.uuid(),
+            },
+            { ownerRelation: s.rel("users", "owner") },
+          ),
+        },
+        { migrations: "none" },
+      ),
     ).not.toThrow();
   });
 

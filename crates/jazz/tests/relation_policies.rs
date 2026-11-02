@@ -337,7 +337,7 @@ fn a_relation_keyed_by_the_row_id_grants_only_the_rows_it_names() {
         "{sql}"
     );
     assert!(
-        plan.contains("resource_access_edges__ix(resource)"),
+        common::unhashed(&plan).contains("resource_access_edges__ix(resource)"),
         "{plan}"
     );
 }
@@ -536,7 +536,8 @@ fn an_insert_check_keyed_by_the_row_id_admits_the_rows_it_names() {
         .explain_write_check_plan("resources", id(3, 1), alice, &[])
         .unwrap();
     assert!(
-        plan.contains("resource_access_edges__ix(resource)") && !plan.contains("LIST SUBQUERY"),
+        common::unhashed(&plan).contains("resource_access_edges__ix(resource)")
+            && !plan.contains("LIST SUBQUERY"),
         "{plan}"
     );
     let insert = |row: RowUuid| {

@@ -155,15 +155,18 @@ describe("ManagedDevRuntime", () => {
     const appId = "00000000-0000-0000-0000-000000000244";
     const adminSecret = "managed-native-admin-secret";
     const dataDir = join(projectRoot, "persistent-server-data");
-    const expectedApp = s.defineApp({
-      todos: s.table(
-        {
-          title: s.string(),
-          done: s.boolean(),
-        },
-        {},
-      ),
-    });
+    const expectedApp = s.defineApp(
+      {
+        todos: s.table(
+          {
+            title: s.string(),
+            done: s.boolean(),
+          },
+          {},
+        ),
+      },
+      { migrations: "none" },
+    );
     const expectedPublishedSchema = {
       todos: { columns: expectedApp.wasmSchema.todos.columns },
     };

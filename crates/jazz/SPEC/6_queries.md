@@ -1002,13 +1002,11 @@ are not marked deleted. Subscription deletion state is exposed through the
 revoking access to a row updates the subscription like any other change: a
 restoration replaces the deleted row with the live one, and a row whose read
 policy no longer holds, including because its granting row was deleted, leaves
-the result. Include-deleted reads of current tables differ by read path. Plain
-one-shot reads support only the current source and reject every other read
-view (branch views and snapshots) with a "not supported yet" error.
-Subscriptions, and transaction reads, which register as snapshot
-subscriptions, accept the current source and any snapshot; they reject branch
-views with a "not supported yet" error. History queries keep their own branch
-selection.
+the result. Include-deleted reads, one-shot or live, accept the current
+source and branch views; subscriptions and transaction reads, which register
+as snapshot subscriptions, accept snapshots too. A replica keeps a live
+branch-view read in its view upstream (ch. 8 §8.4, ch. 11 §11.5). History
+queries keep their own branch selection.
 
 Inside an open serializable transaction, `tx_query` records a binding-sensitive
 `PredicateRead` (`INV-QUERY-13`). The later phantom check (ch. 3,

@@ -1121,10 +1121,12 @@ impl WasmDb {
         let (schema, mut config) = binding_host::decode_open(schema, config).map_err(host_error)?;
         let (identity, trusted) =
             binding_host::open_identity(&mut config, how).map_err(host_error)?;
-        let db = block_on(binding_host::open_memory(binding_host::db_config(
-            schema, &config, identity,
-        )))
-        .map_err(to_js_error)?;
+        let db_config = jazz::tools::deployment::published::with_client_migrations(
+            binding_host::db_config(schema, &config, identity),
+            config.migrations.as_deref(),
+        )
+        .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
+        let db = block_on(binding_host::open_memory(db_config)).map_err(to_js_error)?;
         Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
     }
 
@@ -1213,8 +1215,12 @@ impl WasmDb {
         // Every SQLite store keeps full history, so `history_complete`
         // needs nothing extra.
         let spec = browser::StoreSpec::from_js(&storage, &database)?;
-        let (db, store) =
-            browser::open(&spec, binding_host::db_config(schema, &config, identity)).await?;
+        let db_config = jazz::tools::deployment::published::with_client_migrations(
+            binding_host::db_config(schema, &config, identity),
+            config.migrations.as_deref(),
+        )
+        .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
+        let (db, store) = browser::open(&spec, db_config).await?;
         let owner = Self::runtime_owner(Binding::new(db, identity, trusted));
         *owner.open_inner()?.host.store.borrow_mut() = Some(store);
         Ok(owner)
@@ -1247,11 +1253,22 @@ impl WasmDb {
         })
     }
 
-    /// Register a typed schema view backed by this same runtime owner.
+    /// Register a typed schema view backed by this same runtime owner, of
+    /// an app shipping `migrations` (its bundle as JSON).
     #[wasm_bindgen(js_name = registerSchema)]
-    pub fn register_schema(&self, schema: Vec<u8>) -> Result<WasmDb, JsValue> {
+    pub fn register_schema(
+        &self,
+        schema: Vec<u8>,
+        migrations: Option<Vec<u8>>,
+    ) -> Result<WasmDb, JsValue> {
         let inner = self.open_inner()?;
-        let binding = inner.binding.register_schema(&schema).map_err(host_error)?;
+        let migrations =
+            jazz::tools::deployment::published::lowered_client_migrations(migrations.as_deref())
+                .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
+        let binding = inner
+            .binding
+            .register_schema_shipping(&schema, migrations)
+            .map_err(host_error)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(WasmDbInner { binding, ..inner }))),
             owns_runtime: false,
@@ -1706,7 +1723,10 @@ impl WasmDb {
     ) -> Result<js_sys::Promise, JsValue> {
         let claims = binding_host::claims(identity, json_or_null(claims)?).map_err(host_error)?;
         let inner = self.open_inner()?;
-        let link = inner.binding.accept_subscriber(identity, claims);
+        let link = inner
+            .binding
+            .accept_subscriber(identity, claims)
+            .map_err(host_error)?;
         Ok(js_sys::Promise::resolve(&JsValue::from(
             WasmTransport::new(link, Some(inner.host)),
         )))
