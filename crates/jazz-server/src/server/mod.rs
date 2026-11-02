@@ -96,6 +96,9 @@ pub struct ServerState {
     /// Authentication configuration.
     pub auth_config: AuthConfig,
     pub jwt_verifier: Option<Arc<JwtVerifier>>,
+    /// Set when the server trusts a workload (see `middleware::workload`).
+    pub(crate) workload_verifier: Option<Arc<crate::middleware::workload::WorkloadVerifier>>,
+    pub(crate) workload_secrets: Option<crate::middleware::workload::InternalSecrets>,
     /// Sendable handle to the local-owner server shell for the websocket route.
     pub(crate) core_server_shell: StdRwLock<Option<ServerRuntimeHandle>>,
     /// Per-state admission owner for policy-scoped WebSocket connections.
