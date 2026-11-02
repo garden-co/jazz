@@ -1,3 +1,4 @@
+import { fetchFor } from "./in-process-transport.js";
 import { PlatformURL } from "./platform-url.js";
 /**
  * Build an app-scoped URL under `/apps/<appId>`.
@@ -24,7 +25,7 @@ export async function fetchAdminJson(
   label: string,
   guidance?: (status: number) => string,
 ): Promise<unknown> {
-  const response = await fetch(url, {
+  const response = await fetchFor(url)(url, {
     method: "GET",
     headers: { "X-Jazz-Admin-Secret": adminSecret },
   });
@@ -73,11 +74,23 @@ function normalizeServerUrlBase(serverUrl: string): string {
   return parsed.toString().replace(/\/+$/, "");
 }
 
+/**
+ * Resolve a path-only server URL such as `/jazz` against the page's origin.
+ * A backend that mounts Jazz serves it on the app's own origin, so browser
+ * clients name it by path. Outside a page, a path stays as given (and is
+ * rejected as an invalid URL).
+ */
+export function resolveServerUrl(serverUrl: string): string {
+  if (!serverUrl.startsWith("/") || serverUrl.startsWith("//")) return serverUrl;
+  const location = (globalThis as { location?: { href?: string } }).location;
+  return location?.href ? new PlatformURL(serverUrl, location.href).href : serverUrl;
+}
+
 function parseServerUrl(serverUrl: string): URL {
   let parsed: URL;
 
   try {
-    parsed = new PlatformURL(serverUrl.trim());
+    parsed = new PlatformURL(resolveServerUrl(serverUrl.trim()));
   } catch {
     throw invalidServerUrl(serverUrl);
   }

@@ -38,9 +38,17 @@ export function hasAuthProviderConnection(session: object): boolean {
  */
 export function connectAuthProvider<Client>(
   session: JazzSession<Client>,
-  options: {
-    getToken(): Promise<string>;
-  },
+  options:
+    | {
+        getToken(): Promise<string>;
+      }
+    | {
+        /**
+         * The app's backend (`createJazz`) names the signed-in user: each
+         * admission is `session.loginWithBackend()`, with no token.
+         */
+        backend: true;
+      },
 ): AuthProviderConnection {
   if (owners.has(session)) throw new Error("Jazz session already has an auth provider connection");
   const predecessor = releases.get(session);
@@ -124,6 +132,10 @@ export function connectAuthProvider<Client>(
         // A delayed provider notification can acknowledge an already completed logout.
         const current = session.getSnapshot();
         if (current.status !== "signed-out" || current.error) await session.logout();
+      } else if ("backend" in options) {
+        if (desired.key !== key || desired.isPending)
+          throw new Error("Auth provider session changed");
+        await session.loginWithBackend();
       } else
         await session.loginOrRegisterJWT({
           async getToken() {

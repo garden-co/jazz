@@ -1,3 +1,4 @@
+import { fetchFor } from "../runtime/in-process-transport.js";
 import { runtimeSchemaJsonReplacer } from "../drivers/schema-wire.js";
 import type {
   ColumnType,
@@ -271,7 +272,8 @@ export async function publishDeployment(
   serverUrl: string,
   options: { appId: string; adminSecret: string } & DeploymentArtifacts,
 ): Promise<DeploymentResponse> {
-  const response = await fetch(appScopedUrl(serverUrl, options.appId, "admin/deploy"), {
+  const deployUrl = appScopedUrl(serverUrl, options.appId, "admin/deploy");
+  const response = await fetchFor(deployUrl)(deployUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

@@ -67,6 +67,8 @@ use jazz_server::{
     AuthConfig, JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
     TEST_JWT_AUDIENCE, TEST_JWT_ISSUER, TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
+mod embedded;
+
 use napi::bindgen_prelude::*;
 use napi::sys;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -2065,7 +2067,7 @@ fn parse_jazz_server_start_options(options: JsonValue) -> napi::Result<JazzServe
         .map_err(|error| napi::Error::from_reason(format!("Invalid JazzServer options: {error}")))
 }
 
-fn init_jazz_server_telemetry(collector_url: Option<&str>) {
+pub(crate) fn init_jazz_server_telemetry(collector_url: Option<&str>) {
     let Some(collector_url) = collector_url else {
         return;
     };

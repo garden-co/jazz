@@ -206,6 +206,15 @@ h6 {
   font-size: inherit;
 }
 
+/* Snippet filenames default to small comment-coloured text, which is easy
+   to miss; in docs they label the file, so show them at body size in the
+   primary text colour. */
+.docs-body .astryx-code-block-title {
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-leading);
+  color: var(--color-text-primary);
+}
+
 /* Homepage diagrams (components/home/diagrams.tsx), in the style of the
    Jazz print material: square boxes, mono labels, thin wires with open
    arrowheads. Blue = local, mint = global, periwinkle = in flight. Sizes
@@ -921,4 +930,10 @@ h6 {
 .home-quote-portrait-logo img {
   object-fit: contain;
   filter: grayscale(1);
+}
+
+/* Side nav links at body size; section headers keep the design system's size. */
+nav.astryx-side-nav .astryx-side-nav-item {
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-leading);
 }
