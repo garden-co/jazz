@@ -107,6 +107,16 @@ export interface CreateJazzOptions {
    */
   sessionTtlSeconds?: number;
   /**
+   * What happens to a local-first guest's key once the guest links to a
+   * signed-in user (`linkWithBackend()`):
+   * - `"keep"` (the default): the key stays an identity of the account, so
+   *   the device can still sign in as the guest (e.g. offline) alongside
+   *   the linked user.
+   * - `"revoke"`: the key is retired. Only the linked user signs in to the
+   *   account from then on, so a leaked guest key opens nothing.
+   */
+  guestKeyAfterLink?: "keep" | "revoke";
+  /**
    * Browser origins, besides the backend's own, that may open sync sessions
    * and call sign-in (e.g. `["https://app.example.com"]` when the page is
    * served from another host than the backend). A request from any other
@@ -720,6 +730,28 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       // The core's reason (e.g. the identity already belongs to another
       // account, or the challenge was used) stays on the backend.
       return new Response("link_refused", { status: 409 });
+    }
+    if (options.guestKeyAfterLink === "revoke") {
+      // The link already stands. If the revoke fails (the core just
+      // answered the link, so this is rare), the guest key stays usable:
+      // that is a server error, logged here, not a silent success.
+      const revoked = await core.handle(
+        "POST",
+        `/apps/${encodeURIComponent(accountAppId(options.appId))}/admin/accounts/revoke`,
+        [
+          ["x-jazz-admin-secret", core.adminSecret],
+          ["content-type", "application/json"],
+        ],
+        new TextEncoder().encode(
+          JSON.stringify({ approver: identity(user.userId), target: guest }),
+        ),
+      );
+      if (revoked.status !== 204) {
+        console.error(
+          `Jazz: revoking the guest key after a link failed (${revoked.status}): ${new TextDecoder().decode(revoked.body)}`,
+        );
+        return new Response("guest_key_revoke_failed", { status: 500 });
+      }
     }
     const expiresAt = Math.floor(Date.now() / 1000) + (options.sessionTtlSeconds ?? 3600);
     return Response.json(

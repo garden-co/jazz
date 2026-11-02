@@ -74,6 +74,10 @@ the client calls `linkWithBackend()`. It proves it owns the guest account by sig
 with its local-first key; your backend runs `authenticate` and links the new user to that account. In React, call it from
 `useJazzAuth().sessionActions` in your sign-up form.
 
+By default the guest's key stays an identity of the account, so the device can still sign in as the
+guest, for example offline. Pass `guestKeyAfterLink: "revoke"` to `createJazz` to retire it once it
+links: from then on only the signed-in user opens the account, and a leaked guest key opens nothing.
+
 To link from your own backend code instead, for example a second identity your auth issued, call:
 
 ```ts title="app/api/sign-up/route.ts"

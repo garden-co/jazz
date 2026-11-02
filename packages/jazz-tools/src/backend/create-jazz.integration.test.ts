@@ -430,6 +430,54 @@ describe("createJazz", () => {
     expect(guest).toMatch(/^[0-9a-f-]{36}$/);
   }, 60_000);
 
+  it.each(["keep", "revoke"] as const)(
+    "keeps or retires the guest key after a link (guestKeyAfterLink: %s)",
+    async (guestKeyAfterLink) => {
+      const appId = randomUUID();
+      const jazz = await createJazz({
+        appId,
+        app,
+        permissions,
+        store: memory(),
+        authenticate,
+        guestKeyAfterLink,
+      });
+      cleanups.push(() => jazz.close());
+      const origin = await serve(jazz, { sockets: true });
+      const accounts = `${origin}/jazz/apps/${appId}/accounts`;
+      const post = (path: string, user: string, body?: unknown) =>
+        fetch(`${accounts}/${path}`, {
+          method: "POST",
+          headers: { "x-test-user": user, "content-type": "application/json" },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+      const linkAs = async (user: string, secret: string) => {
+        const { challenge } = (await (await post("backend-link/challenge", user)).json()) as {
+          challenge: string;
+        };
+        return post("backend-link", user, { challenge, proof: signChallenge(secret, challenge) });
+      };
+
+      const secret = generateSecret();
+      const linked = await linkAs("alice", secret);
+      expect(linked.status).toBe(200);
+      const { account } = (await linked.json()) as { account: string };
+      // The guest key, used again to bring another user into the account:
+      // a kept key still can, a revoked one opens nothing.
+      const again = await linkAs("bob", secret);
+      if (guestKeyAfterLink === "keep") {
+        expect(again.status).toBe(200);
+        expect(((await again.json()) as { account: string }).account).toBe(account);
+      } else {
+        expect(again.status).toBe(409);
+      }
+      // The linked user signs in either way.
+      const alice = (await (await post("backend-sign-in", "alice")).json()) as { account: string };
+      expect(alice.account).toBe(account);
+    },
+    60_000,
+  );
+
   it("syncs over the HTTP stream when the host can't upgrade sockets", async () => {
     const appId = randomUUID();
     const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });

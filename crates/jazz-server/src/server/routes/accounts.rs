@@ -234,6 +234,37 @@ pub(super) async fn link_for_admin(
     Ok(response(request.to, assignment))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AdminRevoke {
+    approver: Principal,
+    target: Principal,
+}
+
+/// The app's backend vouches for `approver`, an identity of the account, and
+/// revokes `target`, another of its identities, as the approver's own
+/// credential would (`createJazz` revokes a local-first guest's key once it
+/// links to a signed-in user, when the app asks for that). The assignment
+/// stays: the target can no longer sign in, and is never reassigned.
+pub(super) async fn revoke_for_admin(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<AdminRevoke>,
+) -> Result<StatusCode, Failure> {
+    crate::middleware::auth::validate_admin_secret(
+        super::http::admin_secret_header(&headers),
+        &state.auth_config,
+    )?;
+    owner(&state)?
+        .execute(AccountCommand::Revoke {
+            approver: request.approver,
+            target: request.target,
+        })
+        .await
+        .map_err(failure)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Authentication denial and temporary registry availability are different wire outcomes.
 #[derive(Debug)]
 pub(super) enum AdmissionError {
@@ -717,6 +748,43 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(mallory.status(), StatusCode::NOT_FOUND);
+
+        // The backend may retire the guest's key once it linked: the user
+        // signs in, the guest no longer does, and founding can't revive it.
+        let unvouched = post(
+            "revoke",
+            serde_json::json!({ "approver": user("alice"), "target": guest }),
+            None,
+        );
+        assert_eq!(unvouched.await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        let revoked = post(
+            "revoke",
+            serde_json::json!({ "approver": user("alice"), "target": guest }),
+            secret,
+        )
+        .await
+        .unwrap();
+        assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+        let guest_login = post("resolve", serde_json::json!({ "identity": guest }), secret)
+            .await
+            .unwrap();
+        assert_eq!(guest_login.status(), StatusCode::FORBIDDEN);
+        let refounded = post(
+            "found-local-first",
+            serde_json::json!({ "identity": guest }),
+            secret,
+        )
+        .await
+        .unwrap();
+        assert_eq!(refounded.status(), StatusCode::FORBIDDEN);
+        let alice = post(
+            "resolve",
+            serde_json::json!({ "identity": user("alice") }),
+            secret,
+        )
+        .await
+        .unwrap();
+        assert_eq!(alice.status(), StatusCode::OK);
         core.shutdown().await;
     }
 
