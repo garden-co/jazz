@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import vectors from "../test-vectors.json" with { type: "json" };
+import vectors from "./test-vectors.json" with { type: "json" };
 import { verifyRequest } from "./server.js";
 
 const { now, audience, cases } = vectors;
