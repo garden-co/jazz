@@ -208,3 +208,9 @@ mod write_receipt_owner;
 
 #[path = "../transaction_read_prefix.rs"]
 mod transaction_read_prefix;
+
+#[path = "../accepted_rpc_reads.rs"]
+mod accepted_rpc_reads;
+
+#[path = "../accepted_evidence_wire.rs"]
+mod accepted_evidence_wire;

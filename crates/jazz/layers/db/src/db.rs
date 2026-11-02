@@ -57,7 +57,9 @@ use crate::values::{
     begin_savepoint, cell_from_sql, column_from_sql, end_savepoint, in_savepoint, quote, storage,
     to_sql, unsupported,
 };
-pub use accepted_read::{AcceptedRead, AcceptedRowEvidence, AcceptedVersion};
+pub use accepted_read::{
+    AcceptedRead, AcceptedReadScope, AcceptedRowEvidence, AcceptedVersion, EncodedAcceptedRead,
+};
 pub use sync::{
     ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
     FrameJoiner, Image, MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction,
@@ -460,7 +462,7 @@ pub struct SchemaPublication {
 struct Inner {
     conn: Connection,
     scheduler: Option<Rc<dyn TickScheduler>>,
-    read_deadlines: Vec<Weak<web_time::Instant>>,
+    read_deadlines: Vec<Weak<sync::ReadDeadline>>,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
     /// Errors the next ticks fail with, for tests of a tick driver.
@@ -1649,6 +1651,8 @@ impl Db {
         }
         let result = self.pump_chunk_store().await;
         self.schedule_read_deadlines();
+        self.wake_read_deadlines();
+        self.flush_pending_tick();
         result
     }
 
@@ -7020,22 +7024,33 @@ struct Overlay {
 /// The store behind its one gate: every borrow first undoes a transaction
 /// handle's overlay, so nothing but that handle's next stage or read sees
 /// it.
-struct Store(RefCell<Inner>, RefCell<Vec<u64>>);
+struct Store(
+    RefCell<Inner>,
+    RefCell<Vec<u64>>,
+    // A host wake requested while Inner is borrowed by a callback.
+    std::cell::Cell<bool>,
+);
 
 impl Store {
     fn new(inner: Inner) -> Self {
-        Self(RefCell::new(inner), RefCell::new(Vec::new()))
+        Self(
+            RefCell::new(inner),
+            RefCell::new(Vec::new()),
+            std::cell::Cell::new(false),
+        )
     }
 
     /// A callback can drop a read while the store is borrowed. Keep that
     /// cleanup outside Inner until the next exclusive borrow can apply it.
-    fn cancel_fetch(&self, id: u64) {
+    fn cancel_fetch(&self, id: u64) -> bool {
         if let Ok(mut inner) = self.0.try_borrow_mut() {
-            if let Some(client) = inner.client.as_mut() {
-                client.forget_once(id);
-            }
+            inner
+                .client
+                .as_mut()
+                .is_some_and(|client| client.forget_once(id))
         } else {
             self.1.borrow_mut().push(id);
+            true
         }
     }
 
