@@ -174,7 +174,7 @@ describe("scoped backend clients", () => {
       credential: () => (tokens++, sign({ sub: "worker" })),
     });
     cleanups.push(() => session.close());
-    await session.loginWithBackend();
+    // It opened signed in as its user, without being asked to.
     const { client, status, error } = session.getSnapshot();
     if (status !== "ready") throw error ?? new Error(status);
     const account = client!.session!.user!.account;
@@ -230,9 +230,8 @@ describe("trusted backend clients", () => {
       permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
+      // The token alone decides: this one opens as a trusted machine.
       credential: () => sign({ sub: "ops" }),
-      // The token states the access: the secret is only a stand-in.
-      initial: { backendSecret: "stated-by-backend-credential" },
     });
     cleanups.push(() => session.close());
     const { client, status, error } = session.getSnapshot();
@@ -254,6 +253,29 @@ describe("trusted backend clients", () => {
         })
       ).status,
     ).toBe(401);
+  });
+
+  it("a credential trusted as neither fails to open, and decides alone", async () => {
+    const { appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+    ]);
+    const base = {
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" as const },
+    };
+    await expect(
+      createJazzSession({ ...base, credential: () => sign({ sub: "intruder" }) }),
+    ).rejects.toThrow(/neither as a trusted machine nor as a user/);
+    await expect(
+      createJazzSession({
+        ...base,
+        credential: () => sign({ sub: "ops" }),
+        initial: "local-first",
+      }),
+    ).rejects.toThrow(/leave out initial/);
   });
 
   it("can't sync as a backend without its token", async () => {

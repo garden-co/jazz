@@ -70,10 +70,10 @@ export type JazzSessionConfig = Omit<
    * not a browser): its workload's OIDC token, or a function that returns a
    * fresh one. It is sent as `Authorization: Bearer` on every request and
    * socket to `serverUrl`, and the main backend trusts it with
-   * `trustWorkload` (see `createJazz`'s `backendClients`). A scoped machine
-   * then signs in with `loginWithBackend()`; a trusted machine opens with
-   * `initial: { backendSecret: "stated-by-backend-credential" }`, since its
-   * token, not a secret, states its access.
+   * `trustWorkload` (see `createJazz`'s `backendClients`). The session opens
+   * as whatever the main backend trusts the token as: a trusted machine with
+   * backend authority, a scoped machine as its user. It fails when the main
+   * backend trusts the token as neither. Not with `initial`.
    */
   credential?: BackendClientCredential;
 };
@@ -170,6 +170,9 @@ class NodeUserRuntimeSource extends RuntimeSource {
   }
 }
 
+/** What a trusted backend client states as its secret: its token, not this, states its access. */
+const BACKEND_CLIENT_STAND_IN_SECRET = "stated-by-backend-credential";
+
 function memoryAccountStore(): AccountStore {
   let value: string | null = null;
   return {
@@ -191,6 +194,11 @@ export async function createJazzSession(
   input: JazzSessionConfig,
 ): Promise<JazzSession<JazzClient>> {
   if (Object.hasOwn(input, "webSocket")) throw new Error("Use credential instead of webSocket");
+  if (input.credential !== undefined && input.initial !== undefined) {
+    throw new Error(
+      "createJazzSession: a backend client's credential decides how it opens; leave out initial",
+    );
+  }
   const transport =
     input.credential === undefined
       ? undefined
@@ -230,9 +238,27 @@ export async function createJazzSession(
       },
     },
   });
-  return createJazzSessionOwner({
+  // A backend client opens as what its credential is trusted as: a trusted
+  // machine is admitted as a backend, a scoped one signs in as its user.
+  let initial = config.initial;
+  let signInAsUser = false;
+  if (transport) {
+    try {
+      await admitBackendSecret(
+        `${registry.slice(0, -"/accounts".length)}/backend/admit`,
+        BACKEND_CLIENT_STAND_IN_SECRET,
+        { fetch: transport.fetch },
+      );
+      initial = { backendSecret: BACKEND_CLIENT_STAND_IN_SECRET };
+    } catch (error) {
+      const status = (error as { status?: number }).status;
+      if (status !== 401 && status !== 404) throw error;
+      signInAsUser = true;
+    }
+  }
+  const session = await createJazzSessionOwner({
     accounts,
-    initial: config.initial,
+    initial,
     openClient: async (account) => {
       const backend = getBackendAuth(account, registry);
       if (!backend) {
@@ -382,6 +408,18 @@ export async function createJazzSession(
       return backendClient;
     },
   });
+  if (signInAsUser) {
+    try {
+      await session.loginWithBackend();
+    } catch (error) {
+      await session.close();
+      throw new Error(
+        "createJazzSession: the main backend trusts this backend client's credential neither as a trusted machine nor as a user (see trustWorkload in its backendClients)",
+        { cause: error },
+      );
+    }
+  }
+  return session;
 }
 
 const sessionScopes = new WeakMap<object, (session: Session, attribution: boolean) => Db>();

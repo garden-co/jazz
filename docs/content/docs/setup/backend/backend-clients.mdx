@@ -63,14 +63,11 @@ const session = await createJazzSession({
   serverUrl: "https://app.example.com/jazz",
   driver: { type: "memory" },
   credential: () => getOidcToken({ audience: "https://app.example.com" }),
-  // A trusted machine opens as a backend. Its token, not a secret, states its access:
-  initial: { backendSecret: "stated-by-backend-credential" },
 });
-// A scoped machine leaves out `initial` and signs in as its user:
-// await session.loginWithBackend();
+const { client } = session.getSnapshot();
 ```
 
-A backend client's session ends when its token expires, and the client reconnects with a fresh token.
+The session opens as whatever the main backend trusts the token as: with backend authority for a trusted machine, or signed in as its user for a scoped one. If the main backend trusts the token as neither, `createJazzSession` fails. A backend client's session ends when its token expires, and the client reconnects with a fresh token.
 
 ## When there is no OIDC token
 
