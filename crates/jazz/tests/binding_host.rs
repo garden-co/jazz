@@ -431,6 +431,7 @@ fn a_streamed_value_publishes_as_one_write() {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
     let text = "x".repeat(200 * 1024);

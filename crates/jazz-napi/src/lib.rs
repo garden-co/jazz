@@ -896,6 +896,12 @@ impl StreamingMutation {
         Ok(self.inner.write(&env, write)?)
     }
 
+    /// Stage the value's row mutation in the transaction it began in.
+    #[napi(js_name = "finishInTransaction")]
+    pub fn finish_in_transaction(&mut self) -> js::Result<()> {
+        Ok(self.mutation.finish_in_transaction().map_err(host_error)?)
+    }
+
     #[napi]
     pub fn abort(&mut self) -> js::Result<bool> {
         Ok(self.mutation.abort().map_err(host_error)?)
@@ -1546,6 +1552,7 @@ impl NapiDb {
         updated_at_ms: Option<f64>,
         head: Option<JsonValue>,
         base: Option<JsonValue>,
+        transaction: Option<String>,
     ) -> js::Result<StreamingMutation> {
         let head = structured(head, "head")?;
         let base = structured(base, "base")?;
@@ -1563,6 +1570,7 @@ impl NapiDb {
                 updated_at_ms,
                 head,
                 base,
+                transaction.as_deref(),
             )
             .map_err(host_error)?;
         Ok(StreamingMutation { inner, mutation })

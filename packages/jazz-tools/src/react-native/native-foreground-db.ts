@@ -719,6 +719,7 @@ export class NativeForegroundDb {
     updatedAtMs?: number,
     head?: unknown,
     base?: unknown,
+    transaction?: string,
   ) {
     if (updatedAtMs !== undefined && (!Number.isSafeInteger(updatedAtMs) || updatedAtMs < 0)) {
       throw new Error("updatedAtMs must be a non-negative safe integer");
@@ -730,7 +731,7 @@ export class NativeForegroundDb {
       rowId,
       cells,
       column,
-      optionsJson: JSON.stringify({ updatedAtMs, head, base }),
+      optionsJson: JSON.stringify({ updatedAtMs, head, base, transaction }),
     });
     if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type !== "streamingMutationOpened")
@@ -750,6 +751,16 @@ export class NativeForegroundDb {
         if (pushed.type === "operationError") throw foregroundOperationError(pushed);
         if (pushed.type !== "streamingMutationPushed")
           return unexpected("pushStreamingMutation", pushed.type);
+      },
+      finishInTransaction: async (): Promise<void> => {
+        assertOpen();
+        const finished = await this.completeMutationOperation(
+          this.execute({ type: "finishStreamingMutation", upload }),
+        );
+        closed = true;
+        if (finished.type === "operationError") throw foregroundOperationError(finished);
+        if (finished.type !== "mutationStaged")
+          return unexpected("finishStreamingMutation", finished.type);
       },
       finish: async (): Promise<NativeForegroundWrite> => {
         assertOpen();

@@ -589,9 +589,9 @@ export class ThinRuntime implements Runtime {
     const operation =
       mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
     const context = writeTarget(writeContext, operation);
-    if (context.transaction) {
-      throw new Error("Streaming mutations are not supported inside a transaction");
-    }
+    const transaction = context.transaction
+      ? this.openTransaction(context.transaction, operation)
+      : undefined;
     const definition = this.definition(table);
     const kind = definition.columns.find((candidate) => candidate.name === column)?.column_type
       .type;
@@ -614,6 +614,7 @@ export class ThinRuntime implements Runtime {
         column,
         mutation,
         options: viewOptions(context),
+        transaction: context.transaction ?? undefined,
       },
       stream,
     );
@@ -658,6 +659,15 @@ export class ThinRuntime implements Runtime {
     } catch (error) {
       void this.request({ type: "abortStream", stream }).catch(() => undefined);
       throw error;
+    }
+    if (transaction) {
+      // The value is staged in the transaction; its commit reports a
+      // refusal of the row write.
+      const staged = this.request({ type: "finishStream", stream });
+      transaction.requests.push(staged);
+      transaction.staged = true;
+      await staged;
+      return { id: formatUuid(row), kind: "staged", openTransactionId: context.transaction! };
     }
     return {
       id: formatUuid(row),

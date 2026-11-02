@@ -190,7 +190,10 @@ prepared into nodes before the write (streaming for `insert_streaming_value`
 and the binding upload APIs). Those nodes are held by an upload lease
 (`_jazz_lv_upload`) or, when pushed by a client, by a receipt
 (`_jazz_lv_receipt`) until the commit referencing them lands or the staging
-maximum age passes.
+maximum age passes. A streamed value staged in an open transaction keeps its
+upload lease in the transaction until the transaction commits or is
+abandoned; a commit whose lease expired meanwhile is refused, since its nodes
+may be gone.
 
 `INV-CONTENT-4`: staged nodes are unreachable from any row; staging needs no
 write permission and grants none, and an expired lease or receipt releases
@@ -633,7 +636,10 @@ admission and ordinary row-write admission. TypeScript exposes
 `Db.insertStreaming`, `Db.updateStreaming` and `Db.upsertStreaming` with one
 column replaced by a `ReadableStream` or `AsyncIterable` source; NAPI and
 Browser/WASM feed the same leased upload in bounded windows without
-collecting the whole value or holding a transaction open. Explicit abort and
+collecting the whole value. A transaction's `insertStreaming`,
+`updateStreaming` and `upsertStreaming` stage the finished row write in the
+transaction instead (native Rust: `TxRef::finish_streaming_value_upload`);
+its commit waits for the stream and fails if the stream did. Explicit abort and
 terminal validation failure release the lease at once; the staging maximum
 age bounds abandoned uploads.
 

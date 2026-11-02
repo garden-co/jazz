@@ -44,6 +44,7 @@ struct ThinStream {
     updated_at_ms: Option<u64>,
     head: Option<BranchSelector>,
     base: Option<BranchViewBase>,
+    transaction: Option<OpenTransactionId>,
 }
 
 pub(super) struct ThinSession {
@@ -700,10 +701,15 @@ fn serve_thin_op(
             column,
             mutation,
             options,
+            transaction,
         } => {
             if thin.streams.contains_key(&id) {
                 return Err(argument("an upload with this id is already open"));
             }
+            let transaction = match transaction {
+                Some(transaction) => Some(session_transaction(thin, &transaction)?.0),
+                None => None,
+            };
             let mutation = streaming_mutation(&mutation)?;
             let (updated_at_ms, head, base) = stream_options(&options_json(&options)?)?;
             let cells = decode_cells(&cells).map_err(host_error)?;
@@ -721,6 +727,7 @@ fn serve_thin_op(
                             updated_at_ms,
                             head,
                             base,
+                            transaction,
                         },
                     );
                     ThinBody::Ok
@@ -746,6 +753,24 @@ fn serve_thin_op(
             let Some(open) = thin.streams.remove(&stream) else {
                 return Err(argument("no upload with this id is open"));
             };
+            if let Some(transaction) = open.transaction {
+                let Some(state) = thin.transactions.get_mut(&transaction) else {
+                    return Err(argument("the upload's transaction is no longer open"));
+                };
+                let write = block_on(db.tx_ref(transaction).finish_streaming_value_upload(
+                    open.upload,
+                    open.mutation,
+                    &open.table,
+                    open.row,
+                    open.cells,
+                    &open.column,
+                    WriteIdentity::Session(identity),
+                    open.updated_at_ms,
+                    open.head,
+                    open.base,
+                ));
+                return Ok(Some(staged(state, open.row, write)));
+            }
             written(block_on(db.finish_streaming_value_upload(
                 open.upload,
                 open.mutation,

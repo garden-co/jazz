@@ -7047,6 +7047,9 @@ struct Batch {
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
     edits: LargeEdits,
+    /// Leases of the streamed values the batch's writes hold: their chunks
+    /// stay until the batch commits or is dropped.
+    uploads: Vec<crate::db::large_ops::UploadLease>,
 }
 
 #[derive(Default)]
@@ -7546,6 +7549,7 @@ impl Db {
                 kind,
                 ops: Vec::new(),
                 edits: LargeEdits::default(),
+                uploads: Vec::new(),
             },
         );
         Ok(())
@@ -7749,6 +7753,7 @@ impl Db {
     }
 
     fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+        crate::db::large_ops::renew_upload_leases(&self.inner(), &batch.uploads)?;
         self.with_upload(|| self.commit_ops_now(batch, kind))
     }
 
@@ -8043,6 +8048,23 @@ impl Db {
             batch.edits.pending_nodes.truncate(marks.1);
         }
         staged
+    }
+
+    /// Keep a streamed value's upload lease for as long as batch `id` is
+    /// open.
+    pub(crate) fn hold_upload(
+        &self,
+        id: OpenTransactionId,
+        lease: crate::db::large_ops::UploadLease,
+    ) -> Result<(), Error> {
+        self.inner
+            .staging()
+            .batches
+            .get_mut(&id)
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?
+            .uploads
+            .push(lease);
+        Ok(())
     }
 
     fn record_read(

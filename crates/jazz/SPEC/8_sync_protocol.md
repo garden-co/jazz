@@ -921,10 +921,12 @@ connection that sends any other frame after its `Hello` ends with
   open transactions.
 - `CaptureSnapshot` answers `Snapshot` with the persisted snapshot reference
   of the authority's current frontier, for frozen branch bases.
-- `BeginStream` starts a large-value insert or upsert of one column,
-  `StreamChunk` appends to it in order, and `FinishStream` commits the row
-  (answered `Written`) or `AbortStream` drops it. A stream is named by its
-  `BeginStream` request id and ends with its connection.
+- `BeginStream` starts a large-value insert, update or upsert of one
+  column, `StreamChunk` appends to it in order, and `FinishStream` commits
+  the row (answered `Written`) or `AbortStream` drops it. A `BeginStream`
+  naming an open transaction stages the row write in it instead
+  (`FinishStream` answers `Staged`). A stream is named by its `BeginStream`
+  request id and ends with its connection.
 - While no permissions head is published, an untrusted thin session's
   requests are answered `NotReady`.
 - A thin session's answers share its connection's egress budget: a live
