@@ -23,7 +23,7 @@ Invariant digest:
 - `INV-TX-5`: Core MUST park a commit unit authored under a schema version it does not yet know, with no fate, seq or visible rows, parking a resent copy only once, and MUST decide it exactly once after that schema arrives. Linear history has no version parents, so a unit has no parent prerequisites.
 - `INV-TX-6`: A write MUST carry the base of the row image it was made over (ch. 4 §4.6). Core orders writes by its own seq, never by writer clocks: a write overrides every value accepted before it whatever its clock, and Core does not reject a write because the writer's clock is behind.
 - `INV-TX-7`: A commit unit whose `tx_id.time.physical_ms()` exceeds the authority admission clock by more than `SKEW_TOLERANCE_MS` MUST be rejected as `RejectionReason::ClientClockTooFarAhead` and MUST NOT leave visible version rows.
-- `INV-TX-8`: When Core rejects a transaction, its effects MUST leave the originating node's local view as soon as the rejection is applied, while the node's other pending writes, including edits to the same row, MUST stay visible and settle by their own fates. Rejection does not cascade: no other transaction is rejected because of it.
+- `INV-TX-8`: When Core rejects a transaction, its effects MUST leave the originating node's local view as soon as the rejection is applied, while the node's other pending writes, including edits to the same row, MUST stay visible and settle by their own fates. Rejection cascades only to writes built on the rejected one (`INV-HIST-20`): no other transaction is rejected because of it.
 - `INV-TX-9`: Originating nodes MUST retain rejected local payloads in retry storage and remove the rejected versions from normal history; non-origin authorities MUST NOT retain foreign rejected retry payloads.
 - `INV-TX-10`: Applying a fate update MUST NOT move `global_time` backward and MUST update `durability` only monotonically upward.
 - `INV-TX-11`: Accepted core commits MUST receive a strictly increasing authority-minted `GlobalTime`; the accepted transaction, global-current maintenance, and core `committed_global_time` MUST become durable atomically before publication, and the fate MUST report `DurabilityTier::Global`.
@@ -422,8 +422,10 @@ versions in the normal data path. At an authority that did not author the
 versions, rejection is audit-only: the rejected versions do not remain in normal
 history or current visibility.
 
-Rejection does not cascade. Linear history has no version parents, so no other
-transaction depends on a rejected one. On the originating node the rejected
+Rejection cascades only along bases. Linear history has no version parents, so
+the only transactions that depend on a rejected one are writes built on it,
+whose images carried its values: those are rejected too (`predecessor_rejected`,
+ch. 4 §4.6), and every other transaction is decided on its own. On the originating node the rejected
 transaction's effects leave the local view as soon as the rejection is
 applied: the pending overlay is refolded without it, while the node's other
 pending writes, including edits to the same row, stay visible and settle by

@@ -56,6 +56,7 @@ tungstenite = { version = "0.29", default-features = false, features = ["handsha
 uuid = { version = "1.18.1", features = ["serde", "v4", "v5", "v7"] }
 
 [dev-dependencies]
+flate2 = "1"
 jazz = { workspace = true, default-features = false, features = ["testing"] }
 tempfile = "3.27.0"
 tokio-tungstenite = { version = "0.29", default-features = false, features = [

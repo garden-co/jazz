@@ -18,7 +18,8 @@ the wrapper resolves a unique canonical module-path test name from FILTER, then
 runs that resolved name with --exact. --exact requires FILTER itself to already
 be that full canonical name; without it FILTER is a literal substring.
 -p selects one of Jazz's layer crates (for example jazz-types) instead of
-jazz; it is built with --no-default-features --features testing. Without -p, a
+jazz; it is built with --no-default-features --features testing (jazz-server:
+--features test). Without -p, a
 library filter that starts with db:: or binding_codec:: selects jazz-db.
 
 Examples:
@@ -100,6 +101,7 @@ fi
 features="testing,transport-compression-zstd"
 case "$package" in
   jazz|jazz-db) ;;
+  jazz-server) features="test" ;;
   *) features="testing" ;;
 esac
 cargo_args=(-p "$package" --no-default-features --features "$features")

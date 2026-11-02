@@ -200,6 +200,15 @@ trusted serving, manufacture authority, or change authorship.
 
 ### 9.5 Relays
 
+Jazz has exactly one relay tier. A client either talks to Core directly, or
+sits behind one durable, scope-isolated client relay (the browser shared
+worker, or a native relay, ch. 19) that talks to Core directly; the clients
+behind a relay are non-durable foreground sessions. Relays are not chained, a
+durable replica never attaches behind a relay, and no relay serves more than
+one auth scope. Requirements below are stated for this shape only; other
+shapes are not supported, and supporting one would need new design, not just
+new wiring.
+
 Relays provide unopinionated transport and caching. A relay link uses
 `PeerRole::Relay` with an explicit relay transport capability and no permission
 subject (`INV-EDGE-1`), and forwards
@@ -219,19 +228,25 @@ previously delivered authorized result/payload closure, or for a same-scope
 authored pending version. Mere physical co-location is insufficient: hidden
 policy evidence, catalogue internals, and unrelated cached rows are not thereby
 foreground-repairable. Revocation remains forward-looking for material already
-delivered (`INV-RLS-6`, `INV-EDGE-23`). A multiplexed relay is stricter. It may
-deduplicate immutable payload bytes, but before serving a principal it MUST
-prove the requested version belongs to that principal's exact authorized
-payload closure—not merely that the same row is currently a result member—or
-forward the repair upstream. Possession of cached bytes alone is not a
-cross-scope capability.
+delivered (`INV-RLS-6`, `INV-EDGE-23`). Possession of cached bytes alone is
+not a cross-scope capability.
 
-The default browser architecture is a shared-worker relay isolated to one auth
-scope, where one worker relays for all same-scope tabs. A server-deployed or
-otherwise multiplexed relay MUST preserve the policy-scoped result identities
-defined above rather than relying on physical-store isolation. Native/RN client
-relays have the same semantic boundary even when their storage-owner and
-lifecycle mechanism differs from the browser's IndexedDB marker.
+The browser architecture is a shared-worker relay isolated to one auth scope,
+where one worker relays for all same-scope tabs. Native/RN client relays have
+the same semantic boundary even when their storage-owner and lifecycle
+mechanism differs from the browser's IndexedDB marker. A relay shared across
+auth scopes (server-deployed or otherwise multiplexed) is not supported.
+
+A relay serves one identity: its own. A store configured as a user uploads
+what its sessions write under its own identity, so a session of another user
+would have its writes attributed to the relay's user. Every accept path (the
+core's, and through it the binding host, the browser worker and the native
+relay) refuses such a session with reason `identity_mismatch`; only a system
+store (a server) serves any identity. Each accept names the session's own
+replica author: the browser worker admits a tab as the author the tab
+connected with, never as the worker's own. A server
+checks a replica's declared identity against the one it authenticated when it
+admits the link (`INV-EDGE-26`).
 
 ### 9.6 The Core/client boundary
 

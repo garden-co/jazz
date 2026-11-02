@@ -314,7 +314,7 @@ bindings accept the timeout as the `first_load_remote_wait_ms` read-option
 field. The read uses an _opening gate_ that carries its deadline. The gate applies only
 to `LocalFirst` reads with client-local serving; any other read ignores the option. `FirstLoad` is never persisted. A
 non-durable foreground (below) sends its timeout to its relay with the read
-(the `wait` of `SyncMessage::Subscribe` and `Fetch`), because the relay holds
+(the `wait` of `SyncMessage::Read`), because the relay holds
 the store it waits on: the relay waits that long for its upstream's answer,
 then serves its own store. No other peer sees it.
 

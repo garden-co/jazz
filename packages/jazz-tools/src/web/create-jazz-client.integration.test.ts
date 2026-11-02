@@ -7,9 +7,12 @@ import { createJazzClient as createSvelteJazzClient } from "../svelte/create-jaz
 import { createJazzClient as createVueJazzClient } from "../vue/create-jazz-client.js";
 import { createJazzClient } from "./create-jazz-client.js";
 
-const app = schema.defineApp({
-  todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
-});
+const app = schema.defineApp(
+  {
+    todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
+  },
+  { migrations: "none" },
+);
 
 describe("web/create-jazz-client public API", () => {
   it.each([

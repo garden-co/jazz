@@ -1,16 +1,13 @@
 //! Validate a complete deployment before publishing its artifacts and activating it.
-use super::{
-    ServerRuntimeHandle, ServerState,
-    catalogue::DeploymentResponse,
-    routes::http::{PublishMigrationRequest, lower_migration},
-};
-use crate::runtime::StorageConfig;
+use super::{ServerRuntimeHandle, ServerState, catalogue::DeploymentResponse};
+use crate::runtime::{CatalogueApplyError, StorageConfig};
 use axum::http::StatusCode;
+use jazz::schema::JazzSchema;
+use jazz::tools::deployment::published::{PublishMigrationRequest, lower_migration};
 use jazz::tools::{
     deployment::{self, DeploymentError},
     public_schema::{Schema, SchemaHash, TableName, TablePolicies},
 };
-use jazz::{protocol::CatalogueSnapshot, schema::JazzSchema};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
@@ -117,20 +114,6 @@ fn hash(text: &str) -> Result<SchemaHash, DeployError> {
         )
     })
 }
-fn genesis(snapshot: &CatalogueSnapshot) -> Result<JazzSchema, String> {
-    snapshot
-        .schemas
-        .iter()
-        .find(|schema| {
-            !snapshot
-                .lineages
-                .iter()
-                .any(|(_, publication)| publication.schema.id == schema.id)
-        })
-        .map(|schema| schema.schema.clone())
-        .ok_or_else(|| "deployment has no genesis schema".into())
-}
-
 pub(crate) async fn deploy(
     state: Arc<ServerState>,
     request: DeployRequest,
@@ -145,7 +128,7 @@ pub(crate) async fn deploy(
     if state.shutdown.is_shutting_down() {
         return Err(DeployError::unavailable("server is shutting down"));
     }
-    if state.runtime().is_none() && state.core_server_shell_storage_config.is_none() {
+    if state.runtime().is_none() && state.store.is_none() {
         return Err(DeployError::unavailable(
             "server runtime storage is not configured",
         ));
@@ -189,16 +172,6 @@ pub(crate) async fn deploy(
             permissions: request.permissions,
         },
     )?;
-    let runtime = state.runtime();
-    let current = match &runtime {
-        Some(runtime) => Some(
-            runtime
-                .trusted_catalogue_snapshot()
-                .await
-                .map_err(DeployError::internal)?,
-        ),
-        None => None,
-    };
     let active = state
         .catalogue
         .active_schema_summary(&state.catalogue_store)
@@ -206,16 +179,8 @@ pub(crate) async fn deploy(
     let revision = active
         .map(|head| head.version)
         .unwrap_or(0)
-        .max(
-            current
-                .as_ref()
-                .map(|s| s.current_write_schema.revision)
-                .unwrap_or(0),
-        )
         .checked_add(1)
         .ok_or_else(|| DeployError::invalid("deployment revision overflow"))?;
-    let snapshot = deployment::prepare_runtime_snapshot(&prepared, current, revision)
-        .map_err(DeployError::invalid)?;
     let staged = state
         .catalogue_store
         .stage_deployment(&prepared, revision)
@@ -223,39 +188,67 @@ pub(crate) async fn deploy(
     if !staged.response.changed {
         return Ok(staged.response);
     }
-    let initial_schema = genesis(&snapshot).map_err(DeployError::invalid)?;
-    // This probe performs the same admission planning as activation, without
-    // touching the persistent runtime or creating a database on a failed deploy.
-    if let Some(runtime) = &runtime {
-        runtime
-            .validate_deployment_snapshot(snapshot.clone())
-            .await
-            .map_err(DeployError::invalid)?;
-    } else {
-        let probe = ServerRuntimeHandle::start_with_storage(
-            initial_schema.clone(),
-            StorageConfig::InMemory,
-        )
-        .map_err(DeployError::internal)?;
-        let result = probe.validate_deployment_snapshot(snapshot.clone()).await;
-        probe.shutdown().await.map_err(DeployError::internal)?;
-        result.map_err(DeployError::invalid)?;
-    }
-    // All graph, schema, permission, lens, physical mapping, and encoding
-    // validation has completed. Cross-store write failure recovery is not
-    // implemented here; this flow currently assumes writes succeed.
-    let response = state
+    let genesis = JazzSchema::new(&prepared.schemas()[0]).map_err(DeployError::invalid)?;
+    let runtime = match state.runtime() {
+        Some(runtime) => runtime,
+        None => {
+            // Apply on a scratch store first, so a deployment the catalogue
+            // refuses never creates the app's database. The real store
+            // starts as empty as the scratch one, so the same change
+            // applies there; only a storage failure can still fail it, and
+            // then leaves an empty store that the next deployment reuses.
+            let probe =
+                ServerRuntimeHandle::start_with_storage(genesis.clone(), StorageConfig::InMemory)
+                    .map_err(DeployError::internal)?;
+            let applied = match change(&probe, &prepared, staged.put.clone(), revision).await {
+                Ok(change) => probe
+                    .apply_catalogue(change)
+                    .await
+                    .map_err(DeployError::from),
+                Err(error) => Err(error),
+            };
+            probe.shutdown().await.map_err(DeployError::internal)?;
+            applied?;
+            state
+                .start_core_server_shell(genesis)
+                .map_err(DeployError::internal)?
+        }
+    };
+    state
         .catalogue_store
-        .commit_deployment(staged)
+        .check_unchanged(&staged)
+        .map_err(DeployError::invalid)?;
+    let change = change(&runtime, &prepared, staged.put, revision).await?;
+    // The deployment's rows, admissions and activation commit together on
+    // the store's thread, or not at all.
+    let applied = runtime.apply_catalogue(change).await;
+    state
+        .catalogue_store
+        .refresh()
         .map_err(DeployError::internal)?;
-    let runtime = state
-        .start_core_server_shell(initial_schema)
-        .map_err(DeployError::internal)?;
-    runtime
-        .apply_deployment_snapshot(snapshot)
-        .await
-        .map_err(DeployError::internal)?;
-    Ok(response)
+    applied?;
+    Ok(staged.response)
+}
+
+/// What applying `prepared` to `runtime`'s catalogue changes.
+async fn change(
+    runtime: &ServerRuntimeHandle,
+    prepared: &deployment::PreparedDeployment,
+    put: jazz::catalogue::CataloguePut,
+    revision: u64,
+) -> Result<jazz::catalogue::CatalogueChange, DeployError> {
+    let stored = runtime.catalogue().await.map_err(DeployError::internal)?;
+    deployment::prepare_catalogue_change(prepared, &stored, put, revision)
+        .map_err(DeployError::invalid)
+}
+
+impl From<CatalogueApplyError> for DeployError {
+    fn from(error: CatalogueApplyError) -> Self {
+        match error {
+            CatalogueApplyError::Rejected(message) => DeployError::invalid(message),
+            CatalogueApplyError::Failed(message) => DeployError::internal(message),
+        }
+    }
 }
 
 #[cfg(test)]

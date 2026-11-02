@@ -10,7 +10,7 @@ use crate::model::public_schema::{
     TablePolicies, TableSchemaBuilder,
 };
 use crate::model::public_schema_convert::convert_public_schema;
-use crate::query::{Predicate, RelationQuery, relation_query_to_query};
+use crate::query::{JoinCorrelation, Predicate, RelationQuery, relation_query_to_query};
 
 #[derive(Debug, PartialEq)]
 struct GatherEdge {
@@ -824,8 +824,8 @@ fn filters_on_scalar_gather_rows_are_rejected() {
     );
 }
 
-/// Access rows joined to their team on two equalities; only one can become
-/// the join key.
+/// Access rows joined to their team on two equalities, both bound to the same
+/// team row.
 fn access_joined_on_two_columns() -> RelationExpr {
     filter(
         RelationExpr::Join {
@@ -847,23 +847,48 @@ fn access_joined_on_two_columns() -> RelationExpr {
     )
 }
 
-/// The second equality is rejected wherever the relation sits, including
-/// inside a legacy `Exists` condition.
+fn compound_team_join(joins: &[crate::query::JoinVia]) -> Option<&crate::query::JoinVia> {
+    for join in joins {
+        if join.table == "teams"
+            && join.correlated_filters
+                == [JoinCorrelation {
+                    join_column: "parent".to_owned(),
+                    source_column: "team".to_owned(),
+                }]
+        {
+            return Some(join);
+        }
+        if let Some(found) = compound_team_join(&join.nested_joins) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Compound join conditions remain together in direct and legacy Exists
+/// policy contexts.
 #[test]
-fn joins_on_more_than_one_equality_are_rejected() {
-    let direct = access_policy_error(access_joined_on_two_columns());
-    let nested = match docs_read_policy(PolicyExpr::Exists {
+fn joins_on_more_than_one_equality_preserve_the_same_witness() {
+    let direct = docs_read_policy(PolicyExpr::ExistsRel {
+        rel: access_joined_on_two_columns(),
+    })
+    .expect("compound ExistsRel join compiles");
+    let direct_team = compound_team_join(&direct.joins)
+        .expect("the second equality remains on the joined team row");
+    assert_eq!(direct_team.on_column, "id");
+    assert_eq!(direct_team.source_column.as_deref(), Some("team"));
+
+    let nested = docs_read_policy(PolicyExpr::Exists {
         table: "doc_access".to_owned(),
         condition: Box::new(PolicyExpr::ExistsRel {
             rel: access_joined_on_two_columns(),
         }),
-    }) {
-        Ok(policy) => panic!("the policy must not compile, got {policy:?}"),
-        Err(error) => error,
-    };
-    for error in [direct, nested] {
-        assert!(error.contains("exactly one column equality"), "{error}");
-    }
+    })
+    .expect("nested compound ExistsRel join compiles");
+    assert!(
+        compound_team_join(&nested.joins).is_some(),
+        "nested legacy Exists must retain both conditions on one witness: {nested:?}"
+    );
 }
 
 /// A correlation more than one join below the correlated root would be bound

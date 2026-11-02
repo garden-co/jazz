@@ -155,4 +155,38 @@ describe("RecordPlayer JazzLifecycle", () => {
     // Enrolls once: registering the same identity twice fails.
     expect(events).toEqual(["login:a", "open:a"]);
   });
+  it("enrolls once when a close and remount arrive while an enrollment is in flight", async () => {
+    const events: string[] = [];
+    let selected: ReturnType<typeof account> | undefined;
+    let releaseLogin!: () => void;
+    const loginPending = new Promise<void>((resolve) => {
+      releaseLogin = resolve;
+    });
+    const manager = { getLoggedIn: () => selected, logout: vi.fn() } as never;
+    const lifecycle = new JazzLifecycle(
+      manager,
+      async (next) => {
+        events.push(`open:${next.identity.subject}`);
+        return client(events, next.identity.subject);
+      },
+      () => {},
+    );
+    const enroll = async () => {
+      events.push("register:a");
+      await loginPending;
+      selected = account("a");
+    };
+    const first = lifecycle.reconcile("a", "session-a", enroll);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(events).toEqual(["register:a"]);
+    // The registration request is in flight when the view closes and remounts.
+    void lifecycle.close();
+    const second = lifecycle.reconcile("a", "session-a", enroll);
+    releaseLogin();
+    await first;
+    await second;
+    expect(lifecycle.isCurrent("a", "session-a")).toBe(true);
+    expect(events).toEqual(["register:a", "open:a"]);
+  });
 });

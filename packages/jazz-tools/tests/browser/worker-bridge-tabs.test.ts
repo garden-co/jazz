@@ -1240,18 +1240,26 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(dbA.getAuthState().error).toBeUndefined();
     expect(dbB.getAuthState().error).toBeUndefined();
 
+    // Each account context renews a refused credential by itself, so the
+    // loss can be short-lived: record it rather than poll for it.
+    const errorsA: (string | undefined)[] = [];
+    const errorsB: (string | undefined)[] = [];
+    const stopA = dbA.onAuthChanged((state) => errorsA.push(state.error));
+    const stopB = dbB.onAuthChanged((state) => errorsB.push(state.error));
     dbA.updateAuthToken(invalidJwt);
 
     await waitForCondition(
-      async () => dbA.getAuthState().error === "invalid",
+      async () => errorsA.includes("invalid"),
       20000,
       "First tab should turn unauthenticated when the server rejects its JWT",
     );
     await waitForCondition(
-      async () => dbB.getAuthState().error === "invalid",
+      async () => errorsB.includes("invalid"),
       20000,
       "Second tab should turn unauthenticated through the worker auth fan-out",
     );
+    stopA();
+    stopB();
 
     dbB.updateAuthToken(validJwt);
 

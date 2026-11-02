@@ -1,0 +1,35 @@
+{
+  "encoding": "jazz.sdk.union-arm-output.v1",
+  "cases": [
+    {
+      "name": "legacy-unmodified",
+      "preimage": "{\"conditions\":[],\"hops\":[],\"table\":string:\"rooms\"}",
+      "utf8_hex": "7b22636f6e646974696f6e73223a5b5d2c22686f7073223a5b5d2c227461626c65223a737472696e673a22726f6f6d73227d",
+      "label": "derived:a2c98c186eb3d2566e4e8a5b534b84926b5c2c602ff51a9962bc08ec7dce3e24"
+    },
+    {
+      "name": "page-one",
+      "preimage": "{\"conditions\":[],\"hops\":[],\"output_v1\":{\"limit\":number:1,\"offset\":number:1,\"orderBy\":[[string:\"title\",string:\"asc\"]]},\"table\":string:\"rooms\"}",
+      "utf8_hex": "7b22636f6e646974696f6e73223a5b5d2c22686f7073223a5b5d2c226f75747075745f7631223a7b226c696d6974223a6e756d6265723a312c226f6666736574223a6e756d6265723a312c226f726465724279223a5b5b737472696e673a227469746c65222c737472696e673a22617363225d5d7d2c227461626c65223a737472696e673a22726f6f6d73227d",
+      "label": "derived:182340f32120fb568bce6b071cda5feaf84899dd47d37315aeb25170baf25492"
+    },
+    {
+      "name": "page-two",
+      "preimage": "{\"conditions\":[],\"hops\":[],\"output_v1\":{\"limit\":number:1,\"offset\":number:2,\"orderBy\":[[string:\"title\",string:\"asc\"]]},\"table\":string:\"rooms\"}",
+      "utf8_hex": "7b22636f6e646974696f6e73223a5b5d2c22686f7073223a5b5d2c226f75747075745f7631223a7b226c696d6974223a6e756d6265723a312c226f6666736574223a6e756d6265723a322c226f726465724279223a5b5b737472696e673a227469746c65222c737472696e673a22617363225d5d7d2c227461626c65223a737472696e673a22726f6f6d73227d",
+      "label": "derived:cbf4b99470d4b0696593c8fef5ba7d088f6c74e120329023603d66157f2ca4e5"
+    },
+    {
+      "name": "empty-page",
+      "preimage": "{\"conditions\":[],\"hops\":[],\"output_v1\":{\"limit\":number:0},\"table\":string:\"rooms\"}",
+      "utf8_hex": "7b22636f6e646974696f6e73223a5b5d2c22686f7073223a5b5d2c226f75747075745f7631223a7b226c696d6974223a6e756d6265723a307d2c227461626c65223a737472696e673a22726f6f6d73227d",
+      "label": "derived:50f139dbe8a43ab04a0480d78f42166468240db45b5709a30ecf69e0bca1a44e"
+    },
+    {
+      "name": "explicit-zero-offset",
+      "preimage": "{\"conditions\":[],\"hops\":[],\"output_v1\":{\"offset\":number:0},\"table\":string:\"rooms\"}",
+      "utf8_hex": "7b22636f6e646974696f6e73223a5b5d2c22686f7073223a5b5d2c226f75747075745f7631223a7b226f6666736574223a6e756d6265723a307d2c227461626c65223a737472696e673a22726f6f6d73227d",
+      "label": "derived:c80dbf72e02ecea5f3e881dcd5ae91deebae37e67da01435abfece1f15901456"
+    }
+  ]
+}

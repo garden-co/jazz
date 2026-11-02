@@ -17,7 +17,7 @@ use jazz::tools::{ColumnType, Schema, SchemaBuilder, SchemaHash, TableSchemaBuil
 
 use crate::common;
 
-use common::allow_all_policies;
+use common::{allow_all_policies, physical_column, unhashed};
 
 fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::noop();
@@ -261,14 +261,10 @@ fn composite_index_definition_in_the_store_file_is_pinned() {
     assert_eq!(
         composite,
         [(
-            "tasks__ix(owner,rank)".to_owned(),
+            "tasks__ix(owner~971790,rank~0ee2f7)".to_owned(),
             concat!(
-                "CREATE INDEX \"tasks__ix(owner,rank)\" ON \"tasks\"(",
-                // A text cell may be chunked; the key is its inline text.
-                "(CASE WHEN (substr(CAST(\"owner\" AS BLOB), 1, 1) = X'FF') ",
-                "THEN CAST(substr(CAST(\"owner\" AS BLOB), 39, ",
-                "CAST(CAST(substr(CAST(\"owner\" AS BLOB), 34, 5) AS TEXT) AS INTEGER)) AS TEXT) ",
-                "ELSE \"owner\" END), \"rank\", id)"
+                "CREATE INDEX \"tasks__ix(owner~971790,rank~0ee2f7)\" ON \"tasks\"(",
+                "\"owner~971790\", \"rank~0ee2f7\", id)"
             )
             .to_owned()
         )]
@@ -291,11 +287,20 @@ fn composite_index_definition_in_the_store_file_is_pinned() {
 /// test row uuids are `[n; 16]`.
 fn composite_index_row_order(directory: &std::path::Path) -> Vec<u8> {
     let conn = rusqlite::Connection::open(store_path(directory)).unwrap();
+    let (owner, rank) = (
+        physical_column(&conn, "tasks", "owner"),
+        physical_column(&conn, "tasks", "rank"),
+    );
+    let index = format!(
+        "tasks__ix({},{})",
+        owner.trim_matches('"'),
+        rank.trim_matches('"')
+    );
     let mut statement = conn
-        .prepare(
-            "SELECT id FROM tasks INDEXED BY \"tasks__ix(owner,rank)\" \
-             WHERE owner IS NOT NULL ORDER BY owner, rank, id",
-        )
+        .prepare(&format!(
+            "SELECT id FROM tasks INDEXED BY \"{index}\" \
+             WHERE {owner} IS NOT NULL ORDER BY {owner}, {rank}, id"
+        ))
         .unwrap();
     statement
         .query_map([], |row| row.get::<_, Vec<u8>>(0))
@@ -316,7 +321,7 @@ fn assert_page_uses_composite_index(db: &Db, owner: &str) {
         )
         .unwrap();
     let (_, plan) = db.explain_query_plan(&page, None).unwrap();
-    assert!(plan.contains("tasks__ix(owner,rank)"), "{plan}");
+    assert!(unhashed(&plan).contains("tasks__ix(owner,rank)"), "{plan}");
     assert!(!plan.contains("TEMP B-TREE FOR ORDER BY"), "{plan}");
 }
 
@@ -668,13 +673,76 @@ fn composite_indexes_subsume_their_prefixes_and_id_reads_seek_by_id() {
     let (_, plan) = db
         .explain_query_plan(&db.prepare_query(&ada()).unwrap(), None)
         .unwrap();
-    assert!(plan.contains("tasks__ix(owner,rank)"), "{plan}");
+    assert!(unhashed(&plan).contains("tasks__ix(owner,rank)"), "{plan}");
 
     let point = db
         .prepare_query(&ada().filter(eq(col("id"), lit(Value::Uuid(row(5).0)))))
         .unwrap();
     let (_, plan) = db.explain_query_plan(&point, None).unwrap();
-    assert!(plan.contains("(id=? AND _b=?)"), "{plan}");
+    assert!(plan.contains("(id=? AND _branch=?)"), "{plan}");
     let rows = block_on(db.all(&point, ReadOpts::default())).unwrap();
     assert_eq!(rows.len(), 1);
+}
+
+/// #3399: reopening an existing store under a schema that adds a column to
+/// `index_only` builds that column's index over the rows already stored.
+/// The index set is not part of the schema version: a deployment may
+/// refresh it without a new version.
+#[test]
+fn adding_an_index_only_column_to_an_existing_store_backfills_its_index() {
+    let narrow = JazzSchema::new(
+        &SchemaBuilder::new()
+            .table(tasks_table().index_only(["owner"]))
+            .build(),
+    )
+    .expect("narrow schema compiles");
+    let wider = JazzSchema::new(
+        &SchemaBuilder::new()
+            .table(tasks_table().index_only(["owner", "title"]))
+            .build(),
+    )
+    .expect("wider schema compiles");
+    assert_eq!(narrow.version_id(), wider.version_id());
+
+    let directory = tempfile::tempdir().unwrap();
+    {
+        let db = open_file_db(directory.path(), &narrow);
+        insert_task(&db, row(1), "alice", 2, "plan");
+        insert_task(&db, row(2), "bob", 1, "review");
+    }
+    // The value index on a column (not its large-value marker index).
+    let index_on = |column: &str| {
+        stored_task_indexes(directory.path())
+            .into_iter()
+            .find(|(name, _)| unhashed(name) == format!("tasks__ix({column})"))
+    };
+    assert!(index_on("owner").is_some());
+    assert_eq!(
+        index_on("title"),
+        None,
+        "the narrow schema indexes no title"
+    );
+    {
+        let db = open_file_db(directory.path(), &wider);
+        let titles = |title: &str| {
+            let query = db
+                .prepare_query(
+                    &Query::from("tasks")
+                        .filter(eq(col("title"), lit(Value::String(title.into())))),
+                )
+                .unwrap();
+            block_on(db.all(&query, ReadOpts::default())).unwrap().len()
+        };
+        assert_eq!((titles("plan"), titles("review")), (1, 1));
+    }
+    let (name, _) = index_on("title").expect("reopening builds the title index");
+    let conn = rusqlite::Connection::open(store_path(directory.path())).unwrap();
+    let entries: i64 = conn
+        .query_row(
+            &format!("SELECT count(*) FROM tasks INDEXED BY \"{name}\""),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(entries, 2, "the index holds the rows stored before it");
 }

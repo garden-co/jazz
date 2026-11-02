@@ -41,6 +41,8 @@ import {
 import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { deliverMutationErrorToAttachedPeers } from "./mutation-error-delivery.js";
 import { toError } from "../runtime/util.js";
+import type { RemoteLinkState } from "../runtime/remote-link-state.js";
+import { sameLinkStatus, type LinkStatus } from "../runtime/sync-status.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -53,6 +55,13 @@ type SharedWorkerGlobal = typeof globalThis & {
 type TabPeer = {
   tabId: string;
   context: RuntimeContext;
+  /**
+   * The author of the tab's own replica, as it connected; the runtime serves
+   * only its own. Anonymous tabs share one storage scope but each mints its
+   * own anonymous identity, so a second anonymous tab of another identity is
+   * refused (`identity_mismatch`) rather than relayed as the first one's.
+   */
+  author: Uint8Array;
   port: MessagePort;
   pump: BrowserWorkerTransportPump | null;
   subscriber: Transport | null;
@@ -997,7 +1006,7 @@ async function connectTab(
     });
     assertAdmission();
     // No await between the final fence, peer publication and listener handoff.
-    attachTab(context, message.tabId, port);
+    attachTab(context, message.tabId, port, message.options.author);
     releaseClaim();
     finishBootstrap();
     post(port, { type: "runtime-ready" });
@@ -1096,7 +1105,15 @@ async function initialize(context: RuntimeContext): Promise<void> {
     const node = context.pageStore.replicaNode;
     const schema = encodeSchema(options.schema);
     const proof = options.selfSignedClientProof;
-    const config = openConfig(node, options.author, 1, false, options.initialSyncFlushEvery, proof);
+    const config = openConfig(
+      node,
+      options.author,
+      1,
+      false,
+      options.initialSyncFlushEvery,
+      proof,
+      options.migrations,
+    );
     if (proof && typeof wasmModule.WasmDb.openBrowserWithSelfSignedProof !== "function") {
       throw new Error(
         "WASM runtime does not support self-signed client opens; rebuild the matching Jazz WASM artifact",
@@ -1120,7 +1137,11 @@ async function initialize(context: RuntimeContext): Promise<void> {
       options.author,
       1,
       false,
-      { selfSignedClientProof: proof, scopeIsolatedRelay: true },
+      {
+        selfSignedClientProof: proof,
+        scopeIsolatedRelay: true,
+        slowQueryLog: { appId: options.appId, thresholdMs: options.slowQueryThresholdMs },
+      },
     );
     context.runtime = runtime;
     unownedDb = null;
@@ -1137,17 +1158,30 @@ async function initialize(context: RuntimeContext): Promise<void> {
         post(peer.port, { type: "mutation-error", event: received }),
       );
     });
-    runtime.onRemoteLinkStateChange((state) => {
+    let announced: { state: RemoteLinkState; link: LinkStatus } | null = null;
+    const announceLink = () => {
       // Only the current runtime speaks for this namespace's upstream.
-      if (context.runtime === runtime) broadcast(context, { type: "remote-link", state });
-    }, new AbortController().signal);
-    context.runtime.onServerTransportError((error) => {
+      if (context.runtime !== runtime) return;
+      const state = runtime.remoteLinkState();
+      const link = runtime.upstreamLinkStatus();
+      // Both sources can report one transition; attaching peers get their own copy.
+      if (announced?.state === state && sameLinkStatus(announced.link, link)) return;
+      announced = { state, link };
+      broadcast(context, { type: "remote-link", state, link });
+    };
+    runtime.onRemoteLinkStateChange(announceLink, new AbortController().signal);
+    runtime.onUpstreamLinkStatusChange(announceLink, new AbortController().signal);
+    context.runtime.onServerTransportError((error, { retrying }) => {
       // Transport failures are foreground events, not authority fates or
       // durable notifications. Only peers that have completed admission own a
       // tab runtime capable of rejecting an active remote wait.
       for (const peer of context.peers.values()) {
         if (!peer.subscriber || !peer.pump) continue;
-        post(peer.port, { type: "transport-error", error: serializeBrowserRelayError(error) });
+        post(peer.port, {
+          type: "transport-error",
+          error: serializeBrowserRelayError(error),
+          retrying,
+        });
       }
     });
     if (options.logLevel === "trace") {
@@ -1384,6 +1418,7 @@ function attachTab(
   context: RuntimeContext,
   tabId: string,
   port: MessagePort,
+  author: Uint8Array,
   inspectorAttachment = false,
 ): void {
   closeTab(context, tabId);
@@ -1395,6 +1430,7 @@ function attachTab(
   peer = {
     tabId,
     context,
+    author,
     port,
     pump: null,
     subscriber: null,
@@ -1658,6 +1694,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           unownedSubscriber = await activeRuntime.acceptPeer(
             message.sessionClaims,
             peerAuthority.epoch,
+            peer.author,
           );
           // Close and storage invalidation revoke publication synchronously,
           // without waiting for recovery to finish.
@@ -1678,7 +1715,11 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           } else {
             ensureServerConnection(peer.context);
           }
-          post(peer.port, { type: "remote-link", state: activeRuntime.remoteLinkState() });
+          post(peer.port, {
+            type: "remote-link",
+            state: activeRuntime.remoteLinkState(),
+            link: activeRuntime.upstreamLinkStatus(),
+          });
           result(peer, message.id, undefined, {
             peerAuthority,
             workerRealmId,
@@ -1924,7 +1965,7 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
       } satisfies BrowserInspectorControlEvent);
       return;
     }
-    attachTab(context, message.tabId, message.port, true);
+    attachTab(context, message.tabId, message.port, context.options.author, true);
     port.postMessage({ type: "result", id: message.id } satisfies BrowserInspectorControlEvent);
   };
   const dispose = () => {

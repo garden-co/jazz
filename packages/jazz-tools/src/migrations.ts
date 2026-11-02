@@ -172,16 +172,25 @@ type RemovedColumnName<
   TTable extends MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>,
 > = Exclude<SourceColumnName<TFrom, TTo, TRenameTables, TTable>, ColumnName<TTo, TTable>>;
 
-type BuilderIdentity<TBuilder extends AnyTypedColumnBuilder> = readonly [
+type SourceReferenceFor<TReference, TRenameTables> =
+  TReference extends keyof RenameTables<TRenameTables>
+    ? RenameTables<TRenameTables>[TReference] extends RenameTableFromOp<infer TOldName>
+      ? TOldName
+      : TReference
+    : TReference;
+
+type BuilderIdentity<TBuilder extends AnyTypedColumnBuilder, TRenameTables = undefined> = readonly [
   ColumnBuilderSqlType<TBuilder>,
   ColumnBuilderOptional<TBuilder>,
-  ColumnBuilderReferences<TBuilder>,
+  SourceReferenceFor<ColumnBuilderReferences<TBuilder>, TRenameTables>,
 ];
 
-type BuildersEqual<TLeft extends AnyTypedColumnBuilder, TRight extends AnyTypedColumnBuilder> = [
-  BuilderIdentity<TLeft>,
-] extends [BuilderIdentity<TRight>]
-  ? [BuilderIdentity<TRight>] extends [BuilderIdentity<TLeft>]
+type BuildersEqual<
+  TLeft extends AnyTypedColumnBuilder,
+  TRight extends AnyTypedColumnBuilder,
+  TRenameTables,
+> = [BuilderIdentity<TLeft>] extends [BuilderIdentity<TRight, TRenameTables>]
+  ? [BuilderIdentity<TRight, TRenameTables>] extends [BuilderIdentity<TLeft>]
     ? true
     : false
   : false;
@@ -189,8 +198,9 @@ type BuildersEqual<TLeft extends AnyTypedColumnBuilder, TRight extends AnyTypedC
 type SharedBuildersCompatible<
   TLeft extends AnyTypedColumnBuilder,
   TRight extends AnyTypedColumnBuilder,
+  TRenameTables,
 > =
-  BuildersEqual<TLeft, TRight> extends true
+  BuildersEqual<TLeft, TRight, TRenameTables> extends true
     ? true
     : ColumnBuilderReferences<TLeft> extends undefined
       ? [ColumnBuilderSqlType<TLeft>, ColumnBuilderOptional<TLeft>] extends [
@@ -355,7 +365,8 @@ type ValidateAddedColumnOperation<
           ? TOldName extends RemovedColumnName<TFrom, TTo, TRenameTables, TTable>
             ? BuildersEqual<
                 BuilderForSourceColumn<TFrom, TTo, TRenameTables, TTable, TOldName>,
-                BuilderForTargetColumn<TTo, TTable, TColumn>
+                BuilderForTargetColumn<TTo, TTable, TColumn>,
+                TRenameTables
               > extends true
               ? never
               : {
@@ -457,7 +468,8 @@ type UnsupportedSharedColumnChanges<
       SourceColumnName<TFrom, TTo, TRenameTables, TTable>
     >]: SharedBuildersCompatible<
       BuilderForSourceColumn<TFrom, TTo, TRenameTables, TTable, TColumn>,
-      BuilderForTargetColumn<TTo, TTable, TColumn>
+      BuilderForTargetColumn<TTo, TTable, TColumn>,
+      TRenameTables
     > extends true
       ? never
       : {
@@ -652,12 +664,19 @@ function buildMarkedTableSet(
   return set;
 }
 
-function columnShapeSignature(builder: AnyTypedColumnBuilder, omitReference = false): string {
+function columnShapeSignature(
+  builder: AnyTypedColumnBuilder,
+  omitReference = false,
+  tableRenames?: ReadonlyMap<string, string>,
+): string {
   const column = builder._build("__migration_shape__");
   return JSON.stringify({
     sqlType: columnTypeSignature(sqlTypeToWasm(column.sqlType)),
     nullable: column.nullable,
-    references: omitReference ? null : (column.references ?? null),
+    references:
+      omitReference || !column.references
+        ? null
+        : (tableRenames?.get(column.references) ?? column.references),
   });
 }
 
@@ -682,6 +701,7 @@ function tableMatchesAfterApplyingColumnOperations(
   sourceTable: Record<string, AnyTypedColumnBuilder>,
   targetTable: Record<string, AnyTypedColumnBuilder>,
   tableOps: Record<string, AddOp | DropOp | RenameOp>,
+  tableRenames: ReadonlyMap<string, string>,
   allowReferenceAdditions = false,
 ): boolean {
   const transformed = new Map<string, AnyTypedColumnBuilder>(Object.entries(sourceTable));
@@ -730,8 +750,12 @@ function tableMatchesAfterApplyingColumnOperations(
     if (allowReferenceAdditions && !columnMetadataEqual(sourceBuilder, targetBuilder)) return false;
     const omitReference = allowReferenceAdditions && !sourceBuilder._build(columnName).references;
     if (
-      columnShapeSignature(sourceBuilder, omitReference) !==
-      columnShapeSignature(targetBuilder, omitReference)
+      columnShapeSignature(
+        sourceBuilder,
+        omitReference,
+        // Added columns already use the destination witness's reference names.
+        tableOps[columnName]?._type === "add" ? tableRenames : undefined,
+      ) !== columnShapeSignature(targetBuilder, omitReference, tableRenames)
     ) {
       return false;
     }
@@ -827,7 +851,10 @@ function buildForwardLenses<
       if (!sourceBuilder) continue;
       const source = sourceBuilder._build(sourceColumn);
       const target = targetBuilder._build(columnName);
-      if (source.references === target.references) continue;
+      const targetReference = target.references
+        ? (renameTableMap.get(target.references) ?? target.references)
+        : target.references;
+      if (source.references === targetReference) continue;
       if (
         !source.references &&
         target.references &&
@@ -968,6 +995,7 @@ function buildForwardLenses<
         sourceTables[sourceTableName]!,
         targetTables[tableName]!,
         tableOps,
+        renameTableMap,
         true,
       )
     ) {
@@ -986,7 +1014,14 @@ function buildForwardLenses<
         );
       }
 
-      if (!tableMatchesAfterApplyingColumnOperations(sourceTable, targetTable, tableOps)) {
+      if (
+        !tableMatchesAfterApplyingColumnOperations(
+          sourceTable,
+          targetTable,
+          tableOps,
+          renameTableMap,
+        )
+      ) {
         throw new Error(
           `Table rename ${sourceTableName} -> ${tableName} does not match the target table after applying its column migrations.`,
         );

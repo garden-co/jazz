@@ -13,17 +13,20 @@ import { startLocalJazzServer } from "../testing/index.js";
 // ---------------------------------------------------------------------------
 // Inline schema + permissions
 // ---------------------------------------------------------------------------
-const todoApp = s.defineApp({
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-      description: s.string().optional(),
-      owner_id: s.uuid(),
-    },
-    {},
-  ),
-});
+const todoApp = s.defineApp(
+  {
+    todos: s.table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+        description: s.string().optional(),
+        owner_id: s.uuid(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 const todoAppPermissions = s.definePermissions(todoApp, ({ policy, session }) => {
   policy.todos.allowRead.where({ owner_id: session.user.account });
@@ -224,22 +227,25 @@ describe("forRequest auth and policy", () => {
     const appId = randomUUID();
     const backendSecret = "dependent-transform-backend";
     const adminSecret = "dependent-transform-admin";
-    const app = s.defineApp({
-      products: s.table(
-        {
-          owner_id: s.uuid(),
-          unit: s.string().default("cents"),
-          price: s.float().transform({
-            dependsOn: ["unit"],
-            from: (value, context: Readonly<{ unit: string }>) =>
-              context.unit === "cents" ? value / 100 : value,
-            to: (value: number, context: Readonly<{ unit: string }>) =>
-              context.unit === "cents" ? value * 100 : value,
-          }),
-        },
-        {},
-      ),
-    });
+    const app = s.defineApp(
+      {
+        products: s.table(
+          {
+            owner_id: s.uuid(),
+            unit: s.string().default("cents"),
+            price: s.float().transform({
+              dependsOn: ["unit"],
+              from: (value, context: Readonly<{ unit: string }>) =>
+                context.unit === "cents" ? value / 100 : value,
+              to: (value: number, context: Readonly<{ unit: string }>) =>
+                context.unit === "cents" ? value * 100 : value,
+            }),
+          },
+          {},
+        ),
+      },
+      { migrations: "none" },
+    );
     const permissions = s.definePermissions(app, ({ policy, session }) => {
       policy.products.allowRead.where({ owner_id: session.user.account });
       policy.products.allowInsert.where({});
@@ -953,13 +959,16 @@ it.each(["table", "relation"] as const)(
     const appId = randomUUID();
     const backendSecret = "request-scope-backend";
     const adminSecret = "request-scope-admin";
-    const app = s.defineApp({
-      rooms: s.table(
-        { title: s.string(), code: s.string() },
-        { linksViaRoom: s.reverse("links", "roomRelation") },
-      ),
-      links: s.table({ room: s.uuid() }, { roomRelation: s.rel("rooms", "room") }),
-    });
+    const app = s.defineApp(
+      {
+        rooms: s.table(
+          { title: s.string(), code: s.string() },
+          { linksViaRoom: s.reverse("links", "roomRelation") },
+        ),
+        links: s.table({ room: s.uuid() }, { roomRelation: s.rel("rooms", "room") }),
+      },
+      { migrations: "none" },
+    );
     const query = kind === "relation" ? app.links.hopTo("roomRelation") : app.rooms;
     const permissions = s.definePermissions(app, ({ policy, session }) => {
       policy.rooms.allowRead.where({ code: session.claims["join_code"] });
@@ -1136,7 +1145,7 @@ it("shares explicit backend transport state across scoped Db wrappers", async ()
   const appId = randomUUID();
   const backendSecret = "shared-transport-backend";
   const adminSecret = "shared-transport-admin";
-  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   const permissions = s.definePermissions(app, ({ policy }) => {
     policy.notes.allowRead.where({});
   });
@@ -1193,7 +1202,7 @@ it("rejects a scoped remote wait when its context shuts down offline", async () 
   const appId = randomUUID();
   const backendSecret = "shutdown-transport-backend";
   const adminSecret = "shutdown-transport-admin";
-  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   const permissions = s.definePermissions(app, ({ policy }) => {
     policy.notes.allowRead.where({});
   });

@@ -20,6 +20,22 @@ export function runtimeRandomBytes(length: 16 | 32): Uint8Array {
   throw new Error("Jazz requires a cryptographically secure runtime entropy source");
 }
 
+/**
+ * A random version-4 node UUID (RFC 9562), as 16 wire-order bytes: the form
+ * every transaction-issuing node is minted in, pooled or not.
+ */
+export function randomNodeUuidBytes(entropy: Uint8Array = runtimeRandomBytes(16)): Uint8Array {
+  const bytes = entropy.slice(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  return bytes;
+}
+
+/** Whether `bytes` is a version-4 node UUID (see {@link randomNodeUuidBytes}). */
+export function isRandomNodeUuid(bytes: Uint8Array): boolean {
+  return bytes.byteLength === 16 && (bytes[6]! & 0xf0) === 0x40 && (bytes[8]! & 0xc0) === 0x80;
+}
+
 /** Nonzero wire incarnation; independent of process lifetime and numeric order. */
 export function runtimeConnectionIncarnation(
   entropy: () => Uint8Array = () => runtimeRandomBytes(16),

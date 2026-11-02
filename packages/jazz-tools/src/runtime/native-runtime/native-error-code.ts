@@ -69,7 +69,10 @@ export type NativeCoreErrorReason =
   | "missing_required"
   | "branch_move"
   | "missing_chunks"
-  | "permissions_head_missing";
+  | "permissions_head_missing"
+  | "predecessor_rejected"
+  | "schema_version_not_deployed"
+  | "identity_mismatch";
 
 /** Every reason this build knows; a test checks it against the engine's `Reason::ALL`. */
 export const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCoreErrorReason>([
@@ -83,6 +86,9 @@ export const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCore
   "branch_move",
   "missing_chunks",
   "permissions_head_missing",
+  "predecessor_rejected",
+  "schema_version_not_deployed",
+  "identity_mismatch",
 ]);
 
 /** The core `Reason` a thrown value carries, or `undefined` when it has none this build knows. */

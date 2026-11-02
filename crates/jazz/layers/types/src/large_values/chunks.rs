@@ -1,9 +1,9 @@
 //! Exact, policy-blind access to immutable large-value nodes.
 //!
-//! A node is named by its random [`Locator`] and verified against the object
-//! hash its parent (or descriptor) commits to. Storage never lists locators
-//! or looks nodes up by content hash; disclosure of a descriptor is gated by
-//! ordinary row authorization.
+//! A node is named by its object hash, the hash its parent (or descriptor)
+//! commits to, and verified against it. A hash grants nothing: disclosure
+//! of a descriptor, and of the nodes beneath it, is gated by ordinary row
+//! authorization.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -11,15 +11,13 @@ use std::pin::Pin;
 use bytes::Bytes;
 use thiserror::Error;
 
-use super::{ContentHash, Locator};
+use super::ContentHash;
 
-/// Opaque retrieval identity paired with the hash the reader must verify.
+/// A node to retrieve, by the object hash the reader verifies.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChunkRequest {
     /// The object hash of the encoded node.
     pub object_hash: [u8; 32],
-    /// The node's random locator.
-    pub locator: Locator,
 }
 
 /// Executor-local future returned by a chunk capability.
@@ -31,9 +29,6 @@ pub enum ChunkStorageError {
     /// The node is not stored here.
     #[error("chunk is unavailable")]
     Unavailable,
-    /// The locator already names different content.
-    #[error("opaque locator already names different content")]
-    LocatorConflict,
     /// The stored bytes do not match the requested object hash.
     #[error("staged chunk failed integrity validation")]
     Integrity,
@@ -81,10 +76,6 @@ pub trait ChunkProvider {
 /// Exact reads from the local chunk store only, used to validate an upload
 /// before its staging receipt is issued.
 pub trait ChunkReader {
-    /// The encoded node stored under `locator`, if its hash is `expected_hash`.
-    fn get(
-        &self,
-        locator: Locator,
-        expected_hash: ContentHash,
-    ) -> ChunkFuture<'_, Result<Bytes, ChunkStorageError>>;
+    /// The encoded node whose object hash is `hash`.
+    fn get(&self, hash: ContentHash) -> ChunkFuture<'_, Result<Bytes, ChunkStorageError>>;
 }

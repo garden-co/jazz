@@ -439,7 +439,48 @@ impl JazzServer {
             jwt_token: Some(self.jwt_for_user(user_id)),
             backend_secret: Some(self.backend_secret().to_string()),
             admin_secret: None,
+            migrations: self.published_migrations(),
         }
+    }
+
+    /// The versions and lenses published to this server so far, as an app
+    /// that deployed them ships them (SPEC 10.7).
+    pub fn published_migrations(&self) -> jazz::db::Migrations {
+        let state = &self.state;
+        let store = &state.catalogue_store;
+        let mut schemas = std::collections::HashMap::new();
+        for hash in state
+            .catalogue
+            .known_schema_hashes(store)
+            .expect("read published schema hashes")
+        {
+            if let Some(schema) = state
+                .catalogue
+                .known_schema(store, &hash)
+                .expect("read published schema")
+            {
+                schemas.insert(hash, schema);
+            }
+        }
+        let lenses = state
+            .catalogue
+            .known_lenses(store)
+            .expect("read published lenses")
+            .iter()
+            .filter_map(|lens| {
+                let source = schemas.get(&lens.source_hash)?;
+                let target = schemas.get(&lens.target_hash)?;
+                Some(
+                    jazz::tools::schema_lens::runtime::compile_lens(lens, source, target)
+                        .expect("lower a published lens"),
+                )
+            })
+            .collect();
+        let schemas = schemas
+            .values()
+            .map(|schema| jazz::schema::JazzSchema::new(schema).expect("lower a published schema"))
+            .collect();
+        jazz::db::Migrations { schemas, lenses }
     }
 
     fn require_built_in_jwt_helpers(&self) {

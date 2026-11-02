@@ -16,8 +16,7 @@ use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, UpdateOptions, UpsertOptions};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::large_values::{
-    ContentHash, FORMAT_VERSION, INLINE_VALUE_MAX_BYTES, LargeValueKind, LargeValueRef, Locator,
-    NodeRef,
+    ContentHash, FORMAT_VERSION, INLINE_VALUE_MAX_BYTES, LargeValueKind, LargeValueRef, NodeRef,
 };
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
@@ -115,7 +114,6 @@ fn forged_descriptor() -> Value {
         logical_hash: ContentHash([0x11; 32]),
         root: NodeRef {
             object_hash: ContentHash([0x22; 32]),
-            locator: Locator::random(),
         },
         byte_length: LARGE_BYTES as u64,
         utf16_length: Some(LARGE_BYTES as u64),

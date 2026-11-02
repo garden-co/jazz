@@ -1002,13 +1002,11 @@ are not marked deleted. Subscription deletion state is exposed through the
 revoking access to a row updates the subscription like any other change: a
 restoration replaces the deleted row with the live one, and a row whose read
 policy no longer holds, including because its granting row was deleted, leaves
-the result. Include-deleted reads of current tables differ by read path. Plain
-one-shot reads support only the current source and reject every other read
-view (branch views and snapshots) with a "not supported yet" error.
-Subscriptions, and transaction reads, which register as snapshot
-subscriptions, accept the current source and any snapshot; they reject branch
-views with a "not supported yet" error. History queries keep their own branch
-selection.
+the result. Include-deleted reads, one-shot or live, accept the current
+source and branch views; subscriptions and transaction reads, which register
+as snapshot subscriptions, accept snapshots too. A replica keeps a live
+branch-view read in its view upstream (ch. 8 §8.4, ch. 11 §11.5). History
+queries keep their own branch selection.
 
 Inside an open serializable transaction, `tx_query` records a binding-sensitive
 `PredicateRead` (`INV-QUERY-13`). The later phantom check (ch. 3,
@@ -1047,7 +1045,7 @@ Default result ordering is a conformance requirement for every public query
 surface. The test plan below records additional intended coverage.
 
 - Strengthen the maintained-vs-one-shot differential oracle command
-  `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
+  `cargo test -p jazz --test maintained_differential maintained_one_shot_differential_oracle -- --ignored`
   to compare the canonical `ResultTree` specified in appendix D, rather than a
   root-id set. The oracle should keep using public query shapes/builders and
   compare the maintained stream's reduced result to the one-shot result at each

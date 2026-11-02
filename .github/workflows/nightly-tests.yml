@@ -54,9 +54,9 @@ jobs:
           sccache-s3: false
       - name: Run the 300-seed oracle
         env:
-          JAZZ_SEED_COUNT: "300"
+          JAZZ_DIFFERENTIAL_STEP_COUNT: "60"
           JAZZ_DIFFERENTIAL_CHURN_DEPTHS: "10,1000"
-        run: dev/t --exact node::tests::harness::m3_maintained_one_shot_differential_oracle -- --ignored
+        run: JAZZ_SEED="$(seq -s, 1 300)" dev/t --test maintained_differential --exact maintained_one_shot_differential_oracle -- --ignored
 
   browser-soak:
     name: Worker-bridge browser soak

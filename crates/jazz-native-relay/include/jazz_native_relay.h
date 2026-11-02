@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 /* The relay ABI this header describes (Rust `NATIVE_RELAY_ABI_V1`). */
-#define JAZZ_NATIVE_RELAY_ABI_VERSION 3
+#define JAZZ_NATIVE_RELAY_ABI_VERSION 4
 
 /*
  * Return the shared native relay ABI version embedded in this artifact.

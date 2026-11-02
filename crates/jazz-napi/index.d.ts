@@ -84,8 +84,11 @@ export declare class NapiDb {
    */
   static openPersistentAsBackend(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
   static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
-  /** Register and return a typed view backed by this same runtime owner. */
-  registerSchema(schema: Uint8Array): NapiDb
+  /**
+   * Register and return a typed view backed by this same runtime owner,
+   * of an app shipping `migrations` (its bundle as JSON).
+   */
+  registerSchema(schema: Uint8Array, migrations?: Uint8Array | undefined | null): NapiDb
   /** Begin one owner-wide transaction. */
   beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null): void
   /** Commit an owner-wide transaction by id and optional kind. */
@@ -121,6 +124,8 @@ export declare class NapiDb {
   setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
   /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
   evictExpiredStagedLargeValues(): number
+  /** How many local commits still wait for the server's verdict. */
+  pendingUploadCount(): number
   /**
    * The optimistic in-memory side of a client/worker pair: its
    * subscriptions open with the worker's answer.
@@ -133,6 +138,22 @@ export declare class NapiDb {
    * Drives only local-first reads that wait for the server on first load.
    */
   setRemoteLinkHint(state: string): void
+  /**
+   * A fresh upstream link machine for this runtime's server connection;
+   * `seed` drives its retry jitter.
+   */
+  createUpstreamLink(seed: number): UpstreamLink
+  /**
+   * The slow-query report due now: one line per slow query shape,
+   * naming `app`: the first at once, then at most every 10 seconds. The caller
+   * writes each line with `console.warn`.
+   */
+  takeSlowQueryReport(app?: string | undefined | null): Array<string>
+  /**
+   * Report query runs of at least `ms` milliseconds (default 50); 0
+   * turns the slow-query log off.
+   */
+  setSlowQueryThresholdMs(ms: number): void
   /**
    * Connect to the server over byte frames the host carries: each frame
    * is one postcard `SyncMessage`.
@@ -238,6 +259,22 @@ export declare class Transport {
   tick(): number
   close(): boolean
 }
+
+/**
+ * The shared upstream link machine (`jazz::link`), which decides when the
+ * runtime's WebSocket connects, backs off and reports an outage. The runtime
+ * owns the socket and the timer and steps the machine with JSON documents.
+ */
+export declare class UpstreamLink {
+  /** `seed` drives the retry jitter. */
+  constructor(seed: number)
+  /**
+   * Apply one input observed at `now_ms`; returns the actions, events and
+   * status as JSON.
+   */
+  handle(nowMs: number, input: string): string
+}
+export type NapiUpstreamLink = UpstreamLink
 
 export declare class Write {
   get txId(): string

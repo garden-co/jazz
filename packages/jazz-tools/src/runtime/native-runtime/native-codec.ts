@@ -13,7 +13,9 @@ import {
 } from "./native-row-codec.js";
 import { parseCanonicalAuthorSubject } from "../author-id.js";
 import { exactSignedI64 } from "./exact-integer.js";
+import { runtimeSchemaJsonReplacer } from "../../drivers/schema-wire.js";
 import { encodeRelationQueryPostcard, type RelExpr } from "../../ir.js";
+import type { ClientMigrations } from "../client-migrations.js";
 
 const fatalUtf8Decoder = new Utf8Decoder({ fatal: true });
 
@@ -39,6 +41,7 @@ export type {
   NativeRow,
   NativeRowBatch,
   NativeRowDescriptorField,
+  NativeSplice,
   NativeSubscriptionDelta,
   DescriptorField,
   ValueType,
@@ -100,6 +103,8 @@ export function openConfig(
   historyComplete = false,
   initialSyncFlushEvery?: number,
   selfSignedClientProof?: NativeSelfSignedClientProof,
+  migrations?: ClientMigrations,
+  systemNode?: Uint8Array,
 ): Uint8Array {
   const writer = new PostcardWriter();
   writer.bytes(node);
@@ -115,9 +120,20 @@ export function openConfig(
   } else {
     writer.some((value) => value.u64(initialSyncFlushEvery));
   }
-  // The native binding keeps a trailing `backend_credential` slot solely to
-  // reject legacy raw ingress. New configs must never serialize one.
-  writer.none();
+  // The app's versions and migrations, as JSON the binding lowers into the
+  // lenses its store opens along (SPEC 10.7).
+  if (migrations == null) {
+    writer.none();
+  } else {
+    writer.some((value) => value.bytes(clientMigrationsBytes(migrations)));
+  }
+  // The node SYSTEM provenance names, when a backend's runtime node is drawn
+  // fresh per open but its subject stays stable.
+  if (systemNode == null) {
+    writer.none();
+  } else {
+    writer.some((value) => value.bytes(systemNode));
+  }
   return writer.finish();
 }
 
@@ -211,6 +227,16 @@ export type QueryArraySubquery = {
   nestedArrays?: QueryArraySubquery[];
 };
 
+/** A selected column read only in part (Rust `PartialSelect`, SPEC 19.12). */
+export type QueryPartialSelect =
+  | {
+      column: string;
+      kind: "bytes" | "text_utf16" | "text_utf8";
+      from: number;
+      to: number;
+    }
+  | { column: string; kind: "json_pointer"; at: string };
+
 export type QueryOptions = {
   limit?: number;
   offset?: number;
@@ -219,6 +245,8 @@ export type QueryOptions = {
   arraySubqueries?: QueryArraySubquery[];
   /** Relation expression carried in Query.relation by the public IR adapter. */
   relation?: unknown;
+  /** Selected columns the engine reads only in part. */
+  partial?: QueryPartialSelect[];
 };
 
 export function queryWithPredicates(
@@ -227,7 +255,15 @@ export function queryWithPredicates(
   options: number | QueryOptions = {},
 ): Uint8Array {
   const queryOptions = typeof options === "number" ? { limit: options } : options;
-  const { limit, offset = 0, orderBy = [], select, arraySubqueries = [], relation } = queryOptions;
+  const {
+    limit,
+    offset = 0,
+    orderBy = [],
+    select,
+    arraySubqueries = [],
+    relation,
+    partial = [],
+  } = queryOptions;
   if (limit != null) validateQueryBound("query limit", limit);
   validateQueryBound("query offset", offset);
   const writer = new PostcardWriter();
@@ -274,7 +310,25 @@ export function queryWithPredicates(
     writer.some((relationWriter) =>
       relationWriter.bytes(encodeRelationQueryPostcard(relation as RelExpr), false),
     );
+  writePartialSelects(writer, partial);
   return writer.finish();
+}
+
+function writePartialSelects(writer: PostcardWriter, partial: QueryPartialSelect[]): void {
+  writer.vec((entry, index) => {
+    const selected = partial[index]!;
+    entry.string(selected.column);
+    if (selected.kind === "json_pointer") {
+      entry.u64(3);
+      entry.string(selected.at);
+      return;
+    }
+    validateQueryBound(`partial selection ${selected.column} start`, selected.from);
+    validateQueryBound(`partial selection ${selected.column} end`, selected.to);
+    entry.u64(selected.kind === "bytes" ? 0 : selected.kind === "text_utf16" ? 1 : 2);
+    entry.u64(selected.from);
+    entry.u64(selected.to);
+  }, partial.length);
 }
 
 function writeArraySubquery(writer: PostcardWriter, subquery: QueryArraySubquery): void {
@@ -320,6 +374,8 @@ function writeArraySubquery(writer: PostcardWriter, subquery: QueryArraySubquery
   writer.vec((nested, index) => {
     writeArraySubquery(nested, nestedArrays[index]!);
   }, nestedArrays.length);
+  // Include builders take no partial selections yet.
+  writePartialSelects(writer, []);
 }
 
 function validateQueryBound(label: string, value: number): void {
@@ -756,6 +812,11 @@ export function assertBytes(value: unknown, label: string): Uint8Array {
     return Uint8Array.from(value);
   }
   throw new Error(`expected ${label} to be bytes`);
+}
+
+/** An app's migrations as the bindings take them (JSON). */
+export function clientMigrationsBytes(migrations: ClientMigrations): Uint8Array {
+  return utf8(JSON.stringify(migrations, runtimeSchemaJsonReplacer));
 }
 
 export function utf8(value: string): Uint8Array {

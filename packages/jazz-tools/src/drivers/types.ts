@@ -75,11 +75,21 @@ export interface RuntimeSubscriptionAddedRow {
   row: WasmRow;
 }
 
+/**
+ * One sequential edit of a large value: UTF-16 units and a string for TEXT,
+ * bytes for BYTEA. Each splice's offsets are in the value the earlier ones produced.
+ */
+export type RuntimeValueSplice =
+  | { at: number; delete: number; insert: string }
+  | { at: number; delete: number; insert: Uint8Array };
+
 export interface RuntimeSubscriptionUpdatedRow {
   sourceId: string;
   occurrenceKey: Uint8Array;
   index: number;
   row?: WasmRow;
+  /** Splices from the row's previous value, per column that opted in and could compute them. */
+  splices?: Record<string, RuntimeValueSplice[]>;
 }
 
 export interface RuntimeSubscriptionRemovedRow {
@@ -112,7 +122,7 @@ export type ColumnType =
   | { type: "Array"; element: ColumnType }
   | { type: "Row"; columns: ColumnDescriptor[] };
 
-export type ColumnMergeStrategy = "Counter" | "GSet";
+export type ColumnMergeStrategy = "Counter" | "GSet" | "Text" | "Markdown" | "Html";
 
 export interface ColumnDescriptor {
   name: string;

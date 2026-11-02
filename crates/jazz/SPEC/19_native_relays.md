@@ -10,8 +10,8 @@ A native host owns one **process-local relay** per explicit `{ app namespace,
 storage namespace, auth scope }`. The relay contains a durable ordinary client
 `Db` over a portable ordered-KV backend (SQLite in the first native host). Each
 UI runtime gets a separate, in-memory ordinary client `Db`; it attaches to the
-relay through the normal peer protocol. The relay may itself attach to an
-upstream server through that same protocol.
+relay through the normal peer protocol. The relay may itself attach to Core
+through that same protocol; it never attaches to another relay (ch. 9 §9.5).
 
 This chapter defines the host boundary only. Chapters 3–8, 13, and 16 continue
 to own transactions, permissions, sync, client API, and subscriptions.
@@ -220,7 +220,8 @@ capabilities and trusted revocation; no earlier implementation number or
 compatibility path is part of the released contract. ABI 2 (alpha.58) adds
 coded operation errors (response 25) as answers to existing commands, and
 ABI 3 (alpha.60) adds their optional reason name; see §19.6 ("Coded operation
-errors"). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
+errors"). ABI 4 (alpha.60) ends each subscription delta with its updated rows'
+splices (`updated_splices`, SPEC 18). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
 the current version.
 
 The ABI stays coarse and binary:

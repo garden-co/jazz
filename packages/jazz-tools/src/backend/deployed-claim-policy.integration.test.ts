@@ -5,14 +5,17 @@ import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/ind
 import { resolveSchemaSource } from "../schema-source.js";
 import { createJazzSession } from "./index.js";
 
-const app = s.defineApp({
-  users: s.table({ accountId: s.uuid() }, {}),
-  topics: s.table({ title: s.string() }, {}),
-  notes: s.table(
-    { userId: s.uuid(), topicId: s.uuid(), text: s.string() },
-    { user: s.rel("users", "userId"), topic: s.rel("topics", "topicId") },
-  ),
-});
+const app = s.defineApp(
+  {
+    users: s.table({ accountId: s.uuid() }, {}),
+    topics: s.table({ title: s.string() }, {}),
+    notes: s.table(
+      { userId: s.uuid(), topicId: s.uuid(), text: s.string() },
+      { user: s.rel("users", "userId"), topic: s.rel("topics", "topicId") },
+    ),
+  },
+  { migrations: "none" },
+);
 
 // The referenced table's read policy compares a session claim, and the insert
 // policy of the referencing table checks the referenced row.

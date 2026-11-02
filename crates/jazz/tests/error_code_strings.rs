@@ -69,6 +69,9 @@ fn pinned_reason(reason: Reason) -> &'static str {
         Reason::BranchMove => "branch_move",
         Reason::MissingChunks => "missing_chunks",
         Reason::PermissionsHeadMissing => "permissions_head_missing",
+        Reason::PredecessorRejected => "predecessor_rejected",
+        Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
+        Reason::IdentityMismatch => "identity_mismatch",
     }
 }
 
@@ -131,6 +134,10 @@ fn a_public_api_error_keeps_its_display_text_and_exposes_the_stable_code() {
             author: AuthorSubject::for_test_bytes([0xa1; 16]),
         },
         id_source: None,
+        chunk_store: None,
+        clock: None,
+        migrations: Default::default(),
+        system_node: None,
     }))
     .expect("alice opens a database");
 

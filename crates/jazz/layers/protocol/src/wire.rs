@@ -842,6 +842,15 @@ pub enum TransportError {
     Failed(String),
 }
 
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Backpressure => f.write_str("backpressure"),
+            Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
 fn check_wire_protocol_range(min: u16, max: u16) -> Result<(), WireError> {
     if min == WIRE_PROTOCOL_VERSION && max == WIRE_PROTOCOL_VERSION {
         return Ok(());
@@ -1011,8 +1020,8 @@ mod tests {
         assert!(decode_postcard_exact::<PredicateRead>(&padded).is_err());
     }
 
-    const PREDICATE_READ_WITHOUT_RESULT_HEX: &str = "017410444444444444444444444444444444440174000000000000000000000000000010555555555555555555555555555555550000";
-    const PREDICATE_READ_WITH_RESULT_HEX: &str = "0174104444444444444444444444444444444401740000000000000000000000000000105555555555555555555555555555555500010301abcd";
+    const PREDICATE_READ_WITHOUT_RESULT_HEX: &str = "01741044444444444444444444444444444444017400000000000000000000000000000010555555555555555555555555555555550000";
+    const PREDICATE_READ_WITH_RESULT_HEX: &str = "017410444444444444444444444444444444440174000000000000000000000000000000105555555555555555555555555555555500010301abcd";
 
     /// Wire layout is tested internally because enum tags are not a query API.
     #[test]

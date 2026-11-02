@@ -373,7 +373,7 @@ describe("cli migrations", () => {
     await typecheckGeneratedMigration(filePath);
   }, 30_000);
 
-  it("still creates a migration file for nullability-only schema changes", async () => {
+  it("refuses a same-column nullability change instead of emitting a stub that cannot typecheck", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
     const fromHash = "3030303030303030303030303030303030303030303030303030303030303030";
@@ -404,7 +404,8 @@ describe("cli migrations", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const { result, logs } = await captureConsoleLogs(() =>
+    // #2163: no migration step changes a kept column's optionality.
+    await expect(
       createMigration({
         schemaDir: root,
         serverUrl: "http://localhost:1625",
@@ -413,12 +414,67 @@ describe("cli migrations", () => {
         fromHash: fromHash.slice(0, 12),
         toHash: toHash.slice(0, 12),
       }),
+    ).rejects.toThrow(
+      'Changing column "todos.done" from required to optional is not supported yet. Add a column under a new name and drop the old one instead.',
     );
-
-    expect(result).not.toBeNull();
-    expect(logs.some((line) => line.startsWith("Generated:"))).toBe(true);
-    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(1);
+    expect(
+      (await readdir(migrationsDir).catch(() => [])).filter((name) => name.endsWith(".ts")),
+    ).toHaveLength(0);
   });
+
+  it.each([
+    {
+      change: "the JSON Schema of",
+      from: { type: "Json", schema: { type: "object" } },
+      to: { type: "Json", schema: { type: "object", required: ["state"] } },
+    },
+    {
+      change: "the enum variants of",
+      from: { type: "Enum", variants: ["done", "todo"] },
+      to: { type: "Enum", variants: ["done", "doing", "todo"] },
+    },
+  ])(
+    "refuses changing $change a kept column, which no migration step can do",
+    async ({ change, from, to }) => {
+      const { root } = await createWorkspace();
+      const migrationsDir = join(root, "migrations");
+      const fromHash = "5050505050505050505050505050505050505050505050505050505050505050";
+      const toHash = "6060606060606060606060606060606060606060606060606060606060606060";
+      const fetchMock = vi.fn(async (input: string) => {
+        if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+          return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+        }
+        for (const [hash, columnType] of [
+          [fromHash, from],
+          [toHash, to],
+        ] as const) {
+          if (input.endsWith(`/apps/${APP_ID}/schema/${hash}`)) {
+            return storedSchemaResponse({
+              todos: { columns: [{ name: "state", column_type: columnType, nullable: false }] },
+            });
+          }
+        }
+        throw new Error(`Unexpected fetch: ${input}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(
+        createMigration({
+          schemaDir: root,
+          serverUrl: "http://localhost:1625",
+          adminSecret: "admin-secret",
+          migrationsDir,
+          fromHash: fromHash.slice(0, 12),
+          toHash: toHash.slice(0, 12),
+        }),
+      ).rejects.toThrow(
+        `Changing ${change} column "todos.state" is not supported yet. Add a column under a new name and drop the old one instead.`,
+      );
+      expect(
+        (await readdir(migrationsDir).catch(() => [])).filter((name) => name.endsWith(".ts")),
+      ).toHaveLength(0);
+    },
+  );
 
   it("uses --name to generate a named migration file and skips the rename reminder", async () => {
     const { root } = await createWorkspace();

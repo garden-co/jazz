@@ -20,6 +20,8 @@ export {
 export * from "../accounts/exports.js";
 
 export { accountState } from "./account-state.js";
+export { syncStatus } from "./sync-status.js";
+export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 
 export { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
 export type { JazzSession, JazzSessionSnapshot } from "../session/state.js";
