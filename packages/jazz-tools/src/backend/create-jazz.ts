@@ -38,7 +38,12 @@ import {
   type JazzClient,
 } from "./create-jazz-session.js";
 import type { BackendSchemaInput } from "./create-jazz-context.js";
-import { onVercelDeployment, openVercelCore, type VercelStoreOptions } from "./vercel-store.js";
+import {
+  onVercelDeployment,
+  onVercelHost,
+  openVercelCore,
+  type VercelStoreOptions,
+} from "./vercel-store.js";
 
 export type { VercelStoreOptions } from "./vercel-store.js";
 
@@ -437,7 +442,7 @@ async function openInProcessCore(
  * writable at all), so a sqlite store there loses data silently.
  */
 function refuseServerlessDisk(dir: string): void {
-  const host = onVercelDeployment()
+  const host = onVercelHost()
     ? "Vercel"
     : process.env.AWS_LAMBDA_FUNCTION_NAME
       ? "AWS Lambda"
@@ -1058,7 +1063,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       request.method === "GET" &&
       path?.endsWith("/ws") &&
       request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
-      onVercelDeployment()
+      onVercelHost()
     ) {
       if (!originAllowed(request)) return new Response("origin not allowed", { status: 403 });
       const { upgradeWebSocket } = (await import(
@@ -1075,7 +1080,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     }
     // On Vercel this handler upgrades sockets (above); elsewhere (next dev)
     // only if attach() runs on the same server.
-    return handle(request, upgradesSockets || onVercelDeployment());
+    return handle(request, upgradesSockets || onVercelHost());
   }
 
   function nodeRequest(req: IncomingMessage): Request {

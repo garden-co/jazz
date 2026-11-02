@@ -7,6 +7,7 @@ import {
   defaultCoreName,
   newerVersion,
   onVercelDeployment,
+  onVercelHost,
   startScript,
   type SandboxHandle,
   type SandboxSdk,
@@ -236,6 +237,12 @@ describe("vercel() store", () => {
     expect(onVercelDeployment({ VERCEL: "1", VERCEL_ENV: "preview" })).toBe(true);
     expect(onVercelDeployment({ VERCEL: "1", VERCEL_ENV: "development" })).toBe(false);
     expect(onVercelDeployment({})).toBe(false);
+    // The serverless host checks (no sqlite, sockets via upgradeWebSocket)
+    // exempt only `vercel dev`.
+    expect(onVercelHost({ VERCEL: "1" })).toBe(true);
+    expect(onVercelHost({ VERCEL: "1", VERCEL_ENV: "preview" })).toBe(true);
+    expect(onVercelHost({ VERCEL: "1", VERCEL_ENV: "development" })).toBe(false);
+    expect(onVercelHost({})).toBe(false);
   });
 
   it("orders versions as semver, prereleases before their release", () => {
