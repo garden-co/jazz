@@ -39,6 +39,8 @@ interface LocalJazzServerOptions {
   adminSecret?: string;
   allowLocalFirstAuth?: boolean;
   telemetryCollectorUrl?: string;
+  /** Trust only this OIDC workload instead of the shared secrets. */
+  trustedWorkload?: { issuer: string; audience: string; subject: string };
   enableLogs?: boolean;
 }
 
@@ -53,7 +55,9 @@ export interface LocalJazzServerHandle {
   port: number;
   url: string;
   dataDir: string;
+  /** Empty for a server that trusts a workload instead. */
   adminSecret: string;
+  /** Empty for a server that trusts a workload instead. */
   backendSecret: string;
   stop: () => Promise<void>;
 }
@@ -104,8 +108,17 @@ export async function startLocalJazzServer(
   const port = options.port ?? 0;
   const ownsDataDir = options.inMemory !== true && options.dataDir === undefined;
   const dataDir = ownsDataDir ? await createOwnedDataDir() : options.dataDir;
-  const adminSecret = options.adminSecret ?? `jazz-test-admin-${randomUUID().slice(0, 8)}`;
-  const backendSecret = options.backendSecret ?? `jazz-test-backend-${randomUUID().slice(0, 8)}`;
+  // A trusted workload replaces the shared secrets.
+  const workload = options.trustedWorkload !== undefined;
+  if (workload && (options.adminSecret !== undefined || options.backendSecret !== undefined)) {
+    throw new Error("startLocalJazzServer: trustedWorkload replaces adminSecret and backendSecret");
+  }
+  const adminSecret = workload
+    ? undefined
+    : (options.adminSecret ?? `jazz-test-admin-${randomUUID().slice(0, 8)}`);
+  const backendSecret = workload
+    ? undefined
+    : (options.backendSecret ?? `jazz-test-backend-${randomUUID().slice(0, 8)}`);
 
   let server;
   try {
@@ -123,6 +136,7 @@ export async function startLocalJazzServer(
       allowLocalFirstAuth: options.allowLocalFirstAuth,
       telemetryCollectorUrl: options.telemetryCollectorUrl,
       schema: schema ? [...schema] : undefined,
+      trustedWorkload: options.trustedWorkload,
     });
   } catch (error) {
     if (ownsDataDir && dataDir) {
