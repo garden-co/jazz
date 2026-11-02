@@ -107,13 +107,6 @@ Yes. When a user signs up with an external provider, their identity carries over
 
 </Accordion>
 
-<Accordion id="rust-migrations" title="Do Rust apps need separate migration files?">
-
-No. Define and publish migrations with the TypeScript tooling. The server stores the compiled
-migrations that the Rust runtime uses. See [Migrations](/docs/schemas/migrations) for details.
-
-</Accordion>
-
 <Accordion id="common-errors" title="How do I handle a rejected write?">
 
 Keep the result of the write and call `wait()` when your app needs to know whether the server

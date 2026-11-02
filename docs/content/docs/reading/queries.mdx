@@ -10,7 +10,7 @@ import DurabilityTiersTable from "../../partials/durability-tiers-table.mdx";
 
 A one-shot query runs once against the database without subscribing to changes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-oneshot-ts
@@ -19,11 +19,6 @@ A one-shot query runs once against the database without subscribing to changes.
   <Tab value="Effect">
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-oneshot-effect
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-oneshot-rust
     </include>
   </Tab>
 </Tabs>
@@ -39,7 +34,7 @@ first matching row, or `null` if no row matches or you aren't allowed to read it
 
 Subscribe to a query to receive updates whenever the underlying data changes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-subscriptions-ts
@@ -50,29 +45,15 @@ Subscribe to a query to receive updates whenever the underlying data changes.
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-subscriptions-effect
     </include>
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-subscriptions-rust
-    </include>
-  </Tab>
 </Tabs>
 
 ## Composing queries
 
 Queries are immutable and chainable. Each method returns a new query, so you can store a base and reuse it for different views without side effects.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-composing-queries-ts
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-composing-queries-rust
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-composing-queries-ts
+</include>
 
 See [Filters & Sorting](/docs/reading/filters-and-sorting) for the full list of `where` operators, `orderBy`, `limit`, and `offset`.
 
@@ -98,7 +79,7 @@ behavior and how subscriptions change between offline and online operation.
 These are the only read tiers. Write waits use the separate durability tiers `"local"` and
 `"global"`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-durability-tier-ts
@@ -107,11 +88,6 @@ These are the only read tiers. Write waits use the separate durability tiers `"l
   <Tab value="Effect">
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-durability-tier-effect
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-durability-tier-rust
     </include>
   </Tab>
 </Tabs>
@@ -141,9 +117,6 @@ const rows = useAll(app.todos, {
   firstLoadRemoteWaitMs: 500,
 });
 ```
-
-In Rust, use `client.query_local_first(query, Duration::from_millis(500))` and
-`client.subscribe_local_first(query, Duration::from_millis(500))`.
 
 - Only the initial load waits: a one-shot read, or a subscription's first callback. While the
   client looks online (its connection is live, or its connection attempt started less than 5 s

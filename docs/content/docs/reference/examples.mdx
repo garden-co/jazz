@@ -36,7 +36,6 @@ Reach for the `examples/` apps below when you want to see a specific pattern wor
 | [todo-client-localfirst-solid](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-solid)   | Solid + Vite              | The Solid bindings: `JazzProvider`, `useAll` live queries, `useDb` writes                                                                                                                                                                                 |
 | [todo-client-localfirst-ts](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-ts)         | Vanilla TypeScript + Vite | The low-level client API with no framework bindings: `createDb`, `db.subscribe`, `db.onAuthChanged`, `createAccountManager`                                                                                                                               |
 | [todo-client-localfirst-vue](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-vue)       | Vue + Vite                | The Vue bindings: `JazzProvider`, `useAll` live queries, and `useDb` writes                                                                                                                                                                               |
-| [todo-server-rs](https://github.com/garden-co/jazz/tree/main/examples/todo-server-rs)                               | Rust (axum) + `jazz`      | Using Jazz directly from Rust as the embedded database for an axum REST + SSE service&hairsp;—&hairsp;no browser, no WASM, no Node bindings                                                                                                               |
 | [todo-server-ts](https://github.com/garden-co/jazz/tree/main/examples/todo-server-ts)                               | Node + Express            | Jazz as a server-side backend via `jazz-tools/backend` and NAPI SQLite storage; `await client.forRequest(request)` for per-user policy; SSE live snapshots; `wait({ tier })` durability                                                                   |
 | [world-tour](https://github.com/garden-co/jazz/tree/main/examples/world-tour)                                       | Vue + Vite + MapLibre GL  | The Vue bindings end-to-end in a non-trivial app (tour management with maps)                                                                                                                                                                              |
 
@@ -50,9 +49,9 @@ Reach for the `examples/` apps below when you want to see a specific pattern wor
 - **The `auth-*-chat` family** (`auth-betterauth-chat`, `auth-simple-chat`,
   `auth-workos-chat`) all implement a role-gated chat against three different
   auth setups, each read in the backend's `authenticate`, so the diff between them is the auth integration.
-- **The server-side examples** (`todo-server-ts`, `todo-server-rs`,
+- **The server-side examples** (`todo-server-ts`,
   `nextjs-csr-ssr`, `cloudflare-worker-runtime-ts`) show Jazz used as the
-  database from a server runtime &mdash; Node, Rust, Next.js App Router, and
+  database from a server runtime &mdash; Node, Next.js App Router, and
   Cloudflare Workers respectively.
 - **The product-shaped examples** (`chat-react`, `world-tour`) are full apps
   that lean on Jazz for a specific real-world pattern: real-time chat with

@@ -256,7 +256,7 @@ provide the server URL and secret through `--server-url` and `--admin-secret` or
 
 ## Compiling the schema
 
-Use `schema compile` when working on a non-TypeScript Jazz application that needs to consume the schema written in TypeScript (e.g. when using our Rust bindings).
+Use `schema compile` when working on a non-TypeScript Jazz application that needs to consume the schema written in TypeScript.
 
 You don't need to run it as part of the normal migration workflow: `migrations create` saves
 the required snapshots, and `deploy` compiles the schema before publishing.

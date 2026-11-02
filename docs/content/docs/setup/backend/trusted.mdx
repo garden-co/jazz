@@ -14,18 +14,9 @@ A TypeScript backend creates one `createJazzSession` owner from `jazz-tools/back
 
 Backend admission requires a reachable Jazz server: the Node host sends `POST /apps/{app}/backend/admit` with `X-Jazz-Backend-Secret`, and proceeds only after that server validates it. Core validates the credential and owns account registration and linking. This also applies to a memory driver; backend initialization is not an offline privilege grant. Browser and React Native hosts reject backend selection.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="main.ts"'>
-      ../examples/docs/todo-server-ts/src/main.ts#context-setup-ts-backend
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs" meta='title="main.rs"'>
-      ../examples/docs/todo-server-rs/src/main.rs#context-setup-rust-backend
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts" meta='title="main.ts"'>
+  ../examples/docs/todo-server-ts/src/main.ts#context-setup-ts-backend
+</include>
 
 ## Backend identity pattern
 

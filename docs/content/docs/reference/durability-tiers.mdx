@@ -56,8 +56,7 @@ A local-first read accepts an optional `firstLoadRemoteWaitMs` that bounds how l
 its first result may wait for the server. With an explicit `tier: "local-first"` the default is `0`,
 plain `"local-first"`. A browser or React Native read that names no tier defaults to `5000` when a
 server is configured; pass `firstLoadRemoteWaitMs: 0` to show local data at once. TypeScript rejects
-the option with `"remote"` (JavaScript callers have it ignored). In Rust, use
-`client.query_local_first(query, timeout)` and `client.subscribe_local_first(query, timeout)`.
+the option with `"remote"` (JavaScript callers have it ignored).
 
 Only the initial load waits: a one-shot read, or a subscription's first callback. While the client
 looks online (its connection is live, or its connection attempt started less than five seconds
@@ -114,7 +113,7 @@ storage driver or a JavaScript-side SQLite path.
 
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript", "Effect", "Rust"]}
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript", "Effect"]}
   persist
   updateAnchor
 >
@@ -146,11 +145,6 @@ storage driver or a JavaScript-side SQLite path.
   <Tab value="Effect">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-durability-tier-effect
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs" meta='title="main.rs"'>
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-durability-tier-rust
     </include>
   </Tab>
 </Tabs>

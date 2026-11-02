@@ -59,11 +59,10 @@ already apply locally first and sync in the background.
 
 ## Use a callback for normal work
 
-The callback form commits automatically when the callback finishes. In TypeScript, Jazz rolls the
-transaction back if the callback throws or returns a rejected promise. In Rust, it leaves the
-transaction uncommitted if the callback returns `Err`.
+The callback form commits automatically when the callback finishes. Jazz rolls the transaction back
+if the callback throws or returns a rejected promise.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-ts
@@ -74,16 +73,10 @@ transaction uncommitted if the callback returns `Err`.
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-transaction-effect
     </include>
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs" meta='title="app.rs"'>
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-transaction-rust
-    </include>
-  </Tab>
 </Tabs>
 
 The TypeScript callback returns the new row ID. Jazz exposes that value as `result.value`, and
-`result.wait(...)` resolves to the same value. In Rust, `Db::transaction` returns the callback value
-and the committed transaction ID as a tuple.
+`result.wait(...)` resolves to the same value.
 
 Inside a TypeScript transaction:
 
@@ -148,7 +141,7 @@ A serializable transaction reads from a stable transaction snapshot. The authori
 and writes, then accepts or rejects the transaction as one serialisable unit. This is useful when a
 write is valid only if the data you just read has not changed in a conflicting transaction.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-serializable-transaction-ts
@@ -159,18 +152,10 @@ write is valid only if the data you just read has not changed in a conflicting t
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-serializable-transaction-effect
     </include>
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs" meta='title="app.rs"'>
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-serializable-transaction-rust
-    </include>
-  </Tab>
 </Tabs>
 
 In TypeScript, `wait()` takes no durability tier for a serializable transaction. It resolves if the
 authority accepts the transaction and rejects if the authority rejects it.
-
-The Rust example uses the embedded `jazz::db::Db` API. An owning `SerializableTx` abandons the open
-transaction if it is dropped before `commit()` succeeds.
 
 <Callout type="warn">
   The authority checks only the reads the writing client reports. That keeps honest writers from

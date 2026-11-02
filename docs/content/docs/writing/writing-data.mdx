@@ -63,7 +63,7 @@ Every framework provides a hook to access the database handle. In plain TypeScri
 
 Mutations are methods on the database handle. All three take a table as their first argument.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-crud-ts
@@ -72,11 +72,6 @@ Mutations are methods on the database handle. All three take a table as their fi
   <Tab value="Effect">
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-crud-effect
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-crud-rust
     </include>
   </Tab>
 </Tabs>
@@ -127,7 +122,7 @@ Omitted fields are left unchanged; explicitly passing `undefined` also leaves a 
 To clear a nullable column in TypeScript, pass `null`.
 Required fields cannot be set to `null`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-nullable-update-ts
@@ -136,11 +131,6 @@ Required fields cannot be set to `null`.
   <Tab value="Effect">
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-nullable-update-effect
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-nullable-update-rust
     </include>
   </Tab>
 </Tabs>
@@ -262,7 +252,7 @@ try {
 }
 ```
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-durability-tier-ts
@@ -271,11 +261,6 @@ try {
   <Tab value="Effect">
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-durability-tier-effect
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-durability-tier-rust
     </include>
   </Tab>
 </Tabs>
