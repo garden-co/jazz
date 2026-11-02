@@ -6,7 +6,7 @@
 // secrets are generated inside the Sandbox and read back through the SDK.
 // Wake handling is adapted from garden-co/infra's v2 sync proxy (ADR 0004).
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { JazzCoreSocketEvent } from "jazz-napi";
 import { registerInProcessTransport } from "../runtime/in-process-transport.js";
@@ -19,8 +19,9 @@ export const VERCEL_CORE_PORT = 1625;
 
 export interface VercelStoreOptions {
   /**
-   * Sandbox name. Defaults to `jazz-<VERCEL_PROJECT_ID>-<VERCEL_ENV>`, so each
-   * project has one production and one preview core.
+   * Sandbox name. Defaults to `jazz-<VERCEL_PROJECT_ID>-production` for
+   * production and `jazz-<VERCEL_PROJECT_ID>-preview-<branch>-<hash>` for
+   * each Git branch's previews.
    */
   name?: string;
   /**
@@ -120,6 +121,7 @@ const isWakeConflict = (error: unknown) => /\b409\b|already attached|conflict/i.
 
 async function healthy(base: string, timeoutMs: number, diag: Record<string, number>) {
   const deadline = performance.now() + timeoutMs;
+  let pause = 50;
   while (performance.now() < deadline) {
     let why: string;
     try {
@@ -134,12 +136,45 @@ async function healthy(base: string, timeoutMs: number, diag: Record<string, num
       why = e.name === "TimeoutError" ? "timeout" : (e.cause?.code ?? e.name ?? "error");
     }
     diag[why] = (diag[why] ?? 0) + 1;
-    await sleep(20);
+    await sleep(pause);
+    pause = Math.min(pause * 2, 500);
   }
   return false;
 }
 
-/** Install the server binary for `version` on the Drive, generate secrets once, run. */
+/** Whether semver `a` is newer than `b` (prereleases sort before their release). */
+export function newerVersion(a: string, b: string): boolean {
+  const split = (v: string) => {
+    const [main = "", pre] = v.split(/-(.*)/s, 2);
+    return { main: main.split(".").map(Number), pre: pre?.split(".") };
+  };
+  const x = split(a);
+  const y = split(b);
+  for (let i = 0; i < 3; i++) {
+    if ((x.main[i] ?? 0) !== (y.main[i] ?? 0)) return (x.main[i] ?? 0) > (y.main[i] ?? 0);
+  }
+  if (!x.pre || !y.pre) return !x.pre && !!y.pre;
+  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
+    const p = x.pre[i];
+    const q = y.pre[i];
+    if (p === q) continue;
+    if (p === undefined) return false;
+    if (q === undefined) return true;
+    const numeric = /^\d+$/;
+    if (numeric.test(p) && numeric.test(q)) return Number(p) > Number(q);
+    if (numeric.test(p) !== numeric.test(q)) return !numeric.test(p);
+    return p > q;
+  }
+  return false;
+}
+
+/**
+ * Start the core: install the server binary for `version` on the Drive,
+ * generate the app id and secrets once, and run the newest server version
+ * this Drive has seen, so an instance from an older deployment never
+ * downgrades data a newer one already wrote. A different running version is
+ * stopped first; the same one is left alone.
+ */
 export function startScript(
   appId: string | undefined,
   version: string,
@@ -147,9 +182,28 @@ export function startScript(
 ): string {
   const q = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
   return `#!/bin/bash
-# Written by jazz-tools' vercel() store before each server start.
+# Written by jazz-tools' vercel() store for each server start.
 set -euo pipefail
-bin=/data/bin/jazz-tools-${version}
+# Starts are serialized; the server itself runs without the lock.
+exec 9>/tmp/jazz.lock
+flock 9
+# Semver order: GNU sort -V with "~" sorts a prerelease before its release.
+newer() {
+  [ "$1" != "$2" ] && [ "$(printf '%s\\n%s\\n' "\${1/-/\\~}" "\${2/-/\\~}" | sort -V | tail -1)" = "\${1/-/\\~}" ]
+}
+version=${q(version)}
+highest=$(cat /data/version 2>/dev/null || true)
+if [ -n "$highest" ] && [ -x "/data/bin/jazz-tools-$highest" ] && newer "$highest" "$version"; then
+  version=$highest
+fi
+if [ -f /tmp/jazz.pid ] && kill -0 "$(cat /tmp/jazz.pid)" 2>/dev/null; then
+  [ "$(cat /tmp/jazz.version 2>/dev/null)" = "$version" ] && exit 0
+  pid=$(cat /tmp/jazz.pid)
+  kill -TERM "$pid" 2>/dev/null || true
+  for _ in $(seq 150); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+  kill -KILL "$pid" 2>/dev/null || true
+fi
+bin=/data/bin/jazz-tools-$version
 if [ ! -x "$bin" ]; then
   mkdir -p /data/bin
   # The Sandbox image has node but no curl.
@@ -167,6 +221,12 @@ fi
 set -a; . /data/secrets.env; set +a
 export NODE_ENV=production
 mkdir -p /data/store
+printf '%s\n' "$version" > /data/version.tmp && mv /data/version.tmp /data/version
+# Older servers are never started again (see above).
+find /data/bin -name 'jazz-tools-*' ! -name "jazz-tools-$version" -delete
+printf '%s\n' "$version" > /tmp/jazz.version
+echo $$ > /tmp/jazz.pid
+exec 9>&-
 exec "$bin" server "$JAZZ_APP_ID" --port ${VERCEL_CORE_PORT} --data-dir /data/store
 `;
 }
@@ -189,6 +249,29 @@ function parseSecrets(text: string): {
     throw new Error("vercel(): the core's secrets are missing");
   }
   return { appId, adminSecret, backendSecret };
+}
+
+/** Whether this process runs in a Vercel deployment (not `vercel dev` or a pulled env). */
+export function onVercelDeployment(env: Record<string, string | undefined> = process.env): boolean {
+  return !!env.VERCEL && (env.VERCEL_ENV === "production" || env.VERCEL_ENV === "preview");
+}
+
+/**
+ * The core for this deployment: one for production, and one per Git branch
+ * for previews, so a branch's schema and permissions never apply to
+ * another branch's data.
+ */
+export function defaultCoreName(project: string, env: Record<string, string | undefined>): string {
+  const target = env.VERCEL_ENV ?? "development";
+  if (target !== "preview") return `jazz-${project}-${target}`;
+  const branch = env.VERCEL_GIT_COMMIT_REF ?? env.VERCEL_DEPLOYMENT_ID ?? "unknown";
+  const slug = branch
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 24);
+  const hash = createHash("sha256").update(branch).digest("hex").slice(0, 8);
+  return `jazz-${project}-preview-${slug}-${hash}`;
 }
 
 async function installedVersion(): Promise<string> {
@@ -227,20 +310,28 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       "vercel(): VERCEL_PROJECT_ID is not set; enable system environment variables or pass a name",
     );
   }
-  const name = options.name ?? `jazz-${project}-${env.VERCEL_ENV ?? "development"}`;
+  const name = options.name ?? defaultCoreName(project!, env);
   const creds = options.credentials ?? {};
   const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
   const script = Buffer.from(startScript(appId, version, tarballUrl));
 
   const startServer = async (sbx: SandboxHandle) => {
-    await sbx.writeFiles([{ path: "/data/start.sh", content: script }]);
-    // Several instances may wake the same core; only the lock holder starts it.
+    // A fresh path each time: bash reads a script as it runs, so one that is
+    // running must never be rewritten.
+    const path = `/tmp/jazz-start-${randomUUID()}.sh`;
+    await sbx.writeFiles([{ path, content: script }]);
     await sbx.runCommand({
       cmd: "bash",
-      args: ["-lc", "exec flock -n /tmp/jazz.lock bash /data/start.sh >>/data/server.log 2>&1"],
+      args: ["-lc", `exec bash ${path} >>/data/server.log 2>&1`],
       detached: true,
     });
   };
+
+  /** The server version running in `sbx`, if any. */
+  const runningVersion = async (sbx: SandboxHandle) =>
+    (await sbx.readFileToBuffer({ path: "/tmp/jazz.version" }).catch(() => null))
+      ?.toString("utf8")
+      .trim() || undefined;
 
   const getRunning = async (): Promise<SandboxHandle | null> => {
     const sbx = await sdk.Sandbox.get({ name, resume: false, ...creds }).catch(() => null);
@@ -286,6 +377,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     const deadline = t0 + WAKE_DEADLINE_MS;
     const healthFails: Record<string, number> = {};
     let recycled = false;
+    let restarted = false;
     let sbx = await getRunning();
     for (;;) {
       while (!sbx) {
@@ -325,7 +417,13 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           performance.now() - healthT0 > NOT_LISTENING_RECYCLE_MS
         ) {
           recycled = true;
-          await sbx.stop().catch(() => {});
+          // Other instances may be watching the same session; only the
+          // session this one saw fail is stopped, never a newer one.
+          const watched = sbx.currentSession().startedAt.getTime();
+          const now = await getRunning();
+          if (now && now.currentSession().startedAt.getTime() === watched) {
+            await now.stop().catch(() => {});
+          }
           sbx = null;
           break;
         }
@@ -337,7 +435,24 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           }
         }
       }
-      if (ok && sbx) return { sbx, base };
+      if (ok && sbx) {
+        // An instance of a newer deployment restarts an older server once;
+        // an older instance uses whatever newer server it finds.
+        const running = await runningVersion(sbx);
+        if (!running || !newerVersion(version, running)) return { sbx, base };
+        if (restarted) {
+          throw new Error(`vercel(): core ${name} still runs ${running}, not ${version}`);
+        }
+        restarted = true;
+        await startServer(sbx);
+        while (performance.now() < deadline) {
+          const now = await runningVersion(sbx);
+          if (now && !newerVersion(version, now) && (await healthy(base, 1_000, healthFails))) {
+            return { sbx, base };
+          }
+          await sleep(250);
+        }
+      }
       if (performance.now() > deadline) {
         throw new Error(
           `vercel(): core ${name} did not become healthy in ${since(t0)} ms (${JSON.stringify(healthFails)})`,
@@ -376,6 +491,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
         if (appId && secrets.appId !== appId) {
           throw new Error(`vercel(): core ${name} belongs to app ${secrets.appId}, not ${appId}`);
         }
+        const replaced = live?.core;
         live = {
           sbx,
           base,
@@ -388,6 +504,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           }),
           checkedAt: Date.now(),
         };
+        if (replaced) void replaced.close().catch(() => {});
         return live;
       } finally {
         pending = undefined;
@@ -398,12 +515,19 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
 
   // Keep the core awake while browsers are connected or requests are recent;
   // once quiet, its session timeout stops it.
+  // Each instance reads the session fresh and only tops it up to `idleMs`
+  // from now, so many instances don't stack their extensions.
   const keepalive = setInterval(() => {
     if (!live) return;
     if (sockets === 0 && Date.now() - lastActivity > idleMs) return;
-    const session = live.sbx.currentSession();
-    const left = session.startedAt.getTime() + session.timeout - Date.now();
-    if (left < idleMs) session.extendTimeout(idleMs).catch(() => {});
+    void sdk.Sandbox.get({ name, resume: false, ...creds })
+      .then((sbx) => {
+        if (sbx.status !== "running") return;
+        const session = sbx.currentSession();
+        const left = session.startedAt.getTime() + session.timeout - Date.now();
+        if (left < idleMs - KEEPALIVE_MS) return session.extendTimeout(idleMs - left);
+      })
+      .catch(() => {});
   }, KEEPALIVE_MS);
   (keepalive as { unref?: () => void }).unref?.();
 
@@ -441,10 +565,20 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       ensure().then(
         ({ core }) => {
           if (closed) return;
-          inner = core.openSocket(headers, (error, event) => {
-            if (error || event.kind === "close") done();
-            onEvent(error, event);
-          });
+          try {
+            inner = core.openSocket(headers, (error, event) => {
+              if (error || event.kind === "close") done();
+              onEvent(error, event);
+            });
+          } catch (error) {
+            done();
+            onEvent(error instanceof Error ? error : new Error(String(error)), {
+              kind: "close",
+              code: 1011,
+              reason: "core unavailable",
+            } as JazzCoreSocketEvent);
+            return;
+          }
           for (const data of queued.splice(0)) inner.send(data);
         },
         (error: unknown) => {

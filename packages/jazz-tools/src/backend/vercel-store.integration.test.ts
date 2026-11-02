@@ -3,7 +3,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { createJazz, vercel } from "./index.js";
-import { startScript, type SandboxHandle, type SandboxSdk } from "./vercel-store.js";
+import {
+  defaultCoreName,
+  newerVersion,
+  onVercelDeployment,
+  startScript,
+  type SandboxHandle,
+  type SandboxSdk,
+} from "./vercel-store.js";
 
 const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
 const permissions = s.definePermissions(app, ({ policy }) => {
@@ -29,7 +36,15 @@ function fakeVercel(core: {
   backendSecret: string;
 }) {
   const calls: string[] = [];
-  const state = { exists: false, status: "stopped", drive: false };
+  const state = {
+    exists: false,
+    status: "stopped",
+    drive: false,
+    startedAt: new Date(),
+    timeout: 300_000,
+    /** What the core runs; a start script switches it to its own version. */
+    running: undefined as string | undefined,
+  };
   const files = new Map<string, Buffer>([
     [
       "/data/secrets.env",
@@ -44,15 +59,28 @@ function fakeVercel(core: {
     },
     domain: () => core.url,
     currentSession: () => ({
-      startedAt: new Date(),
-      timeout: 300_000,
-      extendTimeout: async () => void calls.push("extend"),
+      startedAt: state.startedAt,
+      timeout: state.timeout,
+      extendTimeout: async (ms: number) => {
+        calls.push(`extend ${ms}`);
+        state.timeout += ms;
+      },
     }),
-    runCommand: async ({ args }) => void calls.push(`run ${args.at(-1)}`),
+    runCommand: async ({ args }) => {
+      const script = files.get(/exec bash (\S+)/.exec(args.at(-1)!)![1]!)!.toString();
+      const version = /^version='(.*)'$/m.exec(script)![1]!;
+      if (!state.running || newerVersion(version, state.running)) state.running = version;
+      calls.push(`start ${version}`);
+    },
     writeFiles: async (written) => {
       for (const file of written) files.set(file.path, file.content);
     },
-    readFileToBuffer: async ({ path }) => files.get(path) ?? null,
+    readFileToBuffer: async ({ path }) =>
+      path === "/tmp/jazz.version"
+        ? state.running
+          ? Buffer.from(`${state.running}\n`)
+          : null
+        : (files.get(path) ?? null),
     stop: async () => {
       state.status = "stopped";
     },
@@ -114,13 +142,11 @@ describe("vercel() store", () => {
 
     const jazz = await createJazz({ appId, app, permissions, store: vercel({ sdk: fake.sdk }) });
     cleanups.push(() => jazz.close());
-    const name = "jazz-prj_test-preview";
-    expect(fake.calls.slice(0, 3)).toEqual([
-      `drive ${name}-data`,
-      `create ${name}`,
-      "run exec flock -n /tmp/jazz.lock bash /data/start.sh >>/data/server.log 2>&1",
-    ]);
-    expect(fake.files.get("/data/start.sh")?.toString()).toContain(`app_id='${appId}'`);
+    const name = defaultCoreName("prj_test", { VERCEL_ENV: "preview" });
+    expect(fake.calls.slice(0, 2)).toEqual([`drive ${name}-data`, `create ${name}`]);
+    expect(fake.calls[2]).toMatch(/^start /);
+    const scripts = [...fake.files.keys()].filter((path) => path.startsWith("/tmp/jazz-start-"));
+    expect(fake.files.get(scripts[0]!)?.toString()).toContain(`app_id='${appId}'`);
 
     // The backend's own database reaches the core in the Sandbox.
     const row = await jazz.db.insert(app.notes, { text: "on vercel" }).wait({ tier: "global" });
@@ -170,6 +196,56 @@ describe("vercel() store", () => {
     expect(fake.calls).toEqual([]);
   }, 60_000);
 
+  it("restarts an older core on this version, and never moves a newer one back", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
+
+    const older = fakeVercel({ ...core, appId });
+    Object.assign(older.state, { exists: true, drive: true, status: "running", running: "1.0.0" });
+    const upgraded = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: vercel({ sdk: older.sdk }),
+    });
+    cleanups.push(() => upgraded.close());
+    expect(older.calls.filter((call) => call.startsWith("start"))).toHaveLength(1);
+    expect(older.state.running).not.toBe("1.0.0");
+
+    const newer = fakeVercel({ ...core, appId });
+    Object.assign(newer.state, { exists: true, drive: true, status: "running", running: "99.0.0" });
+    const old = await createJazz({ appId, app, permissions, store: vercel({ sdk: newer.sdk }) });
+    cleanups.push(() => old.close());
+    expect(newer.calls.some((call) => call.startsWith("start"))).toBe(false);
+    expect(newer.state.running).toBe("99.0.0");
+  }, 60_000);
+
+  it("gives each preview branch its own core", () => {
+    const main = defaultCoreName("prj_1", { VERCEL_ENV: "production" });
+    const a = defaultCoreName("prj_1", { VERCEL_ENV: "preview", VERCEL_GIT_COMMIT_REF: "feat/A" });
+    const b = defaultCoreName("prj_1", { VERCEL_ENV: "preview", VERCEL_GIT_COMMIT_REF: "feat-a" });
+    expect(main).toBe("jazz-prj_1-production");
+    expect(a).toMatch(/^jazz-prj_1-preview-feat-a-[0-9a-f]{8}$/);
+    expect(new Set([main, a, b]).size).toBe(3);
+  });
+
+  it("uses the cloud core only in production and preview deployments", () => {
+    expect(onVercelDeployment({ VERCEL: "1", VERCEL_ENV: "production" })).toBe(true);
+    expect(onVercelDeployment({ VERCEL: "1", VERCEL_ENV: "preview" })).toBe(true);
+    expect(onVercelDeployment({ VERCEL: "1", VERCEL_ENV: "development" })).toBe(false);
+    expect(onVercelDeployment({})).toBe(false);
+  });
+
+  it("orders versions as semver, prereleases before their release", () => {
+    expect(newerVersion("2.0.0-alpha.60", "2.0.0-alpha.59")).toBe(true);
+    expect(newerVersion("2.0.0-alpha.100", "2.0.0-alpha.99")).toBe(true);
+    expect(newerVersion("2.0.0", "2.0.0-alpha.60")).toBe(true);
+    expect(newerVersion("2.0.0-alpha.60", "2.0.0")).toBe(false);
+    expect(newerVersion("2.0.0", "2.0.0")).toBe(false);
+  });
+
   it("refuses a Sandbox that holds another app's core", async () => {
     const appId = randomUUID();
     const core = await startLocalJazzServer({ appId, inMemory: true });
@@ -195,7 +271,8 @@ describe("vercel() store", () => {
       "2.0.0-alpha.60",
       "https://registry.npmjs.org/jazz-tools/-/jazz-tools-2.0.0-alpha.60.tgz",
     );
-    expect(script).toContain("bin=/data/bin/jazz-tools-2.0.0-alpha.60");
+    expect(script).toContain("version='2.0.0-alpha.60'");
+    expect(script).toContain("bin=/data/bin/jazz-tools-$version");
     expect(script).toContain("if [ ! -f /data/secrets.env ]");
     expect(script).toContain(`app_id='app'\\''1'`);
   });

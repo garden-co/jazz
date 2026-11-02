@@ -38,7 +38,7 @@ import {
   type JazzClient,
 } from "./create-jazz-session.js";
 import type { BackendSchemaInput } from "./create-jazz-context.js";
-import { openVercelCore, type VercelStoreOptions } from "./vercel-store.js";
+import { onVercelDeployment, openVercelCore, type VercelStoreOptions } from "./vercel-store.js";
 
 export type { VercelStoreOptions } from "./vercel-store.js";
 
@@ -90,12 +90,14 @@ export function remote(options: {
 
 /**
  * A core in a persistent Vercel Sandbox in your own Vercel project, with its
- * data on a Drive. It is created on first use, wakes when a request needs it
- * (about a second) and stops after `idleMs` without requests or sockets. It
- * authenticates with the function's OIDC token, so it needs no env vars;
- * install `@vercel/sandbox` next to `jazz-tools`. Outside a Vercel deployment
- * (`next dev`, tests) it runs `local` instead: by default a SQLite core in
- * `.jazz/local`.
+ * data on a Drive: one for production and one per Git branch for previews.
+ * It is created on first use, wakes when a request needs it (about a second)
+ * and stops after `idleMs` without requests or sockets. It authenticates with
+ * the function's OIDC token, so it needs no env vars; install
+ * `@vercel/sandbox` next to `jazz-tools`. A deployment of a newer jazz-tools
+ * restarts the core on its version, and an older deployment never moves it
+ * back. Outside a production or preview deployment (`next dev`, `vercel dev`,
+ * tests) it runs `local` instead: by default a SQLite core in `.jazz/local`.
  */
 export function vercel(
   options: VercelStoreOptions & { local?: Extract<JazzStore, { kind: "sqlite" | "memory" }> } = {},
@@ -522,7 +524,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   );
   const issuer = `jazz:app:${options.appId}`;
   const store =
-    options.store.kind === "vercel" && !process.env.VERCEL ? options.store.local : options.store;
+    options.store.kind === "vercel" && !onVercelDeployment() ? options.store.local : options.store;
   const core =
     store.kind === "remote"
       ? openRemoteCore(options.appId, store)
