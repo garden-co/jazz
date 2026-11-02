@@ -222,6 +222,7 @@ jobs:
         variant:
           - band-chat
           - jamazon
+          - stage-plan-sveltekit
           - jamazon-warehouse
           - wequencer
           - band-book

@@ -89,20 +89,29 @@ export function renderPnpmWorkspace(tarballs) {
   return `overrides:\n${lines.join("\n")}\n`;
 }
 
-/** The environment a variant is built, started and tested with. */
+/** Browser-visible env prefix per framework; Next.js unless a variant says otherwise. */
+const DEFAULT_PUBLIC_PREFIX = "NEXT_PUBLIC_";
+
+/**
+ * The environment a variant is built, started and tested with: its origin as
+ * APP_ORIGIN and `<prefix>APP_ORIGIN`, a fresh app id as `<prefix>JAZZ_APP_ID`,
+ * a fresh Better Auth secret and data directory.
+ */
 export function variantEnv(variant, { dataPath, baseEnv = process.env } = {}) {
   const env = { ...baseEnv };
   // Never inherit a sync server or app identity from the caller's shell: the
   // gate tests Jazz running inside the app.
   for (const key of Object.keys(env)) {
-    if (key.startsWith("JAZZ_") || key.startsWith("NEXT_PUBLIC_")) delete env[key];
+    if (/(^|_)JAZZ_/.test(key) || key.endsWith("APP_ORIGIN")) delete env[key];
   }
   delete env.BETTER_AUTH_SECRET;
   delete env.BACKEND_SECRET;
+  const prefix = variant.publicPrefix ?? DEFAULT_PUBLIC_PREFIX;
   return {
     ...env,
-    NEXT_PUBLIC_APP_ORIGIN: ORIGIN,
-    NEXT_PUBLIC_JAZZ_APP_ID: randomUUID(),
+    APP_ORIGIN: ORIGIN,
+    [`${prefix}APP_ORIGIN`]: ORIGIN,
+    [`${prefix}JAZZ_APP_ID`]: randomUUID(),
     BETTER_AUTH_SECRET: randomBytes(32).toString("hex"),
     JAZZ_DATA_PATH: dataPath,
     NEXT_TELEMETRY_DISABLED: "1",

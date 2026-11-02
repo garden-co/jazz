@@ -24,10 +24,12 @@ A variant directory (`examples/<app>/apps/<framework>-<auth>`) must:
   resolved, so `build` and `start` never reach outside the directory;
 - depend on `@playwright/test` and have a `test:e2e` script;
 - have a `playwright.config.ts` that starts `pnpm start` when `JAZZ_E2E_PROD=1`,
-  on the origin in `NEXT_PUBLIC_APP_ORIGIN`;
+  on the origin in `APP_ORIGIN`;
 - keep its data in `JAZZ_DATA_PATH`, read its app id from
-  `NEXT_PUBLIC_JAZZ_APP_ID` and its Better Auth secret from
-  `BETTER_AUTH_SECRET`. The harness sets fresh values for each run.
+  `<prefix>JAZZ_APP_ID` and its Better Auth secret from `BETTER_AUTH_SECRET`.
+  The prefix is the framework's public env prefix (`NEXT_PUBLIC_` by default;
+  set `publicPrefix`, e.g. `PUBLIC_` for SvelteKit). The harness sets fresh
+  values for each run.
 
 Then add it to `variants.mjs` and to the matrix in `examples-e2e.yml`;
 `dev/gates/test/examples-e2e.test.mjs` checks both lists and the contract above.
