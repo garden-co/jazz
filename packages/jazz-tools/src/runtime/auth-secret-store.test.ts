@@ -89,6 +89,52 @@ describe("BrowserAuthSecretStore", () => {
     expect(p1).toBe(p2);
   });
 
+  it("observes a replacement saved by another instance sharing its storage key", async () => {
+    const original = store.getOrCreateSecret();
+    const sibling = new BrowserAuthSecretStore({ storage });
+    const replacement = generateAuthSecret();
+    await sibling.saveSecret(replacement);
+
+    expect(await store.loadSecret()).toBe(replacement);
+    const updated = store.getOrCreateSecret();
+    expect(await updated).toBe(replacement);
+    expect(updated).not.toBe(original);
+    expect(store.getOrCreateSecret()).toBe(updated);
+  });
+
+  it("persists a new secret after another instance clears the shared key", async () => {
+    const original = await store.getOrCreateSecret();
+    await new BrowserAuthSecretStore({ storage }).clearSecret();
+
+    const replacement = await store.getOrCreateSecret();
+    expect(replacement).not.toBe(original);
+    expect(await store.loadSecret()).toBe(replacement);
+  });
+
+  it("refuses corruption introduced after a successful read without overwriting it", async () => {
+    await store.getOrCreateSecret();
+    const key = authSecretStorageKey();
+    storage.setItem(key, "corrupt");
+
+    expect(() => store.getOrCreateSecret()).toThrow();
+    expect(storage.getItem(key)).toBe("corrupt");
+    const restored = generateAuthSecret();
+    storage.setItem(key, restored);
+    expect(await store.getOrCreateSecret()).toBe(restored);
+  });
+
+  it("does not hide a storage read failure behind a previously cached secret", async () => {
+    await store.getOrCreateSecret();
+    const read = storage.getItem;
+    const failure = new Error("storage unavailable");
+    storage.getItem = () => {
+      throw failure;
+    };
+    expect(() => store.getOrCreateSecret()).toThrow(failure);
+    storage.getItem = read;
+    expect(await store.getOrCreateSecret()).toBe(await store.loadSecret());
+  });
+
   it("clearSecret then getOrCreateSecret produces a new secret", async () => {
     const first = await store.getOrCreateSecret();
     await store.clearSecret();
