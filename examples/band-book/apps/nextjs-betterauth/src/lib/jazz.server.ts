@@ -31,12 +31,8 @@ export function jazz(): Promise<Jazz> {
     app,
     permissions,
     store: sync
-      ? // assertBuildConfiguration checked that both secrets are set.
-        remote({
-          url: sync.url,
-          adminSecret: sync.adminSecret!,
-          backendSecret: sync.backendSecret!,
-        })
+      ? // assertBuildConfiguration checked that the admin secret is set.
+        remote({ url: sync.url, secret: sync.adminSecret! })
       : sqlite({ path: config.dataPath }),
     // Better Auth's session cookie decides who the band member is.
     authenticate: async (request) => {

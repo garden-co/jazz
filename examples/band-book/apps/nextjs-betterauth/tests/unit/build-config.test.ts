@@ -12,7 +12,6 @@ const deployment = {
 const remote = {
   JAZZ_SERVER_URL: "https://jazz.example",
   JAZZ_ADMIN_SECRET: "admin",
-  BACKEND_SECRET: "backend",
 };
 
 describe("build config", () => {
@@ -41,16 +40,17 @@ describe("build config", () => {
     ).toThrow(/missing: NEXT_PUBLIC_APP_ORIGIN, NEXT_PUBLIC_JAZZ_APP_ID$/);
   });
 
-  it("requires both app secrets for a sync server", () => {
+  it("requires the app's admin secret for a sync server", () => {
     const base = { ...deployment, BETTER_AUTH_SECRET: "a" };
     expect(assertBuildConfiguration(readBuildConfig({ ...base, ...remote })).remote).toEqual({
       url: "https://jazz.example",
       adminSecret: "admin",
-      backendSecret: "backend",
     });
     expect(() =>
-      assertBuildConfiguration(readBuildConfig({ ...base, ...remote, BACKEND_SECRET: undefined })),
-    ).toThrow(/missing: BACKEND_SECRET$/);
+      assertBuildConfiguration(
+        readBuildConfig({ ...base, ...remote, JAZZ_ADMIN_SECRET: undefined }),
+      ),
+    ).toThrow(/missing: JAZZ_ADMIN_SECRET$/);
   });
 
   it("requires the secret for any nonlocal deployment", () => {

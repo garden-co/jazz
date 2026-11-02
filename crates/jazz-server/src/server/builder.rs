@@ -149,19 +149,36 @@ impl ServerBuilder {
         validate_server_config(&auth_config)?;
         // A trusted workload replaces shared secrets: the server holds random
         // ones only internally, and a verified token stands in for them.
-        let (workload_verifier, workload_secrets) = match auth_config.trusted_workload.clone() {
-            Some(workload) => {
-                let secrets = crate::middleware::workload::InternalSecrets::generate();
+        // Otherwise the admin secret doubles as a backend credential, so a
+        // backend needs only that one secret; backend access through it gets
+        // the backend secret, or an internal one when none is configured.
+        use crate::middleware::workload::{BackendCredential, InternalSecrets, WorkloadVerifier};
+        let (backend_credential, workload_secrets) = match (
+            auth_config.trusted_workload.clone(),
+            auth_config.admin_secret.clone(),
+        ) {
+            (Some(workload), _) => {
+                let secrets = InternalSecrets::generate();
                 auth_config.admin_secret = Some(secrets.admin.clone());
                 auth_config.backend_secret = Some(secrets.backend.clone());
                 (
-                    Some(Arc::new(
-                        crate::middleware::workload::WorkloadVerifier::new(workload),
-                    )),
+                    Some(Arc::new(BackendCredential::Workload(Box::new(
+                        WorkloadVerifier::new(workload),
+                    )))),
                     Some(secrets),
                 )
             }
-            None => (None, None),
+            (None, Some(admin)) => {
+                let backend = auth_config
+                    .backend_secret
+                    .get_or_insert_with(|| InternalSecrets::generate().backend)
+                    .clone();
+                (
+                    Some(Arc::new(BackendCredential::AdminSecret(admin.clone()))),
+                    Some(InternalSecrets { admin, backend }),
+                )
+            }
+            (None, None) => (None, None),
         };
         if self.max_websocket_connections == 0 {
             return Err("max websocket connections must be at least 1".to_owned());
@@ -190,7 +207,7 @@ impl ServerBuilder {
             app_id: self.app_id,
             auth_config,
             jwt_verifier,
-            workload_verifier,
+            backend_credential,
             workload_secrets,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
             websocket_admissions: Arc::new(

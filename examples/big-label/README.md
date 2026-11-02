@@ -129,8 +129,8 @@ general invitation, account-linking, profile deletion, or cross-organization
 membership workflow.
 
 Production deployments must supply `BETTER_AUTH_SECRET` and
-`NEXT_PUBLIC_JAZZ_APP_ID`, plus `JAZZ_SERVER_URL`, `JAZZ_ADMIN_SECRET` and
-`BACKEND_SECRET` to keep the data on a sync server such as Jazz Cloud. The
+`NEXT_PUBLIC_JAZZ_APP_ID`, plus `JAZZ_SERVER_URL` and `JAZZ_ADMIN_SECRET` to keep
+the data on a sync server such as Jazz Cloud. The
 repository's deterministic development/build fixtures are not production
 fallbacks: startup fails if a production secret is absent.
 
