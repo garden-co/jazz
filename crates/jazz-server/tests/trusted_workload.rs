@@ -38,12 +38,18 @@ async fn start_issuer() -> String {
 }
 
 fn token(issuer: &str, subject: &str) -> String {
+    token_with(issuer, subject, |_| {})
+}
+
+fn token_with(issuer: &str, subject: &str, edit: impl FnOnce(&mut serde_json::Value)) -> String {
     let exp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap() + Duration::from_secs(600);
     let mut header = Header::new(Algorithm::HS256);
     header.kid = Some("w1".to_owned());
+    let mut claims = json!({ "iss": issuer, "aud": "https://vercel.com/garden-co", "sub": subject, "exp": exp.as_secs() });
+    edit(&mut claims);
     encode(
         &header,
-        &json!({ "iss": issuer, "aud": "https://vercel.com/garden-co", "sub": subject, "exp": exp.as_secs() }),
+        &claims,
         &EncodingKey::from_secret(SIGNING_KEY.as_bytes()),
     )
     .unwrap()
@@ -79,6 +85,24 @@ async fn admits_only_the_trusted_workload() {
     let bare = http.get(format!("{app}/schemas")).send().await.unwrap();
     assert_eq!(bare.status(), 401);
     assert!(bare.text().await.unwrap().contains("workload"));
+    for refused in [
+        token_with(&issuer, SUBJECT, |c| {
+            c["iss"] = json!("https://oidc.vercel.com/other")
+        }),
+        token_with(&issuer, SUBJECT, |c| {
+            c["aud"] = json!("https://vercel.com/other")
+        }),
+        token_with(&issuer, SUBJECT, |c| c["exp"] = json!(1)),
+    ] {
+        let response = http
+            .get(format!("{app}/admin/permissions"))
+            .header("X-Jazz-Backend-Credential", &refused)
+            .header("X-Jazz-Backend-Access", "admin")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 401);
+    }
     let wrong = http
         .get(format!("{app}/schemas"))
         .header("X-Jazz-Backend-Credential", &other)

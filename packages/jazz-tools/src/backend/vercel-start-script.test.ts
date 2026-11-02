@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  rmSync,
   readFileSync,
   writeFileSync,
 } from "node:fs";
@@ -42,10 +43,20 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     chmodSync(bin, 0o755);
   }
 
+  const trust = {
+    issuer: "https://oidc.vercel.com/garden-co",
+    audience: "https://vercel.com/garden-co",
+    subject: "owner:garden-co:project:app:environment:production",
+  };
+
   /** Run a start; resolves with the exit code, or "running" once it became the server. */
-  async function start(version: string, tarballUrl = "http://127.0.0.1:9/none.tgz") {
+  async function start(
+    version: string,
+    tarballUrl = "http://127.0.0.1:9/none.tgz",
+    workload = trust,
+  ) {
     const script = join(root, `start-${Math.random()}.sh`);
-    writeFileSync(script, startScript("app-1", version, tarballUrl, root));
+    writeFileSync(script, startScript("app-1", version, tarballUrl, workload, root));
     const child = spawn("bash", [script], { stdio: "ignore", detached: true });
     children.push(child);
     const exited = new Promise<number>((resolve) =>
@@ -67,7 +78,13 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(await start("1.0.0")).toBe("running");
     const first = read("tmp/jazz.pid");
     expect(read("data/version")).toBe("1.0.0");
-    expect(read("data/secrets.env")).toContain("JAZZ_APP_ID=app-1");
+    expect(read("data/app-id")).toBe("app-1");
+    // The server runs as the app and trusts only the workload.
+    expect(read("servers.log")).toBe(
+      `1.0.0 server app-1 --port 1625 --data-dir ${root}/data/store ` +
+        `--trusted-workload-issuer ${trust.issuer} --trusted-workload-audience ${trust.audience} ` +
+        `--trusted-workload-subject ${trust.subject}`,
+    );
 
     expect(await start("1.0.0")).toBe(0);
     expect(read("tmp/jazz.pid")).toBe(first);
@@ -78,6 +95,29 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(read("tmp/jazz.version")).toBe("2.0.0");
     // The older binary is pruned: it never runs on this Drive again.
     expect(existsSync(join(root, "data/bin/jazz-tools-1.0.0"))).toBe(false);
+  });
+
+  it("never retargets a running core to another workload", async () => {
+    installFake("1.0.0");
+    expect(await start("1.0.0")).toBe("running");
+    const first = read("tmp/jazz.pid");
+    expect(read("data/trust")).toBe(`${trust.issuer} ${trust.audience} ${trust.subject}`);
+    const other = { ...trust, subject: "owner:garden-co:project:app:environment:preview" };
+    expect(await start("1.0.0", undefined, other)).toBe(1);
+    // With 2.0.0 already installed, nothing else can stop this start.
+    installFake("2.0.0");
+    expect(await start("2.0.0", undefined, other)).toBe(1);
+    expect(alive(first)).toBe(true);
+    expect(read("data/trust")).toContain(trust.subject);
+    expect(read("servers.log")!.split("\n")).toHaveLength(1);
+  });
+
+  it("pins a core that an older script started, on its next start", async () => {
+    installFake("1.0.0");
+    expect(await start("1.0.0")).toBe("running");
+    rmSync(join(root, "data/trust"));
+    expect(await start("1.0.0")).toBe(0);
+    expect(read("data/trust")).toContain(trust.subject);
   });
 
   it("never moves a newer server back", async () => {

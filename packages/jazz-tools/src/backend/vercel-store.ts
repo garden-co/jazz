@@ -1,15 +1,20 @@
 // The `vercel()` store: the app's core runs in a persistent Vercel Sandbox
 // in the app's own Vercel project, with its data on a Drive. The backend
 // creates the Sandbox on first use, wakes it when a request needs it and lets
-// it stop when the app goes quiet. The Sandbox SDK authenticates with the
-// function's own OIDC token, so the app sets no Jazz env vars: the core's
-// secrets are generated inside the Sandbox and read back through the SDK.
+// it stop when the app goes quiet. The function's own Vercel OIDC token is
+// the only credential: the Sandbox SDK authenticates with it, and the core
+// trusts exactly that workload (its issuer, audience and subject) and admits
+// nothing else, so the app sets no Jazz env vars and no secret exists.
 // Wake handling is adapted from garden-co/infra's v2 sync proxy (ADR 0004).
 
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { JazzCoreSocketEvent } from "jazz-napi";
-import { registerInProcessTransport } from "../runtime/in-process-transport.js";
+import {
+  fetchFor,
+  inProcessWebSocketFor,
+  registerInProcessTransport,
+} from "../runtime/in-process-transport.js";
 import type {
   BrowserWebSocket,
   WebSocketConstructor,
@@ -26,7 +31,7 @@ export interface VercelStoreOptions {
   name?: string;
   /**
    * The core's app id. Defaults to one the core generates on its Drive at
-   * first start and keeps, like its secrets. Set it only to keep the id of
+   * first start and keeps. Set it only to keep the id of
    * an existing app.
    */
   appId?: string;
@@ -48,6 +53,13 @@ export interface VercelStoreOptions {
   serverTarballUrl?: string;
   /** Vercel credentials for scripts outside a Vercel function. Defaults to the function's OIDC token. */
   credentials?: { token: string; teamId: string; projectId: string };
+  /**
+   * The backend's credential to the core: a Vercel OIDC token of this
+   * project and environment. Defaults to the function's own
+   * (`getVercelOidcToken()` from `@vercel/functions/oidc`); pass one for
+   * scripts outside a Vercel function.
+   */
+  backendCredential?: () => string | Promise<string>;
   /** @internal A stand-in for `@vercel/sandbox`, for tests. */
   sdk?: SandboxSdk;
 }
@@ -98,13 +110,19 @@ export interface VercelCore {
   close(): Promise<void>;
 }
 
-/** A core reached at `url` with these secrets: `remote()`'s core. */
+/** A core reached at `url` with this backend credential: `remote()`'s core. */
 export type OpenRemote = (target: {
   appId: string;
   url: string;
-  adminSecret: string;
-  backendSecret: string;
+  backendCredential: () => string | Promise<string>;
 }) => VercelCore;
+
+/** The workload a core trusts: the claims of the function's own OIDC token. */
+export interface TrustedWorkload {
+  issuer: string;
+  audience: string;
+  subject: string;
+}
 
 const since = (t0: number) => Math.round(performance.now() - t0);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -173,7 +191,7 @@ export function newerVersion(a: string, b: string): boolean {
 
 /**
  * Start the core: install the server binary for `version` on the Drive,
- * generate the app id and secrets once, and run the newest server version
+ * generate the app id once, and run the newest server version
  * this Drive has seen, so an instance from an older deployment never
  * downgrades data a newer one already wrote. A different running version is
  * stopped first; the same one is left alone.
@@ -182,10 +200,12 @@ export function startScript(
   appId: string | undefined,
   version: string,
   tarballUrl: string,
+  trust: TrustedWorkload,
   /** @internal Prefix for /data and /tmp, for tests. */
   root = "",
 ): string {
   const q = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
+  const trustLine = `${trust.issuer} ${trust.audience} ${trust.subject}`;
   return `#!/bin/bash
 # Written by jazz-tools' vercel() store for each server start.
 set -euo pipefail
@@ -200,6 +220,15 @@ newer() {
   [ "$1" != "$2" ] && [ "$(printf '%s\\n%s\\n' "\${1/-/\\~}" "\${2/-/\\~}" | sort -V | tail -1)" = "\${1/-/\\~}" ]
 }
 version=${q(version)}
+trust=${q(trustLine)}
+# The first start pins the workload this core trusts; a start for another
+# workload never retargets it.
+pinned=$(cat "$data/trust" 2>/dev/null || true)
+if [ -n "$pinned" ] && [ "$pinned" != "$trust" ]; then
+  echo "jazz: this core trusts $pinned; not retargeting it to $trust (to re-pin after a rename, delete $data/trust)" >&2
+  exit 1
+fi
+[ -n "$pinned" ] || { printf '%s\\n' "$trust" > "$data/trust.tmp" && mv "$data/trust.tmp" "$data/trust"; }
 highest=$(cat "$data/version" 2>/dev/null || true)
 if [ -n "$highest" ] && newer "$highest" "$version"; then
   # A newer deployment owns this Drive: run its server, never ours.
@@ -227,14 +256,11 @@ if [ -n "$pid" ] && [[ "$(tr '\\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" == *
   for _ in $(seq 150); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
   kill -KILL "$pid" 2>/dev/null || true
 fi
-if [ ! -f "$data/secrets.env" ]; then
-  umask 077
-  secret() { head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='; }
+if [ ! -s "$data/app-id" ]; then
   app_id=${appId ? q(appId) : "$(cat /proc/sys/kernel/random/uuid)"}
-  printf 'JAZZ_APP_ID=%s\\nJAZZ_ADMIN_SECRET=%s\\nJAZZ_BACKEND_SECRET=%s\\n' "$app_id" "$(secret)" "$(secret)" > "$data/secrets.env.tmp"
-  mv "$data/secrets.env.tmp" "$data/secrets.env"
+  printf '%s\\n' "$app_id" > "$data/app-id.tmp" && mv "$data/app-id.tmp" "$data/app-id"
 fi
-set -a; . "$data/secrets.env"; set +a
+app_id=$(cat "$data/app-id")
 export NODE_ENV=production
 mkdir -p "$data/store"
 printf '%s\\n' "$version" > "$data/version.tmp" && mv "$data/version.tmp" "$data/version"
@@ -243,28 +269,85 @@ find "$data/bin" -name 'jazz-tools-*' ! -name "jazz-tools-$version" -delete
 printf '%s\\n' "$version" > "$run/jazz.version"
 echo $$ > "$run/jazz.pid"
 exec 9>&-
-exec "$bin" server "$JAZZ_APP_ID" --port ${VERCEL_CORE_PORT} --data-dir "$data/store"
+# The core admits only the deploying function's own workload.
+exec "$bin" server "$app_id" --port ${VERCEL_CORE_PORT} --data-dir "$data/store" \\
+  --trusted-workload-issuer ${q(trust.issuer)} \\
+  --trusted-workload-audience ${q(trust.audience)} \\
+  --trusted-workload-subject ${q(trust.subject)}
 `;
 }
 
-function parseSecrets(text: string): {
-  appId: string;
-  adminSecret: string;
-  backendSecret: string;
-} {
-  const values = new Map(
-    text
-      .split("\n")
-      .map((line) => line.split("=", 2) as [string, string])
-      .filter(([, value]) => value),
-  );
-  const adminSecret = values.get("JAZZ_ADMIN_SECRET");
-  const backendSecret = values.get("JAZZ_BACKEND_SECRET");
-  const appId = values.get("JAZZ_APP_ID");
-  if (!appId || !adminSecret || !backendSecret) {
-    throw new Error("vercel(): the core's secrets are missing");
+/** The workload an OIDC token names: whoever holds such a token is trusted. */
+export function workloadOf(token: string): TrustedWorkload {
+  let claims: { iss?: unknown; aud?: unknown; sub?: unknown };
+  try {
+    claims = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"));
+  } catch {
+    throw new Error("vercel(): the backend credential is not an OIDC token");
   }
-  return { appId, adminSecret, backendSecret };
+  const audience = Array.isArray(claims.aud) ? claims.aud[0] : claims.aud;
+  if (
+    typeof claims.iss !== "string" ||
+    typeof audience !== "string" ||
+    typeof claims.sub !== "string"
+  ) {
+    throw new Error("vercel(): the backend credential's token has no iss, aud or sub");
+  }
+  return { issuer: claims.iss, audience, subject: claims.sub };
+}
+
+const expiry = (token: string): number => {
+  try {
+    const { exp } = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString());
+    return typeof exp === "number" ? exp * 1000 : 0;
+  } catch {
+    return 0;
+  }
+};
+let latestToken: string | undefined;
+
+/**
+ * The function's OIDC token. Vercel hands a fresh one to each request; work
+ * outside a request (reconnects, the first open at cold start) uses the
+ * freshest one seen, or `VERCEL_OIDC_TOKEN`.
+ */
+async function functionOidcToken(): Promise<string> {
+  let fetched: string | undefined;
+  let failure: unknown;
+  try {
+    const { getVercelOidcToken } = (await import(
+      /* @vite-ignore */ "@vercel/functions/oidc" as string
+    )) as { getVercelOidcToken(): Promise<string> };
+    fetched = await getVercelOidcToken();
+  } catch (error) {
+    failure = error;
+    fetched = process.env.VERCEL_OIDC_TOKEN;
+  }
+  for (const token of [fetched, latestToken]) {
+    if (token && (!latestToken || expiry(token) > expiry(latestToken))) latestToken = token;
+  }
+  if (latestToken && expiry(latestToken) > Date.now()) return latestToken;
+  throw new Error(
+    `vercel(): no current Vercel OIDC token (enable OIDC for the project, or pass backendCredential)` +
+      (failure ? `: ${String(failure)}` : ""),
+  );
+}
+
+/**
+ * A deployment only ever starts or reaches its own environment's core.
+ * Custom environments run with VERCEL_ENV=preview and their own slug in
+ * VERCEL_TARGET_ENV and in the token's subject.
+ */
+export function refuseOtherEnvironment(
+  trust: TrustedWorkload,
+  env: Record<string, string | undefined>,
+): void {
+  const target = env.VERCEL_TARGET_ENV ?? env.VERCEL_ENV;
+  if (target && !trust.subject.endsWith(`:environment:${target}`)) {
+    throw new Error(
+      `vercel(): this ${target} deployment's OIDC token is for ${trust.subject}; refusing to start its core`,
+    );
+  }
 }
 
 /** Whether this process runs in a Vercel deployment (not `vercel dev` or a pulled env). */
@@ -285,7 +368,10 @@ export function onVercelHost(env: Record<string, string | undefined> = process.e
 /**
  * The core for this deployment: one for production, and one per Git branch
  * for previews, so a branch's schema and permissions never apply to
- * another branch's data.
+ * another branch's data. This keeps honest branches apart; it is not a
+ * security boundary: every preview deployment's OIDC token names the same
+ * workload (`…:environment:preview`), so any preview function can reach any
+ * branch's core. Production is its own workload.
  */
 export function defaultCoreName(project: string, env: Record<string, string | undefined>): string {
   const target = env.VERCEL_ENV ?? "development";
@@ -342,7 +428,15 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   const name = options.name ?? defaultCoreName(project!, env);
   const creds = options.credentials ?? {};
   const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
-  const script = Buffer.from(startScript(appId, version, tarballUrl));
+  const backendCredential = options.backendCredential ?? functionOidcToken;
+  // The core trusts the workload this function's token names, so every
+  // instance of this project and environment reaches it, and nothing else.
+  const trust = workloadOf(await backendCredential());
+  // Skipped for a `backendCredential` of your own, which names whatever
+  // workload you chose.
+  if (!options.backendCredential) refuseOtherEnvironment(trust, env);
+  const trustLine = `${trust.issuer} ${trust.audience} ${trust.subject}`;
+  const script = Buffer.from(startScript(appId, version, tarballUrl, trust));
 
   const startServer = async (sbx: SandboxHandle) => {
     // A fresh path each time: bash reads a script as it runs, so one that is
@@ -400,6 +494,18 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     return sbx;
   };
 
+  const refuseForeignPin = async (sbx: SandboxHandle) => {
+    const pinned = (await sbx.readFileToBuffer({ path: "/data/trust" }).catch(() => null))
+      ?.toString("utf8")
+      .trim();
+    if (pinned && pinned !== trustLine) {
+      throw new Error(
+        `vercel(): core ${name} trusts ${pinned.split(" ").at(-1)}, not this deployment (${trust.subject}). ` +
+          "After a team or project rename, or a change of OIDC issuer mode, delete /data/trust in the Sandbox to re-pin it.",
+      );
+    }
+  };
+
   /** Resume (or create) the Sandbox and wait until the server answers. */
   const wake = async (): Promise<{ sbx: SandboxHandle; base: string }> => {
     const t0 = performance.now();
@@ -430,6 +536,9 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           sbx = await getRunning();
         }
       }
+      // A core pinned to another workload never becomes ours: say so now,
+      // not after the health checks time out.
+      await refuseForeignPin(sbx);
       let base = sbx.domain(VERCEL_CORE_PORT);
       let ok = await healthy(base, 300, healthFails);
       if (!ok) await startServer(sbx);
@@ -507,30 +616,26 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           return live;
         }
         const { sbx, base } = await wake();
-        const secrets =
+        const coreAppId =
           live?.base === base
-            ? {
-                appId: live.appId,
-                adminSecret: live.core.adminSecret,
-                backendSecret: live.core.backendSecret,
-              }
-            : parseSecrets(
-                (await sbx.readFileToBuffer({ path: "/data/secrets.env" }))?.toString("utf8") ?? "",
-              );
-        if (appId && secrets.appId !== appId) {
-          throw new Error(`vercel(): core ${name} belongs to app ${secrets.appId}, not ${appId}`);
+            ? live.appId
+            : (await sbx.readFileToBuffer({ path: "/data/app-id" }))?.toString("utf8").trim();
+        if (!coreAppId) throw new Error(`vercel(): core ${name} has no app id on its Drive`);
+        if (appId && coreAppId !== appId) {
+          throw new Error(`vercel(): core ${name} belongs to app ${coreAppId}, not ${appId}`);
+        }
+        await refuseForeignPin(sbx);
+        if (live?.base === base) {
+          live.sbx = sbx;
+          live.checkedAt = Date.now();
+          return live;
         }
         const replaced = live?.core;
         live = {
           sbx,
           base,
-          appId: secrets.appId,
-          core: openRemote({
-            appId: secrets.appId,
-            url: base,
-            adminSecret: secrets.adminSecret,
-            backendSecret: secrets.backendSecret,
-          }),
+          appId: coreAppId,
+          core: openRemote({ appId: coreAppId, url: base, backendCredential }),
           checkedAt: Date.now(),
         };
         if (replaced) void replaced.close().catch(() => {});
@@ -562,16 +667,18 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
 
   const first = await ensure();
   // Clients in this process (the backend's own session) reach the core through
-  // an in-process origin, so each of their requests and reconnects wakes it.
+  // an in-process origin, so each of their requests and reconnects wakes it;
+  // they go on through the current remote core's own in-process origin, which
+  // presents the backend credential.
   const serverUrl = `http://jazz-vercel-${randomUUID()}.invalid`;
   const unregister = registerInProcessTransport(serverUrl, {
     fetch: async (input, init) => {
       const request = new Request(input, init);
       const url = new URL(request.url);
-      const { base } = await ensure();
-      return fetch(new Request(`${base}${url.pathname}${url.search}`, request));
+      const inner = (await ensure()).core.serverUrl;
+      return fetchFor(inner)(new Request(`${inner}${url.pathname}${url.search}`, request));
     },
-    WebSocket: wakingWebSocket(async () => (await ensure()).base),
+    WebSocket: wakingWebSocket(async () => (await ensure()).core.serverUrl),
   });
 
   return {
@@ -646,7 +753,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
 }
 
 /** A WebSocket that wakes the core, then connects to wherever it now runs. */
-function wakingWebSocket(resolveBase: () => Promise<string>): WebSocketConstructor {
+function wakingWebSocket(resolveOrigin: () => Promise<string>): WebSocketConstructor {
   return class WakingSocket implements BrowserWebSocket {
     binaryType: "arraybuffer" | "blob" = "arraybuffer";
     readyState = 0;
@@ -655,10 +762,11 @@ function wakingWebSocket(resolveBase: () => Promise<string>): WebSocketConstruct
 
     constructor(url: string) {
       const path = new URL(url).pathname + new URL(url).search;
-      resolveBase().then(
-        (base) => {
+      resolveOrigin().then(
+        (origin) => {
           if (this.readyState >= 2) return;
-          const socket = new globalThis.WebSocket(`${base.replace(/^http/, "ws")}${path}`);
+          const Socket = inProcessWebSocketFor(origin) ?? globalThis.WebSocket;
+          const socket = new Socket(`${origin.replace(/^http/, "ws")}${path}`) as WebSocket;
           socket.binaryType = "arraybuffer";
           this.socket = socket;
           socket.addEventListener("open", () => {
