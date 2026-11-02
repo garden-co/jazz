@@ -1,0 +1,60 @@
+---
+title: Quickstart
+description: "Let your coding agent set up Jazz in your app: the brief it follows, the choices it asks you about, and how it checks it's done."
+---
+
+## Start with your agent
+
+Paste this into your coding agent, or tell it to run `npm create jazz` and follow the output. Both
+give it the same brief, which always lives at
+[jazz.tools/agent-brief.md](https://jazz.tools/agent-brief.md).
+
+<include cwd lang="md" meta='title="Agent brief"'>
+  public/agent-brief.md
+</include>
+
+## The questions your agent will ask
+
+Each one has a default, so "you pick" is a fine answer.
+
+- **Where will Jazz run?** Jazz Cloud or your own server. Default: your own server, locally for now. See [Deployment](/docs/setup/deployment).
+- **Which backend?** Hono, Next.js route handlers, Express, or none yet. See [Backend](/docs/setup/backend).
+- **Which client?** Thin client (default) or local-first; React, Svelte, Vue, vanilla or React Native. See [Browser](/docs/setup/web-client).
+- **Who are the users, and what is the data?** Anonymous or an auth provider, plus the first tables and who may read or write each. See [Auth](/docs/setup/auth) and [Schemas](/docs/schemas).
+
+## How your agent knows it's done
+
+There's no check command. Your agent shows you each of these working:
+
+- The dev setup starts with one command
+- A backend route writes a row that a live query in the UI shows without a reload
+- A second user can't read rows the policies say are private, and the permission tests pass (see [Testing](/docs/tooling/testing))
+
+It finishes with the commands to run, what it chose and why, and any docs that were wrong or missing, with their URLs.
+
+## Run it yourself
+
+Jazz runs inside your backend's dev server, so there's nothing extra to start. Create it once and
+mount it under `/jazz`:
+
+```ts title="jazz.server.ts"
+import { createJazz, sqlite } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+
+export const jazz = await createJazz({
+  appId: "my-app",
+  app,
+  permissions,
+  store: sqlite({ path: "./data/jazz" }),
+  authenticate: async (request) => /* your session */ null,
+});
+```
+
+Edit `schema.ts` or `permissions.ts` and restart the dev server: Jazz applies them on start. See
+[Backend](/docs/setup/backend) for mounting it in Next.js, Hono or Express.
+
+## How we test this page
+
+An "agent as adopter" suite runs this brief end to end: a coding agent in a clean sandbox, a
+simulated user answering its questions, and a separate LLM judge checking the done list. For now we
+run it by hand as a release gate.

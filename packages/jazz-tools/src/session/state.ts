@@ -22,6 +22,7 @@ export type JazzSessionOperation =
   | "createLocalFirst"
   | "restoreLocalFirst"
   | "becomeBackend"
+  | "loginWithBackend"
   | "registerJWT"
   | "loginJWT"
   | "loginOrRegisterJWT"
@@ -58,6 +59,12 @@ export interface JazzSessionActions {
   createLocalFirst(): Promise<void>;
   restoreLocalFirst(secret: string): Promise<void>;
   becomeBackend(auth: BackendAuth): Promise<void>;
+  /**
+   * Sign in as whoever the app's own backend says is signed in. For apps that
+   * mount Jazz with `createJazz`: the backend's `authenticate` decides, from
+   * the app's own session cookie. The client holds no Jazz credential.
+   */
+  loginWithBackend(): Promise<void>;
   registerJWT(auth: JWTAuth): Promise<void>;
   loginJWT(auth: JWTAuth): Promise<void>;
   loginOrRegisterJWT(auth: JWTAuth): Promise<void>;
@@ -297,6 +304,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
     restoreLocalFirst: (secret) =>
       run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret)),
     becomeBackend: (auth) => run("becomeBackend", () => accounts.becomeBackend(auth)),
+    loginWithBackend: () => run("loginWithBackend", () => accounts.loginWithBackend()),
     registerJWT: (auth) => run("registerJWT", () => accounts.registerJWT(auth)),
     loginJWT: (auth) => login("loginJWT", auth),
     loginOrRegisterJWT: (auth) => login("loginOrRegisterJWT", auth),

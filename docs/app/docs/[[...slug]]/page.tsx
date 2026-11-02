@@ -1,20 +1,18 @@
 import type { ReactNode } from "react";
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
-import { findNeighbour } from "fumadocs-core/page-tree";
+import { notFound, redirect } from "next/navigation";
+import { findNeighbour, type Node } from "fumadocs-core/page-tree";
 import { ArrowLeft, ArrowRight } from "lucide-react";
 import { ClickableCard } from "@astryxdesign/core/ClickableCard";
 import { Divider } from "@astryxdesign/core/Divider";
 import { Layout, LayoutContent, LayoutPanel } from "@astryxdesign/core/Layout";
-import { HStack, VStack } from "@astryxdesign/core/Stack";
+import { VStack } from "@astryxdesign/core/Stack";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { getPageImage, source } from "@/lib/source";
 import { textOf } from "@/lib/docs-nav";
 import { getDocsMDXComponents } from "@/components/docs/mdx";
 import { DocsLink } from "@/components/docs/mdx-client";
 import { DocsToc } from "@/components/docs/docs-toc";
-import { LLMCopyButton, ViewOptions } from "@/components/ai/page-actions";
-import { gitConfig } from "@/lib/layout.shared";
 
 function NeighbourCard({
   direction,
@@ -48,10 +46,39 @@ function NeighbourCard({
   );
 }
 
+/**
+ * A folder without an index page (e.g. `/docs/setup/backend`) redirects to
+ * its first page, so folder URLs are stable link targets (the agent brief
+ * links them).
+ */
+function firstPageUnder(slug: string[] | undefined): string | undefined {
+  if (!slug?.length) return undefined;
+  const prefix = `/docs/${slug.join("/")}/`;
+  const walk = (nodes: Node[]): string | undefined => {
+    for (const node of nodes) {
+      if (node.type === "page" && node.url.startsWith(prefix)) return node.url;
+      if (node.type === "folder") {
+        if (node.index?.url.startsWith(prefix)) return node.index.url;
+        const found = walk(node.children);
+        if (found) return found;
+      }
+    }
+    return undefined;
+  };
+  return walk(source.getPageTree().children);
+}
+
+function getPageOrRedirect(slug: string[] | undefined) {
+  const page = source.getPage(slug);
+  if (page) return page;
+  const first = firstPageUnder(slug);
+  if (first) redirect(first);
+  notFound();
+}
+
 export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
   const params = await props.params;
-  const page = source.getPage(params.slug);
-  if (!page) notFound();
+  const page = getPageOrRedirect(params.slug);
 
   const current = page;
   const MDX = page.data.body;
@@ -95,13 +122,6 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
                   {page.data.description}
                 </Text>
               )}
-              <HStack gap={2} vAlign="center">
-                <LLMCopyButton markdownUrl={`${page.url}.mdx`} />
-                <ViewOptions
-                  markdownUrl={`${page.url}.mdx`}
-                  githubUrl={`https://github.com/${gitConfig.user}/${gitConfig.repo}/blob/${gitConfig.branch}/content/docs/${page.path}`}
-                />
-              </HStack>
             </VStack>
             <Divider className="my-8" />
             <MDX components={getDocsMDXComponents({ a: RelativeLink })} />
@@ -125,8 +145,7 @@ export async function generateStaticParams() {
 
 export async function generateMetadata(props: PageProps<"/docs/[[...slug]]">): Promise<Metadata> {
   const params = await props.params;
-  const page = source.getPage(params.slug);
-  if (!page) notFound();
+  const page = getPageOrRedirect(params.slug);
 
   return {
     title: page.data.title,

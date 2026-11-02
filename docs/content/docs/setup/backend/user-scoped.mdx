@@ -1,0 +1,38 @@
+---
+title: User-Scoped Backend
+description: "A backend that runs queries as the signed-in user, with all policies applied."
+---
+
+<Callout type="info">
+  Preview: this page is a rough outline for the server-first docs restructure. Content below is
+  copied from the old Server Setup page; the outline at the end is still to be written.
+</Callout>
+
+## Per-request user-scoped client
+
+Pass `req` to run queries as the authenticated user, with all permission policies applied.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="request-context.ts"'>
+      ../examples/docs/todo-server-ts/src/request-context.ts#backend-request-handler-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="request-context.ts"'>
+      ../examples/docs/todo-effect/src/server.ts#backend-request-handler-effect
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="request-context.rs"'>
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#backend-request-handler-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Coming next
+
+- The default way to build a server-first Jazz app: route handlers / server components on a user-scoped backend
+- User auth integration: `forRequest`, `forAccount`, cookies vs bearer tokens (see [Other / Custom](/docs/setup/auth/custom#backend-request-contexts))
+- Next.js example end to end
+- Deployment & environments

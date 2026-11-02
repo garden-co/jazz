@@ -13,7 +13,7 @@ use crate::runtime::ServerLinkAdmission;
 use crate::runtime::{CommitUnitTrust, ConnectionSessionContext};
 use axum::{
     extract::State,
-    extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
+    extract::ws::{CloseFrame, Message, WebSocketUpgrade, close_code},
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
@@ -38,6 +38,28 @@ const WS_MAX_MESSAGE_BYTES: usize = WS_MAX_FRAME_BYTES;
 const WS_AT_CAPACITY_RETRY_AFTER_SECS: u64 = 5;
 const WS_KEEPALIVE_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 const WS_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A message-level duplex the sync session runs over: the axum WebSocket a
+/// listener upgraded, or a socket an embedding host carries (see
+/// `server::embedded`). Both speak the same WebSocket messages, so the session
+/// loop and its wire format don't depend on which one it is.
+pub(crate) trait SyncSocket:
+    futures::Stream<Item = Result<Message, axum::Error>>
+    + futures::Sink<Message, Error = axum::Error>
+    + Unpin
+    + Send
+    + 'static
+{
+}
+
+impl<T> SyncSocket for T where
+    T: futures::Stream<Item = Result<Message, axum::Error>>
+        + futures::Sink<Message, Error = axum::Error>
+        + Unpin
+        + Send
+        + 'static
+{
+}
 
 #[derive(Debug)]
 pub(crate) struct WebSocketAdmissionState {
@@ -612,14 +634,14 @@ fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|addr| addr.is_loopback())
 }
 
-async fn read_ws_auth_prelude(
-    socket: &mut WebSocket,
+async fn read_ws_auth_prelude<S: SyncSocket>(
+    socket: &mut S,
     shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
     state: &ServerState,
 ) -> Option<Vec<u8>> {
     tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, async {
         tokio::select! {
-            msg = socket.recv() => match msg {
+            msg = socket.next() => match msg {
                 Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
                 Some(Ok(Message::Text(text))) => Some(text.as_bytes().to_vec()),
                 _ => None,
@@ -636,14 +658,14 @@ async fn read_ws_auth_prelude(
     .unwrap_or_default()
 }
 
-async fn read_ws_frame_batch(
-    socket: &mut WebSocket,
+async fn read_ws_frame_batch<S: SyncSocket>(
+    socket: &mut S,
     shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
     state: &ServerState,
 ) -> Option<Vec<u8>> {
     tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, async {
         tokio::select! {
-            msg = socket.recv() => match msg {
+            msg = socket.next() => match msg {
                 Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
                 _ => None,
             },
@@ -659,8 +681,8 @@ async fn read_ws_frame_batch(
     .unwrap_or_default()
 }
 
-async fn handle_ws_connection(
-    mut socket: WebSocket,
+pub(crate) async fn handle_ws_connection<S: SyncSocket>(
+    mut socket: S,
     state: Arc<ServerState>,
     request_headers: HeaderMap,
     _websocket_guard: ActiveWebSocketGuard,
@@ -1089,8 +1111,8 @@ fn decode_ws_encoded_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard:
     jazz::wire::decode_websocket_frame_batch(bytes)
 }
 
-async fn send_ws_encoded_frames(
-    socket: &mut WebSocket,
+async fn send_ws_encoded_frames<S: SyncSocket>(
+    socket: &mut S,
     frames: &[Vec<u8>],
 ) -> Result<(), axum::Error> {
     for batch in encode_ws_frame_batches(frames).map_err(axum::Error::new)? {
@@ -1099,11 +1121,14 @@ async fn send_ws_encoded_frames(
     Ok(())
 }
 
-async fn send_ws_error(socket: &mut WebSocket, error: WireError) {
+async fn send_ws_error<S: SyncSocket>(socket: &mut S, error: WireError) {
     let _ = send_ws_frames(socket, &[WireFrame::Error(error)]).await;
 }
 
-async fn send_ws_frames(socket: &mut WebSocket, frames: &[WireFrame]) -> Result<(), axum::Error> {
+async fn send_ws_frames<S: SyncSocket>(
+    socket: &mut S,
+    frames: &[WireFrame],
+) -> Result<(), axum::Error> {
     let encoded = frames
         .iter()
         .map(encode_frame)
@@ -1138,7 +1163,7 @@ pub(crate) fn encode_ws_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>
     Ok(batches)
 }
 
-async fn close_ws_for_shutdown(socket: &mut WebSocket) {
+async fn close_ws_for_shutdown<S: SyncSocket>(socket: &mut S) {
     let _ = socket
         .send(Message::Close(Some(CloseFrame {
             code: close_code::RESTART,

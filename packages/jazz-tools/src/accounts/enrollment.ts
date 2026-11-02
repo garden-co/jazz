@@ -2,6 +2,7 @@ import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import {
   AccountAuthError,
   requestAccountRegistry,
+  requestBackendSignIn,
   readAccountAssignment,
 } from "./registry-client.js";
 export { AccountAuthError } from "./registry-client.js";
@@ -30,6 +31,11 @@ interface HandleCredentials {
   registry: string;
   auth?: JWTAuth;
   backend?: Readonly<BackendAuth & { nodeId: string }>;
+  /**
+   * Signed in through the app's own backend (`createJazz`): the backend states
+   * the identity and its claims; the client holds no credential.
+   */
+  delegated?: Readonly<{ claims: Record<string, unknown> }>;
   localFirstSecret?: string;
   /** A retained external assignment awaiting its first provider credential. */
   provisional?: boolean;
@@ -162,6 +168,7 @@ export async function accountToken(handle: AccountHandle, registry: string): Pro
   if (!material || material.registry !== registry)
     throw new AccountAuthError("invalid_account_handle");
   if (material.provisional) throw new AccountAuthError("account_credential_pending");
+  if (material.delegated) throw new AccountAuthError("backend_signed_in_account_has_no_token");
   if (material.backend || !material.auth)
     throw new AccountAuthError("backend_account_requires_backend_host");
   const primed = material.primed;
@@ -173,6 +180,21 @@ export async function accountToken(handle: AccountHandle, registry: string): Pro
   if (!sameIdentity(identityFromToken(token), handle.identity))
     throw new AccountAuthError("credential_identity_changed");
   return token;
+}
+
+/**
+ * @internal The claims of an account signed in through the app's backend, or
+ * undefined for any other account. The backend re-states them on every
+ * connection; these only shape local permission checks.
+ */
+export function delegatedAccountClaims(
+  handle: AccountHandle,
+  registry: string,
+): Readonly<Record<string, unknown>> | undefined {
+  const material = credentials.get(handle);
+  if (!material || material.registry !== registry)
+    throw new AccountAuthError("invalid_account_handle");
+  return material.delegated?.claims;
 }
 
 /** @internal Opaque backend material, accessible only to a supported host adapter. */
@@ -203,6 +225,7 @@ export function retainedAccountAssignment(
   if (
     !material ||
     material.backend ||
+    material.delegated ||
     material.localFirstSecret !== undefined ||
     isReservedJazzIssuer(handle.identity.issuer)
   )
@@ -381,6 +404,39 @@ export function createAccountManagerWithRuntime(options: {
         credentials.set(handle, {
           registry,
           backend: Object.freeze({ backendSecret, nodeId }),
+          invalidated: new Set(),
+          bound: new Set(),
+        });
+        return retain(handle);
+      },
+      async loginWithBackend() {
+        unpin();
+        const started = epoch;
+        const value = await requestBackendSignIn(registry, options.fetch);
+        assertCurrent(started);
+        const { identity, claims } = (value ?? {}) as {
+          identity?: AccountIdentity;
+          claims?: unknown;
+        };
+        if (
+          !identity ||
+          typeof identity.issuer !== "string" ||
+          typeof identity.subject !== "string" ||
+          !isPortableAuthorComponent(identity.issuer) ||
+          !isPortableAuthorComponent(identity.subject) ||
+          isReservedJazzIssuer(identity.issuer)
+        )
+          throw new AccountAuthError("invalid_account_response");
+        const id = readAccountAssignment(value, identity);
+        const handle = new EnrolledAccount(id, identity) as AccountHandle;
+        credentials.set(handle, {
+          registry,
+          delegated: Object.freeze({
+            claims:
+              claims && typeof claims === "object" && !Array.isArray(claims)
+                ? Object.freeze({ ...(claims as Record<string, unknown>) })
+                : Object.freeze({}),
+          }),
           invalidated: new Set(),
           bound: new Set(),
         });

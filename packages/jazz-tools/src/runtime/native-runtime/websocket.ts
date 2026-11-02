@@ -1,3 +1,5 @@
+import { inProcessWebSocketFor } from "../in-process-transport.js";
+import { sameOriginWebSocketConstructor } from "./http-stream-socket.js";
 import { Utf8Decoder } from "../utf8.js";
 import { httpUrlToWs } from "../url.js";
 import { mapAuthReason } from "../auth-state.js";
@@ -232,8 +234,9 @@ export class WebSocketCarrier {
   private terminated = false;
 
   constructor(options: WebSocketCarrierOptions) {
-    const WebSocketCtor = options.WebSocket ?? browserWebSocketConstructor();
     this.url = options.endpointUrl;
+    const WebSocketCtor =
+      options.WebSocket ?? inProcessWebSocketFor(this.url) ?? defaultWebSocketConstructor(this.url);
     this.onFrame = options.onFrame;
     this.onError = options.onError;
     this.onTerminal = options.onTerminal;
@@ -658,6 +661,23 @@ export async function bytesFromWebSocketMessage(data: unknown): Promise<Uint8Arr
     return new Uint8Array(await data.arrayBuffer());
   }
   throw new Error(`expected binary websocket message, got ${typeof data}`);
+}
+
+/** Same-origin endpoints fall back to the HTTP stream transport when the host
+ * can't upgrade WebSockets (see `http-stream-socket.ts`). */
+function defaultWebSocketConstructor(url: string): WebSocketConstructor {
+  const native = browserWebSocketConstructor();
+  return isSameOriginEndpoint(url) ? sameOriginWebSocketConstructor(native) : native;
+}
+
+function isSameOriginEndpoint(url: string): boolean {
+  const location = (globalThis as { location?: { host?: string } }).location;
+  if (!location?.host) return false;
+  try {
+    return new URL(url).host === location.host;
+  } catch {
+    return false;
+  }
 }
 
 function browserWebSocketConstructor(): WebSocketConstructor {

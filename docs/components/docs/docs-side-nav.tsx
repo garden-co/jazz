@@ -3,7 +3,13 @@
 import { usePathname } from "next/navigation";
 import { SideNav, SideNavItem, SideNavSection } from "@astryxdesign/core/SideNav";
 
-export type NavEntry = { label: string; url?: string; children?: NavEntry[] };
+export type NavEntry = {
+  label: string;
+  url?: string;
+  /** From `defaultOpen` in the folder's meta.json. */
+  defaultOpen?: boolean;
+  children?: NavEntry[];
+};
 export type NavSection = { title: string; entries: NavEntry[] };
 
 function contains(entry: NavEntry, pathname: string): boolean {
@@ -20,7 +26,7 @@ function Entry({ entry, pathname }: { entry: NavEntry; pathname: string }) {
       label={entry.label}
       href={entry.url}
       isSelected={entry.url === pathname}
-      collapsible={{ defaultIsCollapsed: !contains(entry, pathname) }}
+      collapsible={{ defaultIsCollapsed: !entry.defaultOpen && !contains(entry, pathname) }}
     >
       {children.map((child) => (
         <Entry key={child.url ?? child.label} entry={child} pathname={pathname} />

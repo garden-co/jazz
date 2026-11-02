@@ -16,13 +16,23 @@ import { createListeners, toError } from "../runtime/util.js";
 
 export type JazzAuth =
   | { readonly kind: "better-auth"; readonly client: BetterAuthClient }
-  | ({ readonly kind: "jwt"; getToken(): Promise<string>; logout(): unknown } & AuthProviderState);
+  | ({ readonly kind: "jwt"; getToken(): Promise<string>; logout(): unknown } & AuthProviderState)
+  | ({ readonly kind: "backend"; logout(): unknown } & AuthProviderState);
 export const betterAuth = (client: BetterAuthClient): JazzAuth => ({ kind: "better-auth", client });
 /** The logout callback must clear provider state and eventually publish key: null. */
 export const jwtAuth = (options: Omit<Extract<JazzAuth, { kind: "jwt" }>, "kind">): JazzAuth => ({
   kind: "jwt",
   ...options,
 });
+/**
+ * Sign in through the app's own backend (`createJazz`): its `authenticate`
+ * decides who the user is. `key` is your signed-in user's id, or null when
+ * signed out; Jazz signs in again whenever it changes. `logout` signs out of
+ * your auth and must then report `key: null`.
+ */
+export const backendAuth = (
+  options: Omit<Extract<JazzAuth, { kind: "backend" }>, "kind">,
+): JazzAuth => ({ kind: "backend", ...options });
 export interface JazzAppSnapshot<Client> extends NeedsLoginState {
   readonly status: "starting" | "signed-out" | "transitioning" | "ready" | "error";
   readonly client?: Client;
@@ -135,7 +145,11 @@ export function createJazzAppOwner<Config, Client>(
   function connect() {
     if (!session || !auth || disposed) return;
     if (auth.kind === "better-auth") connection = connectBetterAuth(session, auth.client);
-    else {
+    else if (auth.kind === "backend") {
+      jwtConnection = connectAuthProvider(session, { backend: true });
+      connection = jwtConnection;
+      jwtConnection.update(auth);
+    } else {
       const source = { value: auth };
       jwtSource = source;
       jwtConnection = connectAuthProvider(session, { getToken: () => source.value.getToken() });
@@ -154,6 +168,7 @@ export function createJazzAppOwner<Config, Client>(
     "createLocalFirst",
     "restoreLocalFirst",
     "becomeBackend",
+    "loginWithBackend",
     "registerJWT",
     "loginJWT",
     "loginOrRegisterJWT",
@@ -239,6 +254,8 @@ export function createJazzAppOwner<Config, Client>(
       if (same && next?.kind === "jwt") {
         if (jwtSource) jwtSource.value = next;
         jwtConnection?.update(next);
+      } else if (same && next?.kind === "backend") {
+        jwtConnection?.update(next);
       } else if (!same) {
         disconnect();
         connect();
@@ -285,7 +302,7 @@ export function createJazzAppOwner<Config, Client>(
         if (jwtConnection) {
           const leaving = auth;
           await jwtConnection.logout(() =>
-            leaving?.kind === "jwt" ? leaving.logout() : undefined,
+            leaving?.kind === "jwt" || leaving?.kind === "backend" ? leaving.logout() : undefined,
           );
         } else if (connection) await connection.logout();
         else await current.logout();

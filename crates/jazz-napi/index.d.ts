@@ -15,6 +15,31 @@ export declare class E2EeSodiumStream {
 }
 export type E2eeSodiumStream = E2EeSodiumStream
 
+export declare class JazzCore {
+  /** Open the core's storage and serve it in this process. */
+  static open(options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; jwtPublicKey?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  /**
+   * Route one HTTP request. `url` is the path and query, as the core's
+   * router sees them (`/apps/<appId>/...` or `/health`).
+   */
+  handle(method: string, url: string, headers: Array<Array<string>>, body: Buffer): Promise<JazzCoreResponse>
+  /**
+   * Start a sync session over a socket the host upgraded. `onEvent` gets
+   * each message for the client and, last, the close.
+   */
+  openSocket(headers: Array<Array<string>>, onEvent: (err: Error | null, event: JazzCoreSocketEvent) => void): JazzCoreSocket
+  /** Close every session and the storage. */
+  close(): Promise<void>
+}
+
+/** The host's handle on one session. */
+export declare class JazzCoreSocket {
+  /** Pass one binary message from the client. False once the session ended. */
+  send(data: Uint8Array): boolean
+  /** The client's socket closed. */
+  close(): void
+}
+
 export declare class JazzServer {
   static start(options: { appId: string; backendSecret: string; adminSecret: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[] }): Promise<JazzServer>
   get appId(): string
@@ -340,6 +365,20 @@ export interface InsertOptions {
   attribution?: Uint8Array
   branch?: JsonValue
   updatedAtMs?: number
+}
+
+export interface JazzCoreResponse {
+  status: number
+  headers: Array<Array<string>>
+  body: Buffer
+}
+
+export interface JazzCoreSocketEvent {
+  /** `"message"` or `"close"`. */
+  kind: string
+  data?: Uint8Array
+  code?: number
+  reason?: string
 }
 
 /**

@@ -1,0 +1,64 @@
+---
+title: Trusted Backend
+description: "A backend that acts with backend authority, using the backend secret."
+---
+
+<Callout type="info">
+  Preview: this page is a rough outline for the server-first docs restructure. Content below is
+  copied from the old Server Setup page; the outline at the end is still to be written.
+</Callout>
+
+## Backend context setup
+
+A TypeScript backend creates one `createJazzSession` owner from `jazz-tools/backend`, with `appId`, `app`, `permissions`, `driver`, and `serverUrl` configured once. Select backend authority with `initial: { backendSecret }` or later with `await session.becomeBackend({ backendSecret })`. For authentication and account linking, see [Other / Custom](/docs/setup/auth/custom).
+
+Backend admission requires a reachable Jazz server: the Node host sends `POST /apps/{app}/backend/admit` with `X-Jazz-Backend-Secret`, and proceeds only after that server validates it. Core validates the credential and owns account registration and linking. This also applies to a memory driver; backend initialization is not an offline privilege grant. Browser and React Native hosts reject backend selection.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="main.ts"'>
+      ../examples/docs/todo-server-ts/src/main.ts#context-setup-ts-backend
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="main.rs"'>
+      ../examples/docs/todo-server-rs/src/main.rs#context-setup-rust-backend
+    </include>
+  </Tab>
+</Tabs>
+
+## Backend identity pattern
+
+The ready snapshot exposes `client.db` for backend-owned work. Backend accounts use the reserved nil account UUID and identity `{ issuer: "urn:jazz:system", subject: nodeUUID }`, where `nodeUUID` is the actual originating native node. Copying that identity does not grant authority. The secret stays in private handle material and is never serialized into snapshots or account preferences.
+
+- `client.db` has backend permissions and records SYSTEM node provenance.
+- `await client.forRequest(req)` verifies the caller's bearer and active core account assignment, then returns an immutable database scope with that user's policies and authorship.
+- `await client.forAccount(account)` performs the same verification from an opaque admitted user account handle.
+- `await client.withAttribution(account)` and `await client.withAttributionForRequest(req)` keep backend permissions while recording the verified user's authorship. Use them after the application authorizes the operation.
+
+Request scopes do not change the shared session's selected account, so concurrent requests retain separate policy contexts. Do not switch the shared owner to serve individual requests. When the application deliberately transitions the owner from backend to a user account, the old client shuts down and the replacement opens an ordinary native runtime without backend privilege. The shared lifecycle handles detach, sync, shutdown, retry, and logout; logout invalidates every issued handle. Backend selection is ephemeral across process restarts, while retained local-first signing roots remain available.
+
+`forRequest` reads standard HTTP headers from Express, Hono, Fastify, or a Web Fetch API `Request`. Configure `jwksUrl` or `jwtPublicKey` on `createJazzSession(...)` for external IdP tokens, but not both. Without either, it accepts only Jazz local-first tokens, provided `allowLocalFirstAuth` is enabled. Application cookies must first be resolved to an admitted account by your auth integration.
+
+On Node, `allowLocalFirstAuth` defaults to `false` when `NODE_ENV` is `production` (case-insensitive), and `true` otherwise, including when `NODE_ENV` is unset. Set it explicitly to `true` or `false` to override the default. Existing production backends that relied on the previous implicit `true` default must now set `allowLocalFirstAuth: true` to continue accepting local-first tokens.
+
+This option controls request verification in `forRequest` and `withAttributionForRequest`. It does not control whether the backend itself can create local-first accounts. The backend still sends the caller's token to the sync server to verify the account, so the sync server must also allow local-first authentication. For a self-hosted production sync server, enable `--allow-local-first-auth` or `JAZZ_ALLOW_LOCAL_FIRST_AUTH=true` as well as the Node option.
+
+The TypeScript backend's `jwksUrl` must use HTTPS, except for development HTTP
+with a WHATWG-canonical hostname of `localhost`, `[::1]`, or an IPv4 address in
+`127.0.0.0/8`. For example, `http://localhost:3000/api/auth/jwks` is allowed;
+`http://localhost.:3000/api/auth/jwks` (the trailing-dot spelling) and
+`http://keys.example/api/auth/jwks` are rejected before fetching keys.
+Every redirect is rejected, including redirects to HTTPS. Use the provider's
+final JWKS URL directly. This policy applies to TypeScript request authentication,
+not the separate Rust server's `--jwks-url` verifier.
+
+### Attribution without impersonation
+
+Use `await client.withAttribution(account)` or `await client.withAttributionForRequest(req)` to retain backend access while recording verified user provenance. Raw session objects and issuer/subject strings are not public authority inputs. See [Sessions &gt; Attribution without impersonation](/docs/setup/auth/sessions#attribution-without-impersonation).
+
+## Coming next
+
+- When to use a trusted backend vs a user-scoped one
+- Jazz Cloud OAuth instead of a raw backend secret
+- Environments: dev / preview / prod app ids and secrets

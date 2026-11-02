@@ -1,0 +1,187 @@
+---
+title: Backend
+description: "Run Jazz inside your backend: one createJazz per process, mounted under /jazz, with backend authority for system work and user-scoped queries for requests."
+---
+
+Jazz runs inside your backend. There is no separate Jazz server to start and no deploy step:
+`createJazz` opens the database in your backend's process, applies the schema, migrations and
+permissions your code declares, and serves sync on your own origin under `/jazz`.
+
+## Create Jazz once
+
+```ts title="jazz.server.ts"
+import { createJazz, sqlite } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+import { getUserFromCookie } from "./auth";
+
+export const jazz = await createJazz({
+  appId: "my-app",
+  app,
+  permissions,
+  store: sqlite({ path: "./data/jazz" }),
+  // Your app's own sign-in decides who the user is.
+  authenticate: async (request) => {
+    const user = await getUserFromCookie(request);
+    return user ? { userId: user.id } : null;
+  },
+});
+```
+
+- `app` and `permissions` are the ones your code imports. The bundle that's running is the bundle
+  Jazz enforces, so rolling back your backend rolls back its permissions too.
+- `store` says where the data lives. `sqlite({ path })` keeps it in a directory on this machine,
+  for a server with a lasting disk; one process opens a directory at a time (an OS file lock, which
+  holds across containers on one host's volume and on EFS, but not on NFS mounted with `nolock` or
+  `local_lock`). On serverless hosts
+  (Vercel, AWS Lambda, Netlify) functions have no lasting disk, so `sqlite()` refuses to start
+  there: use `remote({ url, adminSecret, backendSecret })`, a sync server elsewhere such as Jazz
+  Cloud. `memory()` is for tests and throwaway previews, and keeps nothing. See [Deployment](/docs/setup/deployment) for
+  where the data can live.
+- `authenticate(request)` reads your own session (a cookie, a header) and returns
+  `{ userId, claims? }`, or `null` when signed out. It is the only place that decides who a user
+  is: sign-ins, sync connections and `forRequest` all ask it. No JWKS, issuer or audience to
+  configure, and no Jazz token in the browser.
+- Sync and sign-in only accept requests from your backend's own origin. A page served from another
+  origin must be listed in `allowedOrigins: ["https://app.example.com"]`. Don't put a permissive
+  credentialed CORS rule (any origin, with cookies) in front of `/jazz`: it lets other sites act
+  with your users' cookies again.
+- Admin and backend routes never leave the process: from outside, only sync and sign-in are
+  reachable under `/jazz`.
+
+## Mount it
+
+<Tabs groupId="backend-framework" items={["Next.js", "Hono", "Express / Node"]} persist updateAnchor>
+  <Tab value="Next.js">
+    ```ts title="app/jazz/[...path]/route.ts"
+    import { jazz } from "@/jazz.server";
+
+    export const { GET, POST, DELETE } = jazz.next();
+    ```
+
+    On Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/functions`; install
+    `@vercel/functions` and `ws`). Under plain `next dev`, which can't upgrade sockets, the browser
+    switches to an HTTP stream on its own. Stream sessions live in the process that opened them,
+    so serve them from one instance or with sticky routing.
+
+    Keep Jazz's native core out of the bundle in `next.config.ts`:
+
+    ```ts title="next.config.ts"
+    const nextConfig = {
+      serverExternalPackages: ["jazz-napi", "jazz-tools/backend"],
+    };
+    export default nextConfig;
+    ```
+
+  </Tab>
+  <Tab value="Hono">
+    ```ts title="server.ts"
+    import { Hono } from "hono";
+    import { serve } from "@hono/node-server";
+    import { jazz } from "./jazz.server";
+
+    const api = new Hono();
+    api.all("/jazz/*", (c) => jazz.fetch(c.req.raw));
+
+    const server = serve({ fetch: api.fetch, port: 3000 });
+    await jazz.attach(server); // WebSocket upgrades on /jazz (needs `ws`)
+    ```
+
+  </Tab>
+  <Tab value="Express / Node">
+    ```ts title="server.ts"
+    import express from "express";
+    import { jazz } from "./jazz.server";
+
+    const api = express();
+    api.use((req, res, next) => jazz.nodeHandler(req, res, next));
+
+    const server = api.listen(3000);
+    await jazz.attach(server); // WebSocket upgrades on /jazz (needs `ws`)
+    ```
+
+  </Tab>
+</Tabs>
+
+If your host upgrades sockets itself (Bun, Deno, your own `ws` setup), hand each upgraded socket to
+`jazz.acceptSocket(request, socket)` and pass `upgradesSockets: true` to `createJazz`, so a socket
+that fails to open is retried as a socket rather than switched to the HTTP stream.
+
+## Connect the browser
+
+The browser talks to the same origin, so `serverUrl` is a path, and your app's own session cookie is
+all it needs. It never holds a Jazz credential:
+
+```ts title="src/jazz.ts"
+import { createJazzSession } from "jazz-tools/client";
+
+export const session = await createJazzSession({ appId: "my-app", serverUrl: "/jazz" });
+await session.loginWithBackend();
+```
+
+`loginWithBackend()` asks your backend who is signed in. `authenticate` answers, and the client gets
+the account, identity and claims (`session.user`, `session.claims`) as plain data. Every sync
+connection asks `authenticate` again, so a sign-out or changed claims apply on the next reconnect.
+Call `loginWithBackend()` again after your own sign-in changes; on sign-out, call
+`session.logout()`.
+
+## Trusted backend use
+
+`jazz.db` acts with backend authority: it sees and writes everything, so check access in your own
+code first. Use it for system work: jobs, webhooks, migrations, admin routes.
+
+```ts
+import { jazz } from "./jazz.server";
+import { app } from "./schema";
+
+await jazz.db.insert(app.auditLog, { event: "invoice.paid" });
+```
+
+## User-scoped use
+
+`await jazz.forRequest(request)` runs your `authenticate` and returns a database with that user's
+policies and authorship. It's the default for anything a user triggers: route handlers, server
+actions, server components. Concurrent requests stay isolated.
+
+```ts title="app/api/todos/route.ts"
+import { jazz } from "@/jazz.server";
+import { app } from "@/schema";
+
+export async function GET(request: Request) {
+  const db = await jazz.forRequest(request);
+  return Response.json(await db.all(app.todos));
+}
+```
+
+## Edge-style Wasm setup
+
+Some runtimes (like Cloudflare Workers) don't load Jazz the same way a browser does. In those cases, provide the Wasm module or bytes directly.
+
+<include cwd lang="ts" meta='title="worker.ts"'>
+  ../examples/cloudflare-worker-runtime-ts/src/docs-snippets.ts#edge-wasm-module
+</include>
+
+If your platform hands you raw bytes instead of a compiled module, use `runtimeSources.wasmSource`:
+
+```ts title="worker.ts"
+import { createDb, type AccountHandle } from "jazz-tools";
+
+// The request's account manager prepared this handle before context creation.
+export function openRequestDb(account: AccountHandle, wasmBytes: Uint8Array) {
+  return createDb({
+    appId: "my-app",
+    account,
+    runtimeSources: { wasmSource: wasmBytes },
+  });
+}
+```
+
+See the [Cloudflare Wrangler example](https://github.com/garden-co/jazz/tree/main/examples/cloudflare-worker-runtime-ts) for a complete `workerd` setup.
+
+## How it fits with the rest
+
+- **Auth:** which tokens `forRequest` accepts and how to link accounts. See [Auth](/docs/setup/auth).
+- **Permissions:** user-scoped queries run your [policies](/docs/schemas/policies); backend authority skips them.
+- **Reads and writes:** the same query and write API as clients. See [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data), including when a write counts as durable.
+- **Clients:** browsers and apps sync through the same `/jazz` mount, under the same policies. See [Browser](/docs/setup/web-client).
+- **Deployment:** where the data lives in each environment. See [Deployment](/docs/setup/deployment).
+- **Testing:** permission tests against a local server. See [Testing](/docs/tooling/testing).

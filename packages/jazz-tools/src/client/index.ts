@@ -31,6 +31,7 @@ export type {
 export * from "../session/auth-provider-exports.js";
 export { createJazzApp, type JazzAppConfig } from "../session/create-jazz-app.js";
 export {
+  backendAuth,
   betterAuth,
   jwtAuth,
   type JazzAuth,

@@ -218,6 +218,7 @@
     "@types/node": "catalog:default",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/ws": "^8.5.12",
     "@vitejs/plugin-react": "catalog:default",
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
@@ -239,9 +240,11 @@
     "vite-plugin-wasm": "catalog:default",
     "vitest": "catalog:default",
     "vue": "^3.5.22",
+    "ws": "^8.18.0",
     "zod": "^4.3.6"
   },
   "peerDependencies": {
+    "@vercel/functions": ">=3.10.0",
     "better-auth": "1.7.1",
     "effect": "^4.0.0-rc.118",
     "expo": ">=54",
@@ -252,7 +255,8 @@
     "react-native": ">=0.76",
     "solid-js": ">=1.9.13",
     "svelte": "^5.0.0",
-    "vue": "^3.5.0"
+    "vue": "^3.5.0",
+    "ws": "^8.18.0"
   },
   "peerDependenciesMeta": {
     "better-auth": {
@@ -286,6 +290,12 @@
       "optional": true
     },
     "vue": {
+      "optional": true
+    },
+    "ws": {
+      "optional": true
+    },
+    "@vercel/functions": {
       "optional": true
     }
   },

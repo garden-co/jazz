@@ -19,7 +19,8 @@ export type AccountOperation =
   | "loginJWT"
   | "loginOrRegisterJWT"
   | "linkJWT"
-  | "becomeBackend";
+  | "becomeBackend"
+  | "loginWithBackend";
 export interface AccountSnapshot {
   readonly account: AccountHandle | undefined;
   readonly pending: AccountOperation | undefined;
@@ -39,6 +40,7 @@ export interface AccountEnrollment<Auth> {
   restoreLocalFirst?(secret: string): AccountHandle;
   logout?(): void;
   becomeBackend?(auth: BackendAuth): Promise<AccountHandle>;
+  loginWithBackend?(): Promise<AccountHandle>;
   registerJWT(auth: Auth): Promise<AccountHandle>;
   loginJWT(auth: Auth): Promise<AccountHandle>;
   loginOrRegisterJWT(auth: Auth): Promise<AccountHandle>;
@@ -130,6 +132,14 @@ export class AccountManager<Auth> {
     this.generation++;
     this.publish({ account, pending: undefined, error: undefined });
     return account;
+  }
+
+  loginWithBackend(): Promise<AccountHandle> {
+    return this.run("loginWithBackend", () => {
+      if (!this.enrollment.loginWithBackend)
+        throw new Error("Backend sign-in is unavailable on this host");
+      return this.enrollment.loginWithBackend();
+    });
   }
 
   becomeBackend(auth: BackendAuth): Promise<AccountHandle> {

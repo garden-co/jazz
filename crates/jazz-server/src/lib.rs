@@ -15,6 +15,10 @@ pub use server::{
 };
 #[cfg(feature = "embedded-server")]
 pub use server::{
+    EmbeddedOutgoing, EmbeddedServer, EmbeddedSocketPeer, EmbeddedSocketSender, OpenSocketRefused,
+};
+#[cfg(feature = "embedded-server")]
+pub use server::{
     JazzServer, JazzServerBuilder, ServerDataDir, TEST_JWT_AUDIENCE, TEST_JWT_ISSUER,
     TestJwtIssuer, TestJwtOptions, push_catalogue_in_memory,
 };

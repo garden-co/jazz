@@ -1,0 +1,54 @@
+---
+title: React Native
+description: "Use Jazz from React Native and Expo apps."
+---
+
+React Native and Expo are supported as an alpha through `jazz-tools/react-native` and the direct `jazz-rn` native dependency. Use a matching development or release build: Expo Go is unsupported.
+
+## Setup
+
+React Native and Expo use the same session API with platform-specific runtime and account storage adapters:
+
+```tsx
+import { JazzSessionProvider } from "jazz-tools/expo";
+
+function App() {
+  return (
+    <JazzSessionProvider config={{ appId, serverUrl, initial: "local-first" }}>
+      <TodoApp />
+    </JazzSessionProvider>
+  );
+}
+```
+
+Install `jazz-rn` directly in the application alongside `jazz-tools`, add its
+Expo config plugin, and build the native app. Expo Go cannot load the relay. A
+bare React Native host uses the same direct dependency and New Architecture,
+with an OS-protected account store. The [canonical Expo
+scaffold](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-expo)
+shows the complete lifecycle and platform configuration. The alpha has not yet
+proven two physical JSI runtimes attached to one relay.
+
+<Callout type="info">
+  For a local-only context, pass `{ ...config, serverUrl: undefined }`. The handle keeps its registry authority; writes stay locally durable. A later context using the matching server URL can synchronize them.
+</Callout>
+
+<Callout type="warn">
+  The local-first root is that identity's signing credential. If it is lost, the account needs
+  another linked identity or a recovery backup to regain access. Plan for recovery with [backup and
+  restore](/docs/setup/auth/local-first#backing-up-and-restoring-the-secret).
+</Callout>
+
+<Accordions type="single">
+<Accordion title="Runtime assets not loading?">
+
+Some bundlers and runtimes cannot automatically resolve Jazz's Wasm and worker assets. See [Wasm loading](/docs/setup/web-client/local-first-client#wasm-loading).
+
+</Accordion>
+</Accordions>
+
+## Coming next
+
+- Expo vs bare React Native setup, step by step
+- User auth integration
+- Today React Native clients are local-first only; a thin client follows the web thin client

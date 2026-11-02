@@ -1,67 +1,128 @@
 ---
 title: Overview
-description: The database that syncs.
-reviewedAt: "b29b48d1a"
+description: "Jazz is a relational database with live queries, permissions and built-in collaboration. Use Jazz Cloud or run it yourself right next to your app. Use it from your backend, web and native clients, with local-first sync where you need offline."
 ---
 
-Jazz is a local-first relational database with row-level permissions, real-time sync, and offline support&hairsp;—&hairsp;no separate API layer needed. Your app reads from and writes to a local replica, and Jazz syncs it with a server in the background.
+Every Jazz app is defined first by its database schema and permission policies. They're verbose, but agents are good at writing and checking them.
 
-```ts
+```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
 import { migrations } from "./migrations";
 
-// Define your schema
-const schema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-    },
-    {},
-  ),
-};
-const app = s.defineApp(schema, { migrations });
+export const app = s.defineApp(
+  { todos: s.table({ title: s.string(), done: s.boolean() }, {}) },
+  { migrations },
+);
 
-// Write — instant, works offline
-db.insert(app.todos, { title: "Ship it", done: false });
+// Each user sees and edits only the todos they created
+export const permissions = s.definePermissions(app, ({ policy, session }) => {
+  const isCreator = { $createdBy: session.user };
+  policy.todos.allowRead.where(isCreator);
+  policy.todos.allowInsert.where(isCreator);
+  policy.todos.allowUpdate.where(isCreator);
+  policy.todos.allowDelete.where(isCreator);
+});
+```
 
-// Read — reactive, stays up to date across devices
+Jazz runs inside your backend: no separate database server and no deploy step. The schema and permissions your code imports are the ones it enforces.
+
+```ts title="server.ts"
+import { Hono } from "hono";
+import { createJazz, sqlite } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+
+const jazz = await createJazz({
+  appId: "my-app",
+  app,
+  permissions,
+  store: sqlite({ path: "./data/jazz" }),
+  authenticate: async (request) => getSignedInUser(request), // your own auth: { userId } or null
+});
+
+new Hono()
+  // Sync for browsers, on your own origin
+  .all("/jazz/*", (c) => jazz.fetch(c.req.raw))
+  // Runs as the signed-in user: the query only returns their own todos
+  .get("/todos", async (c) => {
+    const db = await jazz.forRequest(c.req.raw);
+    return c.json(await db.all(app.todos.where({ done: false })));
+  })
+  // Runs with backend authority and sees every todo (check admin access in your app first)
+  .get("/admin/todos", async (c) => {
+    return c.json(await jazz.db.all(app.todos));
+  });
+```
+
+You can also query and write to the database right from your frontend. It is protected by the same auth as your backend, and the same permission policies apply. Pick a thin client (about 86 kB gzipped) or a full local-first client (about 1 MB gzipped, mostly the WASM engine).
+
+```ts title="client.ts"
+import { createDb } from "jazz-tools/thin";
+import { app } from "./schema";
+
+const db = createDb({ appId, serverUrl: "/jazz", account });
+
+// Live query: updates as soon as the server (or anyone else) changes a todo
 db.subscribe(app.todos.where({ done: false }), (todos) => {
   console.log(todos);
 });
 ```
 
-Jazz works with React, Vue, Svelte, Solid, Expo/React Native, plain TypeScript, and Rust.
+Or with React:
 
-(Looking for [classic Jazz docs?](https://classic.jazz.tools/docs))
+```tsx title="Todos.tsx"
+import { useAll, useDb } from "jazz-tools/react";
+import { app } from "./schema";
 
-## Quickstart
+export function Todos() {
+  const db = useDb();
+  const { data: todos = [] } = useAll(app.todos.where({ done: false }));
 
-<Cards>
-  <Card title="Quickstart" href="/docs/quickstart" />
-</Cards>
+  return todos.map((todo) => (
+    <label key={todo.id}>
+      <input type="checkbox" onChange={() => db.update(app.todos, todo.id, { done: true })} />
+      {todo.title}
+    </label>
+  ));
+}
+```
 
-## Install
-
-<Cards>
-  <Card title="Client" href="/docs/install/client" />
-  <Card title="TypeScript Server" href="/docs/install/typescript-server" />
-</Cards>
-
-## Setup
-
-<Cards>
-  <Card title="Client Setup" href="/docs/getting-started/client-setup" />
-  <Card title="Server Setup" href="/docs/getting-started/server-setup" />
-</Cards>
-
-## Reference
+## Start here
 
 <Cards>
-  <Card title="Authentication" href="/docs/auth/authentication" />
-  <Card title="Schemas" href="/docs/schemas/defining-tables" />
-  <Card title="Reading Data" href="/docs/reading/queries" />
-  <Card title="Writing Data" href="/docs/writing/writing-data" />
-  <Card title="Permissions" href="/docs/auth/permissions" />
-  <Card title="Migrations" href="/docs/schemas/migrations" />
+  <Card title="Quickstart" href="/docs/setup/run-locally" />
+  <Card title="Why Jazz" href="/docs/why-jazz" />
+  <Card title="How Jazz works" href="/docs/how-jazz-works" />
 </Cards>
+
+## What you'll learn, in order
+
+- [Setup](/docs/setup/run-locally)&hairsp;—&hairsp;run locally, deploy to Jazz Cloud or your own server, add a backend, then a client
+- [Schemas & Policies](/docs/schemas/defining-tables)&hairsp;—&hairsp;tables, column types, relationships, who can do what, and migrations
+- [Reading Data](/docs/reading/queries)&hairsp;—&hairsp;queries, live subscriptions and framework hooks
+- [Writing Data](/docs/writing/writing-data)&hairsp;—&hairsp;inserts, updates, transactions and mergeable text
+- [Operating Jazz](/docs/operating/monitoring)&hairsp;—&hairsp;backups, upgrades, monitoring and scaling
+- [Tooling](/docs/tooling/cli-and-mcp)&hairsp;—&hairsp;CLI, MCP, inspector and testing
+
+## What people build with Jazz
+
+<Callout type="info">
+  Preview: rough sketches of each scenario; each will link to a short path through the docs.
+</Callout>
+
+- **A backend with live data.** Your API or server components read and write through Jazz instead of an ORM, with permissions checked per user and live queries pushed to the browser. Path: [Quickstart](/docs/setup/run-locally) → [User-scoped backend](/docs/setup/backend/user-scoped) → [Policies](/docs/schemas/policies) → [Thin client](/docs/setup/web-client/thin-client).
+- **A collaborative app.** Shared lists, boards or documents that several people edit at once, with mergeable text and edit history. Path: [Mergeable text](/docs/writing/text) → [Shared access](/docs/recipes/access-control/shared-access) → [Edit metadata](/docs/reading/metadata).
+- **An app that works offline.** Field tools, note-taking or mobile apps that keep working without a connection. Path: start thin, then [go local-first](/docs/recipes/local-first) on the screens that need it, or use the [React Native client](/docs/setup/react-native).
+- **Agents and automations.** Background jobs and AI agents that read and write the same data as your users, attributed and permission-checked. Path: [Trusted backend](/docs/setup/backend/trusted) → [Sessions](/docs/setup/auth/sessions) → [CLI & MCP](/docs/tooling/cli-and-mcp).
+- **Drafts and review flows.** Edit a copy, compare it with the original, merge it back. Path: [Drafts & branches](/docs/recipes/drafts-and-branches).
+
+## Recipes
+
+- **Access control:** [user-owned data](/docs/recipes/access-control/user-owned-data), [shared access](/docs/recipes/access-control/shared-access), [invite links](/docs/recipes/access-control/invite-links), [group permissions](/docs/recipes/access-control/group-permissions)
+- **Auth providers:** [Better Auth](/docs/setup/auth/better-auth), [WorkOS](/docs/setup/auth/workos), [any JWT provider](/docs/setup/auth/custom), [Better Auth database adapter](/docs/recipes/auth/better-auth-adapter)
+- **Data patterns:** [collaborative lists](/docs/recipes/data-patterns/real-time-collaborative-list), [collaborative text](/docs/recipes/data-patterns/collaborative-text-editing), [nested data](/docs/recipes/data-patterns/nested-data)
+- **Architecture:** [local-first as a client optimization](/docs/recipes/local-first), [drafts & branches](/docs/recipes/drafts-and-branches), [Effect](/docs/recipes/effect)
+
+## Examples and help
+
+- [Example apps](/docs/reference/examples), from a todo list to a multi-user music sequencer
+- Ask on [Discord](https://discord.gg/RN9UKh52be) or open an issue on [GitHub](https://github.com/garden-co/jazz)
