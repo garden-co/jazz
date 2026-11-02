@@ -1,3 +1,4 @@
+import { generateSecret, identityOf, verifyChallenge } from "@garden-co/local-first-auth";
 import { generateAuthSecret } from "../runtime/auth-secret-store.js";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -234,31 +235,41 @@ it("rejects a backend sign-in that names a SYSTEM identity", async () => {
   await expect(setup(fetcher).loginWithBackend()).rejects.toThrow(/invalid_account_response/);
 });
 
-it("signs in through the backend and links a local-first guest with its own token", async () => {
-  const guest = { issuer: "urn:jazz:local-first", subject: "guest" };
+it("links a local-first guest by signing the backend's challenge, never with its token", async () => {
+  const secret = generateSecret();
+  const guest = { issuer: "urn:jazz:local-first", subject: identityOf(secret).subject };
   const guestToken = `e30.${btoa(JSON.stringify({ iss: guest.issuer, sub: guest.subject }))}.signature`;
+  const challenge = "issued-for-alice.mac";
   // Accept every fetch overload while retaining the recorded request.
-  const fetcher = vi.fn(
-    async (_input: unknown, _init?: RequestInit) =>
-      new Response(JSON.stringify({ account: id, identity, claims: { role: "admin" } })),
+  const fetcher = vi.fn(async (input: unknown, _init?: RequestInit) =>
+    String(input).endsWith("/backend-link/challenge")
+      ? new Response(JSON.stringify({ challenge, expiresAt: 0 }))
+      : new Response(JSON.stringify({ account: id, identity, claims: { role: "admin" } })),
   );
   const manager = createAccountManagerWithRuntime({
     registry,
     fetch: fetcher as typeof fetch,
-    localFirst: { create: () => ({ accountId: id, identity: guest, auth: guestToken }) },
+    localFirst: { create: () => ({ accountId: id, identity: guest, auth: guestToken, secret }) },
   });
   manager.createLocalFirst();
   const linked = await manager.linkWithBackend();
   expect(linked).toMatchObject({ id, identity });
-  expect(fetcher.mock.calls[0]?.[0]).toBe(`${registry}/backend-link`);
-  expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
-    `Bearer ${guestToken}`,
-  );
+  expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+    `${registry}/backend-link/challenge`,
+    `${registry}/backend-link`,
+  ]);
+  const init = fetcher.mock.calls[1]?.[1];
+  // No bearer: the sync token never leaves for a link.
+  expect(new Headers(init?.headers).get("authorization")).toBeNull();
+  const body = JSON.parse(String(init?.body)) as { challenge: string; proof: string };
+  expect(body.challenge).toBe(challenge);
+  expect(verifyChallenge(body.proof, challenge).subject).toBe(guest.subject);
+  expect(JSON.stringify(init)).not.toContain(guestToken);
   // A delegated account has no token of its own.
   await expect(accountToken(linked, registry)).rejects.toThrow(/has_no_token/);
 
   fetcher.mockResolvedValueOnce(new Response("signed_out", { status: 401 }));
   await expect(manager.loginWithBackend()).rejects.toThrow("signed_out");
   expect(manager.getLoggedIn()).toBe(linked);
-  expect(fetcher.mock.calls[1]?.[0]).toBe(`${registry}/backend-sign-in`);
+  expect(fetcher.mock.calls[2]?.[0]).toBe(`${registry}/backend-sign-in`);
 });

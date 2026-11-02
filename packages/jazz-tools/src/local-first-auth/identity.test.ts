@@ -4,13 +4,16 @@ import { sha512 } from "@noble/hashes/sha2.js";
 import { describe, expect, it } from "vitest";
 import vectors from "./test-vectors.json" with { type: "json" };
 import {
+  LOCAL_FIRST_ISSUER,
   generateSecret,
   identityOf,
   secretStorageKey,
   LocalFirstTokenError,
   normalizeAudience,
   parseSecret,
+  signChallenge,
   signToken,
+  verifyChallenge,
   verifyToken,
 } from "./index.js";
 import { base64urlEncode, utf8 } from "./encoding.js";
@@ -245,5 +248,42 @@ describe("secrets", () => {
     expect(secretStorageKey("chat-app", "alice")).toBe(
       "jazz-auth-store-v1-ELxnntGic7Xl4bdw9edWdyBgwjC_G-fte6I7041VVXQ",
     );
+  });
+});
+
+describe("signChallenge", () => {
+  const secret = generateSecret();
+  const challenge = "issued-by-the-server.once";
+
+  it("proves the secret's identity for that challenge", () => {
+    const proof = signChallenge(secret, challenge);
+    const identity = verifyChallenge(proof, challenge);
+    expect(identity.subject).toBe(identityOf(secret).subject);
+    expect(identity.issuer).toBe(LOCAL_FIRST_ISSUER);
+  });
+
+  it("is good for no other challenge", () => {
+    const proof = signChallenge(secret, challenge);
+    expect(() => verifyChallenge(proof, `${challenge}x`)).toThrow(LocalFirstTokenError);
+  });
+
+  it("is not a token, and a token is not a proof", () => {
+    const token = signToken(secret, { audience: "https://app.example/jazz" });
+    expect(() => verifyChallenge(token, challenge)).toThrow(LocalFirstTokenError);
+    const proof = signChallenge(secret, challenge);
+    expect(() => verifyToken(proof, { audience: "https://app.example/jazz" })).toThrow(
+      LocalFirstTokenError,
+    );
+  });
+
+  it("refuses another key's signature", () => {
+    const proof = signChallenge(secret, challenge);
+    const [, signature] = proof.split(".");
+    const other = base64urlEncode(identityOf(generateSecret()).publicKey);
+    expect(() => verifyChallenge(`${other}.${signature}`, challenge)).toThrow(LocalFirstTokenError);
+  });
+
+  it("refuses an empty challenge", () => {
+    expect(() => signChallenge(secret, "")).toThrow(TypeError);
   });
 });
