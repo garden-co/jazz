@@ -24,8 +24,9 @@ use super::auth::{
 };
 use crate::server::ServerState;
 
-/// Header carrying a workload token on requests that carry no secret header.
-pub const WORKLOAD_TOKEN_HEADER: &str = "X-Jazz-Workload-Token";
+/// The backend's credential, on every request and WebSocket upgrade it sends
+/// to the core: separate from (and below) the user's own credentials.
+pub const WORKLOAD_TOKEN_HEADER: &str = "X-Jazz-Backend-Credential";
 pub const ADMIN_SECRET_HEADER: &str = "X-Jazz-Admin-Secret";
 pub const BACKEND_SECRET_HEADER: &str = "X-Jazz-Backend-Secret";
 /// Set by the gate (and stripped from what clients send) on a WebSocket
@@ -152,30 +153,35 @@ impl InternalSecrets {
     }
 }
 
-/// Replace workload tokens offered as secrets with the internal secrets.
+/// Replace offered secrets with the internal ones.
 ///
-/// Every value in `offered` must verify. At least one token must be offered
-/// overall (`also` is a token offered on its own).
+/// With a verified backend credential (`credential`), the secret slots only
+/// say which access the request wants, so any value stands for the internal
+/// secret. Without one, each offered secret must itself be a workload token.
 pub async fn exchange(
     verifier: &WorkloadVerifier,
     now_seconds: u64,
     admin: &mut Option<String>,
     backend: &mut Option<String>,
-    also: Option<&str>,
+    credential: Option<&str>,
     secrets: &InternalSecrets,
 ) -> Result<(), String> {
     let mut verified = false;
-    if let Some(token) = also {
+    if let Some(token) = credential {
         verifier.verify(token, now_seconds).await?;
         verified = true;
     }
     if let Some(token) = admin.as_deref() {
-        verifier.verify(token, now_seconds).await?;
+        if credential.is_none() {
+            verifier.verify(token, now_seconds).await?;
+        }
         *admin = Some(secrets.admin.clone());
         verified = true;
     }
     if let Some(token) = backend.as_deref() {
-        verifier.verify(token, now_seconds).await?;
+        if credential.is_none() {
+            verifier.verify(token, now_seconds).await?;
+        }
         *backend = Some(secrets.backend.clone());
         verified = true;
     }
@@ -334,6 +340,13 @@ mod tests {
 
         let (mut admin, mut backend) = (Some(good.clone()), None);
         exchange(&v, NOW, &mut admin, &mut backend, None, &secrets)
+            .await
+            .unwrap();
+        assert_eq!(admin.as_deref(), Some(secrets.admin.as_str()));
+
+        // With a verified credential, a slot's value only names the access.
+        let (mut admin, mut backend) = (Some("vercel-oidc".to_owned()), None);
+        exchange(&v, NOW, &mut admin, &mut backend, Some(&good), &secrets)
             .await
             .unwrap();
         assert_eq!(admin.as_deref(), Some(secrets.admin.as_str()));

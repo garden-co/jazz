@@ -80,7 +80,7 @@ async fn admits_only_the_trusted_workload() {
     assert!(bare.text().await.unwrap().contains("workload"));
     let wrong = http
         .get(format!("{app}/schemas"))
-        .header("X-Jazz-Workload-Token", &other)
+        .header("X-Jazz-Backend-Credential", &other)
         .send()
         .await
         .unwrap();
@@ -98,7 +98,7 @@ async fn admits_only_the_trusted_workload() {
     // for its own credential), and stands in for the admin secret.
     let passed = http
         .get(format!("{app}/schemas"))
-        .header("X-Jazz-Workload-Token", &good)
+        .header("X-Jazz-Backend-Credential", &good)
         .send()
         .await
         .unwrap()
@@ -150,7 +150,7 @@ async fn opens_sockets_only_for_the_trusted_workload() {
 
     let mut request = url.as_str().into_client_request().unwrap();
     request.headers_mut().insert(
-        "X-Jazz-Workload-Token",
+        "X-Jazz-Backend-Credential",
         token(&issuer, SUBJECT).parse().unwrap(),
     );
     let (_socket, response) = tokio_tungstenite::connect_async(request)
