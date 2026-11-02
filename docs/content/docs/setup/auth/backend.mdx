@@ -1,9 +1,19 @@
 ---
-title: Your Backend Decides
-description: "With createJazz, your backend's authenticate function is the only place that decides who a user is. The browser needs no Jazz API key or token."
+title: How Auth Works in Jazz
+description: "Your main backend's authenticate function decides who a user is. The browser passes your auth library's current user, and every read and write runs as that user's session."
 ---
 
-When Jazz runs inside your backend ([Backend](/docs/setup/backend)), auth is one function. Your
+Auth in Jazz has three parts:
+
+1. **Your main backend decides.** One `authenticate` function maps a request to a user.
+2. **The browser says who is signed in.** It passes the user your auth library already knows, and
+   never holds a Jazz API key or token.
+3. **The session is what Jazz enforces.** Every read and write runs as a session: the user's
+   account, the identity acting for it, and the claims your policies see.
+
+## Your backend decides
+
+When Jazz runs inside your main backend ([Backend](/docs/setup/backend)), auth is one function. Your
 backend already knows who is signed in, so it tells Jazz:
 
 ```ts title="jazz.server.ts"
@@ -30,6 +40,10 @@ Jazz asks `authenticate` on every sign-in, on every sync connection and in `jazz
 sign-out or changed claims apply on the next reconnect, and a connection ends when its sign-in
 expires (after an hour by default, `sessionTtlSeconds`), so the client reconnects and is asked
 again. There are no JWKS, issuer or audience settings, and no Jazz token in the browser.
+
+**Several sign-in methods.** Email, Google, passkeys and the rest belong to your auth library, which
+already merges them into one user. As long as `authenticate` returns that user's id, Jazz sees the
+same account whichever method was used.
 
 ## In the browser
 
@@ -72,18 +86,118 @@ const db = await createClient();
 supabase.auth.onAuthStateChange((_event, session) => db.setUser(session?.user.id ?? null));
 ```
 
-## Several sign-in methods
+## The session
 
-Email, Google, passkeys and the rest belong to your auth library, which already merges them into one
-user. As long as `authenticate` returns that user's id, Jazz sees the same account whichever method
-was used.
+Once signed in, every context has a read-only session. `session.user` names the account and the
+exact identity acting for it:
 
-## Upgrading a guest, linking identities
+```ts
+const author = {
+  account: "00000000-0000-4000-8000-000000000001",
+  identity: { issuer: "https://issuer.example", subject: "alice" },
+};
+```
 
-A local-first guest who signs up keeps its account and data: after your sign-up sets its session,
-the client calls `linkWithBackend()`. It proves it owns the guest account with its own local-first
-key; your backend runs `authenticate` and links the new user to that account. Call it in your sign-up
-handler, right after your auth sets the session; the `user` change that follows is then a no-op.
+- **Ownership** compares `session.user.account`. Linked identities share one account id, so this is
+  what "rows this user owns" should use.
+- **Exact authorship** compares the whole structure, issuer and subject included. Jazz stamps
+  `$createdBy` and `$updatedBy` with it, along with edit timestamps.
+- **`session.claims`** holds the claims `authenticate` returned. A claim named `user` stays under
+  `session.claims.user` and can't shadow `session.user`. Claims never decide which account a request
+  belongs to.
+
+`session.user` is not a profile row, a display name or a subject string. Store a UUID account column
+for ownership, or a matching structured column for exact authorship, rather than serializing the
+author into a string.
+
+### Observe the current session
+
+| Binding              | Read the current session                                            |
+| -------------------- | ------------------------------------------------------------------- |
+| React / React Native | `const session = useSession()`                                      |
+| Vue                  | `const session = useSession()`; read `session.value`                |
+| Solid                | `const session = useSession()`; read `session()`                    |
+| Svelte               | `const session = getSession()`; read `session.current`              |
+| TypeScript           | `db.getAuthState().session`; subscribe with `db.onAuthChanged(...)` |
+
+Framework hooks must run inside the Jazz provider. Signed-out readers have no session account, so
+ownership checks against them fail closed; write an explicit anonymous-access policy when you want
+that access.
+
+### Rows the user owns
+
+Declare a UUID column for ownership, and enforce it with a policy:
+
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+import { migrations } from "./migrations";
+
+export const app = s.defineApp(
+  { todos: s.table({ title: s.string(), owner_id: s.uuid() }, {}) },
+  { migrations },
+);
+
+export const permissions = s.definePermissions(app, ({ policy, session }) => {
+  policy.todos.allowRead.where({ owner_id: session.user.account });
+  policy.todos.allowInsert.where({ owner_id: session.user.account });
+});
+```
+
+Then read and insert with the session's account:
+
+```ts
+const accountId = db.getAuthState().session?.user.account;
+if (accountId) {
+  const todos = await db.all(app.todos.where({ owner_id: accountId }));
+  db.insert(app.todos, { title: "First task", owner_id: accountId });
+}
+```
+
+A client-side filter is a convenience; the policy is what enforces access. Update and delete stay
+denied until you grant them. Assigning `owner_id` doesn't change who Jazz records as the author. See
+[Permissions](/docs/schemas/policies).
+
+### System-authored rows
+
+Writes your main backend makes without acting for a user use the same structure, with a reserved
+account and issuer:
+
+```ts
+const systemAuthor = {
+  account: "00000000-0000-0000-0000-000000000000",
+  identity: {
+    issuer: "urn:jazz:system",
+    subject: "00000000-0000-4000-8000-000000000042", // originating node UUID
+  },
+};
+```
+
+`SYSTEM_ACCOUNT_ID` and `SYSTEM_ISSUER` are exported from `jazz-tools`. Comparing accounts groups all
+system writes; comparing the whole structure tells their originating nodes apart. The reserved
+account and issuer can't be registered or linked, and they grant no way around your policies.
+
+## Acting for a user in your backend
+
+Your main backend has full access by default. To run code as a user instead:
+
+- `await jazz.forRequest(request)` runs `authenticate` on the request and returns a scope with that
+  user's policies and authorship.
+- `await jazz.forAccount(account)` does the same from an account handle, for jobs and backend
+  clients that already know whom they act for.
+- `await jazz.withAttribution(account)` and `await jazz.withAttributionForRequest(request)` keep
+  backend access but record the user as author. Use them only after your own code has made the
+  authorization decision.
+
+A copied account id or claim is not authorization: Jazz checks the request or handle itself. See
+[Trusted backend](/docs/setup/backend/trusted) for background jobs and backend clients.
+
+## Guests and linking
+
+A [local-first](/docs/setup/auth/local-first) guest who signs up keeps its account and data: after
+your sign-up sets its session, the client calls `linkWithBackend()`. It proves it owns the guest
+account with its own local-first key; your backend runs `authenticate` and links the new user to
+that account. Call it in your sign-up handler, right after your auth sets the session; the `user`
+change that follows is then a no-op.
 
 To link from your own backend code instead, for example a second identity your auth issued, call:
 
@@ -93,8 +207,79 @@ await jazz.linkIdentity({ from: guestId, to: user.id });
 
 From then on, `authenticate` returning `user.id` opens the guest's account and all its data. An
 identity can belong to only one account, so `to` must not have signed in to Jazz on its own yet.
+Linking keeps the account id; earlier rows keep their original issuer and subject.
 
-<Callout type="info">
-  Coming next: local-first auth as its own package. Its client half keeps a key on the device and
-  works offline from the first launch; its server half verifies that key inside `authenticate`.
-</Callout>
+## Lifecycle
+
+With the `user` prop, Jazz runs the lifecycle for you. This section is what happens underneath, and
+how to own it yourself.
+
+### Switching accounts
+
+When the user changes, Jazz hides the old client, waits for your components to detach, shuts it
+down gracefully with its writes synced, and only then signs in and opens the new client.
+
+- If the sync barrier fails, the old client stays usable and nothing changes.
+- If sign-in fails after shutdown, Jazz reopens the previous account when it can.
+- If sign-in succeeds but the new client fails to start, the new account stays selected and
+  `retry()` retries startup without asking your backend again.
+- Overlapping account changes reject with a busy error. Sign-out and close win over in-flight work.
+
+### Reactive state
+
+`useJazzSession()` (and `getSnapshot()`/`subscribe()` without a framework) reports `ready`,
+`signed-out`, `transitioning`, `error` or `closed`. A client exists only in `ready`, which may still
+carry a recoverable error so you can show it while the previous account keeps working.
+
+```tsx
+import { useJazzSession } from "jazz-tools/react";
+
+function AccountStatus() {
+  const { status, error, retry } = useJazzSession();
+  return error ? (
+    <button onClick={() => void retry().catch(console.error)}>{error.message}: retry</button>
+  ) : (
+    <p>{status === "signed-out" ? "Sign in to continue" : "Loading…"}</p>
+  );
+}
+```
+
+React Native, Svelte (`getJazzSession()`), Vue and Solid expose the same state.
+
+### Signing out and closing
+
+Signing out stays signed out until a user signs in again. It doesn't erase local data or revoke
+anything at your auth provider; your auth's own cookie is still yours to clear. Local-first keys stay
+on the device for recovery.
+
+Closing a client keeps local data durable and works offline, but doesn't promise that sync finished.
+Account changes use the stronger sync barrier automatically.
+
+### Resetting browser storage
+
+`await db.deleteClientStorage()` clears the active browser namespace and keeps the client usable.
+**It permanently deletes unsynced writes and local-only data.** Data comes back only if it already
+reached your backend and the same account can still read it. It keeps local-first keys and doesn't
+sign anyone out. The [browser console helper](/docs/how-jazz-works#reset-browser-storage) does the
+same.
+
+### Owning the session yourself
+
+For apps that manage accounts without the `user` prop, `createJazzSession` exposes the same state
+machine with explicit commands:
+
+```ts
+import { createJazzSession } from "jazz-tools/client";
+
+const session = await createJazzSession({ initial: "local-first" });
+
+await session.loginWithBackend(); // select the user your backend's authenticate names
+await session.linkWithBackend(); // upgrade this local-first guest, keeping its data
+await session.logout();
+await session.close();
+```
+
+`initial: "local-first"` restores the saved guest or creates one; without it, the session starts
+signed out. In React, pass it to `JazzSessionProvider session={…}`; the provider then leaves closing
+it to you. Below that, `createAccountManager`, `AccountHandle` and `createJazzClient` remain for
+apps that arrange shutdown and replacement themselves.

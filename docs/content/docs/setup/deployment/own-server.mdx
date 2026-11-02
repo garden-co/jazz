@@ -25,7 +25,7 @@ That's the whole deployment:
   declares. If they can't be applied (a schema with no migration path), the process refuses to start
   instead of serving with the wrong rules.
 - **No secrets to manage.** Browsers hold no Jazz credential: your `authenticate` function
-  decides who each request is (see [Your Backend Decides](/docs/setup/auth/backend)).
+  decides who each request is (see [How Auth Works in Jazz](/docs/setup/auth/backend)).
 
 Keep the data directory on a durable disk (a Docker volume, an attached block device), and run one
 process per directory.

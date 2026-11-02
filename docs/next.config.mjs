@@ -130,7 +130,7 @@ const config = {
       },
       {
         source: "/docs/auth/lifecycle",
-        destination: "/docs/setup/auth/lifecycle",
+        destination: "/docs/setup/auth/backend#lifecycle",
         permanent: false,
       },
       {
@@ -139,7 +139,21 @@ const config = {
         permanent: false,
       },
       { source: "/docs/auth/permissions", destination: "/docs/schemas/policies", permanent: false },
-      { source: "/docs/auth/sessions", destination: "/docs/setup/auth/sessions", permanent: false },
+      {
+        source: "/docs/auth/sessions",
+        destination: "/docs/setup/auth/backend#the-session",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/auth/sessions",
+        destination: "/docs/setup/auth/backend#the-session",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/auth/lifecycle",
+        destination: "/docs/setup/auth/backend#lifecycle",
+        permanent: false,
+      },
       {
         source: "/docs/concepts/branches",
         destination: "/docs/recipes/drafts-and-branches",

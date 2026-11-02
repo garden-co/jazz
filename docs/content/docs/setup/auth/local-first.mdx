@@ -21,7 +21,7 @@ const jazz = await createJazzSession({
 
 Session creation prepares crypto, restores usable saved selection, or creates a local-first account. Browser sessions retain signing roots in browser storage. Native hosts use an atomic, protected `AccountStore`. Creating a local-first account works offline once runtime assets are available.
 
-Framework `JazzSessionProvider` and session hooks expose the same lifecycle. Account commands run outside contexts after ordinary graceful shutdown, which Jazz coordinates automatically. See [Lifecycle](/docs/setup/auth/lifecycle). Lower-level account handles and client factories remain available when an app deliberately owns its own context lifecycle.
+Framework `JazzSessionProvider` and session hooks expose the same lifecycle. Account commands run outside contexts after ordinary graceful shutdown, which Jazz coordinates automatically. See [Lifecycle](/docs/setup/auth/backend#lifecycle). Lower-level account handles and client factories remain available when an app deliberately owns its own context lifecycle.
 
 ## Backing up and restoring the secret
 
@@ -74,7 +74,7 @@ account-based ownership remains valid, and earlier rows keep the identity that a
 The user must not have a Jazz account of their own yet. If they do, the app chooses whether to
 sign in to that account (`loginWithBackend()`) or migrate data explicitly; Jazz never merges
 accounts. See [Other / Custom](/docs/setup/auth/custom#guests-who-sign-up) and
-[Lifecycle](/docs/setup/auth/lifecycle) for failure and logout handling.
+[Lifecycle](/docs/setup/auth/backend#lifecycle) for failure and logout handling.
 
 ## Permissions by auth mode
 

@@ -153,7 +153,7 @@ const { data, isPending } = authClient.useSession(); // any auth library's curre
 When `user` changes, the client signs in through `/jazz`: `authenticate` answers, and the client gets
 the account, identity and claims as plain data. Every sync connection asks `authenticate` again, so
 a sign-out or changed claims apply without client code. See
-[Your Backend Decides](/docs/setup/auth/backend#in-the-browser).
+[How Auth Works in Jazz](/docs/setup/auth/backend#in-the-browser).
 
 ## Trusted backend use
 
