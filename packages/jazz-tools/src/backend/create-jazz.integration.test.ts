@@ -4,6 +4,7 @@ import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { generateSecret, identityOf, signChallenge, signToken } from "@garden-co/local-first-auth";
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
@@ -244,7 +245,7 @@ describe("createJazz", () => {
     expect(await signIn({ "sec-fetch-site": "cross-site" })).toBe(403);
     // The right host, but a plain-http page acting on a backend reached over https.
     expect(await signIn({ origin, "x-forwarded-proto": "https" })).toBe(403);
-    for (const route of ["accounts/backend-link", "stream"]) {
+    for (const route of ["accounts/backend-link", "accounts/backend-link/challenge", "stream"]) {
       const response = await fetch(`${origin}/jazz/apps/${appId}/${route}`, {
         method: "POST",
         headers: { "x-test-user": "alice", origin: "https://evil.example" },
@@ -364,6 +365,188 @@ describe("createJazz", () => {
     },
     60_000,
   );
+
+  it("links a guest only on a fresh proof for one challenge, never on its token", async () => {
+    const appId = randomUUID();
+    const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const accounts = `${origin}/jazz/apps/${appId}/accounts`;
+    const post = (path: string, user: string, init: RequestInit = {}) =>
+      fetch(`${accounts}/${path}`, {
+        ...init,
+        method: "POST",
+        headers: { "x-test-user": user, "content-type": "application/json", ...init.headers },
+      });
+    const challengeFor = async (user: string) =>
+      ((await (await post("backend-link/challenge", user)).json()) as { challenge: string })
+        .challenge;
+    const link = (user: string, body: unknown) =>
+      post("backend-link", user, { body: JSON.stringify(body) });
+
+    const secret = generateSecret();
+    const guest = identityOf(secret).subject;
+    // The guest's own (unexpired, or leaked) sync token links nothing.
+    const token = signToken(secret, { audience: appId });
+    const withToken = await post("backend-link", "mallory", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(withToken.status).toBe(400);
+    // Signed out: no challenge.
+    expect((await fetch(`${accounts}/backend-link/challenge`, { method: "POST" })).status).toBe(
+      401,
+    );
+
+    const challenge = await challengeFor("alice");
+    const proof = signChallenge(secret, challenge);
+    // A proof for alice's challenge links no one else, and a forged or
+    // tampered challenge links nothing.
+    expect((await link("mallory", { challenge, proof })).status).toBe(400);
+    const [payload, mac] = challenge.split(".");
+    const forged = `${Buffer.from(
+      JSON.stringify({
+        ...JSON.parse(Buffer.from(payload!, "base64url").toString()),
+        sub: "mallory",
+      }),
+    ).toString("base64url")}.${mac}`;
+    expect(
+      (await link("mallory", { challenge: forged, proof: signChallenge(secret, forged) })).status,
+    ).toBe(400);
+    // Another key's proof for the challenge doesn't prove this guest.
+    expect(
+      (await link("alice", { challenge, proof: signChallenge(generateSecret(), `${challenge}x`) }))
+        .status,
+    ).toBe(401);
+
+    const linked = await link("alice", { challenge, proof });
+    expect(linked.status).toBe(200);
+    const { account } = (await linked.json()) as { account: string };
+    expect(account).toBe(
+      ((await (await post("backend-sign-in", "alice")).json()) as { account: string }).account,
+    );
+    // The same proof again is refused, even for the user it named: its
+    // nonce is used. A fresh challenge for alice is a repeat of a link that
+    // stands, and answers it.
+    expect((await link("alice", { challenge, proof })).status).toBe(409);
+    const fresh = await challengeFor("alice");
+    const repeated = await link("alice", { challenge: fresh, proof: signChallenge(secret, fresh) });
+    expect(repeated.status).toBe(200);
+    expect(((await repeated.json()) as { account: string }).account).toBe(account);
+
+    // An expired challenge links nothing.
+    const stale = await challengeFor("carol");
+    const realNow = Date.now;
+    Date.now = () => realNow() + 121_000;
+    try {
+      expect(
+        (await link("carol", { challenge: stale, proof: signChallenge(secret, stale) })).status,
+      ).toBe(400);
+    } finally {
+      Date.now = realNow;
+    }
+    // Founding is the guest's own account, whatever was tried before.
+    expect(account).toBe(
+      ((await (await post("backend-sign-in", "alice")).json()) as { account: string }).account,
+    );
+    expect(guest).toMatch(/^[0-9a-f-]{36}$/);
+  }, 60_000);
+
+  it.each(["keep", "revoke"] as const)(
+    "keeps or retires the guest key after a link (guestKeyAfterLink: %s)",
+    async (guestKeyAfterLink) => {
+      const appId = randomUUID();
+      const jazz = await createJazz({
+        appId,
+        app,
+        permissions,
+        store: memory(),
+        authenticate,
+        guestKeyAfterLink,
+      });
+      cleanups.push(() => jazz.close());
+      const origin = await serve(jazz, { sockets: true });
+      const accounts = `${origin}/jazz/apps/${appId}/accounts`;
+      const post = (path: string, user: string, body?: unknown) =>
+        fetch(`${accounts}/${path}`, {
+          method: "POST",
+          headers: { "x-test-user": user, "content-type": "application/json" },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+      const linkAs = async (user: string, secret: string) => {
+        const { challenge } = (await (await post("backend-link/challenge", user)).json()) as {
+          challenge: string;
+        };
+        return post("backend-link", user, { challenge, proof: signChallenge(secret, challenge) });
+      };
+
+      const secret = generateSecret();
+      const linked = await linkAs("alice", secret);
+      expect(linked.status).toBe(200);
+      const { account } = (await linked.json()) as { account: string };
+      // The guest key, used again to bring another user into the account:
+      // a kept key still can, a revoked one opens nothing.
+      const again = await linkAs("bob", secret);
+      if (guestKeyAfterLink === "keep") {
+        expect(again.status).toBe(200);
+        expect(((await again.json()) as { account: string }).account).toBe(account);
+      } else {
+        expect(again.status).toBe(409);
+      }
+      // The linked user signs in either way.
+      const alice = (await (await post("backend-sign-in", "alice")).json()) as { account: string };
+      expect(alice.account).toBe(account);
+    },
+    60_000,
+  );
+
+  it("revokes the guest key on a retry when the first link's revoke didn't happen", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    // Two backends on one core: the first links without revoking, as a
+    // link whose revoke failed would leave it; the second revokes.
+    const backend = async (guestKeyAfterLink: "keep" | "revoke") => {
+      const store = remote({ url: core.url, secret: core.adminSecret });
+      const jazz = await createJazz({
+        appId,
+        app,
+        permissions,
+        store,
+        authenticate,
+        guestKeyAfterLink,
+      });
+      cleanups.push(() => jazz.close());
+      const origin = await serve(jazz, { sockets: true });
+      const accounts = `${origin}/jazz/apps/${appId}/accounts`;
+      const post = (path: string, user: string, body?: unknown) =>
+        fetch(`${accounts}/${path}`, {
+          method: "POST",
+          headers: { "x-test-user": user, "content-type": "application/json" },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+      return async (user: string, secret: string) => {
+        const { challenge } = (await (await post("backend-link/challenge", user)).json()) as {
+          challenge: string;
+        };
+        return post("backend-link", user, { challenge, proof: signChallenge(secret, challenge) });
+      };
+    };
+    const keeps = await backend("keep");
+    const revokes = await backend("revoke");
+    const secret = generateSecret();
+
+    const first = await keeps("alice", secret);
+    expect(first.status).toBe(200);
+    const { account } = (await first.json()) as { account: string };
+    // The retry links nothing new, and retires the key.
+    const retried = await revokes("alice", secret);
+    expect(retried.status).toBe(200);
+    expect(((await retried.json()) as { account: string }).account).toBe(account);
+    expect((await keeps("bob", secret)).status).toBe(409);
+    // A retry whose response was lost still answers alice, and only her.
+    expect((await revokes("alice", secret)).status).toBe(200);
+    expect((await revokes("bob", secret)).status).toBe(409);
+  }, 60_000);
 
   it("syncs over the HTTP stream when the host can't upgrade sockets", async () => {
     const appId = randomUUID();

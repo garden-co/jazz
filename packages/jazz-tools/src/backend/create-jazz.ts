@@ -1,9 +1,10 @@
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { verifyChallenge } from "@garden-co/local-first-auth/server";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
 import { registerInProcessTransport } from "../runtime/in-process-transport.js";
-import { accountAppId } from "../accounts/local-first.js";
+import { accountAppId, localFirstAccountId } from "../accounts/local-first.js";
 import { LOCAL_FIRST_JWT_ISSUER, parseJwtPayload } from "../runtime/client-session.js";
 import type {
   BrowserWebSocket,
@@ -161,6 +162,16 @@ export interface CreateJazzOptions {
    * again (the client reconnects on its own). Defaults to one hour.
    */
   sessionTtlSeconds?: number;
+  /**
+   * What happens to a local-first guest's key once the guest links to a
+   * signed-in user (`linkWithBackend()`):
+   * - `"keep"` (the default): the key stays an identity of the account, so
+   *   the device can still sign in as the guest (e.g. offline) alongside
+   *   the linked user.
+   * - `"revoke"`: the key is retired. Only the linked user signs in to the
+   *   account from then on, so a leaked guest key opens nothing.
+   */
+  guestKeyAfterLink?: "keep" | "revoke";
   /**
    * Browser origins, besides the backend's own, that may open sync sessions
    * and call sign-in (e.g. `["https://app.example.com"]` when the page is
@@ -757,7 +768,12 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     );
     const text = new TextDecoder().decode(response.body);
     if (response.status !== 200) {
-      throw new Error(`Jazz account ${operation} failed (${response.status}): ${text}`);
+      throw Object.assign(
+        new Error(`Jazz account ${operation} failed (${response.status}): ${text}`),
+        {
+          status: response.status,
+        },
+      );
     }
     const parsed = JSON.parse(text) as { account: unknown };
     return { ...parsed, account: String(parsed.account) };
@@ -821,39 +837,143 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
 
   /**
+   * Link challenges: a guest links only on a proof made for one challenge,
+   * never on its sync token, so a leaked token can't link it to someone
+   * else. A challenge names the user it links to and expires quickly; it is
+   * signed with a key only this app's backend instances share (derived from
+   * the core's admin secret), and its nonce becomes the link's single-use
+   * intent id at the core, so a proof works once.
+   */
+  const challengeKey = createHmac("sha256", core.adminSecret)
+    .update(`jazz-link-challenge-v1\0${accountAppId(options.appId)}`)
+    .digest();
+  const LINK_CHALLENGE_TTL_SECONDS = 120;
+  const challengeMac = (payload: string) =>
+    createHmac("sha256", challengeKey).update(payload).digest("base64url");
+
+  function issueLinkChallenge(userId: string): { challenge: string; expiresAt: number } {
+    const expiresAt = Math.floor(Date.now() / 1000) + LINK_CHALLENGE_TTL_SECONDS;
+    const payload = Buffer.from(
+      JSON.stringify({ v: 1, sub: userId, nonce: randomUUID(), exp: expiresAt }),
+    ).toString("base64url");
+    return { challenge: `${payload}.${challengeMac(payload)}`, expiresAt };
+  }
+
+  /** The nonce of a challenge this backend issued for `userId`, still fresh; else null. */
+  function readLinkChallenge(challenge: unknown, userId: string): string | null {
+    if (typeof challenge !== "string" || challenge.length > 1024) return null;
+    const [payload, mac, extra] = challenge.split(".");
+    if (!payload || !mac || extra !== undefined) return null;
+    const expected = Buffer.from(challengeMac(payload));
+    const given = Buffer.from(mac);
+    if (expected.length !== given.length || !timingSafeEqual(expected, given)) return null;
+    let claims: { v?: unknown; sub?: unknown; nonce?: unknown; exp?: unknown };
+    try {
+      claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    } catch {
+      return null;
+    }
+    if (
+      claims.v !== 1 ||
+      claims.sub !== userId ||
+      typeof claims.nonce !== "string" ||
+      typeof claims.exp !== "number" ||
+      claims.exp <= Date.now() / 1000
+    ) {
+      return null;
+    }
+    return claims.nonce;
+  }
+
+  /** A challenge for the guest to sign before it links to the signed-in user. */
+  async function backendLinkChallenge(request: Request): Promise<Response> {
+    if (request.method !== "POST") return new Response(null, { status: 405 });
+    const user = await authenticate(request);
+    if (!user) return new Response("signed_out", { status: 401 });
+    return Response.json(issueLinkChallenge(user.userId), {
+      headers: { "Cache-Control": "no-store" },
+    });
+  }
+
+  /**
    * A local-first guest who just signed up: link the guest's identity to the
    * user `authenticate` now names, so the account and its data carry over.
-   * The guest proves itself with its local-first token, which the core
-   * verifies while founding the guest's account.
+   * The guest proves itself by signing a challenge issued for this user
+   * (see {@link issueLinkChallenge}).
    */
   async function backendLink(request: Request): Promise<Response> {
     if (request.method !== "POST") return new Response(null, { status: 405 });
     const user = await authenticate(request);
     if (!user) return new Response("signed_out", { status: 401 });
-    const bearer = /^Bearer (.+)$/.exec(request.headers.get("authorization") ?? "")?.[1];
-    if (!bearer || parseJwtPayload(bearer)?.iss !== LOCAL_FIRST_JWT_ISSUER) {
+    let body: { challenge?: unknown; proof?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
       return new Response("local_first_proof_required", { status: 400 });
     }
-    const founded = await core.handle(
-      "POST",
-      `/apps/${encodeURIComponent(accountAppId(options.appId))}/accounts/found-local-first`,
-      [["authorization", `Bearer ${bearer}`]],
-      new Uint8Array(),
-    );
-    if (founded.status !== 200) return coreResponse(founded);
-    const guest = JSON.parse(new TextDecoder().decode(founded.body)) as {
-      identity: { issuer: string; subject: string };
-    };
-    let account: string;
+    const nonce = readLinkChallenge(body?.challenge, user.userId);
+    if (!nonce) return new Response("invalid_link_challenge", { status: 400 });
+    let guest: { issuer: string; subject: string };
     try {
-      ({ account } = await adminAccounts("link", {
-        from: guest.identity,
-        to: identity(user.userId),
-      }));
+      const proven = verifyChallenge(String(body.proof ?? ""), body.challenge as string);
+      guest = { issuer: proven.issuer, subject: proven.subject };
+    } catch {
+      return new Response("invalid_local_first_proof", { status: 401 });
+    }
+    // The guest's account follows from its key alone, as the core founds it.
+    const account = localFirstAccountId(options.appId, guest.subject);
+    const userIs = async (expected: string) =>
+      (await adminAccounts("resolve", { identity: identity(user.userId) })).account === expected;
+    let guestRevoked = false;
+    try {
+      try {
+        await adminAccounts("found-local-first", { identity: guest });
+      } catch (error) {
+        // A guest key an earlier link retired: only that link's own user
+        // gets an answer (the retry of a link whose response was lost).
+        if ((error as { status?: number }).status !== 403 || !(await userIs(account))) throw error;
+        guestRevoked = true;
+      }
+      if (!guestRevoked) {
+        try {
+          await adminAccounts("link", { from: guest, to: identity(user.userId), nonce });
+        } catch (error) {
+          // Linking is idempotent for this guest and this user: when the user
+          // already belongs to the guest's account (an earlier link went
+          // through, then perhaps its revoke failed), this link is done. A
+          // used challenge (the core refuses its nonce first) and a user of
+          // another account are still refused.
+          if ((error as { status?: number }).status !== 409 || !(await userIs(account)))
+            throw error;
+        }
+      }
     } catch {
       // The core's reason (e.g. the identity already belongs to another
-      // account) stays on the backend.
+      // account, or the challenge was used) stays on the backend.
       return new Response("link_refused", { status: 409 });
+    }
+    if (options.guestKeyAfterLink === "revoke" && !guestRevoked) {
+      // The link already stands. If the revoke fails, the guest key stays
+      // usable until the browser retries the link, which is idempotent and
+      // revokes then: a server error, logged here, not a silent success.
+      const revoked = await core.handle(
+        "POST",
+        `/apps/${encodeURIComponent(accountAppId(options.appId))}/admin/accounts/revoke`,
+        [
+          ["x-jazz-admin-secret", core.adminSecret],
+          ["content-type", "application/json"],
+        ],
+        new TextEncoder().encode(
+          JSON.stringify({ approver: identity(user.userId), target: guest }),
+        ),
+        "admin",
+      );
+      if (revoked.status !== 204) {
+        console.error(
+          `Jazz: revoking the guest key after a link failed (${revoked.status}): ${new TextDecoder().decode(revoked.body)}`,
+        );
+        return new Response("guest_key_revoke_failed", { status: 500 });
+      }
     }
     const expiresAt = Math.floor(Date.now() / 1000) + (options.sessionTtlSeconds ?? 3600);
     return Response.json(
@@ -1173,6 +1293,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     }
     if (/^\/apps\/[^/]+\/accounts\/backend-link$/.test(path)) {
       return backendLink(request);
+    }
+    if (/^\/apps\/[^/]+\/accounts\/backend-link\/challenge$/.test(path)) {
+      return backendLinkChallenge(request);
     }
     const stream = /^\/apps\/[^/]+\/stream(?:\/([^/]+))?$/.exec(path);
     if (stream) {

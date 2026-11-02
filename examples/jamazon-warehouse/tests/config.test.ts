@@ -37,10 +37,14 @@ describe("configuration fails closed", () => {
     );
   });
 
-  it("keeps the data locally unless a sync server and both its secrets are set", () => {
+  it("keeps the data locally unless a sync server and its admin secret are set", () => {
     expect(jazzStore({})).toEqual({ kind: "sqlite", path: ".jazz" });
-    const remote = { JAZZ_SERVER_URL: "https://jazz.example", JAZZ_ADMIN_SECRET: "a" };
-    expect(() => jazzStore(remote)).toThrow(/JAZZ_ADMIN_SECRET and BACKEND_SECRET/);
-    expect(jazzStore({ ...remote, BACKEND_SECRET: "b" })).toMatchObject({ kind: "remote" });
+    const remote = { JAZZ_SERVER_URL: "https://jazz.example" };
+    expect(() => jazzStore(remote)).toThrow(/needs JAZZ_ADMIN_SECRET/);
+    expect(jazzStore({ ...remote, JAZZ_ADMIN_SECRET: "a" })).toEqual({
+      kind: "remote",
+      url: "https://jazz.example",
+      secret: "a",
+    });
   });
 });
