@@ -388,6 +388,40 @@ describe("createJazz", () => {
     expect(upgrades).toBe(refused);
   }, 30_000);
 
+  it("reconnects a user whose socket's cookies expired but who is still signed in", async () => {
+    const appId = randomUUID();
+    // Requests seen before `expiredBefore` carry cookies that have since expired.
+    const firstSeen = new WeakMap<Request, number>();
+    let expiredBefore = 0;
+    const jazz = await createJazz({
+      appId,
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        if (!firstSeen.has(request)) firstSeen.set(request, Date.now());
+        return firstSeen.get(request)! < expiredBefore ? null : authenticate(request);
+      },
+      recheckSeconds: 0.05,
+    });
+    cleanups.push(() => jazz.close());
+    let upgrades = 0;
+    const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
+    const alice = await userSession(appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "before", owner: alice.session!.user!.account })
+      .wait({ tier: "global" });
+    const opened = upgrades;
+    expiredBefore = Date.now() + 1;
+    // The re-check on the old socket fails; the client reconnects with fresh
+    // cookies and keeps syncing.
+    await expect.poll(() => upgrades, { timeout: 5_000, interval: 50 }).toBeGreaterThan(opened);
+    await alice.db
+      .insert(app.todos, { title: "after", owner: alice.session!.user!.account })
+      .wait({ tier: "global" });
+    expect(alice.db.getSyncStatus().link).toEqual({ state: "connected" });
+  }, 30_000);
+
   it("links a second identity to the same account", async () => {
     const appId = randomUUID();
     const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });
