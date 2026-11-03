@@ -35,6 +35,7 @@ import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import { writeRow } from "../runtime/write-row.js";
 import { formatUuid } from "../runtime/hex.js";
 import { canonicalAuthorSubject } from "../runtime/author-id.js";
+import type { Session } from "../runtime/context.js";
 import {
   PostcardReader,
   readNativeSubscriptionDelta,
@@ -178,7 +179,7 @@ export class ThinRuntime implements Runtime {
   private readonly schemaBytes: Uint8Array;
   private readonly WebSocketImpl?: WebSocketConstructor;
   private readonly reconnectDelaysMs: readonly number[];
-  private readonly author: string | undefined;
+  private author: string | undefined;
   private carrier?: WebSocketCarrier;
   private url?: string;
   private authJson?: string;
@@ -229,6 +230,17 @@ export class ThinRuntime implements Runtime {
     // one takes a new connection.
     this.dropConnection(new ThinConnectionLostError());
     this.open();
+  }
+
+  /**
+   * The client's own session: calls naming it are served as this
+   * connection, calls naming any other are refused. Set before the client
+   * connects and again as its auth changes.
+   */
+  useSession(session: Session | null): void {
+    this.author = session
+      ? canonicalAuthorSubject(session.issuer, session.user_id, session.account_id)
+      : undefined;
   }
 
   onAuthFailure(callback: (reason: string) => void): void {
