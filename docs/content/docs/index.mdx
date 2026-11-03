@@ -41,7 +41,7 @@ const jazz = await createJazz({
 
 new Hono()
   // Sync for browsers, on your own origin
-  .all("/jazz/*", (c) => jazz.fetch(c.req.raw))
+  .all("/jazz/*", (c) => jazz.handle(c.req.raw))
   // Runs as the signed-in user: the query only returns their own todos
   .get("/todos", async (c) => {
     const db = await jazz.forRequest(c.req.raw);

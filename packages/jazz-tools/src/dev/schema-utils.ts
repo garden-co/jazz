@@ -7,7 +7,7 @@ import type {
   Value,
   WasmSchema,
 } from "../drivers/types.js";
-import { blake3 } from "@noble/hashes/blake3.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { parseUuidBytes } from "../runtime/hex.js";
 
@@ -93,7 +93,7 @@ export function structuralSchemaHash(schema: WasmSchema): string {
     }
   }
 
-  return bytesToHex(blake3(writer.bytes()));
+  return bytesToHex(sha256(writer.bytes()));
 }
 
 export { columnTypeSignature };

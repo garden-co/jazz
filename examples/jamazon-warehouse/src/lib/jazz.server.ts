@@ -25,10 +25,12 @@ declare global {
 export function jazz(): Promise<Jazz> {
   const store = jazzStore();
   const pending = (globalThis.__jamazonWarehouseJazz ??= createJazz({
-    appId: jazzAppId,
     app,
     permissions,
-    store: store.kind === "remote" ? remote(store) : sqlite({ path: store.path }),
+    store:
+      store.kind === "remote"
+        ? remote({ ...store, appId: jazzAppId })
+        : sqlite({ path: store.path, appId: jazzAppId }),
     // Better Auth's session cookie decides who the operator is.
     authenticate: async (request) => {
       const { auth } = await import("./auth");

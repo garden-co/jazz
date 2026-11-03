@@ -70,3 +70,11 @@ tower = { version = "0.5", features = ["util"] }
 [[test]]
 name = "jwks_retry"
 required-features = ["test"]
+
+[[test]]
+name = "trusted_workload"
+required-features = ["test"]
+
+[[test]]
+name = "admin_secret_credential"
+required-features = ["test"]

@@ -9,6 +9,7 @@ import { writable } from "svelte/store";
 import { backendAuth, type JazzAuth } from "../session/app.js";
 import BackendAuthApp from "../../tests/svelte/BackendAuthApp.svelte";
 import AuthStatus from "../../tests/svelte/AuthStatus.svelte";
+import UserApp from "../../tests/svelte/UserApp.svelte";
 const factory = vi.hoisted(() => vi.fn());
 vi.mock("../session/create-jazz-session.js", () => ({ createJazzSession: factory }));
 vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
@@ -210,4 +211,36 @@ it("updates backend auth descriptors reactively and never mounts private childre
   expect(target.textContent).toBe("PRIVATE");
   expect(owner.getSnapshot().account?.identity.subject).toBe("b");
   expect(events.slice(0, 2)).toEqual(["detached", "shutdown"]);
+});
+
+it("follows the `user` prop: loading, signed in, signed out", async () => {
+  let backendUser = "";
+  const handle = (id: string) =>
+    ({ id, identity: { issuer: "test", subject: id } }) as AccountHandle;
+  const owner = await createJazzSessionOwner({
+    accounts: new AccountManager({
+      logout: () => {},
+      loginWithBackend: async () => handle(backendUser),
+    } as any),
+    openClient: async () =>
+      attachSubscriptionStore(
+        { db: { onAuthChanged: () => () => {} }, session: null, shutdown: async () => {} },
+        {} as never,
+      ) as any,
+  });
+  factory.mockResolvedValue(owner);
+  const user = writable<string | null | undefined>(undefined);
+  const target = document.createElement("div");
+  component = mount(UserApp, { target, props: { user } });
+  await settle();
+  expect(target.textContent).toBe("WAIT");
+  expect(factory).toHaveBeenCalledWith(expect.objectContaining({ initial: undefined }));
+  backendUser = "a";
+  user.set("a");
+  await settle();
+  expect(target.textContent).toBe("PRIVATE");
+  expect(owner.getSnapshot().account?.identity.subject).toBe("a");
+  user.set(null);
+  await settle();
+  expect(target.textContent).toBe("SIGN IN");
 });

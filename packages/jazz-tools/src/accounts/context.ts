@@ -1,3 +1,4 @@
+import { clientScope } from "../runtime/client-scope.js";
 import { PlatformURL } from "../runtime/platform-url.js";
 import { resolveServerUrl } from "../runtime/url.js";
 import { admitAccountConfig } from "./config-capability.js";
@@ -63,9 +64,11 @@ function accountContextScope(config: AccountDbConfig): string {
   const registry = accountRegistry(account);
   // Offline creation still has a configured registry authority; no request is made.
   if (
-    !new PlatformURL(registry).pathname.endsWith(`/apps/${accountAppId(config.appId)}/accounts`) ||
+    !new PlatformURL(registry).pathname.endsWith(
+      `/apps/${accountAppId(clientScope(config))}/accounts`,
+    ) ||
     (config.serverUrl !== undefined &&
-      accountRegistryUrl(config.serverUrl, config.appId) !== registry)
+      accountRegistryUrl(config.serverUrl, clientScope(config)) !== registry)
   ) {
     throw new AccountAuthError("account_application_mismatch");
   }

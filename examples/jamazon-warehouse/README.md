@@ -54,7 +54,7 @@ local defaults, so `pnpm dev` works without setup. A production process (`pnpm b
 `pnpm start`) is always a deployment: it refuses to start without `NEXT_PUBLIC_APP_ORIGIN` and
 `BETTER_AUTH_SECRET`, and never falls back to localhost or the development secret. A deployment
 also sets `NEXT_PUBLIC_JAZZ_APP_ID`, and, to keep the data on a sync server such as Jazz Cloud,
-`JAZZ_SERVER_URL`, `JAZZ_ADMIN_SECRET` and `BACKEND_SECRET`.
+`JAZZ_SERVER_URL` and `JAZZ_ADMIN_SECRET`.
 
 ## Two-phase checkout
 

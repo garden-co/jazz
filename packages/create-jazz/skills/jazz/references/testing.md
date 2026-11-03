@@ -5,6 +5,6 @@ through public APIs. Model the actual topology when authorization, offline behav
 part of the behavior under test. Keep a test's requested durability tier aligned with its
 assertion.
 
-- [Testing recipe](https://jazz.tools/docs/recipes/testing)
+- [Testing recipe](https://jazz.tools/docs/tooling/testing)
 - [Real-time collaborative list recipe](https://jazz.tools/docs/recipes/data-patterns/real-time-collaborative-list)
 - [Nested data recipe](https://jazz.tools/docs/recipes/data-patterns/nested-data)
