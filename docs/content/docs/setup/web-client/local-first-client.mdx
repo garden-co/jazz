@@ -37,10 +37,10 @@ after the first load, with live queries carried over:
   </Tab>
   <Tab value="TypeScript">
     ```ts title="app.ts"
-    import { createDb } from "jazz-tools/local-first";
+    import { createClient } from "jazz-tools/local-first";
     import { app } from "./schema";
 
-    const db = await createDb();
+    const db = await createClient();
     authClient.onSessionChange((session) => db.setUser(session?.user.id ?? null));
 
     const todos = await db.all(app.todos);
@@ -155,7 +155,7 @@ Next.js app that imports `jazz-tools/backend` still needs `serverExternalPackage
 
 ### Wasm loading
 
-Use `runtimeSources` when Jazz can't automatically find its internal assets. This usually only happens with non-standard bundler configurations. For edge runtimes like Cloudflare Workers, see [Edge-style Wasm setup](/docs/setup/deployment/own-server#edge-style-wasm-setup).
+Use `runtimeSources` when Jazz can't automatically find its internal assets. This usually only happens with non-standard bundler configurations.
 
 | Field                            | Use it when                                                                 |
 | -------------------------------- | --------------------------------------------------------------------------- |

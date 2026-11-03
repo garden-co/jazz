@@ -57,8 +57,8 @@ CMD ["node", "dist/server.js"]
 ## Data on another machine
 
 When the data should live apart from your app servers (several app instances sharing one database,
-serverless functions, an existing Jazz Cloud app), run the core elsewhere and point `createJazz` at
-it with `remote()`:
+serverless functions, an existing Jazz Cloud app), keep it in [Jazz Cloud](/docs/setup/deployment/jazz-cloud)
+and point `createJazz` at it with `remote()`:
 
 ```ts title="jazz.server.ts"
 import { createJazz, remote } from "jazz-tools/backend";
@@ -69,7 +69,7 @@ export const jazz = await createJazz({
   permissions,
   store: remote({
     appId: process.env.JAZZ_APP_ID!,
-    url: process.env.JAZZ_SERVER_URL!, // your sync server, or https://v2.sync.jazz.tools
+    url: process.env.JAZZ_SERVER_URL!,
     secret: process.env.JAZZ_ADMIN_SECRET!, // the app's admin secret
   }),
   authenticate: async (request) => /* your session */ null,
@@ -77,74 +77,12 @@ export const jazz = await createJazz({
 ```
 
 Everything else stays the same. Browsers still sync with your backend under `/jazz` and never see
-the core's address or secret. Your backend applies its schema, migrations and permissions to the
-core on start, and tells the core who each user is; the core does no auth of its own and trusts
-only the holder of the app's admin secret. Keep it server-side, like a database password. Instead
-of the secret, `remote({ url, backendCredential })` can present a token of your own on every
-request, such as your platform's OIDC token for a server started with `--trusted-workload-*`.
+the core's address or secret. Your backend sends its schema, migrations and permissions to the core
+on start, and tells the core who each user is; the core does no auth of its own and trusts only the
+holder of the app's admin secret. Keep it server-side, like a database password.
 
-## Standalone sync server
-
-The CLI runs the same core on its own port, for `remote()` or for apps that predate `createJazz`:
-
-<include cwd lang="bash" meta='title="Terminal"'>
-  ../examples/docs/todo-server-rs/docs/self-host-cli.sh#setup-self-host-cli
-</include>
-
-`jazz-tools@alpha server <APP_ID>` currently supports:
-
-| Option                                  | Purpose                                                                                                                                         | Environment variable          | Default                   |
-| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------- |
-| `<APP_ID>` (positional)                 | App namespace identifier (required)                                                                                                             | -                             | -                         |
-| `-p, --port <PORT>`                     | Listen port                                                                                                                                     | -                             | `1625`                    |
-| `-d, --data-dir <DATA_DIR>`             | Persistent storage directory                                                                                                                    | -                             | `./data`                  |
-| `--in-memory`                           | Use in-memory storage instead of files; data is lost when the process exits                                                                     | -                             | off                       |
-| `--jwks-url <JWKS_URL>`                 | JWKS endpoint for external JWT validation                                                                                                       | `JAZZ_JWKS_URL`               | unset                     |
-| `--jwt-public-key <JWT_PUBLIC_KEY>`     | Single JWK JSON object or PEM public key for external JWT validation. Accepts inline contents or a path to a key file.                          | `JAZZ_JWT_PUBLIC_KEY`         | unset                     |
-| `--auth-cookie-name <AUTH_COOKIE_NAME>` | Cookie name to read for browser authentication during WebSocket upgrades                                                                        | `JAZZ_AUTH_COOKIE_NAME`       | unset                     |
-| `--allow-local-first-auth`              | Allow local-first auth (`Authorization: Bearer <self-signed Jazz JWT>`)                                                                         | `JAZZ_ALLOW_LOCAL_FIRST_AUTH` | see `NODE_ENV` note below |
-| `--backend-secret <BACKEND_SECRET>`     | Legacy backend session impersonation for apps that predate `createJazz`; `remote()` needs only the admin secret                                 | `JAZZ_BACKEND_SECRET`         | unset                     |
-| `--admin-secret <ADMIN_SECRET>`         | The app's one secret: `remote({ secret })` presents it, and schema catalogue reads need it.                                                     | `JAZZ_ADMIN_SECRET`           | unset                     |
-| `--shutdown-timeout-secs <SECONDS>`     | Graceful shutdown network-drain timeout in seconds                                                                                              | `JAZZ_SHUTDOWN_TIMEOUT_SECS`  | `30`                      |
-| `--diagnostics-listen <ADDR>`           | Address of a listener serving `/debug/pprof/heap`, e.g. `0.0.0.0:6060`. Non-loopback addresses require `--diagnostics-token`.                   | `JAZZ_DIAGNOSTICS_LISTEN`     | unset                     |
-| `--diagnostics-token <TOKEN>`           | Bearer token the diagnostics listener requires (`Authorization: Bearer <TOKEN>`); a read-only scrape credential separate from the admin secret. | `JAZZ_DIAGNOSTICS_TOKEN`      | unset                     |
-
-Local-first auth is disabled by default when `NODE_ENV` is `production` (case-insensitive) and enabled otherwise, including when `NODE_ENV` is unset. Enable it in production with `--allow-local-first-auth` or `JAZZ_ALLOW_LOCAL_FIRST_AUTH=true`. External JWT auth requires either `--jwks-url` or `--jwt-public-key`, but not both.
-The server runs Core directly. It owns the account registry, permission checks,
-and durable write confirmation. Browser workers and native local relays remain
-client-side persistence components.
-
-Cookie-based WebSocket auth is enabled with `--auth-cookie-name` or `JAZZ_AUTH_COOKIE_NAME`. When no
-explicit auth credential is supplied, the sync server reads that named cookie and validates the JWT
-it contains. If your app uses a separate application session cookie, resolve it in your own app server
-and obtain an admitted account handle from its JWT. Pass that handle to `await client.forAccount(account)`;
-`forRequest` accepts bearer headers and does not parse application session cookies.
-
-See [Monitoring](/docs/operating/monitoring) for heap profiling and diagnostics.
-
-## Edge-style Wasm setup
-
-Some runtimes (like Cloudflare Workers) don't load Jazz the same way a browser does. In those cases, provide the Wasm module or bytes directly.
-
-<include cwd lang="ts" meta='title="worker.ts"'>
-  ../examples/cloudflare-worker-runtime-ts/src/docs-snippets.ts#edge-wasm-module
-</include>
-
-If your platform hands you raw bytes instead of a compiled module, use `runtimeSources.wasmSource`:
-
-```ts title="worker.ts"
-import { createDb, type AccountHandle } from "jazz-tools";
-
-// The request's account manager prepared this handle before context creation.
-export function openRequestDb(account: AccountHandle, wasmBytes: Uint8Array) {
-  return createDb({
-    account,
-    runtimeSources: { wasmSource: wasmBytes },
-  });
-}
-```
-
-See the [Cloudflare Wrangler example](https://github.com/garden-co/jazz/tree/main/examples/cloudflare-worker-runtime-ts) for a complete `workerd` setup.
+Jazz always runs inside a backend like this one. There is no separate Jazz server to install or
+run.
 
 ## Coming next
 

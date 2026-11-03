@@ -43,7 +43,7 @@ In practice, this lets you:
 2. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
 3. **Validate locally**&hairsp;—&hairsp;optionally run `pnpm dlx jazz-tools@alpha validate` to surface
    any policy diagnostics without publishing. Your main backend runs the same checks when it starts;
-   `validate` is most useful as a fast pre-publish sanity check or in CI.
+   `validate` is most useful as a fast check before you deploy, or in CI.
 4. **Create a migration stub for the updated schema**&hairsp;—&hairsp;run:
 
    ```bash
@@ -55,17 +55,16 @@ In practice, this lets you:
 
 5. **Review and customise**&hairsp;—&hairsp;the migration, if needed (see below).
 6. **Deploy your main backend**&hairsp;—&hairsp;restart it locally, or deploy it as usual. When it
-   starts, `createJazz` publishes the schema, permissions and required migrations your code
-   imports. There is no separate deploy command:
-   1. Before publishing, it checks that the schema, permissions and any required migrations are present. First deployments and permission-only changes need no migration.
-   2. It publishes the current schema if the server does not already have it.
-   3. If the server is on an older schema hash, it asks the server whether
-      it already has a migration path between the two hashes. If not, it pushes the bundled migration
-      that closes the gap. If none does, the backend refuses to start with an error naming the missing migration.
-   4. It publishes the current permissions, attached to the current schema hash.
+   starts, `createJazz` sends the schema, permissions and migrations your code imports to its store
+   as one bundle. There is no separate deploy or push command. If the bundle has no migration path
+   from the schema already in the store, the backend refuses to start with an error naming the
+   missing migration. First deployments and permission-only changes need no migration.
 
-   Each deployment's sessions run under that deployment's own permissions, so two deployments can
-   run side by side, and rolling back your backend rolls back its permissions too.
+   Each deployment's sessions run under that deployment's own bundle, so two deployments can run
+   side by side, and rolling back your backend rolls back its permissions too.
+
+The `jazz-tools` CLI only scaffolds and checks migrations (`migrations create`, `validate`,
+`migrations graph`). It never publishes anything: only your main backend does.
 
 ### Shipping migrations with your app
 
@@ -251,7 +250,7 @@ provide the server URL and secret through `--server-url` and `--admin-secret` or
 Use `schema compile` when working on a non-TypeScript Jazz application that needs to consume the schema written in TypeScript.
 
 You don't need to run it as part of the normal migration workflow: `migrations create` saves
-the required snapshots, and `deploy` compiles the schema before publishing.
+the required snapshots, and your main backend compiles the schema when it starts.
 
 `pnpm dlx jazz-tools@alpha schema compile` prints the compiled schema as JSON to stdout. It
 also saves a snapshot of the schema in the local snapshot directory.
