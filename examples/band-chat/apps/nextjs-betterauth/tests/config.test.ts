@@ -58,18 +58,17 @@ describe("configuration fails closed", () => {
     expect(config.dataPath).toBe(".jazz");
   });
 
-  it("needs both of the app's secrets to sync through a remote server", () => {
+  it("needs the app's admin secret to sync through a remote server", () => {
     expect(() => check({ ...deployment, JAZZ_SERVER_URL: "https://sync.example" })).toThrow(
-      /must set JAZZ_ADMIN_SECRET, BACKEND_SECRET/,
+      /must set JAZZ_ADMIN_SECRET\./,
     );
     expect(
       check({
         ...deployment,
         JAZZ_SERVER_URL: "https://sync.example",
         JAZZ_ADMIN_SECRET: "admin",
-        BACKEND_SECRET: "backend",
       }).remote,
-    ).toEqual({ url: "https://sync.example", adminSecret: "admin", backendSecret: "backend" });
+    ).toEqual({ url: "https://sync.example", adminSecret: "admin" });
   });
 
   it("accepts a fully configured deployment", () => {

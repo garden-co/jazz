@@ -36,6 +36,7 @@ pub struct JazzServerBuilder {
     backend_secret: Option<String>,
     jwks_url: Option<String>,
     auth_clock: Option<crate::middleware::auth::AuthClock>,
+    trusted_workload: Option<crate::middleware::workload::TrustedWorkload>,
 }
 
 impl std::fmt::Debug for JazzServerBuilder {
@@ -97,6 +98,15 @@ impl JazzServerBuilder {
     #[cfg(feature = "test")]
     pub fn with_auth_clock(mut self, clock: crate::middleware::auth::TestClock) -> Self {
         self.auth_clock = Some(clock.into());
+        self
+    }
+
+    /// Trust only this workload; the server then has no shared secrets.
+    pub fn with_trusted_workload(
+        mut self,
+        workload: crate::middleware::workload::TrustedWorkload,
+    ) -> Self {
+        self.trusted_workload = Some(workload);
         self
     }
 
@@ -242,6 +252,7 @@ impl JazzServer {
             backend_secret,
             jwks_url,
             auth_clock,
+            trusted_workload,
         } = builder;
 
         let app_id = app_id.unwrap_or_else(AppId::random);
@@ -269,8 +280,9 @@ impl JazzServer {
             jwt_issuer: Some(TEST_JWT_ISSUER.to_owned()),
             jwt_audience: Some(TEST_JWT_AUDIENCE.to_owned()),
             allow_local_first_auth: true,
-            backend_secret: Some(backend_secret.clone()),
-            admin_secret: Some(admin_secret.clone()),
+            backend_secret: trusted_workload.is_none().then(|| backend_secret.clone()),
+            admin_secret: trusted_workload.is_none().then(|| admin_secret.clone()),
+            trusted_workload,
             clock: auth_clock.clone(),
             ..Default::default()
         };

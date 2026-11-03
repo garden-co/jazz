@@ -6,7 +6,7 @@ import { LOCAL_APP_ID, LOCAL_ORIGIN } from "$lib/config";
 /**
  * StagePlan's server configuration. It fails closed: the local defaults apply
  * only to `pnpm dev`. A production server must name its origin, its Jazz app
- * and a Better Auth secret, and a remote sync server needs both app secrets.
+ * and a Better Auth secret, and a remote sync server needs the app's admin secret.
  */
 export function serverConfig() {
   const missing: string[] = [];
@@ -29,7 +29,6 @@ export function serverConfig() {
       ? {
           url: env.JAZZ_SERVER_URL,
           adminSecret: required("JAZZ_ADMIN_SECRET", env.JAZZ_ADMIN_SECRET),
-          backendSecret: required("BACKEND_SECRET", env.BACKEND_SECRET),
         }
       : undefined,
     dataPath: env.JAZZ_DATA_PATH || ".jazz",

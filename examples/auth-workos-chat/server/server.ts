@@ -66,10 +66,9 @@ function setCookie(res: Response, sealed: string) {
 // Jazz runs inside this server; `authenticate` reads the AuthKit cookie, and
 // the organization role becomes the claim the chat permissions check.
 const jazz = await createJazz({
-  appId: APP_ID,
   app: schema,
   permissions,
-  store: sqlite({ path: ".jazz" }),
+  store: sqlite({ path: ".jazz", appId: APP_ID }),
   authenticate: async (request) => {
     const session = await readSession(readCookie(request.headers.get("cookie")));
     return session ? { userId: session.user.id, claims: { role: session.role ?? "" } } : null;

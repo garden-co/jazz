@@ -10,21 +10,16 @@ let instance: Promise<Jazz> | undefined;
  * per server process, shared by auth, bootstrap and the agent runner. Its `db` holds backend authority.
  *
  * Data lives in local SQLite (`.jazz/`) unless JAZZ_SERVER_URL names a sync
- * server such as Jazz Cloud, reached with the app's secrets.
+ * server such as Jazz Cloud, reached with the app's admin secret.
  */
 export function backendJazzClient(): Promise<Jazz> {
   const url = process.env.JAZZ_SERVER_URL;
   const pending = (instance ??= createJazz({
-    appId: jazzAppId,
     app,
     permissions,
     store: url
-      ? remote({
-          url,
-          adminSecret: requiredSecret("JAZZ_ADMIN_SECRET"),
-          backendSecret: requiredSecret("BACKEND_SECRET"),
-        })
-      : sqlite({ path: process.env.JAZZ_DATA_PATH || ".jazz" }),
+      ? remote({ url, appId: jazzAppId, secret: requiredSecret("JAZZ_ADMIN_SECRET") })
+      : sqlite({ path: process.env.JAZZ_DATA_PATH || ".jazz", appId: jazzAppId }),
     // Better Auth's session cookie decides who the user is.
     authenticate: async (request) => {
       const { auth } = await import("./auth");

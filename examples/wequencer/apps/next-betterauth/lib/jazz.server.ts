@@ -26,10 +26,11 @@ declare global {
 export function jazz(): Promise<Jazz> {
   const config = jazzConfig();
   const pending = (globalThis.__wequencerJazz ??= createJazz({
-    appId: config.appId,
     app,
     permissions,
-    store: config.remote ? remote(config.remote) : sqlite({ path: config.dataPath! }),
+    store: config.remote
+      ? remote({ ...config.remote, appId: config.appId })
+      : sqlite({ path: config.dataPath!, appId: config.appId }),
     // Better Auth's session cookie decides who the bandmate is.
     authenticate: async (request) => {
       const { auth } = await import("@/lib/auth");

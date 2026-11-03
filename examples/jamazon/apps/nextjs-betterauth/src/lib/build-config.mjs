@@ -18,14 +18,13 @@ export function readBuildConfig(env = process.env) {
     appId: env.NEXT_PUBLIC_JAZZ_APP_ID || LOCAL_DEFAULTS.appId,
     /**
      * Where the data lives. With JAZZ_SERVER_URL set, the backend connects to
-     * that sync server (such as Jazz Cloud) with the app's secrets; otherwise
+     * that sync server (such as Jazz Cloud) with the app's admin secret; otherwise
      * it keeps the data in a local SQLite directory.
      */
     remote: env.JAZZ_SERVER_URL
       ? {
           url: env.JAZZ_SERVER_URL,
-          adminSecret: env.JAZZ_ADMIN_SECRET || undefined,
-          backendSecret: env.BACKEND_SECRET || undefined,
+          secret: env.JAZZ_ADMIN_SECRET || undefined,
         }
       : undefined,
     dataPath: env.JAZZ_DATA_PATH || ".jazz",
@@ -77,7 +76,7 @@ export function paymentProvider(config = readBuildConfig()) {
  * secret is always required: there are no checked-in secrets, and `pnpm dev`
  * generates a local one (see dev-secrets.mjs). Deployments must also name
  * their origin, Jazz app and payment provider, and a remote sync server needs
- * both of the app's secrets.
+ * the app's admin secret.
  * @param {ReturnType<typeof readBuildConfig>} config
  */
 export function assertBuildConfiguration(config = readBuildConfig()) {
@@ -86,8 +85,7 @@ export function assertBuildConfiguration(config = readBuildConfig()) {
     ...(local ? [] : config.unsetPublic),
     !local && !config.paymentProvider && "PAYMENT_PROVIDER",
     !config.betterAuthSecret && "BETTER_AUTH_SECRET",
-    config.remote && !config.remote.adminSecret && "JAZZ_ADMIN_SECRET",
-    config.remote && !config.remote.backendSecret && "BACKEND_SECRET",
+    config.remote && !config.remote.secret && "JAZZ_ADMIN_SECRET",
   ].filter(Boolean);
   if (missing.length) {
     throw new Error(

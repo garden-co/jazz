@@ -136,6 +136,9 @@ struct WebSocketAdmission {
     trust: CommitUnitTrust,
     credential: WebSocketCredential,
     requested_link: RequestedWebSocketLink,
+    /// The published permissions bundle the backend pinned this session
+    /// to (see [`jazz::catalogue`]).
+    bundle: Option<jazz::catalogue::BundleId>,
 }
 
 /// Authentication class selected by the prelude, independently of the
@@ -268,6 +271,17 @@ struct WebSocketPrelude {
     /// own immutable admitted relay capability or rejects the connection.
     #[serde(default)]
     requested_link: RequestedWebSocketLink,
+    /// The audience a trusted backend verified the client's local-first
+    /// proof against; honoured only with that backend's secret (see
+    /// [`crate::middleware::auth::LOCAL_FIRST_AUDIENCE_HEADER`]).
+    #[serde(default)]
+    local_first_audience: Option<String>,
+    /// The published permissions bundle (hex id) the backend that opened
+    /// this socket serves with; honoured only on that backend's word (its
+    /// credential on the upgrade, or its secret here), as a client could
+    /// otherwise pick an older bundle's laxer policies.
+    #[serde(default)]
+    bundle: Option<String>,
 }
 
 /// The only client-selectable *request* at the WebSocket boundary.  This is
@@ -321,7 +335,40 @@ async fn ws_admission(
 ) -> Result<WebSocketAdmission, super::accounts::AdmissionError> {
     let peer_identity = ws_peer_identity(&prelude.peer_identity)?;
     let requested_link = prelude.requested_link;
-    let auth = prelude.auth;
+    let local_first_audience = prelude.local_first_audience;
+    let bundle = prelude
+        .bundle
+        .as_deref()
+        .map(|text| {
+            jazz::catalogue::BundleId::from_hex(text)
+                .ok_or_else(|| format!("invalid permissions bundle id: {text}"))
+        })
+        .transpose()?;
+    let mut vouched_upgrade = false;
+    let mut auth = prelude.auth;
+    // On a socket whose upgrade carried a backend credential (the HTTP gate
+    // checked it), the prelude's own secret slots never count: the access
+    // the backend stated decides which secrets the socket gets. A server
+    // that trusts a workload admits only such sockets, guests included.
+    if let (Some(check), Some(secrets)) = (
+        state.backend_credential.as_deref(),
+        state.workload_secrets.as_ref(),
+    ) {
+        match crate::middleware::workload::vouched(request_headers, secrets) {
+            Some(access) => {
+                vouched_upgrade = true;
+                let (admin, backend) = access.secrets(secrets);
+                auth.admin_secret = admin;
+                auth.backend_secret = backend;
+            }
+            None if check.required() => {
+                return Err("this server admits only sockets its trusted workload opens"
+                    .to_owned()
+                    .into());
+            }
+            None => {}
+        }
+    }
 
     if let Some(admin_secret) = auth.admin_secret.as_deref() {
         crate::middleware::auth::validate_admin_secret(Some(admin_secret), &state.auth_config)
@@ -335,6 +382,9 @@ async fn ws_admission(
             trust,
             credential: WebSocketCredential::Admin,
             requested_link: RequestedWebSocketLink::OrdinarySession,
+            // Served with full access; sessions it acts for are governed by
+            // the bundle.
+            bundle,
         });
     }
 
@@ -348,6 +398,11 @@ async fn ws_admission(
         let value = axum::http::HeaderValue::from_str(secret)
             .map_err(|error| format!("invalid backend_secret header value: {error}"))?;
         headers.insert("X-Jazz-Backend-Secret", value);
+    }
+    if let Some(audience) = local_first_audience.as_deref() {
+        let value = axum::http::HeaderValue::from_str(audience)
+            .map_err(|error| format!("invalid local_first_audience value: {error}"))?;
+        headers.insert(crate::middleware::auth::LOCAL_FIRST_AUDIENCE_HEADER, value);
     }
     if let Some(session_value) = auth.backend_session.as_ref() {
         use base64::Engine as _;
@@ -381,7 +436,22 @@ async fn ws_admission(
             trust: CommitUnitTrust::TrustedBackend,
             credential: WebSocketCredential::Backend,
             requested_link: RequestedWebSocketLink::OrdinarySession,
+            // The backend's own link: the sessions it acts for (its
+            // `forRequest` reads and writes) are governed by its bundle.
+            bundle,
         });
+    }
+    let backend_vouched = vouched_upgrade
+        || matches!(
+            (
+                state.auth_config.backend_secret.as_deref(),
+                backend_secret,
+            ),
+            (Some(expected), Some(provided))
+                if crate::middleware::workload::constant_time_eq(expected, provided)
+        );
+    if bundle.is_some() && !backend_vouched {
+        return Err("a permissions bundle pin needs the backend's credential".into());
     }
 
     if !has_jwt
@@ -434,6 +504,7 @@ async fn ws_admission(
             WebSocketCredential::Session
         },
         requested_link,
+        bundle,
     })
 }
 
@@ -777,7 +848,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         } else {
             match state.catalogue.known_schema_hashes(&state.catalogue_store) {
                 Ok(hashes) if hashes.is_empty() => {
-                    "no schema has been published for this app; deploy a schema with `jazz-tools deploy <appId>` before connecting"
+                    "no schema has been published for this app; start the app's createJazz backend, which publishes its schema, before connecting"
                 }
                 _ => "runtime is not ready to accept client connections; retry shortly",
             }
@@ -821,6 +892,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         .open_with_session_context(
             admission.identity,
             admission.claims,
+            admission.bundle,
             admission.trust,
             negotiated.features,
             session_context,
@@ -1500,6 +1572,8 @@ mod tests {
                 backend_session: Some(serde_json::json!({ "attacker": true })),
                 ..Default::default()
             },
+            local_first_audience: None,
+            bundle: None,
         };
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1644,6 +1718,8 @@ mod tests {
                     })),
                     ..Default::default()
                 },
+                local_first_audience: None,
+                bundle: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1686,6 +1762,8 @@ mod tests {
                     backend_secret: Some("backend-secret".to_owned()),
                     ..Default::default()
                 },
+                local_first_audience: None,
+                bundle: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1724,6 +1802,8 @@ mod tests {
                     admin_secret: Some("admin-secret".to_owned()),
                     ..Default::default()
                 },
+                local_first_audience: None,
+                bundle: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1746,6 +1826,8 @@ mod tests {
                     admin_secret: Some("admin-secret".to_owned()),
                     ..Default::default()
                 },
+                local_first_audience: None,
+                bundle: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1767,6 +1849,8 @@ mod tests {
                     backend_secret: Some("backend-secret".to_owned()),
                     ..Default::default()
                 },
+                local_first_audience: None,
+                bundle: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1801,6 +1885,8 @@ mod tests {
                 })),
                 ..Default::default()
             },
+            local_first_audience: None,
+            bundle: None,
         };
 
         let error = ws_admission(prelude, &HeaderMap::new(), &state)
@@ -1819,6 +1905,102 @@ mod tests {
     // observable through a public websocket client helper, so this pins
     // the security invariant at the route admission point that feeds
     // ServerRuntimeHandle::open(identity, claims, trust).
+
+    fn pinned_prelude(identity: AuthorSubject, backend_secret: Option<&str>) -> WebSocketPrelude {
+        let (issuer, user_id) = issuer_and_subject(identity);
+        WebSocketPrelude {
+            peer_identity: identity.canonical().to_owned(),
+            bootstrap_catalogue: false,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
+            auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+                backend_secret: backend_secret.map(str::to_owned),
+                backend_session: Some(serde_json::json!({
+                    "account_id": identity.account_id(),
+                    "issuer": issuer,
+                    "user_id": user_id,
+                    "claims": {},
+                    "authMode": "external",
+                })),
+                ..Default::default()
+            },
+            local_first_audience: None,
+            bundle: Some("ab".repeat(32)),
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_backend_pins_its_sessions_to_a_bundle() {
+        let state = make_ws_test_state().await;
+        let identity = AuthorSubject::for_test_bytes([0x62; 16]);
+        let admission = ws_admission(
+            pinned_prelude(identity, Some("backend-secret")),
+            &HeaderMap::new(),
+            &state,
+        )
+        .await
+        .expect("a pinned backend session is admitted");
+        assert_eq!(admission.trust, CommitUnitTrust::Session);
+        assert_eq!(
+            admission.bundle,
+            Some(jazz::catalogue::BundleId([0xab; 32]))
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_a_workload_vouched_upgrade_may_pin_its_session() {
+        use crate::middleware::workload::{BackendAccess, VOUCHED_HEADER, vouched_value};
+        let state = make_ws_test_state().await;
+        let secrets = state.workload_secrets.as_ref().expect("internal secrets");
+        let identity = AuthorSubject::for_test_bytes([0x64; 16]);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            VOUCHED_HEADER,
+            vouched_value(secrets, BackendAccess::Backend)
+                .parse()
+                .unwrap(),
+        );
+        // The vouched upgrade stands in for the backend secret.
+        let admission = ws_admission(pinned_prelude(identity, None), &headers, &state)
+            .await
+            .expect("a vouched upgrade pins its session");
+        assert_eq!(
+            admission.bundle,
+            Some(jazz::catalogue::BundleId([0xab; 32]))
+        );
+
+        // A vouch the gate did not issue counts for nothing.
+        let mut forged = HeaderMap::new();
+        forged.insert(VOUCHED_HEADER, "not-the-backend session".parse().unwrap());
+        let Err(error) = ws_admission(pinned_prelude(identity, None), &forged, &state).await else {
+            panic!("a forged vouch may not pin a session");
+        };
+        assert!(
+            format!("{error:?}").contains("bundle pin needs"),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_bundle_pin_without_the_backend_credential_is_refused() {
+        let state = make_ws_test_state().await;
+        let identity = AuthorSubject::for_test_bytes([0x63; 16]);
+        for secret in [None, Some("not-the-secret")] {
+            let Err(error) =
+                ws_admission(pinned_prelude(identity, secret), &HeaderMap::new(), &state).await
+            else {
+                panic!("a client may not pick its own bundle");
+            };
+            let message = format!("{error:?}");
+            assert!(message.contains("bundle pin needs"), "{message}");
+        }
+        let mut malformed = pinned_prelude(identity, Some("backend-secret"));
+        malformed.bundle = Some("nope".to_owned());
+        let Err(error) = ws_admission(malformed, &HeaderMap::new(), &state).await else {
+            panic!("a malformed bundle id is refused");
+        };
+        assert!(format!("{error:?}").contains("invalid permissions bundle id"));
+    }
+
     #[tokio::test]
     async fn ws_backend_session_admits_session_claims_for_policy_reads() {
         let state = make_ws_test_state().await;
@@ -1844,6 +2026,8 @@ mod tests {
                 })),
                 ..Default::default()
             },
+            local_first_audience: None,
+            bundle: None,
         };
 
         let admission = ws_admission(prelude, &HeaderMap::new(), &state)
@@ -1913,7 +2097,7 @@ mod tests {
     #[tokio::test]
     async fn ws_blank_core_reports_schema_deployment_required() {
         assert_blank_runtime_diagnostic(
-            "no schema has been published for this app; deploy a schema with `jazz-tools deploy <appId>` before connecting",
+            "no schema has been published for this app; start the app's createJazz backend, which publishes its schema, before connecting",
         )
         .await;
     }
@@ -2196,6 +2380,72 @@ mod tests {
             .is_err(),
             "unknown requested_link is an authority request, not an ignored extension"
         );
+    }
+
+    /// A backend that presents the admin secret as its credential and states
+    /// backend access gets a backend session whatever its prelude's secret
+    /// slot says.
+    #[tokio::test]
+    async fn websocket_backend_credential_grants_the_stated_access() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let prelude = serde_json::json!({
+            "peer_identity": AuthorSubject::SYSTEM.canonical(),
+            "auth": { "backend_secret": "a stand-in" },
+        })
+        .to_string();
+        let mut open = Vec::new();
+        for _ in 0..3 {
+            let mut request = ws_url(addr, state.app_id).into_client_request().unwrap();
+            let headers = request.headers_mut();
+            headers.insert("X-Jazz-Backend-Credential", "admin-secret".parse().unwrap());
+            headers.insert("X-Jazz-Backend-Access", "backend".parse().unwrap());
+            let (mut ws, _) = connect_async(request).await.expect("connect websocket");
+            ws.send(WsMessage::Text(prelude.clone().into()))
+                .await
+                .expect("send prelude");
+            expect_ws_server_hello(&mut ws, 0).await;
+            open.push(ws);
+        }
+    }
+
+    /// A socket whose credential states session access gets no secret, even
+    /// when its prelude carries the real admin secret.
+    #[tokio::test]
+    async fn websocket_backend_credential_stating_session_ignores_prelude_secrets() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let prelude = serde_json::json!({
+            "peer_identity": AuthorSubject::SYSTEM.canonical(),
+            "auth": { "admin_secret": "admin-secret", "backend_secret": "backend-secret" },
+        })
+        .to_string();
+        let mut request = ws_url(addr, state.app_id).into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("X-Jazz-Backend-Credential", "admin-secret".parse().unwrap());
+        let (mut ws, _) = connect_async(request).await.expect("connect websocket");
+        ws.send(WsMessage::Text(prelude.into()))
+            .await
+            .expect("send prelude");
+        let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("admission resolves")
+            .expect("response")
+            .expect("wire response");
+        let WsMessage::Binary(bytes) = response else {
+            panic!("expected an admission error, got {response:?}")
+        };
+        let frames: Vec<Vec<u8>> = postcard::from_bytes(&bytes).expect("frame batch");
+        assert!(matches!(
+            decode_frame(&frames[0]).expect("error frame"),
+            WireFrame::Error(WireError {
+                code: WireErrorCode::AuthFailed,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -3334,6 +3584,119 @@ mod tests {
         })
         .await;
         assert!(closed.is_ok(), "the revoked socket must close");
+        core.shutdown().await;
+    }
+
+    /// A browser without an app id signs its local-first proof for the
+    /// endpoint it syncs with. Its backend verifies that audience and vouches
+    /// for it with the backend secret; the core then admits the founder, with
+    /// the account id namespaced by that audience. Without the backend secret
+    /// the vouched audience is refused, and the bare proof fails the app-id
+    /// audience check.
+    #[cfg(feature = "embedded-server")]
+    #[tokio::test]
+    async fn a_backend_vouched_audience_admits_an_endpoint_scoped_local_first_founder() {
+        use crate::server::testing::JazzServer;
+
+        let schema = SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .policies(public_table_policies()),
+            )
+            .build();
+        let core = JazzServer::start_with_schema(schema)
+            .await
+            .expect("start test server");
+        let endpoint = "https://app.example.com/jazz";
+        let token = jazz::tools::identity::mint_jazz_self_signed_token(
+            &[0x5a; 32],
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            endpoint,
+            3600,
+        )
+        .expect("mint endpoint-scoped proof");
+        let verified = jazz::tools::identity::verify_jazz_self_signed_proof(&token, endpoint)
+            .expect("verify endpoint-scoped proof");
+        let account = jazz::account_registry::local_first_account_id(
+            *crate::middleware::auth::local_first_founding_app(endpoint).uuid(),
+            &verified.user_id,
+        );
+        let identity = AuthorSubject::reserved(verified.issuer, &verified.user_id)
+            .expect("local-first author")
+            .with_account(account);
+
+        async fn first_frames(core: &JazzServer, prelude: serde_json::Value) -> Vec<WireFrame> {
+            let (mut ws, _) = connect_async(format!(
+                "ws://127.0.0.1:{}/apps/{}/ws",
+                core.port(),
+                core.app_id()
+            ))
+            .await
+            .expect("connect");
+            ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
+                .await
+                .expect("send prelude");
+            ws.send(WsMessage::Binary(
+                ws_client_hello_batch_with_features(current_wire_features()).into(),
+            ))
+            .await
+            .expect("send hello");
+            match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
+                Ok(Some(Ok(message))) => decode_ws_message(&message),
+                _ => Vec::new(),
+            }
+        }
+        let admitted = |frames: &[WireFrame]| matches!(frames, [WireFrame::Hello(_), ..]);
+
+        let unvouched = first_frames(
+            &core,
+            serde_json::json!({
+                "peer_identity": identity.canonical(),
+                "auth": { "jwt_token": token },
+            }),
+        )
+        .await;
+        assert!(!admitted(&unvouched), "the app id is the default audience");
+
+        let forged = first_frames(
+            &core,
+            serde_json::json!({
+                "peer_identity": identity.canonical(),
+                "auth": { "jwt_token": token },
+                "local_first_audience": endpoint,
+            }),
+        )
+        .await;
+        assert!(
+            !admitted(&forged),
+            "only the backend can name another audience"
+        );
+
+        let vouched = first_frames(
+            &core,
+            serde_json::json!({
+                "peer_identity": identity.canonical(),
+                "auth": { "jwt_token": token, "backend_secret": JazzServer::BACKEND_SECRET },
+                "local_first_audience": endpoint,
+            }),
+        )
+        .await;
+        assert!(admitted(&vouched), "{vouched:?}");
+
+        let elsewhere = first_frames(
+            &core,
+            serde_json::json!({
+                "peer_identity": identity.canonical(),
+                "auth": { "jwt_token": token, "backend_secret": JazzServer::BACKEND_SECRET },
+                "local_first_audience": "https://other.example.com/jazz",
+            }),
+        )
+        .await;
+        assert!(
+            !admitted(&elsewhere),
+            "the proof is bound to its own endpoint"
+        );
         core.shutdown().await;
     }
 

@@ -1,7 +1,9 @@
+import { signChallenge } from "../local-first-auth/index.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import {
   AccountAuthError,
   requestAccountRegistry,
+  requestBackendLinkChallenge,
   requestBackendSignIn,
   readAccountAssignment,
 } from "./registry-client.js";
@@ -284,14 +286,33 @@ export function createAccountManagerWithRuntime(options: {
       loginOrRegisterJWT: (auth) => enrollJWT("login-or-register", auth),
       loginWithBackend: () => backendAccount(() => requestBackendSignIn(registry, options.fetch)),
       async linkWithBackend(account) {
-        // The guest proves itself with its own local-first token; the backend
-        // names the signed-in user and links the two.
+        // The guest proves itself by signing a challenge the backend issued
+        // for the signed-in user, never with its sync token: a proof links
+        // once, and only to that user.
         if (account.identity.issuer !== "urn:jazz:local-first")
           throw new AccountAuthError("local_first_account_required");
-        const guestToken = await accountToken(account, registry);
-        const linked = await backendAccount(() =>
-          requestBackendSignIn(registry, options.fetch, { link: guestToken }),
-        );
+        const material = credentials.get(account);
+        if (!material || material.registry !== registry || !material.localFirstSecret)
+          throw new AccountAuthError("local_first_account_required");
+        const secret = material.localFirstSecret;
+        // The namespace the guest's account was founded in (its token's
+        // audience: the app id, or the endpoint for an app-less client), so
+        // the backend founds the same account.
+        const audience = material.auth
+          ? parseJwtPayload(await tokenFor(material.auth))?.aud
+          : undefined;
+        const linked = await backendAccount(async () => {
+          const challenge = await requestBackendLinkChallenge(registry, options.fetch);
+          if (credentials.get(account) !== material)
+            throw new AccountAuthError("account_logged_out");
+          return requestBackendSignIn(registry, options.fetch, {
+            link: {
+              challenge,
+              proof: signChallenge(secret, challenge),
+              ...(typeof audience === "string" ? { audience } : {}),
+            },
+          });
+        });
         if (linked.id !== account.id) throw new AccountAuthError("linked_account_mismatch");
         return linked;
       },
