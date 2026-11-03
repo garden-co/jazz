@@ -134,6 +134,17 @@ enum Commands {
         #[arg(long)]
         in_memory: bool,
 
+        /// Where large values' bytes live once they settle: `files` (the
+        /// `blobs/` directory next to the data, or --blobs-dir) or `sqlite`
+        /// (inside the database file). A data directory keeps its choice,
+        /// except that `sqlite` may later move to `files`.
+        #[arg(long, default_value = "files", value_parser = ["files", "sqlite"])]
+        blobs: String,
+
+        /// Directory for `--blobs files` (defaults to `<data-dir>/blobs`).
+        #[arg(long)]
+        blobs_dir: Option<String>,
+
         /// URL to fetch JWKS keys for JWT validation (production)
         #[arg(long, env = "JAZZ_JWKS_URL")]
         jwks_url: Option<String>,
@@ -315,6 +326,8 @@ async fn run() {
             port,
             data_dir,
             in_memory,
+            blobs,
+            blobs_dir,
             jwks_url,
             jwt_public_key,
             jwt_issuer,
@@ -385,6 +398,12 @@ async fn run() {
                 port,
                 &data_dir,
                 in_memory,
+                match blobs.as_str() {
+                    "sqlite" => jazz_server::BlobStore::Sqlite,
+                    _ => jazz_server::BlobStore::Files {
+                        dir: blobs_dir.map(Into::into),
+                    },
+                },
                 auth_config,
                 bound_port_file,
                 std::time::Duration::from_secs(shutdown_timeout_secs),
