@@ -1800,6 +1800,13 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * Stream one Text, Json, or Bytea column into a new row, staged in this
    * transaction. Resolves with the row id once the stream is consumed; the
    * commit waits for it and fails if the stream did.
+   *
+   * The streamed value is held for the transaction for at most the store's
+   * staging max age (10 minutes by default) after the stream finishes. A
+   * transaction left open longer than that is refused at commit, with
+   * `streaming upload expired`, so its storage is never held indefinitely;
+   * start it again. The same applies to `updateStreaming` and
+   * `upsertStreaming`.
    */
   insertStreaming<T, Init, StreamingInit>(
     table: TableProxy<T, Init, StreamingInit>,
