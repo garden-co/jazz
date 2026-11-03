@@ -13,15 +13,60 @@ The default web client: about 86 KB gzipped, no Wasm, no local storage. The serv
 
 ## Configure one session
 
-- Import from `jazz-tools/thin`
-- `await createClient()`&hairsp;—&hairsp;signs in through your backend (`/jazz`, with your app's session cookie) and returns the normal `Db`; queries, `subscribe`, insert/update/upsert/delete and the framework hooks all work
-- User auth: see [Auth](/docs/setup/auth)
-- Tabs per framework, as on the local-first page
+Open one client for the app. It signs in through your [main backend](/docs/setup/deployment) at
+`/jazz`, with your app's own session cookie, and returns the same `Db` as the local-first client:
+queries, `subscribe`, insert, update, upsert, delete and the framework hooks all work.
+
+<Tabs groupId="jazz-framework" items={["React", "TypeScript"]} persist updateAnchor>
+  <Tab value="React">
+    ```tsx title="App.tsx"
+    import { JazzProvider } from "jazz-tools/react";
+    import { authClient } from "./auth-client";
+
+    function Root() {
+      const { data, isPending } = authClient.useSession();
+      return (
+        <JazzProvider
+          client="thin"
+          // undefined while your auth loads, null when signed out, the user's id when signed in
+          user={isPending ? undefined : (data?.user.id ?? null)}
+          signedOut={<SignIn />}
+        >
+          <App />
+        </JazzProvider>
+      );
+    }
+    ```
+
+  </Tab>
+  <Tab value="TypeScript">
+    ```ts title="app.ts"
+    import { createClient } from "jazz-tools/thin";
+    import { app } from "./schema";
+
+    const db = await createClient();
+    // Follow your auth library's current user: null when signed out.
+    authClient.onSessionChange((session) => db.setUser(session?.user.id ?? null));
+
+    const todos = await db.all(app.todos);
+    ```
+
+  </Tab>
+</Tabs>
+
+Who the user is always comes from your backend's `authenticate`; see
+[How Auth Works](/docs/setup/auth/backend).
 
 ## Client config options
 
-- `serverUrl` defaults to `/jazz`, the path your backend mounts Jazz under (see [Main Backend](/docs/setup/deployment)). Set it only if you mount Jazz elsewhere
-- No `driver` option: there is no local storage
+| Option              | Default              | What it does                                                                        |
+| :------------------ | :------------------- | :---------------------------------------------------------------------------------- |
+| `serverUrl`         | `/jazz`              | Where your main backend mounts Jazz. Set it only if you mount it somewhere else     |
+| `user`              | asks your backend    | Your auth library's current user: `undefined` while loading, `null` when signed out |
+| `reconnectDelaysMs` | a short backoff      | Delays between reconnect attempts, in ms; the last one repeats                      |
+| `WebSocket`         | the global WebSocket | A WebSocket implementation, for runtimes without a global one                       |
+
+There is no `driver` option, since the thin client keeps nothing locally.
 
 ## What runs on the server
 
