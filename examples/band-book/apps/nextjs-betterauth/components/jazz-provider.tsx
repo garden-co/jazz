@@ -23,7 +23,6 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
       appId={jazzAppId}
       serverUrl="/jazz"
       client={loadLocalFirst}
-      initial="signed-out"
       signedOut={<SignInForm />}
       loading={<StatusScreen label="Opening BandBook" />}
       error={(state) => (

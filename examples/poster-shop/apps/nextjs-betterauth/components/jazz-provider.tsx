@@ -22,7 +22,6 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
       appId={appId}
       serverUrl="/jazz"
       client={loadLocalFirst}
-      initial="signed-out"
       signedOut={children}
       loading={
         <CenteredPage>

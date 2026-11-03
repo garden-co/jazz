@@ -22,7 +22,6 @@ export function App() {
     <JazzProvider
       appId="my-app"
       serverUrl="/jazz"
-      initial="signed-out"
       signedOut={<button onClick={() => void signIn()}>Sign in</button>}
     >
       <YourApp signOut={signOut} />

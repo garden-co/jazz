@@ -16,7 +16,6 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
       appId={jazzAppId}
       serverUrl="/jazz"
       client={loadLocalFirst}
-      initial="signed-out"
       // Signed out, the app renders its own sign-in screen without Jazz.
       signedOut={children}
       loading={<StatusScreen message="Opening MusicAgent…" />}

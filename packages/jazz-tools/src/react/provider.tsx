@@ -98,7 +98,7 @@ function ApplicationJazzProvider(props: JazzAppProviderProps) {
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
   return (
     <ConfiguredJazzAppProvider
-      config={{ ...config, initial: config.initial ?? "local-first" }}
+      config={config}
       createJazzSession={createJazzSession}
       signedOut={signedOut}
       loading={loading === undefined ? <p role="status">Loading…</p> : loading}

@@ -57,7 +57,6 @@ export function App() {
     <JazzProvider
       appId={APP_ID}
       serverUrl="/jazz"
-      initial="signed-out"
       signedOut={<button onClick={() => void signIn()}>Sign in with WorkOS</button>}
     >
       <SignedInChat user={user} onSignIn={signIn} onSignOut={signOut} />

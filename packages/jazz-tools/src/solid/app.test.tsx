@@ -97,7 +97,7 @@ it("retries startup through the default UI and exposes unified auth to children"
   node.querySelector("button")!.click();
   await flush();
   expect(factory).toHaveBeenCalledTimes(2);
-  expect(factory.mock.calls[1][0].initial).toBe("local-first");
+  expect(factory.mock.calls[1][0].initial).toBeUndefined();
   expect(node.textContent).toContain("PRIVATE");
   await auth!.logout();
   expect(events).toEqual(["detached", "shutdown:local"]);

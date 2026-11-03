@@ -41,7 +41,6 @@ export function JazzProvider({ children }: React.PropsWithChildren) {
       appId={APP_ID}
       serverUrl="/jazz"
       client={loadLocalFirst}
-      initial="signed-out"
       loading={<LoadingScreen label="Connecting BandChat…" />}
       signedOut={<LoadingScreen label="Signing in…" />}
       error={(state) => (

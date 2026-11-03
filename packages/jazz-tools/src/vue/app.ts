@@ -71,7 +71,7 @@ export const JazzProvider = defineComponent({
       appId: props.appId,
       scope: props.scope,
       serverUrl: props.serverUrl,
-      initial: props.initial ?? "local-first",
+      initial: props.initial,
     } as JazzSessionConfig;
     const app = createJazzAppOwner(config, createJazzSession, { start: false });
     const snapshot = shallowRef(app.getSnapshot());

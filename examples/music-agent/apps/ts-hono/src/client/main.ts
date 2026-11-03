@@ -20,7 +20,7 @@ const status = (message: string, error = false) =>
 
 // Better Auth's session drives sign-in; the server's Jazz (`createJazz` in
 // src/lib/backend-jazz-client.ts) reads it in `authenticate`.
-const jazz = createJazzApp({ appId, serverUrl: "/jazz", initial: "signed-out" });
+const jazz = createJazzApp({ appId, serverUrl: "/jazz" });
 
 let shown: { key: string; dispose?(): void } | undefined;
 function show(key: string, render: () => HTMLElement | { element: HTMLElement; dispose(): void }) {

@@ -18,7 +18,6 @@ export function Providers({ children }: { children: ReactNode }) {
       <JazzProvider
         appId={jazzAppId}
         serverUrl="/jazz"
-        initial="signed-out"
         signedOut={<SignIn />}
         loading={<Loading />}
         error={(state) => (

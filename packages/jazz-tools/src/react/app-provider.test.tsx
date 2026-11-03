@@ -11,7 +11,7 @@ afterEach(() => {
   cleanup();
   host.create.mockReset();
 });
-it("supplies local-first by default and built-in loading and safe retry UI", async () => {
+it("starts signed out by default and supplies built-in loading and safe retry UI", async () => {
   host.create.mockRejectedValue(new Error("unavailable"));
   const view = render(
     <JazzProvider appId="app" serverUrl="https://sync.example.test" autoAttachDevTools={false}>
@@ -20,7 +20,7 @@ it("supplies local-first by default and built-in loading and safe retry UI", asy
   );
   expect(view.getByRole("status").textContent).toBe("Loading…");
   await waitFor(() => expect(view.getByRole("alert")).toBeDefined());
-  expect(host.create).toHaveBeenCalledWith(expect.objectContaining({ initial: "local-first" }));
+  expect(host.create.mock.calls[0][0].initial).toBeUndefined();
   await act(async () => {
     view.getByRole("button", { name: "Try again" }).click();
   });

@@ -11,7 +11,7 @@ MusicAgent demonstrates; this app only differs in how it is wired.
   `/api/auth`, and the agent routes (`src/server/routes.ts`). Replies run in
   the background after the response; the browser watches the turn's row.
 - `src/client/main.ts` opens Jazz with
-  `createJazzApp({ serverUrl: "/jazz", initial: "signed-out" })`, which asks
+  `createJazzApp({ serverUrl: "/jazz" })`, which starts signed out and asks
   the backend who is signed in; after signing in or out with Better Auth it
   calls `jazz.reauthenticate()`, and
   `src/client/chat.ts` renders conversations from `db.subscribe` results.

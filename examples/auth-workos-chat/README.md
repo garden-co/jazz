@@ -56,8 +56,8 @@ authenticate: async (request) => {
 
 ### Client — `src/App.tsx`
 
-`useWorkOSSession` asks `/api/auth/session` who is signed in, for the UI. `JazzProvider` (with
-`initial="signed-out"`) asks the backend itself, so the identity always comes from `authenticate`;
+`useWorkOSSession` asks `/api/auth/session` who is signed in, for the UI. `JazzProvider` starts
+signed out and asks the backend itself, so the identity always comes from `authenticate`;
 the app calls `reauthenticate()` when the WorkOS user changes and after sign-out, which clears the
 cookie and redirects to the WorkOS logout URL.
 

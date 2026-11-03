@@ -86,7 +86,7 @@ it("owns startup retry and keeps the hook context across fallback and ready chil
   target.querySelector("button")!.click();
   await settle();
   expect(factory).toHaveBeenCalledTimes(2);
-  expect(factory.mock.calls[1][0].initial).toBe("local-first");
+  expect(factory.mock.calls[1][0].initial).toBeUndefined();
   expect(target.textContent).toContain("ready");
   target.querySelector("button")!.click();
   await settle();

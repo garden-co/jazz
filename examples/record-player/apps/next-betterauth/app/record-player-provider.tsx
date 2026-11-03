@@ -36,7 +36,6 @@ export function RecordPlayerProvider({
       appId={appId}
       serverUrl="/jazz"
       client={loadLocalFirst}
-      initial="signed-out"
       signedOut={frame(<SignIn />, false)}
       loading={frame(<Status>Connecting RecordPlayer…</Status>, false)}
       error={(state) =>

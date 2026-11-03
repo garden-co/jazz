@@ -76,7 +76,7 @@ export function NativeJazzAppProvider<Config extends { initial?: unknown }>({
   return (
     <ConfiguredJazzAppProvider
       {...view}
-      config={{ ...config, initial: config.initial ?? "local-first" }}
+      config={config}
       createJazzSession={createJazzSession}
       loading={
         loading === undefined ? (

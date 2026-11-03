@@ -14,9 +14,12 @@ const config = computed(() => ({
   env: "dev" as const,
   ...props.config,
 }));
-// Explicit account overrides retain the caller-owned account path used by tests.
+// Explicit account overrides retain the caller-owned account path used by tests;
+// otherwise the app starts with a local-first guest account.
 const providerProps = computed(() =>
-  config.value.account ? { config: config.value as DbConfig } : config.value,
+  config.value.account
+    ? { config: config.value as DbConfig }
+    : { ...config.value, initial: "local-first" as const },
 );
 // #endregion context-setup-vue
 </script>

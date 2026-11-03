@@ -78,7 +78,6 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
       appId={APP_ID}
       serverUrl="/jazz"
       client={loadLocalFirst}
-      initial="signed-out"
       // Signed-out pages (the sign-in form) need no Jazz.
       signedOut={children}
       loading={<LoadingScreen label="Opening your Jazz account…" />}

@@ -12,12 +12,7 @@ function YourApp() {
 // #region betterauth-jazz-react
 export function App() {
   return (
-    <JazzProvider
-      appId="my-app"
-      serverUrl="/jazz"
-      initial="signed-out"
-      signedOut={<p>Sign in to continue.</p>}
-    >
+    <JazzProvider appId="my-app" serverUrl="/jazz" signedOut={<p>Sign in to continue.</p>}>
       <YourApp />
     </JazzProvider>
   );

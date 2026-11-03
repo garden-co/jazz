@@ -7,9 +7,5 @@ export type JazzAppConfig = JazzSessionConfig;
  * call `reauthenticate()` after your own sign-in or sign-out.
  */
 export function createJazzApp(config: JazzAppConfig, options: { start?: boolean } = {}) {
-  return createJazzAppOwner(
-    { ...config, initial: config.initial ?? "local-first" },
-    createJazzSession,
-    options,
-  );
+  return createJazzAppOwner(config, createJazzSession, options);
 }

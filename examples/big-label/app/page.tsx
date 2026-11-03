@@ -139,7 +139,6 @@ export default function Page() {
     <JazzProvider
       appId={appId}
       serverUrl="/jazz"
-      initial="signed-out"
       signedOut={<SignIn />}
       loading={<Waiting message="Preparing your personal label…" />}
       error={(state) => (

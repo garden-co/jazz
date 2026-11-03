@@ -21,7 +21,6 @@ const status = (message: string, error = false) =>
 const jazz = createJazzApp({
   appId: import.meta.env.VITE_JAZZ_APP_ID,
   serverUrl: "/jazz",
-  initial: "signed-out",
 });
 
 let shown: { key: string; dispose?(): void } | undefined;

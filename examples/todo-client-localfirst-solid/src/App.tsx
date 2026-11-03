@@ -11,6 +11,7 @@ export function App(props: AppProps = {}) {
     appId: env?.VITE_JAZZ_APP_ID ?? env?.JAZZ_APP_ID ?? "",
     serverUrl: env?.VITE_JAZZ_SERVER_URL ?? env?.JAZZ_SERVER_URL,
     env: "dev",
+    initial: "local-first",
     ...props.config,
   });
   const content = () => (

@@ -61,7 +61,7 @@ describe("Vue ergonomic app", () => {
     expect(await renderToString(app)).toContain("Loading Jazz");
     expect(mocks.factory).not.toHaveBeenCalled();
   });
-  it("retries startup failures with the default error button and defaults to local-first", async () => {
+  it("retries startup failures with the default error button and starts signed out by default", async () => {
     const { session } = await fixture();
     mocks.factory
       .mockReset()
@@ -82,7 +82,7 @@ describe("Vue ergonomic app", () => {
     node.querySelector("button")!.click();
     await flush();
     expect(node.textContent).toBe("active");
-    expect(mocks.factory.mock.calls[0][0].initial).toBe("local-first");
+    expect(mocks.factory.mock.calls[0][0].initial).toBeUndefined();
     app.unmount();
     await flush();
   });
