@@ -78,6 +78,17 @@ pub(crate) use conflicts::Built;
 pub use conflicts::WriteConflict;
 pub use large_delta::{CellDelta, WireDelta};
 
+/// Convert internal errors to the client-safe classification carried by a
+/// rejected subscription. Relays retain explicit wire classifications unchanged.
+pub(crate) fn subscription_server_failure_code(error: &Error) -> SubscriptionServerFailureCode {
+    match error.code {
+        ErrorCode::Schema => SubscriptionServerFailureCode::SchemaResolution,
+        ErrorCode::Query => SubscriptionServerFailureCode::QueryValidation,
+        ErrorCode::Protocol => SubscriptionServerFailureCode::QueryResultProtocol,
+        _ => SubscriptionServerFailureCode::Internal,
+    }
+}
+
 /// Wall-clock Unix ms.
 fn now_ms() -> i64 {
     web_time::SystemTime::now()
@@ -1297,12 +1308,14 @@ pub enum SyncMessage {
         key: Vec<u8>,
         hidden: bool,
     },
-    /// A `Read` the server cannot serve, with why: the
-    /// read ends with this error instead of waiting for an answer.
+    /// A `Read` the server cannot serve, or an active subscription whose
+    /// query failed: the read ends instead of waiting for an answer.
     Refused {
         id: u64,
         code: ErrorCode,
         message: String,
+        /// Present for a terminal served-subscription failure; never parsed from text.
+        subscription_code: Option<SubscriptionServerFailureCode>,
     },
     /// How the authority decided commit `id` ([`Outcome`]). `global`:
     /// the fate is the global authority's (directly, or relayed from it),
@@ -1677,7 +1690,7 @@ struct LiveRead {
     reach: RemoteReach,
     answered: Rc<StdCell<bool>>,
     global: Rc<StdCell<bool>>,
-    refused: Rc<RefCell<Option<Error>>>,
+    refused: Rc<RefCell<Option<SubscriptionServerFailureCode>>>,
     /// The highest position the upstream settled this read through: its
     /// results read as of it (or the connection's, when that is further),
     /// see `Inner::visible_read`. Kept across reconnects.
@@ -7299,7 +7312,7 @@ impl Db {
         String,
         (
             Rc<StdCell<bool>>,
-            Rc<RefCell<Option<Error>>>,
+            Rc<RefCell<Option<SubscriptionServerFailureCode>>>,
             Rc<StdCell<bool>>,
         ),
     )> {
@@ -7349,7 +7362,7 @@ impl Inner {
         String,
         (
             Rc<StdCell<bool>>,
-            Rc<RefCell<Option<Error>>>,
+            Rc<RefCell<Option<SubscriptionServerFailureCode>>>,
             Rc<StdCell<bool>>,
         ),
     ) {
@@ -7375,8 +7388,13 @@ impl Inner {
         let refused = Rc::new(RefCell::new(
             client
                 .stranded
-                .then(stranded)
-                .or_else(|| client.uncatalogued.clone()),
+                .then_some(SubscriptionServerFailureCode::StrandedStore)
+                .or_else(|| {
+                    client
+                        .uncatalogued
+                        .as_ref()
+                        .map(subscription_server_failure_code)
+                }),
         ));
         let global = Rc::new(StdCell::new(false));
         let read = self.active_read(
@@ -7445,6 +7463,57 @@ impl Inner {
         let (query, include_deleted, view) = upstream_read(query, include_deleted, view);
         let key = remote_key(&query, binding, include_deleted, &view, reach);
         self.release_upstream_read(&key);
+    }
+
+    /// End a served route. Rows only this route covered become cold, as on
+    /// explicit unsubscribe; queued removals still get their final policy check.
+    fn retire_subscription(&mut self, index: usize, id: u64) -> Result<(), Error> {
+        self.sessions[index].support.remove(&id);
+        self.sessions[index].first_load.remove(&id);
+        self.sessions[index].resume.remove(&id);
+        self.sessions[index].settles.remove(&id);
+        // Rows only this subscription covered go cold: the client
+        // keeps them, unwatched, until a subscription covers them
+        // again and its opening brings them up to date.
+        self.sessions[index].watch.release(id);
+        self.sessions[index].held.release(id);
+        if let Some((query, binding, include_deleted, view)) =
+            self.sessions[index].relayed.remove(&id)
+        {
+            self.release_remote(
+                &query,
+                &binding,
+                include_deleted,
+                &view,
+                RemoteReach::REMOTE,
+            );
+        }
+        if let Some((queue, group, ..)) = self.sessions[index].subs.remove(&id) {
+            let dropped = self.fan.dropped.clone();
+            dropped.set(dropped.get() + 1);
+            // Rows the result lost since the last tick were not
+            // re-checked yet: the client may still hold them.
+            let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
+            if let Some(group) = group.upgrade() {
+                let table = group.borrow().root().to_owned();
+                for event in events {
+                    let SubscriptionEvent::Delta { removed, .. } = event else {
+                        continue;
+                    };
+                    for gone in removed {
+                        let id = gone.row_uuid.0.as_bytes().to_vec();
+                        for image in self.images_where(&table, false, "id = ?1", &[&id])? {
+                            self.sessions[index].touched.insert((
+                                table.clone(),
+                                gone.row_uuid,
+                                image.key,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -8242,7 +8311,12 @@ impl Db {
                     SyncMessage::SchemaAdmission { admitted } => {
                         inner.client.as_mut().expect("client").unadmitted = !admitted;
                     }
-                    SyncMessage::Refused { id, code, message } => {
+                    SyncMessage::Refused {
+                        id,
+                        code,
+                        message,
+                        subscription_code,
+                    } => {
                         let client = inner.client.as_mut().expect("client");
                         if client
                             .reads
@@ -8252,14 +8326,22 @@ impl Db {
                             client.reads.remove(&id);
                         }
                         let error = Error::new(code, message);
+                        let remote_subscription = client
+                            .reads
+                            .get(&id)
+                            .is_some_and(|read| read.live().is_some());
                         client.relay_ready |=
-                            client.relayed_fetches.iter().any(|f| f.upstream == id);
+                            client.relayed_fetches.iter().any(|f| f.upstream == id)
+                                || remote_subscription;
                         if let Some(slot) = client.answers.get_mut(&id) {
                             *slot = Some(Err(error));
                         } else if let Some(remote) =
                             client.reads.get(&id).and_then(ActiveRead::live)
                         {
-                            *remote.refused.borrow_mut() = Some(error);
+                            *remote.refused.borrow_mut() = Some(
+                                subscription_code
+                                    .unwrap_or_else(|| subscription_server_failure_code(&error)),
+                            );
                         }
                     }
                     SyncMessage::Stored { id } => {
@@ -8798,8 +8880,13 @@ impl Inner {
     fn refuse_upstream(&mut self, error: Error) {
         self.detach_upstream();
         if let Some(client) = self.client.as_mut() {
+            let code = if client.stranded {
+                SubscriptionServerFailureCode::StrandedStore
+            } else {
+                subscription_server_failure_code(&error)
+            };
             for remote in client.reads.values().filter_map(ActiveRead::live) {
-                *remote.refused.borrow_mut() = Some(error.clone());
+                *remote.refused.borrow_mut() = Some(code);
             }
         }
     }
@@ -8943,6 +9030,7 @@ impl Inner {
             };
             match answer {
                 Some(Err(error)) => refused.push(SyncMessage::Refused {
+                    subscription_code: None,
                     id: *id,
                     code: error.code,
                     message: error.message,
@@ -9833,6 +9921,7 @@ impl Db {
                         .outbox
                         .push(SyncMessage::Refused {
                             id,
+                            subscription_code: None,
                             code: error.code,
                             message: error.message,
                         });
@@ -10070,6 +10159,38 @@ impl Db {
                     }
                 }
             }
+            // A relay's local group can still produce rows after its upstream
+            // subscription has failed. Forward that typed terminal failure
+            // using the downstream subscription id, even if the session has
+            // no other queued work.
+            let mut rejected_routes: Vec<(u64, SubscriptionServerFailureCode)> = {
+                let session = &inner.sessions[index];
+                if let Some(client) = inner.client.as_ref() {
+                    session
+                        .relayed
+                        .iter()
+                        .filter(|(id, _)| session.subs.contains_key(id))
+                        .filter_map(|(id, (query, binding, include_deleted, view))| {
+                            let key = remote_key(
+                                &remote_query(query),
+                                binding,
+                                *include_deleted,
+                                view,
+                                RemoteReach::REMOTE,
+                            );
+                            let error = client
+                                .live_reads
+                                .get(&key)
+                                .and_then(|id| client.reads.get(id))
+                                .and_then(ActiveRead::live)
+                                .and_then(|remote| *remote.refused.borrow())?;
+                            Some((*id, error))
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            };
             // The session's branch views over a base: a head row written
             // over a base row, or a base row written under a head row, masks
             // (or stops masking) that base row, if the reader may see it
@@ -10109,7 +10230,8 @@ impl Db {
                     }
                 }
             }
-            if recheck.is_empty()
+            if rejected_routes.is_empty()
+                && recheck.is_empty()
                 && masking.is_empty()
                 && inner.sessions[index].idle()
                 && !inner.sessions[index].catalogue_owed
@@ -10203,10 +10325,21 @@ impl Db {
                     opening_masks
                         .extend(group.borrow().masks().iter().map(|mask| (id, mask.clone())));
                 }
-                // A relay's result settles once its upstream answered.
-                let answered = events
+                let event_rejections: Vec<_> = events
                     .iter()
-                    .any(|event| matches!(event, SubscriptionEvent::Delta { settled: true, .. }));
+                    .filter_map(|event| match event {
+                        SubscriptionEvent::Rejected { code } => Some(*code),
+                        _ => None,
+                    })
+                    .collect();
+                let upstream_failed = rejected_routes.iter().any(|(failed, _)| *failed == id);
+                rejected_routes.extend(event_rejections.iter().map(|code| (id, *code)));
+                // A relay's result settles once its upstream answered.
+                let answered = !upstream_failed
+                    && event_rejections.is_empty()
+                    && events.iter().any(|event| {
+                        matches!(event, SubscriptionEvent::Delta { settled: true, .. })
+                    });
                 let global = events.iter().any(|event| {
                     matches!(event, SubscriptionEvent::Delta { settled: true, tier, .. } if *tier == DurabilityTier::Global)
                 });
@@ -10239,6 +10372,7 @@ impl Db {
                 // resumes from: not shipped, but watched again, and their
                 // supporting rows followed (and shipped where they changed).
                 let mut held = Vec::new();
+                let mut terminal = upstream_failed;
                 // Unchanged for a resumed client: a version it held as of
                 // `since` that was in the result then. A row whose
                 // membership inputs changed may have entered the result
@@ -10263,7 +10397,11 @@ impl Db {
                 let mut versions: BTreeMap<String, Vec<(RowUuid, Pos)>> = BTreeMap::new();
                 let mut joined_rows = Vec::new();
                 let mut leaving: BTreeMap<&str, Vec<RowUuid>> = BTreeMap::new();
+                let mut collecting = !upstream_failed;
                 for event in &events {
+                    if matches!(event, SubscriptionEvent::Rejected { .. }) {
+                        collecting = false;
+                    }
                     let SubscriptionEvent::Delta {
                         added,
                         updated,
@@ -10274,7 +10412,7 @@ impl Db {
                     else {
                         continue;
                     };
-                    for row in added.iter().chain(updated.iter()) {
+                    for row in added.iter().chain(updated.iter()).filter(|_| collecting) {
                         joined_rows.extend(
                             joined_tables
                                 .iter()
@@ -10343,9 +10481,13 @@ impl Db {
                         ..
                     } = event
                     else {
+                        terminal = true;
                         continue;
                     };
-                    for row in added.iter().chain(updated.iter()) {
+                    // Stop publishing result additions after rejection, but
+                    // still re-check every removal: the replica may hold a row
+                    // whose permission was revoked after the queued failure.
+                    for row in added.iter().chain(updated.iter()).filter(|_| !terminal) {
                         for _ in row.joined_rows().iter().take(joined_tables.len()) {
                             images.extend(joined_images.next().unwrap_or_default());
                         }
@@ -10735,6 +10877,18 @@ impl Db {
             out.extend(evictions);
             out.extend(std::mem::take(&mut session.outbox));
             out.extend(settled);
+            rejected_routes.sort_by_key(|(id, _)| *id);
+            rejected_routes.dedup_by_key(|(id, _)| *id);
+            out.extend(
+                rejected_routes
+                    .iter()
+                    .map(|(id, code)| SyncMessage::Refused {
+                        id: *id,
+                        code: ErrorCode::Protocol,
+                        message: "served subscription failed".to_owned(),
+                        subscription_code: Some(*code),
+                    }),
+            );
             // The connection's position follows the tick's rows, settles
             // and fates, when it moved: a read's settle no longer moves what
             // the replica knows, and rows shipped past that position would
@@ -10940,6 +11094,12 @@ impl Db {
                     inner.forget_relayed(index);
                     break;
                 }
+            }
+            if !rejected_routes.is_empty() {
+                for (id, _) in rejected_routes {
+                    inner.retire_subscription(index, id)?;
+                }
+                inner.fan.collect();
             }
         }
         Ok(())
@@ -11274,52 +11434,7 @@ impl Db {
                 session.welcome_owed = true;
             }
             SyncMessage::Unsubscribe { id } => {
-                let mut inner = self.inner.borrow_mut();
-                inner.sessions[index].support.remove(&id);
-                inner.sessions[index].first_load.remove(&id);
-                inner.sessions[index].resume.remove(&id);
-                inner.sessions[index].settles.remove(&id);
-                // Rows only this subscription covered go cold: the client
-                // keeps them, unwatched, until a subscription covers them
-                // again and its opening brings them up to date.
-                inner.sessions[index].watch.release(id);
-                inner.sessions[index].held.release(id);
-                if let Some((query, binding, include_deleted, view)) =
-                    inner.sessions[index].relayed.remove(&id)
-                {
-                    inner.release_remote(
-                        &query,
-                        &binding,
-                        include_deleted,
-                        &view,
-                        RemoteReach::REMOTE,
-                    );
-                }
-                if let Some((queue, group, ..)) = inner.sessions[index].subs.remove(&id) {
-                    let dropped = inner.fan.dropped.clone();
-                    dropped.set(dropped.get() + 1);
-                    // Rows the result lost since the last tick were not
-                    // re-checked yet: the client may still hold them.
-                    let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
-                    if let Some(group) = group.upgrade() {
-                        let table = group.borrow().root().to_owned();
-                        for event in events {
-                            let SubscriptionEvent::Delta { removed, .. } = event else {
-                                continue;
-                            };
-                            for gone in removed {
-                                let id = gone.row_uuid.0.as_bytes().to_vec();
-                                for image in inner.images_where(&table, false, "id = ?1", &[&id])? {
-                                    inner.sessions[index].touched.insert((
-                                        table.clone(),
-                                        gone.row_uuid,
-                                        image.key,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
+                self.inner.borrow_mut().retire_subscription(index, id)?;
             }
             SyncMessage::CheckAllowed { id, action, acting } => {
                 // As for a commit: a trusted link may ask for a session it
@@ -11492,6 +11607,7 @@ impl Db {
                     Err(error) => {
                         inner.sessions[index].outbox.push(SyncMessage::Refused {
                             id,
+                            subscription_code: None,
                             code: error.code,
                             message: error.message,
                         });

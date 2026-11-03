@@ -876,6 +876,30 @@ rows here (they may have arrived through another read), goes out as a
 `Settled` without members, and a move of `served_through` as a
 `ConnectionSettled` to every session it has sent one before.
 
+## SQLite served-subscription refusal (unshipped alpha.60)
+
+The SQLite sync wire v1 `Refused` frame appends
+`subscription_code: Option<SubscriptionServerFailureCode>` after its message.
+`None` is encoded as `00`; `Some` is `01` followed by category ordinal 0–7:
+TableNotFound, SchemaResolution, QueryValidation, QueryLowering,
+PolicyEvaluation, QueryResultProtocol, Internal, StrandedStore. `StrandedStore`
+is appended at ordinal 7, preserving the existing ordinals. It identifies a
+store that committed writes before becoming a replica: those writes stay local
+and cannot upload (`INV-SYNC-51`). Relays preserve this typed category; message
+text has no classification role.
+
+This updates the unshipped alpha.60 SQLite layout, not storage bytes. Peers
+must use matching alpha.60 builds; no compatibility with earlier development
+layouts is claimed. The pinned `sqlite_sync_wire_v1.json` refusal and the
+`served_refusal_has_a_typed_wire_category` byte assertion define both shapes.
+After alpha.60 ships, changing this layout requires a new wire version and
+corpus, as specified by the corpus producer.
+
+A served-subscription failure retires the route just like explicit unsubscribe.
+Rows no other active read covers become cold cached copies. Revocations already
+queued at retirement still remove inaccessible rows; later permission changes
+are checked when a fresh read covers those rows again.
+
 ## Open Questions
 
 - 🔶 [#1784](https://github.com/garden-co/jazz/issues/1784) — Relay aggregation of equal reads from several sessions onto one upstream read, and coverage between reads.

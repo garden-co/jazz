@@ -186,12 +186,14 @@ fn some(value: &str) -> Option<Value> {
     )))))
 }
 
-/// The reason the first `Rejected` event `stream` holds gives, if any.
-fn rejection(stream: &mut jazz::db::SubscriptionStream) -> Option<String> {
+/// The typed reason the first `Rejected` event `stream` holds gives, if any.
+fn rejection(
+    stream: &mut jazz::db::SubscriptionStream,
+) -> Option<jazz::db::SubscriptionServerFailureCode> {
     let mut rejected = None;
     while let Some(event) = stream.try_next_event() {
-        if let SubscriptionEvent::Rejected { reason } = event {
-            rejected.get_or_insert(reason);
+        if let SubscriptionEvent::Rejected { code } = event {
+            rejected.get_or_insert(code);
         }
     }
     rejected
@@ -219,8 +221,10 @@ fn a_store_that_wrote_before_becoming_a_replica_refuses_its_upstream() {
             let q = client.prepare_query(&Query::from("notes")).unwrap();
             let mut stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
             pump(&server, &[&client]);
-            let reason = rejection(&mut stream).expect("the remote read says why");
-            assert!(reason.contains("before it became a replica"), "{reason}");
+            assert_eq!(
+                rejection(&mut stream),
+                Some(jazz::db::SubscriptionServerFailureCode::StrandedStore)
+            );
             assert_eq!(ids(&client), vec![2]);
             assert_eq!(ids(&server), on_server);
         }
@@ -230,10 +234,34 @@ fn a_store_that_wrote_before_becoming_a_replica_refuses_its_upstream() {
         let q = client.prepare_query(&Query::from("notes")).unwrap();
         let mut stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
         pump(&server, &[&client]);
-        assert!(rejection(&mut stream).is_some());
+        assert_eq!(
+            rejection(&mut stream),
+            Some(jazz::db::SubscriptionServerFailureCode::StrandedStore)
+        );
         assert_eq!(ids(&client), vec![2]);
         assert_eq!(ids(&server), on_server);
     }
+}
+
+/// Alice's subscription opened before connecting keeps the stranded-store
+/// reason when connecting resets the remote state and refuses Bob.
+#[test]
+fn a_stranded_store_refuses_an_existing_subscription_on_connect() {
+    let dir = tempfile::tempdir().unwrap();
+    let bob = authority_at(v1(), &dir.path().join("server.sqlite"));
+    let alice = open_at(v1(), 1, &dir.path().join("client.sqlite"));
+    insert(&alice, 2, &[("title", "written standalone")]);
+    alice.become_replica();
+    let query = alice.prepare_query(&Query::from("notes")).unwrap();
+    let mut stream = block_on(alice.subscribe(&query, ReadOpts::default())).unwrap();
+    let _link = link(&alice, &bob);
+    pump(&bob, &[&alice]);
+    assert_eq!(
+        rejection(&mut stream),
+        Some(jazz::db::SubscriptionServerFailureCode::StrandedStore)
+    );
+    assert_eq!(ids(&alice), vec![2]);
+    assert!(ids(&bob).is_empty());
 }
 
 /// A store that becomes a replica before it writes uploads what it wrote

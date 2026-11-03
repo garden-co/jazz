@@ -91,6 +91,9 @@ pub(super) struct Group {
     awaiting: bool,
     /// Whether the opening was published.
     opened: bool,
+    #[cfg(any(test, feature = "testing"))]
+    /// One-shot simulated prepared-membership decoding failure.
+    refresh_failure_for_test: Option<Error>,
     /// Under a branch view, per branched stored table, the branch keys it
     /// reads (its head, and its live base): a change on any other key of
     /// that table cannot move the result.
@@ -184,6 +187,22 @@ fn stored_canon(column: Option<&crate::values::Column>, value: String) -> String
 }
 
 impl Fanout {
+    #[cfg(any(test, feature = "testing"))]
+    pub(super) fn fail_next_membership_refresh_for_test(
+        &mut self,
+        table: &str,
+        error: Error,
+    ) -> bool {
+        for group in self.groups.values() {
+            let mut group = group.borrow_mut();
+            if group.root == table && !group.prepared.query.array_subqueries.is_empty() {
+                group.refresh_failure_for_test = Some(error);
+                return true;
+            }
+        }
+        false
+    }
+
     fn index(&mut self, gid: u64, watches: &[Watch]) {
         for watch in watches {
             match watch {
@@ -427,6 +446,8 @@ impl Inner {
             includes,
             awaiting,
             opened: !awaiting,
+            #[cfg(any(test, feature = "testing"))]
+            refresh_failure_for_test: None,
             branches,
             masks,
             tables,
@@ -1298,7 +1319,7 @@ impl Inner {
                 self.read_keys(group);
             }
             Err(error) => group.push(SubscriptionEvent::Rejected {
-                reason: error.to_string(),
+                code: sync::subscription_server_failure_code(&error),
             }),
         }
     }
@@ -1401,6 +1422,13 @@ impl Inner {
 
     /// Bring a group's result up to date; true when it re-ran the query.
     fn refresh_group(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) -> bool {
+        #[cfg(any(test, feature = "testing"))]
+        if let Some(error) = group.refresh_failure_for_test.take() {
+            group.push(SubscriptionEvent::Rejected {
+                code: sync::subscription_server_failure_code(&error),
+            });
+            return true;
+        }
         // The versions the result showed, which splices start from.
         let prior: HashMap<RowUuid, CurrentRow> = if group.key.splices.is_empty() {
             HashMap::new()
@@ -1419,7 +1447,7 @@ impl Inner {
                 Some(Err(error)) if crate::large::is_missing(&error) => {}
                 Some(Err(error)) => {
                     group.push(SubscriptionEvent::Rejected {
-                        reason: error.to_string(),
+                        code: sync::subscription_server_failure_code(&error),
                     });
                     return false;
                 }
@@ -1434,7 +1462,7 @@ impl Inner {
             }
             Err(error) => {
                 let event = SubscriptionEvent::Rejected {
-                    reason: error.to_string(),
+                    code: sync::subscription_server_failure_code(&error),
                 };
                 group.push(event);
                 return true;

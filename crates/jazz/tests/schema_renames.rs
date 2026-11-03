@@ -1179,14 +1179,16 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
     pump(&server, &[&client]);
     let mut rejected = None;
     while let Some(event) = stream.try_next_event() {
-        if let jazz::db::SubscriptionEvent::Rejected { reason } = event {
-            rejected = Some(reason);
+        if let jazz::db::SubscriptionEvent::Rejected { code } = event {
+            rejected = Some(code);
         }
     }
-    let reason = rejected.expect("the remote read says why");
-    assert!(
-        reason.contains("not supported") && !reason.contains("before it became a replica"),
-        "{reason}"
+    let code = rejected.expect("the remote read says why");
+    // Unsupported catalogue mirroring is a Query error on main. Preserve
+    // that classification when exposing the client-safe failure category.
+    assert_eq!(
+        code,
+        jazz::db::SubscriptionServerFailureCode::QueryValidation
     );
     // One opened after the refusal says why at once, never waiting on an
     // upstream this store stopped syncing with.
@@ -1197,11 +1199,11 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
     pump(&server, &[&client]);
     let mut rejected = None;
     while let Some(event) = stream.try_next_event() {
-        if let jazz::db::SubscriptionEvent::Rejected { reason } = event {
-            rejected = Some(reason);
+        if let jazz::db::SubscriptionEvent::Rejected { code } = event {
+            rejected = Some(code);
         }
     }
-    assert_eq!(rejected.as_deref(), Some(reason.as_str()));
+    assert_eq!(rejected, Some(code));
     assert_eq!(
         read_query(&client, Query::from("tasks"), "name", local()),
         [text("local task")]
@@ -1386,8 +1388,8 @@ fn a_write_naming_columns_the_server_does_not_store_is_refused() {
     pump(&server, &[&lensless]);
     let mut rejected = None;
     while let Some(event) = stream.try_next_event() {
-        if let SubscriptionEvent::Rejected { reason } = event {
-            rejected = Some(reason);
+        if let SubscriptionEvent::Rejected { code } = event {
+            rejected = Some(code);
         }
     }
     assert!(rejected.is_some(), "the remote read says why");

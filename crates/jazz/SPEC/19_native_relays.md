@@ -600,6 +600,20 @@ cleanup; the next bounded `Tick` performs its finalization, because awaiting
 that acknowledgement while already executing on the core owner thread would
 deadlock. Repeated close or unsubscribe reports `false`.
 
+**Subscription rejection compatibility (ABI 3).** The foreground Postcard
+encoding remains response ordinal `4` (`SubscriptionEvents`), an event vector,
+and event ordinal `1` (`Rejected`) with one UTF-8 string. New native builds put
+a stable `SubscriptionServerFailureCode` name in that string. Earlier builds
+put diagnostic text there. New JavaScript accepts both: recognized names become
+typed failure codes, and every other valid string becomes `Internal` without
+exposing diagnostic text. Older JavaScript still decodes the string as its
+rejection reason. Thus an OTA bundle can use an existing ABI 3 native build,
+and an older bundle can read a new native build; neither direction changes
+the rejection's meaning or its byte layout. Truncated strings, invalid UTF-8,
+and trailing bytes still fail decoding. Rust and RN byte fixtures pin both
+the typed and legacy forms. A rejection ends the subscription and is never a
+successful settlement or a write outcome.
+
 ABI V1 also includes a deliberately narrow write family: `BeginTransaction` with
 the ordinary `mergeable` or `serializable` core semantics, full-cell
 `Insert`/`Update`/`Upsert`/`Delete`, `CommitTransaction`, and
