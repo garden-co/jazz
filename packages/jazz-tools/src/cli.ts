@@ -15,6 +15,7 @@ import {
 } from "./dev/catalogue-project.js";
 import { renderMigrationGraph } from "./dev/migration-graph.js";
 import { isCloudCommand, runCloudCommand } from "./cloud/commands.js";
+import { runInspectCommand } from "./inspect/cli.js";
 
 export interface BuildOptions {
   schemaDir: string;
@@ -343,6 +344,9 @@ function printHelp(): void {
   console.log("  login | logout | whoami");
   console.log("                        Sign in to Jazz Cloud with your dashboard account");
   console.log("  teams, apps           Manage Jazz Cloud teams and apps (see `apps --help`)");
+  console.log(
+    "  inspect <command>     Read and change an app's data through its backend (see `inspect --help`)",
+  );
   console.log("\nValidation options:");
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log("  --strict-provenance   Reject conventional duplicates of Jazz provenance");
@@ -373,7 +377,9 @@ if (isMainModule()) {
   const command = args[0] ?? "";
   // Cloud commands (login, apps, ...) have their own help.
   const cloudCommand = isCloudCommand(command);
-  if (!cloudCommand && args.some((arg) => arg === "--help" || arg === "-h")) {
+  // Cloud commands and `inspect` have their own help.
+  const ownHelp = cloudCommand || command === "inspect";
+  if (!ownHelp && args.some((arg) => arg === "--help" || arg === "-h")) {
     printHelp();
     process.exit(0);
   }
@@ -385,7 +391,37 @@ if (isMainModule()) {
     loadDotEnv();
   }
 
-  if (cloudCommand) {
+  if (command === "inspect" && args[1] === "mcp") {
+    const rest = args.slice(2);
+    if (rest.some((arg) => arg === "--help" || arg === "-h")) {
+      console.log(
+        "Usage: jazz-tools inspect mcp [--app <url>]\n\nServe the app's Inspector API as an MCP server over stdio.\nAdd it to an agent with e.g. `claude mcp add jazz -- npx jazz-tools inspect mcp --app <url>`.",
+      );
+      process.exit(0);
+    }
+    const appIndex = rest.findIndex((arg) => arg === "--app" || arg.startsWith("--app="));
+    const app =
+      appIndex === -1
+        ? undefined
+        : rest[appIndex]!.startsWith("--app=")
+          ? rest[appIndex]!.slice("--app=".length)
+          : rest[appIndex + 1];
+    void import("./inspect/mcp.js").then(({ runMcpServer }) =>
+      runMcpServer((app ? { app } : {})).then(
+        () => process.exit(0),
+        (error: unknown) => {
+          console.error(error);
+          process.exit(1);
+        },
+      ),
+    );
+  } else if (command === "inspect") {
+    runInspectCommand(args.slice(1), {
+      stdout: (text) => process.stdout.write(text),
+      stderr: (text) => process.stderr.write(text),
+      env: process.env,
+    }).then((code) => process.exit(code));
+  } else if (cloudCommand) {
     runCloudCommand(args, {
       stdout: (text) => process.stdout.write(text),
       stderr: (text) => process.stderr.write(text),

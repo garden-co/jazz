@@ -139,6 +139,9 @@ function printWrapperHelp() {
   console.log("  whoami                Show the signed-in Jazz Cloud user and teams");
   console.log("  teams list            List your Jazz Cloud teams");
   console.log("  apps <command>        Manage Jazz Cloud apps (run `apps --help`)");
+  console.log(
+    "  inspect <command>     Read and change an app's data through its backend (run `inspect --help`)",
+  );
   console.log("  create                Create a new resource");
   console.log("  server                Run a Jazz server");
   console.log("  help                  Print this message");
@@ -167,7 +170,8 @@ if (!command || command === "--help" || command === "-h") {
   command === "logout" ||
   command === "whoami" ||
   command === "teams" ||
-  command === "apps"
+  command === "apps" ||
+  command === "inspect"
 ) {
   const tsCliPath = join(here, "..", "dist", "cli.js");
   if (!existsSync(tsCliPath)) {

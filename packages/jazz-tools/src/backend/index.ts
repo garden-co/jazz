@@ -47,4 +47,8 @@ export {
   type JazzUser,
   type VercelStoreOptions,
   type WsLikeSocket,
+  type InspectEvent,
+  type InspectGrant,
+  type InspectHook,
+  type InspectorOptions,
 } from "./create-jazz.js";
