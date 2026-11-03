@@ -19,7 +19,9 @@ pub use account_session::{
 };
 mod node_lease;
 mod relay;
+mod text_anchors;
 pub use relay::*;
+pub use text_anchors::jazz_native_relay_text_anchors;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;

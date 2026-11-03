@@ -55,6 +55,14 @@ jazz_native_relay_status jazz_native_relay_mint_local_first_token(
     uint64_t ttl_seconds, uint64_t now_seconds,
     jazz_native_relay_bytes *out);
 
+/* Stateless text anchors and ranges (jazz-text). request is UTF-8 JSON
+ * {"op": "captureAnchor" | "resolveAnchor" | "captureRange" | "resolveRange", ...};
+ * out receives the result as UTF-8 JSON. Release it with
+ * jazz_native_relay_bytes_free. */
+jazz_native_relay_status jazz_native_relay_text_anchors(
+    const uint8_t *request, size_t request_len,
+    jazz_native_relay_bytes *out);
+
 typedef struct jazz_native_relay_host jazz_native_relay_host;
 typedef struct jazz_native_relay_host_lease jazz_native_relay_host_lease;
 typedef void (*jazz_native_relay_foreground_wake_callback)(void *context, uint64_t foreground, uint8_t wake_kind, uint64_t delay_ms);
