@@ -1,8 +1,8 @@
 //! Subscription fan-out: shared execution and keyed invalidation.
 //!
-//! Subscriptions whose compiled SQL and parameters are identical share one
-//! live result (a `Group`); a session-independent shape (a public feed) is
-//! one group however many identities watch it. Each group declares
+//! Subscriptions with the same author, claims provenance, compiled SQL and
+//! parameters share one live result (a `Group`). Keeping their scope distinct
+//! also covers policies introduced later. Each group declares
 //! `Watch`es: the tables it reads, narrowed where the query or its read
 //! policy pins a column to one value (a root filter `room = R`, a policy
 //! `EXISTS memberships WHERE member = session.user`). A commit's changed
@@ -33,9 +33,11 @@ struct GroupKey {
     renames: String,
     sql: String,
     params: String,
-    /// Set only when the SQL depends on the identity's session (array
-    /// relations, read as the identity, always may).
-    identity: Option<String>,
+    /// Keep the author even when today's policy is public: a later owner
+    /// policy may depend on the session identity.
+    identity: String,
+    /// Preserve registry-following versus explicit (including empty) claims.
+    request_claims: String,
     /// The array relations nested in each row: queries that differ only
     /// in them compile to the same root SQL.
     relations: String,
@@ -228,7 +230,9 @@ impl Fanout {
     fn drop_group(&mut self, gid: u64) {
         if let Some(group) = self.groups.remove(&gid) {
             let group = group.borrow();
-            self.by_key.remove(&group.key);
+            if self.by_key.get(&group.key) == Some(&gid) {
+                self.by_key.remove(&group.key);
+            }
             self.unindex(gid, &group.watches);
         }
     }
@@ -303,7 +307,27 @@ impl Fanout {
 }
 
 impl Inner {
-    /// Open a subscription: join the group with identical SQL, or start one.
+    fn group_key(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        compiled: &Compiled,
+    ) -> GroupKey {
+        GroupKey {
+            renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
+            sql: compiled.sql.clone(),
+            params: format!("{:?}", compiled.params),
+            identity: format!("{identity:?}"),
+            request_claims: format!("{:?}", prepared.request_claims),
+            relations: format!("{:?}", prepared.query.array_subqueries),
+            partial: format!("{:?}", compiled.partial),
+            splices: read.splices.clone(),
+            position: format!("{:?}", read.position),
+        }
+    }
+
+    /// Open a subscription: join the group with identical SQL and scope, or start one.
     pub(super) fn subscribe_member(
         &mut self,
         prepared: &PreparedQuery,
@@ -312,18 +336,8 @@ impl Inner {
         settled: sync::SettledBy,
     ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
         self.check_splices(&prepared.query, &read.splices)?;
-        let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
-        let key = GroupKey {
-            renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
-            sql: compiled.sql.clone(),
-            params: format!("{:?}", compiled.params),
-            identity: (session_used || !prepared.query.array_subqueries.is_empty())
-                .then(|| format!("{identity:?}")),
-            relations: format!("{:?}", prepared.query.array_subqueries),
-            partial: format!("{:?}", compiled.partial),
-            splices: read.splices.clone(),
-            position: format!("{:?}", read.position),
-        };
+        let (compiled, _) = self.compile_tracked(prepared, identity, &read)?;
+        let key = self.group_key(prepared, identity, &read, &compiled);
         let now = settled.get();
         let member = |queue: &Queue| Member {
             queue: Rc::downgrade(queue),
@@ -818,10 +832,20 @@ impl Inner {
             }
             let old = std::mem::take(&mut group.watches);
             self.fan.unindex(gid, &old);
+            // Retire only this group's old key. Another refreshed group may
+            // now own the same key; its index entry must survive cancellation.
+            if self.fan.by_key.get(&group.key) == Some(&gid) {
+                self.fan.by_key.remove(&group.key);
+            }
             let watches = self
                 .compile(&group.prepared, group.identity, &group.read)
                 .and_then(|compiled| {
-                    self.watches(&group.prepared, group.identity, &group.read, &compiled)
+                    let watches =
+                        self.watches(&group.prepared, group.identity, &group.read, &compiled)?;
+                    group.key =
+                        self.group_key(&group.prepared, group.identity, &group.read, &compiled);
+                    self.fan.by_key.entry(group.key.clone()).or_insert(gid);
+                    Ok(watches)
                 })
                 .unwrap_or(old);
             self.fan.index(gid, &watches);
