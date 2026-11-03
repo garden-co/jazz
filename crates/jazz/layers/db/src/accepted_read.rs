@@ -123,7 +123,7 @@ impl Db {
             cut: Some(Cut::at(Pos::at(through))),
             include_deleted,
             settled_only: true,
-            ..ReadSpec::default()
+            ..ReadSpec::new(self.governance.clone())
         };
         let rows = inner.run(prepared, identity, &read)?;
         let mut evidence = Vec::with_capacity(rows.len());

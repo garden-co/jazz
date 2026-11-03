@@ -272,8 +272,10 @@ pub enum SubscriptionEvent {
 }
 
 /// What a read observes: deletions and the branch view.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct ReadSpec {
+    // Bound by the executing Db, never copied from PreparedQuery.
+    governance: Governance,
     include_deleted: bool,
     /// A replica's `ReadTier::Remote` read: its pending local versions
     /// (at `_clock >= 1<<52`) are left out, and a row they changed
@@ -313,7 +315,19 @@ enum Position {
 }
 
 impl ReadSpec {
-    fn of(opts: &ReadOpts, inner: &Inner) -> Result<Self, Error> {
+    fn new(governance: Governance) -> Self {
+        Self {
+            governance,
+            include_deleted: false,
+            settled_only: false,
+            view: None,
+            cut: None,
+            position: Position::Current,
+            splices: Vec::new(),
+        }
+    }
+
+    fn of(opts: &ReadOpts, inner: &Inner, governance: Governance) -> Result<Self, Error> {
         let mut cut = None;
         let view = match &opts.read_view.source {
             ReadViewSourceSpec::Current => None,
@@ -341,6 +355,7 @@ impl ReadSpec {
             inner.check_not_stranded()?;
         }
         Ok(Self {
+            governance,
             include_deleted: opts.read_view.include_deleted,
             settled_only: inner.client.is_some() && opts.tier == ReadTier::Remote,
             view,
@@ -706,17 +721,24 @@ pub struct Db {
 
 /// Policy provenance is selected by trusted handle/session construction,
 /// never inferred from the schema carrying an operation's names.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum Governance {
     CurrentOwner,
-    Selected(Rc<Schema>),
+    Selected(Rc<Schema>, crate::catalogue::BundleId),
 }
 
 impl Governance {
+    fn key(&self) -> Option<crate::catalogue::BundleId> {
+        match self {
+            Self::CurrentOwner => None,
+            Self::Selected(_, bundle) => Some(*bundle),
+        }
+    }
+
     fn policies(&self, inner: &Inner) -> Rc<Schema> {
         match self {
             Self::CurrentOwner => inner.owner.clone(),
-            Self::Selected(policies) => policies.clone(),
+            Self::Selected(policies, _) => policies.clone(),
         }
     }
 }
@@ -1667,7 +1689,7 @@ impl Db {
     fn governing_schema(&self, inner: &Inner) -> Rc<Schema> {
         match (&self.view, &self.governance) {
             (None, _) => self.governance.policies(inner),
-            (Some(view), Governance::Selected(_)) => view.clone(),
+            (Some(view), Governance::Selected(_, _)) => view.clone(),
             (Some(view), Governance::CurrentOwner) => {
                 Rc::new((**view).clone().with_policies_of(inner.owner.clone()))
             }
@@ -1996,7 +2018,8 @@ impl Db {
         identity: Option<AuthorSubject>,
     ) -> Result<(String, String), Error> {
         let inner = self.inner();
-        let compiled = inner.compile(prepared, identity, &ReadSpec::default())?;
+        let compiled =
+            inner.compile(prepared, identity, &ReadSpec::new(self.governance.clone()))?;
         let mut statement = inner
             .conn
             .prepare(&format!("EXPLAIN QUERY PLAN {}", compiled.sql))
@@ -2126,7 +2149,11 @@ impl Db {
     ) -> Result<Vec<CurrentRow>, Error> {
         self.fetching(|| {
             let inner = self.inner();
-            inner.run(prepared, None, &ReadSpec::of(&opts, &inner)?)
+            inner.run(
+                prepared,
+                None,
+                &ReadSpec::of(&opts, &inner, self.governance.clone())?,
+            )
         })
         .await
     }
@@ -2138,12 +2165,17 @@ impl Db {
         prepared: &PreparedQuery,
         roots: Vec<CurrentRow>,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.inner()
-            .nest_relations(prepared, None, &ReadSpec::default(), roots)
+        self.inner().nest_relations(
+            prepared,
+            None,
+            &ReadSpec::new(self.governance.clone()),
+            roots,
+        )
     }
 
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
-        self.inner().run(prepared, None, &ReadSpec::default())
+        self.inner()
+            .run(prepared, None, &ReadSpec::new(self.governance.clone()))
     }
 
     pub async fn all_for_identity(
@@ -2153,7 +2185,11 @@ impl Db {
         identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         let inner = self.inner();
-        inner.run(prepared, Some(identity), &ReadSpec::of(&opts, &inner)?)
+        inner.run(
+            prepared,
+            Some(identity),
+            &ReadSpec::of(&opts, &inner, self.governance.clone())?,
+        )
     }
 
     pub async fn all_result_tree(
@@ -2162,7 +2198,7 @@ impl Db {
         opts: ReadOpts,
     ) -> Result<ResultTree, Error> {
         let inner = self.inner();
-        let read = ReadSpec::of(&opts, &inner)?;
+        let read = ReadSpec::of(&opts, &inner, self.governance.clone())?;
         let roots = inner.run(prepared, None, &read)?;
         let mut tree = Vec::with_capacity(roots.len());
         for row in roots {
@@ -2207,7 +2243,7 @@ impl Db {
         identity: Option<AuthorSubject>,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
-        let read = ReadSpec::of(&opts, &self.inner())?;
+        let read = ReadSpec::of(&opts, &self.inner(), self.governance.clone())?;
         let client = self.is_client();
         let non_durable = self.inner().non_durable;
         // A branch view's head (and live base) is kept current upstream,
@@ -3751,8 +3787,18 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<Compiled, Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
-        self.read_ctx(prepared, policy.as_ref(), &claims, read)
+        let schema = self.read_schema(prepared, read);
+        self.read_ctx(prepared, &schema, policy.as_ref(), &claims, read)
             .compile_query(&prepared.query, read.include_deleted)
+    }
+
+    fn read_schema(&self, prepared: &PreparedQuery, read: &ReadSpec) -> Rc<Schema> {
+        let names = prepared.schema.as_ref().unwrap_or(&self.owner);
+        Rc::new(
+            (**names)
+                .clone()
+                .with_policies_of(read.governance.policies(self)),
+        )
     }
 
     /// The compile context of a read of `prepared` (or of one of its
@@ -3760,11 +3806,11 @@ impl Inner {
     pub(crate) fn read_ctx<'s>(
         &'s self,
         prepared: &'s PreparedQuery,
+        schema: &'s Schema,
         policy: Option<&'s Session>,
         claims: &'s Session,
         read: &ReadSpec,
     ) -> Ctx<'s> {
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         Ctx::new(schema, policy, claims, &prepared.binding)
             .with_view(read.view.clone())
             .with_withheld(self.withheld.get())
@@ -4101,7 +4147,8 @@ impl Inner {
         let mut relations = BTreeMap::new();
         for array in arrays {
             let (policy, claims) = self.read_sessions(prepared, identity);
-            let ctx = || self.read_ctx(prepared, policy.as_ref(), &claims, read);
+            let schema = self.read_schema(prepared, read);
+            let ctx = || self.read_ctx(prepared, &schema, policy.as_ref(), &claims, read);
             let parent = if array.outer_column == "id" {
                 Value::Uuid(row.id.0)
             } else {
@@ -7102,7 +7149,7 @@ impl Db {
         Ok(Some(Db {
             inner: self.inner.clone(),
             view: Some(view),
-            governance: Governance::Selected(governing),
+            governance: Governance::Selected(governing, *bundle),
         }))
     }
 
@@ -7190,10 +7237,14 @@ impl Db {
                 .or_insert(schema);
             logical
         };
+        let logical = match &self.governance {
+            Governance::CurrentOwner => logical,
+            Governance::Selected(policies, _) => logical.with_policies_of(policies.clone()),
+        };
         Ok(Db {
             inner: self.inner.clone(),
             view: Some(Rc::new(logical)),
-            governance: Governance::CurrentOwner,
+            governance: self.governance.clone(),
         })
     }
 
@@ -8045,7 +8096,7 @@ impl Db {
                     }
                     let spec = ReadSpec {
                         include_deleted: read.include_deleted,
-                        ..ReadSpec::default()
+                        ..ReadSpec::new(self.governance.clone())
                     };
                     let now = inner.read_versions(&read.prepared, batch.reader(), &spec)?;
                     let changed = now.len() != read.rows.len()
@@ -8120,7 +8171,7 @@ impl Db {
             for read in reads {
                 let spec = ReadSpec {
                     include_deleted: read.include_deleted,
-                    ..ReadSpec::default()
+                    ..ReadSpec::new(self.governance.clone())
                 };
                 let governed;
                 let prepared = if read.accepted_evidence {
@@ -8502,7 +8553,7 @@ impl Db {
         let read = ReadSpec {
             include_deleted,
             cut: Some(inner.serializable_cut(*snapshot, own)?),
-            ..ReadSpec::default()
+            ..ReadSpec::new(self.governance.clone())
         };
         let rows = inner.read_versions(prepared, identity, &read)?;
         let scope = inner.accepted_scope_of(prepared, identity.unwrap_or(inner.identity.author));
@@ -8842,7 +8893,7 @@ impl TxRef<'_> {
             let read = ReadSpec {
                 include_deleted,
                 cut,
-                ..ReadSpec::default()
+                ..ReadSpec::new(self.db.governance.clone())
             };
             let roots = inner.run(prepared, identity, &read)?;
             inner.nest_relations(prepared, identity, &read, roots)

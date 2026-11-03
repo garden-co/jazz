@@ -231,3 +231,6 @@ mod catalogue_coverage;
 
 #[path = "../accepted_bundle_reads.rs"]
 mod accepted_bundle_reads;
+
+#[path = "../governance_ordinary.rs"]
+mod governance_ordinary;

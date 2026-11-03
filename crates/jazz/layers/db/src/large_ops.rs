@@ -176,6 +176,7 @@ impl Inner {
         row: RowUuid,
         column: &str,
         identity: Option<AuthorSubject>,
+        governance: Governance,
     ) -> Result<(crate::values::Column, Sql), Error> {
         let t = self.schema.table(table)?;
         if !t.branch_by.is_empty() {
@@ -200,9 +201,9 @@ impl Inner {
             shape: Shape([0; 16]),
             binding_id: Binding([0; 16]),
             request_claims: None,
-            schema: None,
+            schema: Some(self.schema.clone()),
         };
-        let compiled = self.compile(&prepared, identity, &ReadSpec::default())?;
+        let compiled = self.compile(&prepared, identity, &ReadSpec::new(governance))?;
         let cell: Option<Sql> = self
             .conn
             .prepare_cached(&compiled.sql)
@@ -225,8 +226,9 @@ impl Inner {
         column: &str,
         range: std::ops::Range<u64>,
         utf16: bool,
+        governance: Governance,
     ) -> Result<Vec<u8>, Error> {
-        let (col, cell) = self.physical_cell(table, row, column, self.reader())?;
+        let (col, cell) = self.physical_cell(table, row, column, self.reader(), governance)?;
         if !large_cell(&cell) {
             return Err(not_large(table, column));
         }
@@ -622,8 +624,14 @@ impl Db {
         range: std::ops::Range<u64>,
     ) -> Result<Vec<u8>, Error> {
         self.fetching(|| {
-            self.inner()
-                .read_range(table, row, column, range.clone(), false)
+            self.inner().read_range(
+                table,
+                row,
+                column,
+                range.clone(),
+                false,
+                self.governance.clone(),
+            )
         })
         .await
     }
@@ -664,8 +672,14 @@ impl Db {
     ) -> Result<String, Error> {
         let bytes = self
             .fetching(|| {
-                self.inner()
-                    .read_range(table, row, column, range.clone(), true)
+                self.inner().read_range(
+                    table,
+                    row,
+                    column,
+                    range.clone(),
+                    true,
+                    self.governance.clone(),
+                )
             })
             .await?;
         String::from_utf8(bytes).map_err(|_| query("UTF-16 range splits a surrogate pair"))
@@ -693,7 +707,8 @@ impl Db {
     ) -> Result<Option<serde_json::Value>, Error> {
         let inner = self.inner();
         let reader = inner.reader();
-        let (col, cell) = inner.physical_cell(table, row, column, reader)?;
+        let (col, cell) =
+            inner.physical_cell(table, row, column, reader, self.governance.clone())?;
         if crate::large::kind(&col) != lv::LargeValueKind::Json {
             return Err(Error::new(
                 ErrorCode::Schema,
@@ -766,7 +781,13 @@ impl Db {
             let mut inner = self.inner();
             inner.require_mutation_admission()?;
             let edited = inner
-                .physical_cell(table, row, column, identity_of(opts.identity))
+                .physical_cell(
+                    table,
+                    row,
+                    column,
+                    identity_of(opts.identity),
+                    self.governance.clone(),
+                )
                 .and_then(|(col, cell)| Ok(nullable(&col, inner.edited(table, &col, cell, edit)?)));
             match edited {
                 Ok(value) => value,
@@ -815,7 +836,14 @@ impl Db {
             let mut inner = self.inner();
             inner.require_mutation_admission()?;
             let identity = identity_of(opts.identity);
-            inner.lower_large_mutations(table, row, &mut patch, mutations, identity)
+            inner.lower_large_mutations(
+                table,
+                row,
+                &mut patch,
+                mutations,
+                identity,
+                self.governance.clone(),
+            )
         };
         if let Err(error) = lowered {
             self.inner().clear_derived();
@@ -1462,6 +1490,7 @@ impl Inner {
         patch: &mut BTreeMap<String, Value>,
         mutations: Vec<LargeValueUpdate>,
         identity: Option<AuthorSubject>,
+        governance: Governance,
     ) -> Result<(), Error> {
         for mutation in &mutations {
             let column = mutation.column();
@@ -1473,7 +1502,8 @@ impl Inner {
         }
         for mutation in mutations {
             let column = mutation.column().to_owned();
-            let (col, mut cell) = self.physical_cell(table, row, &column, identity)?;
+            let (col, mut cell) =
+                self.physical_cell(table, row, &column, identity, governance.clone())?;
             let value = match mutation {
                 LargeValueUpdate::Splice {
                     within, splices, ..
@@ -1618,7 +1648,14 @@ impl TxRef<'_> {
         };
         let edits = self.db.in_overlay(self.id, None, |inner, _| {
             let identity = identity_of(opts.identity);
-            let lowered = inner.lower_large_mutations(table, row, &mut patch, mutations, identity);
+            let lowered = inner.lower_large_mutations(
+                table,
+                row,
+                &mut patch,
+                mutations,
+                identity,
+                self.db.governance.clone(),
+            );
             let edits = crate::db::LargeEdits {
                 derived: std::mem::take(&mut inner.derived),
                 pending_nodes: std::mem::take(&mut inner.pending_nodes),
