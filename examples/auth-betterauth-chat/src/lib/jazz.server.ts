@@ -19,10 +19,12 @@ declare global {
 /** One Jazz per process, shared across Next's module graphs and reloads. */
 export function jazz(): Promise<Jazz> {
   const pending = (globalThis.__authBetterAuthChatJazz ??= createJazz({
-    appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
     app,
     permissions,
-    store: process.env.NODE_ENV === "test" ? memory() : sqlite({ path: ".jazz" }),
+    store:
+      process.env.NODE_ENV === "test"
+        ? memory({ appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID! })
+        : sqlite({ path: ".jazz", appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID! }),
     // Better Auth's session cookie decides who the user is; its `role`
     // becomes the claim the chat permissions check.
     authenticate: async (request) => {

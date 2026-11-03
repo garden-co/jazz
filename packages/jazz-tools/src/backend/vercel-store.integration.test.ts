@@ -180,7 +180,6 @@ describe("vercel() store", () => {
     onVercel({ VERCEL: "1", VERCEL_ENV: "preview", VERCEL_PROJECT_ID: "prj_test" });
 
     const jazz = await createJazz({
-      appId,
       app,
       permissions,
       store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
@@ -191,7 +190,9 @@ describe("vercel() store", () => {
     expect(fake.calls[2]).toMatch(/^start /);
     const scripts = [...fake.files.keys()].filter((path) => path.startsWith("/tmp/jazz-start-"));
     const script = fake.files.get(scripts[0]!)?.toString();
-    expect(script).toContain(`app_id='${appId}'`);
+    // No app id is named: the core keeps the one on its Drive.
+    expect(script).toContain("app_id=$(cat /proc/sys/kernel/random/uuid)");
+    expect(jazz.appId).toBe(appId);
     // The core trusts exactly the workload the function's own token names.
     expect(script).toContain(`--trusted-workload-issuer '${core.issuer}'`);
     expect(script).toContain(`--trusted-workload-audience '${AUDIENCE}'`);
@@ -200,7 +201,6 @@ describe("vercel() store", () => {
     // The backend's own database reaches the core in the Sandbox.
     const row = await jazz.db.insert(app.notes, { text: "on vercel" }).wait({ tier: "global" });
     const again = await createJazz({
-      appId,
       app,
       permissions,
       store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
@@ -221,7 +221,6 @@ describe("vercel() store", () => {
     Object.assign(fresh.state, { exists: true, drive: true });
     await expect(
       createJazz({
-        appId,
         app,
         permissions,
         store: vercel({ sdk: fresh.sdk, backendCredential: preview }),
@@ -241,7 +240,6 @@ describe("vercel() store", () => {
     const fake = fakeVercel(core);
     onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
     const jazz = await createJazz({
-      appId,
       app,
       permissions,
       store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
@@ -255,7 +253,6 @@ describe("vercel() store", () => {
     const preview = () => oidcToken(core.issuer, "owner:garden-co:project:app:environment:preview");
     await expect(
       createJazz({
-        appId,
         app,
         permissions,
         store: vercel({ sdk: fake.sdk, backendCredential: preview }),
@@ -275,7 +272,6 @@ describe("vercel() store", () => {
     const started = Date.now();
     await expect(
       createJazz({
-        appId,
         app,
         permissions,
         store: vercel({ sdk: fake.sdk, backendCredential: preview }),
@@ -292,7 +288,7 @@ describe("vercel() store", () => {
       delete process.env.VERCEL_OIDC_TOKEN;
     });
     await expect(
-      createJazz({ appId: randomUUID(), app, permissions, store: vercel({ sdk: fake.sdk }) }),
+      createJazz({ app, permissions, store: vercel({ sdk: fake.sdk }) }),
     ).rejects.toThrow(/preview deployment's OIDC token is for .*environment:production/);
     expect(fake.calls).toEqual([]);
   }, 60_000);
@@ -306,7 +302,6 @@ describe("vercel() store", () => {
     onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
 
     const jazz = await createJazz({
-      appId,
       app,
       permissions,
       store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
@@ -326,7 +321,6 @@ describe("vercel() store", () => {
     });
     const { memory } = await import("./index.js");
     const jazz = await createJazz({
-      appId,
       app,
       permissions,
       store: vercel({ sdk: fake.sdk, local: memory() }),
@@ -344,7 +338,6 @@ describe("vercel() store", () => {
     const older = fakeVercel({ ...core, appId });
     Object.assign(older.state, { exists: true, drive: true, status: "running", running: "1.0.0" });
     const upgraded = await createJazz({
-      appId,
       app,
       permissions,
       store: vercel({ sdk: older.sdk, backendCredential: core.credential }),
@@ -356,7 +349,6 @@ describe("vercel() store", () => {
     const newer = fakeVercel({ ...core, appId });
     Object.assign(newer.state, { exists: true, drive: true, status: "running", running: "99.0.0" });
     const old = await createJazz({
-      appId,
       app,
       permissions,
       store: vercel({ sdk: newer.sdk, backendCredential: core.credential }),
@@ -405,10 +397,9 @@ describe("vercel() store", () => {
     onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
     await expect(
       createJazz({
-        appId,
         app,
         permissions,
-        store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
+        store: vercel({ sdk: fake.sdk, backendCredential: core.credential, appId }),
       }),
     ).rejects.toThrow(/belongs to app/);
   }, 60_000);

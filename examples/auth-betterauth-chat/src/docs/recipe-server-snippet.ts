@@ -9,7 +9,6 @@ export const auth = betterAuth({
 });
 
 export const jazz = await createJazz({
-  appId: "my-app",
   app,
   permissions,
   store: sqlite({ path: "./data/jazz" }),

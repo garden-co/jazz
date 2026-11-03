@@ -27,13 +27,12 @@ export function jazz(): Promise<Jazz> {
   const config = assertBuildConfiguration();
   const sync = config.remote;
   const pending = (globalThis.__bandBookJazz ??= createJazz({
-    appId: config.appId,
     app,
     permissions,
     store: sync
       ? // assertBuildConfiguration checked that the admin secret is set.
-        remote({ url: sync.url, secret: sync.adminSecret! })
-      : sqlite({ path: config.dataPath }),
+        remote({ url: sync.url, appId: config.appId, secret: sync.adminSecret! })
+      : sqlite({ path: config.dataPath, appId: config.appId }),
     // Better Auth's session cookie decides who the band member is.
     authenticate: async (request) => {
       const { auth } = await import("./auth");
