@@ -1808,7 +1808,7 @@ importers:
         version: 22.19.13
       concurrently:
         specifier: ^9.1.0
-        version: 9.2.1
+        version: 9.2.5
       typescript:
         specifier: catalog:default
         version: 6.0.2
