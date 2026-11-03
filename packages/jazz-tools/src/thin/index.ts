@@ -59,6 +59,11 @@ export async function createClient(config: ThinDbConfig): Promise<Db> {
  * queries answer from local data straight away; then the thin `Db` waits for
  * its writes and shuts down. The app swaps the returned `Db` in where it held
  * the thin one.
+ *
+ * This is for a thin `Db` the app opened itself with {@link createClient}.
+ * Under a Jazz provider or `createJazzSession`, call the `Db` method
+ * `db.upgradeToLocalFirst(loader)` instead: it takes the loader, and the
+ * session swaps the new `Db` in for every component.
  */
 export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Promise<Db> {
   thinRuntimeOf(thin);

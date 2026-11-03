@@ -136,6 +136,27 @@ describe("browser session", () => {
     expect((await db(again).all(app.notes)).map((row) => row.text)).toEqual(["local"]);
   }, 60_000);
 
+  it("starts thin when the remembered local-first client no longer loads", async () => {
+    vi.stubGlobal("localStorage", memoryLocalStorage());
+    const server = await startServer();
+    const store = memoryStore();
+    const first = await open(server, store, loadLocalFirst);
+    await expect.poll(() => isThinDb(db(first)), { timeout: 10_000 }).toBe(false);
+    await first.close();
+
+    // A deploy renamed the chunk the loader imports: the next visit runs
+    // thin instead of failing.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const again = await open(server, store, async () => {
+      throw new Error("Failed to fetch dynamically imported module");
+    });
+    expect(again.getSnapshot().status).toBe("ready");
+    expect(isThinDb(db(again))).toBe(true);
+    expect(String(warn.mock.calls[0]?.[0])).toMatch(/starting thin/);
+    await db(again).insert(app.notes, { text: "thin again" }).wait({ tier: "global" });
+    warn.mockRestore();
+  }, 60_000);
+
   it("stays thin when the upgrade fails", async () => {
     const server = await startServer();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

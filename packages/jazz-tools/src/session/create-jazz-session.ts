@@ -13,7 +13,11 @@ import {
   mintLocalFirstTokenInJs,
   prefetchThinQueries,
 } from "../thin/index.js";
-import { setLocalFirstUpgrader, type LocalFirstLoader } from "../runtime/local-first-upgrade.js";
+import {
+  setLocalFirstUpgrader,
+  type LocalFirstLoader,
+  type LocalFirstModule,
+} from "../runtime/local-first-upgrade.js";
 import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
 import { clientScope, DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
 import { accountRegistryUrl } from "../accounts/context.js";
@@ -68,8 +72,9 @@ export async function createJazzSession(config: JazzSessionConfig): Promise<Brow
   const openLocalFirst = (createDb: CreateAccountDb, account: AccountHandle) =>
     createRegisteredJazzClient("web", { ...clientConfig, account }, createDb);
 
-  const upgrade = (loader: LocalFirstLoader) =>
-    replaceJazzSessionClient<JazzClient>(session!, async (current, account) => {
+  const upgrade = async (loader: LocalFirstLoader) => {
+    let upgraded: AccountHandle | undefined;
+    await replaceJazzSessionClient<JazzClient>(session!, async (current, account) => {
       const { createClient } = await loader();
       const next = await openLocalFirst(createClient, account);
       try {
@@ -78,9 +83,13 @@ export async function createJazzSession(config: JazzSessionConfig): Promise<Brow
         await next.shutdown().catch(() => {});
         throw error;
       }
-      upgrades.remember(account);
+      upgraded = account;
       return next;
     });
+    // Only once the session took the new client: a superseded upgrade
+    // (a logout or account switch meanwhile) is not remembered.
+    if (upgraded) upgrades.remember(upgraded);
+  };
 
   const openThin = async (account: AccountHandle) => {
     const client = await createRegisteredJazzClient(
@@ -99,8 +108,19 @@ export async function createJazzSession(config: JazzSessionConfig): Promise<Brow
   };
 
   const openClient = async (account: AccountHandle) => {
-    if (loadLocalFirst && upgrades.has(account))
-      return openLocalFirst((await loadLocalFirst()).createClient, account);
+    if (loadLocalFirst && upgrades.has(account)) {
+      let module: LocalFirstModule;
+      try {
+        module = await loadLocalFirst();
+      } catch (error) {
+        // A chunk that no longer loads (renamed by a deploy, or the network)
+        // costs the app its offline start, not the session: it runs thin,
+        // and the background upgrade tries the loader again.
+        console.warn("Jazz could not load the local-first client; starting thin.", error);
+        return openThin(account);
+      }
+      return openLocalFirst(module.createClient, account);
+    }
     return openThin(account);
   };
 
@@ -138,7 +158,13 @@ function upgradeInBackground(session: BrowserJazzSession, loader: LocalFirstLoad
       });
     });
   };
-  session.subscribe(check);
+  const stop = session.subscribe(() => {
+    if (session.getSnapshot().status === "closed") {
+      stop();
+      return;
+    }
+    check();
+  });
   check();
 }
 

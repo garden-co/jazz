@@ -7,6 +7,7 @@ import {
 } from "./state.js";
 import type { JWTAuth } from "../accounts/enrollment.js";
 import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
+import { markThinDb } from "../runtime/local-first-upgrade.js";
 const handle = (id: string) =>
   Object.freeze({ id, identity: { issuer: "test", subject: id } }) as AccountHandle;
 function deferred<T = void>() {
@@ -364,6 +365,33 @@ it("clearOnSignOut wipes the signed-out account's storage instead of syncing it"
   await session.close();
 });
 
+it("clearOnSignOut leaves a thin client's writes to sync, as it stores nothing", async () => {
+  const old = handle("old");
+  const accounts = new AccountManager(
+    {
+      createLocalFirst: () => old,
+      restoreLocalFirst: () => old,
+      logout() {},
+      loginWithBackend: async () => old,
+    },
+    old,
+  );
+  const calls: string[] = [];
+  const openClient = async () => {
+    const db = { deleteClientStorage: async () => void calls.push("wipe") };
+    markThinDb(db as never);
+    return {
+      db,
+      shutdown: async (options?: { waitForSync?: boolean }) =>
+        void calls.push(options?.waitForSync ? "sync+shutdown" : "shutdown"),
+    };
+  };
+  const session = await createJazzSessionOwner({ accounts, openClient, clearOnSignOut: true });
+  await session.logout();
+  expect(calls).toEqual(["sync+shutdown"]);
+  await session.close();
+});
+
 describe("replacing the signed-in client", () => {
   it("publishes the new client, then shuts the old one down after its writes sync", async () => {
     const { session, clients, old } = await setup();
@@ -379,6 +407,18 @@ describe("replacing the signed-in client", () => {
     // The session now owns the replacement: logging out shuts it down.
     await session.logout();
     expect(replacement.shutdown).toHaveBeenCalled();
+  });
+
+  it("completes the swap when the old client fails to shut down", async () => {
+    const { session, clients } = await setup();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    clients[0]!.shutdown.mockRejectedValueOnce(new Error("sync failed"));
+    const replacement = { shutdown: vi.fn(async () => {}) };
+    await replaceJazzSessionClient(session, async () => replacement as never);
+    expect(session.getSnapshot()).toMatchObject({ status: "ready", client: replacement });
+    await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+    warn.mockRestore();
+    await session.close();
   });
 
   it("drops the new client when the session logs out while it opens", async () => {

@@ -3401,7 +3401,9 @@ export class Db {
    * `loader` (for example `() => import("jazz-tools/local-first")`). Under a
    * Jazz provider the provider swaps in the local-first `Db` once it holds the
    * app's live queries, and this resolves then. A local-first `Db` resolves at
-   * once.
+   * once. (A thin `Db` opened directly, outside a session, upgrades with
+   * `upgradeToLocalFirst(thin, open)` from `jazz-tools/thin`, which returns
+   * the new `Db` for the app to swap in itself.)
    */
   async upgradeToLocalFirst(loader: LocalFirstLoader): Promise<void> {
     await upgradeDbToLocalFirst(this, loader);

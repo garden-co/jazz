@@ -326,8 +326,11 @@ export async function createJazzSessionOwner<
     client = next;
     publish({ status: "ready", account: selected, client: next });
     // Children re-render onto the new client first; the old one finishes
-    // uploading its writes before it stops.
-    await current.shutdown({ waitForSync: true });
+    // uploading its writes before it stops. The swap is done either way: a
+    // slow or failing shutdown of the old client neither holds nor fails it.
+    void current.shutdown({ waitForSync: true }).catch((error: unknown) => {
+      console.warn("Jazz could not shut the replaced client down cleanly.", error);
+    });
   });
   consumers.set(session, () => {
     const lease: { waiting?: () => void } = {};
