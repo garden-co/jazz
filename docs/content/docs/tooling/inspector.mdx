@@ -4,9 +4,9 @@ description: "Learn how to explore your app's data, schemas, permissions and sub
 reviewedAt: "3384730e1"
 ---
 
-The [Jazz Inspector](https://v2.inspector.jazz.tools/) is a standalone client for inspecting a Jazz
-app through any reachable sync server. It is not tied to Jazz Cloud: if you have a server URL, app
-ID, and admin credential, you can connect to that app's sync server directly.
+The [Jazz Inspector](https://v2.inspector.jazz.tools/) lets you look at a Jazz Cloud app's data,
+schemas and permissions directly: your backend's `remote()` settings (sync URL, app ID and admin
+secret) are all it needs.
 
 <Callout type="warn" title="Admin access only">
   The inspector uses `adminSecret`, not an end-user session token. On the sync connection, that
@@ -18,7 +18,7 @@ ID, and admin credential, you can connect to that app's sync server directly.
 
 Open [v2.inspector.jazz.tools](https://v2.inspector.jazz.tools/) and enter:
 
-- **Server URL**&hairsp;—&hairsp;base URL of the sync server
+- **Server URL**&hairsp;—&hairsp;the sync URL from your `remote()` settings
 - **App ID**&hairsp;—&hairsp;Jazz app namespace to inspect
 - **Admin secret**&hairsp;—&hairsp;app admin credential
 - **Env**&hairsp;—&hairsp;logical environment such as `dev`, `staging`, or `prod`
@@ -44,14 +44,14 @@ insert new rows, and delete existing ones.
 
 ### Schema and permissions view
 
-Each table includes a schema view showing the stored structural schema for that table. In standalone
-mode, the same page also shows the currently published sync-server permissions for that table, which
-is useful when you want to confirm what policy bundle the server is enforcing.
+Each table includes a schema view showing the stored structural schema for that table, and the
+permissions published for it, which is useful when you want to confirm what policy bundle is being
+enforced.
 
 ### Subscriptions
 
 The Subscriptions tab shows active subscriptions from the inspected page runtime and active
-server-managed subscriptions from the connected sync server. You can inspect the table, propagation
+server-managed subscriptions from the connected core. You can inspect the table, propagation
 mode, branch-view options, and compiled query JSON, then jump straight into the matching table view in Data
 Explorer.
 
@@ -60,16 +60,3 @@ Explorer.
 If an app has multiple published schema hashes, the inspector lets you switch between them without
 reconnecting. This is useful when checking migrations, comparing stored shapes, or debugging data
 that was authored under an older schema.
-
-## Development overlay
-
-The Vite, SvelteKit, and Next.js development integrations can serve an in-app inspector overlay
-that opens the embedded inspector against the running app's local runtime. In React, use
-`JazzProvider` or `JazzSessionProvider` from `jazz-tools/react` to attach that runtime. The overlay is enabled by default
-during development and can be disabled with the integration's `inspector: false` option.
-Next.js serves the assets through a development-only loopback server and rewrite; production
-builds do not include that rewrite or enable the overlay.
-
-For remote or self-hosted sync servers, the hosted client at
-[v2.inspector.jazz.tools](https://v2.inspector.jazz.tools/) is the easiest way to inspect the server
-directly.
