@@ -224,6 +224,7 @@ jobs:
           - band-chat-hono
           - jamazon
           - stage-plan-sveltekit
+          - stage-plan-effect
           - jamazon-warehouse
           - wequencer
           - band-book
