@@ -97,7 +97,9 @@ export async function admitBackendSecret(
         Math.min(attemptTimeoutMs, remaining),
       );
       if (response.status === 204) return;
-      failure = new Error(`Backend admission failed (${response.status})`);
+      failure = Object.assign(new Error(`Backend admission failed (${response.status})`), {
+        status: response.status,
+      });
       if (!WAKING_STATUSES.has(response.status)) throw failure;
       retryAfter = parseRetryAfter(response.headers.get("retry-after"), now());
     } catch (error) {
