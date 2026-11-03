@@ -15,14 +15,15 @@ const implicitAccounts = new Map<string, Promise<AccountHandle>>();
  * configuration.
  */
 export async function acquireBrowserTestAccount(config: {
-  appId: string;
+  /** Optional, as for a browser Db: without one, the account is scoped by its endpoint. */
+  appId?: string;
   serverUrl?: string;
   env?: string;
   key?: string;
 }): Promise<AccountHandle> {
   const serverUrl = config.serverUrl ?? "http://127.0.0.1:1";
   const implicitKey = JSON.stringify([
-    config.appId,
+    config.appId ?? null,
     serverUrl,
     config.env ?? "dev",
     config.key ?? "",
@@ -103,7 +104,7 @@ export async function createBrowserTestDb(
 }
 
 async function issueImplicitAccount(
-  appId: string,
+  appId: string | undefined,
   serverUrl: string,
   env: string | undefined,
 ): Promise<AccountHandle> {

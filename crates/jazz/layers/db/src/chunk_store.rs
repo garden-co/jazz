@@ -111,11 +111,44 @@ pub struct FileChunkStore {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl FileChunkStore {
-    /// A store in `dir`, which is created if it does not exist.
+    /// A store in `dir`, which is created if it does not exist. Temporary
+    /// files left by writes a crash interrupted are removed.
     pub fn new(dir: impl Into<PathBuf>) -> Result<Self, Error> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir).map_err(|e| io("create", &dir, e))?;
-        Ok(Self { dir })
+        let store = Self { dir };
+        store.sweep_temporaries()?;
+        Ok(store)
+    }
+
+    /// Remove `<hash>.<pid>.tmp` files from the fan-out directories. Only
+    /// one process opens a store, so none of them is a write in flight.
+    fn sweep_temporaries(&self) -> Result<(), Error> {
+        let fan_outs = std::fs::read_dir(&self.dir).map_err(|e| io("list", &self.dir, e))?;
+        for fan_out in fan_outs {
+            let fan_out = fan_out.map_err(|e| io("list", &self.dir, e))?.path();
+            let is_fan_out = fan_out.is_dir()
+                && fan_out
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.len() == 2 && name.bytes().all(|b| b.is_ascii_hexdigit())
+                    });
+            if !is_fan_out {
+                continue;
+            }
+            for entry in std::fs::read_dir(&fan_out).map_err(|e| io("list", &fan_out, e))? {
+                let path = entry.map_err(|e| io("list", &fan_out, e))?.path();
+                if path.extension().is_some_and(|ext| ext == "tmp") {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(io("delete", &path, error)),
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn path(&self, node: &NodeKey) -> PathBuf {
@@ -177,5 +210,28 @@ impl ChunkStore for FileChunkStore {
 
     fn get_now(&self, node: &NodeKey) -> Option<Result<Option<Bytes>, Error>> {
         Some(self.read(node))
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opening_a_file_store_removes_interrupted_writes() {
+        let dir = std::env::temp_dir().join(format!("jazz-chunk-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = FileChunkStore::new(&dir).unwrap();
+        let node = NodeKey { hash: [0xab; 32] };
+        store.put_now(&node, b"kept").unwrap();
+        let interrupted = store.path(&node).with_extension("4242.tmp");
+        std::fs::write(&interrupted, b"torn").unwrap();
+        std::fs::write(dir.join("owner"), b"not a fan-out\n").unwrap();
+
+        let store = FileChunkStore::new(&dir).unwrap();
+        assert!(!interrupted.exists());
+        assert!(dir.join("owner").exists());
+        assert_eq!(store.read(&node).unwrap().as_deref(), Some(&b"kept"[..]));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

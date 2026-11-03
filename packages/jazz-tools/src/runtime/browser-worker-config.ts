@@ -1,3 +1,4 @@
+import { clientScope } from "./client-scope.js";
 import { browserRuntimeModuleUrl, bundledBrowserWorkerUrl } from "./browser-worker-assets.js";
 import type { RuntimeSourcesConfig } from "./context.js";
 import type { DbConfig } from "./db.js";
@@ -126,7 +127,7 @@ export function createBrowserWorkerFingerprint(
   return JSON.stringify({
     protocolVersion: SHARED_RUNTIME_PROTOCOL_VERSION,
     storageFormatVersion: BROWSER_STORAGE_FORMAT_VERSION,
-    appId: config.appId,
+    appId: clientScope(config),
     dbName,
     env: config.env ?? "dev",
     schemaHash,
@@ -168,7 +169,7 @@ function browserAuthScope(config: DbConfig): BrowserAuthScope {
   if (config.adminSecret) return { kind: "system" };
 
   const session = resolveClientInternalSessionSync({
-    appId: config.appId,
+    appId: clientScope(config),
     accountId: config.accountId,
     jwtToken: config.jwtToken,
     cookieSession: config.cookieSession,
@@ -210,7 +211,7 @@ export function createBrowserAuthSessionKey(config: DbConfig): string {
   // the same external provider subject without sharing a relay lifecycle.
   return JSON.stringify({
     version: 1,
-    appId: config.appId,
+    appId: clientScope(config),
     env: config.env ?? "dev",
     auth: browserAuthScope(config),
     ...(config.accountId ? { registry: accountRegistryAuthority(config) } : {}),
@@ -232,7 +233,7 @@ export function createBrowserStorageOwner(config: DbConfig): string {
   // auth scope above, never a credential or arbitrary claims.
   return JSON.stringify({
     version: 1,
-    appId: config.appId,
+    appId: clientScope(config),
     env: config.env ?? "dev",
     auth: browserStorageScope(config),
   });
@@ -268,7 +269,7 @@ export function assertBrowserStorageOwnerUnchanged(current: DbConfig, next: DbCo
 export function createBrowserPhysicalDatabaseName(config: DbConfig, baseName: string): string {
   const scope = JSON.stringify({
     version: 1,
-    appId: config.appId,
+    appId: clientScope(config),
     env: config.env ?? "dev",
     auth: browserStorageScope(config),
   });
@@ -278,7 +279,7 @@ export function createBrowserPhysicalDatabaseName(config: DbConfig, baseName: st
 function resolveAuthClass(config: DbConfig): string {
   if (config.adminSecret) return "admin";
   const session = resolveClientInternalSessionSync({
-    appId: config.appId,
+    appId: clientScope(config),
     accountId: config.accountId,
     jwtToken: config.jwtToken,
     cookieSession: config.cookieSession,

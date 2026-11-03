@@ -16,17 +16,37 @@ import { createListeners, toError } from "../runtime/util.js";
 export type JazzAuth =
   | { readonly kind: "better-auth"; readonly client: BetterAuthClient }
   | ({ readonly kind: "backend"; logout(): unknown } & AuthProviderState);
-/** Better Auth's client session drives sign-in; the backend reads it in `authenticate`. */
+/**
+ * Better Auth's client session drives sign-in; the backend reads it in
+ * `authenticate`. Prefer passing `authClient.useSession()`'s user id to the
+ * provider's `user` prop.
+ */
 export const betterAuth = (client: BetterAuthClient): JazzAuth => ({ kind: "better-auth", client });
 /**
  * Sign in through the app's own backend (`createJazz`): its `authenticate`
  * decides who the user is. `key` is your signed-in user's id, or null when
  * signed out; Jazz signs in again whenever it changes. `logout` signs out of
- * your auth and must then report `key: null`.
+ * your auth and must then report `key: null`. Prefer the provider's `user`
+ * prop, which is this without `logout`.
  */
 export const backendAuth = (
   options: Omit<Extract<JazzAuth, { kind: "backend" }>, "kind">,
 ): JazzAuth => ({ kind: "backend", ...options });
+/**
+ * The auth a provider's `user` prop stands for. `user` is who your auth
+ * library says is signed in: `undefined` while it loads, `null` when signed
+ * out, the user's stable id when signed in. `hasUser` is whether the prop was
+ * passed at all, since `user={undefined}` (loading) differs from no prop.
+ */
+export function authForUser(
+  hasUser: boolean,
+  user: string | null | undefined,
+  auth: JazzAuth | undefined,
+): JazzAuth | undefined {
+  if (!hasUser) return auth;
+  if (auth) throw new Error("Pass JazzProvider either `user` or `auth`, not both");
+  return { kind: "backend", key: user ?? null, isPending: user === undefined, logout: () => {} };
+}
 export interface JazzAppSnapshot<Client> {
   readonly status: "starting" | "signed-out" | "transitioning" | "ready" | "error";
   readonly client?: Client;

@@ -425,40 +425,6 @@ fn own_commits_accepted_past_the_known_position_are_named_by_transaction() {
     assert!(after.global_base > held.global_base);
 }
 
-/// A connection position from another sequencer (the upstream gained or lost
-/// a server) does not cover own commits the first one accepted: they stay
-/// named by tx until a position of their own sequencer covers them.
-#[test]
-fn a_position_of_another_sequencer_keeps_own_commits_named() {
-    let server = open(0, AuthorSubject::SYSTEM);
-    let client = open(1, user(1));
-    let link = connect(&server, &client, user(1));
-    let _room = Room::open(&client, "a");
-    pump(&server, &client);
-    link.hold_position();
-    insert(&client, 1, "a", "mine");
-    pump(&server, &client);
-    link.to_client
-        .borrow_mut()
-        .push_back(SyncMessage::ConnectionSettled {
-            through: vec![(Some([9; 16]), 1_000_000)],
-        });
-    pump(&server, &client);
-    let held = block_on(client.capture_snapshot()).unwrap();
-    assert_eq!(
-        held.dots.len(),
-        1,
-        "another sequencer's position covers none of it"
-    );
-    link.release();
-    pump(&server, &client);
-    let after = block_on(client.capture_snapshot()).unwrap();
-    assert!(
-        after.dots.is_empty(),
-        "its own sequencer's position covers it"
-    );
-}
-
 /// Room b's read is settled past a commit to both rooms; room a's is not,
 /// nor is the connection. Each shows the commit only once its own read is
 /// settled through it: never half of it.
@@ -929,16 +895,15 @@ fn related_rows_read_as_of_the_results_settle() {
     );
 }
 
-/// A relay with no server is the last word on its store: a tab's result
-/// it serves settles at the relay's own position, not at an upstream
-/// read's (it relays none).
+/// A relay with no server numbers no accepted positions: a tab's result
+/// it serves settles at the authority position the relay last synced,
+/// while the relay's own write stays pending.
 #[test]
-fn a_relay_with_no_server_settles_its_tabs_at_its_own_position() {
+fn a_relay_with_no_server_settles_its_tabs_at_the_authority_position_it_holds() {
     let server = open(0, AuthorSubject::SYSTEM);
     let relay = open(1, user(1));
     let tab = open(2, user(1));
     tab.set_non_durable_client();
-    let _link = connect(&server, &relay, user(1));
     relay.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
     let tab_link = connect(&relay, &tab, user(1));
     let mut a = Room::open(&tab, "a");
@@ -952,41 +917,22 @@ fn a_relay_with_no_server_settles_its_tabs_at_its_own_position() {
         .borrow()
         .iter()
         .filter_map(|m| match m {
-            SyncMessage::Settled { through, .. } => through.first().map(|&(_, seq)| seq),
+            SyncMessage::Settled { through, .. } => Some(*through),
             _ => None,
         })
         .collect();
+    assert!(!settled.is_empty(), "the tab's result settles");
     assert!(
-        !settled.is_empty() && settled.iter().all(|&seq| seq > 0),
-        "settled at the relay's own position: {settled:?}"
+        settled.iter().all(|&at| at == 0),
+        "settled at the authority's position the relay holds: {settled:?}"
     );
-    assert_eq!(
-        settled_by(&tab_link),
-        vec![Some([1; 16])],
-        "by the relay's node"
-    );
-}
-
-/// The nodes a session's `Settled` positions name, deduplicated.
-fn settled_by(link: &Link) -> Vec<Option<[u8; 16]>> {
-    let mut by: Vec<_> = link
-        .log
-        .borrow()
-        .iter()
-        .filter_map(|m| match m {
-            SyncMessage::Settled { through, .. } => through.first().map(|&(by, _)| by),
-            _ => None,
-        })
-        .collect();
-    by.dedup();
-    by
 }
 
 /// A relay whose host reports no server after a tab subscribed serves
-/// that read itself from then on: its settles name the relay's own
-/// position, not the authority's seq it knew.
+/// that read itself from then on: its settles stay at the authority's seq
+/// it knew, however many writes of its own it holds pending.
 #[test]
-fn a_relay_that_loses_its_server_settles_earlier_reads_at_its_own_position() {
+fn a_relay_that_loses_its_server_settles_earlier_reads_at_the_authority_position() {
     let server = open(0, AuthorSubject::SYSTEM);
     let relay = open(1, user(1));
     let tab = open(2, user(1));
@@ -994,9 +940,11 @@ fn a_relay_that_loses_its_server_settles_earlier_reads_at_its_own_position() {
     let _link = connect(&server, &relay, user(1));
     let tab_link = connect(&relay, &tab, user(1));
     let mut a = Room::open(&tab, "a");
+    insert(&server, 20, "c", "the server's");
     pump3(&server, &relay, &tab);
     relay.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
-    // The relay's own seq runs well past the authority's it knew.
+    let known = server.seq_high_water();
+    // The relay's own writes, pending: they number no accepted position.
     for n in 10..15 {
         insert(&relay, n, "b", "elsewhere");
     }
@@ -1004,30 +952,18 @@ fn a_relay_that_loses_its_server_settles_earlier_reads_at_its_own_position() {
     tab_link.log.borrow_mut().clear();
     pump3(&server, &relay, &tab);
     assert_eq!(a.titles(), titles(&["the relay's"]));
-    assert_eq!(
-        settled_by(&tab_link),
-        vec![Some([1; 16])],
-        "by the relay's node"
-    );
-    let relays = match tab_link.log.borrow().iter().rev().find_map(|m| match m {
-        SyncMessage::ConnectionSettled { through } => through.first().map(|&(_, seq)| seq),
-        _ => None,
-    }) {
-        Some(seq) => seq,
-        None => panic!("no connection position"),
-    };
     let settled: Vec<u64> = tab_link
         .log
         .borrow()
         .iter()
         .filter_map(|m| match m {
-            SyncMessage::Settled { through, .. } => through.first().map(|&(_, seq)| seq),
+            SyncMessage::Settled { through, .. } => Some(*through),
             _ => None,
         })
         .collect();
     assert!(
-        !settled.is_empty() && settled.iter().all(|&seq| seq == relays),
-        "every settle at the relay's own seq {relays}, not the authority's: {settled:?}"
+        !settled.is_empty() && settled.iter().all(|&seq| seq <= known),
+        "every settle at most the authority's seq {known}: {settled:?}"
     );
 }
 

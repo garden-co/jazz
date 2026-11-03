@@ -17,3 +17,14 @@ export const nativeApplication = (
     <Data />
   </JazzProvider>
 );
+declare const signedInUser: string | null | undefined;
+export const nativeApplicationFollowingUser = (
+  <JazzProvider
+    serverUrl="https://app.example.test/jazz"
+    store={store}
+    user={signedInUser}
+    signedOut={null}
+  >
+    <Data />
+  </JazzProvider>
+);
