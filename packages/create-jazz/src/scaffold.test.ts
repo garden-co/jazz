@@ -12,14 +12,12 @@ const hybridStarterPath = path.join(repoRoot, "starters/next-hybrid");
 const sveltekitBetterauthStarterPath = path.join(repoRoot, "starters/sveltekit-betterauth");
 const sveltekitLocalfirstStarterPath = path.join(repoRoot, "starters/sveltekit-localfirst");
 const sveltekitHybridStarterPath = path.join(repoRoot, "starters/sveltekit-hybrid");
-const tsBetterauthStarterPath = path.join(repoRoot, "starters/ts-betterauth");
 const tsLocalfirstStarterPath = path.join(repoRoot, "starters/ts-localfirst");
 const tsHybridStarterPath = path.join(repoRoot, "starters/ts-hybrid");
 const reactBetterauthStarterPath = path.join(repoRoot, "starters/react-betterauth");
 const reactLocalfirstStarterPath = path.join(repoRoot, "starters/react-localfirst");
 const reactHybridStarterPath = path.join(repoRoot, "starters/react-hybrid");
 const tsEffectLocalfirstStarterPath = path.join(repoRoot, "starters/ts-effect-localfirst");
-const tsEffectBetterauthStarterPath = path.join(repoRoot, "starters/ts-effect-betterauth");
 
 // CI runners have no global git identity configured, so inject fallbacks
 // via the env vars git honours. Production code still fails loudly when a
@@ -547,42 +545,6 @@ describe("scaffold() — ts-hybrid e2e via JAZZ_STARTER_PATH", () => {
   });
 });
 
-describe("scaffold() — ts-betterauth e2e via JAZZ_STARTER_PATH", () => {
-  withLocalStarter(tsBetterauthStarterPath);
-  let tmpDir: string;
-
-  afterEach(() => {
-    if (tmpDir && fs.existsSync(tmpDir)) {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
-
-  it("scaffolds a complete ts-betterauth project", { timeout: 30_000 }, async () => {
-    tmpDir = path.join(os.tmpdir(), `scaffold-ts-betterauth-${Date.now()}`);
-
-    await scaffold({
-      appName: "alice-ts-betterauth",
-      targetDir: tmpDir,
-      pm: null,
-      starter: "ts-betterauth",
-    });
-
-    const pkgJson = JSON.parse(fs.readFileSync(path.join(tmpDir, "package.json"), "utf-8")) as {
-      name?: string;
-      dependencies?: Record<string, string>;
-      devDependencies?: Record<string, string>;
-    };
-
-    expect(pkgJson.name).toBe("alice-ts-betterauth");
-    expect(fs.existsSync(path.join(tmpDir, "server/auth.ts"))).toBe(true);
-    // No sign-up-form.ts — the combined form lives in sign-in-form.ts.
-    expect(fs.existsSync(path.join(tmpDir, "src/sign-up-form.ts"))).toBe(false);
-    expect(fs.existsSync(path.join(tmpDir, "src/sign-in-form.ts"))).toBe(true);
-    const allDeps = { ...pkgJson.dependencies, ...pkgJson.devDependencies };
-    expect(allDeps).not.toHaveProperty("react");
-  });
-});
-
 describe("scaffold() — react-localfirst e2e via JAZZ_STARTER_PATH", () => {
   withLocalStarter(reactLocalfirstStarterPath);
   let tmpDir: string;
@@ -706,11 +668,6 @@ for (const { starter, starterPath, files } of [
     starter: "ts-effect-localfirst",
     starterPath: tsEffectLocalfirstStarterPath,
     files: ["src/todo-widget.ts", "src/auth-backup.ts"],
-  },
-  {
-    starter: "ts-effect-betterauth",
-    starterPath: tsEffectBetterauthStarterPath,
-    files: ["src/todo-widget.ts", "server/jazz-api.ts", "server/auth.ts", "server/dev.ts"],
   },
 ] as const) {
   describe(`scaffold() — ${starter} e2e via JAZZ_STARTER_PATH`, () => {

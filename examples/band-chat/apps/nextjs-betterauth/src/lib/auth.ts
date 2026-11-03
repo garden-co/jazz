@@ -1,10 +1,9 @@
 import { betterAuth } from "better-auth";
 import { nextCookies } from "better-auth/next-js";
-import { bearer, jwt } from "better-auth/plugins";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { app } from "../../schema";
-import { authJazzClient } from "./auth-jazz-client";
-import { assertConfiguration, JWT_AUDIENCE } from "./config.mjs";
+import { assertConfiguration } from "./config.mjs";
+import { jazz } from "./jazz.server";
 
 // Fails closed: no fallback secret, and a deployment must name its origin.
 const config = assertConfiguration();
@@ -14,8 +13,10 @@ export const auth = betterAuth({
   baseURL: appOrigin,
   trustedOrigins: [appOrigin],
   secret: config.betterAuthSecret,
+  // Better Auth's tables live in BandChat's own Jazz, through the backend's
+  // database; their client policies deny everything.
   database: jazzAdapter({
-    db: async () => (await authJazzClient()).db,
+    db: async () => (await jazz()).db,
     schema: app.wasmSchema,
   }),
   emailAndPassword: {
@@ -24,19 +25,5 @@ export const auth = betterAuth({
     minPasswordLength: 8,
     requireEmailVerification: false,
   },
-  plugins: [
-    bearer(),
-    jwt({
-      jwks: { keyPairConfig: { alg: "ES256" } },
-      jwt: {
-        issuer: appOrigin,
-        audience: JWT_AUDIENCE,
-        expirationTime: "1h",
-        // Better Auth's stable internal user id remains the raw session user
-        // id. Jazz independently records issuer-scoped session.user.
-        getSubject: ({ user }: { user: { id: string } }) => user.id,
-      },
-    }),
-    nextCookies(),
-  ],
+  plugins: [nextCookies()],
 });

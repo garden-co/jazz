@@ -18,32 +18,19 @@ export interface BetterAuthClient {
       }
     >;
   };
-  $fetch: (
-    path: string,
-    options: { method: "GET" },
-  ) => Promise<{
-    data: unknown;
-    error?: { message?: string } | null;
-  }>;
   signOut(): Promise<{ error?: { message?: string } | null }>;
 }
 
 /** Mount once per JazzSession on the client; dispose on unmount.
- * Signup and sign-in only call Better Auth. Use connection.logout() for safe signout.
+ * Signup and sign-in only call Better Auth; the app's backend (`createJazz`)
+ * reads the Better Auth session in `authenticate`. Use connection.logout()
+ * for safe signout.
  */
 export function connectBetterAuth<Client>(
   session: JazzSession<Client>,
   auth: BetterAuthClient,
 ): Omit<AuthProviderConnection, "update" | "logout"> & { logout(): Promise<void> } {
-  const connection = connectAuthProvider(session, {
-    async getToken() {
-      const result = await auth.$fetch("/token", { method: "GET" });
-      const data = result.data as { token?: string } | null;
-      if (result.error || !data?.token)
-        throw new Error(result.error?.message ?? "No Better Auth token");
-      return data.token;
-    },
-  });
+  const connection = connectAuthProvider(session);
   const atom = auth.$store.atoms.session;
   const update = (state: BetterAuthState) =>
     connection.update({

@@ -1,9 +1,7 @@
 /**
- * Where the browser and the server find Jazz, and which environment they use.
- * Both sides must agree: the server seeds the workspace the browser reads.
- * Development falls back to the local dev server that `withJazz` starts;
- * production must configure every value, so a deploy never talks to a
- * localhost server or a shared local app id.
+ * Which Jazz app the browser and the server use. Both sides must agree: the
+ * server seeds the workspace the browser reads. Development falls back to a
+ * local app id; production must configure it.
  */
 function requiredInProduction(name: string, value: string | undefined, devDefault: string) {
   if (value) return value;
@@ -13,21 +11,9 @@ function requiredInProduction(name: string, value: string | undefined, devDefaul
   return devDefault;
 }
 
-// Read each NEXT_PUBLIC_ variable literally so Next inlines it into the browser bundle.
-export const jazzServerUrl = requiredInProduction(
-  "NEXT_PUBLIC_JAZZ_SERVER_URL",
-  process.env.NEXT_PUBLIC_JAZZ_SERVER_URL,
-  "http://127.0.0.1:4200",
-);
-
+// Read the NEXT_PUBLIC_ variable literally so Next inlines it into the browser bundle.
 export const jazzAppId = requiredInProduction(
   "NEXT_PUBLIC_JAZZ_APP_ID",
   process.env.NEXT_PUBLIC_JAZZ_APP_ID,
-  "music-agent-local",
+  "00000000-0000-0000-0000-00000000a6e7",
 );
-
-export const jazzEnv: "dev" | "prod" =
-  process.env.NEXT_PUBLIC_JAZZ_ENV === "prod" ||
-  (process.env.NEXT_PUBLIC_JAZZ_ENV !== "dev" && process.env.NODE_ENV === "production")
-    ? "prod"
-    : "dev";
