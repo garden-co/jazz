@@ -118,6 +118,7 @@ impl Db {
         let db = Db {
             inner: self.inner.clone(),
             view: self.view.clone(),
+            governance: self.governance.clone(),
         };
         Ok(async move {
             let result = async {

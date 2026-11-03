@@ -164,9 +164,9 @@ impl Db {
                 },
             );
         }
-        let view = {
+        let (view, governance) = {
             let inner = self.inner();
-            inner
+            let view = inner
                 .governed_by(
                     crate::ids::SchemaVersionId::from_bytes(schema),
                     inner.session_policies(index),
@@ -176,11 +176,13 @@ impl Db {
                         ErrorCode::Schema,
                         "accepted-read schema is not admitted by the authority",
                     )
-                })?
+                })?;
+            (view, inner.session_governance(index))
         };
         let db = Db {
             inner: self.inner.clone(),
             view: Some(view),
+            governance,
         };
         let prepared = db
             .prepare_query_bound(&query, binding)?

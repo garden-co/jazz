@@ -384,7 +384,12 @@ impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         self.dropped.set(self.dropped.get() + 1);
         if let Some((inner, query, binding, include_deleted, view, reach)) = self.remote.take() {
-            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, &view, reach);
+            Db {
+                inner,
+                view: None,
+                governance: Governance::CurrentOwner,
+            }
+            .detach_remote(&query, &binding, include_deleted, &view, reach);
         }
     }
 }
@@ -696,6 +701,24 @@ pub struct Db {
     inner: Rc<Store>,
     /// `Some` for a schema-view handle: operations run under this schema.
     view: Option<Rc<Schema>>,
+    governance: Governance,
+}
+
+/// Policy provenance is selected by trusted handle/session construction,
+/// never inferred from the schema carrying an operation's names.
+#[derive(Clone)]
+enum Governance {
+    CurrentOwner,
+    Selected(Rc<Schema>),
+}
+
+impl Governance {
+    fn policies(&self, inner: &Inner) -> Rc<Schema> {
+        match self {
+            Self::CurrentOwner => inner.owner.clone(),
+            Self::Selected(policies) => policies.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1382,6 +1405,7 @@ impl Db {
         let owner = Rc::new(schema.clone());
         let db = Self {
             view: None,
+            governance: Governance::CurrentOwner,
             inner: Rc::new(Store::new(Inner {
                 conn,
                 scheduler: None,
@@ -1635,8 +1659,19 @@ impl Db {
     /// The shared state, set up to run under this handle's schema.
     fn inner(&self) -> std::cell::RefMut<'_, Inner> {
         let mut inner = self.inner.borrow_mut();
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        inner.schema = self.governing_schema(&inner);
         inner
+    }
+
+    /// Keep this handle's names while resolving its explicit policy source.
+    fn governing_schema(&self, inner: &Inner) -> Rc<Schema> {
+        match (&self.view, &self.governance) {
+            (None, _) => self.governance.policies(inner),
+            (Some(view), Governance::Selected(_)) => view.clone(),
+            (Some(view), Governance::CurrentOwner) => {
+                Rc::new((**view).clone().with_policies_of(inner.owner.clone()))
+            }
+        }
     }
 
     pub fn table(&self, table: impl Into<String>) -> Query {
@@ -7039,6 +7074,7 @@ impl Db {
         Some(Db {
             inner: self.inner.clone(),
             view: Some(view),
+            governance: Governance::CurrentOwner,
         })
     }
 
@@ -7059,13 +7095,14 @@ impl Db {
         let Some((_, governing)) = inner.bundle(bundle)? else {
             return Ok(None);
         };
-        let Some(view) = inner.governed_by(version, governing) else {
+        let Some(view) = inner.governed_by(version, governing.clone()) else {
             return Ok(None);
         };
         drop(inner);
         Ok(Some(Db {
             inner: self.inner.clone(),
             view: Some(view),
+            governance: Governance::Selected(governing),
         }))
     }
 
@@ -7156,6 +7193,7 @@ impl Db {
         Ok(Db {
             inner: self.inner.clone(),
             view: Some(Rc::new(logical)),
+            governance: Governance::CurrentOwner,
         })
     }
 
@@ -8176,7 +8214,7 @@ impl Db {
         read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
         let mut inner = self.inner.staging();
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        inner.schema = self.governing_schema(&inner);
         let batch = inner
             .batches
             .get(&id)
@@ -8394,7 +8432,7 @@ impl Db {
         let marks = {
             let mut inner = self.inner.staging();
             inner.require_mutation_admission()?;
-            inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+            inner.schema = self.governing_schema(&inner);
             let chunked = inner.chunk_large_cells(&mut op)?;
             edits.pending_nodes.extend(chunked.pending_nodes);
             let batch = inner

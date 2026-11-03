@@ -9,7 +9,7 @@ use jazz::tools::public_schema::Schema as PublicSchema;
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TableSchemaBuilder};
 use std::collections::BTreeMap;
 
-fn schema(read: bool) -> PublicSchema {
+pub(super) fn schema(read: bool) -> PublicSchema {
     SchemaBuilder::new()
         .table(
             TableSchemaBuilder::new("notes")
@@ -22,7 +22,7 @@ fn schema(read: bool) -> PublicSchema {
         )
         .build()
 }
-fn open(node: u8, author: AuthorSubject, read: bool, authority: bool) -> Db {
+pub(super) fn open(node: u8, author: AuthorSubject, read: bool, authority: bool) -> Db {
     let db = block_on(Db::open(DbConfig::new(
         compile_schema(&schema(read)),
         DbIdentity {
@@ -38,7 +38,7 @@ fn open(node: u8, author: AuthorSubject, read: bool, authority: bool) -> Db {
     }
     db
 }
-fn seed(server: &Db) {
+pub(super) fn seed(server: &Db) {
     server
         .seed_settled_mergeable_for_bootstrap(
             "notes",
@@ -269,6 +269,154 @@ fn accepted_transactions_validate_under_each_authenticated_pin() {
                 client.wait_for_transaction(receipt.0, DurabilityTier::Global),
             )
             .unwrap();
+        }
+    }
+}
+
+/// Alice's accepted commit waits for Bob's durable part. After release an
+/// unpinned retained handle refreshes owner policies; either pinned handle
+/// keeps its admitted bundle, even when the owner changes during the wait.
+#[test]
+fn held_accepted_commits_reselect_applicable_policies_after_the_wait() {
+    use jazz::db::InsertOptions;
+    use jazz::db::shard::{CommitRef, Held, HeldRow};
+    use jazz::tools::OpenTransactionId;
+    use std::task::{Context, Poll, Waker};
+    for pin in [None, Some(false), Some(true)] {
+        for retained in [0, 1, 2] {
+            if pin.is_some() && retained != 0 {
+                continue;
+            }
+            for drift in [false, true] {
+                let owner = pin.map_or(true, |allowed| !allowed);
+                let server = open(9, AuthorSubject::SYSTEM, owner, true);
+                seed(&server);
+                let version = compile_schema(&schema(true)).version_id();
+                let selected = match pin {
+                    Some(allowed) => {
+                        let bundle = block_on(server.publish_bundle(&schema(allowed))).unwrap();
+                        server.check_session_pin(alice(), Some(&bundle)).unwrap();
+                        Some(server.pinned_view(version, Some(&bundle)).unwrap().unwrap())
+                    }
+                    None if retained == 1 => Some(
+                        block_on(server.register_schema_view(compile_schema(&schema(true))))
+                            .unwrap(),
+                    ),
+                    None if retained == 2 => Some(server.governed_view(version).unwrap()),
+                    None => None,
+                };
+                let view = selected.as_ref().unwrap_or(&server);
+                let id = OpenTransactionId::new();
+                block_on(view.begin_serializable_for_identity(id, alice())).unwrap();
+                let prepared = view.prepare_query(&Query::from("notes")).unwrap();
+                let read = block_on(
+                    view.accepted_transaction_query(id, prepared, false, 1000)
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(read.evidence.len(), usize::from(pin.unwrap_or(owner)));
+                let row = RowUuid::from_bytes([77; 16]);
+                block_on(view.tx_ref(id).insert(
+                    "notes",
+                    BTreeMap::from([("body".into(), Value::String("after wait".into()))]),
+                    InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
+                ))
+                .unwrap();
+                let part = CommitRef {
+                    node: [55; 16],
+                    tx: 1,
+                };
+                assert!(matches!(
+                    server
+                        .shard()
+                        .hold(
+                            part,
+                            &[HeldRow {
+                                table: "notes".into(),
+                                row: [77; 16]
+                            }],
+                            b"held part"
+                        )
+                        .unwrap(),
+                    Held::At(_)
+                ));
+                let mut commit = Box::pin(view.commit_serializable_handle(id));
+                let mut cx = Context::from_waker(Waker::noop());
+                assert!(std::future::Future::poll(commit.as_mut(), &mut cx).is_pending());
+                if drift {
+                    server.set_identity_claims(
+                        alice(),
+                        BTreeMap::from([("changed".into(), Value::Bool(true))]),
+                    );
+                }
+                block_on(server.activate_schema(compile_schema(&schema(!owner)))).unwrap();
+                server.shard().release(part).unwrap();
+                let Poll::Ready(result) = std::future::Future::poll(commit.as_mut(), &mut cx)
+                else {
+                    panic!("released commit stayed pending")
+                };
+                if drift {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.code, ErrorCode::WriteRejected);
+                    assert!(error.message.contains("claims changed"));
+                } else if pin.is_some() {
+                    result.expect("the authenticated pin survives owner activation");
+                } else {
+                    assert_eq!(result.unwrap_err().code, ErrorCode::TransactionConflict);
+                }
+                let all = server.prepare_query(&Query::from("notes")).unwrap();
+                let rows = block_on(server.all(&all, Default::default())).unwrap();
+                assert_eq!(
+                    rows.iter().any(|r| r.row_uuid() == row),
+                    pin.is_some() && !drift,
+                    "rejected commit must publish nothing"
+                );
+            }
+        }
+    }
+}
+
+/// Alice admits an accepted read before Bob changes owner policies. Polling
+/// later resolves unpinned root/registered/governed handles against the new
+/// owner, while an explicitly admitted pin keeps its selected policies.
+#[test]
+fn deferred_accepted_evaluation_uses_explicit_governance_provenance() {
+    use jazz::tools::OpenTransactionId;
+    for owner in [false, true] {
+        for kind in 0..5 {
+            let server = open(9, AuthorSubject::SYSTEM, owner, true);
+            seed(&server);
+            let version = compile_schema(&schema(true)).version_id();
+            let selected = match kind {
+                0 => None,
+                1 => Some(
+                    block_on(server.register_schema_view(compile_schema(&schema(owner)))).unwrap(),
+                ),
+                2 => Some(server.pinned_view(version, None).unwrap().unwrap()),
+                _ => {
+                    let bundle = block_on(server.publish_bundle(&schema(kind == 4))).unwrap();
+                    server.check_session_pin(alice(), Some(&bundle)).unwrap();
+                    Some(server.pinned_view(version, Some(&bundle)).unwrap().unwrap())
+                }
+            };
+            let db = selected.as_ref().unwrap_or(&server);
+            let id = OpenTransactionId::new();
+            block_on(db.begin_serializable_for_identity(id, alice())).unwrap();
+            let query = db.prepare_query(&Query::from("notes")).unwrap();
+            let pending = db
+                .accepted_transaction_query(id, query, false, 1000)
+                .unwrap();
+            block_on(server.activate_schema(compile_schema(&schema(!owner)))).unwrap();
+            let read = block_on(pending).unwrap();
+            assert_eq!(
+                read.evidence.len(),
+                usize::from(if kind < 3 { !owner } else { kind == 4 }),
+                "owner={owner}, kind={kind}"
+            );
+            db.abandon_transaction_handle(id).unwrap();
         }
     }
 }

@@ -9268,6 +9268,20 @@ impl Inner {
             .map_or_else(|| self.owner.clone(), |(_, governing)| governing.clone())
     }
 
+    /// Admission has resolved every pinned bundle before serving a session.
+    fn session_governance(&self, index: usize) -> Governance {
+        match self.sessions[index].bundle {
+            None => Governance::CurrentOwner,
+            Some(bundle) => Governance::Selected(
+                self.bundles
+                    .get(&bundle)
+                    .expect("admitted session bundle")
+                    .1
+                    .clone(),
+            ),
+        }
+    }
+
     /// `view` governed by session `index`'s policies: unchanged unless the
     /// session is pinned to a bundle, whose policies then replace its own.
     pub(crate) fn governed_view(&self, view: &Rc<Schema>, index: usize) -> Rc<Schema> {
@@ -11295,27 +11309,29 @@ impl Db {
     fn stored_db_for(&self, index: usize) -> Db {
         let inner = self.inner.borrow();
         let view = inner.governed_view(&inner.stored_view(), index);
+        let governance = inner.session_governance(index);
         drop(inner);
         Db {
             inner: self.inner.clone(),
             view: Some(view),
+            governance,
         }
     }
 
-    /// The schema whose policies this handle's reads and writes are
-    /// governed by: its view's, else the current schema's.
+    /// Resolve the policy source chosen by trusted handle construction.
+    /// Named-view policy snapshots do not establish an authenticated pin.
     pub(super) fn view_policies(&self) -> Rc<Schema> {
-        self.view
-            .as_ref()
-            .and_then(|view| view.policies_from.clone())
-            .unwrap_or_else(|| self.inner.borrow().owner.clone())
+        self.governance.policies(&self.inner.borrow())
     }
 
     fn session_db(&self, index: usize) -> Db {
-        let view = self.inner.borrow_mut().session_schema(index);
+        let mut inner = self.inner.borrow_mut();
+        let view = inner.session_schema(index);
+        let governance = inner.session_governance(index);
         Db {
             inner: self.inner.clone(),
             view,
+            governance,
         }
     }
 
@@ -12614,6 +12630,7 @@ impl Db {
         let db = Db {
             inner: self.inner.clone(),
             view: Some(view),
+            governance: self.governance.clone(),
         };
         let (ops, mut roots) = db.resolve_deltas(policy, ops)?;
         roots.extend(db.proof_roots(policy, &ops)?);
