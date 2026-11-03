@@ -10,7 +10,7 @@
     "test": "tsx --test src/*.test.ts",
     "e2e": "tsx src/cli.ts",
     "e2e:all": "tsx src/cli.ts --all",
-    "e2e:cancel-reopen-subscription": "tsx src/cli.ts ts-betterauth --cancel-reopen-subscription-probe"
+    "e2e:cancel-reopen-subscription": "tsx src/cli.ts ts-hybrid --cancel-reopen-subscription-probe"
   },
   "dependencies": {
     "create-jazz": "workspace:*",

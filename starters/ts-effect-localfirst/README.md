@@ -127,5 +127,3 @@ anonymous local-first connections will receive auth errors.
 - `src/todo-widget.ts` — Jazz Effects and Streams driving plain DOM.
 - The [Effect guide](https://jazz.tools/docs/recipes/effect) for transactions,
   durability waits and server-side use with `jazz-tools/effect/backend`.
-- `ts-effect-betterauth` — the same client with sign-in and an Effect HTTP
-  server that acts as the signed-in user.

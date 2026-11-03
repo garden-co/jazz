@@ -20,6 +20,8 @@ export default defineConfig({
     env: {
       NEXT_PUBLIC_APP_ORIGIN: BASE_URL,
       NEXT_PUBLIC_JAZZ_APP_ID: process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? randomUUID(),
+      // Jazz runs inside the app; a fresh data directory per run as well.
+      JAZZ_DATA_PATH: `.jazz/e2e-${randomUUID()}`,
     },
     url: BASE_URL,
     reuseExistingServer: false,

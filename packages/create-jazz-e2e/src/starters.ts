@@ -19,11 +19,9 @@ export const KNOWN_STARTERS = [
   "react-betterauth",
   "react-localfirst",
   "react-hybrid",
-  "ts-betterauth",
   "ts-localfirst",
   "ts-hybrid",
   "ts-effect-localfirst",
-  "ts-effect-betterauth",
 ] as const;
 
 export type StarterName = (typeof KNOWN_STARTERS)[number];
