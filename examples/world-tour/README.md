@@ -1,6 +1,6 @@
 # Jazz World Tour example
 
-A band plans its world tour on a dot-art globe; fans follow the confirmed dates. Built with Vue + Vite and the Jazz Vite plugin. The globe is a custom 2D canvas projection: illustrative, not cartographic.
+A band plans its world tour on a dot-art globe; fans follow the confirmed dates. Built with Vue + Vite. The globe is a custom 2D canvas projection: illustrative, not cartographic.
 
 ## Getting started
 
@@ -8,7 +8,7 @@ A band plans its world tour on a dot-art globe; fans follow the confirmed dates.
 pnpm dev
 ```
 
-`pnpm dev` starts the Jazz dev server and the Vite dev server together via the Jazz Vite plugin. The first visitor to an empty server gets the seeded demo tour and owns the band.
+`pnpm dev` starts a local Jazz core and the Vite dev server together. The first visitor to an empty server gets the seeded demo tour and owns the band.
 
 ## Who sees what
 

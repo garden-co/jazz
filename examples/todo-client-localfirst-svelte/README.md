@@ -8,8 +8,8 @@ Local-first todo app on Svelte 5 + Vite, anonymous auth via local-first secret, 
 - `QuerySubscription` reactive live queries with composable `where()` filters (filter by title substring, by done status).
 - `getDb` synchronous local writes (`db.insert`, `db.update`, `db.delete`).
 - Row-level permissions — `owner_id` enforced by `definePermissions`; mutations on rows you don't own surface as toast errors via `svelte-sonner`.
-- IndexedDB-backed persistence across reload, plus optional server sync when `PUBLIC_JAZZ_SERVER_URL` is set.
-- `JazzSvelteProvider` wired up via the Jazz Vite plugin (`jazzPlugin` in `vite.config.ts`).
+- IndexedDB-backed persistence across reload, plus optional server sync when `VITE_JAZZ_SERVER_URL` is set.
+- `pnpm dev` starts a local Jazz core next to Vite (`dev/examples/with-local-core.mjs`) and passes its URL in `VITE_JAZZ_SERVER_URL`.
 
 ## Schema
 
@@ -22,7 +22,7 @@ Local-first todo app on Svelte 5 + Vite, anonymous auth via local-first secret, 
 pnpm dev
 ```
 
-`pnpm dev` starts the Jazz dev server and the Vite dev server together via the Jazz Vite plugin. The plugin writes `PUBLIC_JAZZ_APP_ID` / `PUBLIC_JAZZ_SERVER_URL` into the dev environment automatically.
+`pnpm dev` starts a local Jazz core and the Vite dev server together (`dev/examples/with-local-core.mjs`), which passes `VITE_JAZZ_APP_ID` / `VITE_JAZZ_SERVER_URL` to the dev environment.
 
 ## Tests
 

@@ -6,8 +6,8 @@ const managers = new Map<string, ReturnType<typeof createAccountManager>>();
 
 export async function prepareAccountConfig(overrides: Partial<DbConfig> = {}): Promise<DbConfig> {
   const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
-  const appId = overrides.appId ?? env?.PUBLIC_JAZZ_APP_ID;
-  const serverUrl = overrides.serverUrl ?? env?.PUBLIC_JAZZ_SERVER_URL;
+  const appId = overrides.appId ?? env?.VITE_JAZZ_APP_ID;
+  const serverUrl = overrides.serverUrl ?? env?.VITE_JAZZ_SERVER_URL;
   if (!appId) throw new Error("Missing Jazz appId");
   if (overrides.account) return { appId, env: "dev", ...overrides, account: overrides.account };
   if (!serverUrl) throw new Error("Missing Jazz core serverUrl for account preparation");

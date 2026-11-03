@@ -1,7 +1,8 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { jazzPlugin } from "jazz-tools/dev/vite";
 
 export default defineConfig({
-  plugins: [react(), jazzPlugin()],
+  plugins: [react()],
+  // jazz-wasm is wasm-bindgen output, which Vite's dependency pre-bundler cannot handle.
+  optimizeDeps: { exclude: ["jazz-wasm"] },
 });

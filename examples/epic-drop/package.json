@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node ../../dev/examples/with-local-core.mjs vite",
     "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
     "test": "pnpm run test:permissions && pnpm run test:browser",
     "typecheck": "tsc --noEmit",

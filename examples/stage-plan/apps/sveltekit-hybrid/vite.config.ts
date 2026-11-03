@@ -1,9 +1,11 @@
 import { sveltekit } from "@sveltejs/kit/vite";
-import { jazzSvelteKit } from "jazz-tools/dev/sveltekit";
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  // Jazz runs inside this app (src/lib/server/jazz.ts), so the plugin only
-  // wires up the browser runtime: no separate dev sync server.
-  plugins: [sveltekit(), jazzSvelteKit({ server: false })],
+  // Jazz runs inside this app (src/lib/server/jazz.ts): no separate sync server.
+  plugins: [sveltekit()],
+  // jazz-wasm is wasm-bindgen output, which Vite's dependency pre-bundler cannot handle.
+  optimizeDeps: { exclude: ["jazz-wasm"] },
+  // jazz-napi is a native addon: Node loads it at runtime, the SSR bundle leaves it alone.
+  ssr: { external: ["jazz-napi"] },
 });
