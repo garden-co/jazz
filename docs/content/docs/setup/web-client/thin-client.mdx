@@ -13,7 +13,7 @@ The default web client: about 86 KB gzipped, no Wasm, no local storage. The serv
 
 ## Configure one session
 
-The thin client is the default: `JazzProvider` and `createClient` from `jazz-tools/thin` open it
+The thin client is the default: `JazzProvider` in React, or `createClient` from `jazz-tools/thin`, opens it
 with nothing to choose. It signs in through your [main backend](/docs/setup/deployment) at
 `/jazz`, with your app's own session cookie, and returns the same `Db` as the local-first client:
 queries, `subscribe`, insert, update, upsert, delete and the framework hooks all work.
