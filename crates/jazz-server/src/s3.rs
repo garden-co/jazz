@@ -112,12 +112,20 @@ pub struct S3Options {
     /// The service endpoint, e.g. `https://<account>.r2.cloudflarestorage.com`.
     /// `None` is AWS S3 in `region`.
     pub endpoint: Option<String>,
-    /// Prepended to every object name, e.g. `jazz/` to share a bucket.
+    /// Prepended to every object name. Empty is the store's own default,
+    /// `jazz/<app id>/<store id>/`, which the server fills in: two stores
+    /// never share a prefix by accident, since each deletes what it
+    /// reclaims. The prefix is claimed for one store by an owner object.
     pub prefix: String,
     /// Address the bucket in the path (`endpoint/bucket/key`) rather than
-    /// the host name. The default for custom endpoints.
+    /// the host name. The default for custom endpoints, and always used
+    /// for a bucket whose name has a dot (its host would not match AWS's
+    /// TLS certificate).
     pub path_style: bool,
     pub credentials: S3Credentials,
+    /// The STS endpoint web identity roles are assumed at
+    /// (`AWS_ENDPOINT_URL_STS`); `None` is AWS's, in `region`.
+    pub sts_endpoint: Option<String>,
 }
 
 impl S3Options {
@@ -170,6 +178,7 @@ impl S3Options {
             endpoint,
             prefix: prefix.unwrap_or_default(),
             credentials,
+            sts_endpoint: env("AWS_ENDPOINT_URL_STS"),
         })
     }
 
@@ -186,6 +195,11 @@ const REFRESH_EARLY: Duration = Duration::from_secs(5 * 60);
 const ASSUMED_FOR: Duration = Duration::from_secs(60 * 60);
 /// An operation that takes longer fails, and is retried in a later batch.
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
+/// A failed role assumption answers every operation for this long, so a
+/// batch asks STS once, not once per operation.
+const ASSUME_FAILURE_HOLD: Duration = Duration::from_secs(5);
+/// Under the prefix: the id of the store that owns it.
+const OWNER_OBJECT: &str = ".jazz-owner";
 
 /// Large-value bytes in an S3-compatible bucket ([`S3Options`]).
 pub struct S3ChunkStore {
@@ -196,11 +210,32 @@ pub struct S3ChunkStore {
 struct Inner {
     options: S3Options,
     http: reqwest::Client,
-    keys: tokio::sync::Mutex<Option<(Keys, Option<Instant>)>>,
+    keys: tokio::sync::Mutex<KeyState>,
+    /// The store id this prefix is claimed for, and whether the claim
+    /// has been checked (once per process, before the first operation).
+    owner: String,
+    claimed: tokio::sync::OnceCell<()>,
+    /// The last claim that failed, and when: it answers every operation
+    /// for a while, as a failed role assumption does.
+    claim_failed: Mutex<Option<(Instant, String)>>,
+}
+
+#[derive(Default)]
+struct KeyState {
+    /// Keys in use, and when assumed ones must be replaced.
+    keys: Option<(Keys, Option<SystemTime>)>,
+    /// The last role assumption that failed, and when.
+    failed: Option<(Instant, String)>,
 }
 
 impl S3ChunkStore {
-    pub fn new(options: S3Options) -> Result<Self, String> {
+    /// A store whose objects live under `options.prefix`, claimed for the
+    /// store `owner` (a data directory's id): a prefix another store
+    /// claimed is refused on first use.
+    pub fn new(options: S3Options, owner: String) -> Result<Self, String> {
+        if options.prefix.is_empty() {
+            return Err("s3 blobs: no prefix; every store needs one of its own".to_owned());
+        }
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("jazz-s3")
@@ -211,15 +246,21 @@ impl S3ChunkStore {
             .timeout(OPERATION_TIMEOUT)
             .build()
             .map_err(|error| format!("s3 blobs: http client: {error}"))?;
-        let keys = match &options.credentials {
-            S3Credentials::Static(keys) => Some((keys.clone(), None)),
-            S3Credentials::WebIdentity { .. } => None,
+        let keys = KeyState {
+            keys: match &options.credentials {
+                S3Credentials::Static(keys) => Some((keys.clone(), None)),
+                S3Credentials::WebIdentity { .. } => None,
+            },
+            failed: None,
         };
         Ok(Self {
             inner: Arc::new(Inner {
                 options,
                 http,
                 keys: tokio::sync::Mutex::new(keys),
+                owner,
+                claimed: tokio::sync::OnceCell::new(),
+                claim_failed: Mutex::new(None),
             }),
             runtime: Some(runtime),
         })
@@ -230,17 +271,25 @@ impl S3ChunkStore {
     }
 
     /// Run `op` on the store's runtime and await it from any executor.
+    /// Dropping the future aborts the operation.
     fn spawn<T: Send + 'static>(
         &self,
         op: impl std::future::Future<Output = Result<T, String>> + Send + 'static,
     ) -> StoreFuture<'_, T> {
-        let handle = self
-            .runtime
-            .as_ref()
-            .expect("the runtime lives as long as the store")
-            .spawn(op);
+        struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+        impl<T> Drop for AbortOnDrop<T> {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let mut handle = AbortOnDrop(
+            self.runtime
+                .as_ref()
+                .expect("the runtime lives as long as the store")
+                .spawn(op),
+        );
         Box::pin(async move {
-            match handle.await {
+            match (&mut handle.0).await {
                 Ok(result) => result.map_err(storage),
                 Err(error) => Err(storage(format!("s3 blobs: operation failed: {error}"))),
             }
@@ -280,18 +329,30 @@ impl ChunkStore for S3ChunkStore {
     }
 }
 
+/// What one request to the bucket was.
+struct Request<'a> {
+    method: reqwest::Method,
+    /// The object's name under the prefix.
+    name: &'a str,
+    body: Option<Bytes>,
+    /// The SHA-256 of `body`, if there is one.
+    body_hash: Option<[u8; 32]>,
+    /// Put only if nothing is stored under the name.
+    if_none_match: bool,
+}
+
 impl Inner {
     /// The object's URL and host, and its path as signed.
-    fn locate(&self, node: &NodeKey) -> (String, String, String) {
+    fn locate(&self, name: &str) -> (String, String, String) {
         let o = &self.options;
-        let key = format!("{}{}", o.prefix, node.object_name());
+        let key = format!("{}{name}", o.prefix);
         let base = o
             .endpoint
             .clone()
             .unwrap_or_else(|| format!("https://s3.{}.amazonaws.com", o.region));
         let base = base.trim_end_matches('/');
         let (scheme, authority) = base.split_once("://").unwrap_or(("https", base));
-        let (host, path) = if o.path_style {
+        let (host, path) = if o.path_style || o.bucket.contains('.') {
             (
                 authority.to_owned(),
                 format!(
@@ -310,51 +371,120 @@ impl Inner {
     }
 
     async fn keys(&self) -> Result<Keys, String> {
-        let mut cached = self.keys.lock().await;
-        if let Some((keys, until)) = cached.as_ref()
-            && until.is_none_or(|until| Instant::now() < until)
+        let mut state = self.keys.lock().await;
+        if let Some((keys, until)) = state.keys.as_ref()
+            && until.is_none_or(|until| SystemTime::now() < until)
         {
             return Ok(keys.clone());
+        }
+        if let Some((at, error)) = &state.failed
+            && at.elapsed() < ASSUME_FAILURE_HOLD
+        {
+            return Err(error.clone());
         }
         let S3Credentials::WebIdentity { role_arn, token } = &self.options.credentials else {
             unreachable!("static keys never expire");
         };
-        let assumed =
-            assume_role(&self.http, &self.options.region, role_arn, &token.read()?).await?;
-        *cached = Some((
-            assumed.clone(),
-            Some(Instant::now() + ASSUMED_FOR - REFRESH_EARLY),
-        ));
-        Ok(assumed)
+        let assumed = match token.read() {
+            Ok(token) => self.assume_role(role_arn, &token).await,
+            Err(error) => Err(format!("s3 blobs: {error}")),
+        };
+        match assumed {
+            Ok((keys, expires)) => {
+                let until = expires.unwrap_or_else(|| SystemTime::now() + ASSUMED_FOR);
+                state.keys = Some((keys.clone(), Some(until - REFRESH_EARLY)));
+                state.failed = None;
+                Ok(keys)
+            }
+            Err(error) => {
+                state.failed = Some((Instant::now(), error.clone()));
+                Err(error)
+            }
+        }
     }
 
-    async fn send(
+    /// Short-lived keys for `role_arn` (STS `AssumeRoleWithWebIdentity`,
+    /// which the token alone authenticates), and when they expire. The
+    /// token goes in a form body, never in a URL that errors and logs
+    /// could repeat.
+    async fn assume_role(
         &self,
-        method: reqwest::Method,
-        node: &NodeKey,
-        body: Option<Bytes>,
-    ) -> Result<reqwest::Response, String> {
-        let (url, host, path) = self.locate(node);
-        let keys = self.keys().await?;
-        let payload = match &body {
-            // The node's hash is the SHA-256 of its bytes.
-            Some(_) => hex::encode(node.hash),
-            None => hex::encode(Sha256::digest(b"")),
+        role_arn: &str,
+        token: &str,
+    ) -> Result<(Keys, Option<SystemTime>), String> {
+        let sts = match (&self.options.sts_endpoint, self.options.region.as_str()) {
+            (Some(endpoint), _) => endpoint.clone(),
+            (None, "auto" | "") => "https://sts.amazonaws.com".to_owned(),
+            (None, region) => format!("https://sts.{region}.amazonaws.com"),
         };
+        let response = self
+            .http
+            .post(sts)
+            .form(&[
+                ("Action", "AssumeRoleWithWebIdentity"),
+                ("Version", "2011-06-15"),
+                ("DurationSeconds", &ASSUMED_FOR.as_secs().to_string()),
+                ("RoleArn", role_arn),
+                ("RoleSessionName", "jazz-blobs"),
+                ("WebIdentityToken", token),
+            ])
+            .send()
+            .await
+            .map_err(|error| format!("s3 blobs: assume {role_arn}: {}", error.without_url()))?;
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!(
+                "s3 blobs: assume {role_arn}: {status} {} {}",
+                xml_field(&body, "Code").unwrap_or_default(),
+                xml_field(&body, "Message").unwrap_or_default()
+            ));
+        }
+        let field = |name| {
+            xml_field(&body, name).ok_or_else(|| format!("s3 blobs: assume {role_arn}: no {name}"))
+        };
+        let keys = Keys {
+            access_key_id: field("AccessKeyId")?,
+            secret_access_key: field("SecretAccessKey")?,
+            session_token: Some(field("SessionToken")?),
+        };
+        let expires = xml_field(&body, "Expiration").and_then(|at| parse_iso8601(&at));
+        Ok((keys, expires))
+    }
+
+    /// Forget assumed keys the bucket called expired or invalid.
+    async fn drop_keys(&self) {
+        if matches!(self.options.credentials, S3Credentials::WebIdentity { .. }) {
+            self.keys.lock().await.keys = None;
+        }
+    }
+
+    async fn send(&self, request: Request<'_>) -> Result<reqwest::Response, String> {
+        let (url, host, path) = self.locate(request.name);
+        let keys = self.keys().await?;
+        let payload = hex::encode(
+            request
+                .body_hash
+                .unwrap_or_else(|| Sha256::digest(b"").into()),
+        );
         let mut headers = vec![
             ("host".to_owned(), host),
             ("x-amz-content-sha256".to_owned(), payload.clone()),
             ("x-amz-date".to_owned(), amz_date(SystemTime::now())),
         ];
-        if body.is_some() {
+        if let Some(hash) = request.body_hash {
             headers.push((
                 "x-amz-checksum-sha256".to_owned(),
-                base64::engine::general_purpose::STANDARD.encode(node.hash),
+                base64::engine::general_purpose::STANDARD.encode(hash),
             ));
+        }
+        if request.if_none_match {
+            headers.push(("if-none-match".to_owned(), "*".to_owned()));
         }
         if let Some(token) = &keys.session_token {
             headers.push(("x-amz-security-token".to_owned(), token.clone()));
         }
+        let method = request.method;
         let authorization = sign(
             method.as_str(),
             &path,
@@ -364,107 +494,240 @@ impl Inner {
             &keys,
             &self.options.region,
         );
-        let mut request = self.http.request(method, url);
+        let mut http = self.http.request(method, url);
         for (name, value) in headers.iter().filter(|(name, _)| name != "host") {
-            request = request.header(name, value);
+            http = http.header(name, value);
         }
-        request = request.header("authorization", authorization);
-        if let Some(body) = body {
-            request = request.body(body);
+        http = http.header("authorization", authorization);
+        if let Some(body) = request.body {
+            http = http.body(body);
         }
-        request
-            .send()
+        http.send()
             .await
-            .map_err(|error| format!("s3 blobs: {error}"))
+            .map_err(|error| format!("s3 blobs: {}", error.without_url()))
+    }
+
+    /// Check (once per process) that this store owns the prefix, claiming
+    /// it if no store does yet.
+    async fn claim(&self) -> Result<(), String> {
+        if self.claimed.initialized() {
+            return Ok(());
+        }
+        if let Some((at, error)) = &*self.claim_failed.lock().expect("claim state")
+            && at.elapsed() < ASSUME_FAILURE_HOLD
+        {
+            return Err(error.clone());
+        }
+        let claimed = self.claimed
+            .get_or_try_init(|| async {
+                let refused = |other: &str| {
+                    format!(
+                        "s3 blobs: {} belongs to store {other}, not this one ({}); give each store its own bucket or prefix",
+                        self.options.describe(),
+                        self.owner
+                    )
+                };
+                match self.read_owner().await? {
+                    Some(owner) if owner == self.owner => return Ok(()),
+                    Some(owner) => return Err(refused(&owner)),
+                    None => {}
+                }
+                let body = Bytes::from(format!("{}\n", self.owner));
+                let response = self
+                    .send(Request {
+                        method: reqwest::Method::PUT,
+                        name: OWNER_OBJECT,
+                        body_hash: Some(Sha256::digest(&body).into()),
+                        body: Some(body),
+                        if_none_match: true,
+                    })
+                    .await?;
+                if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
+                    // Another store claimed it first.
+                    return match self.read_owner().await? {
+                        Some(owner) if owner == self.owner => Ok(()),
+                        Some(owner) => Err(refused(&owner)),
+                        None => Err("s3 blobs: the owner object vanished while claiming".to_owned()),
+                    };
+                }
+                self.expect_ok(response, "claim", OWNER_OBJECT).await.map(|_| ())
+            })
+            .await
+            .map(|_| ());
+        if let Err(error) = &claimed {
+            *self.claim_failed.lock().expect("claim state") = Some((Instant::now(), error.clone()));
+        }
+        claimed
+    }
+
+    async fn read_owner(&self) -> Result<Option<String>, String> {
+        let response = self.request(reqwest::Method::GET, OWNER_OBJECT).await?;
+        let Some(response) = self.found(response, "read", OWNER_OBJECT).await? else {
+            return Ok(None);
+        };
+        let body = read_bounded(response, 1024, OWNER_OBJECT).await?;
+        Ok(Some(String::from_utf8_lossy(&body).trim().to_owned()))
+    }
+
+    async fn request(
+        &self,
+        method: reqwest::Method,
+        name: &str,
+    ) -> Result<reqwest::Response, String> {
+        self.send(Request {
+            method,
+            name,
+            body: None,
+            body_hash: None,
+            if_none_match: false,
+        })
+        .await
     }
 
     async fn put(&self, node: &NodeKey, bytes: Bytes) -> Result<(), String> {
-        let response = self.send(reqwest::Method::PUT, node, Some(bytes)).await?;
-        expect_ok(response, "put", node).await.map(|_| ())
+        self.claim().await?;
+        let name = node.object_name();
+        let response = self
+            .send(Request {
+                method: reqwest::Method::PUT,
+                name: &name,
+                body: Some(bytes),
+                // The node's hash is the SHA-256 of its bytes.
+                body_hash: Some(node.hash),
+                if_none_match: false,
+            })
+            .await?;
+        self.expect_ok(response, "put", &name).await.map(|_| ())
     }
 
     async fn get(&self, node: &NodeKey) -> Result<Option<Bytes>, String> {
-        let response = self.send(reqwest::Method::GET, node, None).await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        self.claim().await?;
+        let name = node.object_name();
+        let response = self.request(reqwest::Method::GET, &name).await?;
+        let Some(response) = self.found(response, "get", &name).await? else {
             return Ok(None);
-        }
-        let response = expect_ok(response, "get", node).await?;
-        response
-            .bytes()
+        };
+        read_bounded(response, jazz::large_values::MAX_ENCODED_NODE_BYTES, &name)
             .await
             .map(Some)
-            .map_err(|error| format!("s3 blobs: read {}: {error}", node.object_name()))
+    }
+
+    /// A successful GET's response, or `None` if the object is absent. A
+    /// key that is missing answers 403 AccessDenied rather than 404 to keys
+    /// without s3:ListBucket; reading is allowed under the prefix (or the
+    /// owner object could not have been read), so that is absence too.
+    async fn found(
+        &self,
+        response: reqwest::Response,
+        what: &str,
+        name: &str,
+    ) -> Result<Option<reqwest::Response>, String> {
+        let status = response.status();
+        if status.is_success() {
+            return Ok(Some(response));
+        }
+        let body = response.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::NOT_FOUND
+            || (status == reqwest::StatusCode::FORBIDDEN
+                && xml_field(&body, "Code").as_deref() == Some("AccessDenied"))
+        {
+            return Ok(None);
+        }
+        Err(self.failure(status, &body, what, name).await)
     }
 
     async fn delete(&self, node: &NodeKey) -> Result<(), String> {
-        let response = self.send(reqwest::Method::DELETE, node, None).await?;
+        self.claim().await?;
+        let name = node.object_name();
+        let response = self.request(reqwest::Method::DELETE, &name).await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(());
         }
-        expect_ok(response, "delete", node).await.map(|_| ())
+        self.expect_ok(response, "delete", &name).await.map(|_| ())
+    }
+
+    async fn expect_ok(
+        &self,
+        response: reqwest::Response,
+        what: &str,
+        name: &str,
+    ) -> Result<reqwest::Response, String> {
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        Err(self.failure(status, &body, what, name).await)
+    }
+
+    /// The error a failed request comes to; assumed keys the bucket no
+    /// longer takes are dropped, so the next request assumes the role again.
+    async fn failure(
+        &self,
+        status: reqwest::StatusCode,
+        body: &str,
+        what: &str,
+        name: &str,
+    ) -> String {
+        let code = xml_field(body, "Code").unwrap_or_default();
+        if matches!(
+            code.as_str(),
+            "ExpiredToken" | "InvalidToken" | "TokenRefreshRequired"
+        ) {
+            self.drop_keys().await;
+        }
+        let message = xml_field(body, "Message").unwrap_or_default();
+        format!("s3 blobs: {what} {name}: {status} {code} {message}")
     }
 }
 
-async fn expect_ok(
-    response: reqwest::Response,
-    what: &str,
-    node: &NodeKey,
-) -> Result<reqwest::Response, String> {
-    if response.status().is_success() {
-        return Ok(response);
+/// A response body of at most `limit` bytes.
+async fn read_bounded(
+    mut response: reqwest::Response,
+    limit: usize,
+    name: &str,
+) -> Result<Bytes, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(format!("s3 blobs: {name} is larger than any node"));
     }
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    let code = xml_field(&body, "Code").unwrap_or_default();
-    let message = xml_field(&body, "Message").unwrap_or_default();
-    Err(format!(
-        "s3 blobs: {what} {}: {status} {code} {message}",
-        node.object_name()
-    ))
-}
-
-/// Short-lived keys for `role_arn` (STS `AssumeRoleWithWebIdentity`, which
-/// is authenticated by the token alone).
-async fn assume_role(
-    http: &reqwest::Client,
-    region: &str,
-    role_arn: &str,
-    token: &str,
-) -> Result<Keys, String> {
-    let sts = match region {
-        "auto" | "" => "https://sts.amazonaws.com".to_owned(),
-        region => format!("https://sts.{region}.amazonaws.com"),
-    };
-    let response = http
-        .get(sts)
-        .query(&[
-            ("Action", "AssumeRoleWithWebIdentity"),
-            ("Version", "2011-06-15"),
-            ("DurationSeconds", &ASSUMED_FOR.as_secs().to_string()),
-            ("RoleArn", role_arn),
-            ("RoleSessionName", "jazz-blobs"),
-            ("WebIdentityToken", token),
-        ])
-        .send()
+    let mut body = bytes::BytesMut::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|error| format!("s3 blobs: assume {role_arn}: {error}"))?;
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!(
-            "s3 blobs: assume {role_arn}: {status} {} {}",
-            xml_field(&body, "Code").unwrap_or_default(),
-            xml_field(&body, "Message").unwrap_or_default()
-        ));
+        .map_err(|error| format!("s3 blobs: read {name}: {}", error.without_url()))?
+    {
+        if body.len() + chunk.len() > limit {
+            return Err(format!("s3 blobs: {name} is larger than any node"));
+        }
+        body.extend_from_slice(&chunk);
     }
-    let field = |name| {
-        xml_field(&body, name).ok_or_else(|| format!("s3 blobs: assume {role_arn}: no {name}"))
-    };
-    Ok(Keys {
-        access_key_id: field("AccessKeyId")?,
-        secret_access_key: field("SecretAccessKey")?,
-        session_token: Some(field("SessionToken")?),
-    })
+    Ok(body.freeze())
+}
+
+/// `YYYY-MM-DDTHH:MM:SS[.fff]Z`, as STS writes `Expiration`.
+fn parse_iso8601(at: &str) -> Option<SystemTime> {
+    let at = at.trim();
+    let number = |range: std::ops::Range<usize>| at.get(range)?.parse::<i64>().ok();
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    // Civil date to days (Howard Hinnant's algorithm).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + hour * 3_600 + minute * 60 + second;
+    u64::try_from(secs)
+        .ok()
+        .map(|secs| UNIX_EPOCH + Duration::from_secs(secs))
 }
 
 /// The text of the first `<name>` element: enough for STS and S3 replies.
@@ -527,7 +790,7 @@ fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
 /// The SigV4 `Authorization` header for a request to S3. `headers` holds
 /// every header to sign, `x-amz-date` among them, and is sorted in place;
 /// `query` is the canonical query string.
-fn sign(
+pub(crate) fn sign(
     method: &str,
     path: &str,
     query: &str,
@@ -613,6 +876,150 @@ mod tests {
     }
 
     #[test]
+    fn parses_sts_expirations() {
+        let at = |secs| Some(UNIX_EPOCH + Duration::from_secs(secs));
+        assert_eq!(parse_iso8601("2013-05-24T00:00:00Z"), at(1_369_353_600));
+        assert_eq!(
+            parse_iso8601("2000-02-29T01:02:03.000Z"),
+            at(951_782_400 + 3_723)
+        );
+        assert_eq!(parse_iso8601("soon"), None);
+    }
+
+    fn block<T>(future: StoreFuture<'_, T>) -> Result<T, Error> {
+        jazz::db::block_on(future)
+    }
+
+    fn node(seed: u8) -> (NodeKey, Vec<u8>) {
+        let bytes = vec![seed; 1000];
+        (
+            NodeKey {
+                hash: Sha256::digest(&bytes).into(),
+            },
+            bytes,
+        )
+    }
+
+    fn web_identity(bucket: &mock::MockS3, token: &str) -> S3Options {
+        S3Options {
+            credentials: S3Credentials::WebIdentity {
+                role_arn: "arn:aws:iam::1:role/jazz".to_owned(),
+                token: WebIdentityToken::Shared(Arc::new(Mutex::new(Some(token.to_owned())))),
+            },
+            ..bucket.options("app/")
+        }
+    }
+
+    /// A web identity role is assumed once, with the token in a POST form
+    /// (never in a URL), and its session keys sign what follows.
+    #[test]
+    fn assumes_a_web_identity_role_once_with_the_token_in_a_form_body() {
+        use std::sync::atomic::Ordering;
+        let bucket = mock::MockS3::start();
+        let store =
+            S3ChunkStore::new(web_identity(&bucket, "oidc-token"), "me".to_owned()).unwrap();
+        let (key, bytes) = node(1);
+        block(store.put(&key, &bytes)).unwrap();
+        assert_eq!(block(store.get(&key)).unwrap().as_deref(), Some(&bytes[..]));
+        assert_eq!(bucket.state.calls.sts.load(Ordering::Relaxed), 1);
+        assert_eq!(*bucket.state.sts_query.lock().unwrap(), None);
+        assert_eq!(
+            bucket.state.sts_token.lock().unwrap().as_deref(),
+            Some("oidc-token")
+        );
+    }
+
+    /// A role that cannot be assumed fails a whole batch with one STS call,
+    /// and the error names no token.
+    #[test]
+    fn a_failed_assumption_answers_the_whole_batch() {
+        use std::sync::atomic::Ordering;
+        let bucket = mock::MockS3::start();
+        let store = S3ChunkStore::new(web_identity(&bucket, "wrong"), "me".to_owned()).unwrap();
+        let nodes: Vec<_> = (0..8).map(node).collect();
+        let results = jazz::db::block_on(futures::future::join_all(
+            nodes.iter().map(|(key, bytes)| store.put(key, bytes)),
+        ));
+        for result in results {
+            let error = result.unwrap_err();
+            assert!(error.message.contains("InvalidIdentityToken"), "{error}");
+            assert!(!error.message.contains("wrong"), "{error}");
+        }
+        assert_eq!(bucket.state.calls.sts.load(Ordering::Relaxed), 1);
+    }
+
+    /// Deletes reach the bucket, and deleting an absent key succeeds; a
+    /// request signed with the wrong secret is refused.
+    #[test]
+    fn deletes_reach_the_bucket_and_bad_signatures_do_not() {
+        let bucket = mock::MockS3::start();
+        let store = S3ChunkStore::new(bucket.options("app/"), "me".to_owned()).unwrap();
+        let (key, bytes) = node(2);
+        block(store.put(&key, &bytes)).unwrap();
+        assert_eq!(bucket.names("app/"), vec![key.object_name()]);
+        block(store.delete(&key)).unwrap();
+        assert!(bucket.names("app/").is_empty());
+        block(store.delete(&key)).unwrap();
+        assert_eq!(block(store.get(&key)).unwrap(), None);
+
+        let mut forged = bucket.options("app/");
+        forged.credentials = S3Credentials::Static(Keys {
+            access_key_id: "test".to_owned(),
+            secret_access_key: "guess".to_owned(),
+            session_token: None,
+        });
+        let forged = S3ChunkStore::new(forged, "me".to_owned()).unwrap();
+        let error = block(forged.put(&key, &bytes)).unwrap_err();
+        assert!(error.message.contains("SignatureDoesNotMatch"), "{error}");
+    }
+
+    /// A prefix is claimed by the first store to use it; another store is
+    /// refused there before it writes or deletes anything.
+    #[test]
+    fn two_stores_cannot_share_a_prefix() {
+        let bucket = mock::MockS3::start();
+        let (key, bytes) = node(3);
+        let first = S3ChunkStore::new(bucket.options("app/"), "store-a".to_owned()).unwrap();
+        block(first.put(&key, &bytes)).unwrap();
+        let second = S3ChunkStore::new(bucket.options("app/"), "store-b".to_owned()).unwrap();
+        let error = block(second.delete(&key)).unwrap_err();
+        assert!(
+            error.message.contains("belongs to store store-a"),
+            "{error}"
+        );
+        assert_eq!(
+            bucket.names("app/"),
+            vec![key.object_name()],
+            "nothing deleted"
+        );
+        let beside = S3ChunkStore::new(bucket.options("other/"), "store-b".to_owned()).unwrap();
+        block(beside.put(&key, &bytes)).unwrap();
+        let again = S3ChunkStore::new(bucket.options("app/"), "store-a".to_owned()).unwrap();
+        assert_eq!(block(again.get(&key)).unwrap().as_deref(), Some(&bytes[..]));
+    }
+
+    /// Without s3:ListBucket a missing key answers 403: it reads as absent.
+    /// A body larger than any node is refused.
+    #[test]
+    fn reads_of_missing_or_oversized_objects() {
+        let bucket = mock::MockS3::start();
+        let store = S3ChunkStore::new(bucket.options("app/"), "me".to_owned()).unwrap();
+        bucket
+            .state
+            .deny_missing
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let (key, _) = node(4);
+        assert_eq!(block(store.get(&key)).unwrap(), None);
+        let (big, _) = node(5);
+        bucket.state.objects.lock().unwrap().insert(
+            format!("bucket/app/{}", big.object_name()),
+            vec![0; jazz::large_values::MAX_ENCODED_NODE_BYTES + 1],
+        );
+        let error = block(store.get(&big)).unwrap_err();
+        assert!(error.message.contains("larger than any node"), "{error}");
+    }
+
+    #[test]
     fn formats_amz_dates() {
         let at = UNIX_EPOCH + Duration::from_secs(1_369_353_600);
         assert_eq!(amz_date(at), "20130524T000000Z");
@@ -643,17 +1050,312 @@ mod tests {
                 secret_access_key: String::new(),
                 session_token: None,
             }),
+            sts_endpoint: None,
         };
-        let node = NodeKey { hash: [0xab; 32] };
-        let store = S3ChunkStore::new(options(None)).unwrap();
+        let node = NodeKey { hash: [0xab; 32] }.object_name();
+        let store = S3ChunkStore::new(options(None), "me".to_owned()).unwrap();
         let (url, host, path) = store.inner.locate(&node);
         assert_eq!(host, "jazz-app.s3.us-east-1.amazonaws.com");
         assert_eq!(path, format!("/blobs/{}", "ab".repeat(32)));
         assert_eq!(url, format!("https://{host}{path}"));
-        let store = S3ChunkStore::new(options(Some("http://127.0.0.1:9000/"))).unwrap();
+        let store =
+            S3ChunkStore::new(options(Some("http://127.0.0.1:9000/")), "me".to_owned()).unwrap();
         let (url, host, path) = store.inner.locate(&node);
         assert_eq!(host, "127.0.0.1:9000");
         assert_eq!(path, format!("/jazz-app/blobs/{}", "ab".repeat(32)));
         assert_eq!(url, format!("http://{host}{path}"));
+        // A dotted bucket name would not match AWS's certificate as a host.
+        let mut dotted = options(None);
+        dotted.bucket = "jazz.app".to_owned();
+        let store = S3ChunkStore::new(dotted, "me".to_owned()).unwrap();
+        let (_, host, path) = store.inner.locate(&node);
+        assert_eq!(host, "s3.us-east-1.amazonaws.com");
+        assert!(path.starts_with("/jazz.app/blobs/"), "{path}");
+    }
+}
+
+/// An S3 and STS stand-in over HTTP that checks what the real ones check:
+/// every request's SigV4 signature (against the keys it issued), a put's
+/// body against its signed `x-amz-checksum-sha256`, `If-None-Match`, and
+/// that STS gets its token in a form body.
+#[cfg(test)]
+pub(crate) mod mock {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    #[derive(Default)]
+    pub(crate) struct Calls {
+        pub gets: AtomicU64,
+        pub puts: AtomicU64,
+        pub deletes: AtomicU64,
+        pub sts: AtomicU64,
+        pub requests: AtomicU64,
+    }
+
+    #[derive(Default)]
+    pub(crate) struct State {
+        pub objects: Mutex<BTreeMap<String, Vec<u8>>>,
+        pub calls: Calls,
+        /// Every request fails with 503 while set.
+        pub failing: AtomicBool,
+        /// A missing key answers 403 AccessDenied, as without s3:ListBucket.
+        pub deny_missing: AtomicBool,
+        /// Keys by access key id; `test`/`test` is always valid.
+        issued: Mutex<BTreeMap<String, (String, String)>>,
+        /// What STS was last asked to accept.
+        pub sts_token: Mutex<Option<String>>,
+        pub sts_query: Mutex<Option<String>>,
+    }
+
+    pub(crate) struct MockS3 {
+        pub state: Arc<State>,
+        pub endpoint: String,
+        _runtime: tokio::runtime::Runtime,
+    }
+
+    impl MockS3 {
+        pub(crate) fn start() -> Self {
+            let state = Arc::new(State::default());
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let listener = runtime
+                .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+                .unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let served = Arc::clone(&state);
+            let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+                let state = Arc::clone(&served);
+                async move { serve(&state, request).await }
+            });
+            runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
+            Self {
+                state,
+                endpoint,
+                _runtime: runtime,
+            }
+        }
+
+        /// Options for this bucket under `prefix`, with static test keys.
+        pub(crate) fn options(&self, prefix: &str) -> S3Options {
+            S3Options {
+                bucket: "bucket".to_owned(),
+                region: "auto".to_owned(),
+                endpoint: Some(self.endpoint.clone()),
+                prefix: prefix.to_owned(),
+                path_style: true,
+                credentials: S3Credentials::Static(Keys {
+                    access_key_id: "test".to_owned(),
+                    secret_access_key: "test".to_owned(),
+                    session_token: None,
+                }),
+                sts_endpoint: Some(format!("{}/sts", self.endpoint)),
+            }
+        }
+
+        /// Object names under `prefix` (without it), owner object aside.
+        pub(crate) fn names(&self, prefix: &str) -> Vec<String> {
+            let full = format!("bucket/{prefix}");
+            self.state
+                .objects
+                .lock()
+                .unwrap()
+                .keys()
+                .filter_map(|key| key.strip_prefix(&full))
+                .filter(|name| *name != OWNER_OBJECT)
+                .map(str::to_owned)
+                .collect()
+        }
+    }
+
+    type Reply = (axum::http::StatusCode, Vec<u8>);
+
+    fn error(status: axum::http::StatusCode, code: &str) -> Reply {
+        (
+            status,
+            format!("<Error><Code>{code}</Code><Message>mock</Message></Error>").into_bytes(),
+        )
+    }
+
+    async fn serve(state: &State, request: axum::extract::Request) -> Reply {
+        use axum::http::StatusCode;
+        let (parts, body) = request.into_parts();
+        let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        state.calls.requests.fetch_add(1, Ordering::Relaxed);
+        if state.failing.load(Ordering::Relaxed) {
+            return error(StatusCode::SERVICE_UNAVAILABLE, "SlowDown");
+        }
+        if parts.uri.path() == "/sts" {
+            return sts(state, &parts, &body);
+        }
+        if let Err(code) = verify(state, &parts) {
+            return error(StatusCode::FORBIDDEN, code);
+        }
+        let key = parts.uri.path().trim_start_matches('/').to_owned();
+        let header = |name: &str| {
+            parts
+                .headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+        };
+        let mut objects = state.objects.lock().unwrap();
+        match parts.method.as_str() {
+            "PUT" => {
+                state.calls.puts.fetch_add(1, Ordering::Relaxed);
+                let digest =
+                    base64::engine::general_purpose::STANDARD.encode(Sha256::digest(&body));
+                if header("x-amz-checksum-sha256") != Some(digest.as_str()) {
+                    return error(StatusCode::BAD_REQUEST, "BadDigest");
+                }
+                if header("if-none-match") == Some("*") && objects.contains_key(&key) {
+                    return error(StatusCode::PRECONDITION_FAILED, "PreconditionFailed");
+                }
+                objects.insert(key, body.to_vec());
+                (StatusCode::OK, Vec::new())
+            }
+            "GET" => {
+                state.calls.gets.fetch_add(1, Ordering::Relaxed);
+                match objects.get(&key) {
+                    Some(bytes) => (StatusCode::OK, bytes.clone()),
+                    None if state.deny_missing.load(Ordering::Relaxed) => {
+                        error(StatusCode::FORBIDDEN, "AccessDenied")
+                    }
+                    None => error(StatusCode::NOT_FOUND, "NoSuchKey"),
+                }
+            }
+            "DELETE" => {
+                state.calls.deletes.fetch_add(1, Ordering::Relaxed);
+                objects.remove(&key);
+                (StatusCode::NO_CONTENT, Vec::new())
+            }
+            _ => error(StatusCode::METHOD_NOT_ALLOWED, "MethodNotAllowed"),
+        }
+    }
+
+    /// Recompute the request's signature from what arrived.
+    fn verify(state: &State, parts: &axum::http::request::Parts) -> Result<(), &'static str> {
+        let authorization = parts
+            .headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .ok_or("AccessDenied")?;
+        let field = |name: &str| {
+            authorization
+                .split([' ', ','])
+                .find_map(|part| part.strip_prefix(name))
+                .ok_or("AuthorizationHeaderMalformed")
+        };
+        let credential = field("Credential=")?;
+        let signed = field("SignedHeaders=")?;
+        let mut scope = credential.split('/');
+        let access_key_id = scope.next().ok_or("AuthorizationHeaderMalformed")?;
+        let region = scope.nth(1).ok_or("AuthorizationHeaderMalformed")?;
+        let keys = if access_key_id == "test" {
+            Keys {
+                access_key_id: "test".to_owned(),
+                secret_access_key: "test".to_owned(),
+                session_token: None,
+            }
+        } else {
+            let issued = state.issued.lock().unwrap();
+            let (secret, token) = issued.get(access_key_id).ok_or("InvalidAccessKeyId")?;
+            let sent = parts
+                .headers
+                .get("x-amz-security-token")
+                .and_then(|value| value.to_str().ok());
+            if sent != Some(token.as_str()) {
+                return Err("InvalidToken");
+            }
+            Keys {
+                access_key_id: access_key_id.to_owned(),
+                secret_access_key: secret.clone(),
+                session_token: Some(token.clone()),
+            }
+        };
+        let mut headers = Vec::new();
+        for name in signed.split(';') {
+            let value = parts
+                .headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .ok_or("SignatureDoesNotMatch")?;
+            headers.push((name.to_owned(), value.to_owned()));
+        }
+        let payload = parts
+            .headers
+            .get("x-amz-content-sha256")
+            .and_then(|value| value.to_str().ok())
+            .ok_or("SignatureDoesNotMatch")?;
+        let expected = sign(
+            parts.method.as_str(),
+            parts.uri.path(),
+            "",
+            &mut headers,
+            payload,
+            &keys,
+            region,
+        );
+        if expected == authorization {
+            Ok(())
+        } else {
+            Err("SignatureDoesNotMatch")
+        }
+    }
+
+    fn decode(value: &str) -> String {
+        let bytes = value.replace('+', " ").into_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%'
+                && i + 2 < bytes.len()
+                && let Ok(byte) =
+                    u8::from_str_radix(&String::from_utf8_lossy(&bytes[i + 1..i + 3]), 16)
+            {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    fn sts(state: &State, parts: &axum::http::request::Parts, body: &[u8]) -> Reply {
+        use axum::http::StatusCode;
+        state.calls.sts.fetch_add(1, Ordering::Relaxed);
+        *state.sts_query.lock().unwrap() = parts.uri.query().map(str::to_owned);
+        let form: BTreeMap<String, String> = String::from_utf8_lossy(body)
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .map(|(name, value)| (decode(name), decode(value)))
+            .collect();
+        *state.sts_token.lock().unwrap() = form.get("WebIdentityToken").cloned();
+        if parts.method != axum::http::Method::POST
+            || form.get("Action").map(String::as_str) != Some("AssumeRoleWithWebIdentity")
+            || form
+                .get("WebIdentityToken")
+                .is_none_or(|token| token != "oidc-token")
+        {
+            return error(StatusCode::FORBIDDEN, "InvalidIdentityToken");
+        }
+        let n = state.calls.sts.load(Ordering::Relaxed);
+        let (id, secret, token) = (
+            format!("ASIA{n}"),
+            format!("secret{n}"),
+            format!("session{n}"),
+        );
+        state
+            .issued
+            .lock()
+            .unwrap()
+            .insert(id.clone(), (secret.clone(), token.clone()));
+        let reply = format!(
+            "<AssumeRoleWithWebIdentityResponse><AssumeRoleWithWebIdentityResult><Credentials>\
+             <AccessKeyId>{id}</AccessKeyId><SecretAccessKey>{secret}</SecretAccessKey>\
+             <SessionToken>{token}</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration>\
+             </Credentials></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>"
+        );
+        (StatusCode::OK, reply.into_bytes())
     }
 }

@@ -9,7 +9,12 @@ export interface S3BlobStore {
   readonly region?: string;
   /** An S3-compatible endpoint other than AWS, e.g. R2's. */
   readonly endpoint?: string;
-  /** Prepended to every object name, to share a bucket between stores. */
+  /**
+   * Prepended to every object name. Defaults to `jazz/<appId>/<store id>/`,
+   * one per store, so stores sharing a bucket (preview and production) never
+   * share objects. A prefix is claimed by the first store that uses it, and
+   * any other store is refused there.
+   */
   readonly prefix?: string;
 }
 
@@ -41,8 +46,8 @@ export function files(options: { dir?: string } = {}): Extract<BlobStore, { kind
  * `AWS_WEB_IDENTITY_TOKEN_FILE`. Every chunk is put with its SHA-256, so
  * the bucket itself rejects corrupted uploads.
  *
- * Give each store its own bucket or prefix: a store deletes the chunks it
- * no longer needs.
+ * Each store keeps its objects under a prefix of its own (it deletes the
+ * chunks it no longer needs), so one bucket serves many stores.
  */
 export function s3(options: Omit<S3BlobStore, "kind"> = {}): S3BlobStore {
   const set = Object.entries(options).filter(([, value]) => value !== undefined);

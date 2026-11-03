@@ -160,7 +160,8 @@ enum Commands {
         #[arg(long)]
         s3_endpoint: Option<String>,
 
-        /// Prefix for every object name, to share a bucket between stores.
+        /// Prefix for every object name; defaults to jazz/<app id>/<store id>/,
+        /// one per data dir. A prefix is claimed by the first store to use it.
         #[arg(long)]
         s3_prefix: Option<String>,
 

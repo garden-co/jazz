@@ -353,15 +353,24 @@ impl ServerBuilder {
             StorageBackend::Persistent { path } => {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
-                let plan = plan_blob_store(path, &self.blobs)?;
-                let config = match (&plan.blob_dir, &self.blobs) {
+                let blobs = match &self.blobs {
+                    // A bucket's default prefix is this store's own.
+                    BlobStore::S3(options) if options.prefix.is_empty() => {
+                        let mut options = options.clone();
+                        options.prefix = format!("jazz/{}/{}/", self.app_id, store_id(path)?);
+                        BlobStore::S3(options)
+                    }
+                    blobs => blobs.clone(),
+                };
+                let plan = plan_blob_store(path, &blobs)?;
+                let config = match (&plan.blob_dir, &blobs) {
                     (Some(dir), _) => {
                         claim_blob_dir(path, dir)?;
                         StorageConfig::data_dir(path).with_blob_dir(dir.clone())
                     }
                     (None, BlobStore::S3(options)) => {
                         warn_on_distant_bucket(options);
-                        let store = crate::s3::S3ChunkStore::new(options.clone())?;
+                        let store = crate::s3::S3ChunkStore::new(options.clone(), store_id(path)?)?;
                         StorageConfig::data_dir(path).with_blobs(crate::runtime::Blobs::Network(
                             crate::runtime::NetworkChunkStore {
                                 store: Arc::new(store),
@@ -956,6 +965,48 @@ mod tests {
         }
     }
 
+    /// Without a prefix, each data dir gets its own under the app's, so two
+    /// stores sharing a bucket (preview and production) never share keys.
+    #[tokio::test]
+    async fn a_bucket_without_a_prefix_gets_one_per_data_dir() {
+        let app = AppId::from_name("blob-store-prefix");
+        let blobs = BlobStore::S3(crate::s3::S3Options {
+            bucket: "jazz".to_owned(),
+            region: "auto".to_owned(),
+            endpoint: Some("http://127.0.0.1:9".to_owned()),
+            prefix: String::new(),
+            path_style: true,
+            credentials: crate::s3::S3Credentials::Static(crate::s3::Keys {
+                access_key_id: "k".to_owned(),
+                secret_access_key: "s".to_owned(),
+                session_token: None,
+            }),
+            sts_endpoint: None,
+        });
+        let mut recorded = Vec::new();
+        for _ in 0..2 {
+            let data_dir = tempfile::TempDir::new().expect("temp data dir");
+            ServerBuilder::new(app)
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .with_blob_store(blobs.clone())
+                .build()
+                .await
+                .expect("start")
+                .shutdown()
+                .await;
+            let id = std::fs::read_to_string(data_dir.path().join(STORE_ID_FILE)).unwrap();
+            let marker = std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap();
+            assert_eq!(
+                marker,
+                format!("s3 http://127.0.0.1:9 jazz/jazz/{app}/{}/\n", id.trim())
+            );
+            recorded.push(marker);
+        }
+        assert_ne!(recorded[0], recorded[1]);
+    }
+
     #[tokio::test]
     async fn a_data_dir_may_move_its_blobs_from_sqlite_to_a_bucket_and_keeps_it() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
@@ -971,6 +1022,7 @@ mod tests {
                     secret_access_key: "s".to_owned(),
                     session_token: None,
                 }),
+                sts_endpoint: None,
             })
         };
         let start = |blobs: BlobStore| {

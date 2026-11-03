@@ -356,12 +356,24 @@ struct ChunkStoreChoice {
 /// Runs a network chunk store's batches ([`jazz::db::Db::take_chunk_io`])
 /// on a thread of its own and hands each outcome back to the store thread
 /// as runtime work, which applies it and ticks. One batch is out at a time.
+/// After a batch fails, the next waits (1 s, doubling up to a minute), so
+/// a bucket that refuses every request is not asked again on every tick.
 struct ChunkIoRunner {
-    store: Arc<dyn jazz::chunk_store::ChunkStore>,
     batches: std_mpsc::Sender<jazz::chunk_store::ChunkIo>,
-    out: Arc<AtomicBool>,
-    join: Option<thread::JoinHandle<()>>,
+    out: std::cell::Cell<bool>,
+    /// Consecutive failed batches, and when the next may start.
+    failures: std::cell::Cell<u32>,
+    not_before: std::cell::Cell<Option<std::time::Instant>>,
+    /// Dropped to cancel the batch in flight.
+    cancel: Option<futures::channel::oneshot::Sender<()>>,
+    /// Disconnects once the thread has ended.
+    ended: std_mpsc::Receiver<()>,
 }
+
+/// The first wait after a failed batch, and the longest.
+const CHUNK_IO_BACKOFF: (Duration, Duration) = (Duration::from_secs(1), Duration::from_secs(60));
+/// How long dropping a runner waits for its cancelled batch to stop.
+const CHUNK_IO_STOP: Duration = Duration::from_secs(5);
 
 impl ChunkIoRunner {
     fn start(
@@ -369,13 +381,21 @@ impl ChunkIoRunner {
         work: std_mpsc::Sender<Work>,
     ) -> Result<Self, String> {
         let (batches, receiver) = std_mpsc::channel::<jazz::chunk_store::ChunkIo>();
-        let out = Arc::new(AtomicBool::new(false));
-        let thread_store = Arc::clone(&store);
-        let join = thread::Builder::new()
+        let (cancel, mut cancelled) = futures::channel::oneshot::channel::<()>();
+        let (ended_tx, ended) = std_mpsc::channel::<()>();
+        thread::Builder::new()
             .name("jazz-chunk-io".to_owned())
             .spawn(move || {
+                let _ended = ended_tx;
                 for io in receiver {
-                    let done = block_on(io.run(&*thread_store));
+                    // A cancelled batch is dropped mid-flight: its requests
+                    // are aborted and its work goes to the store's next one.
+                    let run = io.run(&*store);
+                    let done =
+                        match block_on(futures::future::select(Box::pin(run), &mut cancelled)) {
+                            futures::future::Either::Left((done, _)) => done,
+                            futures::future::Either::Right(_) => return,
+                        };
                     let finish: Job =
                         Box::new(move |owner: &mut Owner| owner.finish_chunk_io(done));
                     if work.send(Work::Owner(finish)).is_err() {
@@ -385,28 +405,31 @@ impl ChunkIoRunner {
             })
             .map_err(|error| format!("start chunk I/O thread: {error}"))?;
         Ok(Self {
-            store,
             batches,
-            out,
-            join: Some(join),
+            out: std::cell::Cell::new(false),
+            failures: std::cell::Cell::new(0),
+            not_before: std::cell::Cell::new(None),
+            cancel: Some(cancel),
+            ended,
         })
     }
 
-    /// Hand the runtime's next batch over, unless one is out.
+    /// Hand the runtime's next batch over, unless one is out or the last
+    /// failed too recently.
     fn pump(&self, owner: &Owner) {
-        if self.out.load(Ordering::Acquire) {
+        if self.out.get()
+            || self
+                .not_before
+                .get()
+                .is_some_and(|at| std::time::Instant::now() < at)
+        {
             return;
         }
         match owner.db.take_chunk_io() {
-            Ok(Some(io)) if io.is_empty() => {
-                // Nothing to do: an empty batch runs no I/O, so it goes
-                // straight back.
-                if let Err(error) = owner.db.finish_chunk_io(block_on(io.run(&*self.store))) {
-                    tracing::warn!(%error, "large-value store I/O failed");
-                }
-            }
+            // Nothing to do: dropping an empty batch ends it.
+            Ok(Some(io)) if io.is_empty() => {}
             Ok(Some(io)) => {
-                self.out.store(true, Ordering::Release);
+                self.out.set(true);
                 if self.batches.send(io).is_err() {
                     tracing::error!("the chunk I/O thread is gone");
                 }
@@ -416,19 +439,36 @@ impl ChunkIoRunner {
         }
     }
 
-    /// A batch came back.
-    fn returned(&self) {
-        self.out.store(false, Ordering::Release);
+    /// A batch came back; `failed` delays the next. Returns whether to log
+    /// the failure: the first of a run, then once the wait is at its longest.
+    fn returned(&self, failed: bool) -> bool {
+        self.out.set(false);
+        if !failed {
+            self.failures.set(0);
+            self.not_before.set(None);
+            return false;
+        }
+        let failures = self.failures.get().saturating_add(1);
+        self.failures.set(failures);
+        let (first, longest) = CHUNK_IO_BACKOFF;
+        let wait = first
+            .checked_mul(1 << (failures - 1).min(16))
+            .unwrap_or(longest)
+            .min(longest);
+        self.not_before.set(Some(std::time::Instant::now() + wait));
+        failures == 1 || wait == longest
     }
 }
 
 impl Drop for ChunkIoRunner {
     fn drop(&mut self) {
-        // Closing the channel ends the thread once its batch (if any) ran.
+        // Cancel the batch in flight and close the channel; wait a little
+        // for the thread to stop, and never for the bucket.
+        drop(self.cancel.take());
         let (closed, _) = std_mpsc::channel();
         drop(std::mem::replace(&mut self.batches, closed));
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
+        if let Err(std_mpsc::RecvTimeoutError::Timeout) = self.ended.recv_timeout(CHUNK_IO_STOP) {
+            tracing::warn!("the large-value store I/O thread did not stop in time; leaving it");
         }
     }
 }
@@ -1975,11 +2015,15 @@ impl Owner {
     /// A network chunk store's batch came back: apply it (the tick that
     /// follows this job hands the next one over).
     fn finish_chunk_io(&mut self, done: jazz::chunk_store::ChunkIoDone) {
-        if let Some(runner) = &self.chunk_io {
-            runner.returned();
-        }
-        if let Err(error) = self.db.finish_chunk_io(done) {
-            tracing::warn!(%error, app = self.app.as_deref().unwrap_or("?"), "large-value store I/O failed; retrying");
+        let finished = self.db.finish_chunk_io(done);
+        let log = match &self.chunk_io {
+            Some(runner) => runner.returned(finished.is_err()),
+            None => finished.is_err(),
+        };
+        if let Err(error) = finished
+            && log
+        {
+            tracing::warn!(%error, app = self.app.as_deref().unwrap_or("?"), "large-value store I/O failed; retrying with backoff");
         }
     }
 
@@ -2464,106 +2508,13 @@ mod tests {
         assert_eq!(slice.cap.get(), 1, "a tick always takes at least one");
     }
 
-    /// A bucket over HTTP that checks what S3 checks of a put: the body
-    /// matches its signed `x-amz-checksum-sha256`, and the request is signed.
-    struct MockBucket {
-        objects: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
-        gets: Arc<AtomicU64>,
-        endpoint: String,
-        _runtime: tokio::runtime::Runtime,
-    }
-
-    impl MockBucket {
-        fn start() -> Self {
-            use axum::{
-                body::Bytes,
-                extract::Path,
-                http::{HeaderMap, StatusCode},
-                routing::put,
-            };
-            use base64::Engine as _;
-            use sha2::Digest as _;
-            let objects: Arc<Mutex<BTreeMap<String, Vec<u8>>>> = Arc::default();
-            let gets = Arc::new(AtomicU64::new(0));
-            let runtime = tokio::runtime::Runtime::new().unwrap();
-            let listener = runtime
-                .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-                .unwrap();
-            let endpoint = format!("http://{}", listener.local_addr().unwrap());
-            let (put_objects, get_objects, delete_objects, counted) = (
-                Arc::clone(&objects),
-                Arc::clone(&objects),
-                Arc::clone(&objects),
-                Arc::clone(&gets),
-            );
-            let app = axum::Router::new().route(
-                "/{*key}",
-                put(
-                    move |Path(key): Path<String>, headers: HeaderMap, body: Bytes| {
-                        let objects = Arc::clone(&put_objects);
-                        async move {
-                            if !headers.contains_key("authorization") {
-                                return StatusCode::FORBIDDEN;
-                            }
-                            let digest = base64::engine::general_purpose::STANDARD
-                                .encode(sha2::Sha256::digest(&body));
-                            let signed = headers
-                                .get("x-amz-checksum-sha256")
-                                .and_then(|value| value.to_str().ok());
-                            if signed != Some(digest.as_str()) {
-                                return StatusCode::BAD_REQUEST;
-                            }
-                            objects.lock().unwrap().insert(key, body.to_vec());
-                            StatusCode::OK
-                        }
-                    },
-                )
-                .get(move |Path(key): Path<String>| {
-                    let objects = Arc::clone(&get_objects);
-                    counted.fetch_add(1, Ordering::Relaxed);
-                    async move {
-                        match objects.lock().unwrap().get(&key) {
-                            Some(bytes) => (StatusCode::OK, bytes.clone()),
-                            None => (StatusCode::NOT_FOUND, Vec::new()),
-                        }
-                    }
-                })
-                .delete(move |Path(key): Path<String>| {
-                    let objects = Arc::clone(&delete_objects);
-                    async move {
-                        objects.lock().unwrap().remove(&key);
-                        StatusCode::NO_CONTENT
-                    }
-                }),
-            );
-            runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
-            Self {
-                objects,
-                gets,
-                endpoint,
-                _runtime: runtime,
-            }
-        }
-
-        fn blobs(&self) -> Blobs {
-            let store = crate::s3::S3ChunkStore::new(crate::s3::S3Options {
-                bucket: "bucket".to_owned(),
-                region: "auto".to_owned(),
-                endpoint: Some(self.endpoint.clone()),
-                prefix: "app/".to_owned(),
-                path_style: true,
-                credentials: crate::s3::S3Credentials::Static(crate::s3::Keys {
-                    access_key_id: "test".to_owned(),
-                    secret_access_key: "test".to_owned(),
-                    session_token: None,
-                }),
-            })
-            .unwrap();
-            Blobs::Network(NetworkChunkStore {
-                store: Arc::new(store),
-                name: "mock bucket".to_owned(),
-            })
-        }
+    /// A network blob store on the mock bucket, under `prefix`.
+    fn bucket_blobs(bucket: &crate::s3::mock::MockS3, prefix: &str, owner: &str) -> Blobs {
+        let store = crate::s3::S3ChunkStore::new(bucket.options(prefix), owner.to_owned()).unwrap();
+        Blobs::Network(NetworkChunkStore {
+            store: Arc::new(store),
+            name: "mock bucket".to_owned(),
+        })
     }
 
     fn docs() -> JazzSchema {
@@ -2600,9 +2551,10 @@ mod tests {
     /// and a reopened store reads them back from it.
     #[test]
     fn large_values_move_to_an_s3_bucket_and_read_back() {
-        let bucket = MockBucket::start();
+        let bucket = crate::s3::mock::MockS3::start();
         let dir = tempfile::tempdir().unwrap();
-        let storage = || StorageConfig::data_dir(dir.path()).with_blobs(bucket.blobs());
+        let storage =
+            || StorageConfig::data_dir(dir.path()).with_blobs(bucket_blobs(&bucket, "app/", "me"));
         let value: Vec<u8> = (0..400 * 1024u32)
             .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
             .collect();
@@ -2624,7 +2576,7 @@ mod tests {
             .unwrap();
             let deadline = Instant::now() + Duration::from_secs(20);
             // 400 KiB of bytes is at least two leaves.
-            while bucket.objects.lock().unwrap().len() < 2 {
+            while bucket.names("app/").len() < 2 {
                 assert!(Instant::now() < deadline, "leaves never reached the bucket");
                 // Each job is followed by a tick, which hands the next batch over.
                 block_on(runtime.run(|_| Ok(()))).unwrap();
@@ -2632,6 +2584,7 @@ mod tests {
             }
             assert!(
                 bucket
+                    .state
                     .objects
                     .lock()
                     .unwrap()
@@ -2648,9 +2601,85 @@ mod tests {
         let read = block_on(runtime.run(|owner| Ok(read_body(&owner.db)))).unwrap();
         assert_eq!(read.as_deref(), Some(value.as_slice()));
         assert!(
-            bucket.gets.load(Ordering::Relaxed) > 0,
+            bucket.state.calls.gets.load(Ordering::Relaxed) > 0,
             "read from the bucket"
         );
         store.close().unwrap();
+    }
+
+    /// A bucket that refuses everything is asked again with backoff, not
+    /// on every tick; once it answers, the leaves move.
+    #[test]
+    fn a_failing_bucket_is_retried_with_backoff() {
+        let bucket = crate::s3::mock::MockS3::start();
+        bucket.state.failing.store(true, Ordering::Relaxed);
+        let dir = tempfile::tempdir().unwrap();
+        let store = AppStore::open(
+            &StorageConfig::data_dir(dir.path()).with_blobs(bucket_blobs(&bucket, "app/", "me")),
+        )
+        .unwrap();
+        let runtime = store
+            .start_runtime(docs(), NodeRole::Core, false, false)
+            .unwrap();
+        let value: Vec<u8> = (0..400 * 1024u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        block_on(runtime.run(move |owner| {
+            block_on(owner.db.insert(
+                "docs",
+                BTreeMap::from([("body".to_owned(), jazz::records::Value::Bytes(value))]),
+                Default::default(),
+            ))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        }))
+        .unwrap();
+        let tick_for = |how_long: Duration| {
+            let until = Instant::now() + how_long;
+            while Instant::now() < until {
+                block_on(runtime.run(|_| Ok(()))).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        tick_for(Duration::from_millis(2_500));
+        // Batches at 0 s, 1 s and 3 s at most, each failing at its claim.
+        let asked = bucket.state.calls.requests.load(Ordering::Relaxed);
+        assert!((1..=3).contains(&asked), "{asked} requests in 2.5 s");
+        bucket.state.failing.store(false, Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while bucket.names("app/").len() < 2 {
+            assert!(Instant::now() < deadline, "leaves never reached the bucket");
+            tick_for(Duration::from_millis(50));
+        }
+        store.close().unwrap();
+    }
+
+    #[test]
+    fn chunk_io_backoff_doubles_to_a_minute_and_resets() {
+        let (work, _work) = std_mpsc::channel();
+        let store: Arc<dyn jazz::chunk_store::ChunkStore> = Arc::new(
+            jazz::chunk_store::FileChunkStore::new(tempfile::tempdir().unwrap().keep()).unwrap(),
+        );
+        let runner = ChunkIoRunner::start(store, work).unwrap();
+        let wait = |runner: &ChunkIoRunner| {
+            runner.not_before.get().map(|at| {
+                at.saturating_duration_since(Instant::now())
+                    .as_secs_f64()
+                    .round() as u64
+            })
+        };
+        let mut logged = Vec::new();
+        let mut waits = Vec::new();
+        for _ in 0..9 {
+            logged.push(runner.returned(true));
+            waits.push(wait(&runner).unwrap());
+        }
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
+        assert_eq!(
+            logged,
+            [true, false, false, false, false, false, true, true, true]
+        );
+        assert!(!runner.returned(false));
+        assert_eq!(wait(&runner), None);
     }
 }
