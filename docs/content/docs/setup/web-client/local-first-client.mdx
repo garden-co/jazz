@@ -117,6 +117,21 @@ version). Jazz adds that value to both asset URLs, so a rolling deployment canno
 long-lived SharedWorker with bytes fetched from an older build at the same URL. Your asset host
 must serve these URLs with query strings intact.
 
+## Turn it on
+
+Every app starts on the [thin client](/docs/setup/web-client/thin-client). Pass a loader for the
+local-first client, and Jazz upgrades to it in the background after the first load:
+
+```tsx title="App.tsx"
+<JazzProvider user={user} localFirst={() => import("jazz-tools/local-first")}>
+  <App />
+</JazzProvider>
+```
+
+The dynamic import keeps the local-first client and its Wasm in their own chunk. To upgrade only
+on demand, call `useDb().upgradeToLocalFirst(() => import("jazz-tools/local-first"))` instead.
+See [Upgrading to local-first](/docs/setup/web-client/thin-client#upgrading-to-local-first).
+
 ## Configure one session
 
 A Jazz session owns account selection and its current client. Give it the app configuration once, with `initial: "local-first"` to restore a saved account or start offline without signup. Its commands handle graceful shutdown and context replacement when authentication changes. See [Lifecycle](/docs/setup/auth/backend#lifecycle).

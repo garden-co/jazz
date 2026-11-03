@@ -13,7 +13,8 @@ The default web client: about 86 KB gzipped, no Wasm, no local storage. The serv
 
 ## Configure one session
 
-Open one client for the app. It signs in through your [main backend](/docs/setup/deployment) at
+The thin client is the default: `JazzProvider` and `createClient` from `jazz-tools/thin` open it
+with nothing to choose. It signs in through your [main backend](/docs/setup/deployment) at
 `/jazz`, with your app's own session cookie, and returns the same `Db` as the local-first client:
 queries, `subscribe`, insert, update, upsert, delete and the framework hooks all work.
 
@@ -27,7 +28,6 @@ queries, `subscribe`, insert, update, upsert, delete and the framework hooks all
       const { data, isPending } = authClient.useSession();
       return (
         <JazzProvider
-          client="thin"
           // undefined while your auth loads, null when signed out, the user's id when signed in
           user={isPending ? undefined : (data?.user.id ?? null)}
           signedOut={<SignIn />}
@@ -84,4 +84,25 @@ Each is an explicit "not supported" error:
 
 ## Upgrading to local-first
 
-- `upgradeToLocalFirst(thinDb, () => import("jazz-tools").then((jazz) => jazz.createClient(config)))` loads every subscribed query into a local-first `Db` for the same account, lets the thin `Db` finish its writes, and hands back the new `Db` to swap in. See [Local-First Client](/docs/setup/web-client/local-first-client).
+Hand the provider a loader for the local-first client. It starts thin, then upgrades in the
+background after the first load. Your live queries carry over, and the thin client finishes its
+writes before it shuts down:
+
+```tsx
+<JazzProvider user={user} localFirst={() => import("jazz-tools/local-first")}>
+```
+
+The dynamic import lives in your code, so the local-first client and its Wasm become a separate
+chunk: apps that never pass `localFirst` never download it.
+
+To upgrade only when you need to, for example when a user opens an editor or goes offline, call
+the hook instead:
+
+```tsx
+const { upgradeToLocalFirst } = useDb();
+await upgradeToLocalFirst(() => import("jazz-tools/local-first"));
+```
+
+Without a framework, `upgradeToLocalFirst(db, () => import("jazz-tools/local-first"))` from
+`jazz-tools/thin` returns the local-first `Db` to use from then on. See
+[Local-First Client](/docs/setup/web-client/local-first-client).
