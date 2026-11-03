@@ -29,4 +29,4 @@ pnpm test:e2e     # Playwright smoke against `pnpm dev`
 ```
 
 Production sets `APP_ORIGIN`, `VITE_JAZZ_APP_ID` and `BETTER_AUTH_SECRET`, and
-optionally `JAZZ_SERVER_URL` with `JAZZ_ADMIN_SECRET` and `BACKEND_SECRET`.
+optionally `JAZZ_SERVER_URL` with `JAZZ_ADMIN_SECRET`.

@@ -5,7 +5,7 @@ export const LOCAL_ORIGIN = "http://127.0.0.1:3000";
 /**
  * StagePlan's server configuration. It fails closed: the local defaults apply
  * only outside production. A production server must name its origin, its Jazz
- * app and a Better Auth secret, and a remote sync server needs both app secrets.
+ * app and a Better Auth secret, and a remote sync server needs the app's admin secret.
  */
 export function serverConfig(env = process.env) {
   const production = env.NODE_ENV === "production";
@@ -30,7 +30,6 @@ export function serverConfig(env = process.env) {
       ? {
           url: env.JAZZ_SERVER_URL,
           adminSecret: required("JAZZ_ADMIN_SECRET", env.JAZZ_ADMIN_SECRET),
-          backendSecret: required("BACKEND_SECRET", env.BACKEND_SECRET),
         }
       : undefined,
     dataPath: env.JAZZ_DATA_PATH || ".jazz",

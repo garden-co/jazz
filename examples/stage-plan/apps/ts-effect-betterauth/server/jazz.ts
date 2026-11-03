@@ -9,10 +9,11 @@ let instance: Promise<Jazz> | undefined;
 export function jazz(): Promise<Jazz> {
   const config = serverConfig();
   const pending = (instance ??= createJazz({
-    appId: config.appId,
     app,
     permissions,
-    store: config.remote ? remote(config.remote) : sqlite({ path: config.dataPath }),
+    store: config.remote
+      ? remote({ url: config.remote.url, appId: config.appId, secret: config.remote.adminSecret })
+      : sqlite({ path: config.dataPath, appId: config.appId }),
     // Better Auth's session cookie decides who the user is.
     authenticate: async (request) => {
       const { auth } = await import("./auth");
