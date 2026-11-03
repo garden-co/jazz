@@ -23,6 +23,8 @@ mod branch_column_evolution;
 mod branch_view_sync;
 #[path = "../branch_views.rs"]
 mod branch_views;
+#[path = "../bundle_permissions.rs"]
+mod bundle_permissions;
 #[path = "../catalogue_rows.rs"]
 mod catalogue_rows;
 #[path = "../claims_change.rs"]
@@ -135,6 +137,8 @@ mod serializable_sync;
 mod session_policy_values;
 #[path = "../session_write_checks.rs"]
 mod session_write_checks;
+#[path = "../shard_role.rs"]
+mod shard_role;
 #[path = "../slow_queries.rs"]
 mod slow_queries;
 #[path = "../snapshots.rs"]
@@ -153,6 +157,8 @@ mod structured_result_tree;
 mod sync_access_loss;
 #[path = "../sync_aggregates.rs"]
 mod sync_aggregates;
+#[path = "../sync_connection_settled.rs"]
+mod sync_connection_settled;
 #[path = "../sync_differential.rs"]
 mod sync_differential;
 #[path = "../sync_echo.rs"]

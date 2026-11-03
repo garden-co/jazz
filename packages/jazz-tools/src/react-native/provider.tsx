@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { View, Text, Pressable } from "react-native";
 import { ConfiguredJazzAppProvider, type JazzAppViewProps } from "../react-core/app.js";
-import type { JazzAuth } from "../session/app.js";
+import { authForUser, type JazzAuth } from "../session/app.js";
 import type { JazzSession } from "../session/state.js";
 import { createJazzSession, type JazzSessionConfig } from "./create-jazz-session.js";
 import type { PublicSession } from "../runtime/context.js";
@@ -34,7 +34,11 @@ export type LegacyJazzProviderProps = {
 };
 
 export type JazzAppProviderProps = JazzSessionConfig &
-  JazzAppViewProps<CreatedJazzClient> & { auth?: JazzAuth };
+  JazzAppViewProps<CreatedJazzClient> & {
+    auth?: JazzAuth;
+    /** Who your auth says is signed in: `undefined` loading, `null` signed out, else the user's id. */
+    user?: string | null;
+  };
 export type JazzProviderProps = LegacyJazzProviderProps | JazzAppProviderProps;
 
 export function JazzProvider(props: JazzProviderProps) {
@@ -58,14 +62,9 @@ export function useDb(): Db {
 export { useSession };
 export type { JazzClientContextValue };
 
-function ApplicationJazzProvider({
-  auth,
-  children,
-  signedOut,
-  loading,
-  error,
-  ...config
-}: JazzAppProviderProps) {
+function ApplicationJazzProvider(props: JazzAppProviderProps) {
+  const { auth: explicitAuth, user, children, signedOut, loading, error, ...config } = props;
+  const auth = authForUser(Object.hasOwn(props, "user"), user, explicitAuth);
   const view = { auth, children, signedOut, loading, error };
   return <NativeJazzAppProvider {...view} config={config} createJazzSession={createJazzSession} />;
 }

@@ -13,7 +13,7 @@ import {
   Spinner,
   VStack,
 } from "@astryxdesign/core";
-import { useAll, useSession } from "jazz-tools/react";
+import { useAll, useJazzAuth, useSession } from "jazz-tools/react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { app } from "@/schema";
 import { AssetShelf } from "@/src/components/AssetShelf";
@@ -76,6 +76,7 @@ export function PosterStudio({
 }) {
   const session = useSession();
   const { data: authSession } = authClient.useSession();
+  const { logout } = useJazzAuth();
   const { data: canvases, error: canvasesError } = useAll(app.canvases);
   const author = session?.user.account ?? null;
   // The poster the user picked in this visit; until then the invited poster,
@@ -155,7 +156,8 @@ export function PosterStudio({
             label="Sign out"
             variant="ghost"
             clickAction={async () => {
-              await authClient.signOut();
+              // Signs out of Jazz first (flushing local writes), then of Better Auth.
+              await logout();
               window.location.assign("/");
             }}
           />

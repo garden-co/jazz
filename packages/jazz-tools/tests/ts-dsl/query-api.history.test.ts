@@ -1205,8 +1205,8 @@ describe("TS Query API private draft branch history", () => {
     },
     { migrations: "none" },
   );
-  const draftPermissions = s.definePermissions(drafts, ({ policy, anyOf, isCreator }) => {
-    policy.notes.allowRead.where(anyOf([{ branch: "main" }, isCreator]));
+  const draftPermissions = s.definePermissions(drafts, ({ policy, anyOf, session }) => {
+    policy.notes.allowRead.where(anyOf([{ branch: "main" }, { $createdBy: session.user }]));
     policy.notes.allowInsert.always();
     policy.notes.allowUpdate.always();
   });
@@ -1301,11 +1301,13 @@ describe("TS Query API branch history with relational read policies", () => {
   );
   const projectPermissions = s.definePermissions(
     projectsApp,
-    ({ policy, anyOf, isCreator, allowedTo }) => {
-      policy.projects.allowRead.where(isCreator);
+    ({ policy, anyOf, session, allowedTo }) => {
+      policy.projects.allowRead.where({ $createdBy: session.user });
       policy.projects.allowInsert.always();
       // The writer creates the notes; bob reads them only through his project.
-      policy.notes.allowRead.where(anyOf([allowedTo.read("project"), isCreator]));
+      policy.notes.allowRead.where(
+        anyOf([allowedTo.read("project"), { $createdBy: session.user }]),
+      );
       policy.notes.allowInsert.always();
       policy.notes.allowUpdate.always();
     },

@@ -71,7 +71,7 @@ jobs:
           STARTER_FILTER: ${{ github.event.inputs.starter }}
         run: |
           case "$STARTER_FILTER" in
-            ""|next-betterauth|next-localfirst|next-hybrid|sveltekit-betterauth|sveltekit-localfirst|sveltekit-hybrid|react-betterauth|react-localfirst|react-hybrid|ts-betterauth|ts-localfirst|ts-hybrid|ts-effect-localfirst|ts-effect-betterauth)
+            ""|next-betterauth|next-localfirst|next-hybrid|sveltekit-betterauth|sveltekit-localfirst|sveltekit-hybrid|react-betterauth|react-localfirst|react-hybrid|ts-localfirst|ts-hybrid|ts-effect-localfirst)
               ;;
             *)
               echo "::error::Unknown starter '$STARTER_FILTER'"
@@ -258,14 +258,12 @@ jobs:
           - react-betterauth
           - react-localfirst
           - react-hybrid
-          - ts-betterauth
           - ts-localfirst
           - ts-hybrid
           - ts-effect-localfirst
-          - ts-effect-betterauth
         cancel_reopen_subscription_probe: [false]
         include:
-          - starter: ts-betterauth
+          - starter: ts-hybrid
             cancel_reopen_subscription_probe: true
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

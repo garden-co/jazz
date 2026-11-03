@@ -54,7 +54,7 @@ const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 /// Every `SyncMessage` variant, in declaration order. A message too
 /// large for one frame travels in parts below the message layer
 /// (binding_host's frame-split test covers it).
-const VARIANTS: [&str; 19] = [
+const VARIANTS: [&str; 20] = [
     "Read",
     "Unsubscribe",
     "ResendWhole",
@@ -74,6 +74,7 @@ const VARIANTS: [&str; 19] = [
     "Join",
     "Catalogue",
     "Welcome",
+    "ConnectionSettled",
 ];
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -366,7 +367,7 @@ impl Transport for Recording {
 }
 
 /// Message shapes the one frame per variant leaves unpinned: a one-shot
-/// `Read` (as of a seq or a snapshot), `Rows` carrying the commits behind
+/// `Read` (fresh, resumed, or historical), `Rows` carrying the commits behind
 /// history versions, a `Catalogue` carrying versions with their stored
 /// names and a lens's cells, a trusted link's `Commit`s acting as an
 /// attributed author and as a session, a live `Read` in a branch view
@@ -374,7 +375,7 @@ impl Transport for Recording {
 /// `AccessLost` (a branch view's row whose head version the reader may not
 /// read), and serializable `Commit`s with a snapshot the authority served
 /// and one a worker with no server numbered.
-const SHAPES: [&str; 11] = [
+const SHAPES: [&str; 13] = [
     "Read/once",
     "Rows/tx_ids",
     "Catalogue/versions",
@@ -385,16 +386,31 @@ const SHAPES: [&str; 11] = [
     "Read/live-branch-head",
     "AccessLost/hidden",
     "Commit/serializable",
-    "Commit/serializable-by",
+    "Rows/pending",
+    "Read/once-resumed",
+    "Read/once-historical",
 ];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
     match message {
         SyncMessage::Read {
-            span: ReadSpan::Once { .. },
+            since,
+            span: ReadSpan::Once { at },
             ..
-        } => Some(SHAPES[0]),
+        } if since.is_some() && at.is_none() => Some(SHAPES[11]),
+        SyncMessage::Read {
+            span: ReadSpan::Once { at },
+            ..
+        } if at.is_some() => Some(SHAPES[12]),
+        SyncMessage::Read {
+            since,
+            span: ReadSpan::Once { at },
+            ..
+        } if since.is_none() && at.is_none() => Some(SHAPES[0]),
         SyncMessage::Rows { tx_ids, .. } if !tx_ids.is_empty() => Some(SHAPES[1]),
+        SyncMessage::Rows { images, .. } if images.iter().any(|image| !image.at.accepted()) => {
+            Some(SHAPES[10])
+        }
         SyncMessage::Catalogue(catalogue)
             if !catalogue.versions.is_empty() && !catalogue.cells.is_empty() =>
         {
@@ -410,7 +426,7 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
         } if !claims.is_empty() => Some(SHAPES[4]),
         SyncMessage::Read {
             view,
-            span: ReadSpan::Live { .. },
+            span: ReadSpan::Live,
             ..
         } if matches!(
             **view,
@@ -424,7 +440,7 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
         }
         SyncMessage::Read {
             view,
-            span: ReadSpan::Live { .. },
+            span: ReadSpan::Live,
             ..
         } => match **view {
             ReadViewSourceSpec::BranchView {
@@ -436,13 +452,9 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
         },
         SyncMessage::AccessLost { hidden: true, .. } => Some(SHAPES[8]),
         SyncMessage::Commit {
-            kind: WireKind::Serializable { snapshot, .. },
+            kind: WireKind::Serializable { .. },
             ..
-        } => match snapshot.as_slice() {
-            [(None, _)] => Some(SHAPES[9]),
-            [(Some(_), _)] => Some(SHAPES[10]),
-            _ => None,
-        },
+        } => Some(SHAPES[9]),
         _ => None,
     }
 }
@@ -719,8 +731,8 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     .unwrap();
     pump(&[&alice, &server, &alice]);
 
-    // Commit (serializable, at a snapshot a worker numbered): a tab of a
-    // worker with no server pins at the worker's position.
+    // Rows (a relay's unsettled version): a worker with no server keeps
+    // its own write pending, and ships it to its tab in its own band.
     let wendy = open(0x57, user(1), false);
     wendy.set_remote_link_hint(RemoteLinkHint::NoServer);
     let tab = open(0x58, user(1), false);
@@ -728,23 +740,17 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     tab.set_remote_link_hint(RemoteLinkHint::Live);
     connect(&tab, &wendy, user(1), &recorded);
     let tab_notes = tab.prepare_query(&Query::from("notes")).unwrap();
+    // Read (once, fresh): the tab's first read has no checkpoint to resume.
     let open_tx = OpenTransactionId::new();
     block_on(tab.begin_serializable(open_tx)).unwrap();
     let _ = drive(
         &[&tab, &wendy, &tab],
         tab.tx_ref(open_tx).all_prepared(&tab_notes),
     );
-    drive(
-        &[&tab, &wendy, &tab],
-        tab.tx_ref(open_tx)
-            .insert("notes", note(1, vec![10]), InsertOptions::default()),
-    )
-    .unwrap();
-    drive(
-        &[&tab, &wendy, &tab],
-        tab.commit_serializable_handle(open_tx),
-    )
-    .unwrap();
+    tab.abandon_transaction_handle(open_tx).unwrap();
+    let _tab_stream = block_on(tab.subscribe(&tab_notes, ReadOpts::default())).unwrap();
+    pump(&[&tab, &wendy, &tab]);
+    block_on(wendy.insert("notes", note(1, vec![10]), InsertOptions::default())).unwrap();
     pump(&[&tab, &wendy, &tab]);
 
     // A history subscription ships superseded versions, with the commits
@@ -892,7 +898,8 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
             tier: ReadTier::LocalFirst,
             wait: None,
             view: Box::new(ReadViewSourceSpec::Current),
-            span: ReadSpan::Live { since: Vec::new() },
+            since: None,
+            span: ReadSpan::Live,
         },
     ])));
     server
@@ -920,6 +927,19 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         .insert("ResendWhole".to_owned(), ("server".to_owned(), frame));
 
     hidden_in_a_view(&recorded);
+
+    // Alice's fresh client records a plain one-shot, then repeats it using
+    // the checkpoint saved from the first response.
+    let alice = open(0x59, user(1), false);
+    connect(&alice, &server, user(1), &recorded);
+    let notes = alice.prepare_query(&Query::from("notes")).unwrap();
+    for _ in 0..2 {
+        drive(
+            &[&alice, &server, &alice],
+            alice.all(&notes, ReadOpts::for_read_tier(ReadTier::Remote)),
+        )
+        .unwrap();
+    }
     recorded.borrow().clone()
 }
 
