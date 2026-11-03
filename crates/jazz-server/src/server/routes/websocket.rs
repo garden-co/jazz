@@ -5323,6 +5323,11 @@ mod tests {
         // one none.
         let open = publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await;
         let closed = publish_docs_bundle(addr, &state, &schema, PolicyExpr::False).await;
+        // As after a restart over these bundles, the store waits for a
+        // permissions head; sessions pinned to a published bundle are
+        // served regardless.
+        let runtime = state.runtime_for_client().expect("runtime");
+        runtime.await_permissions_for_test().await;
         let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
         let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
         let features = jazz::wire::FEATURE_THIN_RESULTS;
@@ -5453,6 +5458,100 @@ mod tests {
         };
         assert_eq!(code, "NotReady");
         assert_eq!(answer(CommitUnitTrust::TrustedBackend).await, ThinBody::Ok);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_output_held_at_the_egress_budget_drains_as_the_client_reads() {
+        // Answers and live-query events pile up while the session's egress
+        // budget is spent, then the client reads it back to `room` short of
+        // the budget. Everything held must then reach the client by its
+        // reading alone, before the idle tick, whatever the room is
+        // relative to the frames' sizes.
+        for room in [
+            1, 8, 16, 24, 32, 48, 64, 80, 96, 128, 160, 192, 256, 512, 4096,
+        ] {
+            drain_with_room(room).await;
+        }
+    }
+
+    async fn drain_with_room(room: usize) {
+        use crate::runtime::{IDLE_TICK, SESSION_QUEUE_BUDGET, ServerRuntimeHandle, StorageConfig};
+        use jazz::thin::{ThinBody, ThinOp, ThinRequest};
+        let source = private_docs_public_schema();
+        let runtime = ServerRuntimeHandle::start_with_storage(
+            JazzSchema::new(&source).unwrap(),
+            StorageConfig::InMemory,
+        )
+        .unwrap();
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let session = runtime
+            .open_thin_session(
+                alice,
+                BTreeMap::new(),
+                None,
+                CommitUnitTrust::TrustedBackend,
+            )
+            .await
+            .unwrap();
+        let mut stream = runtime.open_wire_stream(session).unwrap();
+        runtime.hold_egress_for_test(session, SESSION_QUEUE_BUDGET);
+        let mut requests = vec![
+            ThinOp::Schema {
+                schema: serde_json::to_vec(&source).unwrap(),
+            },
+            ThinOp::Subscribe {
+                query: docs_query(),
+                options: br#"{"tier":"local-first"}"#.to_vec(),
+            },
+        ];
+        for title in ["one", "two", "three"] {
+            requests.push(ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells(title, alice),
+                options: Vec::new(),
+                transaction: None,
+            });
+        }
+        for (id, op) in requests.into_iter().enumerate() {
+            runtime
+                .receive_thin_request(session, ThinRequest { id: id as u64, op }, 16)
+                .unwrap();
+            runtime.request_wire_tick(session).unwrap();
+            runtime.settle_for_test().await;
+        }
+        runtime.release_egress_for_test(session, room);
+        // Well before the idle tick, which would move a stalled session on
+        // regardless of the client's reading.
+        let deadline = tokio::time::Instant::now() + IDLE_TICK / 2;
+
+        let (mut answered, mut seen) = (Vec::new(), 0usize);
+        while answered.len() < 4 || seen < 3 {
+            let frames = tokio::time::timeout_at(deadline, stream.recv())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "output stalled with {room} bytes of room: answered {answered:?}, saw {seen} rows"
+                    )
+                })
+                .expect("open")
+                .expect("frames");
+            for frame in frames {
+                let WireFrame::ThinResponse(response) = decode_frame(&frame).unwrap() else {
+                    panic!("expected a thin response");
+                };
+                match response.body {
+                    ThinBody::Event { delta, .. } => {
+                        let (added, _) =
+                            jazz::binding_codec::decode_subscription_delta_rows(&delta).unwrap();
+                        seen += titles_of(added).len();
+                    }
+                    ThinBody::Ok | ThinBody::Written { .. } => answered.push(response.id),
+                    other => panic!("unexpected answer to {}: {other:?}", response.id),
+                }
+            }
+        }
+        answered.sort();
+        assert_eq!(answered, [0, 2, 3, 4], "with {room} bytes of room");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
