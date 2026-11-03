@@ -35,7 +35,7 @@ We can define permissions in `permissions.ts`:
 <Callout type="info">
   Write your permissions policies in `permissions.ts` next to `schema.ts`. By default Jazz looks for both files at your project root — except in SvelteKit projects, where they should live in `src/lib/` (the standard location for shared app code).
 
-Run `pnpm dlx jazz-tools@alpha validate` before publishing to surface missing table or operation grants that will deny access. You do not need to write a schema migration to update permissions policies. Push the updated policies by running `pnpm dlx jazz-tools@alpha deploy <appId>`.
+Run `pnpm dlx jazz-tools@alpha validate` before publishing to surface missing table or operation grants that will deny access. You do not need to write a schema migration to update permissions policies. Updated policies go live when your main backend restarts or deploys with them.
 
 </Callout>
 
@@ -303,7 +303,7 @@ As the app developer, check your own configuration:
 2. Check that the grants match the authenticated session and the relevant row
    values, including both old and new values for updates. Test these cases with
    [permission tests](/docs/tooling/testing#testing-permissions).
-3. Deploy the intended policies with `pnpm dlx jazz-tools@alpha deploy <appId>`
+3. Deploy your main backend with the intended policies
    and verify the app ID and deployed configuration. Editing `permissions.ts`
    locally does not update the server's policies.
 

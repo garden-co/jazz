@@ -42,8 +42,8 @@ In practice, this lets you:
 
 2. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
 3. **Validate locally**&hairsp;—&hairsp;optionally run `pnpm dlx jazz-tools@alpha validate` to surface
-   any policy diagnostics without publishing. `deploy` runs the same checks; `validate` is most
-   useful as a fast pre-publish sanity check or in CI.
+   any policy diagnostics without publishing. Your main backend runs the same checks when it starts;
+   `validate` is most useful as a fast pre-publish sanity check or in CI.
 4. **Create a migration stub for the updated schema**&hairsp;—&hairsp;run:
 
    ```bash
@@ -54,26 +54,22 @@ In practice, this lets you:
    current schema and writes a stub migration file into `migrations/`. It also saves a snapshot of the generated schema.
 
 5. **Review and customise**&hairsp;—&hairsp;the migration, if needed (see below).
-6. **Deploy**&hairsp;—&hairsp;publish the schema, permissions, and required migrations:
-
-   ```bash
-   pnpm dlx jazz-tools@alpha deploy <appId>
-   ```
-
+6. **Deploy your main backend**&hairsp;—&hairsp;restart it locally, or deploy it as usual. When it
+   starts, `createJazz` publishes the schema, permissions and required migrations your code
+   imports. There is no separate deploy command:
    1. Before publishing, it checks that the schema, permissions and any required migrations are present. First deployments and permission-only changes need no migration.
-   2. Publishes the current schema if the server does not already have it.
-   3. If the server is on an older schema hash, asks the server whether
-      it already has a migration path between the two hashes. If not, pushes the local migration
-      file that closes the gap (and fails with a helpful message if you haven't created one yet).
-   4. Publishes the current permissions, attached to the current schema hash.
+   2. It publishes the current schema if the server does not already have it.
+   3. If the server is on an older schema hash, it asks the server whether
+      it already has a migration path between the two hashes. If not, it pushes the bundled migration
+      that closes the gap. If none does, the backend refuses to start with an error naming the missing migration.
+   4. It publishes the current permissions, attached to the current schema hash.
 
-   A network failure can leave schemas or migrations stored without advancing the permissions
-   head. Retrying reuses stored artifacts. If another deploy wins the permissions-head check,
-   review that release before retrying yours.
+   Each deployment's sessions run under that deployment's own permissions, so two deployments can
+   run side by side, and rolling back your backend rolls back its permissions too.
 
 ### Shipping migrations with your app
 
-`validate` and `deploy` also regenerate `migrations/index.ts`. It bundles every schema version and
+`validate` and `migrations create` also regenerate `migrations/index.ts`. It bundles every schema version and
 every lens, and your app passes it to `defineApp`:
 
 ```ts title="schema.ts"
@@ -87,8 +83,8 @@ before they first sync, so a client never has to rename or reshape stored data l
 whose schema version is missing from the bundle refuses to open with an error telling you to
 regenerate it.
 
-Permission-only changes in `permissions.ts` don't need a migration but still need to be deployed:
-`pnpm dlx jazz-tools@alpha deploy <appId>`. See [Permissions](/docs/schemas/policies) for details.
+Permission-only changes in `permissions.ts` don't need a migration; they go live when your main
+backend restarts with them. See [Permissions](/docs/schemas/policies) for details.
 
 ## The migration file
 
@@ -169,7 +165,7 @@ Choose one:
    Create a migration from each branch to that merged schema:
      jazz-tools migrations create <your-app-id> --fromHash <due-dates-schema-hash>
      jazz-tools migrations create <your-app-id> --fromHash <priorities-schema-hash>
-   Review both migrations, then deploy.
+   Review both migrations, then deploy your main backend.
 ```
 
 You can either return to the common ancestor before switching branches, or merge both changes.
@@ -180,15 +176,15 @@ To leave Alice's due-date change behind and deploy Bob's priorities branch:
 
 1. Restore the original task schema in `schema.ts`, and make sure `permissions.ts` is valid
    for it.
-2. Run `pnpm dlx jazz-tools@alpha deploy <appId>`. The original schema is an ancestor of
+2. Deploy your main backend. The original schema is an ancestor of
    the active schema, so Jazz allows reactivating it without a new migration.
 3. Restore Bob's schema with `priority`.
-4. Run `pnpm dlx jazz-tools@alpha deploy <appId>` again. Bob's migration provides a forward
+4. Deploy your main backend again. Bob's migration provides a forward
    path from the now-active original schema to the priorities schema.
 
 Both original migrations remain in the graph. Reverting adds no reverse edge: only the active
 schema changes. Do not create a reverse migration to perform this revert; it would create a
-cycle, which deploy rejects.
+cycle, which your main backend rejects on start.
 
 <Callout type="warn" title="Reverting changes what rows expose">
   Reverting does not delete stored tasks or their column identities. Reads using the original or
@@ -219,11 +215,7 @@ Both commands use the current `schema.ts` as their destination. Review the gener
 - The migration from Alice's schema should preserve `dueDate` and introduce `priority`.
 - The migration from Bob's schema should preserve `priority` and introduce `dueDate`.
 
-And then deploy:
-
-```bash
-pnpm dlx jazz-tools@alpha deploy <appId>
-```
+And then deploy your main backend.
 
 The merged schema can now be deployed whether due dates or priorities are currently active.
 Jazz validates that alternative forward paths agree on the values and column identities they

@@ -77,7 +77,7 @@ Relation names must not collide with stored column names.
 
 <SchemaSetup />
 
-When you change your schema on a shared app, prepare any required migration and run `jazz-tools deploy <appId>`. See [Migrations](/docs/schemas/migrations) for details.
+When you change your schema on a shared app, prepare any required migration and deploy your main backend: `createJazz` publishes the schema, permissions and migrations when it starts. See [Migrations](/docs/schemas/migrations) for details.
 
 ## Exporting the app
 
@@ -85,7 +85,7 @@ When you change your schema on a shared app, prepare any required migration and 
 This is what you pass to queries, mutations, and subscriptions throughout your application code.
 
 `migrations` comes from `migrations/index.ts` beside your `schema.ts`. `jazz-tools` writes that
-file on every `validate` and `deploy` of an app that imports it, even while your app has a single
+file on every `validate` and `migrations create` of an app that imports it, even while your app has a single
 schema version, so the import always looks the same:
 
 ```ts title="schema.ts"

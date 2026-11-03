@@ -5,9 +5,8 @@ Validate your schema and permissions locally:
 This validates `schema.ts` and `permissions.ts`, then compiles them into Jazz's
 internal schema representation.
 
-When Jazz reports a difference between the old and new schema hashes after changing `schema.ts`, and your app already has data, create a migration and deploy the updated app as described in [Migrations](/docs/schemas/migrations):
+When Jazz reports a difference between the old and new schema hashes after changing `schema.ts`, and your app already has data, create a migration as described in [Migrations](/docs/schemas/migrations), then restart your main backend (locally) or deploy it as usual: on start, `createJazz` publishes the new schema, permissions and migrations:
 
 ```bash
 pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash> --toHash <toHash>
-pnpm dlx jazz-tools@alpha deploy <appId>
 ```
