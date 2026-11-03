@@ -19,6 +19,8 @@ export const {
   e2eeSodiumSigningKeyPair,
   e2eeSodiumSign,
   e2eeSodiumVerify,
+  JazzCore,
+  JazzCoreSocket,
   JazzServer,
   NapiDb,
   StreamingMutation,

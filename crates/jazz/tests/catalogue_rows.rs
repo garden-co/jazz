@@ -130,6 +130,7 @@ fn deploy(v1: &Schema, v2: &Schema, policies: TablePolicies, revision: u64) -> C
                 forward: lens.forward.clone(),
             }],
             permissions: vec![(revision, SchemaHash::compute(v2), permissions, 3)],
+            ..Default::default()
         },
         admit: vec![(compile_schema(v2), vec![migration.clone()])],
         activate: Some((revision, current, vec![migration])),
@@ -473,10 +474,19 @@ fn every_definition_shape_reads_back_equal_after_a_reopen() {
             forward: forward.clone(),
         }],
         permissions: vec![(4, target, permissions.clone(), 9)],
+        bundles: vec![(target, permissions.clone(), 10)],
     });
     assert_eq!(rows.schema(&target).unwrap().schema, schema);
     assert_eq!(rows.lenses[0].forward, forward);
     assert_eq!(rows.head().unwrap().permissions, permissions);
+    // A bundle is kept whole, by its content id.
+    assert_eq!(rows.bundles.len(), 1);
+    assert_eq!(
+        rows.bundles[0].id,
+        jazz::catalogue::bundle_id(&target, &permissions).unwrap()
+    );
+    assert_eq!(rows.bundles[0].permissions, permissions);
+    assert_eq!(rows.bundles[0].published_at, 10);
 }
 
 /// JSON has no NaN or infinity: a definition holding one is refused when

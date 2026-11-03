@@ -328,7 +328,7 @@ pub struct StreamingExecutionStats {
 #[derive(Clone, Debug)]
 pub struct StreamingChecksum {
     cursor: LargeValueCursor,
-    hasher: blake3::Hasher,
+    hasher: crate::sha256::Hasher,
     max_bytes_per_turn: usize,
     bytes_this_turn: usize,
     stats: StreamingExecutionStats,
@@ -345,7 +345,7 @@ impl StreamingChecksum {
         }
         Ok(Self {
             cursor: LargeValueCursor::new(value, window_bytes.min(max_bytes_per_turn))?,
-            hasher: blake3::Hasher::new(),
+            hasher: crate::sha256::Hasher::new(),
             max_bytes_per_turn,
             bytes_this_turn: 0,
             stats: StreamingExecutionStats::default(),
@@ -3738,8 +3738,16 @@ fn validate_untyped_node_structure(node: &ChunkNode) -> Result<(), Error> {
     Ok(())
 }
 
+/// A node's identity: plain SHA-256 over its canonical encoding, which is
+/// also exactly the object a chunk store holds. No domain prefix, so an
+/// object store that checks a SHA-256 checksum on upload (S3 and R2 with a
+/// presigned PUT that signs `x-amz-checksum-sha256`) verifies the node hash
+/// itself. The encoding opens with the node tag (leaf or branch), the format
+/// version and the column kind, which separates nodes of different formats
+/// and kinds.
 pub fn object_hash(encoded: &[u8]) -> ContentHash {
-    hash_domain(b"groove-large-object-v1", encoded)
+    use sha2::Digest;
+    ContentHash(sha2::Sha256::digest(encoded).into())
 }
 
 fn node_logical_hash(node: &ChunkNode) -> ContentHash {
@@ -4525,7 +4533,7 @@ fn base_range_attempt(
 }
 
 fn hash_domain(domain: &[u8], bytes: &[u8]) -> ContentHash {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = crate::sha256::Hasher::new();
     hasher.update(&(domain.len() as u64).to_le_bytes());
     hasher.update(domain);
     hasher.update(bytes);
@@ -5119,12 +5127,12 @@ mod tests {
         );
         assert_eq!(
             hex(&node_hash.0),
-            "84e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e",
+            "16e2c8a19cfd936bb443835d260fcb915819d837f46f2c34e558c970cce16073",
             "object hashes commit to the exact v1 node bytes"
         );
         assert_eq!(
             hex(&node_logical_hash(&leaf).0),
-            "357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da65",
+            "9fa56dff6e75ad6fad689cec6efd851074de94e770f81ce589be906cdf011624",
             "logical hashes bind the v1 format and semantic kind"
         );
         assert_eq!(
@@ -5159,7 +5167,7 @@ mod tests {
         let descriptor_bytes = encode_large_value_ref(&value_ref).unwrap();
         assert_eq!(
             hex(&descriptor_bytes),
-            "00010a000000000000003100000051000000357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da6584e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e010000000900000000000000010000000000000065",
+            "00010a0000000000000031000000510000009fa56dff6e75ad6fad689cec6efd851074de94e770f81ce589be906cdf01162416e2c8a19cfd936bb443835d260fcb915819d837f46f2c34e558c970cce16073010000000900000000000000010000000000000065",
             "v1 descriptor bytes are a reviewed storage fixture"
         );
         let decoded_ref = decode_large_value_ref(&descriptor_bytes).unwrap();
@@ -5181,7 +5189,7 @@ mod tests {
         let scalar_bytes = encode_stored_scalar(LargeValueKind::Bytes, &scalar).unwrap();
         assert_eq!(
             hex(&scalar_bytes),
-            "01010a000000000000003100000051000000357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da6584e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e010000000900000000000000010000000000000065",
+            "01010a0000000000000031000000510000009fa56dff6e75ad6fad689cec6efd851074de94e770f81ce589be906cdf01162416e2c8a19cfd936bb443835d260fcb915819d837f46f2c34e558c970cce16073010000000900000000000000010000000000000065",
             "schema-known stored-scalar kind does not add a descriptor kind tag"
         );
         assert_eq!(
@@ -5253,8 +5261,8 @@ mod tests {
             (
                 text,
                 "00010176312df09f9982",
-                "8ca733330fa66126ffe0096382780f11b272047aea7be36fc5c23b6f16d8680a",
-                "9e87a0d9054fae5cbe72f01ea5ee76cf97c0073ae4955797470365ab08952661",
+                "4eeadfd4777dd1b13b8da3acca4626bd8067d71860e997d57885d6afc25f8a3c",
+                "762318b0747711a5b6a23f8903c2c9eaa2d37780ba5cd2c015a092ab224a4bda",
                 NodeMetrics {
                     byte_length: 7,
                     utf16_length: Some(5),
@@ -5263,8 +5271,8 @@ mod tests {
             (
                 json,
                 "0001027b226e223a2d307d",
-                "a9865ebcd28c3e1868f670948dd798c1ff5287c025efe5d26b344c261e628dcc",
-                "4be873c1509bff9e7e4a861e5e405c29088d67a49cd685ec82be6f4fb4532a28",
+                "6231a9a257cf98e60027949ca0c6d4441c532b8f43f44a77a822c7b2c2e67c66",
+                "c22d0865a689698828d596354bb59ce63622659faf92915fd4202ed6bc976c6b",
                 NodeMetrics {
                     byte_length: 8,
                     utf16_length: Some(8),
@@ -5313,11 +5321,11 @@ mod tests {
         );
         assert_eq!(
             hex(&object_hash(&encoded_node).0),
-            "14dff6ca13ae13d1dd320af8f190088393f1ffaf270a0a66172f3b4a18beaf37"
+            "14a0de65080d2eb324c82cfffe322127220cf808058ab9a42fb080cff5e992aa"
         );
         assert_eq!(
             hex(&node_logical_hash(&node).0),
-            "4a267f38a9486460670c54d2ca475f4058aee0dc528742ddd18ed8f3dae8bab8"
+            "107f49b545ea05a6a56ab69b598a61238ecefe5c08ef821405641a2c9912d037"
         );
         assert_eq!(
             decode_node_for_format(
@@ -5377,7 +5385,7 @@ mod tests {
         );
         assert_eq!(
             hex(&encode_large_value_ref(&with_tail).unwrap()),
-            "02013e000000000000003b0000000000000039000000590000004a267f38a9486460670c54d2ca475f4058aee0dc528742ddd18ed8f3dae8bab814dff6ca13ae13d1dd320af8f190088393f1ffaf270a0a66172f3b4a18beaf370100000000000000000000005400000000000000000000000000000054000000000000007b226c69746572616c223a22f09f9982222c22647570223a332c226e223a302c22736369656e7469666963223a312e302c2274657874223a22c3a921227d"
+            "02013e000000000000003b000000000000003900000059000000107f49b545ea05a6a56ab69b598a61238ecefe5c08ef821405641a2c9912d03714a0de65080d2eb324c82cfffe322127220cf808058ab9a42fb080cff5e992aa0100000000000000000000005400000000000000000000000000000054000000000000007b226c69746572616c223a22f09f9982222c22647570223a332c226e223a302c22736369656e7469666963223a312e302c2274657874223a22c3a921227d"
         );
         let scalar = encode_stored_scalar(
             LargeValueKind::Json,
@@ -5386,7 +5394,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             hex(&scalar),
-            "01013e000000000000003b0000000000000039000000590000004a267f38a9486460670c54d2ca475f4058aee0dc528742ddd18ed8f3dae8bab814dff6ca13ae13d1dd320af8f190088393f1ffaf270a0a66172f3b4a18beaf370100000000000000000000005400000000000000000000000000000054000000000000007b226c69746572616c223a22f09f9982222c22647570223a332c226e223a302c22736369656e7469666963223a312e302c2274657874223a22c3a921227d"
+            "01013e000000000000003b000000000000003900000059000000107f49b545ea05a6a56ab69b598a61238ecefe5c08ef821405641a2c9912d03714a0de65080d2eb324c82cfffe322127220cf808058ab9a42fb080cff5e992aa0100000000000000000000005400000000000000000000000000000054000000000000007b226c69746572616c223a22f09f9982222c22647570223a332c226e223a302c22736369656e7469666963223a312e302c2274657874223a22c3a921227d"
         );
         assert_eq!(
             decode_stored_scalar(LargeValueKind::Json, &scalar),
@@ -5589,29 +5597,30 @@ mod tests {
                 (
                     vec![
                         145537, 34950, 152569, 41743, 42982, 69329, 56603, 124288, 73969, 85750,
-                        84406, 23086, 111851, 83424
+                        84406, 23086, 111851, 83424, 141343, 68613
                     ],
-                    "b4d852672e851cd0b793c3c371c23be93635bfec4d74045b7529f0c91eb210f2".to_owned(),
-                    "c8b977ca28bab218dd195785eec03dc78706b126edae83a480772b517381a575".to_owned()
+                    "aea04ba499f781e5787f6a525cb2b1aab46cd72decdfd7d3298ae8b31efa2b26".to_owned(),
+                    "b5390ceb63f0223c3b3b5534bc38895cb149f48cd8d9061a2ac7741ca60fc790".to_owned()
                 ),
                 (
                     vec![
-                        141343, 68613, 47729, 74996, 73008, 85833, 211362, 73517, 82091, 19309,
-                        84454, 160417, 126463, 84455, 79700, 38374, 46026, 71601, 69902, 35485,
-                        44337, 19041, 139318, 50419
+                        47729, 74996, 73008, 85833, 211362, 73517, 82091, 19309, 84454
                     ],
-                    "47cc24bd324a5d621f3c1d10746324b256a2569a39897c5d4fc3dbdd72886a9e".to_owned(),
-                    "d274d2f7b43d8e4a774c8b52929567e6fd059a5fb035a76ba7d694c561536d1a".to_owned()
+                    "bf93ad893a7756f8a71d5c3d9775e012fa21d2c455de7715f7eb05ee64507e51".to_owned(),
+                    "eb89ba06a4584f9e58b623cc103a6244d9d37bdf75cc43d92435d2c3e492c9a3".to_owned()
                 ),
                 (
-                    vec![73665, 79319],
-                    "93b0c07ec7c6c4dc8d870d7318f65935c7ae6da0f8a135c0c91321e40a00c0e9".to_owned(),
-                    "64119616bbd532be38b6ae4e33fb1b9260cd022f322cc9225b3efe4607e27365".to_owned()
+                    vec![
+                        160417, 126463, 84455, 79700, 38374, 46026, 71601, 69902, 35485, 44337,
+                        19041, 139318, 50419, 73665, 79319
+                    ],
+                    "f4304543608ea532be738fb8cbaec1b110947bceb7990131f0ed76574789db94".to_owned(),
+                    "33b185fc1d7e366cc2017e0c0d4cc534e5129c123dfa855b0927d60c74c992d5".to_owned()
                 ),
                 (
-                    vec![1130487, 1927793, 152984],
-                    "e4f9965a295739a36a1ff9bf93a808135dbddc3a9ebda35aeb96d4ed85f79141".to_owned(),
-                    "2d9f7ec079e2ac62ff79eafb27784ad9dbe6651e91df5795fe3fe54807247e2e".to_owned()
+                    vec![1340443, 752299, 1118522],
+                    "0f607fb687eb4afc6d4a5454a2ae28aa1e78bfcb3ec6d218b09a23467f73217c".to_owned(),
+                    "56aa24c27e5af1a11969f5603b281f48d24c2c3f462645b7539080bd2072f8a6".to_owned()
                 ),
             ],
             "multi-branch grouping and every branch object hash are frozen"
@@ -7243,16 +7252,16 @@ mod tests {
             let hash = object_hash(&expected);
             let expected_hashes = [
                 [
-                    195, 212, 162, 65, 159, 4, 233, 245, 84, 192, 101, 31, 146, 204, 183, 231, 218,
-                    44, 185, 114, 203, 31, 92, 250, 182, 240, 104, 89, 122, 224, 205, 204,
+                    122, 246, 90, 35, 37, 24, 132, 243, 77, 212, 226, 93, 184, 21, 55, 244, 169,
+                    235, 0, 76, 163, 67, 79, 11, 214, 168, 208, 215, 79, 152, 64, 237,
                 ],
                 [
-                    126, 12, 124, 189, 40, 65, 241, 189, 83, 136, 45, 201, 157, 35, 167, 129, 151,
-                    42, 186, 223, 205, 32, 170, 14, 43, 184, 64, 63, 115, 177, 9, 243,
+                    239, 180, 157, 156, 136, 84, 139, 156, 201, 239, 43, 160, 173, 147, 9, 210,
+                    176, 148, 126, 158, 1, 115, 13, 52, 181, 82, 7, 192, 250, 252, 141, 73,
                 ],
                 [
-                    26, 87, 38, 110, 179, 118, 246, 176, 114, 47, 133, 52, 241, 243, 62, 178, 219,
-                    157, 115, 6, 29, 27, 201, 211, 197, 120, 251, 68, 70, 58, 214, 124,
+                    83, 89, 199, 92, 67, 225, 69, 161, 4, 221, 230, 28, 99, 116, 141, 73, 134, 92,
+                    255, 254, 117, 173, 0, 4, 152, 18, 194, 20, 201, 81, 178, 137,
                 ],
             ];
             assert_eq!(hash.0, expected_hashes[usize::from(kind_tag)]);

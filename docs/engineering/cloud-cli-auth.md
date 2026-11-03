@@ -195,7 +195,7 @@ Edge cases:
 
 ## Stage 2: deploy without the root secret
 
-`jazz-tools deploy` and `migrations graph` still need the app's admin secret,
+`migrations graph` (and, before createJazz replaced it, `jazz-tools deploy`) still needs the app's admin secret,
 because the sync server only admits it. #3157 adds short-lived, app-scoped
 **Inspector sessions** on the sync server: `POST /apps/:id/admin/inspector/sessions`,
 authenticated by the admin secret, mints an HS256 token of at most 900 s with

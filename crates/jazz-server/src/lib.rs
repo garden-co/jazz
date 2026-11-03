@@ -11,7 +11,12 @@ mod tcp;
 
 pub use middleware::AuthConfig;
 pub use server::{
-    BuiltServer, ServerBuilder, ServerState, ShutdownController, ShutdownPhase, StorageBackend,
+    BlobStore, BuiltServer, ServerBuilder, ServerState, ShutdownController, ShutdownPhase,
+    StorageBackend,
+};
+#[cfg(feature = "embedded-server")]
+pub use server::{
+    EmbeddedOutgoing, EmbeddedServer, EmbeddedSocketPeer, EmbeddedSocketSender, OpenSocketRefused,
 };
 #[cfg(feature = "embedded-server")]
 pub use server::{
@@ -30,6 +35,61 @@ use tracing::info;
 
 const STANDALONE_INSPECTOR_URL: &str = "https://jazz2-inspector.vercel.app/";
 
+/// Why [`lock_data_dir`] could not lock a data dir.
+#[derive(Debug)]
+pub enum DataDirLockError {
+    /// Another open core holds it; the text names the holder, if it said.
+    Held(String),
+    Io(String),
+}
+
+impl std::fmt::Display for DataDirLockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Held(holder) if holder.is_empty() => write!(f, "already open"),
+            Self::Held(holder) => write!(f, "already open ({holder})"),
+            Self::Io(error) => f.write_str(error),
+        }
+    }
+}
+
+impl std::error::Error for DataDirLockError {}
+
+/// Lock `<dir>/jazz.lock` for as long as the returned file is open, so two
+/// cores (a restart racing the old process, two replicas on one volume, two
+/// cores in one process) never open one data dir. The lock is the OS's on
+/// the open file, so it goes away with the process however it exits.
+pub fn lock_data_dir(dir: &std::path::Path) -> Result<std::fs::File, DataDirLockError> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| DataDirLockError::Io(format!("{}: {e}", dir.display())))?;
+    let path = dir.join("jazz.lock");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| DataDirLockError::Io(format!("{}: {e}", path.display())))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let holder = std::fs::read_to_string(&path).unwrap_or_default();
+            return Err(DataDirLockError::Held(holder.trim().to_owned()));
+        }
+        Err(std::fs::TryLockError::Error(e)) => {
+            return Err(DataDirLockError::Io(format!(
+                "could not lock {}: {e}",
+                path.display()
+            )));
+        }
+    }
+    // Who holds it, for the message above; the lock itself is what counts.
+    let _ = file.set_len(0);
+    let _ = write!(file, "process {}", std::process::id());
+    Ok(file)
+}
+
 /// Run the native Jazz server process shell.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -37,6 +97,7 @@ pub async fn run(
     port: u16,
     data_dir: &str,
     in_memory: bool,
+    blobs: BlobStore,
     auth_config: AuthConfig,
     bound_port_file: Option<String>,
     shutdown_timeout: Duration,
@@ -52,6 +113,15 @@ pub async fn run(
         info!("Storage mode: in-memory");
     } else {
         info!("Data directory: {}", data_dir);
+        match &blobs {
+            BlobStore::Sqlite => info!("Large values: in jazz.sqlite"),
+            BlobStore::Files { dir } => info!(
+                "Large values: files in {}",
+                dir.as_ref()
+                    .map(|dir| dir.display().to_string())
+                    .unwrap_or_else(|| format!("{data_dir}/blobs"))
+            ),
+        }
     }
     match limits.memory_limit_bytes {
         Some(limit) => info!("Memory limit: {} MiB", limit / (1024 * 1024)),
@@ -84,6 +154,17 @@ pub async fn run(
             .cache_budget_governor()
             .map(|governor| AbortOnDrop(tokio::spawn(govern_cache_budget(governor)))),
     );
+    // One process per data dir: held until this function returns, and
+    // dropped by the kernel however the process exits.
+    let _data_dir_lock = if in_memory {
+        None
+    } else {
+        Some(
+            lock_data_dir(std::path::Path::new(data_dir)).map_err(|error| {
+                format!("data dir '{data_dir}' {error}; give each server its own data dir")
+            })?,
+        )
+    };
     let mut builder = ServerBuilder::new(app_id)
         .with_auth_config(auth_config)
         .with_shutdown_timeout(shutdown_timeout)
@@ -98,6 +179,7 @@ pub async fn run(
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.into(),
             })
+            .with_blob_store(blobs)
             .build()
             .await
     }
@@ -420,5 +502,18 @@ mod tests {
             let _activity = runtime.subscribe_activity();
             runtime.notify_activity();
         };
+    }
+}
+
+#[cfg(test)]
+mod data_dir_lock_tests {
+    #[test]
+    fn a_second_server_on_one_data_dir_is_refused_until_the_first_lets_go() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let first = super::lock_data_dir(dir.path()).expect("first");
+        let error = super::lock_data_dir(dir.path()).expect_err("second refused");
+        assert!(matches!(error, super::DataDirLockError::Held(_)), "{error}");
+        drop(first);
+        super::lock_data_dir(dir.path()).expect("free again");
     }
 }

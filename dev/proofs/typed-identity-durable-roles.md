@@ -30,7 +30,7 @@ they are not stored output caches.
   a logical name or value type requires the matching compiled schema; it cannot
   reinterpret a previous payload merely because its row width is unchanged.
 
-The codec tests pin these deterministic BLAKE3 fixtures:
+The codec tests pinned these deterministic BLAKE3 fixtures. Jazz has since moved to SHA-256, and the tests now pin the SHA-256 values instead:
 
 | Fixture                                      | Hash                                                               |
 | -------------------------------------------- | ------------------------------------------------------------------ |

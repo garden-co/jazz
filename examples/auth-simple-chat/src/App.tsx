@@ -1,14 +1,9 @@
 import * as React from "react";
 import { JazzProvider, useJazzAuth, useAuthState } from "jazz-tools/react";
-import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, DEFAULT_APP_ID, SYNC_SERVER_URL } from "../constants.js";
-import {
-  clearStoredAuthSession,
-  readStoredAuthSession,
-  writeStoredAuthSession,
-} from "./auth-storage.js";
+import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, DEFAULT_APP_ID } from "../constants.js";
 import { ChatPanel } from "./ChatPanel.js";
 import { AuthCard } from "./AuthCard.js";
-import { requestSignIn, requestSignUp } from "./api.js";
+import { fetchSignedInUser, requestSignIn, requestSignOut, requestSignUp } from "./api.js";
 
 type Credentials = (email: string, password: string) => Promise<void>;
 
@@ -55,9 +50,10 @@ function ChatShell({
   );
 }
 
+// Jazz runs inside the auth server, reached on this origin under /jazz.
 const config = {
   appId: DEFAULT_APP_ID,
-  serverUrl: SYNC_SERVER_URL,
+  serverUrl: "/jazz",
   driver: { type: "memory" as const },
 };
 
@@ -87,12 +83,6 @@ export function App() {
   );
 }
 
-async function getStoredToken() {
-  const saved = readStoredAuthSession(DEFAULT_APP_ID);
-  if (!saved) throw new Error("Sign in to the provider first");
-  return saved.token;
-}
-
 function SessionScreen({
   providerError,
   reportError,
@@ -108,9 +98,9 @@ function SessionScreen({
   React.useEffect(() => {
     if (restored.current || session.status !== "ready") return;
     restored.current = true;
-    const saved = readStoredAuthSession(DEFAULT_APP_ID);
-    if (saved)
-      void perform(() => actions.loginOrRegisterJWT({ getToken: getStoredToken })).catch(() => {});
+    void perform(async () => {
+      if (await fetchSignedInUser()) await actions.loginWithBackend();
+    }).catch(() => {});
   }, [session.status]);
   // This is the manual hybrid escape hatch: no automatic enrollment connector
   // runs while signup links the provider identity to this local-first account.
@@ -125,19 +115,19 @@ function SessionScreen({
     }
   }
   async function signIn(email: string, password: string) {
-    const auth = await requestSignIn(email, password);
-    writeStoredAuthSession(DEFAULT_APP_ID, auth);
-    await perform(() => actions.loginOrRegisterJWT({ getToken: getStoredToken }));
+    await requestSignIn(email, password);
+    await perform(() => actions.loginWithBackend());
   }
   async function signUp(email: string, password: string) {
-    const auth = await requestSignUp(email, password);
-    writeStoredAuthSession(DEFAULT_APP_ID, auth);
-    await perform(() => actions.linkJWT({ getToken: getStoredToken }));
+    await requestSignUp(email, password);
+    // The backend links this browser's local-first account to the new user,
+    // so everything written as a guest stays theirs.
+    await perform(() => actions.linkWithBackend());
   }
   async function signOut() {
     await perform(async () => {
       await actions.logout();
-      clearStoredAuthSession(DEFAULT_APP_ID);
+      await requestSignOut();
       await actions.createLocalFirst();
     });
   }
@@ -152,8 +142,7 @@ function SessionScreen({
               void perform(
                 session.error
                   ? session.retry
-                  : (recovery.current ??
-                      (() => actions.loginOrRegisterJWT({ getToken: getStoredToken }))),
+                  : (recovery.current ?? (() => actions.loginWithBackend())),
               ).catch(() => {})
             }
           >

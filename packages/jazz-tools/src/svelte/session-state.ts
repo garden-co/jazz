@@ -22,7 +22,7 @@ export function setJazzSession(session: JazzSession<JazzClient>): void {
   setContext(SESSION_CONTEXT, sessionState(session));
 }
 
-/** Read `$session.status` / `$session.account` and call `session.linkJWT(...)`. */
+/** Read `$session.status` / `$session.account` and call `session.loginWithBackend()`. */
 export function getJazzSession(): JazzSessionState<JazzClient> {
   const session = getContext<JazzSessionState<JazzClient> | undefined>(SESSION_CONTEXT);
   if (!session) throw new Error("getJazzSession must be used within JazzSessionProvider");

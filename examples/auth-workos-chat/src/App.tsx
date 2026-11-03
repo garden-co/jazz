@@ -1,12 +1,12 @@
 import * as React from "react";
-import { type User, AuthKitProvider, useAuth } from "@workos-inc/authkit-react";
-import { JazzProvider, jwtAuth, useJazzAuth, useAuthState } from "jazz-tools/react";
-import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, WORKOS_CLIENT_ID } from "../constants.js";
+import { JazzProvider, backendAuth, useJazzAuth, useAuthState } from "jazz-tools/react";
+import { ANNOUNCEMENTS_CHAT_ID, APP_ID, CHAT_ID } from "../constants.js";
+import { type WorkOSUser, useWorkOSSession } from "./session.js";
 import { ChatPanel } from "./ChatPanel.js";
 import { AuthCard } from "./AuthCard.js";
 
 type ChatShellProps = {
-  user: User | null;
+  user: WorkOSUser | null;
   onSignIn: () => void | Promise<void>;
   onSignOut: () => void | Promise<void>;
 };
@@ -49,20 +49,18 @@ function ChatShell({ user, onSignIn, onSignOut }: ChatShellProps) {
   );
 }
 
-const appId = import.meta.env.VITE_JAZZ_APP_ID;
-const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
-
-function JazzApp() {
-  const { isLoading, user, getAccessToken, signIn, signOut } = useAuth();
+export function App() {
+  const { isLoading, user, signIn, signOut } = useWorkOSSession();
   return (
+    // Jazz runs in the backend (server/server.ts) under /jazz; its
+    // `authenticate` reads the AuthKit session cookie.
     <JazzProvider
-      appId={appId}
-      serverUrl={serverUrl}
-      auth={jwtAuth({
-        key: user?.id ?? null,
+      appId={APP_ID}
+      serverUrl="/jazz"
+      auth={backendAuth({
+        key: user?.email ?? null,
         isPending: isLoading,
-        getToken: () => getAccessToken({ forceRefresh: true }),
-        logout: () => signOut({ returnTo: window.location.href }),
+        logout: signOut,
       })}
       signedOut={<button onClick={() => void signIn()}>Sign in with WorkOS</button>}
     >
@@ -74,12 +72,4 @@ function JazzApp() {
 function SignedInChat({ user, onSignIn }: Pick<ChatShellProps, "user" | "onSignIn">) {
   const { logout } = useJazzAuth();
   return <ChatShell user={user} onSignIn={onSignIn} onSignOut={logout} />;
-}
-
-export function App() {
-  return (
-    <AuthKitProvider clientId={WORKOS_CLIENT_ID} devMode={true}>
-      <JazzApp />
-    </AuthKitProvider>
-  );
 }
