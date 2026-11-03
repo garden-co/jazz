@@ -5,9 +5,11 @@ pub mod middleware;
 pub mod profiling;
 pub mod resources;
 pub mod runtime;
+pub mod s3;
 pub mod server;
 pub mod storage_cache;
 mod tcp;
+pub mod vercel_blob;
 
 pub use middleware::AuthConfig;
 pub use server::{
@@ -121,6 +123,8 @@ pub async fn run(
                     .map(|dir| dir.display().to_string())
                     .unwrap_or_else(|| format!("{data_dir}/blobs"))
             ),
+            BlobStore::S3(options) => info!("Large values: {}", options.describe()),
+            BlobStore::VercelBlob(options) => info!("Large values: {}", options.describe()),
         }
     }
     match limits.memory_limit_bytes {
