@@ -221,13 +221,17 @@ jobs:
         # dev/gates/test/examples-e2e.test.mjs).
         variant:
           - band-chat
+          - band-chat-hono
           - jamazon
+          - stage-plan-sveltekit
+          - stage-plan-effect
           - jamazon-warehouse
           - wequencer
           - band-book
           - poster-shop
           - record-player
           - music-agent
+          - music-agent-hono
           - big-label
     steps:
       - name: Skip if variant doesn't match dispatch filter
