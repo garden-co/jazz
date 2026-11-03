@@ -8,6 +8,7 @@ members = [
   "crates/jazz/layers/protocol",
   "crates/jazz/layers/types",
   "crates/jazz-compression",
+  "crates/jazz-text",
   "crates/wasm-tracing",
   "crates/jazz-wasm",
   "crates/jazz-native-transport",
@@ -46,6 +47,7 @@ jazz-model = { path = "crates/jazz/layers/model", default-features = false }
 jazz-protocol = { path = "crates/jazz/layers/protocol", default-features = false }
 jazz-types = { path = "crates/jazz/layers/types", default-features = false }
 jazz-compression = { path = "crates/jazz-compression", default-features = false }
+jazz-text = { path = "crates/jazz-text" }
 jazz-otel = { path = "crates/jazz-otel" }
 jazz-native-transport = { path = "crates/jazz-native-transport" }
 rustc-hash = "2.1.1"
