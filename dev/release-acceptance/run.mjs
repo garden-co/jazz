@@ -280,7 +280,6 @@ try {
       "local CLI validation/deploy, ordinary CRUD, backend/deny-read, large values, offline pending persistence and restart",
   });
   for (const gate of [
-    "npm-create-scaffold",
     "external-jwt-and-negative-auth",
     "denied-write",
     "deterministic-in-flight-cancellation",
