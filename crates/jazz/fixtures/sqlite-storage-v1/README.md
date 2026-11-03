@@ -7,13 +7,14 @@ not read bumps `STORAGE_FORMAT` and adds a new corpus beside this one, and
 never rewrites these. Until then format 1 is still moving, so such a change
 re-runs the producer and re-pins the hashes here and in the test instead
 (for example: enum columns stored as tags, per-write timestamps on the wire changed how pending uploads
-are stored, a rejection's reason name changed how fates are recorded, and
-pending uploads moved from one encoded message to a row per op).
+are stored, a rejection's reason name changed how fates are recorded,
+pending uploads moved from one encoded message to a row per op, and
+watermarks became per-sequencer rows).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `0bd49cd130a2a205eadac2356299665f49eb6569cd2caee8bfbe360b31dc69f3`.
+  the SQLite file `4ed6e440fe4f74dbc745011475e0892f5d3543a73ffdde8bcc68f86336ed4bbf`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `fcbd981b7c8e257e0c383fbeb37542c49cb720b9fcde1dda326479ab25c13034`.
+  `9c819e575adcf9cd04d31f49ac6c9f68aebadc23d6d451488cd794c602259273`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -26,7 +27,7 @@ nodes and write times:
   on a branch;
 - a client text edit to `documents.body` (text-merging) that the server
   merged with its own concurrent edit, so its history keeps the client's
-  write as sent (`_st` bit 2, at `_seq` = minus the commit's seq);
+  write as sent (`_state` bit 2, at `_clock` = minus the commit's position);
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
   rejected (so `_jazz_transactions` keeps a rejected fate with its reason name),
@@ -90,3 +91,49 @@ same way). A storage change re-pins this corpus and the browser corpus;
 `server-data-dir-v1` is re-pinned only when an authority's bytes change (an
 authority never writes `_jazz_withheld`, and that producer is not
 byte-deterministic).
+
+Storing every version at a position `(_n, _seq)`, `_n` being the code of the
+node that numbered it (0 for the authority; a replica's own writes at its
+node's code instead of a reserved local seq range), regenerated it the same
+way. It adds `_n` to every row and history table (history keyed by
+`(id, _b, _n, _seq)`), `sn` to `_jazz_transactions` and `node` to
+`_jazz_lv_via`.
+
+Naming a pending commit's tables and columns by stored names, so a commit no
+longer depends on the schema version that wrote it, dropped
+`_jazz_pending_versions` and re-encoded the pending ops and serializable reads
+(a read now names the version its query is in), which regenerated it the same
+way.
+
+Giving a replicated insert the backwards defaults of the columns its writer's
+lineage dropped, and a replicated upsert the cells it writes only if it
+creates its row (`created`), changed the encoded pending ops, which
+regenerated it the same way.
+
+Ordering unsettled versions last-writer-wins by their commits' clocks gave
+each pending commit's header a `clock` (its writer's commit clock), which
+regenerated it the same way.
+
+Replacing the `(_n, _seq)` pair with one scalar position `_t` (below
+2^53) regenerated it the same way. `_t` has two kinds: accepted (the
+authority's position, below 2^52) and pending (`1<<52 |` the commit's HLC
+as this store took it; a relay bounds a writer's clock to its own plus
+500 ms). Every row and history table has `_t` in place of `_n` and `_seq`,
+with index `__by_t`, and `_w`: a pending version's writer (its 16-byte node
+and 8-byte big-endian tx), `X''` for an accepted version. History is keyed
+by `(id, _b, _t, _w)`, so two writers' versions at one `_t` both stay.
+`_jazz_transactions` is `(n, tx, t, result)` (index
+`_jazz_transactions_by_t`), `_jazz_lv_via` has `t` in place of
+`node`/`seq`, `_jazz_watermarks` is one `through` per key, the sequencer
+tables are gone, and a pending commit's `clock` is its commit HLC.
+
+Giving the reserved row columns descriptive names regenerated it the same
+way: `_b` is `_branch`, `_t` is `_clock` (index `__by_clock`), `_w` is
+`_writer`, `_st` is `_state` and `_cols` is `_touched`; `_base` keeps its
+name. History is keyed by `(id, _branch, _clock, _writer)`.
+
+Replacing BLAKE3 with SHA-256 everywhere Jazz used it (large-value
+object hashes are now plain SHA-256 over the node's encoding, so an object
+store can verify a presigned upload against the node hash itself; schema
+hashes, schema version ids, stored column and table names, and derived ids
+are SHA-256 too) regenerated it the same way.

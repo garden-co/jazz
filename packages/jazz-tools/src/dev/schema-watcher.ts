@@ -1,6 +1,6 @@
 import { statSync, watch, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
-import { deploy } from "./catalogue-project.js";
+import { CLIENT_MIGRATIONS_FILE, deploy } from "./catalogue-project.js";
 import { toError } from "../runtime/util.js";
 
 export interface SchemaWatcherOptions {
@@ -65,7 +65,8 @@ export function watchSchema(options: SchemaWatcherOptions): { close: () => void 
     migrationDirectoryIdentity = undefined;
     if (identity) {
       migrationWatcher = watch(migrationsDir, (_event, filename) => {
-        if (filename?.endsWith(".ts")) schedulePush();
+        // The migrations module is deploy's output, not a source.
+        if (filename?.endsWith(".ts") && filename !== CLIENT_MIGRATIONS_FILE) schedulePush();
       });
       migrationDirectoryIdentity = identity;
     }

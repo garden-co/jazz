@@ -23,37 +23,43 @@ import {
   waitForRemoteBrowserDbTitle,
 } from "./remote-browser-db.js";
 
-const app = schema.defineApp({
-  todos: schema.table(
-    {
-      title: schema.string(),
-      done: schema.boolean(),
-      list: schema.string(),
-    },
-    {},
-  ),
-});
+const app = schema.defineApp(
+  {
+    todos: schema.table(
+      {
+        title: schema.string(),
+        done: schema.boolean(),
+        list: schema.string(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
-const richApp = schema.defineApp({
-  users: schema.table(
-    {
-      name: schema.string(),
-    },
-    { todosViaOwner: schema.reverse("todos", "owner") },
-  ),
-  todos: schema.table(
-    {
-      title: schema.string(),
-      done: schema.boolean(),
-      list: schema.string(),
-      priority: schema.int(),
-      tags: schema.array(schema.string()),
-      payload: schema.bytes().optional(),
-      ownerId: schema.uuid().optional(),
-    },
-    { owner: schema.rel("users", "ownerId") },
-  ),
-});
+const richApp = schema.defineApp(
+  {
+    users: schema.table(
+      {
+        name: schema.string(),
+      },
+      { todosViaOwner: schema.reverse("todos", "owner") },
+    ),
+    todos: schema.table(
+      {
+        title: schema.string(),
+        done: schema.boolean(),
+        list: schema.string(),
+        priority: schema.int(),
+        tags: schema.array(schema.string()),
+        payload: schema.bytes().optional(),
+        ownerId: schema.uuid().optional(),
+      },
+      { owner: schema.rel("users", "ownerId") },
+    ),
+  },
+  { migrations: "none" },
+);
 
 const permissions = schema.definePermissions(app, ({ policy }) => [
   policy.todos.allowRead.always(),

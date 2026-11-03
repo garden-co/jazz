@@ -6,7 +6,7 @@ schema lineage and migration conventions; do not create a migration format of yo
 - [Defining tables](https://jazz.tools/docs/schemas/defining-tables)
 - [Column types](https://jazz.tools/docs/schemas/column-types)
 - [Migrations](https://jazz.tools/docs/schemas/migrations)
-- [Permissions](https://jazz.tools/docs/auth/permissions)
+- [Permissions](https://jazz.tools/docs/schemas/policies)
 - [User-owned data recipe](https://jazz.tools/docs/recipes/access-control/user-owned-data)
 - [Shared access recipe](https://jazz.tools/docs/recipes/access-control/shared-access)
 - [Group permissions recipe](https://jazz.tools/docs/recipes/access-control/group-permissions)

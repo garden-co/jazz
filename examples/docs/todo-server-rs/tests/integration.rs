@@ -114,6 +114,7 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
+        migrations: Default::default(),
     };
 
     let client = TodoClient::connect(with_offline_account(context))
@@ -493,6 +494,7 @@ async fn local_persistence() {
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
+            migrations: Default::default(),
         };
         let client = connect_native(with_offline_account(context)).await.unwrap();
 
@@ -527,6 +529,7 @@ async fn local_persistence() {
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
+            migrations: Default::default(),
         };
         let client = connect_native(with_offline_account(context)).await.unwrap();
 
@@ -815,6 +818,7 @@ async fn server_resync() {
             jwt_token: Some(make_test_jwt("client1-user")),
             backend_secret: None,
             admin_secret: None,
+            migrations: Default::default(),
         };
         let permissions_schema = test_schema();
         permissions_support::publish_allow_all_permissions(
@@ -862,6 +866,7 @@ async fn server_resync() {
             jwt_token: Some(make_test_jwt("client2-user")),
             backend_secret: None,
             admin_secret: None, // Intentionally no admin - server already has schema
+            migrations: Default::default(),
         };
         let client = connect_native(context).await.unwrap();
 

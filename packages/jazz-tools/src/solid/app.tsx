@@ -12,7 +12,7 @@ import {
   type JSX,
 } from "solid-js";
 import { createJazzApp, type JazzAppConfig } from "../session/create-jazz-app.js";
-import type { JazzAppSnapshot } from "../session/app.js";
+import { authForUser, type JazzAppSnapshot } from "../session/app.js";
 import type { JazzSessionActions } from "../session/state.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
 import { ActiveClient } from "./session.js";
@@ -78,7 +78,7 @@ function AppProvider(props: JazzAppProviderProps) {
     });
   });
   createRenderEffect(() => {
-    app.updateAuth(props.auth);
+    app.updateAuth(authForUser("user" in props, props.user, props.auth));
   });
   createEffect(() => {
     snapshot();

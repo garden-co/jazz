@@ -3,11 +3,10 @@ import { createAccountManager, type DbConfig } from "jazz-tools";
 import { JazzProvider, createAccountState } from "jazz-tools/solid";
 
 // Login starts outside a context. Linking requires the old context to complete
-// shutdown({ waitForSync: true }) before calling accounts.linkJWT.
+// shutdown({ waitForSync: true }) before calling accounts.linkWithBackend.
 export function AuthExternal(
   props: ParentProps<{
     accounts: Awaited<ReturnType<typeof createAccountManager>>;
-    getToken: () => Promise<string>;
     config: Omit<DbConfig, "account">;
   }>,
 ) {
@@ -20,7 +19,7 @@ export function AuthExternal(
           <button
             disabled={!!state().pending}
             onClick={() => {
-              void props.accounts.loginJWT({ getToken: props.getToken }).catch(() => {});
+              void props.accounts.loginWithBackend().catch(() => {});
             }}
           >
             Sign in

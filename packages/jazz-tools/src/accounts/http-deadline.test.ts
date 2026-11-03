@@ -68,7 +68,7 @@ describe("account HTTP deadlines", () => {
       });
       const openClient = vi.fn(async () => ({ shutdown: async () => {} }));
       const session = await createJazzSessionOwner({ accounts, openClient });
-      const admission = session.loginJWT(token).catch((error: unknown) => error);
+      const admission = session.loginWithBackend().catch((error: unknown) => error);
       await vi.advanceTimersByTimeAsync(0);
       expect(fetcher).toHaveBeenCalledTimes(1);
       let finished = false;
@@ -83,7 +83,7 @@ describe("account HTTP deadlines", () => {
       expect(openClient).not.toHaveBeenCalled();
       expect(accounts.getLoggedIn()).toBeUndefined();
       if (action === "logout") {
-        await session.loginJWT(token);
+        await session.loginWithBackend();
         expect(openClient).toHaveBeenCalledTimes(1);
         await session.close();
       }

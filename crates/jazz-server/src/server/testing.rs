@@ -36,6 +36,7 @@ pub struct JazzServerBuilder {
     backend_secret: Option<String>,
     jwks_url: Option<String>,
     auth_clock: Option<crate::middleware::auth::AuthClock>,
+    trusted_workload: Option<crate::middleware::workload::TrustedWorkload>,
 }
 
 impl std::fmt::Debug for JazzServerBuilder {
@@ -97,6 +98,15 @@ impl JazzServerBuilder {
     #[cfg(feature = "test")]
     pub fn with_auth_clock(mut self, clock: crate::middleware::auth::TestClock) -> Self {
         self.auth_clock = Some(clock.into());
+        self
+    }
+
+    /// Trust only this workload; the server then has no shared secrets.
+    pub fn with_trusted_workload(
+        mut self,
+        workload: crate::middleware::workload::TrustedWorkload,
+    ) -> Self {
+        self.trusted_workload = Some(workload);
         self
     }
 
@@ -242,6 +252,7 @@ impl JazzServer {
             backend_secret,
             jwks_url,
             auth_clock,
+            trusted_workload,
         } = builder;
 
         let app_id = app_id.unwrap_or_else(AppId::random);
@@ -269,8 +280,9 @@ impl JazzServer {
             jwt_issuer: Some(TEST_JWT_ISSUER.to_owned()),
             jwt_audience: Some(TEST_JWT_AUDIENCE.to_owned()),
             allow_local_first_auth: true,
-            backend_secret: Some(backend_secret.clone()),
-            admin_secret: Some(admin_secret.clone()),
+            backend_secret: trusted_workload.is_none().then(|| backend_secret.clone()),
+            admin_secret: trusted_workload.is_none().then(|| admin_secret.clone()),
+            trusted_workload,
             clock: auth_clock.clone(),
             ..Default::default()
         };
@@ -439,7 +451,48 @@ impl JazzServer {
             jwt_token: Some(self.jwt_for_user(user_id)),
             backend_secret: Some(self.backend_secret().to_string()),
             admin_secret: None,
+            migrations: self.published_migrations(),
         }
+    }
+
+    /// The versions and lenses published to this server so far, as an app
+    /// that deployed them ships them (SPEC 10.7).
+    pub fn published_migrations(&self) -> jazz::db::Migrations {
+        let state = &self.state;
+        let store = &state.catalogue_store;
+        let mut schemas = std::collections::HashMap::new();
+        for hash in state
+            .catalogue
+            .known_schema_hashes(store)
+            .expect("read published schema hashes")
+        {
+            if let Some(schema) = state
+                .catalogue
+                .known_schema(store, &hash)
+                .expect("read published schema")
+            {
+                schemas.insert(hash, schema);
+            }
+        }
+        let lenses = state
+            .catalogue
+            .known_lenses(store)
+            .expect("read published lenses")
+            .iter()
+            .filter_map(|lens| {
+                let source = schemas.get(&lens.source_hash)?;
+                let target = schemas.get(&lens.target_hash)?;
+                Some(
+                    jazz::tools::schema_lens::runtime::compile_lens(lens, source, target)
+                        .expect("lower a published lens"),
+                )
+            })
+            .collect();
+        let schemas = schemas
+            .values()
+            .map(|schema| jazz::schema::JazzSchema::new(schema).expect("lower a published schema"))
+            .collect();
+        jazz::db::Migrations { schemas, lenses }
     }
 
     fn require_built_in_jwt_helpers(&self) {

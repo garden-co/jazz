@@ -5,9 +5,12 @@ import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { Jazz, JazzError } from "./index.js";
 
-const app = s.defineApp({
-  todos: s.table({ title: s.string(), done: s.boolean() }, {}),
-});
+const app = s.defineApp(
+  {
+    todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+  },
+  { migrations: "none" },
+);
 
 class Oops extends Data.TaggedError("Oops")<{}> {}
 

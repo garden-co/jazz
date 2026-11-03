@@ -10,7 +10,7 @@ declare the column as a text merge column and keep writing it as a plain string.
 ## Why a plain string column is not enough
 
 A plain string column works well for replacing a value. When two people change it at the same time,
-[one edit wins the whole field](/docs/concepts/how-sync-works#concurrent-edits). The other edit stays
+[one edit wins the whole field](/docs/recipes/local-first/local-first-data-model#concurrent-edits). The other edit stays
 in the row's history, but it disappears from the text.
 
 ## Declare a text merge column
@@ -21,6 +21,7 @@ survive; where two people replaced the same words, the later edit wins that part
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
+import { migrations } from "./migrations";
 
 const schema = {
   notes: s.table(
@@ -33,7 +34,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
 ```
 
 Pick the format that matches what the column holds: `"text"` for prose, `"markdown"` for Markdown
@@ -94,5 +95,5 @@ cursors.
 - The merge keeps Markdown and HTML markup intact but is not tree-aware: it does not check that the
   merged result is well formed.
 
-See [how text merges work](/docs/concepts/how-sync-works#text-merges) for the full rules, including
+See [how text merges work](/docs/recipes/local-first/how-sync-works#text-merges) for the full rules, including
 what happens when a very large value is rewritten heavily on both sides.

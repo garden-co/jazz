@@ -1,0 +1,150 @@
+---
+title: Other / Custom
+description: "Any auth library works the same way: your backend's authenticate names the user, the browser signs in through your backend, and a guest keeps its data on sign-up."
+reviewedAt: "f14d92bf11"
+---
+
+Jazz doesn't talk to your auth provider. Your backend does, and tells Jazz who each request's user
+is. Whatever you use (Clerk, Auth0, Supabase Auth, Firebase, Lucia, your own sessions), the shape is
+the same: a function that reads your session and returns a user id.
+
+```ts title="jazz.server.ts"
+import { createJazz, remote } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+import { getUser } from "./your-auth";
+
+export const jazz = await createJazz({
+  appId: "my-app",
+  app,
+  permissions,
+  store: remote({
+    url: process.env.JAZZ_SERVER_URL!,
+    secret: process.env.JAZZ_ADMIN_SECRET!,
+  }),
+  authenticate: async (request) => {
+    const user = await getUser(request); // your cookie, or a bearer token you verify
+    return user ? { userId: user.id, claims: { role: user.role } } : null;
+  },
+});
+```
+
+Mount it under `/jazz` (see [Backend](/docs/setup/backend#mount-it)). The browser talks only to your
+backend; the core behind `remote()` trusts your backend to say who the user is, and never sees your
+users' credentials.
+
+## How it works
+
+<Sequence
+  description="A browser signing in to Jazz through the app's backend."
+  participants={[
+    { id: "browser", label: "Browser" },
+    { id: "backend", label: "Your backend" },
+    { id: "jazz", label: "Jazz core", createAtStep: 2 },
+  ]}
+  steps={[
+    { kind: "message", from: "browser", to: "backend", text: "Sign in (your auth library)" },
+    { kind: "message", from: "backend", to: "browser", text: "Session cookie", line: "dashed" },
+    { kind: "message", from: "browser", to: "backend", text: "POST /jazz/.../backend-sign-in" },
+    { kind: "message", from: "backend", to: "backend", text: "authenticate(request)" },
+    { kind: "message", from: "backend", to: "jazz", text: "Log in or register this user" },
+    {
+      kind: "message",
+      from: "jazz",
+      to: "browser",
+      text: "Account, identity, claims",
+      line: "dashed",
+    },
+  ]}
+/>
+
+1. The user signs in with your auth library, which sets its own session cookie.
+2. The client calls `loginWithBackend()`. Your backend runs `authenticate` and returns the user id.
+3. Jazz gives that user an account the first time, and the same account every time after. The
+   identity is `{ issuer: "jazz:app:<appId>", subject: userId }`.
+4. Every sync connection asks `authenticate` again, so a sign-out or changed claims apply on the
+   next reconnect.
+
+## In the client
+
+With React, pass `backendAuth` to `JazzProvider`:
+
+```tsx
+import { JazzProvider, backendAuth } from "jazz-tools/react";
+
+<JazzProvider
+  appId="my-app"
+  serverUrl="/jazz"
+  auth={backendAuth({ key: user?.id ?? null, isPending, logout: () => signOut() })}
+  signedOut={<SignIn />}
+>
+  <App />
+</JazzProvider>;
+```
+
+`key` is whatever identifies the signed-in user on the client, or `null`; when it changes, Jazz
+signs in again through your backend. `logout` signs out of your auth; your source must then report
+`key: null`. For Better Auth, `betterAuth(authClient)` does all of this for you.
+
+Without React, own the session yourself:
+
+```ts
+import { createJazzSession } from "jazz-tools/client";
+
+const jazz = await createJazzSession({ appId: "my-app", serverUrl: "/jazz" });
+await jazz.loginWithBackend(); // after your own sign-in
+// ...
+await jazz.logout(); // before your own sign-out
+```
+
+Svelte, Solid, Vue and React Native expose the same actions through their bindings.
+
+## Guests who sign up
+
+An app can start every visitor as a [local-first](/docs/setup/auth/local-first) guest
+(`initial: "local-first"`). When the guest signs up, call `linkWithBackend()` instead of
+`loginWithBackend()`:
+
+```ts
+await yourAuth.signUp(email, password); // sets your session cookie
+await jazz.linkWithBackend();
+```
+
+The guest proves itself with its own local-first key; your backend checks that the user
+`authenticate` names has no Jazz account yet and links the two. From then on, signing in as that
+user opens the guest's account and everything it wrote. An identity belongs to one account only,
+so linking a user who already has an account fails: Jazz doesn't merge accounts.
+
+To link from your own backend code instead (a second sign-in method, an anonymous id your app
+issued), call `jazz.linkIdentity({ from, to })`.
+
+## Using claims in permissions
+
+`claims` from `authenticate` are available to your policies under `session.claims`.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
+</include>
+
+See [Permissions](/docs/schemas/policies) for the full claims API.
+
+## Ownership and provenance
+
+Public sessions and author columns expose the same structured value:
+
+```ts
+{
+  account: "00000000-0000-4000-8000-000000000001",
+  identity: { issuer: "jazz:app:my-app", subject: "alice" },
+}
+```
+
+Compare `.account` for account-owned data. Two linked identities (a guest and the user it became)
+share account ownership while keeping distinct authorship.
+
+## Backend request contexts
+
+`await jazz.forRequest(request)` runs your `authenticate` and returns a database with that user's
+policies and authorship; `jazz.db` acts with backend authority. See
+[Backend](/docs/setup/backend#user-scoped-use).
+
+Full working examples: [Better Auth chat](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat), [simple auth chat](https://github.com/garden-co/jazz/tree/main/examples/auth-simple-chat), [WorkOS chat](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat).

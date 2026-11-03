@@ -28,7 +28,7 @@ const testSchema = {
   ),
 };
 type TestSchema = s.Schema<typeof testSchema>;
-const testApp: s.App<TestSchema> = s.defineApp(testSchema);
+const testApp: s.App<TestSchema> = s.defineApp(testSchema, { migrations: "none" });
 const testPermissions = definePermissions(testApp, ({ policy, session }) => {
   policy.todos.allowRead.where(
     anyOf([{ ownerId: session.user.account }, { ownerId: { isNull: true } }]),
@@ -453,7 +453,9 @@ describe("createPolicyTestApp", () => {
       staffNotes: s.table({ body: s.string() }, {}),
       carts: s.table({ item: s.string(), ownerId: s.uuid() }, {}),
     };
-    const guestApp: s.App<s.Schema<typeof guestSchema>> = s.defineApp(guestSchema);
+    const guestApp: s.App<s.Schema<typeof guestSchema>> = s.defineApp(guestSchema, {
+      migrations: "none",
+    });
     const guestPermissions = definePermissions(guestApp, ({ policy, session, allOf }) => {
       policy.products.allowRead.where(
         session.where({ authMode: { in: ["local-first", "external"] } }),
@@ -510,7 +512,9 @@ describe("createPolicyTestApp", () => {
     const actorSchema = {
       carts: s.table({ item: s.string(), ownerId: s.uuid() }, {}),
     };
-    const actorApp: s.App<s.Schema<typeof actorSchema>> = s.defineApp(actorSchema);
+    const actorApp: s.App<s.Schema<typeof actorSchema>> = s.defineApp(actorSchema, {
+      migrations: "none",
+    });
     const actorPermissions = definePermissions(actorApp, ({ policy, session }) => {
       policy.carts.allowRead.where({ ownerId: session.user.account });
       policy.carts.allowInsert.where({ ownerId: session.user.account });
@@ -716,7 +720,7 @@ describe("policies that correlate optional and required columns", () => {
     ),
   };
   type InviteSchema = s.Schema<typeof inviteSchema>;
-  const inviteApp: s.App<InviteSchema> = s.defineApp(inviteSchema);
+  const inviteApp: s.App<InviteSchema> = s.defineApp(inviteSchema, { migrations: "none" });
   const invitePermissions = definePermissions(inviteApp, ({ policy, session }) => {
     policy.shows.allowRead.always();
     policy.members.allowRead.where({ account: session.user.account });
