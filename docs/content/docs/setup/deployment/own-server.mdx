@@ -26,6 +26,23 @@ export const jazz = await createJazz({
 
 <include>../../../partials/main-backend-config.mdx</include>
 
+### Large values
+
+By default `sqlite()` keeps large values, such as files and long streams, as files in
+`<path>/blobs` and keeps everything else in SQLite. Choose where they go with `blobs`:
+
+```ts
+import { files, sqlite } from "jazz-tools/backend";
+
+sqlite({ path: "./data/jazz" }); // large values in ./data/jazz/blobs
+sqlite({ path: "./data/jazz", blobs: files({ dir: "/mnt/blobs" }) }); // a directory of your choice
+sqlite({ path: "./data/jazz", blobs: "sqlite" }); // everything inside the SQLite database
+```
+
+The data directory records its choice in `<path>/blob-store`. You can move an existing directory
+from `"sqlite"` to files later; any other switch is not supported yet and refuses to start. A blob
+directory belongs to exactly one data directory, so two data directories can't share one.
+
 <include>../../../partials/main-backend-mount.mdx</include>
 
 ## Deploy it

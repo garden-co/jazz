@@ -1,6 +1,6 @@
 ---
 title: Backups & Upgrades
-description: "Learn how to keep a self-hosted Jazz server's data safe and upgrade it across releases."
+description: "Learn how to keep the data in your backend's Jazz directory safe and upgrade it across releases."
 ---
 
 <Callout type="info">
@@ -8,6 +8,8 @@ description: "Learn how to keep a self-hosted Jazz server's data safe and upgrad
   what it will cover.
 </Callout>
 
-- What the data dir holds (one SQLite database)
+- What the data dir holds: the SQLite database, `store-id`, `blob-store`, and the large values in
+  `blobs/` (or the directory you passed to `files({ dir })`)
+- Back up all of it together, with the backend stopped
 - Backups and restores per platform
 - Upgrading between releases, and the alpha.59 to SQLite migration
