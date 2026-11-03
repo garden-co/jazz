@@ -2,6 +2,8 @@ import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { verifyChallenge } from "../local-first-auth/server.js";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
 import { registerInProcessTransport } from "../runtime/in-process-transport.js";
 import { accountAppId, localFirstAccountId } from "../accounts/local-first.js";
@@ -59,11 +61,13 @@ export type { VercelStoreOptions } from "./vercel-store.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
-  | { readonly kind: "sqlite"; readonly path: string }
-  | { readonly kind: "memory" }
+  | { readonly kind: "sqlite"; readonly path: string; readonly appId?: string }
+  | { readonly kind: "memory"; readonly appId?: string }
   | {
       readonly kind: "remote";
       readonly url: string;
+      /** The app this core serves. */
+      readonly appId: string;
       /** This backend's credential for the core, asked for each request and socket. */
       readonly backendCredential: BackendCredential;
     }
@@ -75,13 +79,25 @@ export type JazzStore =
     };
 
 /** A SQLite core in this process, kept in the directory `path`. */
-export function sqlite(options: { path: string }): Extract<JazzStore, { kind: "sqlite" }> {
-  return { kind: "sqlite", path: options.path };
+/**
+ * A SQLite core in this process, kept in the directory `path`. It generates
+ * its app id on first start and keeps it beside its data; set `appId` only
+ * to keep the id of an existing app.
+ */
+export function sqlite(options: {
+  path: string;
+  appId?: string;
+}): Extract<JazzStore, { kind: "sqlite" }> {
+  return {
+    kind: "sqlite",
+    path: options.path,
+    ...(options.appId === undefined ? {} : { appId: options.appId }),
+  };
 }
 
 /** An in-memory core in this process: for tests and throwaway previews. */
-export function memory(): Extract<JazzStore, { kind: "memory" }> {
-  return { kind: "memory" };
+export function memory(options: { appId?: string } = {}): Extract<JazzStore, { kind: "memory" }> {
+  return { kind: "memory", ...(options.appId === undefined ? {} : { appId: options.appId }) };
 }
 
 /**
@@ -93,15 +109,21 @@ export function memory(): Extract<JazzStore, { kind: "memory" }> {
 export type BackendCredential = () => string | Promise<string>;
 
 /**
- * A core running elsewhere (Jazz Cloud, or a sync server you run), reached
- * from this backend with the app's one secret (its admin secret), or with a
- * `backendCredential` of your own. Browsers still talk only to your backend:
- * it decides who each user is, and the core trusts it to say so. The secret
- * never leaves your server.
+ * A core running elsewhere (Jazz Cloud, or a sync server you run), serving
+ * the app `appId`, reached from this backend with the app's one secret (its
+ * admin secret), or with a `backendCredential` of your own. Browsers still
+ * talk only to your backend: it decides who each user is, and the core
+ * trusts it to say so. The secret never leaves your server.
  */
 export function remote(
-  options: { url: string; secret: string } | { url: string; backendCredential: BackendCredential },
+  options:
+    | { url: string; appId: string; secret: string }
+    | { url: string; appId: string; backendCredential: BackendCredential },
 ): Extract<JazzStore, { kind: "remote" }> {
+  const appId = options.appId;
+  if (typeof appId !== "string" || !appId.trim()) {
+    throw new Error("remote(): appId must name the app the core serves (it is empty)");
+  }
   let backendCredential: BackendCredential;
   if ("backendCredential" in options) {
     backendCredential = options.backendCredential;
@@ -117,7 +139,7 @@ export function remote(
     }
     backendCredential = () => secret;
   }
-  return { kind: "remote", url: options.url.replace(/\/+$/, ""), backendCredential };
+  return { kind: "remote", url: options.url.replace(/\/+$/, ""), appId, backendCredential };
 }
 
 /**
@@ -159,7 +181,6 @@ export interface JazzUser {
 }
 
 export interface CreateJazzOptions {
-  appId: string;
   app: BackendSchemaInput;
   permissions: CompiledPermissionsMap;
   store: JazzStore;
@@ -351,6 +372,11 @@ type BackendAccess = "admin" | "backend" | "session";
 
 /** The core this backend fronts: in this process, or reached over the network. */
 interface Core {
+  /**
+   * The app the core serves: the one `remote()` names, or the id an
+   * in-process or Vercel core keeps with its data.
+   */
+  readonly appId: string;
   /** Where this process's own clients reach it. */
   readonly serverUrl: string;
   /**
@@ -575,7 +601,6 @@ function withBundle(prelude: Uint8Array, bundle: string | undefined): Uint8Array
 
 /** `bundle` is the published bundle every socket the core opens is pinned to. */
 async function openInProcessCore(
-  appId: string,
   store: Extract<JazzStore, { kind: "sqlite" | "memory" }>,
   bundle: () => string | undefined,
 ): Promise<Core> {
@@ -583,6 +608,10 @@ async function openInProcessCore(
   const adminSecret = randomBytes(32).toString("base64url");
   // The core holds `<path>/jazz.lock` with an OS lock while it's open.
   if (store.kind === "sqlite") refuseServerlessDisk(store.path);
+  const appId =
+    store.kind === "sqlite"
+      ? await keptAppId(store.path, store.appId)
+      : (store.appId ?? randomUUID());
   const core = await JazzCore.open({
     appId,
     backendSecret,
@@ -610,6 +639,7 @@ async function openInProcessCore(
     ),
   });
   const opened: Core = {
+    appId,
     serverUrl,
     adminSecret,
     backendSecret,
@@ -621,6 +651,39 @@ async function openInProcessCore(
     },
   };
   return opened;
+}
+
+/**
+ * The app id an in-process SQLite core keeps beside its data, in
+ * `<path>/app-id`: `named` (or a new one) on first start, so the app's
+ * identities stay the same across restarts without the app naming an id.
+ */
+async function keptAppId(dir: string, named: string | undefined): Promise<string> {
+  const file = join(dir, "app-id");
+  const kept = async (): Promise<string | undefined> => {
+    try {
+      return (await readFile(file, "utf8")).trim() || undefined;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      return undefined;
+    }
+  };
+  let appId = await kept();
+  if (appId === undefined) {
+    await mkdir(dir, { recursive: true });
+    // `wx`: two processes starting the same store at once agree on one id.
+    try {
+      appId = named ?? randomUUID();
+      await writeFile(file, `${appId}\n`, { flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      appId = (await kept())!;
+    }
+  }
+  if (named !== undefined && named !== appId) {
+    throw new Error(`sqlite(): the store at ${dir} belongs to app ${appId}, not ${named}`);
+  }
+  return appId;
 }
 
 /**
@@ -638,7 +701,7 @@ function refuseServerlessDisk(dir: string): void {
   if (!host) return;
   throw new Error(
     `sqlite({ path: ${JSON.stringify(dir)} }) can't keep data on ${host}: its functions have no lasting disk. ` +
-      "Use remote({ url, secret }) to a sync server or Jazz Cloud.",
+      "Use remote({ url, appId, secret }) to a sync server or Jazz Cloud.",
   );
 }
 
@@ -693,6 +756,7 @@ function openRemoteCore(
     });
 
   const core: Core = {
+    appId,
     serverUrl: `http://jazz-remote-${randomUUID()}.invalid`,
     adminSecret: target.secrets?.adminSecret ?? STAND_IN_SECRET,
     backendSecret: target.secrets?.backendSecret ?? STAND_IN_SECRET,
@@ -837,7 +901,11 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       return parsed;
     }),
   );
-  const issuer = `jazz:app:${options.appId}`;
+  if ("appId" in options) {
+    throw new Error(
+      "createJazz(): appId moved to the store: remote({ url, appId, secret }) names the app it serves, and sqlite(), memory() and vercel() keep their own id (pass appId to them only to keep an existing app's).",
+    );
+  }
   const store =
     options.store.kind === "vercel" && !onVercelDeployment() ? options.store.local : options.store;
   // The bundle this backend published: every socket to the core carries it,
@@ -846,22 +914,23 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   const bundle = () => pin;
   const core =
     store.kind === "remote"
-      ? openRemoteCore(options.appId, store, bundle)
+      ? openRemoteCore(store.appId, store, bundle)
       : store.kind === "vercel"
         ? await openVercelCore({
-            appId: options.appId,
             options: store.options,
             // The function's OIDC token is the core's only credential.
             openRemote: ({ appId, url, backendCredential }) =>
               openRemoteCore(appId, { url, backendCredential }, bundle),
           })
-        : await openInProcessCore(options.appId, store, bundle);
+        : await openInProcessCore(store, bundle);
+  const appId = core.appId;
+  const issuer = `jazz:app:${appId}`;
 
   let session: JazzSession<JazzClient>;
   try {
-    pin = await applyBundle(core.serverUrl, { ...options, adminSecret: core.adminSecret });
+    pin = await applyBundle(core.serverUrl, { ...options, appId, adminSecret: core.adminSecret });
     session = await createJazzSession({
-      appId: options.appId,
+      appId,
       app: options.app,
       permissions: options.permissions,
       serverUrl: core.serverUrl,
@@ -897,7 +966,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   async function adminAccounts(operation: string, body: unknown): Promise<{ account: string }> {
     const response = await core.handle(
       "POST",
-      `/apps/${encodeURIComponent(accountAppId(options.appId))}/admin/accounts/${operation}`,
+      `/apps/${encodeURIComponent(accountAppId(appId))}/admin/accounts/${operation}`,
       [
         ["x-jazz-admin-secret", core.adminSecret],
         ["content-type", "application/json"],
@@ -984,7 +1053,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
    * intent id at the core, so a proof works once.
    */
   const challengeKey = createHmac("sha256", core.adminSecret)
-    .update(`jazz-link-challenge-v1\0${accountAppId(options.appId)}`)
+    .update(`jazz-link-challenge-v1\0${accountAppId(appId)}`)
     .digest();
   const LINK_CHALLENGE_TTL_SECONDS = 120;
   const challengeMac = (payload: string) =>
@@ -1064,7 +1133,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     // app-less client. Any other namespace is another app's guest.
     const founding = linkAudience(request, body.audience);
     if (!founding) return new Response("invalid_local_first_proof", { status: 401 });
-    const account = localFirstAccountId(founding.endpoint ?? options.appId, guest.subject);
+    const account = localFirstAccountId(founding.endpoint ?? appId, guest.subject);
     const userIs = async (expected: string) =>
       (await adminAccounts("resolve", { identity: identity(user.userId) })).account === expected;
     let guestRevoked = false;
@@ -1104,7 +1173,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       // revokes then: a server error, logged here, not a silent success.
       const revoked = await core.handle(
         "POST",
-        `/apps/${encodeURIComponent(accountAppId(options.appId))}/admin/accounts/revoke`,
+        `/apps/${encodeURIComponent(accountAppId(appId))}/admin/accounts/revoke`,
         [
           ["x-jazz-admin-secret", core.adminSecret],
           ["content-type", "application/json"],
@@ -1554,7 +1623,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     if (request.method !== "POST") return new Response(null, { status: 405 });
     const response = await core.handle(
       "POST",
-      `/apps/${encodeURIComponent(accountAppId(options.appId))}/backend/admit`,
+      `/apps/${encodeURIComponent(accountAppId(appId))}/backend/admit`,
       [["x-jazz-backend-secret", core.backendSecret]],
       new Uint8Array(0),
       "backend",
@@ -1609,7 +1678,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     if (warnedAudiences.has(named) || warnedAudiences.size > 100) return;
     warnedAudiences.add(named);
     console.warn(
-      `createJazz: refused a local-first guest whose proof is for ${named}; this endpoint accepts ${JSON.stringify([options.appId, ...accepted])}. If browsers reach Jazz through a proxy that changes the host or path, set publicUrl to the URL they use.`,
+      `createJazz: refused a local-first guest whose proof is for ${named}; this endpoint accepts ${JSON.stringify([appId, ...accepted])}. If browsers reach Jazz through a proxy that changes the host or path, set publicUrl to the URL they use.`,
     );
   }
 
@@ -1620,7 +1689,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
    */
   function guestAudience(request: Request, token: string): { endpoint?: string } | null {
     try {
-      verifyLocalFirstToken(token, options.appId);
+      verifyLocalFirstToken(token, appId);
       return {};
     } catch {
       // Not this app's id; try the endpoint.
@@ -1651,7 +1720,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   function linkAudience(request: Request, audience: unknown): { endpoint?: string } | null {
     // Tokens name their audience as given or as its app id (a UUID).
     const names = (value: string) => audience === value || audience === accountAppId(value);
-    if (audience === undefined || (typeof audience === "string" && names(options.appId))) return {};
+    if (audience === undefined || (typeof audience === "string" && names(appId))) return {};
     if (typeof audience !== "string") return null;
     const endpoints = endpointAudiences(request);
     const endpoint = endpoints.find(names);
@@ -1740,7 +1809,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         : Buffer.from(await request.arrayBuffer());
     const headers = headerPairs(request.headers);
     // A browser names the app however its scope does; the core knows it by id.
-    const corePath = path.replace(/^\/apps\/[^/]+/, `/apps/${encodeURIComponent(options.appId)}`);
+    const corePath = path.replace(/^\/apps\/[^/]+/, `/apps/${encodeURIComponent(appId)}`);
     return coreResponse(
       await core.handle(
         request.method,
@@ -1856,7 +1925,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
 
   let closing: Promise<void> | undefined;
   return {
-    appId: options.appId,
+    appId,
     basePath,
     handle: (request) => handle(request),
     next: () => ({ GET: nextHandler, POST: nextHandler, DELETE: nextHandler }),
