@@ -31,7 +31,7 @@ import { computeSchemaHash } from "../schema-hash.js";
 import { validateSchemaAndPermissions } from "../dev/schema-validation.js";
 import { deployArtifacts } from "../dev/catalogue.js";
 import { fetchMigrationGraph } from "../dev/migration-graph.js";
-import type { PublishedTableLens } from "../dev/catalogue-api.js";
+import { DeploymentError, type PublishedTableLens } from "../dev/catalogue-api.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
@@ -335,7 +335,7 @@ interface CoreReply {
 }
 
 /** One sync session on the core. */
-interface CoreSocket {
+export interface CoreSocket {
   /** False once the session ended. */
   send(data: Uint8Array): boolean;
   close(): void;
@@ -486,7 +486,7 @@ async function applyBundle(
     app: BackendSchemaInput;
     permissions: CompiledPermissionsMap;
   },
-): Promise<void> {
+): Promise<string> {
   const declared = resolveSchemaSource(options.app);
   const schema = mergePermissionsIntoWasmSchema(declared, {});
   await validateSchemaAndPermissions(schema, options.permissions);
@@ -499,7 +499,10 @@ async function applyBundle(
   schemas.set(targetSchemaHash, schema);
   const server = { appId: options.appId, serverUrl: origin, adminSecret: options.adminSecret };
   const graph = await fetchMigrationGraph(server);
-  await deployArtifacts(server, graph, {
+  // Published, never activated: this backend's sessions are pinned to its
+  // bundle, so deployments of the app serve side by side and a rollback is
+  // publishing the older bundle again.
+  const deployed = await deployArtifacts(server, graph, {
     targetSchemaHash,
     schemas: [...schemas].map(([hash, schema]) => ({ hash, schema })),
     migrations: (shipped?.migrations ?? []).map((edge) => ({
@@ -508,12 +511,73 @@ async function applyBundle(
       forward: edge.forward as PublishedTableLens[],
     })),
     permissions: options.permissions,
+    activate: false,
+  }).catch((error: unknown) => {
+    // A core without `/bundles` predates per-deployment permissions; it
+    // must not be handed a deployment it would activate for every backend.
+    if (error instanceof DeploymentError && (error.status === 404 || error.status === 405)) {
+      throw new Error(
+        "createJazz: the sync server predates per-deployment permissions bundles; upgrade it before this backend",
+        { cause: error },
+      );
+    }
+    throw error;
   });
+  if (!deployed.bundle) {
+    throw new Error("createJazz: the core did not publish a permissions bundle; upgrade it");
+  }
+  return deployed.bundle;
 }
 
+/**
+ * `socket`, its first frame (the prelude) pinned to the published bundle
+ * this backend serves with. The core honours the pin only on this backend's
+ * word, so whatever bundle a browser stated is replaced.
+ */
+export function pinnedSocket(socket: CoreSocket, bundle: () => string | undefined): CoreSocket {
+  let first = true;
+  return {
+    send(data) {
+      if (first) {
+        first = false;
+        const pinned = withBundle(data, bundle());
+        // A prelude the pin cannot be stamped into would open unpinned.
+        if (pinned === null) {
+          socket.close();
+          return false;
+        }
+        data = pinned;
+      }
+      return socket.send(data);
+    },
+    close: () => socket.close(),
+  };
+}
+
+/**
+ * `prelude` pinned to `bundle`, or with no pin while none is published yet
+ * (the backend's own sockets while it boots): a bundle a browser stated
+ * never reaches the core. `null` when the prelude is not a JSON object.
+ */
+function withBundle(prelude: Uint8Array, bundle: string | undefined): Uint8Array | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(prelude));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const { bundle: _stated, ...rest } = parsed as Record<string, unknown>;
+  return new TextEncoder().encode(
+    JSON.stringify(bundle === undefined ? rest : { ...rest, bundle }),
+  );
+}
+
+/** `bundle` is the published bundle every socket the core opens is pinned to. */
 async function openInProcessCore(
   appId: string,
   store: Extract<JazzStore, { kind: "sqlite" | "memory" }>,
+  bundle: () => string | undefined,
 ): Promise<Core> {
   const backendSecret = randomBytes(32).toString("base64url");
   const adminSecret = randomBytes(32).toString("base64url");
@@ -541,19 +605,22 @@ async function openInProcessCore(
         ),
       );
     },
-    WebSocket: inProcessWebSocket((_url, onEvent) => core.openSocket([], onEvent)),
+    WebSocket: inProcessWebSocket((_url, onEvent) =>
+      pinnedSocket(core.openSocket([], onEvent), bundle),
+    ),
   });
-  return {
+  const opened: Core = {
     serverUrl,
     adminSecret,
     backendSecret,
     handle,
-    openSocket: (headers, onEvent) => core.openSocket(headers, onEvent),
+    openSocket: (headers, onEvent) => pinnedSocket(core.openSocket(headers, onEvent), bundle),
     async close() {
       unregister();
       await core.close();
     },
   };
+  return opened;
 }
 
 /**
@@ -596,6 +663,7 @@ function openRemoteCore(
     backendCredential: BackendCredential;
     secrets?: { adminSecret: string; backendSecret: string };
   },
+  bundle: () => string | undefined,
 ): Core {
   const socketUrl = `${target.url.replace(/^http/, "ws")}/apps/${encodeURIComponent(appId)}/ws`;
   if (!globalThis.WebSocket) {
@@ -649,7 +717,8 @@ function openRemoteCore(
         body: new Uint8Array(await response.arrayBuffer()),
       };
     },
-    openSocket: (_headers, onEvent, access = "session") => connect(socketUrl, onEvent, access),
+    openSocket: (_headers, onEvent, access = "session") =>
+      pinnedSocket(connect(socketUrl, onEvent, access), bundle),
     async close() {
       unregister();
     },
@@ -722,10 +791,9 @@ function openRemoteCore(
     },
     WebSocket: inProcessWebSocket((url, onEvent) => {
       const { pathname, search } = new URL(url);
-      return connect(
-        `${target.url.replace(/^http/, "ws")}${pathname}${search}`,
-        onEvent,
-        "backend",
+      return pinnedSocket(
+        connect(`${target.url.replace(/^http/, "ws")}${pathname}${search}`, onEvent, "backend"),
+        bundle,
       );
     }),
   });
@@ -772,22 +840,26 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   const issuer = `jazz:app:${options.appId}`;
   const store =
     options.store.kind === "vercel" && !onVercelDeployment() ? options.store.local : options.store;
+  // The bundle this backend published: every socket to the core carries it,
+  // and the core governs this backend's sessions by its permissions alone.
+  let pin: string | undefined;
+  const bundle = () => pin;
   const core =
     store.kind === "remote"
-      ? openRemoteCore(options.appId, store)
+      ? openRemoteCore(options.appId, store, bundle)
       : store.kind === "vercel"
         ? await openVercelCore({
             appId: options.appId,
             options: store.options,
             // The function's OIDC token is the core's only credential.
             openRemote: ({ appId, url, backendCredential }) =>
-              openRemoteCore(appId, { url, backendCredential }),
+              openRemoteCore(appId, { url, backendCredential }, bundle),
           })
-        : await openInProcessCore(options.appId, store);
+        : await openInProcessCore(options.appId, store, bundle);
 
   let session: JazzSession<JazzClient>;
   try {
-    await applyBundle(core.serverUrl, { ...options, adminSecret: core.adminSecret });
+    pin = await applyBundle(core.serverUrl, { ...options, adminSecret: core.adminSecret });
     session = await createJazzSession({
       appId: options.appId,
       app: options.app,
@@ -1244,7 +1316,15 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       const audience = guestAudience(request, token);
       if (!audience) return null;
       if (audience.endpoint === undefined) {
-        return { prelude, userId: undefined, access: "session", trusted: false };
+        // Its own token decides who it is; the backend's secret only vouches
+        // for the bundle this socket is pinned to (see `pinnedSocket`).
+        const pinned = { ...parsed, auth: { ...auth, backend_secret: core.backendSecret } };
+        return {
+          prelude: new TextEncoder().encode(JSON.stringify(pinned)),
+          userId: undefined,
+          access: "session",
+          trusted: false,
+        };
       }
       // Signed for this endpoint, which the core can't know: vouch for it.
       const vouched = {
