@@ -160,7 +160,7 @@ fn slow_query_threshold() -> Option<Duration> {
 
 /// How often the owner ticks with no traffic, for time-based engine work
 /// such as expiring staged large-value chunks.
-const IDLE_TICK: Duration = Duration::from_secs(1);
+pub(crate) const IDLE_TICK: Duration = Duration::from_secs(1);
 
 /// Inbound messages one session may have applied per round of ticks.
 const INBOUND_MESSAGES_PER_TICK: usize = 16;
@@ -932,6 +932,18 @@ fn session_closed_error(error: &jazz::db::Error) -> jazz::wire::WireError {
     jazz::wire::WireError::new(code, retry, format!("sync session closed: {error}"))
 }
 
+/// Take `bytes` the client read off `egress`. Crossing back under the
+/// budget queues a tick: output the owner held back can move again.
+fn release_egress(egress: &AtomicUsize, bytes: usize, runtime: &Weak<Inner>) {
+    let before = egress.fetch_sub(bytes, Ordering::AcqRel);
+    if before >= SESSION_QUEUE_BUDGET
+        && before - bytes < SESSION_QUEUE_BUDGET
+        && let Some(inner) = runtime.upgrade()
+    {
+        let _ = ServerRuntimeHandle { inner }.queue_tick();
+    }
+}
+
 /// One session's ordered outbound frame batches.
 pub struct ServerRuntimeFrameStream {
     receiver: tokio_mpsc::UnboundedReceiver<Outbound>,
@@ -943,14 +955,7 @@ impl ServerRuntimeFrameStream {
     /// Receive the next batch of outbound frames.
     pub async fn recv(&mut self) -> Option<Result<Vec<AbiBytes>, jazz::wire::WireError>> {
         let (result, bytes) = self.receiver.recv().await?;
-        let before = self.egress.fetch_sub(bytes, Ordering::AcqRel);
-        if before >= SESSION_QUEUE_BUDGET
-            && before - bytes < SESSION_QUEUE_BUDGET
-            && let Some(inner) = self.runtime.upgrade()
-        {
-            // Output the owner held back for this session can move again.
-            let _ = ServerRuntimeHandle { inner }.queue_tick();
-        }
+        release_egress(&self.egress, bytes, &self.runtime);
         Some(result)
     }
 }
@@ -1184,6 +1189,41 @@ impl ServerRuntimeHandle {
             owner.thin_request(session, request);
             ingress.fetch_sub(bytes, Ordering::AcqRel);
         }))
+    }
+
+    /// Count `bytes` against `session`'s egress budget as if they were
+    /// queued and never drained, to test output near the budget.
+    #[cfg(test)]
+    pub(crate) fn hold_egress_for_test(&self, session: ServerSession, bytes: usize) {
+        let edges = self.edges().expect("edges");
+        edges[&session].egress.fetch_add(bytes, Ordering::AcqRel);
+    }
+
+    /// Release `bytes` held by [`Self::hold_egress_for_test`], as the
+    /// client reading them would.
+    #[cfg(test)]
+    pub(crate) fn release_egress_for_test(&self, session: ServerSession, bytes: usize) {
+        let egress = Arc::clone(&self.edges().expect("edges")[&session].egress);
+        release_egress(&egress, bytes, &Arc::downgrade(&self.inner));
+    }
+
+    /// Make the owner wait for a published permissions head again, as a
+    /// store reopened over bundles published earlier does until its next
+    /// catalogue change.
+    #[cfg(test)]
+    pub(crate) async fn await_permissions_for_test(&self) {
+        self.run(|owner| {
+            owner.awaiting_permissions = true;
+            Ok(())
+        })
+        .await
+        .expect("owner");
+    }
+
+    /// Wait until the owner has run everything queued before this call.
+    #[cfg(test)]
+    pub(crate) async fn settle_for_test(&self) {
+        self.run(|_| Ok(())).await.expect("owner");
     }
 
     /// Ask the owner for a tick; requests coalesce. Output reaches every

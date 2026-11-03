@@ -13,7 +13,8 @@ use jazz::binding_host::{
 };
 use jazz::db::{
     Db, Error, ErrorCode, LargeValueUpdate, SerializedReadResult, StreamingMutationKind,
-    StreamingValueUpload, SubscriptionStream, UpdateOptions, WriteHandle, WriteIdentity, block_on,
+    StreamingValueUpload, SubscriptionEvent, SubscriptionStream, UpdateOptions, WriteHandle,
+    WriteIdentity, block_on,
 };
 use jazz::ids::{AuthorSubject, RowUuid, SchemaVersionId};
 use jazz::model::transaction::OpenTransactionId;
@@ -66,6 +67,9 @@ pub(super) struct ThinSession {
     streams: BTreeMap<u64, ThinStream>,
     /// Answers produced while the session's egress budget is spent.
     held: Vec<ThinResponse>,
+    /// The live query the next pump drains first, so one busy query
+    /// cannot keep the others' events waiting.
+    next_subscription: u64,
     output: tokio_mpsc::UnboundedSender<Outbound>,
     egress: Arc<AtomicUsize>,
 }
@@ -88,6 +92,7 @@ impl ThinSession {
             transactions: BTreeMap::new(),
             streams: BTreeMap::new(),
             held: Vec::new(),
+            next_subscription: 0,
             output,
             egress,
         }
@@ -99,26 +104,27 @@ impl ThinSession {
 
     /// Send `responses` as one batch. False once the socket side is gone.
     fn send(&self, responses: Vec<ThinResponse>) -> bool {
-        if responses.is_empty() {
-            return true;
-        }
         let mut frames = Vec::with_capacity(responses.len());
         for response in responses {
-            match encode_frame(&WireFrame::ThinResponse(response)) {
-                Ok(frame) => frames.push(frame),
-                Err(error) => {
-                    tracing::error!(%error, "encode thin response");
-                    let _ = self.output.send((
-                        Err(jazz::wire::WireError::new(
-                            WireErrorCode::Internal,
-                            WireRetry::Never,
-                            format!("thin session closed: {error}"),
-                        )),
-                        0,
-                    ));
-                    return false;
-                }
+            match self.encode(response) {
+                Some(frame) => frames.push(frame),
+                None => return false,
             }
+        }
+        self.send_frames(frames)
+    }
+
+    /// `response` on the wire; `None` once the session was closed because
+    /// it could not be encoded.
+    fn encode(&self, response: ThinResponse) -> Option<Vec<u8>> {
+        encode_response(&self.output, response)
+    }
+
+    /// Send encoded `frames` as one batch, counted against the egress
+    /// budget. False once the socket side is gone.
+    fn send_frames(&self, frames: Vec<Vec<u8>>) -> bool {
+        if frames.is_empty() {
+            return true;
         }
         let bytes = frames.iter().map(Vec::len).sum::<usize>();
         self.egress.fetch_add(bytes, Ordering::AcqRel);
@@ -377,66 +383,18 @@ impl Owner {
 
     /// After a tick: every thin session's held answers and its live
     /// queries' new events, up to its egress budget. What does not fit
-    /// waits (answers in `held`, events in their streams) until the client
-    /// drains its socket, which queues the next tick.
+    /// waits (answers in `held`, events in their streams). A drain only
+    /// stops early once the encoded batch fills the budget, so the egress
+    /// it leaves is over budget and the client draining its socket below
+    /// it queues the next tick ([`super::ServerRuntimeFrameStream::recv`]).
     pub(super) fn pump_thin(&mut self) {
         let mut gone = Vec::new();
         for (session, thin) in &mut self.thin {
             if !thin.has_room() {
                 continue;
             }
-            let mut batch = std::mem::take(&mut thin.held);
-            let mut bytes = batch.iter().map(response_bytes).sum::<usize>();
-            let mut ended = Vec::new();
-            'streams: for (id, stream) in &mut thin.subscriptions {
-                loop {
-                    if thin.egress.load(Ordering::Acquire) + bytes >= SESSION_QUEUE_BUDGET {
-                        break 'streams;
-                    }
-                    let Some(event) = stream.try_next_event() else {
-                        break;
-                    };
-                    let body = match event_chunk(event) {
-                        Ok(EventChunk::Delta {
-                            delta,
-                            reset,
-                            settled,
-                            tier,
-                        }) => ThinBody::Event {
-                            delta,
-                            reset,
-                            settled,
-                            tier,
-                        },
-                        Ok(EventChunk::Closed) => {
-                            ended.push(*id);
-                            ThinBody::Closed
-                        }
-                        Ok(EventChunk::Rejected { detail }) => {
-                            ended.push(*id);
-                            ThinBody::Error {
-                                code: "Rejected".to_owned(),
-                                message: detail,
-                            }
-                        }
-                        Err(error) => {
-                            ended.push(*id);
-                            argument(format!("{error:?}"))
-                        }
-                    };
-                    let last = !matches!(body, ThinBody::Event { .. });
-                    let response = ThinResponse { id: *id, body };
-                    bytes += response_bytes(&response);
-                    batch.push(response);
-                    if last {
-                        break;
-                    }
-                }
-            }
-            for id in ended {
-                thin.subscriptions.remove(&id);
-            }
-            if !thin.send(batch) {
+            let sent = drain_thin(thin).is_some_and(|frames| thin.send_frames(frames));
+            if !sent {
                 gone.push(*session);
             }
         }
@@ -446,17 +404,112 @@ impl Owner {
     }
 }
 
-/// About what `response` takes on the wire, to keep a batch within the
-/// session's egress budget.
-fn response_bytes(response: &ThinResponse) -> usize {
-    const OVERHEAD: usize = 64;
-    OVERHEAD
-        + match &response.body {
-            ThinBody::Event { delta, .. } => delta.len(),
-            ThinBody::Rows { rows, .. } => rows.len(),
-            ThinBody::Error { code, message } => code.len() + message.len(),
-            _ => 0,
+/// `thin`'s held answers, then its live queries' events in turn from
+/// [`ThinSession::next_subscription`], encoded until the batch fills the
+/// session's egress budget. Answers that do not fit stay held. `None` once
+/// the session was closed over a response it could not encode.
+fn drain_thin(thin: &mut ThinSession) -> Option<Vec<Vec<u8>>> {
+    let room = SESSION_QUEUE_BUDGET.saturating_sub(thin.egress.load(Ordering::Acquire));
+    let mut frames = Vec::new();
+    let mut bytes = 0;
+    let mut held = std::mem::take(&mut thin.held).into_iter();
+    for response in held.by_ref() {
+        let frame = thin.encode(response)?;
+        bytes += frame.len();
+        frames.push(frame);
+        if bytes >= room {
+            break;
         }
+    }
+    thin.held = held.collect();
+    if !thin.held.is_empty() {
+        return Some(frames);
+    }
+    let cursor = thin.next_subscription;
+    let order: Vec<u64> = thin
+        .subscriptions
+        .range(cursor..)
+        .chain(thin.subscriptions.range(..cursor))
+        .map(|(id, _)| *id)
+        .collect();
+    let mut ended = Vec::new();
+    'streams: for id in order {
+        let stream = thin.subscriptions.get_mut(&id).expect("listed above");
+        while bytes < room {
+            let Some(event) = stream.try_next_event() else {
+                continue 'streams;
+            };
+            let (body, last) = event_body(event);
+            if last {
+                ended.push(id);
+            }
+            let frame = encode_response(&thin.output, ThinResponse { id, body })?;
+            bytes += frame.len();
+            frames.push(frame);
+            if last {
+                continue 'streams;
+            }
+        }
+        // Full: the next drain starts after this query.
+        thin.next_subscription = id + 1;
+        break;
+    }
+    for id in ended {
+        thin.subscriptions.remove(&id);
+    }
+    Some(frames)
+}
+
+/// `response` on the wire. On failure the session is told it closed, and
+/// `None` is returned.
+fn encode_response(
+    output: &tokio_mpsc::UnboundedSender<Outbound>,
+    response: ThinResponse,
+) -> Option<Vec<u8>> {
+    match encode_frame(&WireFrame::ThinResponse(response)) {
+        Ok(frame) => Some(frame),
+        Err(error) => {
+            tracing::error!(%error, "encode thin response");
+            let _ = output.send((
+                Err(jazz::wire::WireError::new(
+                    WireErrorCode::Internal,
+                    WireRetry::Never,
+                    format!("thin session closed: {error}"),
+                )),
+                0,
+            ));
+            None
+        }
+    }
+}
+
+/// A live query's event as a response body, and whether it ends the query.
+fn event_body(event: SubscriptionEvent) -> (ThinBody, bool) {
+    match event_chunk(event) {
+        Ok(EventChunk::Delta {
+            delta,
+            reset,
+            settled,
+            tier,
+        }) => (
+            ThinBody::Event {
+                delta,
+                reset,
+                settled,
+                tier,
+            },
+            false,
+        ),
+        Ok(EventChunk::Closed) => (ThinBody::Closed, true),
+        Ok(EventChunk::Rejected { detail }) => (
+            ThinBody::Error {
+                code: "Rejected".to_owned(),
+                message: detail,
+            },
+            true,
+        ),
+        Err(error) => (argument(format!("{error:?}")), true),
+    }
 }
 
 /// The open transaction `transaction` names, if this session began it.

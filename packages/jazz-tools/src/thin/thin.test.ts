@@ -316,7 +316,7 @@ describe("thin client", () => {
     expect((await db.all(app.notes)).map((row) => row.text)).toEqual(["again"]);
   }, 60_000);
 
-  it("refuses reads and transactions as another session", async () => {
+  it("refuses reads, writes and transactions as another session", async () => {
     const server = await startServer();
     const db = await thinDb(server);
     await db.all(app.notes);
@@ -326,6 +326,25 @@ describe("thin client", () => {
     await expect(runtime.query(query, session)).rejects.toThrow(/not supported in thin mode/);
     expect(() => runtime.createSubscription(query, session)).toThrow(/not supported in thin mode/);
     expect(() => runtime.beginTransaction("mergeable", "tx-other" as never, session)).toThrow(
+      /not supported in thin mode/,
+    );
+    const asOther = JSON.stringify({ session: JSON.parse(session), transaction_id: "tx-1" });
+    for (const writeContext of [session, asOther]) {
+      expect(() => runtime.insert("notes", {} as never, writeContext)).toThrow(
+        /not supported in thin mode/,
+      );
+      expect(() =>
+        runtime.delete("notes", "00000000-0000-7000-8000-000000000000", writeContext),
+      ).toThrow(/not supported in thin mode/);
+    }
+    // Its own session is served.
+    await db.insert(app.notes, { text: "mine", done: false }).wait({ tier: "global" });
+
+    // A connection that does not know its author (a cookie session)
+    // refuses any session named explicitly.
+    const anonymous = new ThinRuntime((runtime as unknown as { schema: never }).schema);
+    await expect(anonymous.query(query, session)).rejects.toThrow(/not supported in thin mode/);
+    expect(() => anonymous.insert("notes", {} as never, session)).toThrow(
       /not supported in thin mode/,
     );
   }, 60_000);
