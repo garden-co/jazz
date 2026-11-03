@@ -9,7 +9,7 @@ Local-first todo app on React + Vite, anonymous auth via `useLocalFirstAuth`, In
 - `useDb` synchronous local writes (`db.insert`, `db.update`, `db.delete`).
 - Row-level permissions — `owner_id` enforced by `definePermissions`; mutations on rows you don't own surface as toast errors via `sonner`.
 - IndexedDB-backed persistence across reload, plus optional server sync when `VITE_JAZZ_SERVER_URL` is set.
-- `JazzProvider` wired up via the Jazz Vite plugin (`jazzPlugin` in `vite.config.ts`).
+- `pnpm dev` starts a local Jazz core next to Vite (`dev/examples/with-local-core.mjs`) and passes its URL in `VITE_JAZZ_SERVER_URL`.
 - Embedded inspector integration via the Jazz Vite plugin.
 
 ## Schema

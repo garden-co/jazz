@@ -51,7 +51,7 @@ export default defineConfig({
       JAZZ_BACKEND_SECRET: testBackendSecret,
       ADMIN_SECRET: "",
       JAZZ_ADMIN_SECRET: "",
-      JAZZ_E2E_IN_MEMORY: "1",
+      JAZZ_IN_MEMORY: "1",
     },
   },
 });

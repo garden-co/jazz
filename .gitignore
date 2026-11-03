@@ -41,6 +41,9 @@ examples/wequencer/walkthrough/*.html
 # Local data
 # Runtime-owned process identity locks/receipts, not application source.
 **/.jazz/foreground-node-leases/
+# Local Jazz data of examples run through dev/examples/with-local-core.mjs.
+examples/**/.jazz/
+dev/stress-tests/**/.jazz/
 data/
 
 # Sync server data

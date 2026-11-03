@@ -1,5 +1,8 @@
-import { withJazz } from "jazz-tools/dev/next";
+import type { NextConfig } from "next";
 
-const inMemoryE2E = process.env.JAZZ_E2E_IN_MEMORY === "1";
-
-export default withJazz({}, inMemoryE2E ? { server: { inMemory: true } } : {});
+// `pnpm dev` starts a local Jazz core (dev/examples/with-local-core.mjs) and
+// passes its URL and app id in NEXT_PUBLIC_JAZZ_SERVER_URL / NEXT_PUBLIC_JAZZ_APP_ID.
+export default {
+  // jazz-napi is a native addon: Node loads it at runtime, the bundler leaves it alone.
+  serverExternalPackages: ["jazz-napi"],
+} satisfies NextConfig;

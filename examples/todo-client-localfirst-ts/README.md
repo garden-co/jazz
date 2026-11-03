@@ -8,7 +8,7 @@ Local-first todo app in vanilla TypeScript + Vite — no UI framework. Anonymous
 - The low-level Jazz client API: `createDb`, `db.subscribe`, `db.insert` / `db.update` / `db.delete`, `db.onAuthChanged` — consumed without React, Svelte, or Vue bindings.
 - Row-level permissions — `owner_id` enforced by `definePermissions`; mutations on rows you don't own are rejected by the runtime.
 - IndexedDB-backed persistence across reload, plus optional server sync when `VITE_JAZZ_SERVER_URL` is set.
-- The Jazz Vite plugin (`jazzPlugin` in `vite.config.ts`) hosts the dev sync server alongside Vite.
+- `pnpm dev` starts a local Jazz core next to Vite (`dev/examples/with-local-core.mjs`) and passes its URL in `VITE_JAZZ_SERVER_URL`.
 
 ## Schema
 
