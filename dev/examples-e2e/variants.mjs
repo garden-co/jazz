@@ -9,6 +9,9 @@
  * config that starts the production server (`pnpm start`) when
  * JAZZ_E2E_PROD=1.
  *
+ * `publicPrefix` is the framework's browser-visible env prefix (default
+ * NEXT_PUBLIC_); the harness sets `<prefix>JAZZ_APP_ID` and APP_ORIGIN.
+ *
  * `env` is added to the harness environment for build, start and tests. Use it
  * for settings a production build requires, or to match values a variant's
  * build script pins.
@@ -25,6 +28,13 @@ export const VARIANTS = Object.freeze([
     dir: "examples/jamazon/apps/nextjs-betterauth",
     environment: "Next.js hybrid: guest cart, then Better Auth",
     env: Object.freeze({ PAYMENT_PROVIDER: "sandbox" }),
+  }),
+  Object.freeze({
+    name: "stage-plan-sveltekit",
+    dir: "examples/stage-plan/apps/sveltekit-hybrid",
+    environment: "SvelteKit hybrid: local-first guest, then Better Auth",
+    publicPrefix: "PUBLIC_",
+    env: Object.freeze({}),
   }),
   Object.freeze({
     name: "jamazon-warehouse",
