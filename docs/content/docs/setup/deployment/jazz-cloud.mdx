@@ -17,13 +17,12 @@ Your app ID namespaces your data for storage and sync. Click below to generate o
 
 ## Connect your backend
 
-Put the generated values in your backend's environment. All of them stay server-side; the browser never needs the app ID or the sync URL, and both secrets are like a database password:
+Put the generated values in your backend's environment. All of them stay server-side; the browser never needs the app ID or the sync URL, and the admin secret is like a database password:
 
 ```bash title=".env"
 JAZZ_APP_ID="<your app ID>"
 JAZZ_SERVER_URL="https://v2.sync.jazz.tools/"
 JAZZ_ADMIN_SECRET="<admin secret>"
-BACKEND_SECRET="<backend secret>"
 ```
 
 Then point `createJazz` at Jazz Cloud with the `remote()` store:
@@ -38,8 +37,7 @@ export const jazz = await createJazz({
   store: remote({
     appId: process.env.JAZZ_APP_ID!,
     url: process.env.JAZZ_SERVER_URL!,
-    adminSecret: process.env.JAZZ_ADMIN_SECRET!,
-    backendSecret: process.env.BACKEND_SECRET!,
+    secret: process.env.JAZZ_ADMIN_SECRET!, // the app's admin secret
   }),
   // Who is signed in, read from your own auth's session.
   authenticate: async (request) => {

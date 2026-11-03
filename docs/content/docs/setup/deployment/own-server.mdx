@@ -70,17 +70,18 @@ export const jazz = await createJazz({
   store: remote({
     appId: process.env.JAZZ_APP_ID!,
     url: process.env.JAZZ_SERVER_URL!, // your sync server, or https://v2.sync.jazz.tools
-    adminSecret: process.env.JAZZ_ADMIN_SECRET!,
-    backendSecret: process.env.BACKEND_SECRET!,
+    secret: process.env.JAZZ_ADMIN_SECRET!, // the app's admin secret
   }),
   authenticate: async (request) => /* your session */ null,
 });
 ```
 
 Everything else stays the same. Browsers still sync with your backend under `/jazz` and never see
-the core's address or secrets. Your backend applies its schema, migrations and permissions to the
+the core's address or secret. Your backend applies its schema, migrations and permissions to the
 core on start, and tells the core who each user is; the core does no auth of its own and trusts
-only the holder of the secrets. Keep them server-side, like a database password.
+only the holder of the app's admin secret. Keep it server-side, like a database password. Instead
+of the secret, `remote({ url, backendCredential })` can present a token of your own on every
+request, such as your platform's OIDC token for a server started with `--trusted-workload-*`.
 
 ## Standalone sync server
 
@@ -102,8 +103,8 @@ The CLI runs the same core on its own port, for `remote()` or for apps that pred
 | `--jwt-public-key <JWT_PUBLIC_KEY>`     | Single JWK JSON object or PEM public key for external JWT validation. Accepts inline contents or a path to a key file.                          | `JAZZ_JWT_PUBLIC_KEY`         | unset                     |
 | `--auth-cookie-name <AUTH_COOKIE_NAME>` | Cookie name to read for browser authentication during WebSocket upgrades                                                                        | `JAZZ_AUTH_COOKIE_NAME`       | unset                     |
 | `--allow-local-first-auth`              | Allow local-first auth (`Authorization: Bearer <self-signed Jazz JWT>`)                                                                         | `JAZZ_ALLOW_LOCAL_FIRST_AUTH` | see `NODE_ENV` note below |
-| `--backend-secret <BACKEND_SECRET>`     | Enable backend session impersonation                                                                                                            | `JAZZ_BACKEND_SECRET`         | unset                     |
-| `--admin-secret <ADMIN_SECRET>`         | Required for `deploy` and schema catalogue reads. In development mode, structural schema auto-sync works without it.                            | `JAZZ_ADMIN_SECRET`           | unset                     |
+| `--backend-secret <BACKEND_SECRET>`     | Legacy backend session impersonation for apps that predate `createJazz`; `remote()` needs only the admin secret                                 | `JAZZ_BACKEND_SECRET`         | unset                     |
+| `--admin-secret <ADMIN_SECRET>`         | The app's one secret: `remote({ secret })` presents it, and schema catalogue reads need it.                                                     | `JAZZ_ADMIN_SECRET`           | unset                     |
 | `--shutdown-timeout-secs <SECONDS>`     | Graceful shutdown network-drain timeout in seconds                                                                                              | `JAZZ_SHUTDOWN_TIMEOUT_SECS`  | `30`                      |
 | `--diagnostics-listen <ADDR>`           | Address of a listener serving `/debug/pprof/heap`, e.g. `0.0.0.0:6060`. Non-loopback addresses require `--diagnostics-token`.                   | `JAZZ_DIAGNOSTICS_LISTEN`     | unset                     |
 | `--diagnostics-token <TOKEN>`           | Bearer token the diagnostics listener requires (`Authorization: Bearer <TOKEN>`); a read-only scrape credential separate from the admin secret. | `JAZZ_DIAGNOSTICS_TOKEN`      | unset                     |

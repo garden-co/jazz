@@ -102,7 +102,7 @@ On first run the plugin generates an app ID, persists it to `.env`, and starts a
 
 ### Env var names
 
-Each plugin writes the same two values (`appId`, `serverUrl`) under the prefix its bundler uses to expose env vars to the client bundle. SvelteKit's `PUBLIC_*` prefix also covers Svelte+Vite via `jazzSvelteKit`. Secrets are always unprefixed — they're server-only: `JAZZ_ADMIN_SECRET` and `BACKEND_SECRET`.
+Each plugin writes the same two values (`appId`, `serverUrl`) under the prefix its bundler uses to expose env vars to the client bundle. SvelteKit's `PUBLIC_*` prefix also covers Svelte+Vite via `jazzSvelteKit`. The admin secret is always unprefixed, since it's server-only: `JAZZ_ADMIN_SECRET`.
 
 | Bundler   | App ID                    | Server URL                    |
 | --------- | ------------------------- | ----------------------------- |

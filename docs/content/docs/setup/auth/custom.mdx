@@ -19,8 +19,7 @@ export const jazz = await createJazz({
   store: remote({
     appId: process.env.JAZZ_APP_ID!,
     url: process.env.JAZZ_SERVER_URL!,
-    adminSecret: process.env.JAZZ_ADMIN_SECRET!,
-    backendSecret: process.env.BACKEND_SECRET!,
+    secret: process.env.JAZZ_ADMIN_SECRET!, // the app's admin secret
   }),
   authenticate: async (request) => {
     const user = await getUser(request); // your cookie, or a bearer token you verify
