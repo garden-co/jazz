@@ -32,6 +32,24 @@ pub(super) async fn admit_backend(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The app's backend, vouching for the identities it names: its admin
+/// secret, or the backend secret a backend client holds (a backend client may
+/// already act as any user on its sockets, so naming the user's account here
+/// grants it nothing more). Linking and revoking stay admin-only.
+fn validate_vouching_backend(headers: &HeaderMap, state: &ServerState) -> Result<(), Failure> {
+    match super::http::admin_secret_header(headers) {
+        Some(admin) => {
+            crate::middleware::auth::validate_admin_secret(Some(admin), &state.auth_config)
+        }
+        None => crate::middleware::auth::validate_backend_secret(
+            headers
+                .get("x-jazz-backend-secret")
+                .and_then(|value| value.to_str().ok()),
+            &state.auth_config,
+        ),
+    }
+}
+
 fn owner(state: &ServerState) -> Result<&crate::server::accounts::AccountRegistryOwner, Failure> {
     state.accounts.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -79,10 +97,7 @@ pub(super) async fn resolve_for_admin(
     headers: HeaderMap,
     Json(request): Json<IdentityRequest>,
 ) -> Result<Json<AccountResponse>, Failure> {
-    crate::middleware::auth::validate_admin_secret(
-        super::http::admin_secret_header(&headers),
-        &state.auth_config,
-    )?;
+    validate_vouching_backend(&headers, &state)?;
     let assignment = owner(&state)?
         .login(request.identity.clone())
         .await
@@ -99,10 +114,7 @@ pub(super) async fn login_or_register_for_admin(
     headers: HeaderMap,
     Json(request): Json<IdentityRequest>,
 ) -> Result<Json<AccountResponse>, Failure> {
-    crate::middleware::auth::validate_admin_secret(
-        super::http::admin_secret_header(&headers),
-        &state.auth_config,
-    )?;
+    validate_vouching_backend(&headers, &state)?;
     jazz::ids::AuthorSubject::authenticated(&request.identity.issuer, &request.identity.subject)
         .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_external_identity"))?;
     let assignment = owner(&state)?
@@ -132,10 +144,7 @@ pub(super) async fn found_local_first_for_admin(
     headers: HeaderMap,
     Json(request): Json<AdminFoundLocalFirst>,
 ) -> Result<Json<AccountResponse>, Failure> {
-    crate::middleware::auth::validate_admin_secret(
-        super::http::admin_secret_header(&headers),
-        &state.auth_config,
-    )?;
+    validate_vouching_backend(&headers, &state)?;
     if request.identity.issuer != jazz::tools::identity::LOCAL_FIRST_ISSUER {
         return Err((StatusCode::BAD_REQUEST, "local_first_identity_required"));
     }
@@ -441,6 +450,75 @@ mod tests {
             .await;
             assert_eq!(denied.status(), StatusCode::FORBIDDEN, "{operation}");
         }
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_backend_client_names_accounts_but_cannot_link_or_revoke() {
+        let core = JazzServer::start().await.expect("start test server");
+        let client = reqwest::Client::new();
+        let admin = format!("{}/apps/{}/admin/accounts", core.base_url(), core.app_id());
+        let identity = serde_json::json!({ "issuer": "jazz:app:test", "subject": "user" });
+        let other = serde_json::json!({ "issuer": "jazz:app:test", "subject": "other" });
+        let post = |operation: &str, secret: &str, body: serde_json::Value| {
+            client
+                .post(format!("{admin}/{operation}"))
+                .header("x-jazz-backend-secret", secret)
+                .json(&body)
+                .send()
+        };
+        let resolve = post(
+            "resolve",
+            core.backend_secret(),
+            serde_json::json!({ "identity": identity }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolve.status(), StatusCode::NOT_FOUND);
+        let registered = post(
+            "login-or-register",
+            core.backend_secret(),
+            serde_json::json!({ "identity": identity }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(registered.status(), StatusCode::OK);
+        let account = registered.json::<AccountResponse>().await.unwrap().account;
+        let resolved = post(
+            "resolve",
+            core.backend_secret(),
+            serde_json::json!({ "identity": identity }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            resolved.json::<AccountResponse>().await.unwrap().account,
+            account
+        );
+        let wrong = post(
+            "login-or-register",
+            "not-the-secret",
+            serde_json::json!({ "identity": identity }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+        let link = post(
+            "link",
+            core.backend_secret(),
+            serde_json::json!({ "from": identity, "to": other }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(link.status(), StatusCode::UNAUTHORIZED);
+        let revoke = post(
+            "revoke",
+            core.backend_secret(),
+            serde_json::json!({ "approver": identity, "target": identity }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(revoke.status(), StatusCode::UNAUTHORIZED);
         core.shutdown().await;
     }
 

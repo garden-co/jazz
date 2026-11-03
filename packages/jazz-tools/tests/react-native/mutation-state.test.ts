@@ -54,9 +54,6 @@ it("delivers unwaited authority rejection once and leaves waited rejection with 
   const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
     inMemory: true,
-    jwksUrl: issuer.jwksUrl,
-    jwtIssuer: issuer.issuer,
-    jwtAudience: issuer.audience,
   });
   try {
     const permissions = schema.definePermissions(app, ({ policy }) => [
@@ -109,7 +106,7 @@ it("delivers unwaited authority rejection once and leaves waited rejection with 
         },
         upstream: {
           serverUrl: server.url,
-          jwt: issuer.jwtForUser("rn-mutation-user"),
+          jwt: await issuer.jwtForUser("rn-mutation-user"),
         },
       },
     );
@@ -162,9 +159,6 @@ it.each(["finish", "abort"] as const)(
     const issuer = await startTestJwtIssuer();
     const server = await startLocalJazzServer({
       inMemory: true,
-      jwksUrl: issuer.jwksUrl,
-      jwtIssuer: issuer.issuer,
-      jwtAudience: issuer.audience,
     });
     try {
       await withNativeRelayFixture(
@@ -240,7 +234,7 @@ it.each(["finish", "abort"] as const)(
           },
           upstream: {
             serverUrl: server.url,
-            jwt: issuer.jwtForUser("rn-capacity-user"),
+            jwt: await issuer.jwtForUser("rn-capacity-user"),
           },
         },
       );

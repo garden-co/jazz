@@ -36,7 +36,7 @@ describe("Node shared backend session", () => {
       jwtIssuer: issuer.issuer,
       jwtAudience: issuer.audience,
     };
-    const server = await startLocalJazzServer({ appId, ...auth });
+    const server = await startLocalJazzServer({ appId });
     const owner = await createJazzSession({
       appId,
       serverUrl: server.url,
@@ -57,8 +57,8 @@ describe("Node shared backend session", () => {
       const original = owner.getSnapshot();
       const backend = original.client!;
       const tokens = await Promise.all([
-        issuer.jwtForUser("reader-a"),
-        issuer.jwtForUser("reader-b"),
+        await issuer.jwtForUser("reader-a"),
+        await issuer.jwtForUser("reader-b"),
       ]);
       const requests = tokens.map((token) => ({ headers: { authorization: `Bearer ${token}` } }));
       await expect(backend.forRequest(requests[0]!)).rejects.toMatchObject({

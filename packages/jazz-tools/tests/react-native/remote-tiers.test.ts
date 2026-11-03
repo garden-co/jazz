@@ -71,9 +71,6 @@ it("resumes strict remote reads and Global write waits after native reconnect", 
   const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
     inMemory: true,
-    jwksUrl: issuer.jwksUrl,
-    jwtIssuer: issuer.issuer,
-    jwtAudience: issuer.audience,
   });
   try {
     const permissions = schema.definePermissions(app, ({ policy }) => [
@@ -154,7 +151,7 @@ it("resumes strict remote reads and Global write waits after native reconnect", 
           claims: { role: "user" },
           authMode: "external",
         },
-        upstream: { serverUrl: server.url, jwt: issuer.jwtForUser("rn-tier-reader") },
+        upstream: { serverUrl: server.url, jwt: await issuer.jwtForUser("rn-tier-reader") },
       },
     );
   } finally {
@@ -170,9 +167,6 @@ it("keeps local work usable while remote read tiers recover from an established 
   const dataDir = await mkdtemp(join(tmpdir(), "jazz-rn-established-outage-"));
   let server = await startLocalJazzServer({
     dataDir,
-    jwksUrl: issuer.jwksUrl,
-    jwtIssuer: issuer.issuer,
-    jwtAudience: issuer.audience,
   });
   try {
     const permissions = schema.definePermissions(app, ({ policy }) => [
@@ -235,9 +229,6 @@ it("keeps local work usable while remote read tiers recover from an established 
         server = await startLocalJazzServer({
           ...initial,
           dataDir,
-          jwksUrl: issuer.jwksUrl,
-          jwtIssuer: issuer.issuer,
-          jwtAudience: issuer.audience,
         });
         // Recovery establishes a fresh authority snapshot, which may precede
         // this queued write's later Global admission.
@@ -254,7 +245,7 @@ it("keeps local work usable while remote read tiers recover from an established 
           claims: {},
           authMode: "external",
         },
-        upstream: { serverUrl: server.url, jwt: issuer.jwtForUser("rn-established-outage") },
+        upstream: { serverUrl: server.url, jwt: await issuer.jwtForUser("rn-established-outage") },
       },
     );
   } finally {
@@ -270,9 +261,6 @@ it("shows local rows at the deadline when a live server has not answered", async
   const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
     inMemory: true,
-    jwksUrl: issuer.jwksUrl,
-    jwtIssuer: issuer.issuer,
-    jwtAudience: issuer.audience,
   });
   const transport = await createTransportControl(server.url);
   try {
@@ -287,7 +275,7 @@ it("shows local rows at the deadline when a live server has not answered", async
       schema: app,
       permissions,
     });
-    const nativeOptions = (userId: string, serverUrl: string) => ({
+    const nativeOptions = async (userId: string, serverUrl: string) => ({
       appId: server.appId,
       session: {
         issuer: issuer.issuer,
@@ -295,7 +283,7 @@ it("shows local rows at the deadline when a live server has not answered", async
         claims: {},
         authMode: "external" as const,
       },
-      upstream: { serverUrl, jwt: issuer.jwtForUser(userId) },
+      upstream: { serverUrl, jwt: await issuer.jwtForUser(userId) },
     });
     await withNativeRelayFixture(
       app,
@@ -306,7 +294,7 @@ it("shows local rows at the deadline when a live server has not answered", async
           .insert(app.todos, { title: "Only on the server", done: false })
           .wait({ tier: "global" });
       },
-      nativeOptions("rn-deadline-writer", server.url),
+      await nativeOptions("rn-deadline-writer", server.url),
     );
     await withNativeRelayFixture(
       app,
@@ -350,7 +338,7 @@ it("shows local rows at the deadline when a live server has not answered", async
           stop();
         }
       },
-      nativeOptions("rn-deadline-reader", transport.url),
+      await nativeOptions("rn-deadline-reader", transport.url),
     );
   } finally {
     transport.unblock();

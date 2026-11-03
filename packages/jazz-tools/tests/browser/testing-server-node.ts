@@ -25,9 +25,6 @@ async function startJazzServer(appId?: string): Promise<StartedJazzServer> {
   const backendSecret = "jazz-browser-test-backend";
   const server = await startLocalJazzServer({
     appId: appId ?? "00000000-0000-0000-0000-000000000001",
-    jwksUrl: jwtIssuer.jwksUrl,
-    jwtIssuer: jwtIssuer.issuer,
-    jwtAudience: jwtIssuer.audience,
     inMemory: true,
     adminSecret,
     backendSecret,
@@ -76,7 +73,7 @@ export async function jazzServerJwtForUser(
   appId?: string,
 ): Promise<string> {
   const { jwtIssuer } = await getOrStartJazzServer(appId);
-  return jwtIssuer.jwtForUser(userId, claims);
+  return await jwtIssuer.jwtForUser(userId, claims);
 }
 
 export async function stopJazzServerByUrl(serverUrl: string): Promise<void> {

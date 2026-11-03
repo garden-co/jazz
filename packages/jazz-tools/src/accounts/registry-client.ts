@@ -42,6 +42,41 @@ export async function requestAccountRegistry(
 }
 
 /**
+ * The app's backend vouches to the core's registry for an identity it
+ * verified itself, with its backend secret: resolve its account
+ * (`resolve`), create it on first sign-in (`login-or-register`), or found a
+ * local-first guest's (`found-local-first`). `registry` is the app's
+ * `/accounts` URL; these routes live under `/admin/accounts`.
+ */
+export async function requestVouchedAccount(
+  registry: string,
+  operation: "resolve" | "login-or-register" | "found-local-first",
+  identity: AccountIdentity,
+  backendSecret: string,
+  fetcher: typeof fetch = fetchFor(registry),
+): Promise<unknown> {
+  const admin = registry.replace(/\/accounts\/?$/, "/admin/accounts");
+  return withAuthRequestDeadline(async (signal) => {
+    const response = await fetcher(`${admin}/${operation}`, {
+      signal,
+      method: "POST",
+      credentials: "omit",
+      redirect: "error",
+      headers: { "X-Jazz-Backend-Secret": backendSecret, "Content-Type": "application/json" },
+      body: JSON.stringify({ identity }),
+    });
+    if (!response.ok) {
+      const code = await response.text();
+      throw new AccountAuthError(
+        /^[a-z_]{1,80}$/.test(code) ? code : "account_request_failed",
+        response.status,
+      );
+    }
+    return response.json();
+  }, new AccountAuthError("account_request_timeout"));
+}
+
+/**
  * Sign in through the app's backend (`createJazz`), same-origin with the app's
  * cookies: the backend's `authenticate` decides, and the answer carries the
  * account, identity and claims but no credential. With `link`, a local-first

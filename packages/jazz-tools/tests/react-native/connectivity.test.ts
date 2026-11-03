@@ -27,9 +27,6 @@ it("disconnects before any query and reconnects using only native credentials", 
   const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
     inMemory: true,
-    jwksUrl: issuer.jwksUrl,
-    jwtIssuer: issuer.issuer,
-    jwtAudience: issuer.audience,
   });
   try {
     const permissions = schema.definePermissions(app, ({ policy }) => [
@@ -114,7 +111,7 @@ it("disconnects before any query and reconnects using only native credentials", 
           claims: {},
           authMode: "external",
         },
-        upstream: { serverUrl: server.url, jwt: issuer.jwtForUser("connectivity-user") },
+        upstream: { serverUrl: server.url, jwt: await issuer.jwtForUser("connectivity-user") },
       },
     );
   } finally {

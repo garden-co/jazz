@@ -104,9 +104,6 @@ it("waits for native upstream authority before accepting a serializable commit",
   const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
     inMemory: true,
-    jwksUrl: issuer.jwksUrl,
-    jwtIssuer: issuer.issuer,
-    jwtAudience: issuer.audience,
   });
   try {
     const permissions = schema.definePermissions(app, ({ policy }) => [
@@ -171,7 +168,7 @@ it("waits for native upstream authority before accepting a serializable commit",
         },
         upstream: {
           serverUrl: server.url,
-          jwt: issuer.jwtForUser("rn-serializable-writer"),
+          jwt: await issuer.jwtForUser("rn-serializable-writer"),
         },
       },
     );

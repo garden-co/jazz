@@ -27,9 +27,6 @@ it("isolates pending advice handles and retires them on cancel and close", async
   const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
     inMemory: true,
-    jwksUrl: issuer.jwksUrl,
-    jwtIssuer: issuer.issuer,
-    jwtAudience: issuer.audience,
   });
   try {
     await deploy({
@@ -99,7 +96,7 @@ it("isolates pending advice handles and retires them on cancel and close", async
         },
         upstream: {
           serverUrl: server.url,
-          jwt: issuer.jwtForUser("rn-advice-isolation"),
+          jwt: await issuer.jwtForUser("rn-advice-isolation"),
         },
       },
     );
@@ -142,11 +139,8 @@ it("uses authority dry runs and admitted identity across scopes, disconnect, and
   const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
     inMemory: true,
-    jwksUrl: issuer.jwksUrl,
-    jwtIssuer: issuer.issuer,
-    jwtAudience: issuer.audience,
   });
-  const options = (user: string) => ({
+  const options = async (user: string) => ({
     appId: server.appId,
     session: {
       issuer: issuer.issuer,
@@ -154,7 +148,7 @@ it("uses authority dry runs and admitted identity across scopes, disconnect, and
       claims: {},
       authMode: "external" as const,
     },
-    upstream: { serverUrl: server.url, jwt: issuer.jwtForUser(user) },
+    upstream: { serverUrl: server.url, jwt: await issuer.jwtForUser(user) },
   });
   try {
     await deploy({
@@ -185,7 +179,7 @@ it("uses authority dry runs and admitted identity across scopes, disconnect, and
               bob.createDb({
                 ...bob.config,
                 // @ts-expect-error An unrelated credential cannot override Bob's account.
-                cookieSession: options("alice").session,
+                cookieSession: (await options("alice")).session,
               }),
             ).rejects.toThrow("account_handle_required");
             const other = await bob.createDb();
@@ -193,7 +187,7 @@ it("uses authority dry runs and admitted identity across scopes, disconnect, and
             expect(await other.canRead(app.notes, row.id)).toBe("denied");
             expect(await other.canInsert(app.notes, { title: "dry run" })).toBe("allowed");
           },
-          options("bob"),
+          await options("bob"),
         );
         await db.disconnect();
         const pending = db.canRead(app.notes, row.id);
@@ -210,7 +204,7 @@ it("uses authority dry runs and admitted identity across scopes, disconnect, and
         await db.shutdown();
         expect(await closing).toBe("unknown");
       },
-      options("alice"),
+      await options("alice"),
     );
   } finally {
     await server.stop();
