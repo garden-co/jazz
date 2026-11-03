@@ -33,12 +33,16 @@ import { parseSnapshotRef, type SnapshotRef } from "../runtime/snapshot-ref.js";
 import { streamingChunks } from "../runtime/streaming-source.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import { writeRow } from "../runtime/write-row.js";
+import { formatUuid } from "../runtime/hex.js";
+import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import {
   PostcardReader,
   readNativeSubscriptionDelta,
 } from "../runtime/native-runtime/native-codec.js";
 import {
   addNestedOuterColumns,
+  assertNoUnsupportedPermissionIntrospection,
+  assertSupportedReadOptions,
   branchViewFromWriteContext,
   decodeSubscriptionDelta,
   effectiveUpdatedAtMs,
@@ -47,7 +51,6 @@ import {
   encodeCellsForStreamingPatch,
   encodeCellsForStreamingRow,
   encodeQueryJson,
-  formatUuid,
   openTransactionIdFromOptions,
   parseUuid,
   queryHasArraySubqueries,
@@ -110,6 +113,20 @@ export class ThinConnectionLostError extends Error {
   }
 }
 
+/**
+ * The server ends a thin connection's open transactions with it (on a
+ * reconnect, including the one a credential renewal takes): their staged
+ * writes are gone, and the transaction can only be started again.
+ */
+export class ThinTransactionLostError extends Error {
+  constructor(id: OpenTransactionId) {
+    super(
+      `transaction ${id} was lost with the connection to the Jazz server; its staged writes were discarded, so start it again`,
+    );
+    this.name = "ThinTransactionLostError";
+  }
+}
+
 const DEFAULT_RECONNECT_DELAYS_MS = [250, 500, 1_000, 2_000, 5_000];
 
 type OneShot = {
@@ -139,13 +156,22 @@ type OpenTransaction = {
   /** The begin and every staged write: the commit waits for their answers. */
   requests: Promise<ThinBody>[];
   staged: boolean;
+  /** Its begin, which reached the server once `sent`. */
+  begin: OneShot;
+  /** The connection it was begun on ended, and the server abandoned it. */
+  lost: boolean;
 };
 
 type Write = {
   done: Promise<void>;
   /** Some wait took the outcome; a failure needs no fallback report. */
   observed: boolean;
+  /** The server confirmed it. */
+  committed: boolean;
 };
+
+/** Committed writes kept for later waits on them. */
+const RETAINED_WRITES = 1024;
 
 export class ThinRuntime implements Runtime {
   readonly schema: WasmSchema;
@@ -304,7 +330,21 @@ export class ThinRuntime implements Runtime {
       live.requestId = undefined;
       if (live.delivered) live.resetNext = true;
     }
+    // The server abandoned every transaction begun on this connection.
+    const lost = new Set<OpenTransactionId>();
+    for (const [id, transaction] of this.transactions) {
+      if (transaction.begin.sent && !transaction.lost) {
+        transaction.lost = true;
+        lost.add(id);
+      }
+    }
     for (const [id, oneShot] of this.oneShots) {
+      const transaction = transactionOf(oneShot.op);
+      if (transaction !== undefined && lost.has(transaction)) {
+        this.oneShots.delete(id);
+        oneShot.reject(new ThinTransactionLostError(transaction));
+        continue;
+      }
       // Requests not sent yet wait for the next connection.
       if (!oneShot.sent) continue;
       this.oneShots.delete(id);
@@ -321,15 +361,25 @@ export class ThinRuntime implements Runtime {
   // ---- requests ---------------------------------------------------------
 
   private request(op: ThinOp, id = this.nextRequestId++): Promise<ThinBody> {
-    if (this.closed) return Promise.reject(new Error("the thin runtime is closed"));
-    return new Promise<ThinBody>((resolve, reject) => {
-      const oneShot: OneShot = { op, resolve, reject, sent: false };
+    return this.requestWith(op, id).answer;
+  }
+
+  /** {@link request}, with the request's own record. */
+  private requestWith(
+    op: ThinOp,
+    id = this.nextRequestId++,
+  ): { answer: Promise<ThinBody>; oneShot?: OneShot } {
+    if (this.closed) return { answer: Promise.reject(new Error("the thin runtime is closed")) };
+    let oneShot: OneShot | undefined;
+    const answer = new Promise<ThinBody>((resolve, reject) => {
+      oneShot = { op, resolve, reject, sent: false };
       this.oneShots.set(id, oneShot);
       if (this.bound) this.transmit(id, oneShot);
     }).then((body) => {
       if (body.type === "error") throw new ThinRemoteError(body.code, body.message);
       return body;
     });
+    return { answer, oneShot };
   }
 
   private transmit(id: number, oneShot: OneShot): void {
@@ -353,12 +403,44 @@ export class ThinRuntime implements Runtime {
 
   // ---- reads ------------------------------------------------------------
 
+  /**
+   * Every read and write runs as this connection's session. The client
+   * names its own session with each call; another one (a trusted backend
+   * acting for a user) is refused rather than silently read as this one.
+   */
+  private refuseOtherSession(sessionJson: string | null | undefined, operation: string): void {
+    if (sessionJson == null) return;
+    type SessionJson = { issuer?: string; user_id?: string; account_id?: string };
+    // A session, or a write context naming one.
+    const parsed = JSON.parse(sessionJson) as SessionJson & {
+      session?: SessionJson;
+      attribution?: unknown;
+    };
+    if (parsed.attribution != null) {
+      throw new Error(`${operation} failed: attributed writes are not supported in thin mode`);
+    }
+    const session = parsed.session ?? parsed;
+    if (session.user_id === undefined || this.author === undefined) return;
+    const author =
+      session.issuer && session.user_id
+        ? canonicalAuthorSubject(session.issuer, session.user_id, session.account_id)
+        : undefined;
+    if (author !== this.author) {
+      throw new Error(
+        `${operation} failed: reading or writing as another session is not supported in thin mode`,
+      );
+    }
+  }
+
   async query(
     queryJson: string,
-    _sessionJson?: string | null,
+    sessionJson?: string | null,
     tier?: string | null,
     optionsJson?: string | null,
   ): Promise<unknown> {
+    this.refuseOtherSession(sessionJson, "Query");
+    assertSupportedReadOptions(tier, optionsJson);
+    assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
     const transaction = openTransactionIdFromOptions(optionsJson);
     if (transaction) this.openTransaction(transaction, "Query setup");
@@ -377,10 +459,13 @@ export class ThinRuntime implements Runtime {
 
   createSubscription(
     queryJson: string,
-    _sessionJson?: string | null,
+    sessionJson?: string | null,
     tier?: string | null,
     optionsJson?: string | null,
   ): number {
+    this.refuseOtherSession(sessionJson, "Subscription");
+    assertSupportedReadOptions(tier, optionsJson);
+    assertNoUnsupportedPermissionIntrospection(queryJson);
     const handle = this.nextHandle++;
     this.liveQueries.set(handle, {
       queryJson,
@@ -456,15 +541,18 @@ export class ThinRuntime implements Runtime {
       live.callback(delta);
       return;
     }
-    // Anything else ends the live query on the server.
+    // Anything else ends the live query on the server. The app still wants
+    // it (an unsubscribe forgets the request first), so it hears why.
     this.liveByRequest.delete(requestId);
     live.requestId = undefined;
-    if (body.type === "error") {
-      const callback = live.callback;
-      this.liveQueries.delete(handle);
-      live.callback = undefined;
-      callback(new ThinRemoteError(body.code, body.message));
-    }
+    const callback = live.callback;
+    this.liveQueries.delete(handle);
+    live.callback = undefined;
+    callback(
+      body.type === "error"
+        ? new ThinRemoteError(body.code, body.message)
+        : new ThinRemoteError("Closed", "the Jazz server ended this live query"),
+    );
   }
 
   // ---- writes -----------------------------------------------------------
@@ -600,7 +688,7 @@ export class ThinRuntime implements Runtime {
         `Streaming insert requires a Text, Json, or Bytea column: ${table}.${column}`,
       );
     }
-    const row = objectId ? parseUuid(objectId) : runtimeRandomBytes(16);
+    const row = objectId ? parseUuid(objectId) : uuidv7();
     const stream = this.nextRequestId++;
     const begun = this.request(
       {
@@ -671,16 +759,27 @@ export class ThinRuntime implements Runtime {
   beginTransaction(
     kind: TransactionKind,
     id: OpenTransactionId,
-    _sessionJson?: string | null,
+    sessionJson?: string | null,
   ): OpenTransactionId {
+    this.refuseOtherSession(sessionJson, "Begin transaction");
     if (this.closed) throw new Error("Begin transaction failed: the thin runtime is closed");
     if (this.transactions.has(id)) {
       throw new Error(`Begin transaction failed: transaction ${id} has already been opened`);
     }
     // The server binds the transaction to this connection's session.
-    const begun = this.request({ type: "begin", transaction: id, kind });
+    const { answer: begun, oneShot: begin } = this.requestWith({
+      type: "begin",
+      transaction: id,
+      kind,
+    });
     begun.catch(() => undefined);
-    this.transactions.set(id, { kind, requests: [begun], staged: false });
+    this.transactions.set(id, {
+      kind,
+      requests: [begun],
+      staged: false,
+      begin: begin!,
+      lost: false,
+    });
     return id;
   }
 
@@ -697,6 +796,7 @@ export class ThinRuntime implements Runtime {
       );
     }
     this.transactions.delete(id);
+    if (transaction.lost) return Promise.reject(new ThinTransactionLostError(id));
     // A staged write the server refused outright fails the commit; one its
     // row's state refused is the commit's own rejection, from the server.
     return Promise.all(transaction.requests).then(
@@ -716,6 +816,8 @@ export class ThinRuntime implements Runtime {
       );
     }
     this.transactions.delete(id);
+    // The server already abandoned a lost transaction.
+    if (transaction.lost) return true;
     await this.request({ type: "rollback", transaction: id });
     return true;
   }
@@ -735,6 +837,7 @@ export class ThinRuntime implements Runtime {
         `${operation} failed: Write error: open transaction ${id} has already been completed or was never opened`,
       );
     }
+    if (transaction.lost) throw new ThinTransactionLostError(id);
     return transaction;
   }
 
@@ -758,8 +861,13 @@ export class ThinRuntime implements Runtime {
     _tier: string,
     options?: RuntimeWriteWaitOptions,
   ): Promise<void> {
-    const write = this.writes.get(await txId);
-    if (!write) throw new Error(`unknown thin write ${String(await txId)}`);
+    const id = await txId;
+    const write = this.writes.get(id);
+    if (!write) {
+      // Forgotten once committed (see pruneWrites); ids are this runtime's own.
+      if (typeof id === "string" && id.startsWith("thin:")) return;
+      throw new Error(`unknown thin write ${String(id)}`);
+    }
     // The server confirms a thin write only once it committed on the
     // authority, which meets every durability tier.
     if (!options?.observeOnly) write.observed = true;
@@ -796,7 +904,7 @@ export class ThinRuntime implements Runtime {
 
   private write(op: ThinOp): TxId {
     const txId = `thin:${this.nextRequestId}` as TxId;
-    const write: Write = { observed: false, done: Promise.resolve() };
+    const write: Write = { observed: false, committed: false, done: Promise.resolve() };
     write.done = this.request(op).then(
       (body) => {
         if (body.type !== "written") throw new Error(`unexpected answer to a write: ${body.type}`);
@@ -807,19 +915,21 @@ export class ThinRuntime implements Runtime {
         // client's rejected write.
         queueMicrotask(() => {
           if (write.observed) return;
+          // Only the server's answer is a rejection. A write whose
+          // connection ended unanswered may have committed: its fate is
+          // unknown, not rejected.
+          const rejected = failure instanceof ThinRemoteError;
+          const code = rejected ? failure.code : "outcome_unknown";
           this.mutationErrorCallback?.({
-            code: failure instanceof ThinRemoteError ? failure.code : "connection_lost",
+            code,
             reason: failure.message,
             transaction: {
               transactionId: txId,
               kind: "mergeable",
               sealed: true,
-              latestSettlement: {
-                kind: "rejected",
-                transactionId: txId,
-                code: failure instanceof ThinRemoteError ? failure.code : "connection_lost",
-                reason: failure.message,
-              },
+              latestSettlement: rejected
+                ? { kind: "rejected", transactionId: txId, code, reason: failure.message }
+                : { kind: "missing", transactionId: txId },
             },
           });
         });
@@ -828,8 +938,26 @@ export class ThinRuntime implements Runtime {
     );
     // An unobserved failure is reported above, not as an unhandled rejection.
     write.done.catch(() => undefined);
+    write.done.then(
+      () => (write.committed = true),
+      () => undefined,
+    );
     this.writes.set(txId, write);
+    this.pruneWrites();
     return txId;
+  }
+
+  /**
+   * Forget the oldest committed writes beyond {@link RETAINED_WRITES}: a
+   * long session makes unboundedly many. A wait on a forgotten write
+   * resolves, as every forgotten write committed.
+   */
+  private pruneWrites(): void {
+    if (this.writes.size <= RETAINED_WRITES) return;
+    for (const [txId, write] of this.writes) {
+      if (this.writes.size <= RETAINED_WRITES) break;
+      if (write.committed) this.writes.delete(txId);
+    }
   }
 
   private definition(table: string): (typeof this.schema)[string] {
@@ -884,4 +1012,10 @@ function uuidv7(): Uint8Array {
   bytes[6] = (bytes[6]! & 0x0f) | 0x70;
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   return bytes;
+}
+
+/** The open transaction a request belongs to, if any. */
+function transactionOf(op: ThinOp): OpenTransactionId | undefined {
+  const transaction = (op as { transaction?: unknown }).transaction;
+  return typeof transaction === "string" ? (transaction as OpenTransactionId) : undefined;
 }

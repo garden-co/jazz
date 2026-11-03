@@ -144,7 +144,7 @@ pub struct ServerSession(u64);
 /// Bytes a session may have queued in each direction. Inbound frames past
 /// it are refused (the peer ignored flow control); outbound messages past it
 /// wait in the engine until the socket catches up.
-const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
+pub(crate) const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
 /// The slow-query threshold: `JAZZ_SLOW_QUERY_MS` (0 turns the log off),
 /// else jazz-db's default.
 fn slow_query_threshold() -> Option<Duration> {
@@ -1162,16 +1162,28 @@ impl ServerRuntimeHandle {
         opened.map(|()| session)
     }
 
-    /// Queue a thin client's request for the owner.
+    /// Queue a thin client's request, `bytes` long on the wire, for the
+    /// owner. Refused when the session already has its budget queued, as
+    /// [`Self::receive_wire_frames`] refuses sync frames.
     pub fn receive_thin_request(
         &self,
         session: ServerSession,
         request: jazz::thin::ThinRequest,
+        bytes: usize,
     ) -> Result<(), String> {
-        if !self.edges()?.contains_key(&session) {
-            return Err("unknown server session".to_owned());
+        let ingress = self
+            .edges()?
+            .get(&session)
+            .map(|edge| Arc::clone(&edge.ingress))
+            .ok_or_else(|| "unknown server session".to_owned())?;
+        if ingress.fetch_add(bytes, Ordering::AcqRel) + bytes > SESSION_QUEUE_BUDGET {
+            ingress.fetch_sub(bytes, Ordering::AcqRel);
+            return Err("session ingress budget exceeded".to_owned());
         }
-        self.send(Box::new(move |owner| owner.thin_request(session, request)))
+        self.send(Box::new(move |owner| {
+            owner.thin_request(session, request);
+            ingress.fetch_sub(bytes, Ordering::AcqRel);
+        }))
     }
 
     /// Ask the owner for a tick; requests coalesce. Output reaches every

@@ -4,7 +4,9 @@ import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
-import { formatUuidAt } from "../hex.js";
+import { formatUuid, formatUuidAt } from "../hex.js";
+
+export { formatUuid };
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
 import { writeRow } from "../write-row.js";
@@ -4820,7 +4822,10 @@ function readFirstLoadWaitsForRemote(optionsJson?: string | null): boolean {
   }
 }
 
-function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
+export function assertSupportedReadOptions(
+  tier?: string | null,
+  optionsJson?: string | null,
+): void {
   if (tier != null && !["local-first", "remote", "local-only"].includes(tier)) {
     throw new Error(`Native runtime received unsupported read tier '${tier}'`);
   }
@@ -4936,7 +4941,7 @@ function nativeQueryInput(queryJson: string, schema: WasmSchema): NativeQueryInp
   return encodeQueryJson(queryJson, schema);
 }
 
-function assertNoUnsupportedPermissionIntrospection(queryJson: string): void {
+export function assertNoUnsupportedPermissionIntrospection(queryJson: string): void {
   if (!queryContainsPermissionIntrospection(queryJson)) return;
   throw new Error(
     "Native runtime does not support permission-introspection query columns or predicates " +
@@ -7251,10 +7256,6 @@ export function parseUuid(value: string): Uint8Array {
     bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   }
   return bytes;
-}
-
-export function formatUuid(bytes: Uint8Array): string {
-  return formatUuidAt(bytes, 0);
 }
 
 function readU32Le(bytes: Uint8Array, offset: number): number {
