@@ -59,7 +59,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures::FutureExt;
 use jazz::binding_host::{self, Binding, EventChunk, HostError, HostFuture, HostResult, OpenAs};
 use jazz::db::{Error as CoreError, FileOptions, LargeValueUpdate, SubscriptionEvent as CoreEvent};
-use jazz::db::{SubscriptionStream, block_on};
+use jazz::db::{SubscriptionStream, TickScheduler, TickUrgency, block_on};
 use jazz::identity;
 use jazz::tools::AppId;
 use jazz::tx::DurabilityTier;
@@ -578,6 +578,32 @@ impl Host {
         );
         if status != napi::Status::Ok {
             self.tick_requested.store(false, Ordering::Release);
+        }
+    }
+}
+
+impl TickScheduler for Host {
+    fn schedule_tick(&self, urgency: TickUrgency) {
+        if urgency == TickUrgency::Immediate {
+            self.request_tick();
+            return;
+        }
+        let wake = match urgency {
+            TickUrgency::Deferred => "deferred",
+            TickUrgency::AfterCurrentTurn => "after-current-turn",
+            TickUrgency::Immediate => unreachable!(),
+        };
+        if let Some(scheduler) = self.tick_scheduler.borrow().as_ref() {
+            scheduler.call(Ok(wake.to_owned()), ThreadsafeFunctionCallMode::NonBlocking);
+        }
+    }
+
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        if let Some(scheduler) = self.tick_scheduler.borrow().as_ref() {
+            scheduler.call(
+                Ok(format!("after:{delay_ms}")),
+                ThreadsafeFunctionCallMode::NonBlocking,
+            );
         }
     }
 }
@@ -1680,14 +1706,16 @@ impl NapiDb {
         kind: String,
         author: Option<Uint8Array>,
         attribution: Option<Uint8Array>,
+        accepted_evidence: Option<bool>,
     ) -> js::Result<()> {
         Ok(self
             .binding()?
-            .begin_transaction(
+            .begin_transaction_with_capability(
                 &open_transaction_id,
                 &kind,
                 author.as_deref(),
                 attribution.as_deref(),
+                accepted_evidence.unwrap_or(false),
             )
             .map_err(host_error)?)
     }
@@ -1716,8 +1744,8 @@ impl NapiDb {
             .map_err(host_error)?)
     }
 
-    /// The host's tick callback: called with `"immediate"` whenever there
-    /// is sync work (a local write to upload, frames to apply).
+    /// Install the core's progress/deadline hook. The host schedules ticks
+    /// and re-polls pending reads, using `"after:<milliseconds>"` for timers.
     #[napi(
         js_name = "setTickScheduler",
         ts_args_type = "callback: ((err: Error | null, arg: string) => void)"
@@ -1731,10 +1759,16 @@ impl NapiDb {
             .build_callback(move |context| {
                 // Clear before calling JS so reentrant progress can request
                 // the next turn without losing its wake.
-                requested.store(false, Ordering::Release);
+                if context.value == "immediate" {
+                    requested.store(false, Ordering::Release);
+                }
                 Ok(context.value)
             })?;
         *inner.host.tick_scheduler.borrow_mut() = Some(callback);
+        inner
+            .binding
+            .db
+            .set_tick_scheduler(Some(inner.host.clone()));
         Ok(())
     }
 
@@ -1777,6 +1811,31 @@ impl NapiDb {
                 query.to_vec(),
                 &json_or_null(opts),
                 open_transaction_id.as_deref(),
+                author.as_deref(),
+                claims,
+            )
+            .map_err(host_error)?;
+        read_or_pending(read)
+    }
+
+    /// Authority evidence in one explicitly admitted serializable transaction.
+    #[napi(js_name = "acceptedRead")]
+    pub fn accepted_read(
+        &self,
+        query: Uint8Array,
+        open_transaction_id: String,
+        include_deleted: bool,
+        timeout_ms: f64,
+        author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
+    ) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+        let read = self
+            .binding()?
+            .accepted_read(
+                query.to_vec(),
+                &open_transaction_id,
+                include_deleted,
+                timeout_ms,
                 author.as_deref(),
                 claims,
             )
@@ -2023,6 +2082,7 @@ impl NapiDb {
             return Ok(Either::A(Vec::new().into()));
         };
         if self.owns_runtime {
+            inner.binding.db.set_tick_scheduler(None);
             inner.host.tick_scheduler.borrow_mut().take();
             inner.host.mutation_errors.borrow_mut().take();
             inner.host.upstream_mutation_errors.borrow_mut().take();
