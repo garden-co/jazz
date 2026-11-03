@@ -845,11 +845,43 @@ impl Inner {
             let watches = self
                 .compile(&group.prepared, group.identity, &group.read)
                 .and_then(|compiled| {
-                    let watches =
-                        self.watches(&group.prepared, group.identity, &group.read, &compiled)?;
-                    group.key =
-                        self.group_key(&group.prepared, group.identity, &group.read, &compiled);
+                    // Rebuild properties derived from compilation before
+                    // applying another delta under the refreshed policy.
+                    let prepared = &group.prepared;
+                    let read = &group.read;
+                    let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+                    let root = schema
+                        .stored_table(
+                            history_source_table(&prepared.query.table)
+                                .unwrap_or(&prepared.query.table),
+                        )?
+                        .to_owned();
+                    let watches = self.watches(prepared, group.identity, read, &compiled)?;
+                    let tables = self.with_relation_tables(prepared, &compiled.tables)?;
+                    let includes =
+                        self.output_only_includes(prepared, group.identity, read, &compiled)?;
+                    let branches = view_branches(schema, read, &watches);
+                    let masks = view_masks(
+                        schema,
+                        prepared,
+                        read,
+                        watches
+                            .iter()
+                            .map(|(Watch::Table(table) | Watch::Key(table, ..))| table),
+                    );
+                    let recheck = recheckable(&prepared.query, &root, read, &compiled);
+                    let projected = order_projected(&prepared.query, &compiled);
+                    let key = self.group_key(prepared, group.identity, read, &compiled);
+                    group.key = key;
                     self.fan.by_key.entry(group.key.clone()).or_insert(gid);
+                    group.root = root;
+                    group.tables = tables;
+                    group.includes = includes;
+                    group.branches = branches;
+                    group.masks = masks;
+                    group.recheck = recheck;
+                    group.projected = projected;
+                    group.keys.clear();
                     Ok(watches)
                 })
                 .unwrap_or(old);

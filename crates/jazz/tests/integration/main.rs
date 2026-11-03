@@ -157,6 +157,8 @@ mod stored_identities;
 mod streaming_upload_ownership;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
+#[path = "../subscription_refresh_metadata.rs"]
+mod subscription_refresh_metadata;
 #[path = "../subscription_scope_sharing.rs"]
 mod subscription_scope_sharing;
 #[path = "../sync_access_loss.rs"]
