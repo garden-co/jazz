@@ -14,7 +14,7 @@ use jazz::query::Query;
 
 use jazz::tools::{AppContext, AppId, ClientStorage, DurabilityTier, Value};
 use jazz_native_relay as _;
-use jazz_server::{JazzServer, TestJwtIssuer};
+use jazz_server::JazzServer;
 use jazz_testkit::{connect, wait_for_query};
 
 fn main() {
@@ -36,7 +36,6 @@ fn main() {
 async fn run() {
     let run_nonce = std::env::var("JAZZ_DEVICE_RUN_NONCE").expect("host run nonce is required");
     let title = format!("high-level-foreground-row:{run_nonce}");
-    let issuer = TestJwtIssuer::start().await;
     let app_id = AppId::from_name("jazz-device-acceptance");
     let schema = device_fixture::schema();
     let server_storage = tempfile::tempdir().expect("persistent Core storage");
@@ -45,7 +44,6 @@ async fn run() {
         .with_data_dir(server_storage.path())
         .with_persistent_storage()
         .with_schema(schema.clone())
-        .with_jwks_url(issuer.endpoint())
         .start()
         .await
         .expect("start test server");
@@ -60,8 +58,9 @@ async fn run() {
         data_dir: observer_storage.path().to_owned(),
         storage: ClientStorage::Memory,
         account_id: None,
-        jwt_token: Some(TestJwtIssuer::jwt_for_user("rn-device-core-observer")),
+        jwt_token: None,
         backend_secret: None,
+        backend_session: None,
         admin_secret: Some(core.admin_secret().to_owned()),
         migrations: Default::default(),
     })
@@ -133,7 +132,6 @@ async fn run() {
         .with_data_dir(server_storage.path())
         .with_persistent_storage()
         .with_schema(schema.clone())
-        .with_jwks_url(issuer.endpoint())
         .with_admin_secret(admin_secret)
         .start()
         .await
@@ -147,10 +145,9 @@ async fn run() {
         data_dir: writer_storage.path().to_owned(),
         storage: ClientStorage::Memory,
         account_id: None,
-        jwt_token: Some(TestJwtIssuer::jwt_for_user(
-            "rn-device-core-recovery-writer",
-        )),
+        jwt_token: None,
         backend_secret: None,
+        backend_session: None,
         admin_secret: Some(core.admin_secret().to_owned()),
         migrations: Default::default(),
     })

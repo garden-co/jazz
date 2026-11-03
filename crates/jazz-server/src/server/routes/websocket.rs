@@ -421,17 +421,33 @@ async fn ws_admission(
     let backend_secret = headers
         .get("X-Jazz-Backend-Secret")
         .and_then(|value| value.to_str().ok());
-    let has_authenticated_backend_session = has_session_header
-        && matches!(
-            (
-                state.auth_config.backend_secret.as_deref(),
-                backend_secret,
-            ),
-            (Some(expected), Some(provided)) if expected == provided
-        );
-    if backend_secret.is_some() && !has_jwt && !has_session_header {
-        crate::middleware::auth::validate_backend_secret(backend_secret, &state.auth_config)
-            .map_err(|(_, message)| message.to_owned())?;
+    let backend_credential = matches!(
+        (
+            state.auth_config.backend_secret.as_deref(),
+            backend_secret,
+        ),
+        (Some(expected), Some(provided))
+            if crate::middleware::workload::constant_time_eq(expected, provided)
+    );
+    // A core admits its own backend only: the app's backend (`createJazz`)
+    // decides who a user is and opens their sessions with its credential,
+    // and relays a local-first guest's proof with it (or on an upgrade its
+    // trusted workload vouched for).
+    if !backend_credential && !vouched_upgrade {
+        return Err(match backend_secret {
+            Some(_) => "Invalid backend secret",
+            None => {
+                "this core admits only its app's backend: connect through the app's createJazz handler"
+            }
+        }
+        .into());
+    }
+    if !has_jwt && !has_session_header {
+        if !backend_credential {
+            return Err(
+                "Session required. Provide a backend session or a local-first proof.".into(),
+            );
+        }
         return Ok(WebSocketAdmission {
             identity: peer_identity,
             claims: BTreeMap::new(),
@@ -443,42 +459,20 @@ async fn ws_admission(
             bundle,
         });
     }
-    let backend_vouched = vouched_upgrade
-        || matches!(
-            (
-                state.auth_config.backend_secret.as_deref(),
-                backend_secret,
-            ),
-            (Some(expected), Some(provided))
-                if crate::middleware::workload::constant_time_eq(expected, provided)
-        );
-    if bundle.is_some() && !backend_vouched {
-        return Err("a permissions bundle pin needs the backend's credential".into());
-    }
 
-    if !has_jwt
-        && !has_authenticated_backend_session
-        && ws_has_auth_cookie(&headers, state.auth_config.auth_cookie_name.as_deref())
-    {
-        validate_ws_cookie_origin(&headers, state.auth_config.trust_forwarded_host)?;
-    }
-
-    let session = crate::middleware::auth::extract_session(
-        &headers,
-        state.app_id,
-        &state.auth_config,
-        state.jwt_verifier.as_deref(),
-    )
-    .await
-    .map_err(super::accounts::AdmissionError::from)?;
+    let session =
+        crate::middleware::auth::extract_session(&headers, state.app_id, &state.auth_config)
+            .await
+            .map_err(super::accounts::AdmissionError::from)?;
 
     let Some(mut session) = session else {
-        return Err("Session required. Provide JWT, backend secret, or admin secret.".into());
+        return Err("Session required. Provide a backend session or a local-first proof.".into());
     };
 
-    // A backend-authenticated impersonation remains policy-scoped, but its
-    // authority is the backend credential, not a public account bearer.
-    if !has_authenticated_backend_session {
+    // A session the backend states is policy-scoped, and its authority is the
+    // backend credential. A guest's own proof decides who it is: its key
+    // must hold the account the registry assigned it.
+    if !has_session_header {
         let account = peer_identity
             .account_id()
             .ok_or("public sessions require an enrolled account identity")?;
@@ -500,7 +494,7 @@ async fn ws_admission(
         identity: peer_identity,
         claims: session_claims(session)?,
         trust: CommitUnitTrust::Session,
-        credential: if has_authenticated_backend_session {
+        credential: if has_session_header {
             WebSocketCredential::Backend
         } else {
             WebSocketCredential::Session
@@ -608,103 +602,6 @@ fn ws_validate_session_identity(
         return Err("websocket peer_identity must match authenticated session author".to_owned());
     }
     Ok(())
-}
-
-fn ws_has_auth_cookie(headers: &HeaderMap, cookie_name: Option<&str>) -> bool {
-    let Some(cookie_name) = cookie_name else {
-        return false;
-    };
-    headers
-        .get(axum::http::header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|cookie| {
-            cookie.split(';').any(|segment| {
-                let Some((name, value)) = segment.trim().split_once('=') else {
-                    return false;
-                };
-                name == cookie_name && !value.trim().is_empty()
-            })
-        })
-}
-
-fn validate_ws_cookie_origin(
-    headers: &HeaderMap,
-    trust_forwarded_host: bool,
-) -> Result<(), String> {
-    let origin = headers
-        .get(axum::http::header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| "cookie websocket auth requires Origin header".to_owned())?;
-    let host = ws_cookie_origin_host(headers, trust_forwarded_host)
-        .ok_or_else(|| "cookie websocket auth requires Host header".to_owned())?;
-
-    if ws_origin_matches_host(origin, host) {
-        return Ok(());
-    }
-    Err("cookie websocket auth Origin does not match Host".to_owned())
-}
-
-fn ws_cookie_origin_host(headers: &HeaderMap, trust_forwarded_host: bool) -> Option<&str> {
-    let forwarded_host = trust_forwarded_host
-        .then(|| {
-            headers
-                .get("X-Forwarded-Host")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.split(',').next())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-        })
-        .flatten();
-    forwarded_host.or_else(|| {
-        headers
-            .get(axum::http::header::HOST)
-            .and_then(|value| value.to_str().ok())
-    })
-}
-
-fn ws_origin_matches_host(origin: &str, host: &str) -> bool {
-    let Ok(origin) = reqwest::Url::parse(origin) else {
-        return false;
-    };
-    let Some(origin_host) = origin.host_str() else {
-        return false;
-    };
-    let origin_port = origin
-        .port_or_known_default()
-        .unwrap_or_else(|| match origin.scheme() {
-            "https" | "wss" => 443,
-            _ => 80,
-        });
-    let Ok(request_authority) = ws_parse_authority(host, origin_port) else {
-        return false;
-    };
-    if origin_host.eq_ignore_ascii_case(&request_authority.host)
-        && origin_port == request_authority.port
-    {
-        return true;
-    }
-
-    is_loopback_host(origin_host) && is_loopback_host(&request_authority.host)
-}
-
-struct WebSocketAuthority {
-    host: String,
-    port: u16,
-}
-
-fn ws_parse_authority(authority: &str, default_port: u16) -> Result<WebSocketAuthority, ()> {
-    let parsed = reqwest::Url::parse(&format!("ws://{authority}")).map_err(|_| ())?;
-    let host = parsed.host_str().ok_or(())?.to_owned();
-    let port = parsed.port().unwrap_or(default_port);
-    Ok(WebSocketAuthority { host, port })
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost")
-        || host.eq_ignore_ascii_case("::1")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|addr| addr.is_loopback())
 }
 
 async fn read_ws_auth_prelude<S: SyncSocket>(
@@ -1462,19 +1359,6 @@ mod tests {
     }
 
     #[test]
-    fn ws_cookie_auth_detects_configured_cookie() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            axum::http::header::COOKIE,
-            "other=value; jazz-auth=token".parse().unwrap(),
-        );
-
-        assert!(ws_has_auth_cookie(&headers, Some("jazz-auth")));
-        assert!(!ws_has_auth_cookie(&headers, Some("missing")));
-        assert!(!ws_has_auth_cookie(&headers, None));
-    }
-
-    #[test]
     fn websocket_session_claims_use_canonical_and_collision_proof_namespaces() {
         let mut session = Session::new("https://issuer.example", "verified-subject").with_claims(
             serde_json::json!({
@@ -1545,128 +1429,6 @@ mod tests {
                 "raw alias leaked: {forbidden}"
             );
         }
-    }
-
-    #[test]
-    fn ws_cookie_origin_accepts_same_origin_and_loopback() {
-        assert!(ws_origin_matches_host(
-            "https://app.example:8443",
-            "app.example:8443"
-        ));
-        assert!(ws_origin_matches_host(
-            "http://localhost:5173",
-            "127.0.0.1:4200"
-        ));
-    }
-
-    #[test]
-    fn bug_302_cookie_origin_ignores_forwarded_host_without_trusted_proxy() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            axum::http::header::ORIGIN,
-            "https://evil.example".parse().unwrap(),
-        );
-        headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
-        headers.insert("X-Forwarded-Host", "evil.example".parse().unwrap());
-
-        assert!(
-            validate_ws_cookie_origin(&headers, false).is_err(),
-            "an untrusted forwarded host must not bypass the cookie origin guard"
-        );
-    }
-
-    #[test]
-    fn ws_cookie_origin_uses_first_forwarded_host_when_trusted_proxy_enabled() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            axum::http::header::ORIGIN,
-            "https://app.example".parse().unwrap(),
-        );
-        headers.insert(axum::http::header::HOST, "internal.local".parse().unwrap());
-        headers.insert(
-            "X-Forwarded-Host",
-            "app.example, proxy.local".parse().unwrap(),
-        );
-
-        assert!(validate_ws_cookie_origin(&headers, true).is_ok());
-    }
-
-    #[test]
-    fn ws_cookie_origin_rejects_missing_or_cross_origin() {
-        assert!(!ws_origin_matches_host(
-            "https://evil.example",
-            "app.example"
-        ));
-
-        let mut headers = HeaderMap::new();
-        headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
-        assert!(validate_ws_cookie_origin(&headers, false).is_err());
-
-        headers.insert(
-            axum::http::header::ORIGIN,
-            "https://evil.example".parse().unwrap(),
-        );
-        assert!(validate_ws_cookie_origin(&headers, false).is_err());
-    }
-
-    #[tokio::test]
-    async fn bug_302_orphan_backend_session_cannot_bypass_cookie_origin_check() {
-        let app_id = AppId::random();
-        let state = ServerBuilder::new(app_id)
-            .with_auth_config(AuthConfig {
-                auth_cookie_name: Some("jazz-auth".to_owned()),
-                allow_local_first_auth: true,
-                ..Default::default()
-            })
-            .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .build()
-            .await
-            .expect("build cookie auth websocket state")
-            .state;
-        let seed = [0x42; 32];
-        let token = jazz::tools::identity::mint_jazz_self_signed_token(
-            &seed,
-            jazz::tools::identity::LOCAL_FIRST_ISSUER,
-            &app_id.to_string(),
-            3_600,
-        )
-        .expect("mint local-first cookie token");
-        let user_id = jazz::tools::identity::derive_user_id(&seed).to_string();
-        let peer_identity = AuthorSubject::from_canonical(
-            &serde_json::to_string(&(jazz::tools::identity::LOCAL_FIRST_ISSUER, user_id))
-                .expect("encode local-first author"),
-        )
-        .expect("local-first peer identity");
-        let prelude = WebSocketPrelude {
-            peer_identity: peer_identity.canonical().to_owned(),
-            bootstrap_catalogue: false,
-            requested_link: RequestedWebSocketLink::OrdinarySession,
-            auth: jazz::tools::websocket_prelude_auth::AuthConfig {
-                backend_session: Some(serde_json::json!({ "attacker": true })),
-                ..Default::default()
-            },
-            local_first_audience: None,
-            bundle: None,
-        };
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            axum::http::header::COOKIE,
-            format!("jazz-auth={token}").parse().unwrap(),
-        );
-        headers.insert(
-            axum::http::header::ORIGIN,
-            "https://evil.example".parse().unwrap(),
-        );
-        headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
-
-        let error = ws_admission(prelude, &headers, &state)
-            .await
-            .expect_err("orphan backend session must not suppress cookie origin enforcement");
-        assert!(
-            error.to_string().contains("Origin does not match Host"),
-            "{error}"
-        );
     }
 
     #[test]
@@ -2049,9 +1811,101 @@ mod tests {
             panic!("a forged vouch may not pin a session");
         };
         assert!(
-            format!("{error:?}").contains("bundle pin needs"),
+            format!("{error:?}").contains("admits only its app's backend"),
             "{error:?}"
         );
+    }
+
+    /// A core admits only its app's backend. A client's own proof, a
+    /// backend session without the secret, or an external JWT reaches it
+    /// only through the backend (`createJazz`), never directly.
+    #[tokio::test]
+    async fn ws_a_client_connecting_directly_to_the_core_is_refused() {
+        let state = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                allow_local_first_auth: true,
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(Schema::new())
+            .build()
+            .await
+            .expect("build websocket test state")
+            .state;
+        let seed = [0x71; 32];
+        let proof = jazz::tools::identity::mint_jazz_self_signed_token(
+            &seed,
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            &state.app_id.to_string(),
+            3_600,
+        )
+        .expect("mint local-first proof");
+        let subject = jazz::tools::identity::derive_user_id(&seed).to_string();
+        let guest = AuthorSubject::reserved(jazz::tools::identity::LOCAL_FIRST_ISSUER, &subject)
+            .expect("local-first author")
+            .with_account(jazz::account_registry::local_first_account_id(
+                *state.app_id.uuid(),
+                &subject,
+            ));
+        let prelude = |auth: jazz::tools::websocket_prelude_auth::AuthConfig| WebSocketPrelude {
+            peer_identity: guest.canonical().to_owned(),
+            bootstrap_catalogue: false,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
+            auth,
+            local_first_audience: None,
+            bundle: None,
+        };
+        for auth in [
+            jazz::tools::websocket_prelude_auth::AuthConfig {
+                jwt_token: Some(proof.clone()),
+                ..Default::default()
+            },
+            jazz::tools::websocket_prelude_auth::AuthConfig {
+                backend_session: Some(serde_json::json!({
+                    "issuer": "https://issuer.example",
+                    "user_id": "alice",
+                    "claims": {},
+                })),
+                ..Default::default()
+            },
+            jazz::tools::websocket_prelude_auth::AuthConfig::default(),
+        ] {
+            let Err(error) = ws_admission(prelude(auth), &HeaderMap::new(), &state).await else {
+                panic!("a direct client must be refused");
+            };
+            assert!(
+                error.to_string().contains("admits only its app's backend"),
+                "{error}"
+            );
+        }
+
+        // An external JWT is refused even with the backend's secret: the
+        // backend verifies its users' tokens itself.
+        let external = prelude(jazz::tools::websocket_prelude_auth::AuthConfig {
+            jwt_token: Some("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2ln".to_owned()),
+            backend_secret: Some("backend-secret".to_owned()),
+            ..Default::default()
+        });
+        let Err(error) = ws_admission(external, &HeaderMap::new(), &state).await else {
+            panic!("an external JWT must be refused");
+        };
+        assert!(
+            error.to_string().contains("verifies no external JWTs"),
+            "{error}"
+        );
+
+        // The same proof, relayed by the backend, admits the guest.
+        let relayed = prelude(jazz::tools::websocket_prelude_auth::AuthConfig {
+            jwt_token: Some(proof),
+            backend_secret: Some("backend-secret".to_owned()),
+            ..Default::default()
+        });
+        let admission = ws_admission(relayed, &HeaderMap::new(), &state)
+            .await
+            .expect("a relayed guest is admitted");
+        assert_eq!(admission.trust, CommitUnitTrust::Session);
     }
 
     #[tokio::test]
@@ -2065,7 +1919,11 @@ mod tests {
                 panic!("a client may not pick its own bundle");
             };
             let message = format!("{error:?}");
-            assert!(message.contains("bundle pin needs"), "{message}");
+            assert!(
+                message.contains("admits only its app's backend")
+                    || message.contains("Invalid backend secret"),
+                "{message}"
+            );
         }
         let mut malformed = pinned_prelude(identity, Some("backend-secret"));
         malformed.bundle = Some("nope".to_owned());
@@ -3505,6 +3363,88 @@ mod tests {
         ));
     }
 
+    /// The app's backend's word on the account registry (its admin calls).
+    #[cfg(feature = "embedded-server")]
+    async fn admin_accounts(
+        core: &crate::server::testing::JazzServer,
+        operation: &str,
+        body: serde_json::Value,
+    ) -> reqwest::Response {
+        reqwest::Client::new()
+            .post(format!(
+                "{}/apps/{}/admin/accounts/{operation}",
+                core.base_url(),
+                core.app_id()
+            ))
+            .header("x-jazz-admin-secret", core.admin_secret())
+            .json(&body)
+            .send()
+            .await
+            .expect("admin account call")
+    }
+
+    /// Enroll an identity the backend authenticated, returning its account.
+    #[cfg(feature = "embedded-server")]
+    async fn enroll(
+        core: &crate::server::testing::JazzServer,
+        subject: &str,
+    ) -> jazz::account_registry::AccountId {
+        let response = admin_accounts(
+            core,
+            "login-or-register",
+            serde_json::json!({ "identity": {
+                "issuer": crate::server::testing::TEST_JWT_ISSUER,
+                "subject": subject,
+            } }),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body: serde_json::Value = response.json().await.expect("account response");
+        jazz::account_registry::AccountId(
+            uuid::Uuid::parse_str(body["account"].as_str().expect("account")).expect("uuid"),
+        )
+    }
+
+    /// Revoke an identity, as its own account approves.
+    #[cfg(feature = "embedded-server")]
+    async fn revoke(
+        core: &crate::server::testing::JazzServer,
+        issuer: &str,
+        subject: &str,
+    ) -> reqwest::Response {
+        let identity = serde_json::json!({ "issuer": issuer, "subject": subject });
+        admin_accounts(
+            core,
+            "revoke",
+            serde_json::json!({ "approver": identity, "target": identity }),
+        )
+        .await
+    }
+
+    /// A local-first guest of `core`: its proof, its founding author (with the
+    /// account the core assigns it) and its subject. The only public session
+    /// a core admits, relayed by the backend with its secret.
+    #[cfg(feature = "embedded-server")]
+    fn guest(
+        core: &crate::server::testing::JazzServer,
+        seed: [u8; 32],
+    ) -> (String, AuthorSubject, String) {
+        let token = jazz::tools::identity::mint_jazz_self_signed_token(
+            &seed,
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            &core.app_id().to_string(),
+            3600,
+        )
+        .expect("mint guest proof");
+        let subject = jazz::tools::identity::derive_user_id(&seed).to_string();
+        let account =
+            jazz::account_registry::local_first_account_id(*core.app_id().uuid(), &subject);
+        let identity = AuthorSubject::reserved(jazz::tools::identity::LOCAL_FIRST_ISSUER, &subject)
+            .expect("local-first author")
+            .with_account(account);
+        (token, identity, subject)
+    }
+
     /// Alice holds a live account websocket. An unrelated registry change
     /// (Bob enrolling) must not disconnect her, while revoking Alice's
     /// identity must still close her socket promptly with an auth failure.
@@ -3513,7 +3453,7 @@ mod tests {
     #[cfg(feature = "embedded-server")]
     #[tokio::test]
     async fn revoking_an_account_closes_its_live_websocket_promptly() {
-        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER, TestJwtIssuer};
+        use crate::server::testing::JazzServer;
 
         let schema = SchemaBuilder::new()
             .table(
@@ -3525,27 +3465,7 @@ mod tests {
         let core = JazzServer::start_with_schema(schema)
             .await
             .expect("start test server");
-        let client = reqwest::Client::new();
-        let accounts = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
-        let alice = TestJwtIssuer::jwt_for_user("alice");
-        let registered: serde_json::Value = client
-            .post(format!("{accounts}/register"))
-            .bearer_auth(&alice)
-            .send()
-            .await
-            .expect("register Alice")
-            .json()
-            .await
-            .expect("Alice's account");
-        let account = jazz::account_registry::AccountId(
-            registered["account"]
-                .as_str()
-                .and_then(|value| uuid::Uuid::parse_str(value).ok())
-                .expect("account uuid"),
-        );
-        let identity = AuthorSubject::authenticated(TEST_JWT_ISSUER, "alice")
-            .expect("Alice's principal")
-            .with_account(account);
+        let (alice, identity, alice_subject) = guest(&core, [0xa1; 32]);
 
         let (mut ws, _) = connect_async(format!(
             "ws://127.0.0.1:{}/apps/{}/ws",
@@ -3556,7 +3476,7 @@ mod tests {
         .expect("connect Alice");
         let prelude = serde_json::json!({
             "peer_identity": identity.canonical(),
-            "auth": { "jwt_token": alice },
+            "auth": { "jwt_token": alice, "backend_secret": JazzServer::BACKEND_SECRET },
         });
         ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
             .await
@@ -3579,13 +3499,7 @@ mod tests {
             "Alice's account session must be admitted"
         );
 
-        let bob = client
-            .post(format!("{accounts}/register"))
-            .bearer_auth(TestJwtIssuer::jwt_for_user("bob"))
-            .send()
-            .await
-            .expect("register Bob");
-        assert_eq!(bob.status(), axum::http::StatusCode::OK);
+        enroll(&core, "bob").await;
         let quiet_until = tokio::time::Instant::now() + Duration::from_millis(300);
         while let Ok(message) = tokio::time::timeout_at(quiet_until, ws.next()).await {
             let message = message
@@ -3599,15 +3513,12 @@ mod tests {
             );
         }
 
-        let revoked = client
-            .post(format!("{accounts}/revoke"))
-            .bearer_auth(&alice)
-            .json(&serde_json::json!({
-                "identity": { "issuer": TEST_JWT_ISSUER, "subject": "alice" }
-            }))
-            .send()
-            .await
-            .expect("revoke Alice");
+        let revoked = revoke(
+            &core,
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            &alice_subject,
+        )
+        .await;
         assert_eq!(revoked.status(), axum::http::StatusCode::NO_CONTENT);
         // No client traffic is needed: the registry change alone must close
         // the socket. The per-message gate is pinned separately by
@@ -3768,7 +3679,7 @@ mod tests {
     #[cfg(feature = "embedded-server")]
     #[tokio::test]
     async fn failed_revoke_flush_still_closes_the_per_message_account_gate() {
-        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER, TestJwtIssuer};
+        use crate::server::testing::JazzServer;
 
         let schema = SchemaBuilder::new()
             .table(
@@ -3783,24 +3694,7 @@ mod tests {
             .start()
             .await
             .expect("start test server");
-        let client = reqwest::Client::new();
-        let accounts = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
-        let alice = TestJwtIssuer::jwt_for_user("alice");
-        let registered: serde_json::Value = client
-            .post(format!("{accounts}/register"))
-            .bearer_auth(&alice)
-            .send()
-            .await
-            .expect("register Alice")
-            .json()
-            .await
-            .expect("Alice's account");
-        let account = jazz::account_registry::AccountId(
-            uuid::Uuid::parse_str(registered["account"].as_str().expect("account")).expect("uuid"),
-        );
-        let identity = AuthorSubject::authenticated(TEST_JWT_ISSUER, "alice")
-            .expect("principal")
-            .with_account(account);
+        let (alice, identity, alice_subject) = guest(&core, [0xa2; 32]);
         let (mut ws, _) = connect_async(format!(
             "ws://127.0.0.1:{}/apps/{}/ws",
             core.port(),
@@ -3808,7 +3702,7 @@ mod tests {
         ))
         .await
         .expect("connect Alice");
-        let prelude = serde_json::json!({ "peer_identity": identity.canonical(), "auth": { "jwt_token": alice } });
+        let prelude = serde_json::json!({ "peer_identity": identity.canonical(), "auth": { "jwt_token": alice, "backend_secret": JazzServer::BACKEND_SECRET } });
         ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
             .await
             .expect("prelude");
@@ -3832,11 +3726,12 @@ mod tests {
         let mut changes = state.accounts.as_ref().map(|registry| registry.subscribe());
         let registry = state.accounts.as_ref().expect("account registry");
         registry.fail_next_write_for_test();
-        let revoked = client
-            .post(format!("{accounts}/revoke"))
-            .bearer_auth(&alice)
-            .json(&serde_json::json!({ "identity": { "issuer": TEST_JWT_ISSUER, "subject": "alice" } }))
-            .send().await.expect("revoke Alice");
+        let revoked = revoke(
+            &core,
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            &alice_subject,
+        )
+        .await;
         assert!(
             !revoked.status().is_success(),
             "the injected flush failure surfaces as a failed revoke"
@@ -3851,8 +3746,8 @@ mod tests {
         let lookup = super::super::accounts::resolve_assignment(
             &core.server_state(),
             jazz::account_registry::Principal {
-                issuer: TEST_JWT_ISSUER.into(),
-                subject: "alice".into(),
+                issuer: jazz::tools::identity::LOCAL_FIRST_ISSUER.into(),
+                subject: alice_subject.clone(),
             },
         )
         .await;
@@ -3882,24 +3777,10 @@ mod tests {
     #[cfg(feature = "embedded-server")]
     #[tokio::test]
     async fn per_message_account_gate_refuses_the_first_frame_after_revocation() {
-        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER, TestJwtIssuer};
+        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER};
 
         let core = JazzServer::start().await.expect("start test server");
-        let client = reqwest::Client::new();
-        let accounts = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
-        let alice = TestJwtIssuer::jwt_for_user("alice");
-        let registered: serde_json::Value = client
-            .post(format!("{accounts}/register"))
-            .bearer_auth(&alice)
-            .send()
-            .await
-            .expect("register Alice")
-            .json()
-            .await
-            .expect("Alice's account");
-        let account = jazz::account_registry::AccountId(
-            uuid::Uuid::parse_str(registered["account"].as_str().expect("account")).expect("uuid"),
-        );
+        let account = enroll(&core, "alice").await;
         let identity = Some(
             AuthorSubject::authenticated(TEST_JWT_ISSUER, "alice")
                 .expect("principal")
@@ -3911,22 +3792,12 @@ mod tests {
             .await
             .expect("admitted");
 
-        let bob = client
-            .post(format!("{accounts}/register"))
-            .bearer_auth(TestJwtIssuer::jwt_for_user("bob"))
-            .send()
-            .await
-            .expect("register Bob");
-        assert_eq!(bob.status(), axum::http::StatusCode::OK);
+        enroll(&core, "bob").await;
         account_admission_current(&state, identity, &mut changes)
             .await
             .expect("an unrelated enrollment keeps Alice admitted");
 
-        let revoked = client
-            .post(format!("{accounts}/revoke"))
-            .bearer_auth(&alice)
-            .json(&serde_json::json!({ "identity": { "issuer": TEST_JWT_ISSUER, "subject": "alice" } }))
-            .send().await.expect("revoke Alice");
+        let revoked = revoke(&core, TEST_JWT_ISSUER, "alice").await;
         assert_eq!(revoked.status(), axum::http::StatusCode::NO_CONTENT);
         assert!(
             account_admission_current(&state, identity, &mut changes)
@@ -3944,7 +3815,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     #[ignore = "#3387: timing probe, run manually with --ignored"]
     async fn probe_3387_per_message_admission_cost() {
-        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER, TestJwtIssuer};
+        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER};
 
         const CHECKS_PER_SOCKET: usize = 2_000;
         let core = JazzServer::builder()
@@ -3952,21 +3823,7 @@ mod tests {
             .start()
             .await
             .expect("start test server");
-        let client = reqwest::Client::new();
-        let accounts = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
-        let registered: serde_json::Value = client
-            .post(format!("{accounts}/register"))
-            .bearer_auth(TestJwtIssuer::jwt_for_user("alice"))
-            .send()
-            .await
-            .expect("register Alice")
-            .json()
-            .await
-            .expect("Alice's account");
-        let account = jazz::account_registry::AccountId(
-            uuid::Uuid::parse_str(registered["account"].as_str().expect("account"))
-                .expect("account uuid"),
-        );
+        let account = enroll(&core, "alice").await;
         let identity = Some(
             AuthorSubject::authenticated(TEST_JWT_ISSUER, "alice")
                 .expect("Alice's principal")

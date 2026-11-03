@@ -370,6 +370,7 @@ async fn public_jazz_client_syncs_through_explicit_native_adapter() {
                     account_id: None,
                     jwt_token: None,
                     backend_secret: None,
+                    backend_session: None,
                     admin_secret: Some("secret".to_owned()),
                     migrations: Default::default(),
                 },
