@@ -2654,6 +2654,64 @@ mod tests {
         store.close().unwrap();
     }
 
+    /// The same through a Vercel Blob store: the core writes every leaf
+    /// itself, and a reopened store reads them back (each checked against
+    /// its hash, since Blob keeps no checksum).
+    #[test]
+    fn large_values_move_to_a_vercel_blob_store_and_read_back() {
+        let blob = crate::vercel_blob::mock::MockBlob::start();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = || {
+            let store = crate::vercel_blob::VercelBlobChunkStore::new(
+                blob.options("jazz/app/"),
+                "me".to_owned(),
+            )
+            .unwrap();
+            StorageConfig::data_dir(dir.path()).with_blobs(Blobs::Network(NetworkChunkStore {
+                store: Arc::new(store),
+                name: "mock blob".to_owned(),
+            }))
+        };
+        let value: Vec<u8> = (0..400 * 1024u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        {
+            let store = AppStore::open(&storage()).unwrap();
+            let runtime = store
+                .start_runtime(docs(), NodeRole::Core, false, false)
+                .unwrap();
+            let written = value.clone();
+            block_on(runtime.run(move |owner| {
+                block_on(owner.db.insert(
+                    "docs",
+                    BTreeMap::from([("body".to_owned(), jazz::records::Value::Bytes(written))]),
+                    Default::default(),
+                ))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            }))
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while blob.names("jazz/app/").len() < 2 {
+                assert!(Instant::now() < deadline, "leaves never reached the store");
+                block_on(runtime.run(|_| Ok(()))).unwrap();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            store.close().unwrap();
+        }
+        let store = AppStore::open(&storage()).unwrap();
+        let runtime = store
+            .start_runtime(docs(), NodeRole::Core, false, false)
+            .unwrap();
+        let read = block_on(runtime.run(|owner| Ok(read_body(&owner.db)))).unwrap();
+        assert_eq!(read.as_deref(), Some(value.as_slice()));
+        assert!(
+            blob.state.calls.gets.load(Ordering::Relaxed) > 0,
+            "read from the store"
+        );
+        store.close().unwrap();
+    }
+
     #[test]
     fn chunk_io_backoff_doubles_to_a_minute_and_resets() {
         let (work, _work) = std_mpsc::channel();
