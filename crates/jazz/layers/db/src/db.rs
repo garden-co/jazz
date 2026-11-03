@@ -97,6 +97,13 @@ pub struct PreparedQuery {
 }
 
 impl PreparedQuery {
+    /// An unrelated requested subject does not replace the executing author's registry.
+    fn fixed_claims_for(&self, author: AuthorSubject) -> Option<&BTreeMap<String, Value>> {
+        self.request_claims
+            .as_ref()
+            .and_then(|(requested, claims)| (*requested == author).then_some(claims))
+    }
+
     /// The same query without its window (limit and offset).
     pub(crate) fn unwindowed(&self) -> PreparedQuery {
         let mut query = self.query.clone();
@@ -3649,11 +3656,9 @@ impl Inner {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
     ) -> (Option<Session>, Session) {
-        let claims_for = |author: AuthorSubject| match &prepared.request_claims {
-            Some((requested, claims)) if *requested == author => {
-                Session::for_author(author, claims.clone())
-            }
-            _ => self.session(author),
+        let claims_for = |author: AuthorSubject| match prepared.fixed_claims_for(author) {
+            Some(claims) => Session::for_author(author, claims.clone()),
+            None => self.session(author),
         };
         let policy = identity.map(claims_for);
         let claims = policy
