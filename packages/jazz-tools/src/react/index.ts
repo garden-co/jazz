@@ -26,11 +26,10 @@ export { useAuthState, type AuthStateInfo } from "../react-core/use-auth-state.j
 export { useSyncStatus } from "../react-core/use-sync-status.js";
 export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 export type { QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
+export type { LocalFirstLoader, LocalFirstModule } from "../runtime/local-first-upgrade.js";
 
-export {
-  createAccountManager,
-  type AccountManagerConfig,
-} from "../accounts/create-account-manager.js";
+export { createAccountManager } from "../web/lazy-local-first.js";
+export type { AccountManagerConfig } from "../accounts/create-account-manager.js";
 export * from "../accounts/exports.js";
 
 export { useAccountState } from "../react-core/use-account-state.js";

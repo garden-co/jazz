@@ -1,1 +1,2 @@
-export { createJazzClient, type JazzClient } from "../web/create-jazz-client.js";
+export { createJazzClient } from "../web/lazy-local-first.js";
+export type { JazzClient } from "../web/registered-jazz-client.js";
