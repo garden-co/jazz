@@ -17,6 +17,7 @@ import {
   type AccountDbConfig,
 } from "../accounts/context.js";
 import { prepareAccountManager, type AccountStore } from "../accounts/persistence.js";
+import { clientScope, DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
 import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
 import type { Db } from "../runtime/db.js";
 import { LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
@@ -80,10 +81,12 @@ export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Pr
  * JavaScript instead of WASM.
  */
 export async function createAccountManager(config: AccountManagerConfig) {
-  const registry = accountRegistryUrl(config.serverUrl, config.appId);
+  const serverUrl = config.serverUrl ?? DEFAULT_SERVER_URL;
+  const scope = clientScope({ ...config, serverUrl });
+  const registry = accountRegistryUrl(serverUrl, scope);
   const store = config.store ?? browserAccountStore(registry, config.env ?? "dev");
   return prepareAccountManager({
-    appId: config.appId,
+    appId: scope,
     registry,
     store,
     // A thin client has no local data to reopen before the provider answers.

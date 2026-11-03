@@ -1,6 +1,7 @@
 import type { ConnectRuntimeOptions } from "../runtime/client.js";
 import { JazzClient } from "../runtime/client.js";
 import { canonicalAuthorSubject } from "../runtime/author-id.js";
+import { clientScope } from "../runtime/client-scope.js";
 import { resolveClientInternalSessionSync } from "../runtime/client-session.js";
 import type { AppContext } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
@@ -44,7 +45,7 @@ export class ThinRuntimeSource extends RuntimeSource<DbConfig> {
   }: RuntimeClientContext<DbConfig>): JazzClient {
     const runtimeOptions: ConnectRuntimeOptions = { onAuthFailure };
     const context: AppContext = {
-      appId: config.appId,
+      appId: clientScope(config),
       accountId: config.accountId,
       schema,
       driver: { type: "memory" },
