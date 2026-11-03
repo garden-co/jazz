@@ -163,8 +163,24 @@ impl WorkloadVerifier {
         if verified.subject != self.workload.subject {
             return Err("workload token subject is not the trusted workload".to_owned());
         }
+        if let Ok(mut latest) = LATEST_WORKLOAD_TOKEN.lock() {
+            *latest = Some(token.to_owned());
+        }
         Ok(())
     }
+}
+
+/// The trusted workload's latest verified token in this process: on
+/// Vercel, the deploying function's OIDC token, which is also what its AWS
+/// role trusts ([`crate::s3::WebIdentityToken::Workload`]).
+static LATEST_WORKLOAD_TOKEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The trusted workload's latest verified token, if one arrived yet.
+pub fn latest_workload_token() -> Option<String> {
+    LATEST_WORKLOAD_TOKEN
+        .lock()
+        .ok()
+        .and_then(|token| token.clone())
 }
 
 /// How a server checks the backend credential.
@@ -284,7 +300,7 @@ fn header(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn vouched_value(secrets: &InternalSecrets, access: BackendAccess) -> String {
+pub(crate) fn vouched_value(secrets: &InternalSecrets, access: BackendAccess) -> String {
     format!("{} {}", secrets.backend, access.as_str())
 }
 

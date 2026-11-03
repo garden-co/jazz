@@ -3,7 +3,6 @@ packages:
   - packages/*
   - crates/jazz-rn
   - crates/jazz-rn/npm/*
-  - starters/*
   - examples/*
   - examples/*/apps/*
   - examples/docs/*
@@ -38,9 +37,6 @@ catalogs:
     jsdom: 26.1.0
     vitest: 4.1.0
     vue-tsc: "^2.1.10"
-
-ignoredBuiltDependencies:
-  - blake3
 
 allowBuilds:
   "@swc/core": true

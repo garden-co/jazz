@@ -51,6 +51,15 @@ async function shoot(page, name) {
 
 const sidebarItem = (page, name) => page.getByRole("button", { name, exact: true }).first();
 
+/** Waits for the open page's title; the previous page's title field is still there until it switches. */
+async function titleIs(page, title) {
+  await page.waitForFunction(
+    (title) => document.querySelector('textarea[aria-label="Page title"]')?.value === title,
+    title,
+    { timeout },
+  );
+}
+
 try {
   const ownerContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   const owner = await signUp(ownerContext, "Ada");
@@ -63,11 +72,7 @@ try {
   // Blocks are editable in place and new ones append at the end.
   await sidebarItem(owner, "Songs").click();
   await sidebarItem(owner, "Harbour lights").click();
-  await owner.getByRole("textbox", { name: "Page title" }).waitFor();
-  assert.equal(
-    await owner.getByRole("textbox", { name: "Page title" }).inputValue(),
-    "Harbour lights",
-  );
+  await titleIs(owner, "Harbour lights");
   await owner.getByRole("button", { name: "Add block" }).click();
   await owner.getByRole("menuitem", { name: "Text" }).click();
   await owner.keyboard.type("Bridge: stay on the IV chord");
@@ -78,12 +83,13 @@ try {
   await owner.getByRole("table").waitFor();
   assert.ok(await owner.getByText("Confirm backline with Porto venue").isVisible());
   await shoot(owner, "issues-table");
-  await owner.getByRole("tab", { name: "Board" }).click();
+  await owner.getByRole("button", { name: "Board", exact: true }).click();
   await owner.getByRole("region", { name: "In progress" }).waitFor();
   await shoot(owner, "issues-board");
 
   // Share one song with a guest.
   await sidebarItem(owner, "Harbour lights").click();
+  await titleIs(owner, "Harbour lights");
   await owner.getByRole("button", { name: "Share" }).click();
   await owner.getByRole("button", { name: "Create link" }).click();
   const linkInput = owner.getByRole("dialog").getByRole("textbox").last();
@@ -98,19 +104,19 @@ try {
   const guest = await signUp(guestContext, "Bo");
   await guest.goto(inviteUrl);
   await guest.waitForURL(/p=/);
-  await guest.getByRole("textbox", { name: "Page title" }).waitFor();
-  assert.equal(
-    await guest.getByRole("textbox", { name: "Page title" }).inputValue(),
-    "Harbour lights",
-  );
+  await titleIs(guest, "Harbour lights");
   await guest
     .getByText("Bridge: stay on the IV chord")
     .or(guest.locator("textarea", { hasText: "Bridge" }))
     .first()
     .waitFor();
-  const guestNav = await guest.getByRole("navigation", { name: "Pages" }).innerText();
-  assert.ok(guestNav.includes("Harbour lights"), "guest sees the shared song");
-  assert.ok(!guestNav.includes("Tour notes"), "guest does not see the rest of the band");
+  await guest.getByText("Shared with you").waitFor();
+  assert.ok(await sidebarItem(guest, "Harbour lights").isVisible(), "guest sees the shared song");
+  assert.equal(
+    await guest.getByRole("button", { name: "Tour notes", exact: true }).count(),
+    0,
+    "guest does not see the rest of the band",
+  );
   await shoot(guest, "guest");
 
   // Live collaboration: the owner's edit reaches the guest without a reload.

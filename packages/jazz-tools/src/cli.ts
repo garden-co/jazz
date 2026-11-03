@@ -19,6 +19,8 @@ import { isCloudCommand, runCloudCommand } from "./cloud/commands.js";
 export interface BuildOptions {
   schemaDir: string;
   strictProvenance?: boolean;
+  /** Move nothing; fail if migrations or snapshots still need moving or renaming. */
+  check?: boolean;
 }
 
 export interface SchemaCompileOptions {
@@ -43,8 +45,9 @@ function parseArgs(args: string[]): { command: string; options: BuildOptions } {
   const command = args[0] || "";
   const schemaDir = getFlagValue(args, "--schema-dir", "last") ?? process.cwd();
   const strictProvenance = args.includes("--strict-provenance");
+  const check = args.includes("--check");
 
-  return { command, options: { schemaDir, strictProvenance } };
+  return { command, options: { schemaDir, strictProvenance, check } };
 }
 
 export async function validate(options: BuildOptions): Promise<void> {
@@ -333,6 +336,7 @@ function printHelp(): void {
   console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
   console.log("\nCommands:");
   console.log("  validate              Validate root schema.ts and permissions.ts");
+  console.log("                        (--check: move nothing, fail if legacy migrations remain)");
   console.log("  schema compile        Print the compiled schema as JSON");
   console.log("  migrations create     Generate a migration stub between two schema versions");
   console.log("  migrations graph      Visualize the full migration graph");

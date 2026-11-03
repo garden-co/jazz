@@ -29,6 +29,9 @@ pub struct DbConfig {
     /// Where settled large-value leaf bytes live. `None` keeps them in the
     /// SQLite file ([`crate::chunk_store`]).
     pub chunk_store: Option<std::sync::Arc<dyn crate::chunk_store::ChunkStore>>,
+    /// The host runs chunk-store I/O ([`crate::db::Db::take_chunk_io`])
+    /// and the tick never awaits it.
+    pub host_chunk_io: bool,
     /// The wall clock (Unix ms) the store draws commit positions from, as
     /// hybrid-clock timestamps ([`crate::db::shard`]), so the positions of
     /// every store compare by time. `None` reads the system clock
@@ -60,6 +63,7 @@ impl DbConfig {
             identity,
             id_source: None,
             chunk_store: None,
+            host_chunk_io: false,
             clock: None,
             migrations: Migrations::default(),
             system_node: None,
@@ -85,6 +89,17 @@ impl DbConfig {
         store: std::sync::Arc<dyn crate::chunk_store::ChunkStore>,
     ) -> Self {
         self.chunk_store = Some(store);
+        self
+    }
+
+    /// Have the host run the chunk store's I/O: [`crate::db::Db::tick`]
+    /// then never awaits it, and the host takes each batch with
+    /// [`crate::db::Db::take_chunk_io`], runs it where it likes (a network
+    /// store on its own runtime) and hands the outcome back with
+    /// [`crate::db::Db::finish_chunk_io`]. For hosts whose tick is
+    /// synchronous, so a slow bucket never stalls sync.
+    pub fn with_host_chunk_io(mut self) -> Self {
+        self.host_chunk_io = true;
         self
     }
 

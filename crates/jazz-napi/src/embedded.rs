@@ -7,7 +7,9 @@
 use std::sync::{Arc, Mutex};
 
 use jazz::tools::AppId;
-use jazz_server::{AuthConfig, EmbeddedOutgoing, EmbeddedServer, ServerBuilder, StorageBackend};
+use jazz_server::{
+    AuthConfig, BlobStore, EmbeddedOutgoing, EmbeddedServer, ServerBuilder, StorageBackend,
+};
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
@@ -21,6 +23,17 @@ struct JazzCoreOpenOptions {
     admin_secret: String,
     data_dir: Option<String>,
     in_memory: Option<bool>,
+    /// `"files"`, `"s3"` or `"sqlite"` (the default): where settled
+    /// large-value bytes of a persistent core live.
+    blobs: Option<String>,
+    /// The directory for `blobs: "files"`; defaults to `<dataDir>/blobs`.
+    blobs_dir: Option<String>,
+    /// For `blobs: "s3"`, each defaulting to the environment
+    /// (`S3_BUCKET_NAME`, `AWS_REGION`; credentials always come from it).
+    s3_bucket: Option<String>,
+    s3_region: Option<String>,
+    s3_endpoint: Option<String>,
+    s3_prefix: Option<String>,
     jwt_public_key: Option<String>,
     jwt_issuer: Option<String>,
     jwt_audience: Option<String>,
@@ -57,7 +70,7 @@ impl JazzCore {
     /// Open the core's storage and serve it in this process.
     #[napi(
         factory,
-        ts_args_type = "options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; jwtPublicKey?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }",
+        ts_args_type = "options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: \"files\" | \"s3\" | \"sqlite\"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; jwtPublicKey?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }",
         ts_return_type = "Promise<JazzCore>"
     )]
     pub async fn open(options: serde_json::Value) -> napi::Result<Self> {
@@ -88,9 +101,35 @@ impl JazzCore {
                 path: data_dir.into(),
             }
         };
+        let blobs = match (opts.blobs.as_deref(), opts.blobs_dir) {
+            (None | Some("sqlite"), None) => BlobStore::Sqlite,
+            (Some("files"), dir) => BlobStore::Files {
+                dir: dir.map(Into::into),
+            },
+            (Some("s3"), None) => BlobStore::S3(
+                jazz_server::s3::S3Options::from_env(
+                    opts.s3_bucket,
+                    opts.s3_region,
+                    opts.s3_endpoint,
+                    opts.s3_prefix,
+                )
+                .map_err(|error| napi::Error::from_reason(format!("JazzCore: {error}")))?,
+            ),
+            (Some("sqlite" | "s3") | None, Some(_)) => {
+                return Err(napi::Error::from_reason(
+                    "JazzCore: blobsDir needs blobs: \"files\"",
+                ));
+            }
+            (Some(other), _) => {
+                return Err(napi::Error::from_reason(format!(
+                    "JazzCore: blobs must be \"files\", \"s3\" or \"sqlite\", not {other:?}"
+                )));
+            }
+        };
         let built = ServerBuilder::new(app_id)
             .with_auth_config(auth_config)
             .with_storage(storage)
+            .with_blob_store(blobs)
             .build()
             .await
             .map_err(napi::Error::from_reason)?;
@@ -233,47 +272,21 @@ impl JazzCoreSocket {
 /// too, and it goes away with the process, so a crash or `docker stop`
 /// never leaves the directory locked.
 fn lock_data_dir(dir: &std::path::Path) -> napi::Result<std::fs::File> {
-    use std::io::Write;
-    std::fs::create_dir_all(dir).map_err(|error| {
-        napi::Error::from_reason(format!("sqlite(): {}: {error}", dir.display()))
-    })?;
-    let path = dir.join("jazz.lock");
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&path)
-        .map_err(|error| {
-            napi::Error::from_reason(format!("sqlite(): {}: {error}", path.display()))
-        })?;
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => {
-            let holder = std::fs::read_to_string(&path).unwrap_or_default();
-            let holder = holder.trim();
-            return Err(napi::Error::from_reason(format!(
-                "sqlite(): {} is already open{}. One core per directory: create Jazz once and reuse it \
-                 (cache it on globalThis across hot reloads), and give each process its own directory or use remote().",
-                dir.display(),
-                if holder.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({holder})")
-                },
-            )));
+    jazz_server::lock_data_dir(dir).map_err(|error| match error {
+        jazz_server::DataDirLockError::Held(holder) => napi::Error::from_reason(format!(
+            "sqlite(): {} is already open{}. One core per directory: create Jazz once and reuse it \
+             (cache it on globalThis across hot reloads), and give each process its own directory or use remote().",
+            dir.display(),
+            if holder.is_empty() {
+                String::new()
+            } else {
+                format!(" ({holder})")
+            },
+        )),
+        jazz_server::DataDirLockError::Io(error) => {
+            napi::Error::from_reason(format!("sqlite(): {error}"))
         }
-        Err(std::fs::TryLockError::Error(error)) => {
-            return Err(napi::Error::from_reason(format!(
-                "sqlite(): could not lock {}: {error}",
-                path.display()
-            )));
-        }
-    }
-    // Who holds it, for the message above; the lock itself is what counts.
-    let _ = file.set_len(0);
-    let _ = write!(file, "process {}", std::process::id());
-    Ok(file)
+    })
 }
 
 fn pairs(headers: &[Vec<String>]) -> Vec<(String, String)> {

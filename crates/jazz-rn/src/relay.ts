@@ -45,6 +45,8 @@ export type NativeForegroundRuntimeFactory = {
     ttlSeconds: number,
     nowSeconds: number,
   ): string;
+  /** Stateless text anchors and ranges: a JSON request in, JSON out. */
+  textAnchors?(requestJson: string): string;
   /**
    * Create one memory-only foreground runtime for an already admitted scope.
    * The returned JSI HostObject is consumed only by Jazz's internal native
@@ -333,6 +335,10 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
     mintLocalFirstToken:
       typeof installed.mintLocalFirstToken === "function"
         ? installed.mintLocalFirstToken.bind(installed)
+        : undefined,
+    textAnchors:
+      typeof installed.textAnchors === "function"
+        ? installed.textAnchors.bind(installed)
         : undefined,
     openAttached(capability: Uint8Array): NativeForegroundRuntime {
       // This is not the authorization check--the native host still validates

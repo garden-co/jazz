@@ -1,3 +1,4 @@
+import { textAnchorsFrom, type TextAnchors } from "../runtime/text-anchors.js";
 import { createHash, randomUUID } from "node:crypto";
 import { clientScope } from "../runtime/client-scope.js";
 import { admitBackendSecret } from "./admission.js";
@@ -7,7 +8,13 @@ import {
 } from "../runtime/credentialed-transport.js";
 import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
 import type { BackendRequestOptions } from "./request-auth.js";
-import { NapiDb } from "jazz-napi";
+import {
+  NapiDb,
+  captureTextAnchor,
+  captureTextRange,
+  resolveTextAnchor,
+  resolveTextRange,
+} from "jazz-napi";
 import { mintLocalFirstTokenFromSeed } from "../runtime/local-first-token.js";
 import { accountRegistryUrl, createAccountDbWithRuntimeSource } from "../accounts/context.js";
 import {
@@ -112,6 +119,15 @@ function backendNodeId(config: JazzSessionConfig): string {
 
 /** Each selected user opens an ordinary native client, never a backend facade. */
 class NodeUserRuntimeSource extends RuntimeSource {
+  override textAnchors(): TextAnchors {
+    return textAnchorsFrom({
+      captureTextAnchor,
+      captureTextRange,
+      resolveTextAnchor,
+      resolveTextRange,
+    });
+  }
+
   override readonly supportsPolicyBypass = false;
   flush(): void {
     // Native writes already cross the local durability boundary when committed.
