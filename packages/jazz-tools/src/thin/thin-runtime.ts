@@ -334,7 +334,10 @@ export class ThinRuntime implements Runtime {
     const lost = new Set<OpenTransactionId>();
     for (const [id, transaction] of this.transactions) {
       if (transaction.begin.sent && !transaction.lost) {
+        // Kept, so its handle's commit says it was lost, but without its
+        // staged writes' answers.
         transaction.lost = true;
+        transaction.requests = [];
         lost.add(id);
       }
     }
@@ -406,7 +409,9 @@ export class ThinRuntime implements Runtime {
   /**
    * Every read and write runs as this connection's session. The client
    * names its own session with each call; another one (a trusted backend
-   * acting for a user) is refused rather than silently read as this one.
+   * acting for a user, `db.forSession(other)`) is refused rather than
+   * silently served as this one. A connection that does not know its
+   * author (a cookie session) refuses any session named explicitly.
    */
   private refuseOtherSession(sessionJson: string | null | undefined, operation: string): void {
     if (sessionJson == null) return;
@@ -420,16 +425,26 @@ export class ThinRuntime implements Runtime {
       throw new Error(`${operation} failed: attributed writes are not supported in thin mode`);
     }
     const session = parsed.session ?? parsed;
-    if (session.user_id === undefined || this.author === undefined) return;
-    const author =
-      session.issuer && session.user_id
-        ? canonicalAuthorSubject(session.issuer, session.user_id, session.account_id)
-        : undefined;
-    if (author !== this.author) {
+    if (session.user_id === undefined) return;
+    const author = session.issuer
+      ? canonicalAuthorSubject(session.issuer, session.user_id, session.account_id)
+      : undefined;
+    if (this.author === undefined || author !== this.author) {
       throw new Error(
         `${operation} failed: reading or writing as another session is not supported in thin mode`,
       );
     }
+  }
+
+  /** What a write context asks of a thin write. Its session is the connection's. */
+  private writeTarget(writeContext: string | null | undefined, operation: string): WriteTarget {
+    this.refuseOtherSession(writeContext, operation);
+    return {
+      operation,
+      transaction: txIdFromContext(writeContext),
+      branchView: branchViewFromWriteContext(writeContext),
+      updatedAtMs: effectiveUpdatedAtMs(writeContext) ?? Date.now(),
+    };
   }
 
   async query(
@@ -563,7 +578,7 @@ export class ThinRuntime implements Runtime {
     writeContext?: string | null,
     objectId?: string | null,
   ): InsertResult {
-    const context = writeTarget(writeContext, "Insert");
+    const context = this.writeTarget(writeContext, "Insert");
     const definition = this.definition(table);
     const id = objectId ?? formatUuid(uuidv7());
     const cells = encodeCellsForRow(definition, values, table);
@@ -587,7 +602,7 @@ export class ThinRuntime implements Runtime {
     values: Record<string, Value>,
     writeContext?: string | null,
   ): MutationResult {
-    const context = writeTarget(writeContext, "Update");
+    const context = this.writeTarget(writeContext, "Update");
     return this.mutate(context, {
       type: "update",
       table,
@@ -603,7 +618,7 @@ export class ThinRuntime implements Runtime {
     values: InsertValues,
     writeContext?: string | null,
   ): MutationResult {
-    const context = writeTarget(writeContext, "Upsert");
+    const context = this.writeTarget(writeContext, "Upsert");
     return this.mutate(context, {
       type: "upsert",
       table,
@@ -614,7 +629,7 @@ export class ThinRuntime implements Runtime {
   }
 
   delete(table: string, objectId: string, writeContext?: string | null): MutationResult {
-    const context = writeTarget(writeContext, "Delete");
+    const context = this.writeTarget(writeContext, "Delete");
     this.definition(table);
     return this.mutate(context, {
       type: "delete",
@@ -630,7 +645,7 @@ export class ThinRuntime implements Runtime {
     values: InsertValues,
     writeContext?: string | null,
   ): InsertResult {
-    const context = writeTarget(writeContext, "Restore");
+    const context = this.writeTarget(writeContext, "Restore");
     const definition = this.definition(table);
     const receipt = this.mutate(context, {
       type: "restore",
@@ -650,7 +665,7 @@ export class ThinRuntime implements Runtime {
     descriptors: readonly unknown[],
     writeContext?: string | null,
   ): MutationResult {
-    const context = writeTarget(writeContext, "Update");
+    const context = this.writeTarget(writeContext, "Update");
     // Branch views have no partial-value coordinate space yet (#2087).
     if (context.branchView) {
       throw new Error("Typed large-value updates are not supported in branch views.");
@@ -676,7 +691,7 @@ export class ThinRuntime implements Runtime {
   ): Promise<StreamingInsertResult> {
     const operation =
       mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
-    const context = writeTarget(writeContext, operation);
+    const context = this.writeTarget(writeContext, operation);
     if (context.transaction) {
       throw new Error("Streaming mutations are not supported inside a transaction");
     }
@@ -973,22 +988,6 @@ type WriteTarget = {
   branchView?: EncodedBranchView;
   updatedAtMs: number;
 };
-
-/** What a write context asks of a thin write. Its session is the connection's. */
-function writeTarget(writeContext: string | null | undefined, operation: string): WriteTarget {
-  if (writeContext) {
-    const parsed = JSON.parse(writeContext) as { attribution?: unknown };
-    if (parsed.attribution != null) {
-      throw new Error(`${operation} failed: attributed writes are not supported in thin mode`);
-    }
-  }
-  return {
-    operation,
-    transaction: txIdFromContext(writeContext),
-    branchView: branchViewFromWriteContext(writeContext),
-    updatedAtMs: effectiveUpdatedAtMs(writeContext) ?? Date.now(),
-  };
-}
 
 /** Write options for a write through a branch view. */
 function viewOptions(context: WriteTarget): object {
