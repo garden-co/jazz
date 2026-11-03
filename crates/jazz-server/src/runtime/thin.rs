@@ -52,6 +52,9 @@ pub(super) struct ThinSession {
     claims: Option<BTreeMap<String, Value>>,
     /// A session under its own identity (not a trusted backend link).
     untrusted: bool,
+    /// The published permissions bundle its backend pinned it to: its
+    /// reads and writes are governed by that bundle's policies.
+    bundle: Option<jazz::catalogue::BundleId>,
     /// The schema version the client declared.
     version: Option<SchemaVersionId>,
     /// Live queries, by the id of the request that opened them.
@@ -70,6 +73,7 @@ impl ThinSession {
     pub(super) fn new(
         identity: AuthorSubject,
         claims: Option<BTreeMap<String, Value>>,
+        bundle: Option<jazz::catalogue::BundleId>,
         output: tokio_mpsc::UnboundedSender<Outbound>,
         egress: Arc<AtomicUsize>,
     ) -> Self {
@@ -77,6 +81,7 @@ impl ThinSession {
             identity,
             claims,
             untrusted: identity != AuthorSubject::SYSTEM,
+            bundle,
             version: None,
             subscriptions: BTreeMap::new(),
             transactions: BTreeMap::new(),
@@ -254,15 +259,24 @@ impl Owner {
         session: ServerSession,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
+        bundle: Option<jazz::catalogue::BundleId>,
         output: tokio_mpsc::UnboundedSender<Outbound>,
         egress: Arc<AtomicUsize>,
-    ) {
+    ) -> Result<(), String> {
+        // Admitted on the same terms as a sync session: a pinned bundle must
+        // resolve here, and a createJazz app serves only pinned sessions.
+        self.db
+            .check_session_pin(identity, bundle.as_ref())
+            .map_err(|error| error.to_string())?;
         let claims = (identity != AuthorSubject::SYSTEM).then(|| {
             self.db.set_identity_claims(identity, claims.clone());
             claims
         });
-        self.thin
-            .insert(session, ThinSession::new(identity, claims, output, egress));
+        self.thin.insert(
+            session,
+            ThinSession::new(identity, claims, bundle, output, egress),
+        );
+        Ok(())
     }
 
     pub(super) fn close_thin_session(&mut self, session: ServerSession) {
@@ -276,7 +290,9 @@ impl Owner {
         let Some(thin) = self.thin.get(&session) else {
             return;
         };
-        let body = if self.awaiting_permissions && thin.untrusted {
+        // A pinned session's bundle is published already: it does not wait
+        // for the current permissions.
+        let body = if self.awaiting_permissions && thin.untrusted && thin.bundle.is_none() {
             ThinBody::Error {
                 code: "NotReady".to_owned(),
                 message: "no permissions are published for this app yet; deploy them before \
@@ -313,12 +329,13 @@ impl Owner {
                 Ok(schema) => schema.version_id(),
                 Err(error) => return Some(host_error(error)),
             };
-            return Some(match self.db.governed_view(version) {
-                Some(_) => {
+            return Some(match self.db.pinned_view(version, thin.bundle.as_ref()) {
+                Err(error) => error_body(&error),
+                Ok(Some(_)) => {
                     thin.version = Some(version);
                     ThinBody::Ok
                 }
-                None => ThinBody::Error {
+                Ok(None) => ThinBody::Error {
                     code: "SchemaNotDeployed".to_owned(),
                     message: "the client's schema version is not deployed to this server"
                         .to_owned(),
@@ -340,8 +357,12 @@ impl Owner {
             return Some(argument("a thin session declares its schema version first"));
         };
         // Resolved per request: an activation changes the policies that
-        // govern the declared version.
-        let Some(db) = self.db.governed_view(version) else {
+        // govern the declared version (a pinned bundle's never change).
+        let db = match self.db.pinned_view(version, thin.bundle.as_ref()) {
+            Ok(db) => db,
+            Err(error) => return Some(error_body(&error)),
+        };
+        let Some(db) = db else {
             return Some(ThinBody::Error {
                 code: "SchemaNotDeployed".to_owned(),
                 message: "the client's schema version is no longer deployed".to_owned(),

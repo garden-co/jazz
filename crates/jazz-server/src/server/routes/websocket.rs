@@ -898,7 +898,12 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     let thin = negotiated.features & jazz::wire::FEATURE_THIN_RESULTS != 0;
     let opened = if thin {
         core_server_shell
-            .open_thin_session(admission.identity, admission.claims, admission.trust)
+            .open_thin_session(
+                admission.identity,
+                admission.claims,
+                admission.bundle,
+                admission.trust,
+            )
             .await
     } else {
         core_server_shell
@@ -5232,6 +5237,143 @@ mod tests {
         assert!(
             titles_of(jazz::binding_codec::decode_rows(&rows).unwrap()).is_empty(),
             "bob must not see alice's private doc"
+        );
+    }
+
+    /// Publish the docs schema as a bundle whose docs read by `select`
+    /// (createJazz's `/bundles`); its hex id.
+    async fn publish_docs_bundle(
+        addr: std::net::SocketAddr,
+        state: &Arc<ServerState>,
+        schema: &Schema,
+        select: PolicyExpr,
+    ) -> String {
+        let hash = jazz::tools::public_schema::SchemaHash::compute(schema).to_string();
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}/apps/{}/admin/bundles", state.app_id))
+            .header("X-Jazz-Admin-Secret", "admin-secret")
+            .header("Content-Type", "application/json")
+            .body(
+                serde_json::json!({
+                    "targetSchemaHash": hash,
+                    "schemas": [{ "hash": hash, "schema": schema }],
+                    "migrations": [],
+                    "permissions": { "docs": public_table_policies().with_select(select) },
+                })
+                .to_string(),
+            )
+            .send()
+            .await
+            .expect("publish bundle");
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.expect("bundle response");
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        body["bundle"].as_str().expect("bundle id").to_owned()
+    }
+
+    fn pinned_thin_prelude(identity: AuthorSubject, bundle: Option<&str>) -> Vec<u8> {
+        let mut prelude: serde_json::Value =
+            serde_json::from_slice(&ws_session_prelude(identity)).unwrap();
+        if let Some(bundle) = bundle {
+            prelude["bundle"] = serde_json::json!(bundle);
+        }
+        prelude.to_string().into_bytes()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_sessions_pinned_to_a_bundle_are_governed_by_its_policies() {
+        // A createJazz app's store: its backend publishes every deployment
+        // as a bundle, starting from no schema.
+        let schema = private_docs_public_schema();
+        let state = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build bundle test state")
+            .state;
+        let addr = start_ws_test_server(state.clone()).await;
+        // Two deployments publish their own policies: one reads every doc,
+        // one none.
+        let open = publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await;
+        let closed = publish_docs_bundle(addr, &state, &schema, PolicyExpr::False).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+        let features = jazz::wire::FEATURE_THIN_RESULTS;
+
+        let mut alice_ws = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(alice, Some(&closed)),
+            features,
+        )
+        .await;
+        bind_thin_schema(&mut alice_ws, &schema).await;
+        send_thin(
+            &mut alice_ws,
+            1,
+            jazz::thin::ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells("alice's", alice),
+                options: Vec::new(),
+                transaction: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut alice_ws, 1).await,
+            jazz::thin::ThinBody::Written { .. }
+        ));
+        assert!(
+            thin_titles(&mut alice_ws, 2, None).await.is_empty(),
+            "the closed bundle reads nothing, not even alice's own doc"
+        );
+
+        let mut bob_ws = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(bob, Some(&open)),
+            features,
+        )
+        .await;
+        bind_thin_schema(&mut bob_ws, &schema).await;
+        assert_eq!(
+            thin_titles(&mut bob_ws, 1, None).await,
+            vec!["alice's".to_owned()],
+            "the open bundle reads alice's doc"
+        );
+
+        // Once bundles are published, an unpinned user session is refused,
+        // as a sync session is.
+        let (mut unpinned, _) = connect_async(ws_url(addr, state.app_id))
+            .await
+            .expect("connect websocket");
+        unpinned
+            .send(WsMessage::Binary(pinned_thin_prelude(bob, None).into()))
+            .await
+            .unwrap();
+        unpinned
+            .send(WsMessage::Binary(
+                ws_client_hello_batch_with_features(features).into(),
+            ))
+            .await
+            .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(5), unpinned.next())
+            .await
+            .expect("an answer")
+            .expect("a frame")
+            .expect("a message");
+        let frames = decode_ws_message(&message);
+        assert!(
+            matches!(
+                frames.as_slice(),
+                [WireFrame::Error(error)] if error.message.contains("served through createJazz")
+            ),
+            "{frames:?}"
         );
     }
 

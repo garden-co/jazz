@@ -6995,6 +6995,33 @@ impl Db {
         })
     }
 
+    /// [`Self::governed_view`] for a session pinned to published bundle
+    /// `bundle` (see [`Self::check_session_pin`]): governed by the
+    /// bundle's policies instead of the current schema's. Without a bundle
+    /// it is [`Self::governed_view`]. `None` while `version` is not
+    /// admitted or the bundle does not resolve.
+    pub fn pinned_view(
+        &self,
+        version: crate::ids::SchemaVersionId,
+        bundle: Option<&crate::catalogue::BundleId>,
+    ) -> Result<Option<Db>, Error> {
+        let Some(bundle) = bundle else {
+            return Ok(self.governed_view(version));
+        };
+        let mut inner = self.inner.borrow_mut();
+        let Some((_, governing)) = inner.bundle(bundle)? else {
+            return Ok(None);
+        };
+        let Some(view) = inner.governed_by(version, governing) else {
+            return Ok(None);
+        };
+        drop(inner);
+        Ok(Some(Db {
+            inner: self.inner.clone(),
+            view: Some(view),
+        }))
+    }
+
     /// Ship more of the app's versions and lenses (see
     /// [`DbConfig::with_migrations`]): a client learns an app's migrations
     /// when it first sees the app, not only when it opens.

@@ -9171,7 +9171,7 @@ impl Inner {
 
     /// Admitted `version` under its stored names, governed by `policies`'
     /// policies.
-    fn governed_by(
+    pub(crate) fn governed_by(
         &self,
         version: crate::ids::SchemaVersionId,
         policies: Rc<Schema>,
@@ -9476,6 +9476,50 @@ impl Db {
         Ok(())
     }
 
+    /// Whether this store may serve a session of `identity` pinned to
+    /// `bundle` ([`Self::check_serves`] first). A bundle this store has not
+    /// published, or whose write schema it has not admitted, is refused, and
+    /// so is an unpinned session of a user once createJazz publishes
+    /// bundles here.
+    pub fn check_session_pin(
+        &self,
+        identity: AuthorSubject,
+        bundle: Option<&crate::catalogue::BundleId>,
+    ) -> Result<(), Error> {
+        self.check_serves(identity)?;
+        let mut inner = self.inner.borrow_mut();
+        if let Some(bundle) = bundle
+            && inner.bundle(bundle)?.is_none()
+        {
+            let published = crate::catalogue::bundle(&inner.conn, bundle)?.is_some();
+            return Err(Error::new(
+                ErrorCode::Schema,
+                if published {
+                    format!(
+                        "permissions bundle {bundle} is published, but this store never admitted its write schema"
+                    )
+                } else {
+                    format!("permissions bundle {bundle} is not published on this store")
+                },
+            ));
+        }
+        // Once createJazz publishes bundles here, its backend pins every
+        // session it opens. An unpinned policy session would be governed by
+        // the current permissions, which createJazz no longer advances, so
+        // a later tightening or rollback would never reach it.
+        if bundle.is_none()
+            && identity != AuthorSubject::SYSTEM
+            && crate::catalogue::serves_bundles(&inner.conn)?
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "this app is served through createJazz: connect through its backend, \
+                 which pins each session to the permissions it deployed",
+            ));
+        }
+        Ok(())
+    }
+
     /// Serve a client over `transport` as `identity`, once
     /// [`Self::check_serves`] allows it.
     pub fn accept_subscriber(
@@ -9509,37 +9553,8 @@ impl Db {
         claims: Option<BTreeMap<String, Value>>,
         bundle: Option<crate::catalogue::BundleId>,
     ) -> Result<SubscriberId, Error> {
-        self.check_serves(identity)?;
+        self.check_session_pin(identity, bundle.as_ref())?;
         let mut inner = self.inner.borrow_mut();
-        if let Some(bundle) = &bundle
-            && inner.bundle(bundle)?.is_none()
-        {
-            let published = crate::catalogue::bundle(&inner.conn, bundle)?.is_some();
-            return Err(Error::new(
-                ErrorCode::Schema,
-                if published {
-                    format!(
-                        "permissions bundle {bundle} is published, but this store never admitted its write schema"
-                    )
-                } else {
-                    format!("permissions bundle {bundle} is not published on this store")
-                },
-            ));
-        }
-        // Once createJazz publishes bundles here, its backend pins every
-        // session it opens. An unpinned policy session would be governed by
-        // the current permissions, which createJazz no longer advances, so
-        // a later tightening or rollback would never reach it.
-        if bundle.is_none()
-            && identity != AuthorSubject::SYSTEM
-            && crate::catalogue::serves_bundles(&inner.conn)?
-        {
-            return Err(Error::new(
-                ErrorCode::Protocol,
-                "this app is served through createJazz: connect through its backend, \
-                 which pins each session to the permissions it deployed",
-            ));
-        }
         // One relay tier only (SPEC 9 §9.5).
         debug_assert!(
             !inner.non_durable,
