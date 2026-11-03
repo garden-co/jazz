@@ -1,29 +1,95 @@
-Set up Jazz (https://jazz.tools) in this project. You do the work; ask me only the questions below.
+# Agent Quickstart for jazz.tools
 
-1. Look at the project first. If it is empty, create the app with the framework's own
-   scaffolder (create-next-app, create-vite, sv create, a plain Hono/Node app...) once I've
-   answered the backend and client questions. Don't hand-write framework boilerplate.
-2. Install jazz-tools. Add this to AGENTS.md (create it if missing):
-   "Jazz: before writing Jazz code, fetch https://jazz.tools/llms.txt and the relevant page
-   (append .md for Markdown). The installed jazz-tools types win over the docs."
-   Follow that yourself from now on.
-3. Ask me these in one message, each with your suggested answer and the docs link:
-   - Where will Jazz run? Vercel, Jazz Cloud or your own server. Default: own server locally
-     for now. https://jazz.tools/docs/setup/deployment
-   - Which backend? Hono, Next.js route handlers, Express, or none yet.
-     https://jazz.tools/docs/setup/backend
-   - Which client? Thin (default) or local-first; React, Svelte, Vue, vanilla, React Native.
-     https://jazz.tools/docs/setup/web-client
-   - Who are the users, and what is the data? Anonymous or an auth provider; the first
-     tables and who may read or write each. https://jazz.tools/docs/setup/auth,
-     https://jazz.tools/docs/schemas
-4. Build in this order: schema.ts, then permissions.ts with permission tests, then mount
-   Jazz in the backend with createJazz (jazz.server.ts, served under /jazz), then backend
-   routes, then the client. There is no separate Jazz server to run and no deploy step.
-5. You're done when you have shown me all of these working, and not before:
-   - the dev setup starts with one command
-   - a backend route writes a row that a live query in the UI shows without reload
-   - a second user can't read rows the policies say are private, and the permission
-     tests pass
-6. Finish with: the commands to run, what you chose and why, and any docs that were wrong
-   or missing (with URLs). Tell me about those; don't silently work around them.
+A guide from the Jazz team for agents building with Jazz. You and your user have the most context
+about what you're building, so use your intuition. Depending on how established or greenfield the
+project is and what the user wants, explain how Jazz fits their existing tech choices, recommend
+options for open choices, or just make the choices needed to get things running quickly. Every
+choice below has a default you can take when the user has no preference.
+
+All docs links are paths on https://jazz.tools. Append `.md` to any docs page for Markdown.
+
+Before writing Jazz code, add this line to AGENTS.md (create it if missing) and follow it yourself:
+"Jazz: before writing Jazz code, fetch https://jazz.tools/llms.txt and the relevant page (append
+.md for Markdown). The installed jazz-tools types win over the docs."
+
+## Decide
+
+1. **Where should this project be deployed?** Jazz runs embedded in your backend, so it deploys
+   with your app. It works best on serverless platforms like Vercel; Cloudflare support is coming.
+   You don't need to deploy to start: locally, Jazz uses a SQLite file.
+   Default: Vercel for a Next.js app, your own server otherwise.
+   See /docs/setup/deployment, /docs/setup/deployment/vercel, /docs/setup/deployment/own-server
+2. **What auth provider or library should be used?** Jazz is unopinionated here: it hooks into
+   however your backend already does auth, including roles and claims from your identity provider,
+   which policies can check directly.
+   Default: keep what the project uses; for a new app, Better Auth.
+   See /docs/setup/auth/backend, /docs/setup/auth/better-auth, /docs/setup/auth/workos,
+   /docs/setup/auth/custom, /docs/setup/auth/local-first
+3. **Which backend framework should be used?** Next.js, Hono, Express / Node, Bun or Effect. Each
+   setup page has a tab per framework.
+   Default: what the project already has; for a new app, Next.js.
+4. **Should Jazz only be used through traditional API routes, or would this app benefit from
+   simpler state management by accessing Jazz directly from the frontend?** This choice is cheap
+   to change later: a screen moves from thin to local-first with the same schema, queries and
+   policies.
+   - React Native is always local-first: /docs/setup/react-native
+   - For the web: is this an app where fast loads and bundle size matter most, with lots of
+     first-time visitors? Use the thin client (/docs/setup/web-client/thin-client). Or is it a
+     frequently used app that benefits from local storage for UI speed and offline support? Use
+     the local-first client (/docs/setup/web-client/local-first-client). Both pages list the
+     current bundle sizes.
+   - Which frontend framework? React, Vue, Svelte, Solid, Effect or plain TypeScript.
+     Default: thin client, React.
+
+## Design the data
+
+5. **The most important thing to get right in a Jazz app is the schema** (/docs/schemas/defining-tables,
+   /docs/schemas/column-types, /docs/schemas/relationships) **and its permission policies**
+   (/docs/schemas/policies).
+   - For new apps, this is the core design question. Show the user the schema and policies and
+     iterate with them now, before building the whole app.
+   - For existing apps migrating from another data store, the existing data should constrain this
+     enough.
+   - Write permission tests next to the policies: /docs/tooling/testing
+   - In either case, use these Jazz features instead of modeling them yourself:
+     - Built-in metadata columns like `$createdBy`, `$createdAt`, `$updatedBy` and `$updatedAt`:
+       /docs/reading/metadata
+     - Edit history: /docs/reading/history
+     - Blobs, mutable files, streams and collaborative rich text, as large values:
+       TODO(docs): link the large-values page once it exists (/docs/schemas/large-values)
+
+## Build
+
+6. **Now build the app** with server- or client-side queries (/docs/reading/queries,
+   /docs/reading/filters-and-sorting, /docs/reading/includes-and-relations) and transactions
+   (/docs/writing/writing-data, /docs/writing/transactions, /docs/writing/text).
+   One subtlety of Jazz is choosing between two kinds of transaction. Start with mergeable ones.
+   - Mergeable transactions are eventually consistent and local-first: concurrent writes are
+     combined by merge strategies.
+   - Serializable transactions are ACID with serializable isolation and locally optimistic: use
+     them for invariants that must hold across users, such as unique names, stock counts or
+     balances. The server can still reject them, so handle that in the UI.
+7. **Debug.** TODO(docs): inspector access to server data, agent debug access, inspector deep
+   links for queries you run, the embedded inspector for local-first clients, and sync-state
+   checks. Until then: /docs/tooling/inspector, /docs/tooling/testing, and "Showing sync status"
+   on /docs/writing/writing-data.
+8. **Telemetry and feedback.** TODO: how to opt into telemetry and why it helps, and how agents
+   and humans leave feedback.
+
+## You're done when
+
+You have shown the user all of these working, and not before:
+
+- the dev setup starts with one command
+- a backend route writes a row that a live query in the UI shows without a reload
+- a second user can't read rows the policies say are private, and the permission tests pass
+
+Finish with: the commands to run, what you chose and why, and any docs that were wrong or missing
+(with URLs). Tell the user about those; don't silently work around them.
+
+## Later and more advanced topics to be aware of
+
+1. Schema evolution and migrations are particularly interesting in Jazz: /docs/schemas/migrations
+2. Need backend clients that can't be part of the main backend API? /docs/setup/backend-client
+3. Drafts and branches of rows: /docs/recipes/drafts-and-branches
+4. Durability tiers, for "is it saved?" indicators: /docs/reference/durability-tiers

@@ -17,10 +17,11 @@ give it the same brief, which always lives at
 
 Each one has a default, so "you pick" is a fine answer.
 
-- **Where will Jazz run?** Vercel, Jazz Cloud or your own server. Default: your own server, locally for now. See [Main Backend](/docs/setup/deployment).
-- **Which backend?** Hono, Next.js route handlers, Express, or none yet. See [Main Backend](/docs/setup/deployment).
-- **Which client?** Thin client (default) or local-first; React, Svelte, Vue, vanilla or React Native. See [Browser](/docs/setup/web-client).
-- **Who are the users, and what is the data?** Anonymous or an auth provider, plus the first tables and who may read or write each. See [Auth](/docs/setup/auth) and [Schemas](/docs/schemas).
+- **Where will it be deployed?** Vercel or your own server; Cloudflare is coming. Default: Vercel for Next.js, your own server otherwise. See [Main Backend](/docs/setup/deployment).
+- **Which auth?** Whatever your backend already uses; Better Auth for a new app. See [How Auth Works](/docs/setup/auth/backend).
+- **Which backend framework?** Next.js, Hono, Express / Node, Bun or Effect. Default: Next.js.
+- **API routes only, or Jazz from the frontend too?** If the frontend, the thin client (default) or local-first, and React, Vue, Svelte, Solid or plain TypeScript. React Native is always local-first. See [Thin Client](/docs/setup/web-client/thin-client).
+- **What is the data, and who may read or write it?** Your agent shows you the schema and policies before building the rest. See [Defining Tables](/docs/schemas/defining-tables) and [Policies](/docs/schemas/policies).
 
 ## How your agent knows it's done
 
