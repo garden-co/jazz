@@ -25,14 +25,13 @@ export function jazz(): Promise<Jazz> {
   // Throws (fails closed) on an incomplete configuration.
   const config = assertConfiguration();
   const pending = (globalThis.__bandChatJazz ??= createJazz({
-    appId: config.appId,
     app,
     permissions,
     store: config.remote
-      ? remote({ url: config.remote.url, secret: config.remote.adminSecret })
+      ? remote({ url: config.remote.url, appId: config.appId, secret: config.remote.adminSecret })
       : process.env.NODE_ENV === "test"
-        ? memory()
-        : sqlite({ path: config.dataPath }),
+        ? memory({ appId: config.appId })
+        : sqlite({ path: config.dataPath, appId: config.appId }),
     // Better Auth's session cookie decides who the user is.
     authenticate: async (request) => {
       const { auth } = await import("./auth");

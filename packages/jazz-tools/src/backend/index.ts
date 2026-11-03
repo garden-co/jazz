@@ -30,10 +30,12 @@ export {
 export { trustWorkload, type BackendClientTrust } from "./backend-clients.js";
 export {
   createJazz,
+  files,
   memory,
   remote,
   sqlite,
   vercel,
+  type BlobStore,
   type CreateJazzOptions,
   type Jazz,
   type JazzStore,

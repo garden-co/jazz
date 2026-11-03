@@ -1945,7 +1945,7 @@ impl NativeRelayHost {
         RelayScope::from(scope.clone())
             .validate()
             .map_err(relay_status)?;
-        let digest = blake3::hash(
+        let digest = jazz::sha256::hash(
             format!(
                 "{}\0{}\0{}",
                 scope.app_namespace, scope.storage_namespace, canonical_subject

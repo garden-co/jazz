@@ -52,6 +52,7 @@ pub use jazz_types::local_executor;
 pub use jazz_types::object;
 pub use jazz_types::postcard_exact;
 pub use jazz_types::records;
+pub use jazz_types::sha256;
 pub use jazz_types::time;
 /// Public runtime and data-model support APIs formerly provided by jazz-tools.
 // The tools API was a separate crate before consolidation and intentionally
