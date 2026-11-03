@@ -13,6 +13,8 @@ mod aggregate_nullable_keys;
 mod aggregate_ordering;
 #[path = "../array_columns.rs"]
 mod array_columns;
+#[path = "../authority_accepted_content.rs"]
+mod authority_accepted_content;
 #[path = "../authorization_scope_reentry.rs"]
 mod authorization_scope_reentry;
 #[path = "../binding_host.rs"]
@@ -101,6 +103,10 @@ mod pre_sync_writes;
 mod prepared_claim_routing;
 #[path = "../provenance.rs"]
 mod provenance;
+#[path = "../read_deadline_scheduling.rs"]
+mod read_deadline_scheduling;
+#[path = "../read_request_lifecycle.rs"]
+mod read_request_lifecycle;
 #[path = "../recheck_policies.rs"]
 mod recheck_policies;
 #[path = "../recheck_queries.rs"]
@@ -187,6 +193,10 @@ mod text_merge;
 mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]
 mod transaction_handles;
+#[path = "../transaction_identity.rs"]
+mod transaction_identity;
+#[path = "../transaction_read_guards.rs"]
+mod transaction_read_guards;
 #[path = "../transaction_read_tiers.rs"]
 mod transaction_read_tiers;
 #[path = "../union_queries.rs"]
@@ -200,3 +210,15 @@ mod write_receipt_owner;
 
 #[path = "../transaction_read_prefix.rs"]
 mod transaction_read_prefix;
+
+#[path = "../accepted_rpc_reads.rs"]
+mod accepted_rpc_reads;
+
+#[path = "../accepted_evidence_wire.rs"]
+mod accepted_evidence_wire;
+
+#[path = "../accepted_transaction_reads.rs"]
+mod accepted_transaction_reads;
+
+#[path = "../accepted_bundle_reads.rs"]
+mod accepted_bundle_reads;
