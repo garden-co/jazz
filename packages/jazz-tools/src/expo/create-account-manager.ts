@@ -1,11 +1,18 @@
 import { CryptoDigestAlgorithm, digestStringAsync } from "expo-crypto";
 import { getItem, getItemAsync, setItem } from "expo-secure-store";
 import { accountRegistryUrl } from "../accounts/context.js";
+import { clientScope } from "../runtime/client-scope.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { createAccountManager as createNativeAccountManager } from "../react-native/create-account-manager.js";
 
 export interface AccountManagerConfig {
-  appId: string;
+  /**
+   * Backend and test code only; a browser client leaves it out and is scoped
+   * by `serverUrl` (see `clientScope`).
+   */
+  appId?: string;
+  /** The app id an existing local-first app's users were created under. */
+  scope?: string;
   serverUrl: string;
   /** Separate retained account selections within the same application. */
   profile?: string;
@@ -14,7 +21,7 @@ export interface AccountManagerConfig {
 
 /** Prepare retained accounts without opening a database or a Jazz context. */
 export async function createAccountManager(config: AccountManagerConfig) {
-  const registry = accountRegistryUrl(config.serverUrl, config.appId);
+  const registry = accountRegistryUrl(config.serverUrl, clientScope(config));
   const native = await import("jazz-rn/relay");
   const factory = native.installNativeForegroundRuntime();
   if (typeof factory.withAccountStoreLock !== "function") {

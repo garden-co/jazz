@@ -134,6 +134,17 @@ enum Commands {
         #[arg(long)]
         in_memory: bool,
 
+        /// Where large values' bytes live once they settle: `files` (the
+        /// `blobs/` directory next to the data, or --blobs-dir) or `sqlite`
+        /// (inside the database file). A data directory keeps its choice,
+        /// except that `sqlite` may later move to `files`.
+        #[arg(long, default_value = "files", value_parser = ["files", "sqlite"])]
+        blobs: String,
+
+        /// Directory for `--blobs files` (defaults to `<data-dir>/blobs`).
+        #[arg(long)]
+        blobs_dir: Option<String>,
+
         /// URL to fetch JWKS keys for JWT validation (production)
         #[arg(long, env = "JAZZ_JWKS_URL")]
         jwks_url: Option<String>,
@@ -168,6 +179,36 @@ enum Commands {
         /// Required in NODE_ENV=production.
         #[arg(long, env = "JAZZ_ALLOW_LOCAL_FIRST_AUTH")]
         allow_local_first_auth: bool,
+
+        /// Trust only this OIDC workload instead of shared secrets: every
+        /// request and session must carry its token in
+        /// X-Jazz-Backend-Credential, and states its access in
+        /// X-Jazz-Backend-Access. Needs the subject and audience flags too;
+        /// replaces the backend and admin secrets. Graceful shutdown then
+        /// goes through SIGTERM.
+        #[arg(
+            long,
+            env = "JAZZ_TRUSTED_WORKLOAD_ISSUER",
+            requires_all = ["trusted_workload_audience", "trusted_workload_subject"],
+            conflicts_with_all = ["backend_secret", "admin_secret"]
+        )]
+        trusted_workload_issuer: Option<String>,
+
+        /// Audience a trusted workload token must target.
+        #[arg(
+            long,
+            env = "JAZZ_TRUSTED_WORKLOAD_AUDIENCE",
+            requires = "trusted_workload_issuer"
+        )]
+        trusted_workload_audience: Option<String>,
+
+        /// Exact subject a trusted workload token must carry.
+        #[arg(
+            long,
+            env = "JAZZ_TRUSTED_WORKLOAD_SUBJECT",
+            requires = "trusted_workload_issuer"
+        )]
+        trusted_workload_subject: Option<String>,
 
         /// Secret for backend session impersonation
         #[arg(long, env = "JAZZ_BACKEND_SECRET")]
@@ -285,6 +326,8 @@ async fn run() {
             port,
             data_dir,
             in_memory,
+            blobs,
+            blobs_dir,
             jwks_url,
             jwt_public_key,
             jwt_issuer,
@@ -294,6 +337,9 @@ async fn run() {
             allow_local_first_auth,
             backend_secret,
             admin_secret,
+            trusted_workload_issuer,
+            trusted_workload_audience,
+            trusted_workload_subject,
             shutdown_timeout_secs,
             max_connections,
             memory_limit_bytes,
@@ -338,6 +384,13 @@ async fn run() {
                 allow_local_first_auth,
                 backend_secret,
                 admin_secret,
+                trusted_workload: trusted_workload_issuer.map(|issuer| {
+                    jazz_server::middleware::workload::TrustedWorkload {
+                        issuer,
+                        audience: trusted_workload_audience.unwrap_or_default(),
+                        subject: trusted_workload_subject.unwrap_or_default(),
+                    }
+                }),
                 ..Default::default()
             };
             if let Err(e) = jazz_server::run(
@@ -345,6 +398,12 @@ async fn run() {
                 port,
                 &data_dir,
                 in_memory,
+                match blobs.as_str() {
+                    "sqlite" => jazz_server::BlobStore::Sqlite,
+                    _ => jazz_server::BlobStore::Files {
+                        dir: blobs_dir.map(Into::into),
+                    },
+                },
                 auth_config,
                 bound_port_file,
                 std::time::Duration::from_secs(shutdown_timeout_secs),

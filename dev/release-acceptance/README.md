@@ -222,5 +222,5 @@ per-command client traces and `RUST_LOG` for server logs.
 The client driver and CLI calls assume the current API: `createJazzSession`
 with a persistent driver, the `"global"` durability tier,
 `jazz-tools server --bound-port-file --allow-local-first-auth` and
-`jazz-tools deploy --schema-dir`. A release that renames any of these needs
+the `deploy-fixture.mjs` catalogue deploy. A release that renames any of these needs
 matching edits to `mixed-version.mjs` and `mixed-version-client.mjs`.

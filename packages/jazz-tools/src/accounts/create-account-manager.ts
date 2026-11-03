@@ -2,12 +2,19 @@ import { DefaultRuntimeSource } from "../runtime/default-runtime-source.js";
 import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
 import type { RuntimeSourcesConfig } from "../runtime/context.js";
 import { accountRegistryUrl } from "./context.js";
+import { clientScope, DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
 import { prepareAccountManager, type AccountStore } from "./persistence.js";
-import { isBrowserHostRuntime } from "./browser-host.js";
 
 export interface AccountManagerConfig {
-  appId: string;
-  serverUrl: string;
+  /**
+   * Backend and test code only; a browser client leaves it out and is scoped
+   * by `serverUrl` (see `clientScope`).
+   */
+  appId?: string;
+  /** The app id an existing local-first app's users were created under. */
+  scope?: string;
+  /** The app's Jazz endpoint (default `"/jazz"`, its own backend). */
+  serverUrl?: string;
   env?: string;
   runtimeSources?: RuntimeSourcesConfig;
   /**
@@ -20,20 +27,16 @@ export interface AccountManagerConfig {
 
 /** Prepare crypto and restore selection; createLocalFirst() is synchronous afterward. */
 export async function createAccountManager(config: AccountManagerConfig) {
-  const registry = accountRegistryUrl(config.serverUrl, config.appId);
-  const browserHost = isBrowserHostRuntime();
+  const serverUrl = config.serverUrl ?? DEFAULT_SERVER_URL;
+  const scope = clientScope({ ...config, serverUrl });
+  const registry = accountRegistryUrl(serverUrl, scope);
   const source = new DefaultRuntimeSource();
-  await source.load({ appId: config.appId, runtimeSources: config.runtimeSources });
+  await source.load({ appId: scope, runtimeSources: config.runtimeSources });
   const store = config.store ?? browserAccountStore(registry, config.env ?? "dev");
   return prepareAccountManager({
-    appId: config.appId,
+    appId: scope,
     registry,
     store,
-    // Only the browser's own selection store, in an actual browser, reopens a
-    // retained account before the provider answers. A host-supplied store
-    // (Node, SSR, tests) or a non-browser runtime with browser-like globals
-    // keeps the ordinary per-login transition.
-    retainAccountAssignment: config.store === undefined && browserHost,
     mintToken(secret, audience) {
       return source.mintLocalFirstToken({
         secret: authSecretSeedForMinting(secret),

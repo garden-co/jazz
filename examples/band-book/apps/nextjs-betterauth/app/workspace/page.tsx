@@ -19,7 +19,6 @@ export default function WorkspacePage() {
   // The Jazz provider renders this page only once the account's client is ready.
   const session = useSession();
   const account = session?.user.account;
-  const principal = session?.user.identity.subject;
   const db = useDb();
   const [bootstrap, setBootstrap] = useState<Bootstrap>(() => {
     const remembered = account ? rememberedHomeWorkspace(account) : null;
@@ -30,7 +29,7 @@ export default function WorkspacePage() {
   // renders from local data meanwhile; this only picks the home workspace and
   // reports a failure when there is nothing else to show.
   const run = useCallback(
-    (account: string, principal: string) => {
+    (account: string) => {
       let cancelled = false;
       const fail = (cause: unknown) =>
         !cancelled &&
@@ -39,7 +38,7 @@ export default function WorkspacePage() {
           message: cause instanceof Error ? cause.message : String(cause),
         });
       const remembered = rememberedHomeWorkspace(account) !== null;
-      ensureHomeWorkspace(account, principal).then((workspaceId) => {
+      ensureHomeWorkspace(account).then((workspaceId) => {
         if (cancelled) return;
         setBootstrap({ state: "ready", workspaceId });
         if (!remembered) return;
@@ -50,7 +49,7 @@ export default function WorkspacePage() {
           (exists) => {
             if (cancelled || exists) return;
             setBootstrap({ state: "pending" });
-            ensureHomeWorkspace(account, principal).then(
+            ensureHomeWorkspace(account).then(
               (fresh) => !cancelled && setBootstrap({ state: "ready", workspaceId: fresh }),
               fail,
             );
@@ -66,8 +65,8 @@ export default function WorkspacePage() {
   );
 
   useEffect(() => {
-    if (account && principal) return run(account, principal);
-  }, [account, principal, run]);
+    if (account) return run(account);
+  }, [account, run]);
 
   return (
     <Suspense fallback={<StatusScreen label="Opening BandBook" />}>
@@ -75,12 +74,12 @@ export default function WorkspacePage() {
         homeWorkspaceId={bootstrap.state === "ready" ? bootstrap.workspaceId : null}
         settingUp={bootstrap.state === "pending"}
         setupError={
-          bootstrap.state === "failed" && account && principal
+          bootstrap.state === "failed" && account
             ? {
                 message: bootstrap.message,
                 retry: () => {
                   setBootstrap({ state: "pending" });
-                  run(account, principal);
+                  run(account);
                 },
               }
             : null
