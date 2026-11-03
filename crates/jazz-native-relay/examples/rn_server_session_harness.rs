@@ -12,7 +12,7 @@ mod device_fixture;
 
 use jazz::query::Query;
 
-use jazz::tools::{AppContext, AppId, ClientStorage, DurabilityTier, Value};
+use jazz::tools::{AppContext, AppId, ClientStorage, DurabilityTier, Session, Value};
 use jazz_native_relay as _;
 use jazz_server::JazzServer;
 use jazz_testkit::{connect, wait_for_query};
@@ -59,9 +59,13 @@ async fn run() {
         storage: ClientStorage::Memory,
         account_id: None,
         jwt_token: None,
-        backend_secret: None,
-        backend_session: None,
-        admin_secret: Some(core.admin_secret().to_owned()),
+        // A user the app's backend opens a session for, as createJazz does.
+        backend_secret: Some(core.backend_secret().to_owned()),
+        backend_session: Some(Session::new(
+            "jazz:app:rn-device",
+            "rn-device-core-observer",
+        )),
+        admin_secret: None,
         migrations: Default::default(),
     })
     .await
@@ -146,9 +150,13 @@ async fn run() {
         storage: ClientStorage::Memory,
         account_id: None,
         jwt_token: None,
-        backend_secret: None,
-        backend_session: None,
-        admin_secret: Some(core.admin_secret().to_owned()),
+        // A user the app's backend opens a session for, as createJazz does.
+        backend_secret: Some(core.backend_secret().to_owned()),
+        backend_session: Some(Session::new(
+            "jazz:app:rn-device",
+            "rn-device-core-recovery-writer",
+        )),
+        admin_secret: None,
         migrations: Default::default(),
     })
     .await
