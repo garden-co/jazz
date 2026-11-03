@@ -9,9 +9,9 @@ Nothing here is part of the workspace or of any release build.
 Two binaries, because alpha.59 and the SQLite engine link different
 `libsqlite3-sys` versions that both declare `links = "sqlite3"`:
 
-| binary | built in | does |
-| --- | --- | --- |
-| `a59-export` | jazz `v2.0.0-alpha.59` | copies the data dir, reads the copy with alpha.59's own decoders, writes a dump |
+| binary          | built in                 | does                                                                                        |
+| --------------- | ------------------------ | ------------------------------------------------------------------------------------------- |
+| `a59-export`    | jazz `v2.0.0-alpha.59`   | copies the data dir, reads the copy with alpha.59's own decoders, writes a dump             |
 | `sqlite-import` | the SQLite engine commit | builds a new data dir from a dump through the new server's own code paths, and `verify`s it |
 
 `prepare.sh` checks out each version (or uses `A59_DIR` / `A60_DIR`), copies
