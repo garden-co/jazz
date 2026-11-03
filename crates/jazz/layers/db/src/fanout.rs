@@ -1,8 +1,8 @@
 //! Subscription fan-out: shared execution and keyed invalidation.
 //!
-//! Subscriptions with the same governing bundle, author, claims provenance,
-//! compiled SQL and parameters share one live result (a `Group`). Keeping
-//! their scope distinct also covers policies introduced later. Each group declares
+//! Subscriptions with the same governance, author, claims provenance, SQL and
+//! parameters share one live result (a `Group`). Keeping their scope distinct
+//! also covers policies introduced later. Each group declares
 //! `Watch`es: the tables it reads, narrowed where the query or its read
 //! policy pins a column to one value (a root filter `room = R`, a policy
 //! `EXISTS memberships WHERE member = session.user`). A commit's changed
@@ -329,7 +329,7 @@ impl Inner {
         }
     }
 
-    /// Open a subscription: join the group with identical SQL, or start one.
+    /// Open a subscription: join the group with identical SQL and scope, or start one.
     pub(super) fn subscribe_member(
         &mut self,
         prepared: &PreparedQuery,
@@ -472,7 +472,10 @@ impl Inner {
         let root = schema.table(&query.table)?;
         let mut bare = prepared.clone();
         bare.query.includes.retain(|include| include.require);
-        let others = self.compile_tracked(&bare, identity, read)?.0.tables;
+        let bare_compiled = self.compile_tracked(&bare, identity, read)?.0;
+        // An include can also support a nested child policy or filter. Such a
+        // change must recompute those children, not replay their cached rows.
+        let others = self.with_relation_tables(&bare, identity, read, &bare_compiled.tables)?;
         let mut out = Vec::new();
         for include in query.includes.iter().filter(|include| !include.require) {
             let column = include.path.split('.').next().unwrap_or_default();
@@ -808,17 +811,16 @@ impl Inner {
             // refreshes CurrentOwner and preserves Selected; names stay intact.
             let old = std::mem::take(&mut group.watches);
             self.fan.unindex(gid, &old);
-            // The previous SQL/claims key must not admit new members after
-            // recompilation. Other groups may now have the same key; dropping
-            // this group must not remove their index entry.
+            // Retire only this group's old key. Another refreshed group may
+            // now own the same key; its index entry must survive cancellation.
             if self.fan.by_key.get(&group.key) == Some(&gid) {
                 self.fan.by_key.remove(&group.key);
             }
             let watches = self
                 .compile(&group.prepared, group.identity, &group.read)
                 .and_then(|compiled| {
-                    // Rebuild every property derived from compilation before
-                    // serving another delta under the refreshed policy.
+                    // Rebuild properties derived from compilation before
+                    // applying another delta under the refreshed policy.
                     let prepared = &group.prepared;
                     let read = &group.read;
                     let schema = self.read_schema(prepared, read);
@@ -849,6 +851,8 @@ impl Inner {
                     let recheck = recheckable(&prepared.query, &root, read, &compiled);
                     let projected = order_projected(&prepared.query, &compiled);
                     let key = self.group_key(prepared, group.identity, read, &compiled);
+                    group.key = key;
+                    self.fan.by_key.entry(group.key.clone()).or_insert(gid);
                     group.root = root;
                     group.tables = tables;
                     group.includes = includes;
@@ -857,8 +861,6 @@ impl Inner {
                     group.recheck = recheck;
                     group.projected = projected;
                     group.keys.clear();
-                    group.key = key;
-                    self.fan.by_key.entry(group.key.clone()).or_insert(gid);
                     Ok(watches)
                 })
                 .unwrap_or(old);
