@@ -49,6 +49,7 @@ import { collectConventionalProvenanceDiagnostics } from "../provenance-guidance
 import { fetchSchemaHashes, fetchStoredWasmSchema } from "./catalogue-api.js";
 import { renderMigrationStub } from "./migrations.js";
 import { normalizeSchemaHashInput } from "./schema-utils.js";
+import { legacySchemaHash } from "./legacy-schema-hash.js";
 import {
   assertMigrationMatchesCanonicalBundle,
   computeSchemaHash,
@@ -110,6 +111,8 @@ export interface DeployOptions extends CatalogueProjectOptions {
 export interface ValidateProjectOptions {
   schemaDir: string;
   migrationsDir?: string;
+  /** Move, rename and write nothing; fail if `validate` would move or rename a migration or snapshot. */
+  check?: boolean;
 }
 
 export interface ValidateProjectResult {
@@ -189,17 +192,19 @@ export async function validateProject(
   const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
   await validateSchemaAndPermissions(compiled.wasmSchema, compiled.permissions);
   const migrationsDir = resolvedMigrationsDir(options.schemaDir, options.migrationsDir);
-  const retired = await retireLegacyMigrations(migrationsDir, compiled.wasmSchema);
-  await writeLocalClientMigrations(options.schemaDir, migrationsDir);
+  let retired: string[] = [];
+  if (options.check) {
+    await checkLegacyMigrations(migrationsDir, compiled.wasmSchema);
+  } else {
+    retired = await retireLegacyMigrations(migrationsDir, compiled.wasmSchema);
+    await writeLocalClientMigrations(options.schemaDir, migrationsDir);
+  }
   return {
     schemaFile: compiled.schemaFile,
     permissionsFile: compiled.permissionsFile,
     tableCount: compiled.schema.tables.length,
     warnings: [
-      ...retired.map(
-        (fileName) =>
-          `Moved ${fileName} to ${LEGACY_MIGRATIONS_DIR}/: it names schema versions by the hashes Jazz used before alpha.60 switched schema hashes to SHA-256, so it no longer applies. The app runs on schema.ts as it is; delete the legacy folder once you no longer need it.`,
-      ),
+      ...retired,
       ...collectConventionalProvenanceDiagnostics(compiled.schema),
       ...collectMissingExplicitPolicyDiagnostics(
         compiled.schema.tables.map((table) => table.name),
@@ -1584,53 +1589,71 @@ async function writeClientMigrations(
   await writeClientMigrationsModule(path, JSON.stringify(bundle, runtimeSchemaJsonReplacer, 2));
 }
 
-/**
- * Write the app's migrations module from what this project holds locally:
- * schema.ts, its snapshots and its migration files.
- */
 /** Where `validate` moves migrations that predate SHA-256 schema hashes. */
 export const LEGACY_MIGRATIONS_DIR = "legacy";
 
 const SNAPSHOT_NAME_HASH = /([0-9a-f]{12})\.json$/i;
 const SNAPSHOT_HASH_PREFIX = 12;
 
+const LEGACY_REASON =
+  "names schema versions by the BLAKE3 hashes Jazz used before alpha.60 switched schema hashes to SHA-256";
+
+/** What `validate` does to a project an alpha.59 or older tool left. */
+interface LegacyPlan {
+  /** Migration files to move to `legacy/`. */
+  migrations: string[];
+  /** Snapshots named by their BLAKE3 hash, to name by their SHA-256 one. */
+  snapshots: { from: string; to: string }[];
+}
+
 /**
- * Schema hashes changed from BLAKE3 to SHA-256 in alpha.60. A snapshot's hash
- * is recomputed from its contents, but its file name and every migration
- * written against it still carry the old short hash. Old-hash snapshots are
- * renamed to their current hash (their contents are exact), and migrations
- * whose filename names an old hash that no current version answers are
- * listed as legacy: their edges can't be resolved, and an app upgrading to
- * alpha.60 starts again from its current schema.
+ * Schema hashes changed from BLAKE3 to SHA-256 in alpha.60. A snapshot's
+ * hash is recomputed from its contents, but its file name and every
+ * migration written against it still carry the BLAKE3 short hash.
+ *
+ * A migration is legacy when one of its ends resolves to no SHA-256
+ * version this project knows (its snapshots and schema.ts) but is the
+ * BLAKE3 hash of one of them: its edges can't be resolved, and an app
+ * upgrading to alpha.60 starts again from its current schema. This is
+ * decided from the migration and the schemas alone, so a run that stopped
+ * halfway (snapshots renamed, migrations not yet moved) is finished by the
+ * next. A migration whose ends match nothing at all is not legacy; it is
+ * left for the usual checks to report.
+ *
+ * A snapshot named by neither hash of its contents is refused: it was
+ * edited or renamed by hand, and renaming it would hide that.
  */
-async function findLegacyMigrations(
+async function planLegacyMigrations(
   migrationsDir: string,
   currentSchema: WasmSchema,
-  options: { renameSnapshots: boolean },
-): Promise<string[]> {
-  if (!(await pathExists(migrationsDir))) return [];
+): Promise<LegacyPlan> {
+  const plan: LegacyPlan = { migrations: [], snapshots: [] };
+  if (!(await pathExists(migrationsDir))) return plan;
   await assertNoSymlinkComponents(migrationsDir);
-  const storage = new MigrationStorage(migrationsDir);
-  const snapshots = await storage.listSnapshots();
+  const snapshots = await new MigrationStorage(migrationsDir).listSnapshots();
   const known = [
     ...new Set([...snapshots.map(({ hash }) => hash), await computeSchemaHash(currentSchema)]),
   ];
-  const stale = new Set<string>();
+  const legacyShort = new Set([shortSchemaHash(legacySchemaHash(currentSchema))]);
   for (const snapshot of snapshots) {
+    const legacy = shortSchemaHash(legacySchemaHash(snapshot.schema));
+    legacyShort.add(legacy);
     const named = snapshot.fileName.match(SNAPSHOT_NAME_HASH)?.[1]?.toLowerCase();
     const current = shortSchemaHash(snapshot.hash);
     if (!named || named === current) continue;
-    stale.add(named);
-    if (options.renameSnapshots) {
-      const renamed = join(
+    if (named !== legacy) {
+      throw new Error(
+        `Snapshot ${snapshot.fileName} is named for schema hash ${named}, but its contents hash to ${current} (and were ${legacy} before alpha.60). Restore the snapshot from version control, or rename it to end in ${current}.json if its contents are right.`,
+      );
+    }
+    plan.snapshots.push({
+      from: snapshot.filePath,
+      to: join(
         dirname(snapshot.filePath),
         snapshot.fileName.replace(SNAPSHOT_NAME_HASH, `${current}.json`),
-      );
-      if (await pathExists(renamed)) await rm(snapshot.filePath);
-      else await rename(snapshot.filePath, renamed);
-    }
+      ),
+    });
   }
-  if (stale.size === 0) return [];
   const resolves = (hash: string) => {
     try {
       resolveKnownSchemaHash(hash, "schema hash", known);
@@ -1639,7 +1662,8 @@ async function findLegacyMigrations(
       return false;
     }
   };
-  const legacy = [];
+  const legacy = (hash: string) =>
+    !resolves(hash) && legacyShort.has(hash.slice(0, SNAPSHOT_HASH_PREFIX).toLowerCase());
   for (const fileName of (await readdir(migrationsDir)).filter(isMigrationFile).sort()) {
     let named;
     try {
@@ -1647,45 +1671,121 @@ async function findLegacyMigrations(
     } catch {
       continue;
     }
-    const old = (hash: string) =>
-      stale.has(hash.slice(0, SNAPSHOT_HASH_PREFIX).toLowerCase()) && !resolves(hash);
-    if (old(named.from) || old(named.to)) legacy.push(fileName);
+    if (legacy(named.from) || legacy(named.to)) plan.migrations.push(fileName);
   }
-  return legacy;
+  return plan;
 }
 
-/** Move legacy migrations ({@link findLegacyMigrations}) to `legacy/`; returns their names. */
+async function sameBytes(left: string, right: string): Promise<boolean> {
+  const [a, b] = await Promise.all([readFile(left), readFile(right)]);
+  return a.equals(b);
+}
+
+/**
+ * Carry out {@link planLegacyMigrations} under the migrations lock:
+ * migrations move to `legacy/` first, then snapshots are renamed, so an
+ * interrupted run leaves a project the next run finishes. A migration whose
+ * name is taken in `legacy/` by a different file is refused before
+ * anything moves. Returns a warning per change.
+ */
 async function retireLegacyMigrations(
   migrationsDir: string,
   currentSchema: WasmSchema,
 ): Promise<string[]> {
-  const legacy = await findLegacyMigrations(migrationsDir, currentSchema, {
-    renameSnapshots: true,
+  if (!(await pathExists(migrationsDir))) return [];
+  const storage = new MigrationStorage(migrationsDir);
+  return withMigrationDirectoryLock(storage, async () => {
+    const plan = await planLegacyMigrations(migrationsDir, currentSchema);
+    const legacyDir = join(migrationsDir, LEGACY_MIGRATIONS_DIR);
+    const moves = plan.migrations.map((fileName) => ({
+      fileName,
+      from: join(migrationsDir, fileName),
+      to: join(legacyDir, fileName),
+    }));
+    const kept = new Set<string>();
+    for (const move of moves) {
+      if (!(await pathExists(move.to))) continue;
+      if (!(await sameBytes(move.from, move.to))) {
+        throw new Error(
+          `Cannot move ${move.fileName} to ${LEGACY_MIGRATIONS_DIR}/: a different ${LEGACY_MIGRATIONS_DIR}/${move.fileName} is already there. Compare the two, keep the one you want in ${LEGACY_MIGRATIONS_DIR}/ and delete the other, then run validate again.`,
+        );
+      }
+      kept.add(move.fileName);
+    }
+    const warnings: string[] = [];
+    if (moves.length > 0) {
+      await mkdir(legacyDir, { recursive: true });
+      await assertNoSymlinkComponents(legacyDir);
+    }
+    for (const move of moves) {
+      if (kept.has(move.fileName)) {
+        await rm(move.from);
+        warnings.push(
+          `Removed ${move.fileName}: it ${LEGACY_REASON}, and the same file is already in ${LEGACY_MIGRATIONS_DIR}/.`,
+        );
+      } else {
+        await rename(move.from, move.to);
+        warnings.push(
+          `Moved ${move.fileName} to ${LEGACY_MIGRATIONS_DIR}/: it ${LEGACY_REASON}, so it no longer applies. The app runs on schema.ts as it is. Delete ${LEGACY_MIGRATIONS_DIR}/ once you no longer need it, or exclude it from type checking.`,
+        );
+      }
+    }
+    for (const snapshot of plan.snapshots) {
+      const from = basename(snapshot.from);
+      const to = basename(snapshot.to);
+      if (await pathExists(snapshot.to)) {
+        // The same schema (its SHA-256 says so) under its current name.
+        await rm(snapshot.from);
+        warnings.push(
+          `Removed snapshot ${from}: it is named by its pre-alpha.60 BLAKE3 hash, and ${to} holds the same schema.`,
+        );
+      } else {
+        await rename(snapshot.from, snapshot.to);
+        warnings.push(
+          `Renamed snapshot ${from} to ${to}: snapshots are named by their SHA-256 schema hash since alpha.60.`,
+        );
+      }
+    }
+    return warnings;
   });
-  if (legacy.length === 0) return [];
-  const legacyDir = join(migrationsDir, LEGACY_MIGRATIONS_DIR);
-  await mkdir(legacyDir, { recursive: true });
-  await assertNoSymlinkComponents(legacyDir);
-  for (const fileName of legacy) {
-    await rename(join(migrationsDir, fileName), join(legacyDir, fileName));
-  }
-  return legacy;
 }
 
-/** Refuse to publish while legacy migrations are in place, pointing at `validate`. */
+/** Refuse while legacy migrations are in place, pointing at `validate`. */
 async function assertNoLegacyMigrations(
   migrationsDir: string,
   currentSchema: WasmSchema,
 ): Promise<void> {
-  const legacy = await findLegacyMigrations(migrationsDir, currentSchema, {
-    renameSnapshots: false,
-  });
-  if (legacy.length === 0) return;
+  const { migrations } = await planLegacyMigrations(migrationsDir, currentSchema);
+  if (migrations.length === 0) return;
+  const one = migrations.length === 1;
   throw new Error(
-    `${legacy.join(", ")} ${legacy.length === 1 ? "names" : "name"} schema versions by the hashes Jazz used before alpha.60 switched schema hashes to SHA-256. Run \`jazz-tools validate\` to move ${legacy.length === 1 ? "it" : "them"} to ${LEGACY_MIGRATIONS_DIR}/; the app then runs on schema.ts as it is.`,
+    `${migrations.join(", ")} ${one ? "names" : "name"} schema versions by the BLAKE3 hashes Jazz used before alpha.60 switched schema hashes to SHA-256. Run \`jazz-tools validate\` to move ${one ? "it" : "them"} to ${LEGACY_MIGRATIONS_DIR}/; the app then runs on schema.ts as it is.`,
   );
 }
 
+/**
+ * For `validate --check`: fail, changing nothing, while a project holds
+ * legacy migrations or snapshots named by their BLAKE3 hash.
+ */
+async function checkLegacyMigrations(
+  migrationsDir: string,
+  currentSchema: WasmSchema,
+): Promise<void> {
+  const plan = await planLegacyMigrations(migrationsDir, currentSchema);
+  const pending = [
+    ...plan.migrations.map((fileName) => `move ${fileName} to ${LEGACY_MIGRATIONS_DIR}/`),
+    ...plan.snapshots.map(({ from, to }) => `rename snapshot ${basename(from)} to ${basename(to)}`),
+  ];
+  if (pending.length === 0) return;
+  throw new Error(
+    `This project still uses the schema hashes Jazz used before alpha.60. Run \`jazz-tools validate\` to ${pending.join("; ")}.`,
+  );
+}
+
+/**
+ * Write the app's migrations module from what this project holds locally:
+ * schema.ts, its snapshots and its migration files.
+ */
 async function writeLocalClientMigrations(schemaDir: string, migrationsDir: string): Promise<void> {
   const compiled = await loadCompiledSchema(schemaDir);
   if (!(await importsClientMigrations(compiled.schemaFile))) return;
