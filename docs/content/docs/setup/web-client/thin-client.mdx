@@ -89,11 +89,11 @@ background after the first load. Your live queries carry over, and the thin clie
 writes before it shuts down:
 
 ```tsx
-<JazzProvider user={user} localFirst={() => import("jazz-tools/local-first")}>
+<JazzProvider user={user} client={() => import("jazz-tools/local-first")}>
 ```
 
 The dynamic import lives in your code, so the local-first client and its Wasm become a separate
-chunk: apps that never pass `localFirst` never download it.
+chunk: apps that never pass `client` never download it.
 
 To upgrade only when you need to, for example when a user opens an editor or goes offline, call
 the hook instead:

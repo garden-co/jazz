@@ -123,7 +123,7 @@ Every app starts on the [thin client](/docs/setup/web-client/thin-client). Pass 
 local-first client, and Jazz upgrades to it in the background after the first load:
 
 ```tsx title="App.tsx"
-<JazzProvider user={user} localFirst={() => import("jazz-tools/local-first")}>
+<JazzProvider user={user} client={() => import("jazz-tools/local-first")}>
   <App />
 </JazzProvider>
 ```
