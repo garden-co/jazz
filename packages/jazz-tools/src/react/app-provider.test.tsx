@@ -4,7 +4,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { makeFakeAccount, makeFakeClient } from "../react-core/test-utils.js";
-import { jwtAuth } from "../session/app.js";
+import { backendAuth } from "../session/app.js";
 import { useJazzAuth } from "../react-core/app.js";
 const host = vi.hoisted(() => ({ create: vi.fn() }));
 vi.mock("../session/create-jazz-session.js", () => ({ createJazzSession: host.create }));
@@ -34,10 +34,7 @@ it("provides logout in the data tree without an application auth context", async
     {
       createLocalFirst: () => account,
       restoreLocalFirst: () => account,
-      registerJWT: async () => account,
-      loginJWT: async () => account,
-      loginOrRegisterJWT: async () => account,
-      linkJWT: async () => account,
+      loginWithBackend: async () => account,
       logout() {},
     },
     account,
@@ -82,10 +79,7 @@ it("opens an authenticated provider client with cloneable host options after enr
       accounts: new AccountManager({
         createLocalFirst: () => account,
         restoreLocalFirst: () => account,
-        registerJWT: async () => account,
-        loginJWT: async () => account,
-        loginOrRegisterJWT: async () => account,
-        linkJWT: async () => account,
+        loginWithBackend: async () => account,
         logout() {},
       }),
       openClient: async () => {
@@ -101,7 +95,7 @@ it("opens an authenticated provider client with cloneable host options after enr
       appId="app"
       serverUrl="https://sync.example.test"
       autoAttachDevTools={false}
-      auth={jwtAuth({ key, getToken: async () => "token", logout: async () => {} })}
+      auth={backendAuth({ key, logout: async () => {} })}
       signedOut={<p>signed out</p>}
     >
       <p>private data</p>
@@ -115,4 +109,64 @@ it("opens an authenticated provider client with cloneable host options after enr
   expect(cloned).toEqual([
     { appId: "app", serverUrl: "https://sync.example.test", initial: undefined },
   ]);
+});
+
+it("follows the `user` prop without a browser app id: loading, signed in, signed out", async () => {
+  const account = makeFakeAccount();
+  const configs: unknown[] = [];
+  const shutdowns: unknown[] = [];
+  host.create.mockImplementation((config) => {
+    configs.push(config);
+    return createJazzSessionOwner({
+      accounts: new AccountManager({
+        createLocalFirst: () => account,
+        restoreLocalFirst: () => account,
+        loginWithBackend: async () => account,
+        logout() {},
+      }),
+      openClient: async () => {
+        const client = makeFakeClient({ authMode: "external", userId: "one", claims: {} });
+        const shutdown = client.shutdown.bind(client);
+        return Object.assign(client, {
+          shutdown: async (options?: { waitForSync?: boolean }) => {
+            shutdowns.push(options);
+            await shutdown();
+          },
+        });
+      },
+    });
+  });
+  const tree = (user: string | null | undefined) => (
+    <JazzProvider
+      user={user}
+      autoAttachDevTools={false}
+      loading={<p>loading</p>}
+      signedOut={<p>signed out</p>}
+    >
+      <p>private data</p>
+    </JazzProvider>
+  );
+  const view = render(tree(undefined));
+  expect(view.getByText("loading")).toBeDefined();
+  view.rerender(tree("one"));
+  await waitFor(() => expect(view.getByText("private data")).toBeDefined());
+  expect(configs).toEqual([{ initial: undefined }]);
+  view.rerender(tree(null));
+  await waitFor(() => expect(view.getByText("signed out")).toBeDefined());
+  expect(shutdowns).toEqual([{ waitForSync: true }]);
+});
+
+it("refuses both a `user` prop and an `auth` adapter", () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  expect(() =>
+    render(
+      <JazzProvider
+        user="one"
+        auth={backendAuth({ key: "one", logout: async () => {} })}
+        autoAttachDevTools={false}
+      >
+        <p>data</p>
+      </JazzProvider>,
+    ),
+  ).toThrow("either `user` or `auth`");
 });

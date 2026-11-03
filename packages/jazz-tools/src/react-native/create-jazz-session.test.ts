@@ -28,10 +28,7 @@ for (const [host, create, prepare] of [
         {
           createLocalFirst: vi.fn(() => replacement),
           restoreLocalFirst: () => replacement,
-          registerJWT: async () => replacement,
-          loginJWT: async () => replacement,
-          loginOrRegisterJWT: async () => replacement,
-          linkJWT: async () => replacement,
+          loginWithBackend: async () => replacement,
           logout: vi.fn(),
         },
         retained,
@@ -65,10 +62,7 @@ for (const [host, create, prepare] of [
       const accounts = new AccountManager({
         createLocalFirst: () => makeFakeAccount(),
         restoreLocalFirst: () => makeFakeAccount(),
-        registerJWT: async () => makeFakeAccount(),
-        loginJWT: async () => makeFakeAccount(),
-        loginOrRegisterJWT: async () => makeFakeAccount(),
-        linkJWT: async () => makeFakeAccount(),
+        loginWithBackend: async () => makeFakeAccount(),
         logout: vi.fn(),
       });
       prepare.mockResolvedValue(accounts);

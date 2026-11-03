@@ -149,6 +149,9 @@ pub struct AuthConfig {
     pub backend_secret: Option<String>,
     /// Secret for admin operations (schema/policy sync).
     pub admin_secret: Option<String>,
+    /// The one workload (an OIDC identity) this server trusts instead of
+    /// shared secrets. When set, nothing else is admitted.
+    pub trusted_workload: Option<super::workload::TrustedWorkload>,
     /// Time source for auth expiry checks. Defaults to the system clock.
     pub clock: AuthClock,
 }
@@ -165,6 +168,7 @@ impl AuthConfig {
             || self.allow_local_first_auth
             || self.backend_secret.is_some()
             || self.admin_secret.is_some()
+            || self.trusted_workload.is_some()
     }
 }
 
@@ -1093,6 +1097,50 @@ fn is_jazz_self_signed_identity_proof(token: &str) -> Option<&'static str> {
     }
 }
 
+/// Header with which a trusted backend names the audience it already checked
+/// a local-first proof against.
+///
+/// A browser client without an app id signs its local-first proof for the
+/// endpoint it syncs with (its `serverUrl`), which only that endpoint's
+/// backend knows. The backend verifies the audience, then forwards the proof
+/// with this header and its backend secret; the core verifies the proof for
+/// that audience. The audience also namespaces the founder's account id.
+pub const LOCAL_FIRST_AUDIENCE_HEADER: &str = "X-Jazz-Local-First-Audience";
+
+/// The audience local-first proofs on this request are verified against: the
+/// app id, or the audience a trusted backend vouches for.
+pub fn local_first_audience(
+    headers: &HeaderMap,
+    app_id: AppId,
+    config: &AuthConfig,
+) -> Result<String, UnauthenticatedResponse> {
+    let Some(audience) = headers.get(LOCAL_FIRST_AUDIENCE_HEADER) else {
+        return Ok(app_id.to_string());
+    };
+    let audience = audience
+        .to_str()
+        .ok()
+        .map(str::trim)
+        .filter(|audience| !audience.is_empty())
+        .ok_or_else(|| UnauthenticatedResponse::invalid("Invalid local-first audience"))?;
+    let provided = headers
+        .get("X-Jazz-Backend-Secret")
+        .and_then(|value| value.to_str().ok());
+    validate_backend_secret(provided, config).map_err(|(_, message)| {
+        UnauthenticatedResponse::invalid(match message {
+            "Invalid backend secret" => message,
+            _ => "A local-first audience must be vouched for with the backend secret",
+        })
+    })?;
+    Ok(audience.to_owned())
+}
+
+/// The registry namespace a local-first founder's account id derives from:
+/// the audience its proof was verified against, read as an app id.
+pub fn local_first_founding_app(audience: &str) -> AppId {
+    AppId::from_string(audience).unwrap_or_else(|_| AppId::from_name(audience))
+}
+
 /// Extract session from headers with priority resolution.
 ///
 /// Priority:
@@ -1115,7 +1163,9 @@ pub async fn extract_session(
             .and_then(|v| v.to_str().ok());
 
         match (&config.backend_secret, backend_secret) {
-            (Some(expected), Some(got)) if expected == got => {
+            (Some(expected), Some(got))
+                if crate::middleware::workload::constant_time_eq(expected, got) =>
+            {
                 let session = decode_session_header(session_b64)
                     .ok_or_else(|| UnauthenticatedResponse::invalid("Invalid session format"))?;
                 return Ok(Some(session));
@@ -1169,9 +1219,10 @@ pub async fn extract_session(
                     "Local-first auth is not enabled for this app",
                 ));
             }
+            let audience = local_first_audience(headers, app_id, config)?;
             let verified = identity::verify_jazz_self_signed_proof_at(
                 token,
-                &app_id.to_string(),
+                &audience,
                 config.clock.now_seconds(),
             )
             .map_err(local_first_auth_error)?;
@@ -1240,7 +1291,11 @@ pub fn validate_backend_secret(
     config: &AuthConfig,
 ) -> Result<(), (StatusCode, &'static str)> {
     match (&config.backend_secret, provided) {
-        (Some(expected), Some(got)) if expected == got => Ok(()),
+        (Some(expected), Some(got))
+            if crate::middleware::workload::constant_time_eq(expected, got) =>
+        {
+            Ok(())
+        }
         (Some(_), Some(_)) => Err((StatusCode::UNAUTHORIZED, "Invalid backend secret")),
         (Some(_), None) => Err((
             StatusCode::UNAUTHORIZED,
@@ -1261,7 +1316,11 @@ pub fn validate_admin_secret(
     config: &AuthConfig,
 ) -> Result<(), (StatusCode, &'static str)> {
     match (&config.admin_secret, provided) {
-        (Some(expected), Some(got)) if expected == got => Ok(()),
+        (Some(expected), Some(got))
+            if crate::middleware::workload::constant_time_eq(expected, got) =>
+        {
+            Ok(())
+        }
         (Some(_), Some(_)) => Err((StatusCode::UNAUTHORIZED, "Invalid admin secret")),
         (Some(_), None) => Err((
             StatusCode::UNAUTHORIZED,

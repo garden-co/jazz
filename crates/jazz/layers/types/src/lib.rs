@@ -53,6 +53,8 @@ pub mod local_executor;
 pub mod object;
 /// Canonical, whole-input postcard decoding.
 pub mod postcard_exact;
+/// SHA-256, the one hash Jazz uses for identities and fingerprints.
+pub mod sha256;
 /// Logical time and sequence counters.
 pub mod time;
 
