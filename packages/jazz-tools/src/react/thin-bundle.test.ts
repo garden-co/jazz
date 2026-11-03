@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 // The local-first client: its WASM loader, the runtime source that starts it,
-// and the createDb that opens it. None of them may load before an upgrade.
+// and the createDb behind its createClient. None of them may load before an upgrade.
 const ENGINE = [
   "src/runtime/wasm-loader.ts",
   "src/runtime/default-runtime-source.ts",

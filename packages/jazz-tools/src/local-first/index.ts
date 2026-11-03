@@ -11,5 +11,5 @@
  *
  * or on demand with `useDb().upgradeToLocalFirst(() => import("jazz-tools/local-first"))`.
  */
-export { createDb } from "../runtime/default-create-db.js";
+export { createDb as createClient } from "../runtime/default-create-db.js";
 export type { LocalFirstLoader, LocalFirstModule } from "../runtime/local-first-upgrade.js";

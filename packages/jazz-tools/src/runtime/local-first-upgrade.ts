@@ -6,7 +6,7 @@ import type { Db } from "./db.js";
  * client, with its WASM engine, worker and local storage.
  */
 export interface LocalFirstModule {
-  createDb(config: AccountDbConfig): Promise<Db>;
+  createClient(config: AccountDbConfig): Promise<Db>;
 }
 
 /**

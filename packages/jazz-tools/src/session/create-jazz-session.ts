@@ -9,7 +9,7 @@ import {
 } from "../web/registered-jazz-client.js";
 import type { JazzClientConfig } from "../web/create-jazz-client.js";
 import {
-  createDb as createThinDb,
+  createClient as createThinDb,
   mintLocalFirstTokenInJs,
   prefetchThinQueries,
 } from "../thin/index.js";
@@ -70,8 +70,8 @@ export async function createJazzSession(config: JazzSessionConfig): Promise<Brow
 
   const upgrade = (loader: LocalFirstLoader) =>
     replaceJazzSessionClient<JazzClient>(session!, async (current, account) => {
-      const { createDb } = await loader();
-      const next = await openLocalFirst(createDb, account);
+      const { createClient } = await loader();
+      const next = await openLocalFirst(createClient, account);
       try {
         await prefetchThinQueries(current.db, next.db);
       } catch (error) {
@@ -100,7 +100,7 @@ export async function createJazzSession(config: JazzSessionConfig): Promise<Brow
 
   const openClient = async (account: AccountHandle) => {
     if (loadLocalFirst && upgrades.has(account))
-      return openLocalFirst((await loadLocalFirst()).createDb, account);
+      return openLocalFirst((await loadLocalFirst()).createClient, account);
     return openThin(account);
   };
 

@@ -56,7 +56,7 @@ function memoryLocalStorage() {
   };
 }
 
-const loadLocalFirst: LocalFirstLoader = async () => ({ createDb: createLocalFirstDb });
+const loadLocalFirst: LocalFirstLoader = async () => ({ createClient: createLocalFirstDb });
 
 async function open(
   server: LocalJazzServerHandle,
