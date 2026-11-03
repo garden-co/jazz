@@ -1,7 +1,8 @@
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
-import { jazzPlugin } from "jazz-tools/dev/vite";
 
 export default defineConfig({
-  plugins: [vue(), jazzPlugin()],
+  plugins: [vue()],
+  // jazz-wasm is wasm-bindgen output, which Vite's dependency pre-bundler cannot handle.
+  optimizeDeps: { exclude: ["jazz-wasm"] },
 });

@@ -23,7 +23,7 @@ describe("dev-server re-export compatibility", () => {
   it("exports the same functions from dev/index.ts", async () => {
     const dev = await import("./index.js");
     expect(typeof dev.startLocalJazzServer).toBe("function");
-    expect(typeof dev.watchSchema).toBe("function");
+    expect(dev).not.toHaveProperty("watchSchema");
     expect(dev).not.toHaveProperty("pushSchema");
     expect(dev).not.toHaveProperty("pushPermissions");
     expect(dev).not.toHaveProperty("pushMigration");

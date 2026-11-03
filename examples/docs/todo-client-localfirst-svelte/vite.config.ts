@@ -1,6 +1,5 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { jazzPlugin } from "jazz-tools/dev/vite";
 import { fileURLToPath } from "node:url";
 
 export default defineConfig({
@@ -11,5 +10,7 @@ export default defineConfig({
       ),
     },
   },
-  plugins: [svelte(), jazzPlugin()],
+  plugins: [svelte()],
+  // jazz-wasm is wasm-bindgen output, which Vite's dependency pre-bundler cannot handle.
+  optimizeDeps: { exclude: ["jazz-wasm"] },
 });

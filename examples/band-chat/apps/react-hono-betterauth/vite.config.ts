@@ -1,6 +1,5 @@
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
-import { jazzPlugin } from "jazz-tools/dev/vite";
 import { defineConfig } from "vite";
 import { readConfig } from "./src/lib/config.mjs";
 
@@ -9,7 +8,9 @@ import { readConfig } from "./src/lib/config.mjs";
 const backend = "http://127.0.0.1:3001";
 
 export default defineConfig({
-  plugins: [react(), jazzPlugin({ server: false })],
+  plugins: [react()],
+  // jazz-wasm is wasm-bindgen output, which Vite's dependency pre-bundler cannot handle.
+  optimizeDeps: { exclude: ["jazz-wasm"] },
   resolve: { alias: { "@": fileURLToPath(new URL(".", import.meta.url)) } },
   // The browser and the backend name the same Jazz app (a local default in
   // development; `pnpm build` checks it is set).
