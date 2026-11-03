@@ -2,7 +2,6 @@ import { signChallenge } from "../local-first-auth/index.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import {
   AccountAuthError,
-  requestAccountRegistry,
   requestBackendLinkChallenge,
   requestBackendSignIn,
   readAccountAssignment,
@@ -232,25 +231,6 @@ export function createAccountManagerWithRuntime(options: {
     issued.add(handle);
     return handle;
   };
-  // Test fixtures only: enroll with a JWT the test's core trusts. Apps sign
-  // in through their backend (`loginWithBackend`) or stay local-first.
-  const enrollJWT = async (operation: string, auth: JWTAuth): Promise<AccountHandle> => {
-    const started = epoch;
-    const token = await tokenFor(auth);
-    assertCurrent(started);
-    const identity = identityFromToken(token);
-    if (isReservedJazzIssuer(identity.issuer))
-      throw new AccountAuthError("external_identity_required");
-    const response = await requestAccountRegistry(
-      registry,
-      operation,
-      token,
-      undefined,
-      options.fetch,
-    );
-    assertCurrent(started);
-    return retain(mintHandle(registry, readAccountAssignment(response, identity), identity, auth));
-  };
   if (options.restoredLocalFirstSecret !== undefined)
     parseAuthSecret(options.restoredLocalFirstSecret);
   const restored =
@@ -312,9 +292,6 @@ export function createAccountManagerWithRuntime(options: {
         });
         return retain(handle);
       },
-      registerJWT: (auth) => enrollJWT("register", auth),
-      loginJWT: (auth) => enrollJWT("login", auth),
-      loginOrRegisterJWT: (auth) => enrollJWT("login-or-register", auth),
       loginWithBackend: () => backendAccount(() => requestBackendSignIn(registry, backendFetch)),
       async linkWithBackend(account) {
         // The guest proves itself by signing a challenge the backend issued

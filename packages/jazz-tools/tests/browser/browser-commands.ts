@@ -16,11 +16,6 @@ export interface JazzServerBrowserCommands {
     url: string,
     init: { method: string; headers: [string, string][]; body: string | null },
   ): Promise<{ status: number; headers: [string, string][]; body: string }>;
-  jazzServerJwtForUser(
-    userId: string,
-    claims?: Record<string, unknown>,
-    appId?: string,
-  ): Promise<string>;
 }
 
 export interface JazzServerTransportControlBrowserCommands {
@@ -73,8 +68,7 @@ function isJazzServerBrowserCommands(value: unknown): value is JazzServerBrowser
     hasFunction(value, "jazzServerStop") &&
     hasFunction(value, "jazzAppFront") &&
     hasFunction(value, "jazzAppUser") &&
-    hasFunction(value, "jazzAppRequest") &&
-    hasFunction(value, "jazzServerJwtForUser")
+    hasFunction(value, "jazzAppRequest")
   );
 }
 
@@ -95,8 +89,7 @@ export function jazzServerBrowserCommands(): JazzServerBrowserCommands {
   if (!isJazzServerBrowserCommands(commands)) {
     throw new Error(
       "Browser test project is missing Jazz server commands. Configure jazzServerInfo, " +
-        "jazzServerStop, and " +
-        "jazzServerJwtForUser.",
+        "jazzServerStop, jazzAppFront, jazzAppUser and jazzAppRequest.",
     );
   }
   return commands;

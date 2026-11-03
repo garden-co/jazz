@@ -114,22 +114,6 @@ export function stopJazzServer(serverUrl: string): Promise<void> {
   return jazzServerBrowserCommands().jazzServerStop(serverUrl);
 }
 
-export async function getJazzServerJwtForUser(
-  userId: string,
-  claims?: Record<string, unknown>,
-  appId?: string,
-): Promise<string> {
-  // Browser-command argument serialization elides `undefined` array entries.
-  // Keep the optional `appId` in its third position and preserve the test
-  // issuer's documented default claims rather than accidentally signing the
-  // app ID as a scalar `claims` value.
-  return jazzServerBrowserCommands().jazzServerJwtForUser(
-    userId,
-    claims ?? { role: "user" },
-    appId,
-  );
-}
-
 /**
  * Browser bridge to the shared TransportControl: buffer delivery without
  * disconnecting, using the same block/blockInbound/unblock operations as Rust.

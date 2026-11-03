@@ -1,10 +1,8 @@
 import {
   startLocalJazzServer,
   startTestJazz,
-  startTestJwtIssuer,
   type LocalJazzServerHandle,
   type TestJazz,
-  type TestJwtIssuerHandle,
 } from "../../src/testing/index.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
@@ -17,7 +15,6 @@ interface StartedJazzServer {
   server: LocalJazzServerHandle;
   /** The app's backend (createJazz) in front of the core, once a test deploys. */
   front?: TestJazz;
-  jwtIssuer: TestJwtIssuerHandle;
   appId: string;
   serverUrl: string;
   adminSecret: string;
@@ -26,7 +23,6 @@ interface StartedJazzServer {
 const DEFAULT_JAZZ_SERVER_KEY = "__default__";
 const jazzServerPromises = new Map<string, Promise<StartedJazzServer>>();
 async function startJazzServer(appId?: string): Promise<StartedJazzServer> {
-  const jwtIssuer = await startTestJwtIssuer();
   const adminSecret = "jazz-browser-test-admin";
   const backendSecret = "jazz-browser-test-backend";
   const server = await startLocalJazzServer({
@@ -37,7 +33,6 @@ async function startJazzServer(appId?: string): Promise<StartedJazzServer> {
   });
   return {
     server,
-    jwtIssuer,
     appId: server.appId,
     serverUrl: server.url,
     adminSecret: server.adminSecret,
@@ -73,15 +68,6 @@ export async function jazzServerInfo(appId?: string): Promise<{
   };
 }
 
-export async function jazzServerJwtForUser(
-  userId: string,
-  claims?: Record<string, unknown>,
-  appId?: string,
-): Promise<string> {
-  const { jwtIssuer } = await getOrStartJazzServer(appId);
-  return await jwtIssuer.jwtForUser(userId, claims);
-}
-
 async function startedFor(url: string): Promise<[string, StartedJazzServer] | undefined> {
   for (const [key, runningServer] of jazzServerPromises) {
     const started = await runningServer.catch(() => undefined);
@@ -92,7 +78,7 @@ async function startedFor(url: string): Promise<[string, StartedJazzServer] | un
 
 async function stopStarted(started: StartedJazzServer): Promise<void> {
   await started.front?.stop();
-  await Promise.all([started.server.stop(), started.jwtIssuer.stop()]);
+  await started.server.stop();
 }
 
 /** Stop a core (named by its own URL or its app backend's) and its app backend. */

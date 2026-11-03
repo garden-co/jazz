@@ -13,34 +13,6 @@ export class AccountAuthError extends Error {
   }
 }
 
-/** Shared bearer-only account protocol; never substitute a backend credential. */
-export async function requestAccountRegistry(
-  registry: string,
-  path: string,
-  token: string,
-  body?: unknown,
-  fetcher: typeof fetch = fetchFor(registry),
-): Promise<unknown> {
-  return withAuthRequestDeadline(async (signal) => {
-    const response = await fetcher(`${registry}/${path}`, {
-      signal,
-      method: "POST",
-      credentials: "omit",
-      redirect: "error",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    if (!response.ok) {
-      const code = await response.text();
-      throw new AccountAuthError(
-        /^[a-z_]{1,80}$/.test(code) ? code : "account_request_failed",
-        response.status,
-      );
-    }
-    return response.json();
-  }, new AccountAuthError("account_request_timeout"));
-}
-
 /**
  * The app's backend vouches to the core's registry for an identity it
  * verified itself, with its backend secret: resolve its account

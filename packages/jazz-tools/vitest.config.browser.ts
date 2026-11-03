@@ -25,7 +25,6 @@ import {
   jazzAppUser,
   jazzAppRequest,
   jazzServerInfo,
-  jazzServerJwtForUser,
   stopJazzServerByUrl,
   blockJazzServerTransport,
   unblockJazzServerTransport,
@@ -212,8 +211,6 @@ export default defineConfig({
         restartRemoteBrowserDb: async (_commandContext, id) => restartRemoteBrowserDb(id),
         deleteRemoteBrowserIndexedDbAndWaitForReload: async (_commandContext, id, dbName) =>
           deleteRemoteBrowserIndexedDbAndWaitForReload(id, dbName),
-        jazzServerJwtForUser: async (_context, userId, claims, appId) =>
-          jazzServerJwtForUser(userId, claims, appId),
         writeRealisticBrowserReport: async (_context, runId, report) => {
           mkdirSync(realisticBrowserBenchReportDir, { recursive: true });
           const reportFile = resolve(realisticBrowserBenchReportDir, `${runId}.json`);
