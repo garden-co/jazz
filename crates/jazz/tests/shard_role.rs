@@ -774,3 +774,102 @@ fn a_replica_numbers_at_its_leaders_positions_and_waits_out_the_bound_to_lead() 
     insert(&replica, "two");
     assert_eq!(newest(&replica), hlc(replica_now.get()), "at its own clock");
 }
+
+/// Alice's trusted gateway supplies an explicitly admitted pinned Db handle
+/// to check_part. Bob's owner policy cannot replace that pin, and neither a
+/// successful trial nor a refusal publishes rows or fate. The root stays
+/// unpinned; identity and claims alone do not manufacture a bundle context.
+#[test]
+fn part_checks_preserve_the_supplied_pin_and_stored_names() {
+    use jazz::protocol::{LensOp, MigrationLens, TableLens};
+    use jazz::tools::PolicyExpr;
+    let source = |allowed: bool| {
+        SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("docs")
+                    .column("title", ColumnType::Text)
+                    .policies(allow_all_policies().with_insert(if allowed {
+                        PolicyExpr::True
+                    } else {
+                        PolicyExpr::False
+                    })),
+            )
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("title", ColumnType::Text)
+                    .policies(common::allow_all_writes()),
+            )
+            .build()
+    };
+    for owner in [false, true] {
+        for renamed in [false, true] {
+            let original = compile_schema(&source(owner));
+            let db = block_on(Db::open(DbConfig::new(
+                original.clone(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([1; 16]),
+                    author: AuthorSubject::SYSTEM,
+                },
+            )))
+            .unwrap();
+            let (writer, _upstream, sent_up, _sent_down) = writer_of(&db);
+            let part = upload(&writer, &sent_up, None);
+            let ops = uploaded_ops(&sent_up);
+            let bundle = block_on(db.publish_bundle(&source(!owner))).unwrap();
+            let alice = AuthorSubject::for_test_bytes([5; 16]);
+            db.check_session_pin(alice, Some(&bundle)).unwrap();
+            if renamed {
+                let new = compile_schema(
+                    &SchemaBuilder::new()
+                        .table(
+                            TableSchemaBuilder::new("docs")
+                                .column("heading", ColumnType::Text)
+                                .policies(allow_all_policies().with_insert(if owner {
+                                    PolicyExpr::True
+                                } else {
+                                    PolicyExpr::False
+                                })),
+                        )
+                        .table(
+                            TableSchemaBuilder::new("notes")
+                                .column("title", ColumnType::Text)
+                                .policies(common::allow_all_writes()),
+                        )
+                        .build(),
+                );
+                let lens = MigrationLens::new(
+                    original.version_id(),
+                    new.version_id(),
+                    vec![TableLens {
+                        source_table: "docs".into(),
+                        target_table: "docs".into(),
+                        ops: vec![LensOp::RenameColumn {
+                            from: "title".into(),
+                            to: "heading".into(),
+                        }],
+                    }],
+                )
+                .unwrap();
+                block_on(db.activate_schema_with_lenses(new, &[lens])).unwrap();
+            }
+            let pinned = db
+                .pinned_view(original.version_id(), Some(&bundle))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                pinned
+                    .check_part(alice, None, Acting::Own, (part.node, part.tx), ops.clone())
+                    .is_ok(),
+                !owner
+            );
+            assert_eq!(
+                db.check_part(alice, None, Acting::Own, (part.node, part.tx), ops)
+                    .is_ok(),
+                owner
+            );
+            let old_names = block_on(db.register_schema_view(original)).unwrap();
+            assert!(titles(&old_names).is_empty());
+            assert_eq!(db.shard().resolution(part).unwrap(), None);
+        }
+    }
+}

@@ -5377,6 +5377,135 @@ mod tests {
         );
     }
 
+    /// Alice's two backend-admitted pins govern direct and retained-name thin
+    /// reads independently of Bob's owner policies. Client schema definitions
+    /// and later deployments cannot replace either authenticated pin.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_pins_preserve_retained_names_and_ignore_owner_or_schema_spoofs() {
+        use jazz::tools::deployment::published::{
+            PublishLensOp, PublishMigrationRequest, PublishTableLens,
+        };
+        use jazz::tools::public_schema::SchemaHash;
+        for owner in [false, true] {
+            for renamed in [false, true] {
+                let schema = SchemaBuilder::new()
+                    .table(
+                        PublicTableSchema::builder("docs")
+                            .column("title", ColumnType::Text)
+                            .column("owner", ColumnType::Text)
+                            .policies(public_table_policies().with_select(if owner {
+                                PolicyExpr::True
+                            } else {
+                                PolicyExpr::False
+                            })),
+                    )
+                    .build();
+                let state = ServerBuilder::new(AppId::random())
+                    .with_auth_config(AuthConfig {
+                        admin_secret: Some("admin-secret".into()),
+                        backend_secret: Some("backend-secret".into()),
+                        ..Default::default()
+                    })
+                    .with_storage(StorageBackend::InMemory)
+                    .with_schema(schema.clone())
+                    .build()
+                    .await
+                    .unwrap()
+                    .state;
+                let addr = start_ws_test_server(state.clone()).await;
+                let open = publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await;
+                let closed = publish_docs_bundle(addr, &state, &schema, PolicyExpr::False).await;
+                let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+                let mut clients = Vec::new();
+                for (bundle, allowed) in [(&closed, false), (&open, true)] {
+                    let mut ws = open_negotiated_ws_with_prelude_and_features(
+                        addr,
+                        &state,
+                        pinned_thin_prelude(alice, Some(bundle)),
+                        jazz::wire::FEATURE_THIN_RESULTS,
+                    )
+                    .await;
+                    bind_thin_schema(&mut ws, &schema).await;
+                    clients.push((ws, allowed));
+                }
+                send_thin(
+                    &mut clients[0].0,
+                    1,
+                    jazz::thin::ThinOp::Insert {
+                        table: "docs".into(),
+                        cells: doc_cells("kept title", alice),
+                        options: Vec::new(),
+                        transaction: None,
+                    },
+                )
+                .await;
+                assert!(matches!(
+                    thin_answer(&mut clients[0].0, 1).await,
+                    jazz::thin::ThinBody::Written { .. }
+                ));
+                if renamed {
+                    let next = SchemaBuilder::new()
+                        .table(
+                            PublicTableSchema::builder("docs")
+                                .column("heading", ColumnType::Text)
+                                .column("owner", ColumnType::Text)
+                                .policies(public_table_policies().with_select(if owner {
+                                    PolicyExpr::False
+                                } else {
+                                    PolicyExpr::True
+                                })),
+                        )
+                        .build();
+                    let from_hash = SchemaHash::compute(&schema).to_string();
+                    let to_hash = SchemaHash::compute(&next).to_string();
+                    let migration = PublishMigrationRequest {
+                        from_hash,
+                        to_hash: to_hash.clone(),
+                        forward: vec![PublishTableLens {
+                            table: "docs".into(),
+                            added: false,
+                            removed: false,
+                            renamed_from: None,
+                            operations: vec![PublishLensOp::Rename {
+                                column: "title".into(),
+                                value: "heading".into(),
+                            }],
+                        }],
+                    };
+                    let response = reqwest::Client::new().post(format!("http://{addr}/apps/{}/admin/deploy", state.app_id))
+                        .header("X-Jazz-Admin-Secret", "admin-secret").json(&serde_json::json!({ "targetSchemaHash": to_hash, "schemas": [{ "hash": to_hash, "schema": next }], "migrations": [migration], "permissions": { "docs": public_table_policies().with_select(if owner { PolicyExpr::False } else { PolicyExpr::True }) } }))
+                        .send().await.unwrap();
+                    let status = response.status();
+                    let body = response.text().await.unwrap();
+                    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+                }
+                // The submitted schema carries permissive policies. It names a
+                // version, not authority to select that version's policies.
+                let spoof = SchemaBuilder::new()
+                    .table(
+                        PublicTableSchema::builder("docs")
+                            .column("title", ColumnType::Text)
+                            .column("owner", ColumnType::Text)
+                            .policies(public_table_policies()),
+                    )
+                    .build();
+                for (ws, allowed) in &mut clients {
+                    bind_thin_schema(ws, &spoof).await;
+                    let titles = thin_titles(ws, 2, None).await;
+                    assert_eq!(
+                        titles,
+                        if *allowed {
+                            vec!["kept title".to_owned()]
+                        } else {
+                            vec![]
+                        },
+                        "owner={owner}, renamed={renamed}, allowed={allowed}"
+                    );
+                }
+            }
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn thin_subscription_receives_results_for_writes_from_other_sessions() {
         use jazz::thin::{ThinBody, ThinOp};
