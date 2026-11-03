@@ -148,6 +148,11 @@ pub(super) async fn found_local_first_for_admin(
     if request.identity.issuer != jazz::tools::identity::LOCAL_FIRST_ISSUER {
         return Err((StatusCode::BAD_REQUEST, "local_first_identity_required"));
     }
+    // A core that admits no local-first accounts admits none on a backend's
+    // word either.
+    if !state.auth_config.allow_local_first_auth {
+        return Err((StatusCode::FORBIDDEN, "local_first_auth_disabled"));
+    }
     let result = owner(&state)?
         .execute(AccountCommand::FoundLocalFirst {
             principal: request.identity.clone(),
@@ -593,6 +598,34 @@ mod tests {
             link("guest", "bob").await.unwrap().status(),
             StatusCode::CONFLICT
         );
+        core.shutdown().await;
+    }
+
+    /// With local-first auth off, a backend cannot found a guest's account
+    /// either.
+    #[tokio::test]
+    async fn vouched_founding_respects_disabled_local_first_auth() {
+        let core = JazzServer::builder()
+            .without_local_first_auth()
+            .start()
+            .await
+            .expect("start test server");
+        let founded = reqwest::Client::new()
+            .post(format!(
+                "{}/apps/{}/admin/accounts/found-local-first",
+                core.base_url(),
+                core.app_id()
+            ))
+            .header("x-jazz-backend-secret", core.backend_secret())
+            .json(&serde_json::json!({ "identity": {
+                "issuer": jazz::tools::identity::LOCAL_FIRST_ISSUER,
+                "subject": "6f9619ff-8b86-5011-b42d-00c04fc964ff",
+            }}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(founded.status(), StatusCode::FORBIDDEN);
+        assert_eq!(founded.text().await.unwrap(), "local_first_auth_disabled");
         core.shutdown().await;
     }
 

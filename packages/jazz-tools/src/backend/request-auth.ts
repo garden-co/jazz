@@ -76,6 +76,7 @@ const REGISTRY_REJECTIONS = new Map([
   ["identity_not_authorized", 403],
   ["identity_already_assigned", 409],
   ["invalid_external_identity", 400],
+  ["local_first_auth_disabled", 403],
 ]);
 
 /**
