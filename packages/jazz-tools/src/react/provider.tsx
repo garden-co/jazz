@@ -12,7 +12,7 @@ import {
 import { ConfiguredJazzAppProvider, type JazzAppViewProps } from "../react-core/app.js";
 import { authForUser, type JazzAuth } from "../session/app.js";
 import { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
-import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
+import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import { DevToolsAutoAttach } from "./devtools-auto-attach.js";
 
 // In dev builds, pull in a generated module that withJazz (next.ts/vite.ts/...)
@@ -31,8 +31,12 @@ interface JazzClientContextValue {
   shutdown: CreatedJazzClient["shutdown"];
 }
 
-const createClient: CreateJazzClient = (config) =>
-  createJazzClient(config) as Promise<CreatedJazzClient>;
+// A provider given an explicit `config` opens the local-first client. It loads
+// on first use, so apps on the (default) thin client never bundle it eagerly.
+const createClient: CreateJazzClient = async (config) => {
+  const { createJazzClient } = await import("../web/create-jazz-client.js");
+  return (await createJazzClient(config)) as CreatedJazzClient;
+};
 
 type JazzProviderCommonProps = {
   fallback?: ReactNode;

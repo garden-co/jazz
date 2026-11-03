@@ -10,5 +10,14 @@ export function sessionConfig(overrides: Partial<JazzSessionConfig> = {}): JazzS
   const serverUrl = overrides.serverUrl ?? env.VITE_JAZZ_SERVER_URL ?? env.JAZZ_SERVER_URL;
   if (!appId) throw new Error("Missing Jazz appId");
   if (!serverUrl) throw new Error("Missing Jazz serverUrl");
-  return { env: "dev", ...overrides, appId, serverUrl, initial: "local-first" };
+  return {
+    env: "dev",
+    // Start on the thin client; load the local-first one in its own chunk
+    // once the page has loaded, then keep working offline.
+    client: () => import("jazz-tools/local-first"),
+    ...overrides,
+    appId,
+    serverUrl,
+    initial: "local-first",
+  };
 }
