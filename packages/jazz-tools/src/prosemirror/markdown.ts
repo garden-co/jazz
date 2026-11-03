@@ -60,6 +60,9 @@ export class MarkdownWriter {
   // Right after a list marker, whose first block shares its line.
   private fresh = false;
 
+  /** The document is one empty paragraph, written as nothing. */
+  emptyDocument = false;
+
   constructor(private readonly spec: Required<MarkdownSpec>) {}
 
   /** Writes block syntax, such as `"# "` or a code fence. */
@@ -119,10 +122,16 @@ export class MarkdownWriter {
         continue;
       }
       this.startLine();
-      const escape = !raw && this.needsEscape(text, i);
+      // Markdown drops spaces that start a line, and reads four as code:
+      // the first is written as a character reference, which it keeps, so
+      // the line no longer starts with whitespace.
+      const reference =
+        !raw && (unit === " " || unit === "\t") && !this.inlineSyntax && this.lineText === "";
+      const escape = reference || (!raw && this.needsEscape(text, i));
       this.mark(pos + i, this.out.length, true);
-      if (escape) this.out += "\\";
-      this.out += unit;
+      if (reference) this.out += unit === " " ? "&#32;" : "&#9;";
+      else if (escape) this.out += "\\";
+      if (!reference) this.out += unit;
       this.lineText += unit;
       this.mark(pos + i + 1, this.out.length, !escape);
     }
@@ -367,7 +376,12 @@ function writeList(out: MarkdownWriter, list: Node, pos: number, marker: (i: num
 export const commonMarkSpec: Required<MarkdownSpec> = {
   nodes: {
     doc: (out, node) => out.blocks(node, 0),
-    paragraph: (out, node, pos) => out.inline(node, pos + 1),
+    paragraph: (out, node, pos) => {
+      out.inline(node, pos + 1);
+      // Markdown has no empty paragraph: one holding only a space (written
+      // as a reference) keeps its place. An empty document stays empty.
+      if (node.content.size === 0 && !out.emptyDocument) out.content(" ", pos + 1);
+    },
     heading: (out, node, pos) => {
       out.write("#".repeat(node.attrs.level ?? 1) + " ");
       out.inline(node, pos + 1);
@@ -431,6 +445,7 @@ export function toMarkdown(doc: Node, spec: MarkdownSpec = {}): MappedMarkdown {
     nodes: { ...commonMarkSpec.nodes, ...spec.nodes },
     marks: { ...commonMarkSpec.marks, ...spec.marks },
   });
+  writer.emptyDocument = doc.childCount === 1 && doc.firstChild!.content.size === 0;
   writer.block(doc, 0);
   return writer.finish();
 }

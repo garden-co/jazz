@@ -967,5 +967,63 @@
       }
     ],
     "keeps": ["Day 1: we finally played", "Day 59: we last played", "Day 30: we played"]
+  },
+  {
+    "name": "both sides move the same block to the same place",
+    "format": "markdown",
+    "intent": "one copy of a block both moved",
+    "base": "## Monday\nRehearsal at the studio.\n\n## Tuesday\nRadio interview at noon.\n\n## Wednesday\nTravel to Leeds by van.\n",
+    "steps": [
+      {
+        "user": "A",
+        "set": "## Wednesday\nTravel to Leeds by van.\n\n## Monday\nRehearsal at the studio.\n\n## Tuesday\nRadio interview at noon.\n"
+      },
+      {
+        "user": "B",
+        "set": "## Wednesday\nTravel to Leeds by van.\n\n## Monday\nRehearsal at the studio.\n\n## Tuesday\nRadio interview at noon.\n"
+      }
+    ],
+    "expect": "## Wednesday\nTravel to Leeds by van.\n\n## Monday\nRehearsal at the studio.\n\n## Tuesday\nRadio interview at noon.\n"
+  },
+  {
+    "name": "both sides move one block to different places",
+    "format": "markdown",
+    "intent": "a block both moved ends up once, nothing else lost, no stray markup (known: a heading marker and full stop are left behind)",
+    "base": "## Monday\nRehearsal at the studio.\n\n## Tuesday\nRadio interview at noon.\n\n## Wednesday\nTravel to Leeds by van.\n",
+    "steps": [
+      {
+        "user": "A",
+        "set": "## Wednesday\nTravel to Leeds by van.\n\n## Monday\nRehearsal at the studio.\n\n## Tuesday\nRadio interview at noon.\n"
+      },
+      {
+        "user": "B",
+        "set": "## Monday\nRehearsal at the studio.\n\n## Wednesday\nTravel to Leeds by van.\n\n## Tuesday\nRadio interview at noon.\n"
+      }
+    ],
+    "keeps": [
+      "## Monday\nRehearsal at the studio.",
+      "## Tuesday\nRadio interview at noon.",
+      "## Wednesday\nTravel to Leeds by van."
+    ],
+    "drops": ["## .\n"],
+    "baseline": "fails"
+  },
+  {
+    "name": "an edit straddling the edge of a moved block",
+    "format": "markdown",
+    "intent": "an edit across a moved block's edge loses no text",
+    "base": "## Monday\nRehearsal at the studio.\n\n## Tuesday\nRadio interview at noon.\n\n## Wednesday\nTravel to Leeds by van.\n",
+    "steps": [
+      {
+        "user": "A",
+        "set": "## Tuesday\nRadio interview at noon.\n\n## Monday\nRehearsal at the studio.\n\n## Wednesday\nTravel to Leeds by van.\n"
+      },
+      {
+        "user": "B",
+        "replace": "at noon.\n\n## Wednesday",
+        "with": "at noon, then lunch.\n\n## Wednesday (day off)"
+      }
+    ],
+    "keeps": ["then lunch", "(day off)", "Rehearsal at the studio.", "Travel to Leeds by van."]
   }
 ]

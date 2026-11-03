@@ -21,22 +21,18 @@ export interface SelectionPresence {
 export interface Collaborator extends SelectionPresence {
   id: string;
   name: string;
-  /** A CSS colour for their caret and selection. */
+  /** A CSS colour for their caret and selection: a hex colour, a colour
+   * name, or an `rgb()`/`hsl()`/`oklch()` function. Anything else is drawn
+   * grey, since it comes from another user. */
   color: string;
 }
 
 /** The editor's selection as presence to store. */
-export function capturePresence(
-  state: EditorState,
-  anchors: TextAnchors,
-  version?: number,
-): SelectionPresence {
+export function capturePresence(state: EditorState, anchors: TextAnchors): SelectionPresence {
   const { head, from, to, empty } = state.selection;
   // The caret stays with the text before it, as typing at it extends that.
-  const cursor = captureAnchor(state, anchors, head, "before", version);
-  return empty
-    ? { cursor }
-    : { cursor, selection: captureRange(state, anchors, from, to, version) };
+  const cursor = captureAnchor(state, anchors, head, "before");
+  return empty ? { cursor } : { cursor, selection: captureRange(state, anchors, from, to) };
 }
 
 /** Whether two presences point at the same place, to skip needless writes. */
@@ -46,7 +42,8 @@ export function samePresence(a: SelectionPresence | undefined, b: SelectionPrese
 
 /** Overlays for collaborators' carets (with their name) and selections. */
 export function presenceOverlays(collaborators: readonly Collaborator[]): Overlay[] {
-  return collaborators.flatMap((person) => {
+  return collaborators.flatMap((stored) => {
+    const person = { ...stored, color: safeColor(stored.color) };
     const caret: Overlay = {
       id: `presence:${person.id}:cursor`,
       anchor: person.cursor,
@@ -68,6 +65,15 @@ export function presenceOverlays(collaborators: readonly Collaborator[]): Overla
       caret,
     ];
   });
+}
+
+const COLOR =
+  /^(#[0-9a-f]{3,8}|[a-z]{3,20}|(rgb|rgba|hsl|hsla|oklch|oklab)\([0-9a-z.%\s,/+-]{1,64}\))$/i;
+
+/** `color` if it is only a colour, so it cannot add other style
+ * declarations where it is written into a style attribute. */
+export function safeColor(color: string): string {
+  return COLOR.test(color.trim()) ? color.trim() : "gray";
 }
 
 function caretElement(person: Collaborator): HTMLElement {

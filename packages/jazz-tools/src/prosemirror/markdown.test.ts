@@ -32,7 +32,20 @@ const CANONICAL = [
   "`` `tick ``",
   "Emoji 🎸 and accents: Café Olé",
   "> - quoted\n> - list",
+  "&#32;   indented by four",
+  "&#9;tab first",
+  "First\n\n&#32;\n\nafter an empty paragraph",
+  "- item\n- &#32;two spaces",
 ];
+
+/** `unit` is written at `offset`: as itself, escaped, or as a character
+ * reference. */
+function expectUnitAt(text: string, offset: number, unit: string, pos: number) {
+  const reference = `&#${unit.charCodeAt(0)};`;
+  if (text.startsWith(reference, offset)) return;
+  const at = text[offset] === unit ? offset : offset + 1;
+  expect(text[at], `unit ${JSON.stringify(unit)} at ${pos}`).toBe(unit);
+}
 
 /** Every text unit's document position and its unit. */
 function units(doc: Node): { pos: number; unit: string }[] {
@@ -61,8 +74,7 @@ describe("toMarkdown", () => {
     const mapped = toMarkdown(doc);
     for (const { pos, unit } of units(doc)) {
       const offset = mapped.toText(pos, "after");
-      const at = mapped.text[offset] === unit ? offset : offset + 1;
-      expect(mapped.text[at], `unit ${JSON.stringify(unit)} at ${pos}`).toBe(unit);
+      expectUnitAt(mapped.text, offset, unit, pos);
       expect(mapped.toDoc(offset, "after")).toBe(pos);
     }
   });
@@ -98,6 +110,19 @@ describe("toMarkdown", () => {
     expect(mapped.toDoc(6, "after")).toBe(6);
     expect(mapped.toText(6, "before")).toBe(5);
     expect(mapped.toText(6, "after")).toBe(7);
+  });
+
+  it("keeps empty paragraphs and leading spaces", () => {
+    const p = (text?: string) => schema.node("paragraph", null, text ? [schema.text(text)] : []);
+    const doc = schema.node("doc", null, [p("First"), p(), p("    code-like"), p("\tTabbed")]);
+    const text = toMarkdown(doc).text;
+    const back = parse(text);
+    expect(back.childCount).toBe(4);
+    expect(back.child(1).textContent.trim()).toBe("");
+    expect(back.child(2).type.name).toBe("paragraph");
+    expect(back.child(2).textContent).toBe("    code-like");
+    expect(back.child(3).textContent).toBe("\tTabbed");
+    expect(toMarkdown(back).text).toBe(text);
   });
 
   it("maps an empty document", () => {
@@ -217,8 +242,7 @@ describe("toMarkdown on random documents", () => {
     expect(parse(canonical.text).eq(parsed)).toBe(true);
     for (const { pos, unit } of units(parsed)) {
       const offset = canonical.toText(pos, "after");
-      const at = canonical.text[offset] === unit ? offset : offset + 1;
-      expect(canonical.text[at], `unit ${JSON.stringify(unit)} at ${pos}`).toBe(unit);
+      expectUnitAt(canonical.text, offset, unit, pos);
       expect(canonical.toDoc(offset, "after")).toBe(pos);
     }
   });

@@ -7,9 +7,9 @@
 //! lot, the text around it still roots it in roughly the same place.
 
 use crate::anchor::{
-    CONTEXT_UNITS, context_end, context_start, edit_distance, fuzzy_ends_with_distance,
-    moved_penalty, occurrences, pick, prefix_distance, shortlist, side_similarity,
-    within_then_whole,
+    CONTEXT_UNITS, MAX_CANDIDATES, char_boundary, context_end, context_start, edit_distance,
+    first_units, fuzzy_ends_with_distance, last_units, moved_penalty, occurrences, pick,
+    prefix_distance, shortlist, side_similarity, within_then_whole,
 };
 
 /// Past this many UTF-16 code units, a range's covered text is compared by
@@ -19,6 +19,11 @@ const EDGE_UNITS: usize = 64;
 /// How many starts and ends found by the text around a range are paired
 /// with each other regardless of length.
 const HELD_PAIRS: usize = 16;
+/// The most search cells one resolve spends following the covered text's
+/// ends back to its starts.
+const FOLLOW_CELLS: usize = 4_000_000;
+/// The most spans one resolve scores.
+const MAX_SPANS: usize = 4 * MAX_CANDIDATES;
 
 /// A span of a text value, found again in later versions by its text and
 /// the text around it. Like an [`crate::Anchor`], it can be captured from a
@@ -78,8 +83,8 @@ impl Range {
     pub fn capture(text: &str, version: Option<u64>, start: usize, end: usize) -> Self {
         let units: Vec<u16> = text.encode_utf16().collect();
         let (start, end) = (
-            start.min(end).min(units.len()),
-            end.max(start).min(units.len()),
+            char_boundary(&units, start.min(end).min(units.len())),
+            char_boundary(&units, end.max(start).min(units.len())),
         );
         Self {
             version,
@@ -110,9 +115,9 @@ impl Range {
         }
         let search = RangeSearch {
             text: &text,
-            before: self.before.encode_utf16().collect(),
+            before: last_units(&self.before, CONTEXT_UNITS),
             matched: self.matched.encode_utf16().collect(),
-            after: self.after.encode_utf16().collect(),
+            after: first_units(&self.after, CONTEXT_UNITS),
             hint,
         };
         within_then_whole(
@@ -162,11 +167,27 @@ impl RangeSearch<'_> {
                 spans.push((at, at + len));
             }
         }
-        // The covered text's ends, approximately.
-        for (end, distance) in fuzzy_ends_with_distance(text, lo, hi, self.tail()) {
+        // The covered text's ends, approximately: on repetitive text the
+        // tail can match at every step, so only the matches nearest the
+        // hint are followed back to a start.
+        let mut tail_ends = fuzzy_ends_with_distance(text, lo, hi, self.tail());
+        if let Some((_, end_hint)) = self.hint {
+            tail_ends.sort_by_key(|&(end, _)| (end.abs_diff(end_hint), end));
+        }
+        tail_ends.truncate(MAX_CANDIDATES);
+        let reversed_head: Vec<u16> = self.head().iter().rev().copied().collect();
+        let mut follow_cells = FOLLOW_CELLS;
+        for (end, distance) in tail_ends {
             ends.push(end);
-            let reversed_head: Vec<u16> = self.head().iter().rev().copied().collect();
             let from = end.saturating_sub(len + distance + EDGE_UNITS);
+            // Following an end back costs its reach times the head; past
+            // the budget, ends are kept but their starts come from the
+            // text around the range alone.
+            let cells = (end - from) * reversed_head.len();
+            if cells > follow_cells {
+                continue;
+            }
+            follow_cells -= cells;
             let near: Vec<u16> = text[from..end].iter().rev().copied().collect();
             for (back, _) in fuzzy_ends_with_distance(&near, 0, near.len(), &reversed_head) {
                 starts.push(end - back);
@@ -178,7 +199,12 @@ impl RangeSearch<'_> {
             .map(|(end, _)| end)
             .collect();
         let mut held_ends: Vec<usize> = Vec::new();
-        for (end, distance) in fuzzy_ends_with_distance(text, lo, hi, &self.after) {
+        let mut after_ends = fuzzy_ends_with_distance(text, lo, hi, &self.after);
+        if let Some((_, end_hint)) = self.hint {
+            after_ends.sort_by_key(|&(end, _)| (end.abs_diff(end_hint), end));
+        }
+        after_ends.truncate(MAX_CANDIDATES);
+        for (end, distance) in after_ends {
             held_ends.extend(
                 end.saturating_sub(self.after.len() + distance)
                     ..=end.saturating_sub(self.after.len().saturating_sub(distance)),
@@ -224,9 +250,23 @@ impl RangeSearch<'_> {
         let mut seen = std::collections::HashSet::new();
         spans
             .retain(|&(start, end)| start <= end && end <= text.len() && seen.insert((start, end)));
+        // Scoring is the costly part: only the spans nearest the hint (or,
+        // without one, the first found, exact matches first) are scored.
+        if let Some(hint) = self.hint {
+            spans.sort_by_key(|&(start, end)| {
+                (start.abs_diff(hint.0) + end.abs_diff(hint.1), start)
+            });
+        }
+        spans.truncate(MAX_SPANS);
+        let from_hint = self.hint.map(|hint| {
+            move |span: &(usize, usize)| span.0.abs_diff(hint.0).max(span.1.abs_diff(hint.1))
+        });
         let (span, confidence, ambiguous) = pick(
             spans.into_iter().map(|span| (span, self.score(span))),
             |a, b| a.0.abs_diff(b.0).max(a.1.abs_diff(b.1)),
+            from_hint
+                .as_ref()
+                .map(|f| f as &dyn Fn(&(usize, usize)) -> usize),
         )
         .expect("there is always a span");
         ResolvedRange {

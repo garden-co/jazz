@@ -86,7 +86,17 @@ export function overlays(options: OverlayOptions): Plugin<OverlayState> {
           return { ...value, decorations: value.decorations.map(tr.mapping, tr.doc) };
         }
         const list = set ?? value.overlays;
-        const placed = list.map((overlay) => place(state, anchors(), overlay, options));
+        // A merged value moves overlays it did not touch along with their
+        // text, as a local edit would; only those it touched, and orphans
+        // whose text may be back, are found again from their anchors.
+        const placed =
+          set === undefined
+            ? value.placed.map((old) =>
+                old.orphaned || touches(tr, old.from, old.to)
+                  ? place(state, anchors(), old.overlay, options)
+                  : { ...old, from: tr.mapping.map(old.from, 1), to: tr.mapping.map(old.to, -1) },
+              )
+            : list.map((overlay) => place(state, anchors(), overlay, options));
         placedChanged = true;
         return { overlays: list, placed, decorations: decorate(state, placed) };
       },
@@ -141,6 +151,20 @@ function place(
     orphaned,
     drifted: !orphaned && found.confidence < drift,
   };
+}
+
+/** Whether `tr` changed anything in or right at `from..to`. */
+function touches(tr: Transaction, from: number, to: number): boolean {
+  let hit = false;
+  for (const map of tr.mapping.maps) {
+    map.forEach((start, end) => {
+      if (start <= to && end >= from) hit = true;
+    });
+    if (hit) return true;
+    from = map.map(from, 1);
+    to = Math.max(from, map.map(to, -1));
+  }
+  return false;
 }
 
 function decorate(state: EditorState, placed: readonly PlacedOverlay[]): DecorationSet {

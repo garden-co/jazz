@@ -108,13 +108,42 @@ describe("markdownSync", () => {
     expect(ed.marked()).toBe("Remember the **set‸list** printouts.");
   });
 
-  it("ignores echoes of values it wrote, even older ones", () => {
+  it("ignores the echo of its latest write", () => {
     const ed = editor("A‸");
     ed.local((s) => s.tr.insertText("b"));
     ed.local((s) => s.tr.insertText("c"));
-    expect(ed.remote("Ab")).toBe(false);
     expect(ed.remote("Abc")).toBe(false);
     expect(markdownOf(ed.state).text).toBe("Abc");
+  });
+
+  it("applies a merged value that equals one of its earlier writes", () => {
+    const ed = editor("Bring the ‸");
+    ed.local((s) => s.tr.insertText("van"));
+    // Someone deleted the word this editor just typed.
+    expect(ed.remote("Bring the")).toBe(true);
+    expect(markdownOf(ed.state).text).toBe("Bring the");
+    ed.local((s) => s.tr.insertText(" keys", s.doc.content.size - 1));
+    expect(ed.written.at(-1)).toBe("Bring the keys");
+  });
+
+  it("writes the canonical value when its edit cannot be placed in a non-canonical one", () => {
+    // Two spots written differently, far apart: the part between them is
+    // too large to diff, so the edit's place in the stored value is unknown.
+    const middle = Array.from({ length: 300 }, (_, i) => `Line ${i} of the set notes.`).join(
+      "\n\n",
+    );
+    const stored = `__Tour__\n\n${middle}\n\n* last item`;
+    const ed = editor("Start‸");
+    expect(ed.remote(stored)).toBe(true);
+    const target = "Line 150 of the set notes.";
+    const at = docPosition(ed.state, markdownOf(ed.state).text.indexOf(target) + "Line 150".length);
+    ed.local((s) => s.tr.insertText(" (encore)", at));
+    const write = ed.written.at(-1)!;
+    // Nothing the editors show is lost: the write holds every line.
+    expect(markdownOf(editor(write).state).text).toBe(markdownOf(ed.state).text);
+    expect(write).toContain("Line 150 (encore) of the set notes.");
+    expect(write).toContain("Line 0 of the set notes.");
+    expect(write).toContain("Line 299 of the set notes.");
   });
 
   it("leaves blocks the change does not reach as they are", () => {
