@@ -213,3 +213,8 @@ mod transaction_read_prefix;
 
 #[path = "../executing_handle_policy_context.rs"]
 mod executing_handle_policy_context;
+
+#[path = "../governance_claims_composition.rs"]
+mod governance_claims_composition;
+#[path = "../governance_ordinary_composition.rs"]
+mod governance_ordinary_composition;

@@ -13266,3 +13266,7 @@ mod nested_policy_dependencies_tests;
 #[cfg(test)]
 #[path = "executing_handle_policy_context_tests.rs"]
 mod executing_handle_policy_context_tests;
+
+#[cfg(test)]
+#[path = "governance_composition_tests.rs"]
+mod governance_composition_tests;
