@@ -5,49 +5,49 @@
       "name": "integer",
       "columnType": { "type": "Integer" },
       "nullable": false,
-      "hash": "0891ce37936c69d11b46f3403fd7c44e63822c9fde9ce4bff1566af64560c84f"
+      "hash": "3841e722367ab90654ea70c824374b3a1289192f9f4bc89865f67324a3369695"
     },
     {
       "name": "bigint",
       "columnType": { "type": "BigInt" },
       "nullable": false,
-      "hash": "070b3f469fe220a17555cfbad95c39483237cc915dfb7f628ca17d46acd0d751"
+      "hash": "e44a520529ec5fbccb3ab1fd23a4ebb980b5a980a7348202700b6ca0e054d849"
     },
     {
       "name": "double",
       "columnType": { "type": "Double" },
       "nullable": false,
-      "hash": "c2587617ebd2f3ecc51a3306401dda33a028d3c1d5e06512e4c9d74066ba2d03"
+      "hash": "d2a4dedd98f69da28ffc9795647db6d58161e10109117f482840c58c399d361d"
     },
     {
       "name": "boolean",
       "columnType": { "type": "Boolean" },
       "nullable": false,
-      "hash": "53ca87b3b8eef71d3bf6aa83a422f771b79dad63be16cb999b971d0f54f94a20"
+      "hash": "9de1a5cd5ce5fdc88a0694cb26f91323cc99e87093ed944f3c8da473586ca065"
     },
     {
       "name": "text",
       "columnType": { "type": "Text" },
       "nullable": false,
-      "hash": "9da9085d13c72df3665d499aa39ac57ce97cb11a505c21dc8c81bfb19b27c3ec"
+      "hash": "b25bd7d8e7cab3fba07bcfb59e6b6615dfcb67976efeab8dac17c4f1f8f60645"
     },
     {
       "name": "json",
       "columnType": { "type": "Json" },
       "nullable": false,
-      "hash": "996449b66ec60ad1d01b3e1cb865081e359dacca5d6d4da4d1cb357f8eaa3aaa"
+      "hash": "68c64b6098c6626029f650b028df2d2e033db412bdf7a1c14d988b0c2881618e"
     },
     {
       "name": "enum",
       "columnType": { "type": "Enum", "variants": ["draft", "active", "archived"] },
       "nullable": false,
-      "hash": "00f576e4b61f7d1a0075ba0c90712bdaf4ca1f5175997da1cb25e7d2c360e633"
+      "hash": "6b920d6cdc1f6332ab04bc17dad57676b858eb35950170d3d1d82d3bf1e38f80"
     },
     {
       "name": "enum-reordered",
       "columnType": { "type": "Enum", "variants": ["active", "draft", "archived"] },
       "nullable": false,
-      "hash": "26c5a9a07bf9c5bcc199ef19850965cda792d7abf5a814744e000f3c09be27b4"
+      "hash": "d8269ce5914aef59043ae907325f760e3a3bf587ff5dea6c41796acfbb8b5178"
     },
     {
       "name": "enum-payload",
@@ -62,7 +62,7 @@
         ]
       },
       "nullable": false,
-      "hash": "adca3e6c8923e02112ce53eefe05f80b58380910e919499401414e668a465175"
+      "hash": "2556ae3abd5c72c359507a583419b0eec11d12f0d4fc9dd6bd06f7276097281f"
     },
     {
       "name": "enum-payload-reordered",
@@ -77,7 +77,7 @@
         ]
       },
       "nullable": false,
-      "hash": "b5e9d9601c99e799deb73fa880195cf304360f2ebe41d0f27288c2c14866b6b8"
+      "hash": "89165a453f1d1805ffa2af2eaaf4d7014399a8d44ef0be690c538a610f1ea135"
     },
     {
       "name": "enum-payload-nullable-field",
@@ -92,31 +92,31 @@
         ]
       },
       "nullable": false,
-      "hash": "25cdaca37175d33de7238e8818b2c1b8a51fbc61625cf6bb59bdd75f6d6f2271"
+      "hash": "a820544a5c3f8e7632d9f578344fccfcf4e6ced02aae9b977359b53fc977bb3f"
     },
     {
       "name": "timestamp",
       "columnType": { "type": "Timestamp" },
       "nullable": false,
-      "hash": "05ed5bb54a538d12e4ceb34b67959874b8b2f34c7adb3665abec2484886f13ae"
+      "hash": "83521c52eeb944500710efac0bb38238d42c9587f9f4fb82c9e848f307a486f0"
     },
     {
       "name": "uuid",
       "columnType": { "type": "Uuid" },
       "nullable": false,
-      "hash": "1a62903cadf9823d9881eaf69ab00c404b9aef8de011d7603e6a6c727d71e6ca"
+      "hash": "7d0681b27e552b4bc8baf67157978265e00c61c266cce7b51912957f36107d6f"
     },
     {
       "name": "bytea",
       "columnType": { "type": "Bytea" },
       "nullable": false,
-      "hash": "5d4d1d4364ac6972a5aa65196fb259f3f4d2486fc66ad62b905e61ef63159eb2"
+      "hash": "80f5be45d6a250c7fbea01e00f719d73cdbd0cfb6c328bebd1dd6e478c7c6ab8"
     },
     {
       "name": "array",
       "columnType": { "type": "Array", "element": { "type": "Uuid" } },
       "nullable": false,
-      "hash": "3c59c880bb81fbff2695aa4a23b87f0f0135679da685825d53ed54411f8025cb"
+      "hash": "132e55902913f424d24f1f39e492eb67675d863b2d399b192942b242981074b1"
     },
     {
       "name": "row",
@@ -128,13 +128,13 @@
         ]
       },
       "nullable": false,
-      "hash": "16e4938f28824dd6526cbea32f6836c42d21b2caaef9bdae219730bc7cb6ef4c"
+      "hash": "6bd5a76c3180dbdae4462c5754cd89f26978f7995b0ca2056ccd4fe5a8b01a1a"
     },
     {
       "name": "nullable-text",
       "columnType": { "type": "Text" },
       "nullable": true,
-      "hash": "b538ab7ca774cdf97c4bccce8270bda486e9d0f8ab6d04cea86200fc12bdd0bf"
+      "hash": "03f40065c3462df46fdbc42aa03a47f861a0cf6696eeb9699061cf22f6163a05"
     },
     {
       "name": "nested-composite",
@@ -182,7 +182,7 @@
         }
       },
       "nullable": false,
-      "hash": "dd622416483432dbc37d09a7894d1af286b3c7a404bd337dc358343f3be4a630"
+      "hash": "e19e301349458093efd4c414b765d50e7f4bdff4bf5150874e9551aa9266f398"
     }
   ],
   "defaultCases": [
@@ -194,7 +194,7 @@
         "type": "Integer",
         "value": -2147483648
       },
-      "hash": "0fde6940c734b2ed2c808bfd4da4d77906a9fcb26a0fcc58a8a74b3bf55b75a5",
+      "hash": "524e323811a6483baca1dd1c4215891d312816df8a146aa254b70a09bb2462dd",
       "name": "integer-min",
       "nullable": false
     },
@@ -206,7 +206,7 @@
         "type": "Integer",
         "value": 2147483647
       },
-      "hash": "404f8bf78329021a9f43698493336813c06fad1511fdae31b0eac74d43de8dd0",
+      "hash": "cd05b1fe4a25e5d5db5933dbdf7cadf58d16694d9c3981506b28061943cacf2c",
       "name": "integer-max",
       "nullable": false
     },
@@ -218,7 +218,7 @@
         "type": "BigInt",
         "value": "-9223372036854775808"
       },
-      "hash": "ded06ed8399ab046d6d48893fbe37a66dfc3a7728b6a85d76a99a6a889271d05",
+      "hash": "f2a5cd11289e16522a8ad0597dfb4d7df3f99a3a7446b59a200f6ecdcce407db",
       "name": "bigint-min",
       "nullable": false
     },
@@ -230,7 +230,7 @@
         "type": "BigInt",
         "value": "9223372036854775807"
       },
-      "hash": "44c9702474bd52304d56b26761b22d224c88645c389bc46516a5014173a17607",
+      "hash": "a4bb78c660f436c554eaf4e8e11985c16cbf510e822f7fd206e3309acce22e5e",
       "name": "bigint-max",
       "nullable": false
     },
@@ -242,7 +242,7 @@
         "type": "Double",
         "value": -12.5
       },
-      "hash": "7ba4bc040c4a0d5a0a7af33e379cbd8d55cb52be96078130b57238f62121c349",
+      "hash": "729846a8da714d63d6eb0fd8402721b0a18ce806c357cb54d990c364ef4eae5c",
       "name": "double",
       "nullable": false
     },
@@ -254,7 +254,7 @@
         "type": "Boolean",
         "value": false
       },
-      "hash": "2ff50c48f8ef554900d301801bbc89aec9518cfed5746e432ce339ffd9183cf9",
+      "hash": "b597fd1280f69be1e38d6185a17dcceff1a9d28ff511e62b6db5b12d7240dbb5",
       "name": "boolean-false",
       "nullable": false
     },
@@ -266,7 +266,7 @@
         "type": "Text",
         "value": "café 🌿"
       },
-      "hash": "0ff880fdb8e60e9e53d9095dd534c72db18805fd88e80b72d13f8c70fd92061a",
+      "hash": "4b089ec7cc0bb857acabbd68d87f53fd0133eee6b42ccd5ca928239d877889a0",
       "name": "text-unicode",
       "nullable": false
     },
@@ -278,7 +278,7 @@
         "type": "Text",
         "value": "{\"count\":2}"
       },
-      "hash": "0ccd01838c979d4c88cc11aaa66eae6211990a797c72676e5e4807d1389a0568",
+      "hash": "7a30b0d9b48f42cf54b2ea9b76a923d724d2532b8a3e9e2f4f19c042ed21368f",
       "name": "json",
       "nullable": false
     },
@@ -309,7 +309,7 @@
         "type": "Text",
         "value": "{\"z\":2,\"a\":\"ok\"}"
       },
-      "hash": "c0c194fab3b85da53ddeb41481bf1b2ac6d8b43e566c68de03e3746c1cc0e33b",
+      "hash": "a3a680e76e5a4920c7b215e3a44fbdfa30a1e19255ba3ea9519dc383654f3c27",
       "name": "json-schema",
       "nullable": false
     },
@@ -321,7 +321,7 @@
         "type": "Timestamp",
         "value": 1700000000123
       },
-      "hash": "d5588ff7bc5263ca2a7d24130fe99187ec086cd963191e5e6b2dbc55d23ec579",
+      "hash": "37a1de27017d9cb2847d9381725d25f8e58438a5d0a0b2b27a719e1e644114aa",
       "name": "timestamp",
       "nullable": false
     },
@@ -333,7 +333,7 @@
         "type": "Uuid",
         "value": "00112233-4455-6677-8899-aabbccddeeff"
       },
-      "hash": "420b60f8799c62cfb834bd51d6c9f483a1c27181bf73864363b98696a106b6e1",
+      "hash": "88913b86017889051bc2bfcba19e451a4d0e098e424a98ac008c1417d11bf9a4",
       "name": "uuid",
       "nullable": false
     },
@@ -345,7 +345,7 @@
         "type": "Bytea",
         "value": [0, 1, 127, 128, 255]
       },
-      "hash": "7a22b7ab67255133078cb8e922b77f5708c631feaed6a3ce6df5d0c9230e352f",
+      "hash": "de0d4d0ef4eefd1212188517f39072de6ce01216e7bac62c03486980d1170fbe",
       "name": "bytea",
       "nullable": false
     },
@@ -369,7 +369,7 @@
           }
         ]
       },
-      "hash": "9c1dc0e93ba33f1878a1a430b392857dc399acc8760cd1f7e748cac53479bd82",
+      "hash": "7140c45481fccdb8b8e27de2d6eff1226f9db2ed7f0688be7e6e1878853f1666",
       "name": "array",
       "nullable": false
     },
@@ -384,7 +384,7 @@
         "type": "Array",
         "value": []
       },
-      "hash": "63d2c62c08637cb6ed612d426da79a5372361ba09082d627752af5b9707285fc",
+      "hash": "d61364e118e31d37b3b212924dd4c4bf2ae58528bc969aeb6ac5ea90406a16f4",
       "name": "empty-array",
       "nullable": false
     },
@@ -422,7 +422,7 @@
           ]
         }
       },
-      "hash": "13937b9d93f5d7d84e59c6346ec4b292497607baf8da12226129b69eedaf3039",
+      "hash": "0de5afe006986f38ff094ea420a1abdd26df48bd27994889936fb470eaf17e10",
       "name": "row",
       "nullable": false
     },
@@ -435,7 +435,7 @@
         "type": "Text",
         "value": "active"
       },
-      "hash": "a8be5a0af1b19cf44f82c51b21787708a5b845eb4e892962b474be8c51656c8c",
+      "hash": "a277a209b5c6247d0b40b4df75f54dbc362ec8b45750dec574b5d2c418d670c3",
       "name": "enum",
       "nullable": false
     },
@@ -473,7 +473,7 @@
           ]
         }
       },
-      "hash": "99401b36c24acb71f7705439dcf8cf08a40b968d550c2561bf8a81007a33534f",
+      "hash": "58b767e9b35d0b562958116df12c46b2f7b93e97c4ab523c073089107037d056",
       "name": "enum-payload",
       "nullable": false
     },
@@ -484,7 +484,7 @@
       "default": {
         "type": "Null"
       },
-      "hash": "e599d2ed34fc3d58ee4e5388a29c6e14879ba2e82dd8d5b877474467a87c2683",
+      "hash": "5f7df877daaca7b5cec2377797d53aaf2974afdb6a37016765f5110690857a90",
       "name": "null",
       "nullable": true
     },
@@ -492,7 +492,7 @@
       "columnType": {
         "type": "Text"
       },
-      "hash": "b538ab7ca774cdf97c4bccce8270bda486e9d0f8ab6d04cea86200fc12bdd0bf",
+      "hash": "03f40065c3462df46fdbc42aa03a47f861a0cf6696eeb9699061cf22f6163a05",
       "name": "absent",
       "nullable": true
     },
@@ -505,7 +505,7 @@
         "type": "Text",
         "value": "main"
       },
-      "hash": "52c30e9358eeaec995682401f585b0a2db6688afa8c89753ef01e74673895bfc",
+      "hash": "03fc219204366f20d042027463fcc045172debc688b569981269509e0d3eca44",
       "name": "branch-by",
       "nullable": false
     },
@@ -513,7 +513,7 @@
       "columnType": {
         "type": "Integer"
       },
-      "hash": "d145712b9d53865821167aa1a539ba25317cfac7cf3eeca4682fb6aae65fb34a",
+      "hash": "52c96375c69337954ab1c2926a4dcb9b40ec235f1c2ef179ec83317123fda72a",
       "mergeStrategy": "Counter",
       "name": "merge-only",
       "nullable": false
@@ -526,7 +526,7 @@
         "type": "Integer",
         "value": 5
       },
-      "hash": "b43e7fdc87fd439971910e9795fd0dc24ca696f4da7e05cafbbcd198991cec2a",
+      "hash": "968e0e8248efd1a40ddf47a3dcbabcde0afa3dbc9bc678a3e0ab85d1739cc6fa",
       "mergeStrategy": "Counter",
       "name": "default-and-merge",
       "nullable": false
@@ -537,13 +537,13 @@
       "name": "composite-one",
       "columns": ["owner", "updated"],
       "compositeIndexes": [["owner", "updated"]],
-      "hash": "ca6530e8ae7ce9572235d007b4ac57a56d4ac2263f41415d8d5863455f0c7d31"
+      "hash": "2612804f61fb582f212ddbb4673207e2aa44e8cbd8b8630d26c9e64785d0dfc1"
     },
     {
       "name": "composite-column-order-is-identity",
       "columns": ["owner", "updated"],
       "compositeIndexes": [["updated", "owner"]],
-      "hash": "612d03779b68da33f63644a6de8fb6bde90b0432fb242f4dfcf163e5b7772680"
+      "hash": "d7e88fa06ea300cbef3321084ff08cbd17fe4901892520ddafc305f301cf9fb8"
     },
     {
       "name": "composite-two-declared-sorted",
@@ -552,7 +552,7 @@
         ["owner", "updated"],
         ["updated", "owner"]
       ],
-      "hash": "b9068bd48979c32723dc502b29109f9658f1671913a5560413e3b2169b6a2098"
+      "hash": "1febfeffd7d5cbe2b62735815b9831c180acdcd66a960086d4ab8af08b7af2f0"
     },
     {
       "name": "composite-two-declared-reversed",
@@ -561,7 +561,7 @@
         ["updated", "owner"],
         ["owner", "updated"]
       ],
-      "hash": "b9068bd48979c32723dc502b29109f9658f1671913a5560413e3b2169b6a2098"
+      "hash": "1febfeffd7d5cbe2b62735815b9831c180acdcd66a960086d4ab8af08b7af2f0"
     },
     {
       "name": "composite-utf8-not-utf16-order",
@@ -570,19 +570,19 @@
         ["\ud800\udc00", "a"],
         ["\ue000", "a"]
       ],
-      "hash": "9206d3bb7999f301f3143b827b0ad1fbe8cccdd3f996126a6d6de5b9dc8e461b"
+      "hash": "fbad4530bcc1d1cd6c57cbf40a59e2c4c512a5ba161c20653478f0c3c0795b20"
     }
   ],
   "historyCases": [
     {
       "name": "full",
       "history": null,
-      "hash": "9da9085d13c72df3665d499aa39ac57ce97cb11a505c21dc8c81bfb19b27c3ec"
+      "hash": "b25bd7d8e7cab3fba07bcfb59e6b6615dfcb67976efeab8dac17c4f1f8f60645"
     },
     {
       "name": "latest",
       "history": "latest",
-      "hash": "363d9e6879e25133e48913d1339d659196bf8e2962c4033046a89c96155a776d"
+      "hash": "e60dfd77fe22066815cadbd5c2e7a80bed0e871400c6c9787d9659b3b585ce53"
     }
   ]
 }

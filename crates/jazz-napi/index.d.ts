@@ -15,8 +15,33 @@ export declare class E2EeSodiumStream {
 }
 export type E2eeSodiumStream = E2EeSodiumStream
 
+export declare class JazzCore {
+  /** Open the core's storage and serve it in this process. */
+  static open(options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; jwtPublicKey?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  /**
+   * Route one HTTP request. `url` is the path and query, as the core's
+   * router sees them (`/apps/<appId>/...` or `/health`).
+   */
+  handle(method: string, url: string, headers: Array<Array<string>>, body: Buffer): Promise<JazzCoreResponse>
+  /**
+   * Start a sync session over a socket the host upgraded. `onEvent` gets
+   * each message for the client and, last, the close.
+   */
+  openSocket(headers: Array<Array<string>>, onEvent: (err: Error | null, event: JazzCoreSocketEvent) => void): JazzCoreSocket
+  /** Close every session and the storage. */
+  close(): Promise<void>
+}
+
+/** The host's handle on one session. */
+export declare class JazzCoreSocket {
+  /** Pass one binary message from the client. False once the session ended. */
+  send(data: Uint8Array): boolean
+  /** The client's socket closed. */
+  close(): void
+}
+
 export declare class JazzServer {
-  static start(options: { appId: string; backendSecret: string; adminSecret: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[] }): Promise<JazzServer>
+  static start(options: { appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }): Promise<JazzServer>
   get appId(): string
   get url(): string
   get port(): number
@@ -84,8 +109,11 @@ export declare class NapiDb {
    */
   static openPersistentAsBackend(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
   static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
-  /** Register and return a typed view backed by this same runtime owner. */
-  registerSchema(schema: Uint8Array): NapiDb
+  /**
+   * Register and return a typed view backed by this same runtime owner,
+   * of an app shipping `migrations` (its bundle as JSON).
+   */
+  registerSchema(schema: Uint8Array, migrations?: Uint8Array | undefined | null): NapiDb
   /** Begin one owner-wide transaction. */
   beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null): void
   /** Commit an owner-wide transaction by id and optional kind. */
@@ -287,6 +315,12 @@ export declare class Write {
   close(): boolean
 }
 
+/** The anchor at `position` (UTF-16 code units) of `text`. */
+export declare function captureTextAnchor(text: string, version: number | undefined | null, position: number, side: JsonValue): JsonValue
+
+/** The range `start..end` (UTF-16 code units) of `text`. */
+export declare function captureTextRange(text: string, version: number | undefined | null, start: number, end: number): JsonValue
+
 export interface DeleteOptions {
   author?: Uint8Array
   attribution?: Uint8Array
@@ -339,6 +373,20 @@ export interface InsertOptions {
   updatedAtMs?: number
 }
 
+export interface JazzCoreResponse {
+  status: number
+  headers: Array<Array<string>>
+  body: Buffer
+}
+
+export interface JazzCoreSocketEvent {
+  /** `"message"` or `"close"`. */
+  kind: string
+  data?: Uint8Array
+  code?: number
+  reason?: string
+}
+
 /**
  * Any JSON-compatible value crossing the native JavaScript boundary.
  *
@@ -354,6 +402,12 @@ export declare function mintLocalFirstToken(seedB64: string, audience: string, t
 
 /** Exact build/ABI fingerprint for the generated native artifact. */
 export declare function nativeArtifactFingerprint(): string
+
+/** Where `anchor` lands in `text`: `{ position, confidence, ambiguous }`. */
+export declare function resolveTextAnchor(anchor: JsonValue, text: string, version?: number | undefined | null): JsonValue
+
+/** Where `range` lands in `text`: `{ start, end, confidence, ambiguous }`. */
+export declare function resolveTextRange(range: JsonValue, text: string, version?: number | undefined | null): JsonValue
 
 export interface RestoreOptions {
   author?: Uint8Array

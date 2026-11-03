@@ -495,6 +495,26 @@ impl RuntimeSchema {
             &self.canonical_bytes(),
         ))
     }
+
+    /// An id shared by every version whose rows pass unchanged between
+    /// them: the same tables and columns, whatever their order, merge
+    /// strategies and indexes. Deployment connects such versions with an
+    /// empty lens; stored names derived from this id agree across them,
+    /// whichever of them a store admits first.
+    pub fn compatibility_id(&self) -> SchemaVersionId {
+        let mut schema = Self {
+            tables: self.tables.clone(),
+        };
+        for table in &mut schema.tables {
+            table.columns.sort_by(|a, b| a.name.cmp(&b.name));
+            table.merge_strategies.clear();
+            table.composite_indexes.clear();
+            table.history = HistoryRetention::Full;
+        }
+        let mut bytes = b"jazz-schema-compatibility".to_vec();
+        bytes.extend(canonical_schema_bytes(&schema));
+        SchemaVersionId(uuid::Uuid::new_v5(&SCHEMA_VERSION_NAMESPACE, &bytes))
+    }
 }
 
 /// Per-column strategy used when upstream nodes merge concurrent content heads.
@@ -532,17 +552,7 @@ impl MergeStrategy {
     }
 }
 
-/// How a text-merging column's values are cut into the units a merge never
-/// splits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TextFormat {
-    /// Words, whitespace and other characters.
-    Plain,
-    /// Plain units, plus delimiter runs, list markers and link targets.
-    Markdown,
-    /// Plain units, plus tags and entities.
-    Html,
-}
+pub use jazz_text::TextFormat;
 
 #[cfg(any(test, feature = "testing"))]
 fn is_counter_column_type(column_type: &StorageColumnType) -> bool {
@@ -861,8 +871,10 @@ pub struct TableSchema {
     /// Per-column merge strategy. Columns omitted here use [`MergeStrategy::Lww`].
     #[serde(default)]
     pub merge_strategies: BTreeMap<String, MergeStrategy>,
-    /// How much of each row's history nodes keep (SPEC 4 §4.9). It does
-    /// not change how rows are stored, so it is not part of the version id.
+    /// How much of each row's history nodes keep (SPEC 4 §4.9). Part of
+    /// the version id, as merge strategies are, so a store admits a change
+    /// to it as a version of its own; it does not change how rows are
+    /// stored, so not of the compatibility id.
     #[serde(default)]
     pub history: HistoryRetention,
 }
@@ -1559,8 +1571,34 @@ const SCHEMA_ID_DOMAIN_V2_COMPOSITE_INDEXES: &str = "jazz-schema-v2-composite-in
 /// `u64` variant count and each length-prefixed variant in declared order
 /// (count 0 for a column that is no enum).
 const SCHEMA_ID_DOMAIN_V3_ENUM_VARIANTS: &str = "jazz-schema-v3-enum-variants";
+/// Domain tag used exactly when some table is latest-only (SPEC 4 §4.9):
+/// a `u64` count and each such table's length-prefixed name, in name
+/// order, then the encoding the schema would have without it. Every
+/// schema with full-history tables only keeps its id.
+const SCHEMA_ID_DOMAIN_LATEST_ONLY: &str = "jazz-schema-latest-only-tables";
 
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
+    let mut latest = schema
+        .tables
+        .iter()
+        .filter(|table| table.history == HistoryRetention::Latest)
+        .map(|table| table.name.as_str())
+        .collect::<Vec<_>>();
+    if latest.is_empty() {
+        return structural_schema_bytes(schema);
+    }
+    latest.sort();
+    let mut bytes = Vec::new();
+    put_str(&mut bytes, SCHEMA_ID_DOMAIN_LATEST_ONLY);
+    put_u64(&mut bytes, latest.len() as u64);
+    for name in latest {
+        put_str(&mut bytes, name);
+    }
+    bytes.extend(structural_schema_bytes(schema));
+    bytes
+}
+
+fn structural_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
     let with_enum_variants = schema.tables.iter().any(|table| {
         table
             .columns

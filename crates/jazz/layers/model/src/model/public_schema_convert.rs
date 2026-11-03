@@ -35,11 +35,22 @@ const PUBLIC_AUTH_MODE_SESSION_PATHS: &[&str] = &["authMode", "auth_mode"];
 const RESERVED_AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
 
 /// The columns every stored row table keeps beside the app's: its row key,
-/// branch, position (sequencer node code and seq), state bits (deleted, no
-/// content), and what the authority keeps of an accepted upload (SPEC 4
-/// §4.6). An app column cannot take their names.
-pub const RESERVED_ROW_COLUMNS: [&str; 8] =
-    ["id", "rid", "_b", "_n", "_seq", "_st", "_base", "_cols"];
+/// branch, position (`_clock`: accepted or pending), a pending version's writer
+/// (`_writer`), state bits (deleted, no content), and what the authority keeps
+/// of an accepted upload (SPEC 4 §4.6), and `_partition`, the partition a sharded
+/// deployment stores each row under (SPEC 15). An app column cannot take
+/// their names.
+pub const RESERVED_ROW_COLUMNS: [&str; 9] = [
+    "id",
+    "rid",
+    "_branch",
+    "_clock",
+    "_writer",
+    "_state",
+    "_base",
+    "_touched",
+    "_partition",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Error produced while compiling a developer-authored schema for the runtime.
@@ -3507,7 +3518,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_only_tables_compile_with_their_retention_and_the_same_version() {
+    fn latest_only_tables_compile_with_their_retention_as_a_compatible_version() {
         let table = |latest: bool| {
             let table = TableSchemaBuilder::new("presence")
                 .column("cursor", ColumnType::Json { schema: None })
@@ -3520,9 +3531,14 @@ mod tests {
 
         assert_eq!(full.tables()[0].history, HistoryRetention::Full);
         assert_eq!(latest.tables()[0].history, HistoryRetention::Latest);
-        assert_eq!(
+        assert_ne!(
             full.version_id(),
             latest.version_id(),
+            "a store admits a retention change as a version of its own"
+        );
+        assert_eq!(
+            full.compatibility_id(),
+            latest.compatibility_id(),
             "retention changes what nodes keep, not how rows are stored"
         );
     }

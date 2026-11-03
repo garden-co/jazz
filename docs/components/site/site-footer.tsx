@@ -9,7 +9,7 @@ const columns = [
     title: "Product",
     links: [
       { label: "Docs", href: "/docs" },
-      { label: "Quickstart", href: "/docs/quickstart" },
+      { label: "Quickstart", href: "/docs/setup/run-locally" },
       { label: "Examples & benches", href: "/examples" },
       { label: "Roadmap", href: "https://github.com/garden-co/jazz/milestones" },
     ],

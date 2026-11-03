@@ -19,7 +19,7 @@ const schema = {
   ),
 };
 type AppSchema = s.Schema<typeof schema>;
-const app: s.App<AppSchema> = s.defineApp(schema);
+const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 
 describe("hopTo type inference", () => {
   it("infers the destination table's row type after a forward hop", () => {

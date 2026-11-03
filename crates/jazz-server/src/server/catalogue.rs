@@ -298,6 +298,10 @@ struct CatalogueIndex {
     lenses: HashMap<(SchemaHash, SchemaHash), Lens>,
     /// Every permissions revision, oldest first; the last is current.
     revisions: Vec<ActiveSchema>,
+    /// Every published permissions bundle (see [`jazz::catalogue`]).
+    bundles: HashSet<jazz::catalogue::BundleId>,
+    /// The admitted schemas, oldest first.
+    admitted: Vec<SchemaHash>,
 }
 
 impl CatalogueIndex {
@@ -349,6 +353,14 @@ impl CatalogueIndex {
             });
             parent = Some(bundle_object_id);
         }
+        index.bundles = rows.bundles.iter().map(|bundle| bundle.id).collect();
+        let mut admitted: Vec<_> = rows
+            .schemas
+            .iter()
+            .filter_map(|schema| Some((schema.admitted?, schema.hash)))
+            .collect();
+        admitted.sort_by_key(|(n, _)| *n);
+        index.admitted = admitted.into_iter().map(|(_, hash)| hash).collect();
         if let Some(schema) = initial_schema {
             index.add_schema(schema.clone());
         }

@@ -30,6 +30,11 @@ use crate::common::{allow_all_policies, compile_schema};
 /// `presence(doc, cursor)`, latest-only, and `notes(doc, cursor)`, which
 /// keeps full history, so each test compares the two.
 fn schema() -> JazzSchema {
+    schema_with(true)
+}
+
+/// [`schema`], with `presence` latest-only or not.
+fn schema_with(latest_only: bool) -> JazzSchema {
     let table = |name: &str| {
         TableSchemaBuilder::new(name)
             .column("doc", ColumnType::Text)
@@ -38,16 +43,23 @@ fn schema() -> JazzSchema {
     };
     compile_schema(
         &SchemaBuilder::new()
-            .table(table("presence").latest_only())
+            .table(match latest_only {
+                true => table("presence").latest_only(),
+                false => table("presence"),
+            })
             .table(table("notes"))
             .build(),
     )
 }
 
 fn open_at(node: u8, path: &Path) -> Db {
+    open_with(node, path, schema())
+}
+
+fn open_with(node: u8, path: &Path, schema: JazzSchema) -> Db {
     block_on(Db::open_at(
         DbConfig::new(
-            schema(),
+            schema,
             DbIdentity {
                 node: NodeUuid::from_bytes([node; 16]),
                 author: AuthorSubject::SYSTEM,
@@ -159,7 +171,7 @@ fn read(db: &Db, table: &str, doc: Option<&str>) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Accepted versions (`_n = 0`) in the history of stored table `table`.
+/// Accepted versions (`_writer` empty, `_clock` below the pending kind) in the history of stored table `table`.
 fn history_rows(path: &Path, table: &str) -> i64 {
     let conn = rusqlite::Connection::open(path).unwrap();
     let stored: String = conn
@@ -170,7 +182,10 @@ fn history_rows(path: &Path, table: &str) -> i64 {
         )
         .unwrap();
     conn.query_row(
-        &format!("SELECT count(*) FROM \"{stored}__h\" WHERE _n = 0"),
+        &format!(
+            "SELECT count(*) FROM \"{stored}__h\" WHERE _writer = X'' AND _clock BETWEEN 0 AND {}",
+            (1i64 << 52) - 1
+        ),
         [],
         |row| row.get(0),
     )
@@ -197,6 +212,35 @@ fn the_authority_keeps_one_superseded_version_of_a_latest_only_row() {
     drop(db);
     assert_eq!(history_rows(&path, "presence"), 1);
     assert_eq!(history_rows(&path, "notes"), 9);
+}
+
+/// The authority's own schema keeps `presence`'s history, but a newer
+/// version that makes it latest-only is admitted (published by a deploy,
+/// not made current): the newest deploy decides, so its older versions
+/// go, and still do after a restart that opens with the older schema.
+#[test]
+fn the_newest_admitted_version_decides_a_tables_retention() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("authority.sqlite");
+    let db = open_with(0, &path, schema_with(false));
+    db.set_authority();
+    insert(&db, "presence", row(1), "a", "0");
+    for step in 1..5 {
+        update(&db, "presence", row(1), "a", &step.to_string());
+    }
+    block_on(db.admit_schema_with_lenses(schema(), &[])).unwrap();
+    update(&db, "presence", row(1), "a", "5");
+    drop(db);
+    assert_eq!(history_rows(&path, "presence"), 1);
+
+    let db = open_with(0, &path, schema_with(false));
+    db.set_authority();
+    for step in 6..9 {
+        update(&db, "presence", row(1), "a", &step.to_string());
+    }
+    assert_eq!(read(&db, "presence", None), [("a".into(), "8".into())]);
+    drop(db);
+    assert_eq!(history_rows(&path, "presence"), 1);
 }
 
 /// Alice watches the presence in doc `a` on the authority itself while her
@@ -473,7 +517,7 @@ fn transactions_of(path: &Path, node: u8) -> i64 {
         .unwrap()
         .query_row(
             "SELECT count(*) FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
-             WHERE n.node = ?1 AND t.seq IS NOT NULL",
+             WHERE n.node = ?1 AND t.t BETWEEN 0 AND (1 << 52) - 1",
             [vec![node; 16]],
             |row| row.get(0),
         )
@@ -630,4 +674,47 @@ fn a_chunked_value_is_refused_in_a_latest_only_table() {
     );
     assert!(read(&db, "presence", None).is_empty());
     write("notes").expect("a full-history table chunks it");
+}
+
+/// Alice's store holds the server's new `presence` and `notes` rows, but
+/// not yet the connection's position past them, as a sharded upstream
+/// can leave it. A one-shot read of `notes` reads as of the position she
+/// knows, so it leaves the new note out; `presence` keeps no version to
+/// read back to, so it reads its rows as she holds them (a branch view's
+/// known limit, `INV-HIST-29`) rather than being refused.
+#[test]
+fn a_latest_only_read_skips_the_per_query_position() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(&dir.path().join("server.sqlite"));
+    let alice = open_at(1, &dir.path().join("alice.sqlite"));
+    let (_upstream, down) = lossy_link(&alice, &server);
+    let live = |table: &str| {
+        block_on(alice.subscribe(
+            &alice.prepare_query(&Query::from(table)).unwrap(),
+            ReadOpts::default(),
+        ))
+        .unwrap()
+    };
+    let (_presence, _notes) = (live("presence"), live("notes"));
+    pump(&server, &[&alice]);
+
+    insert(&server, "presence", row(1), "a", "0");
+    insert(&server, "notes", row(2), "a", "note");
+    for _ in 0..6 {
+        block_on(server.tick()).unwrap();
+        down.borrow_mut()
+            .retain(|message| !matches!(message, SyncMessage::ConnectionSettled { .. }));
+        block_on(alice.tick()).unwrap();
+    }
+
+    let one_shot = |table: &str| {
+        let prepared = alice.prepare_query(&Query::from(table)).unwrap();
+        block_on(alice.all(&prepared, ReadOpts::default()))
+    };
+    assert_eq!(
+        one_shot("notes").unwrap().len(),
+        0,
+        "the note is past the position Alice knows"
+    );
+    assert_eq!(read(&alice, "presence", None), [("a".into(), "0".into())]);
 }

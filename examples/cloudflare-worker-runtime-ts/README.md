@@ -10,7 +10,7 @@ Minimal Wrangler example that proves Jazz can boot inside Cloudflare Workers by 
 - The example uses the public `jazz-tools` package and a prepared opaque account handle.
 - Each `/smoke` request owns a disposable local-first account and in-memory database, then shuts it down. Requests never share a user context. This demonstrates runtime initialization, not durable storage or authentication.
 
-For an authenticated application, use your core registry URL and `accounts.loginJWT(...)` before opening the request context. Use an appropriate durable account store when retaining local-first signing roots. The smoke example supplies an ephemeral request-local store and omits the context server URL, so it performs no sync or registry request.
+For an authenticated application, run Jazz in your Worker's backend with `createJazz` and read the request's user with `jazz.forRequest(request)`. Use an appropriate durable account store when retaining local-first signing roots. The smoke example supplies an ephemeral request-local store and omits the context server URL, so it performs no sync or registry request.
 
 ## Run locally
 

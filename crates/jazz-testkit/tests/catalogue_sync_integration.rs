@@ -1346,11 +1346,24 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
 
     seed_schema_catalogue(&server, &v2_schema).await;
 
-    let bob =
-        jazz_testkit::connect(server.make_client_context_for_user(
-            v2_schema.clone(),
-            test_user_id("bob-schema-before-lens"),
-        ))
+    // Bob's app ships v2 with its lens from v1 before the server has it.
+    let mut context = server
+        .make_client_context_for_user(v2_schema.clone(), test_user_id("bob-schema-before-lens"));
+    context.migrations = jazz::db::Migrations {
+        schemas: vec![
+            jazz::schema::JazzSchema::new(&schema_v1()).unwrap(),
+            jazz::schema::JazzSchema::new(&schema_v2()).unwrap(),
+        ],
+        lenses: vec![
+            jazz::tools::schema_lens::runtime::compile_lens(
+                &v1_to_v2_lens(),
+                &schema_v1(),
+                &schema_v2(),
+            )
+            .unwrap(),
+        ],
+    };
+    let bob = jazz_testkit::connect(context)
         .await
         .expect("connect bob with unpublished draft schema");
     let query = jazz::query::Query::from("users");

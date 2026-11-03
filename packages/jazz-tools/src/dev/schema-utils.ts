@@ -7,7 +7,7 @@ import type {
   Value,
   WasmSchema,
 } from "../drivers/types.js";
-import { blake3 } from "@noble/hashes/blake3.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { parseUuidBytes } from "../runtime/hex.js";
 
@@ -66,6 +66,11 @@ function compareCodePoints(left: string, right: string): number {
 }
 
 export function structuralSchemaHash(schema: WasmSchema): string {
+  return bytesToHex(sha256(structuralSchemaBytes(schema)));
+}
+
+/** The canonical bytes a schema's structural hash is taken over. */
+export function structuralSchemaBytes(schema: WasmSchema): Uint8Array {
   const writer = new StructuralHashWriter();
 
   for (const tableName of Object.keys(schema).sort()) {
@@ -97,7 +102,7 @@ export function structuralSchemaHash(schema: WasmSchema): string {
     }
   }
 
-  return bytesToHex(blake3(writer.bytes()));
+  return writer.bytes();
 }
 
 export { columnTypeSignature };

@@ -135,6 +135,10 @@ fn a_public_api_error_keeps_its_display_text_and_exposes_the_stable_code() {
         },
         id_source: None,
         chunk_store: None,
+        host_chunk_io: false,
+        clock: None,
+        migrations: Default::default(),
+        system_node: None,
     }))
     .expect("alice opens a database");
 

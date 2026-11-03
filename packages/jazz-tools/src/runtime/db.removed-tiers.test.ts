@@ -15,7 +15,7 @@ const removedReadTiers = [
   ["core", 'The "core" read tier was removed'],
 ] as const;
 
-const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
 
 let db: Db | undefined;
 

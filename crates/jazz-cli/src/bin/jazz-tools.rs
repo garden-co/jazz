@@ -134,6 +134,59 @@ enum Commands {
         #[arg(long)]
         in_memory: bool,
 
+        /// Where large values' bytes live once they settle: `files` (the
+        /// `blobs/` directory next to the data, or --blobs-dir), `s3` (an
+        /// S3-compatible bucket, see --s3-*), `vercel-blob` (a Vercel Blob
+        /// store, see --vercel-blob-*) or `sqlite` (inside the database
+        /// file). A data directory keeps its choice, except that `sqlite`
+        /// may later move to any other.
+        #[arg(long, default_value = "files", value_parser = ["files", "s3", "vercel-blob", "sqlite"])]
+        blobs: String,
+
+        /// Directory for `--blobs files` (defaults to `<data-dir>/blobs`).
+        #[arg(long)]
+        blobs_dir: Option<String>,
+
+        /// Bucket for `--blobs s3` (defaults to S3_BUCKET_NAME). Credentials
+        /// come from AWS_ROLE_ARN with an OIDC token, or AWS_ACCESS_KEY_ID
+        /// and AWS_SECRET_ACCESS_KEY.
+        #[arg(long)]
+        s3_bucket: Option<String>,
+
+        /// The bucket's region (defaults to AWS_REGION; `auto` for R2).
+        #[arg(long)]
+        s3_region: Option<String>,
+
+        /// An S3-compatible endpoint other than AWS, e.g. R2's.
+        #[arg(long)]
+        s3_endpoint: Option<String>,
+
+        /// Prefix for every object name; defaults to jazz/<app id>/<store id>/,
+        /// one per data dir. A prefix is claimed by the first store to use it.
+        #[arg(long)]
+        s3_prefix: Option<String>,
+
+        /// Assume AWS_ROLE_ARN with the trusted workload's own OIDC token
+        /// (as a `vercel()` core does), not AWS_WEB_IDENTITY_TOKEN_FILE.
+        #[arg(long)]
+        s3_role_from_workload: bool,
+
+        /// Store for `--blobs vercel-blob` (defaults to BLOB_STORE_ID, or the
+        /// store BLOB_READ_WRITE_TOKEN is for). Credentials come from
+        /// VERCEL_OIDC_TOKEN, or BLOB_READ_WRITE_TOKEN.
+        #[arg(long)]
+        vercel_blob_store_id: Option<String>,
+
+        /// Prefix for every blob's pathname; defaults to
+        /// jazz/<app id>/<store id>/, one per data dir.
+        #[arg(long)]
+        vercel_blob_prefix: Option<String>,
+
+        /// Authenticate to Vercel Blob with the trusted workload's own OIDC
+        /// token (as a `vercel()` core does), not VERCEL_OIDC_TOKEN.
+        #[arg(long)]
+        vercel_blob_token_from_workload: bool,
+
         /// URL to fetch JWKS keys for JWT validation (production)
         #[arg(long, env = "JAZZ_JWKS_URL")]
         jwks_url: Option<String>,
@@ -168,6 +221,36 @@ enum Commands {
         /// Required in NODE_ENV=production.
         #[arg(long, env = "JAZZ_ALLOW_LOCAL_FIRST_AUTH")]
         allow_local_first_auth: bool,
+
+        /// Trust only this OIDC workload instead of shared secrets: every
+        /// request and session must carry its token in
+        /// X-Jazz-Backend-Credential, and states its access in
+        /// X-Jazz-Backend-Access. Needs the subject and audience flags too;
+        /// replaces the backend and admin secrets. Graceful shutdown then
+        /// goes through SIGTERM.
+        #[arg(
+            long,
+            env = "JAZZ_TRUSTED_WORKLOAD_ISSUER",
+            requires_all = ["trusted_workload_audience", "trusted_workload_subject"],
+            conflicts_with_all = ["backend_secret", "admin_secret"]
+        )]
+        trusted_workload_issuer: Option<String>,
+
+        /// Audience a trusted workload token must target.
+        #[arg(
+            long,
+            env = "JAZZ_TRUSTED_WORKLOAD_AUDIENCE",
+            requires = "trusted_workload_issuer"
+        )]
+        trusted_workload_audience: Option<String>,
+
+        /// Exact subject a trusted workload token must carry.
+        #[arg(
+            long,
+            env = "JAZZ_TRUSTED_WORKLOAD_SUBJECT",
+            requires = "trusted_workload_issuer"
+        )]
+        trusted_workload_subject: Option<String>,
 
         /// Secret for backend session impersonation
         #[arg(long, env = "JAZZ_BACKEND_SECRET")]
@@ -285,6 +368,16 @@ async fn run() {
             port,
             data_dir,
             in_memory,
+            blobs,
+            blobs_dir,
+            s3_bucket,
+            s3_region,
+            s3_endpoint,
+            s3_prefix,
+            s3_role_from_workload,
+            vercel_blob_store_id,
+            vercel_blob_prefix,
+            vercel_blob_token_from_workload,
             jwks_url,
             jwt_public_key,
             jwt_issuer,
@@ -294,6 +387,9 @@ async fn run() {
             allow_local_first_auth,
             backend_secret,
             admin_secret,
+            trusted_workload_issuer,
+            trusted_workload_audience,
+            trusted_workload_subject,
             shutdown_timeout_secs,
             max_connections,
             memory_limit_bytes,
@@ -338,13 +434,71 @@ async fn run() {
                 allow_local_first_auth,
                 backend_secret,
                 admin_secret,
+                trusted_workload: trusted_workload_issuer.map(|issuer| {
+                    jazz_server::middleware::workload::TrustedWorkload {
+                        issuer,
+                        audience: trusted_workload_audience.unwrap_or_default(),
+                        subject: trusted_workload_subject.unwrap_or_default(),
+                    }
+                }),
                 ..Default::default()
+            };
+            let blobs = match blobs.as_str() {
+                "sqlite" => jazz_server::BlobStore::Sqlite,
+                "s3" => {
+                    let options = jazz_server::s3::S3Options::from_env(
+                        s3_bucket,
+                        s3_region,
+                        s3_endpoint,
+                        s3_prefix,
+                    )
+                    .and_then(|mut options| {
+                        if s3_role_from_workload {
+                            let jazz_server::s3::S3Credentials::WebIdentity { token, .. } =
+                                &mut options.credentials
+                            else {
+                                return Err("--s3-role-from-workload needs AWS_ROLE_ARN".to_owned());
+                            };
+                            *token = jazz_server::s3::WebIdentityToken::Workload;
+                        }
+                        Ok(options)
+                    });
+                    match options {
+                        Ok(options) => jazz_server::BlobStore::S3(options),
+                        Err(error) => {
+                            eprintln!("Error: {error}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                "vercel-blob" => {
+                    let options = jazz_server::vercel_blob::VercelBlobOptions::from_env(
+                        vercel_blob_store_id,
+                        vercel_blob_prefix,
+                        vercel_blob_token_from_workload.then_some(
+                            jazz_server::vercel_blob::VercelBlobCredentials::Oidc(
+                                jazz_server::s3::WebIdentityToken::Workload,
+                            ),
+                        ),
+                    );
+                    match options {
+                        Ok(options) => jazz_server::BlobStore::VercelBlob(options),
+                        Err(error) => {
+                            eprintln!("Error: {error}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                _ => jazz_server::BlobStore::Files {
+                    dir: blobs_dir.map(Into::into),
+                },
             };
             if let Err(e) = jazz_server::run(
                 &app_id,
                 port,
                 &data_dir,
                 in_memory,
+                blobs,
                 auth_config,
                 bound_port_file,
                 std::time::Duration::from_secs(shutdown_timeout_secs),

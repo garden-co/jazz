@@ -1,4 +1,4 @@
-import { JazzProvider, jwtAuth, useJazzAuth } from "./index.js";
+import { JazzProvider, backendAuth, useJazzAuth } from "./index.js";
 import type { AccountStore } from "../accounts/persistence.js";
 declare const store: AccountStore;
 function Data() {
@@ -11,7 +11,18 @@ export const nativeApplication = (
     appId="native-app"
     serverUrl="https://sync.example.test"
     store={store}
-    auth={jwtAuth({ key: null, getToken: async () => "token", logout: async () => {} })}
+    auth={backendAuth({ key: null, logout: async () => {} })}
+    signedOut={null}
+  >
+    <Data />
+  </JazzProvider>
+);
+declare const signedInUser: string | null | undefined;
+export const nativeApplicationFollowingUser = (
+  <JazzProvider
+    serverUrl="https://app.example.test/jazz"
+    store={store}
+    user={signedInUser}
     signedOut={null}
   >
     <Data />

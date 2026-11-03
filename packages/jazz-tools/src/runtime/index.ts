@@ -60,6 +60,7 @@ export {
   type TableProxy,
 } from "./db.js";
 export type { AccountDbConfig as DbConfig } from "../accounts/context.js";
+export type { ClientMigrations } from "./client-migrations.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
 export type { LinkStatus, SyncStatus } from "./sync-status.js";
 export {
@@ -86,3 +87,11 @@ export {
   AuthSecretFormatError,
 } from "./auth-secret-store.js";
 export type { AuthSecretStore, BrowserAuthSecretStoreOptions } from "./auth-secret-store.js";
+export type {
+  ResolvedTextAnchor,
+  ResolvedTextRange,
+  TextAnchor,
+  TextAnchors,
+  TextRange,
+  TextSide,
+} from "./text-anchors.js";

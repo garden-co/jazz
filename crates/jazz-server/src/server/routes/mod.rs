@@ -31,11 +31,13 @@ use crate::server::{MAX_CATALOGUE_REQUEST_BODY_BYTES, ServerState};
 
 use http::{
     admin_subscription_introspection_handler, deploy_handler, health_handler,
-    internal_shutdown_handler, migration_graph_handler, permissions_handler, schema_handler,
-    schema_hashes_handler,
+    internal_shutdown_handler, migration_graph_handler, permissions_handler,
+    publish_bundle_handler, schema_handler, schema_hashes_handler,
 };
 use utils::parse_app_id_param;
 pub(crate) use websocket::WebSocketAdmissionState;
+#[cfg(feature = "embedded-server")]
+pub(crate) use websocket::handle_ws_connection;
 use websocket::ws_handler;
 
 async fn app_id_gate(
@@ -86,7 +88,18 @@ async fn app_shutdown_gate(
 pub fn create_router(state: Arc<ServerState>) -> Router {
     let admin_routes = Router::new()
         .route("/deploy", post(deploy_handler))
+        .route("/bundles", post(publish_bundle_handler))
         .route("/accounts/resolve", post(accounts::resolve_for_admin))
+        .route(
+            "/accounts/login-or-register",
+            post(accounts::login_or_register_for_admin),
+        )
+        .route("/accounts/link", post(accounts::link_for_admin))
+        .route(
+            "/accounts/found-local-first",
+            post(accounts::found_local_first_for_admin),
+        )
+        .route("/accounts/revoke", post(accounts::revoke_for_admin))
         .route("/permissions", get(permissions_handler))
         .route("/migrations/graph", get(migration_graph_handler))
         .route(
@@ -113,6 +126,10 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             app_shutdown_gate,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::workload::workload_gate,
         ))
         .route_layer(middleware::from_fn_with_state(state.clone(), app_id_gate))
         .layer(TraceLayer::new_for_http());

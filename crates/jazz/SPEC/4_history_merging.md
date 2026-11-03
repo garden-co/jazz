@@ -17,11 +17,12 @@ Invariant digest:
 - `INV-HIST-8`: For a plain (`MergeStrategy::Lww`) column and for `_deletion`, Core MUST apply each accepted write to the row's post-image as a patch in the order it accepts the writes: every cell the write authored takes the write's value (last arrival wins), every cell it did not author keeps the row's value, and nothing a write authored is dropped. Concurrent writes to different cells of one row therefore all apply, and a write that does not author `_deletion` keeps the row's deletion state, so an edit made over an image older than an accepted delete leaves the row deleted.
 - `INV-HIST-9`: `MergeStrategy::Counter` MUST be declared only on non-nullable integer user columns.
 - `INV-HIST-10`: For `MergeStrategy::Counter`, a write MUST travel as its delta from the row image it was made over, and Core MUST add each accepted delta to the current value, so concurrent increments from the same base sum exactly. Core MUST reject a write whose delta would take the counter outside its column type's range rather than wrap, and a write that does not author a merge column MUST NOT replace that column's accepted ops with the writer's snapshot, also across schema versions.
-- `INV-HIST-24`: A text-merging column (`MergeStrategy::Text`, `Markdown` or `Html`) MUST be declared only on a string user column, nullable or not, and MUST store a plain string or NULL; writes to it travel as plain values. Only Core merges: when a version before the write that its writer never saw (§4.6) authored the column, Core MUST three-way merge the value its writer last saw of the column (the newest commit on its chain that authored the column, as that commit sent it, or else the accepted version the chain was built on), the value it holds and the write's value at token boundaries: changes to disjoint parts of the base all apply, a change both sides made applies once, inserts at one point apply in seq order, overlapping pure inserts and deletes union (as do one side's inserts with the other's replacements), and of two overlapping replacements the write sequenced later wins. Otherwise, or when the merge would spend more than a fixed budget of diff steps, the write's value stands as sent. On a nullable column a NULL base merges as the empty string, and a write of NULL or a write over a held NULL stands as sent: the later write wins the whole value. For a version whose value a merge changed, Core MUST also keep that version as its writer sent it, flagged as sent in its state bits, and MUST NOT list, sync or read it as a version.
-- `INV-HIST-25`: A table MAY declare latest-only history retention. Retention MUST NOT change the table's `SchemaVersionId`, the structural `SchemaHash` MUST cover it only when it is latest-only, a schema MUST fail to compile when a latest-only table declares `branchBy` or a text-merging column, and a deploy MUST be refused when it switches a table of the active schema to latest-only without confirming that it drops history.
+- `INV-HIST-24`: A text-merging column (`MergeStrategy::Text`, `Markdown` or `Html`) MUST be declared only on a string user column, nullable or not, and MUST store a plain string or NULL; writes to it travel as plain values. Only Core merges: when a version before the write that its writer never saw (§4.6) authored the column, Core MUST three-way merge the value its writer last saw of the column (the newest commit on its chain that authored the column, as that commit sent it, or else the accepted version the chain was built on), the value it holds and the write's value at token boundaries: changes to disjoint parts of the base all apply, a change both sides made applies once, inserts at one point apply in seq order, overlapping pure inserts and deletes union (as do one side's inserts with the other's replacements), and of two overlapping replacements the write sequenced later wins. Each side's diff against the base first keeps in place the heaviest in-order run of word tokens that occur once on both sides; a block of at least three words one side deleted and reinserted elsewhere is a move, and the other side's changes inside it apply to the moved copy. Whitespace inserted at the very end of the value goes after other inserts there, and in an HTML column the merge drops tags it left unmatched, keeping their content. Otherwise, or when the merge would spend more than a fixed budget of diff steps, the write's value stands as sent. On a nullable column a NULL base merges as the empty string, and a write of NULL or a write over a held NULL stands as sent: the later write wins the whole value. For a version whose value a merge changed, Core MUST also keep that version as its writer sent it, flagged as sent in its state bits, and MUST NOT list, sync or read it as a version.
+- `INV-HIST-25`: A table MAY declare latest-only history retention. A retention change MUST be a version of its own that keeps its predecessor's compatibility id, schemas whose tables all keep full history MUST keep their `SchemaVersionId` and `SchemaHash`, and the newest admitted version that has a table MUST decide its retention, activated or only published. A schema MUST fail to compile when a latest-only table declares `branchBy` or a text-merging column, and a deploy MUST be refused when it switches a table the store keeps in full to latest-only without confirming that it drops history.
 - `INV-HIST-26`: For each row of a latest-only table a node MUST keep its current version, the newest accepted version it superseded, and every version above that (its own or a relay's unsettled ones), and SHOULD drop the older accepted versions when it writes or receives the next one. A value large enough to be chunked MUST be refused there with a typed not-supported error, since its chunks name versions the table drops.
 - `INV-HIST-27`: A read of a latest-only table that needs a version the table drops MUST fail with a typed not-supported error or ship whole, never answer with another version; a subscription resuming over a latest-only input that changed since it settled MUST open fresh; and a write to a latest-only table is never maybe conflicting.
 - `INV-HIST-28`: On the authority, the dedupe entry of an accepted commit that wrote only latest-only tables MAY be dropped once the same node's next commit is accepted; each node's newest entry and every rejected commit's entry MUST be kept. A resend of a commit whose entry was dropped MUST be answered as accepted without being applied again, and a later write built on such a commit MUST be accepted as a blind write.
+- `INV-HIST-29`: A replica's read of a latest-only table under per-query visibility (SPEC 8 §8.4) MUST read the table as the replica holds it rather than at its read's settled position, as a branch view does (a known limit): the table keeps no version to read back to.
 - `INV-HIST-11`: Content and deletion state MUST be separate layers; content writes MUST NOT change the deletion register, and a current `DeletionEvent::Deleted` MUST hide the content-current row until a current `DeletionEvent::Restored` reveals it.
 - `INV-HIST-12`: Accepted globally settled versions that become per-layer winners MUST be reflected in `jazz_{table}_global_current` or `jazz_{table}_register_global_current`.
 - `INV-HIST-13`: Re-ingesting the same commit unit with identical version rows in a different order MUST be idempotent and MUST NOT create a conflict.
@@ -197,8 +198,8 @@ overlapping either way.
 From `The cat sat.`, a concurrent `The black cat sat.` and `The cat
 slept.` merge to `The black cat slept.` in either order. When a merge
 changes a write's value, Core also keeps the write as its writer sent it:
-a hidden history row (in `__h`, at `_seq` = minus the
-commit's seq, so the commit keeps its one seq, with bit 2 of `_st` set,
+a hidden history row (in `__h`, at `_clock` = minus the
+commit's position, so the commit keeps its one position, with bit 2 of `_state` set,
 "as sent"), holding the version's cells with the merged columns at their
 values as sent. A later write built on that commit (an offline chain) is
 merged over what its writer saw: the chain walk's link is read from its
@@ -522,16 +523,17 @@ On SQLite a commit carries, beside its operations, the base of each row it
 writes over an image its writer held (`WireBase`: the row, by the index of
 the commit's first op that writes it and its branch key, and the version it
 was built on as `BuiltOn`). A non-durable session (a worker's tab) may hold
-its relay's unsettled version of a row (stored at the relay's node, the
-position of the relay's commit that wrote it) and send it as
-`Commit { relay node, tx }`. A relay forwards a session's commit under the
+its relay's unsettled version of a row (stored at its writer's pending
+`_clock`) and send it as `Commit { node, tx }`, the commit that wrote it (the
+relay's own, or another session's it carries). A
+relay forwards a session's commit under the
 session's own id, and renames every base into names its upstream knows
 before it does: an upstream seq, the session's `Own` predecessor and the
 session's own `Commit` stay (Core knows the session's commits by their
 ids); its own unsettled version becomes `Commit { node, tx }` of the commit
 that wrote it (its own, or another session's it carries), or the upstream
 seq that commit already landed at, so Core never sees a relay's own
-positions. A version at the relay's node that is no commit of
+positions. A pending version of the relay's that is no commit of
 its own (one from before the relay's store was reset) cannot be named
 upstream: the write counts as built
 on the newest version of the row the relay holds accepted upstream, so it may
@@ -550,12 +552,14 @@ counts only for a node the link's identity writes as; one of any other node
 rejects the commit the same way, whether or not Core holds it, so a base
 cannot probe for another identity's commits. It keeps, in the version the commit wrote
 (the row table and history alike), `_base`: the resolved `Seq` as is, or
-the seq the named commit landed at negated; and `_cols`, the authored stored
+the seq the named commit landed at negated; and `_touched`, the authored stored
 columns as a bitmask over their positions in the row table (stored tables
 only grow by `ADD COLUMN`, so a position never moves). A delete or restore
-authors `_st`, the version's state bits (bit 0: its commit wrote no content;
+authors `_state`, the version's state bits (bit 0: its commit wrote no content;
 bit 1: deleted; bit 2, in history only: a merged text write as sent, §4.3). An app column cannot take the name of a stored row column
-(`id`, `rid`, `_b`, `_n`, `_seq`, `_st`, `_base`, `_cols`). `_base` and `_cols`
+(`id`, `rid`, `_branch`, `_clock`, `_state`, `_base`, `_touched`), nor `_partition`, the
+partition a sharded deployment stores each row under (SPEC 15; an unsharded
+store never creates it). `_base` and `_touched`
 are NULL on every other replica and for Core's own writes: those are made over the current image, so they are never maybe
 conflicting, and in another write's analysis they author every column. The
 flag, the walk and the merge base are derived on demand
@@ -793,26 +797,28 @@ often and whose past is worthless, such as editor presence, can declare
 **latest-only** retention instead (`table.history("latest")`, a public
 `TableSchema` with `history: "latest"`).
 
-Retention is a property of what nodes keep, not of how rows are stored. It
-is not part of the `SchemaVersionId` (ch. 2 §2.4), so a retention change is
-a schema that differs from its predecessor only in its structural hash; it
-deploys without a migration, joined by an empty lens like an index-only
-change. The newest deployed schema decides a stored table's retention.
+Retention is a property of what nodes keep, not of how rows are stored. A
+retention change is a schema version of its own (ch. 2 §2.4) that keeps its
+predecessor's stored names; it deploys without a migration, joined by an
+empty lens like an index-only change. The newest version a store admitted
+that has a table decides the table's retention, whether its deploy made it
+current or only published it as a bundle (the newest deploy wins).
 Turning latest-only on loses the history a row had, at that row's next
-write, and cannot be undone, so a deploy that switches a table of the
-active schema to latest-only is refused (`drops_history`, naming the
-tables) unless it confirms with `--allow-dropping-history`
-(`allowDroppingHistory` in the deploy API). Tables are matched by name, so
-a table renamed in the same deploy is not caught. Turning it off keeps
-every version from then on (`INV-HIST-25`).
+write, and cannot be undone, so a deploy that switches a table the store
+keeps in full (by that rule) to latest-only is refused (`drops_history`,
+naming the tables) unless it confirms with `allowDroppingHistory: true`
+(a `createJazz` option, also in the deploy API). Tables are matched by
+name, so a table renamed in the same deploy is not caught. Turning it off
+keeps every version from then on (`INV-HIST-25`).
 
 A latest-only node keeps each row's current version, the newest accepted
 version it superseded, and the versions above that: its own unsettled
 writes, or a relay's. Write checks, keyed fanout and a replica's settled
 reads under its pending writes read that one superseded version; every
 older accepted version is dropped as the node writes or receives the
-next (`INV-HIST-26`). Each node prunes by its own deployed schema, so a
-client still on an older schema keeps full history locally. Rows are
+next (`INV-HIST-26`). Each node prunes by the newest version it admitted,
+so a client that never admitted the latest-only one keeps full history
+locally. Rows are
 still deleted by tombstones, which a replica needs to drop a copy no read
 covers (`INV-SYNC-17`).
 
@@ -846,6 +852,11 @@ never dropped, and a later write built on a dropped commit counts as blind
 A subscription that resumes over a latest-only input that changed since it
 settled reopens fresh rather than reading its prior result through history
 (`INV-HIST-27`).
+
+A replica reads each live result as of its read's settled position while
+it holds others' newer versions (ch. 8 §8.4), a cut a latest-only table
+cannot serve: it reads such a table as it holds it, as a branch view does
+(a known limit, `INV-HIST-29`).
 
 ## Open Questions
 

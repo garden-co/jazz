@@ -7,7 +7,7 @@ import { localAccountConfig } from "./testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { createTransportControl } from "./testing/transport-control.js";
 
-const app = s.defineApp({ entries: s.table({ title: s.string() }, {}) });
+const app = s.defineApp({ entries: s.table({ title: s.string() }, {}) }, { migrations: "none" });
 const permissions = definePermissions(app, ({ policy }) => {
   policy.entries.allowRead.always();
   policy.entries.allowInsert.always();

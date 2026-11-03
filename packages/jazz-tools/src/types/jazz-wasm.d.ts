@@ -10,6 +10,20 @@ declare module "jazz-wasm" {
   export function drainTraceEntries(): unknown[];
   export function subscribeTraceEntries(callback: () => void): () => void;
   export function generateId(): string;
+  export function captureTextAnchor(
+    text: string,
+    version: number | undefined,
+    position: number,
+    side: unknown,
+  ): unknown;
+  export function resolveTextAnchor(anchor: unknown, text: string, version?: number): unknown;
+  export function captureTextRange(
+    text: string,
+    version: number | undefined,
+    start: number,
+    end: number,
+  ): unknown;
+  export function resolveTextRange(range: unknown, text: string, version?: number): unknown;
   export function currentTimestamp(): bigint;
   export function deriveUserId(seedB64: string): string;
   export function mintLocalFirstToken(
@@ -149,7 +163,7 @@ declare module "jazz-wasm" {
     /** Resolves once every commit so far is in the browser store's backing storage. */
     flush(): Promise<void>;
 
-    registerSchema(schema: Uint8Array): WasmDb;
+    registerSchema(schema: Uint8Array, migrations?: Uint8Array): WasmDb;
     captureSnapshot(): Uint8Array | PendingNativeRead;
     beginTransaction(
       openTransactionId: string,

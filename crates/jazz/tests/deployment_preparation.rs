@@ -161,7 +161,7 @@ fn switching_an_active_table_to_latest_only_needs_an_explicit_flag() {
         "{error}"
     );
     assert!(
-        error.to_string().contains("--allow-dropping-history"),
+        error.to_string().contains("allowDroppingHistory: true"),
         "{error}"
     );
 
@@ -183,6 +183,19 @@ fn switching_an_active_table_to_latest_only_needs_an_explicit_flag() {
         request(&full, std::slice::from_ref(&full), vec![]),
     )
     .expect("switching back to full history drops nothing");
+
+    // A bundle published since (admitted, not made current) is the newest
+    // deploy: it says how the store keeps the table now.
+    let published = |admitted: [&Schema; 2]| DeploymentCatalogue {
+        schemas: vec![full.clone(), latest.clone()],
+        active_schema_hash: Some(SchemaHash::compute(&full)),
+        admitted_schema_hashes: admitted.iter().map(|s| SchemaHash::compute(s)).collect(),
+        ..Default::default()
+    };
+    prepare_deployment(&published([&full, &latest]), request(&latest, &[], vec![]))
+        .expect("the table already keeps only its latest version");
+    prepare_deployment(&published([&latest, &full]), request(&latest, &[], vec![]))
+        .expect_err("a newer bundle keeps it in full again");
 }
 
 #[test]
@@ -196,6 +209,7 @@ fn equivalent_diamond_combines_stored_and_submitted_history_in_any_order() {
         schemas: vec![base.clone(), left.clone()],
         migrations: vec![first.clone()],
         active_schema_hash: Some(SchemaHash::compute(&left)),
+        ..Default::default()
     };
     let mut update = request(
         &merged,
@@ -246,6 +260,7 @@ fn sibling_path_cannot_deploy_without_forward_convergence_from_the_authored_bran
         schemas: vec![base.clone(), left.clone()],
         migrations: vec![migration(&base, &left, vec![add("a")])],
         active_schema_hash: Some(SchemaHash::compute(&left)),
+        ..Default::default()
     };
     let error = prepare_deployment(
         &stored,

@@ -70,6 +70,10 @@ fn open_db() -> Db {
         },
         id_source: None,
         chunk_store: None,
+        host_chunk_io: false,
+        clock: None,
+        migrations: Default::default(),
+        system_node: None,
     }))
     .expect("open db")
 }

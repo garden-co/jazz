@@ -8,6 +8,11 @@ use jazz::tools::deployment::{DeploymentCatalogue, PreparedDeployment};
 pub(crate) struct DeploymentResponse {
     pub changed: bool,
     pub published: PublishedArtifacts,
+    /// The published permissions bundle a deployment that activates
+    /// nothing made (see [`jazz::catalogue`]): what the backend pins its
+    /// sessions to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<String>,
 }
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub(crate) struct PublishedArtifacts {
@@ -37,13 +42,17 @@ impl StoredCatalogue {
             active_schema_hash: index
                 .active_schema_summary()
                 .map(|active| active.schema_hash),
+            admitted_schema_hashes: index.admitted.clone(),
         })
     }
 
+    /// Stage `prepared`: as permissions revision `version`, made current,
+    /// or (`activate` false) as a published bundle, activating nothing.
     pub(crate) fn stage_deployment(
         &self,
         prepared: &PreparedDeployment,
         version: u64,
+        activate: bool,
     ) -> Result<StagedDeployment, CatalogueError> {
         let expected = self
             .index
@@ -97,6 +106,29 @@ impl StoredCatalogue {
             .map(|(name, table)| (*name, table.policies.clone()))
             .collect::<HashMap<_, _>>();
         validate_permissions_relations(&permissions).map_err(CatalogueError::WriteError)?;
+        if !activate {
+            let permissions: jazz::catalogue::Permissions = permissions.into_iter().collect();
+            let bundle = jazz::catalogue::bundle_id(&schema_hash, &permissions)
+                .map_err(|error| CatalogueError::WriteError(error.to_string()))?;
+            let new = !expected.bundles.contains(&bundle);
+            if new {
+                put.bundles.push((schema_hash, permissions, now));
+            }
+            let changed = new || !published.schemas.is_empty() || !published.migrations.is_empty();
+            published.schemas.sort();
+            published
+                .migrations
+                .sort_by(|a, b| (&a.from_hash, &a.to_hash).cmp(&(&b.from_hash, &b.to_hash)));
+            return Ok(StagedDeployment {
+                expected,
+                put,
+                response: DeploymentResponse {
+                    changed,
+                    published,
+                    bundle: Some(bundle.to_hex()),
+                },
+            });
+        }
         let current = expected.active_schema();
         let same_active = current.as_ref().is_some_and(|active| {
             active.summary.schema_hash == schema_hash && active.permissions == permissions
@@ -122,7 +154,11 @@ impl StoredCatalogue {
         Ok(StagedDeployment {
             expected,
             put,
-            response: DeploymentResponse { changed, published },
+            response: DeploymentResponse {
+                changed,
+                published,
+                bundle: None,
+            },
         })
     }
 
@@ -185,7 +221,7 @@ mod tests {
                 },
             )
             .unwrap();
-            store.stage_deployment(&prepared, revision).unwrap()
+            store.stage_deployment(&prepared, revision, true).unwrap()
         };
         let initial = stage(base_hash, vec![], vec![], HashMap::new(), 1);
         assert_eq!(

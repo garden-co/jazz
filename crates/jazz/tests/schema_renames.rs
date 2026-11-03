@@ -97,7 +97,20 @@ fn rename_todos() -> MigrationLens {
     lens(&v2(), &v3(), "todos", "tasks", vec![])
 }
 
+/// `schema`'s config, shipping the app's versions and lenses as an app
+/// does (SPEC 10.7), so a store reaches any of them along its lenses. A
+/// test's own `schema` outside them ships as one more version.
 fn config(schema: JazzSchema, node: u8, author: AuthorSubject) -> DbConfig {
+    let mut schemas = vec![v1(), v2(), v3(), with_copy()];
+    if !schemas.contains(&schema) {
+        schemas.push(schema.clone());
+    }
+    bare_config(schema, node, author)
+        .with_migrations(schemas, vec![rename_title(), rename_todos(), copy_title()])
+}
+
+/// `schema`'s config without the app's lenses.
+fn bare_config(schema: JazzSchema, node: u8, author: AuthorSubject) -> DbConfig {
     DbConfig::new(
         schema,
         DbIdentity {
@@ -208,6 +221,7 @@ fn stored(path: &Path) -> BTreeMap<String, Vec<String>> {
                 .filter(|column| {
                     !column.starts_with(['_', '$']) && column != "id" && column != "rid"
                 })
+                .map(|column| common::unhashed(&column))
                 .collect();
             (table, columns)
         })
@@ -377,7 +391,7 @@ fn a_table_rename_holds_across_reopen_and_for_a_fresh_receiver() {
     {
         let db = open_at(before.clone(), &path);
         insert(&db, "notes", 1, "body", "a");
-        block_on(db.activate_schema_with_lenses(after.clone(), &[rename])).unwrap();
+        block_on(db.activate_schema_with_lenses(after.clone(), &[rename.clone()])).unwrap();
         let old = block_on(db.register_schema_view(before.clone())).unwrap();
         insert(&old, "notes", 2, "body", "b");
     }
@@ -407,7 +421,10 @@ fn a_table_rename_holds_across_reopen_and_for_a_fresh_receiver() {
 
     let server = open_at(after.clone(), &path);
     server.set_authority();
-    let fresh = block_on(Db::open(config(after, 2, user(2)))).unwrap();
+    let fresh = block_on(Db::open(
+        bare_config(after, 2, user(2)).with_migrations(vec![before], vec![rename]),
+    ))
+    .unwrap();
     let (client_side, server_side) = pipe();
     let _link = block_on(fresh.connect_upstream(client_side));
     server.accept_subscriber(server_side, user(2)).unwrap();
@@ -445,7 +462,11 @@ fn a_name_freed_by_a_rename_gets_its_own_stored_column() {
     assert_eq!(read(&old, "todos", "title"), texts(&["old"]));
     let columns = &stored(&path)["todos"];
     assert_eq!(columns.len(), 3, "{columns:?}");
-    assert!(columns.contains(&"title~2".to_owned()), "{columns:?}");
+    assert_eq!(
+        columns.iter().filter(|c| *c == "title").count(),
+        2,
+        "the new `title` starts a stored column of its own: {columns:?}"
+    );
 }
 
 #[test]
@@ -783,7 +804,10 @@ fn copy_title() -> MigrationLens {
 fn history(path: &Path, table: &str, column: &str) -> Vec<String> {
     let conn = rusqlite::Connection::open(path).unwrap();
     let mut values: Vec<String> = conn
-        .prepare(&format!("SELECT \"{column}\" FROM \"{table}__h\""))
+        .prepare(&format!(
+            "SELECT {} FROM \"{table}__h\"",
+            common::physical_column(&conn, table, column)
+        ))
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
@@ -978,17 +1002,7 @@ fn a_row_a_newer_version_inserts_gives_a_dropped_column_its_backwards_default() 
         },
     ))
     .unwrap();
-    let drop_rank = lens(
-        &v1(),
-        &without_rank(),
-        "todos",
-        "todos",
-        vec![LensOp::DropColumn {
-            column: "rank".into(),
-            backwards_default: Value::I64(7),
-        }],
-    );
-    block_on(db.activate_schema_with_lenses(without_rank(), &[drop_rank])).unwrap();
+    block_on(db.activate_schema_with_lenses(without_rank(), &[drop_rank()])).unwrap();
     let old = block_on(db.register_schema_view(v1())).unwrap();
 
     insert(&db, "todos", 2, "title", "new");
@@ -1076,7 +1090,8 @@ fn a_pending_write_staged_before_a_client_upgrade_uploads_and_reads_by_the_new_n
     let _link = block_on(client.connect_upstream(c));
     server.accept_subscriber(s, user(1)).unwrap();
     pump(&server, &[&client]);
-    assert!(client.take_upstream_rejections().is_empty());
+    let rejections = client.take_upstream_rejections();
+    assert!(rejections.is_empty(), "{rejections:?}");
     assert_eq!(read(&server, "todos", "name"), [text("offline v1 write")]);
     assert_eq!(column(&client, "name"), [Some(text("offline v1 write"))]);
 }
@@ -1144,12 +1159,17 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
     let path = scratch("unmirrorable");
     {
         // Offline under v1, then v3 without the lenses between: `tasks` is
-        // stored here as itself, beside v1's `todos`.
+        // stored here as a new table, beside v1's `todos`.
         let client = open_at(v1(), &path);
         client.become_replica();
         insert(&client, "todos", 2, "title", "v1 row");
     }
-    let client = open_at(v3(), &path);
+    let client = block_on(Db::open_at(
+        bare_config(v3(), 1, AuthorSubject::SYSTEM),
+        &path,
+        FileOptions::default(),
+    ))
+    .unwrap();
     insert(&client, "tasks", 3, "name", "local task");
     let (c, s) = pipe();
     let _link = block_on(client.connect_upstream(c));
@@ -1168,13 +1188,374 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
         reason.contains("not supported") && !reason.contains("before it became a replica"),
         "{reason}"
     );
+    // One opened after the refusal says why at once, never waiting on an
+    // upstream this store stopped syncing with.
+    let later = client
+        .prepare_query(&Query::from("tasks").filter(eq(col("name"), lit(text("x")))))
+        .unwrap();
+    let mut stream = block_on(client.subscribe(&later, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    let mut rejected = None;
+    while let Some(event) = stream.try_next_event() {
+        if let jazz::db::SubscriptionEvent::Rejected { reason } = event {
+            rejected = Some(reason);
+        }
+    }
+    assert_eq!(rejected.as_deref(), Some(reason.as_str()));
     assert_eq!(
         read_query(&client, Query::from("tasks"), "name", local()),
         [text("local task")]
     );
     let stored = stored(&path);
     assert!(
-        stored.contains_key("tasks") && stored.contains_key("todos"),
+        stored
+            .keys()
+            .any(|table| common::unhashed(table) == "tasks")
+            && stored.contains_key("todos"),
         "{stored:?}"
+    );
+}
+
+fn drop_rank() -> MigrationLens {
+    lens(
+        &v1(),
+        &without_rank(),
+        "todos",
+        "todos",
+        vec![LensOp::DropColumn {
+            column: "rank".into(),
+            backwards_default: Value::I64(7),
+        }],
+    )
+}
+
+/// A commit names tables and columns by stored names, and an insert names
+/// every column of the version that wrote it, its default where the app
+/// gave none: the server needs no schema version to apply it.
+///
+/// ```text
+/// old(v1) ──Insert { todos, {title~…: "x", rank~…: 0} }──► server(v2)
+/// ```
+#[test]
+fn a_replicated_insert_names_every_column_of_its_version_by_stored_name() {
+    let server = server(v1(), vec![(v2(), rename_title())]);
+    let old = block_on(Db::open(config(v1(), 1, user(1)))).unwrap();
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let _link = block_on(old.connect_upstream(Box::new(Pipe {
+        out: up.clone(),
+        inbound: down.clone(),
+    })));
+    insert(&old, "todos", 1, "title", "x");
+    block_on(old.tick()).unwrap();
+    let commit = up
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::Commit { ops, .. } => Some(ops.clone()),
+            _ => None,
+        })
+        .expect("the insert uploads");
+    let [op] = commit.as_slice() else {
+        panic!("one op: {commit:?}");
+    };
+    let jazz::db::WireWrite::Insert { table, cells, .. } = &op.write else {
+        panic!("an insert: {op:?}");
+    };
+    let (stored_table, title) = server.stored_column_for_test("todos", "name");
+    let (_, rank) = server.stored_column_for_test("todos", "rank");
+    assert_eq!(*table, stored_table);
+    assert_eq!(
+        *cells,
+        BTreeMap::from([(title, text("x")), (rank, Value::I64(0))]),
+        "by stored names, the default included"
+    );
+
+    server
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down,
+                inbound: up,
+            }),
+            user(1),
+        )
+        .unwrap();
+    pump(&server, &[&old]);
+    assert_eq!(read(&server, "todos", "name"), texts(&["x"]));
+}
+
+/// The server fills an old client's insert's lens cells from the stored
+/// columns it names, not from its version: a copy it leaves out follows
+/// the source it gives.
+#[test]
+fn an_old_clients_insert_fills_a_copy_at_the_server() {
+    let server = server(v1(), vec![(with_copy(), copy_title())]);
+    let old = block_on(Db::open(config(v1(), 1, user(1)))).unwrap();
+    let (c, s) = pipe();
+    let _link = block_on(old.connect_upstream(c));
+    server.accept_subscriber(s, user(1)).unwrap();
+    insert(&old, "todos", 1, "title", "from old");
+    pump(&server, &[&old]);
+    assert_eq!(read(&server, "todos", "search_title"), texts(&["from old"]));
+    assert_eq!(read(&server, "todos", "title"), texts(&["from old"]));
+}
+
+/// A dropped column a new client's insert leaves out takes the lens's
+/// backwards default at the server; an old client's insert, which names
+/// it, keeps its value.
+#[test]
+fn a_dropped_column_takes_its_backwards_default_only_where_an_insert_leaves_it_out() {
+    let server = server(v1(), vec![(without_rank(), drop_rank())]);
+    let old = block_on(Db::open(config(v1(), 1, user(1)))).unwrap();
+    let new = block_on(Db::open(
+        bare_config(without_rank(), 2, user(2))
+            .with_migrations(vec![v1(), without_rank()], vec![drop_rank()]),
+    ))
+    .unwrap();
+    let (old_client, old_server) = pipe();
+    let (new_client, new_server) = pipe();
+    let _old_link = block_on(old.connect_upstream(old_client));
+    let _new_link = block_on(new.connect_upstream(new_client));
+    server.accept_subscriber(old_server, user(1)).unwrap();
+    server.accept_subscriber(new_server, user(2)).unwrap();
+    insert(&new, "todos", 1, "title", "new");
+    block_on(old.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), text("old")),
+            ("rank".to_owned(), Value::I64(3)),
+        ]),
+        InsertOptions {
+            row_id: Some(row(2)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump(&server, &[&old, &new]);
+    let v1_view = block_on(server.register_schema_view(v1())).unwrap();
+    let mut ranks = read(&v1_view, "todos", "rank");
+    ranks.sort_by_key(|value| format!("{value:?}"));
+    assert_eq!(ranks, vec![Value::I64(3), Value::I64(7)]);
+}
+
+/// A client whose app lacks a lens its server applied names the version's
+/// columns by other stored names than the server does. Its write is never
+/// remapped in silence: the server refuses it with a typed reason, and the
+/// client, unable to store rows as its upstream does, stops syncing and
+/// says why.
+#[test]
+fn a_write_naming_columns_the_server_does_not_store_is_refused() {
+    let server = server(v1(), vec![(without_rank(), drop_rank())]);
+    let lensless = block_on(Db::open(config(without_rank(), 2, user(2)))).unwrap();
+    assert_ne!(
+        lensless.stored_column_for_test("todos", "title"),
+        server.stored_column_for_test("todos", "title")
+    );
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let _link = block_on(lensless.connect_upstream(Box::new(Pipe {
+        out: up.clone(),
+        inbound: down.clone(),
+    })));
+    insert(&lensless, "todos", 1, "title", "x");
+    let q = lensless.prepare_query(&Query::from("todos")).unwrap();
+    let mut stream = block_on(lensless.subscribe(&q, ReadOpts::default())).unwrap();
+    block_on(lensless.tick()).unwrap();
+    server
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down.clone(),
+                inbound: up,
+            }),
+            user(2),
+        )
+        .unwrap();
+    block_on(server.tick()).unwrap();
+    let reason = down.borrow().iter().find_map(|message| match message {
+        SyncMessage::Fate {
+            outcome:
+                jazz::db::Outcome::Refused {
+                    error: jazz::db::WireError::Rejected { reason, .. },
+                    ..
+                },
+            ..
+        } => reason.clone(),
+        _ => None,
+    });
+    assert_eq!(reason.as_deref(), Some("schema_version_not_deployed"));
+    pump(&server, &[&lensless]);
+    let mut rejected = None;
+    while let Some(event) = stream.try_next_event() {
+        if let SubscriptionEvent::Rejected { reason } = event {
+            rejected = Some(reason);
+        }
+    }
+    assert!(rejected.is_some(), "the remote read says why");
+    assert_eq!(read(&server, "todos", "title"), Vec::<Value>::new());
+}
+
+/// v1 plus a required `owner` the schema gives no default.
+fn with_owner() -> JazzSchema {
+    schema(vec![
+        todos("todos", "title").column("owner", ColumnType::Text),
+    ])
+}
+
+/// A required column a lens added with a default, the schema declaring
+/// none: an old client's insert, which cannot name it, takes the lens's
+/// default at the server rather than being refused as missing it.
+#[test]
+fn an_old_clients_insert_takes_a_lens_added_columns_default() {
+    let add_owner = lens(
+        &v1(),
+        &with_owner(),
+        "todos",
+        "todos",
+        vec![LensOp::AddColumn {
+            column: "owner".into(),
+            default: text("nobody"),
+        }],
+    );
+    let server = server(v1(), vec![(with_owner(), add_owner)]);
+    let old = block_on(Db::open(config(v1(), 1, user(1)))).unwrap();
+    let (c, s) = pipe();
+    let _link = block_on(old.connect_upstream(c));
+    server.accept_subscriber(s, user(1)).unwrap();
+    insert(&old, "todos", 1, "title", "from old");
+    pump(&server, &[&old]);
+    assert_eq!(read(&server, "todos", "owner"), texts(&["nobody"]));
+}
+
+/// `from` to [`without_rank`]: drops `column` (backwards default "BACK")
+/// and `rank` (backwards default 7).
+fn drop_with_rank(from: &JazzSchema, column: &str) -> MigrationLens {
+    lens(
+        from,
+        &without_rank(),
+        "todos",
+        "todos",
+        vec![
+            LensOp::DropColumn {
+                column: column.into(),
+                backwards_default: text("BACK"),
+            },
+            LensOp::DropColumn {
+                column: "rank".into(),
+                backwards_default: Value::I64(7),
+            },
+        ],
+    )
+}
+
+/// v1 plus `note`, default "added".
+fn with_note() -> JazzSchema {
+    schema(vec![todos("todos", "title").column_with_default(
+        "note",
+        ColumnType::Text,
+        jazz::tools::Value::Text("added".into()),
+    )])
+}
+
+/// A v1 row, written at the server through a v1 view and synced from a v1
+/// client, after v2 copied `title` into `search_title` and v3 dropped it:
+/// both take the copy, never v3's backwards default, which only a writer
+/// descending from v3 names.
+#[test]
+fn an_old_clients_insert_fills_a_copy_a_later_version_dropped() {
+    let server = server(
+        v1(),
+        vec![
+            (with_copy(), copy_title()),
+            (without_rank(), drop_with_rank(&with_copy(), "search_title")),
+        ],
+    );
+    let v1_local = block_on(server.register_schema_view(v1())).unwrap();
+    insert(&v1_local, "todos", 9, "title", "local old");
+    let old = block_on(Db::open(config(v1(), 1, user(1)))).unwrap();
+    let (c, s) = pipe();
+    let _link = block_on(old.connect_upstream(c));
+    server.accept_subscriber(s, user(1)).unwrap();
+    insert(&old, "todos", 1, "title", "from old");
+    pump(&server, &[&old]);
+    let v2 = block_on(server.register_schema_view(with_copy())).unwrap();
+    let mut got = read(&v2, "todos", "search_title");
+    got.sort_by_key(|v| format!("{v:?}"));
+    assert_eq!(got, texts(&["from old", "local old"]));
+}
+
+/// A column v2 added (default "added") and v3 dropped: a v1 client's row
+/// reads v2's default through v2, as a v1 write at the server does.
+#[test]
+fn an_old_clients_insert_takes_an_added_columns_default_a_later_version_dropped() {
+    let add_note = lens(
+        &v1(),
+        &with_note(),
+        "todos",
+        "todos",
+        vec![LensOp::AddColumn {
+            column: "note".into(),
+            default: text("added"),
+        }],
+    );
+    let server = server(
+        v1(),
+        vec![
+            (with_note(), add_note),
+            (without_rank(), drop_with_rank(&with_note(), "note")),
+        ],
+    );
+    let v1_local = block_on(server.register_schema_view(v1())).unwrap();
+    insert(&v1_local, "todos", 9, "title", "local old");
+    let old = block_on(Db::open(config(v1(), 1, user(1)))).unwrap();
+    let (c, s) = pipe();
+    let _link = block_on(old.connect_upstream(c));
+    server.accept_subscriber(s, user(1)).unwrap();
+    insert(&old, "todos", 1, "title", "from old");
+    pump(&server, &[&old]);
+    let v2 = block_on(server.register_schema_view(with_note())).unwrap();
+    assert_eq!(read(&v2, "todos", "note"), texts(&["added", "added"]));
+}
+
+fn upsert(db: &Db, n: u8, title: &str) {
+    block_on(db.upsert(
+        "todos",
+        row(n),
+        BTreeMap::from([("title".to_owned(), text(title))]),
+        jazz::db::UpsertOptions::default(),
+    ))
+    .unwrap();
+}
+
+/// An upsert that creates its row gives the columns it leaves out its
+/// writer's defaults: an old client's `rank` its own default (not the
+/// backwards default a later version's drop gives), a new client's the
+/// backwards default of the column its version dropped.
+#[test]
+fn an_upsert_creating_its_row_takes_its_writers_defaults() {
+    let server = server(v1(), vec![(without_rank(), drop_rank())]);
+    let old = block_on(Db::open(config(v1(), 1, user(1)))).unwrap();
+    let new = block_on(Db::open(
+        bare_config(without_rank(), 2, user(2))
+            .with_migrations(vec![v1(), without_rank()], vec![drop_rank()]),
+    ))
+    .unwrap();
+    let (old_client, old_server) = pipe();
+    let (new_client, new_server) = pipe();
+    let _old_link = block_on(old.connect_upstream(old_client));
+    let _new_link = block_on(new.connect_upstream(new_client));
+    server.accept_subscriber(old_server, user(1)).unwrap();
+    server.accept_subscriber(new_server, user(2)).unwrap();
+    upsert(&old, 1, "old");
+    upsert(&new, 2, "new");
+    assert_eq!(read(&old, "todos", "rank"), vec![Value::I64(0)]);
+    pump(&server, &[&old, &new]);
+    let v1_view = block_on(server.register_schema_view(v1())).unwrap();
+    let mut ranks = read(&v1_view, "todos", "rank");
+    ranks.sort_by_key(|value| format!("{value:?}"));
+    assert_eq!(ranks, vec![Value::I64(0), Value::I64(7)]);
+    assert_eq!(
+        read(&old, "todos", "rank"),
+        vec![Value::I64(0)],
+        "the echo keeps the client's value"
     );
 }

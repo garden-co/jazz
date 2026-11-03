@@ -5,6 +5,7 @@
 mod compatible;
 pub use compatible::schemas_are_compatible;
 mod migration_validation;
+pub mod published;
 mod runtime;
 pub use runtime::prepare_catalogue_change;
 
@@ -27,6 +28,10 @@ pub struct DeploymentCatalogue {
     pub schemas: Vec<Schema>,
     pub migrations: Vec<Lens>,
     pub active_schema_hash: Option<SchemaHash>,
+    /// The schemas the store admitted, oldest first: published bundles'
+    /// as well as activated ones. The newest that has a table decides how
+    /// much of its history the store keeps (SPEC 4 §4.9).
+    pub admitted_schema_hashes: Vec<SchemaHash>,
 }
 
 /// Missing artifacts plus the requested target and its complete permission set.
@@ -103,7 +108,7 @@ pub enum DeploymentError {
         second: Vec<SchemaHash>,
     },
     #[error(
-        "deploying schema {target} switches {} to latest-only history, which drops each row's past versions at its next write and cannot be undone. Deploy again with --allow-dropping-history to confirm.",
+        "deploying schema {target} switches {} to latest-only history, which drops each row's past versions at its next write and cannot be undone. Deploy again with `allowDroppingHistory: true` to confirm.",
         display_tables(.tables)
     )]
     DropsHistory {
@@ -163,10 +168,17 @@ pub fn prepare_deployment(
             return Err(DeploymentError::MissingSchema { schema: hash });
         }
     }
-    if !request.allow_dropping_history
-        && let Some(active) = stored.active_schema_hash
-    {
-        let tables = drops_history(&schemas[&active.0], &schemas[&request.target_schema_hash.0]);
+    if !request.allow_dropping_history {
+        // Newest first, the active schema last for a catalogue that lists
+        // no admissions.
+        let deployed: Vec<&Schema> = stored
+            .admitted_schema_hashes
+            .iter()
+            .rev()
+            .chain(stored.active_schema_hash.iter())
+            .filter_map(|hash| schemas.get(&hash.0))
+            .collect();
+        let tables = drops_history(&deployed, &schemas[&request.target_schema_hash.0]);
         if !tables.is_empty() {
             return Err(DeploymentError::DropsHistory {
                 target: request.target_schema_hash,
@@ -287,16 +299,18 @@ pub fn prepare_deployment(
     })
 }
 
-/// The tables `target` keeps latest-only that `active` keeps in full, by
-/// name: switching them drops their past versions (SPEC 4 §4.9). A table
-/// renamed in the same deploy is not caught.
-fn drops_history(active: &Schema, target: &Schema) -> Vec<TableName> {
+/// The tables `target` keeps latest-only that the store keeps in full now,
+/// by name: switching them drops their past versions (SPEC 4 §4.9). The
+/// newest of `deployed` (newest first) that has a table says how the store
+/// keeps it. A table renamed in the same deploy is not caught.
+fn drops_history(deployed: &[&Schema], target: &Schema) -> Vec<TableName> {
     target
         .iter()
         .filter(|(name, table)| {
             table.history == HistoryRetention::Latest
-                && active
-                    .get(*name)
+                && deployed
+                    .iter()
+                    .find_map(|schema| schema.get(*name))
                     .is_some_and(|before| before.history == HistoryRetention::Full)
         })
         .map(|(name, _)| name.clone())
