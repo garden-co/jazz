@@ -243,6 +243,7 @@ async fn connected_native_transport_reports_idle_websocket_closure() {
             app_id,
             peer_identity: jazz::ids::AuthorSubject::SYSTEM,
             auth: transport_auth("secret"),
+            authorization: None,
             wake: Arc::new(|| {}),
         })
         .await
@@ -287,6 +288,7 @@ async fn connected_native_transport_reports_owner_drop() {
             app_id,
             peer_identity: jazz::ids::AuthorSubject::SYSTEM,
             auth: transport_auth("secret"),
+            authorization: None,
             wake: Arc::new(|| {}),
         })
         .await

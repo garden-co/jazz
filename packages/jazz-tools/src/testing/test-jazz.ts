@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { createJazz, remote, type CreateJazzOptions, type Jazz } from "../backend/create-jazz.js";
@@ -40,6 +41,11 @@ export interface TestJazz {
    * name them, and the app's `authenticate` reads who they are from it.
    */
   as(userId: string, claims?: Record<string, unknown>): Promise<TestUserConfig>;
+  /**
+   * An opaque bearer token the app's `authenticate` reads as `userId`, for a
+   * client that sends `Authorization: Bearer` (a native app) to {@link url}.
+   */
+  bearer(userId: string, claims?: Record<string, unknown>): string;
   /**
    * Deploy a new version of the app, as a real redeploy does: publish it to
    * the core (with its migration), then restart the app's Jazz on it. Every
@@ -84,6 +90,13 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
     options.core ?? (await startLocalJazzServer({ inMemory: true, ...options.coreOptions }));
   // Which user each origin (by its Host) is signed in as.
   const users = new Map<string, { userId: string; claims?: Record<string, unknown> }>();
+  // Who each bearer from `bearer()` is.
+  const bearers = new Map<string, { userId: string; claims?: Record<string, unknown> }>();
+  const userFor = (request: Request) => {
+    const authorization = request.headers.get("authorization");
+    if (authorization?.startsWith("Bearer ")) return bearers.get(authorization.slice(7)) ?? null;
+    return users.get(new URL(request.url).host) ?? null;
+  };
   const servers: Server[] = [];
   // Every connection, including upgraded sync sockets, which `server.close`
   // would otherwise wait on: a redeploy or stop drops them, as a real one does.
@@ -94,7 +107,7 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
       app: app as CreateJazzOptions["app"],
       permissions,
       store: remote({ url: core.url, appId: core.appId, secret: core.adminSecret }),
-      authenticate: (request) => users.get(new URL(request.url).host) ?? null,
+      authenticate: userFor,
     });
   let jazz: Jazz;
   try {
@@ -138,6 +151,11 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
     backendSecret: core.backendSecret,
     get jazz() {
       return jazz;
+    },
+    bearer(userId, claims) {
+      const token = `test-bearer-${randomUUID()}`;
+      bearers.set(token, { userId, claims });
+      return token;
     },
     async as(userId, claims) {
       const host = await serve();

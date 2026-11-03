@@ -10,6 +10,7 @@ import {
 } from "../../src/runtime/native-runtime/native-runtime-adapter.js";
 
 import { withNativeRelayFixture } from "./fixture.js";
+import type { TestJazz } from "../../src/testing/index.js";
 
 const app = schema.defineApp(
   {
@@ -49,12 +50,12 @@ it("refuses write state snapshots explicitly and retires closed writes", async (
 });
 
 it("delivers unwaited authority rejection once and leaves waited rejection with its waiter", async () => {
-  const { startLocalJazzServer, startTestJwtIssuer, deploy } =
+  const { startLocalJazzServer, startTestJazz, deploy } =
     await import("../../src/testing/index.js");
-  const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
     inMemory: true,
   });
+  let backend: TestJazz | undefined;
   try {
     const permissions = schema.definePermissions(app, ({ policy }) => [
       policy.documents.allowRead.always(),
@@ -66,6 +67,7 @@ it("delivers unwaited authority rejection once and leaves waited rejection with 
       schema: app,
       permissions,
     });
+    backend = await startTestJazz({ core: server, app, permissions });
     await withNativeRelayFixture(
       app,
       permissions,
@@ -98,21 +100,12 @@ it("delivers unwaited authority rejection once and leaves waited rejection with 
       },
       {
         appId: server.appId,
-        session: {
-          issuer: issuer.issuer,
-          user_id: "rn-mutation-user",
-          claims: { role: "user" },
-          authMode: "external",
-        },
-        upstream: {
-          serverUrl: server.url,
-          jwt: await issuer.jwtForUser("rn-mutation-user"),
-        },
+        upstream: { backend: backend!, userId: "rn-mutation-user", claims: { role: "user" } },
       },
     );
   } finally {
+    await backend?.stop();
     await server.stop();
-    await issuer.stop();
   }
 }, 30_000);
 
@@ -155,12 +148,13 @@ it("closes an unfinished large upload without publication or late mutation callb
 it.each(["finish", "abort"] as const)(
   "can %s an upload while pending operations are at native capacity",
   async (terminal) => {
-    const { startLocalJazzServer, startTestJwtIssuer } = await import("../../src/testing/index.js");
-    const issuer = await startTestJwtIssuer();
+    const { startLocalJazzServer, startTestJazz } = await import("../../src/testing/index.js");
     const server = await startLocalJazzServer({
       inMemory: true,
     });
+    let backend: TestJazz | undefined;
     try {
+      backend = await startTestJazz({ core: server, app: app, permissions: {} });
       await withNativeRelayFixture(
         app,
         {},
@@ -226,21 +220,12 @@ it.each(["finish", "abort"] as const)(
         },
         {
           appId: server.appId,
-          session: {
-            issuer: issuer.issuer,
-            user_id: "rn-capacity-user",
-            claims: {},
-            authMode: "external",
-          },
-          upstream: {
-            serverUrl: server.url,
-            jwt: await issuer.jwtForUser("rn-capacity-user"),
-          },
+          upstream: { backend: backend!, userId: "rn-capacity-user" },
         },
       );
     } finally {
+      await backend?.stop();
       await server.stop();
-      await issuer.stop();
     }
   },
   30_000,

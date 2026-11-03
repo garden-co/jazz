@@ -809,6 +809,7 @@ impl JazzClient {
                 app_id: context.app_id,
                 peer_identity: identity.author,
                 auth: credentials.borrow_and_update().clone(),
+                authorization: None,
                 wake: Arc::new(move || wake.notify_one()),
             };
             // The first attempt decides whether the server admits this

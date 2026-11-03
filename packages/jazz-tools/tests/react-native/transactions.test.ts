@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ReadTier } from "../../src/runtime/client.js";
 import { schema } from "../../src/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
+import type { TestJazz } from "../../src/testing/index.js";
 
 const app = schema.defineApp(
   {
@@ -99,12 +100,12 @@ describe("React Native transaction reads through the native C ABI", () => {
 });
 
 it("waits for native upstream authority before accepting a serializable commit", async () => {
-  const { startLocalJazzServer, startTestJwtIssuer, deploy } =
+  const { startLocalJazzServer, startTestJazz, deploy } =
     await import("../../src/testing/index.js");
-  const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
     inMemory: true,
   });
+  let backend: TestJazz | undefined;
   try {
     const permissions = schema.definePermissions(app, ({ policy }) => [
       policy.todos.allowRead.always(),
@@ -118,6 +119,7 @@ it("waits for native upstream authority before accepting a serializable commit",
       schema: app,
       permissions,
     });
+    backend = await startTestJazz({ core: server, app, permissions });
     await withNativeRelayFixture(
       app,
       permissions,
@@ -160,20 +162,11 @@ it("waits for native upstream authority before accepting a serializable commit",
       },
       {
         appId: server.appId,
-        session: {
-          issuer: issuer.issuer,
-          user_id: "rn-serializable-writer",
-          claims: { role: "user" },
-          authMode: "external",
-        },
-        upstream: {
-          serverUrl: server.url,
-          jwt: await issuer.jwtForUser("rn-serializable-writer"),
-        },
+        upstream: { backend: backend!, userId: "rn-serializable-writer", claims: { role: "user" } },
       },
     );
   } finally {
+    await backend?.stop();
     await server.stop();
-    await issuer.stop();
   }
 }, 30_000);

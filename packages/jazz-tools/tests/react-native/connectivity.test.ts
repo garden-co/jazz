@@ -6,6 +6,7 @@ import type { NativeForegroundModule } from "../../src/react-native/native-foreg
 const { encodeNativeForegroundCommand, decodeNativeForegroundResponse } =
   nativeCommands as unknown as NativeForegroundModule;
 import { withNativeRelayFixture } from "./fixture.js";
+import type { TestJazz } from "../../src/testing/index.js";
 
 const app = schema.defineApp(
   { notes: schema.table({ title: schema.string() }, {}) },
@@ -22,12 +23,12 @@ it("rejects disconnect without a native upstream and leaves local reads usable",
 });
 
 it("disconnects before any query and reconnects using only native credentials", async () => {
-  const { startLocalJazzServer, startTestJwtIssuer, deploy } =
+  const { startLocalJazzServer, startTestJazz, deploy } =
     await import("../../src/testing/index.js");
-  const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
     inMemory: true,
   });
+  let backend: TestJazz | undefined;
   try {
     const permissions = schema.definePermissions(app, ({ policy }) => [
       policy.notes.allowRead.always(),
@@ -40,6 +41,7 @@ it("disconnects before any query and reconnects using only native credentials", 
       schema: app,
       permissions,
     });
+    backend = await startTestJazz({ core: server, app, permissions });
     await withNativeRelayFixture(
       app,
       permissions,
@@ -105,17 +107,11 @@ it("disconnects before any query and reconnects using only native credentials", 
       },
       {
         appId: server.appId,
-        session: {
-          issuer: issuer.issuer,
-          user_id: "connectivity-user",
-          claims: {},
-          authMode: "external",
-        },
-        upstream: { serverUrl: server.url, jwt: await issuer.jwtForUser("connectivity-user") },
+        upstream: { backend: backend!, userId: "connectivity-user" },
       },
     );
   } finally {
+    await backend?.stop();
     await server.stop();
-    await issuer.stop();
   }
 }, 30_000);
