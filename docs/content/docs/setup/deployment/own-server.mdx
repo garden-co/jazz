@@ -42,6 +42,8 @@ sqlite({ path: "./data/jazz", blobs: "sqlite" }); // everything inside the SQLit
 The data directory records its choice in `<path>/blob-store`. You can move an existing directory
 from `"sqlite"` to files later; any other switch is not supported yet and refuses to start. A blob
 directory belongs to exactly one data directory, so two data directories can't share one.
+To copy a data directory, give the copy its own blob directory and delete its `store-id` and
+`blob-store` files before it first starts, or it claims the original's blob directory.
 
 <include>../../../partials/main-backend-mount.mdx</include>
 
@@ -57,7 +59,7 @@ That's the whole deployment:
   decides who each request is (see [How Auth Works in Jazz](/docs/setup/auth/backend)).
 
 Keep the data directory on a durable disk (a Docker volume, an attached block device), and run one
-process per directory.
+process per directory: a second process on the same directory is refused (`<path>/jazz.lock`).
 
 ```dockerfile title="Dockerfile"
 FROM node:22-slim
