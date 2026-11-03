@@ -56,7 +56,11 @@ pub(crate) const DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_lenses (source BLOB NOT NULL, target BLOB NOT NULL, \
      published_at INTEGER NOT NULL, def TEXT NOT NULL, PRIMARY KEY (source, target)) WITHOUT ROWID;\
     CREATE TABLE IF NOT EXISTS _jazz_permissions (revision INTEGER PRIMARY KEY, hash BLOB NOT NULL, \
-     published_at INTEGER, activated_seq INTEGER, read_digest INTEGER, def TEXT NOT NULL);\
+     published_at INTEGER, activated_seq INTEGER, read_digest INTEGER, def TEXT NOT NULL);";
+
+/// Created by the first published bundle, not on open: opening a store that
+/// predates bundles (or never serves one) leaves its file byte for byte as it was.
+const BUNDLES_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_bundles (id BLOB PRIMARY KEY, hash BLOB NOT NULL, \
      published_at INTEGER NOT NULL, def TEXT NOT NULL) WITHOUT ROWID;";
 
@@ -372,6 +376,9 @@ pub(crate) fn put(conn: &Connection, put: &CataloguePut) -> Result<(), Error> {
             ])
         })
         .map_err(storage)?;
+    }
+    if !put.bundles.is_empty() {
+        conn.execute_batch(BUNDLES_DDL).map_err(storage)?;
     }
     for (schema, permissions, published_at) in &put.bundles {
         let def = canonical_json(&without_defaults(permissions))?;
