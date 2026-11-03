@@ -69,8 +69,33 @@ pub enum StorageBackend {
     Persistent { path: PathBuf },
 }
 
+/// Where a persistent store keeps the bytes of large values once they
+/// settle (see [`jazz::chunk_store`]). The rows and the chunk metadata
+/// always stay in `jazz.sqlite`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlobStore {
+    /// In `jazz.sqlite` itself. Simplest, but the file grows with every
+    /// large value.
+    Sqlite,
+    /// As files under `dir`; `None` is `blobs/` in the data directory.
+    Files { dir: Option<PathBuf> },
+}
+
+impl BlobStore {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Sqlite => "sqlite",
+            Self::Files { .. } => "files",
+        }
+    }
+}
+
+/// Records which [`BlobStore`] a data directory was started with.
+const BLOB_STORE_MARKER: &str = "blob-store";
+
 pub struct ServerBuilder {
     app_id: AppId,
+    blobs: BlobStore,
     auth_config: AuthConfig,
     schema_mode: ServerSchemaMode,
     storage_backend: StorageBackend,
@@ -89,6 +114,7 @@ impl ServerBuilder {
                 ..Default::default()
             },
             schema_mode: ServerSchemaMode::Dynamic,
+            blobs: BlobStore::Sqlite,
             storage_backend: StorageBackend::Persistent {
                 path: PathBuf::from("./data"),
             },
@@ -122,6 +148,15 @@ impl ServerBuilder {
 
     pub fn with_storage(mut self, backend: StorageBackend) -> Self {
         self.storage_backend = backend;
+        self
+    }
+
+    /// Where a persistent store keeps settled large-value bytes. Defaults to
+    /// [`BlobStore::Sqlite`]. A data directory keeps the blob store it was
+    /// started with, except that one whose blobs are in SQLite may move
+    /// them out (they move on later ticks).
+    pub fn with_blob_store(mut self, blobs: BlobStore) -> Self {
+        self.blobs = blobs;
         self
     }
 
@@ -310,7 +345,12 @@ impl ServerBuilder {
             StorageBackend::Persistent { path } => {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
-                Ok(StorageConfig::data_dir(path))
+                pin_blob_store(path, &self.blobs)?;
+                Ok(match &self.blobs {
+                    BlobStore::Sqlite => StorageConfig::data_dir(path),
+                    BlobStore::Files { dir } => StorageConfig::data_dir(path)
+                        .with_blob_dir(dir.clone().unwrap_or_else(|| path.join("blobs"))),
+                })
             }
         }
     }
@@ -319,6 +359,37 @@ impl ServerBuilder {
     fn local_durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Global
     }
+}
+
+/// Refuse to start `data_dir` with a blob store other than the one it was
+/// started with, then record `blobs` as its blob store. A directory with no
+/// record keeps its blobs in SQLite (every store did before blob stores).
+fn pin_blob_store(data_dir: &std::path::Path, blobs: &BlobStore) -> Result<(), String> {
+    let marker = data_dir.join(BLOB_STORE_MARKER);
+    let recorded = match std::fs::read_to_string(&marker) {
+        Ok(recorded) => recorded.trim().to_owned(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "sqlite".to_owned(),
+        Err(error) => return Err(format!("read {}: {error}", marker.display())),
+    };
+    let wanted = match blobs {
+        BlobStore::Sqlite => "sqlite".to_owned(),
+        BlobStore::Files { dir } => match dir {
+            Some(dir) => format!("files {}", dir.display()),
+            None => "files".to_owned(),
+        },
+    };
+    if recorded == wanted {
+        return Ok(());
+    }
+    if recorded != "sqlite" {
+        return Err(format!(
+            "data dir '{}' keeps its large values in {recorded:?}; moving them to {:?} is not supported yet",
+            data_dir.display(),
+            blobs.kind()
+        ));
+    }
+    std::fs::write(&marker, format!("{wanted}\n"))
+        .map_err(|error| format!("write {}: {error}", marker.display()))
 }
 
 fn refuse_pre_sqlite_data_dir(path: &std::path::Path) -> Result<(), String> {
@@ -651,6 +722,52 @@ mod tests {
             tiers,
             std::collections::HashSet::from([DurabilityTier::Global])
         );
+    }
+
+    #[tokio::test]
+    async fn a_data_dir_keeps_its_blob_store_except_moving_out_of_sqlite() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let start = |blobs: BlobStore| {
+            ServerBuilder::new(AppId::from_name("blob-store-pin"))
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .with_blob_store(blobs)
+                .build()
+        };
+        let files = || BlobStore::Files { dir: None };
+
+        // A store from before blob stores keeps its blobs in SQLite, and may
+        // move them out.
+        start(BlobStore::Sqlite)
+            .await
+            .expect("sqlite")
+            .shutdown()
+            .await;
+        assert!(!data_dir.path().join(BLOB_STORE_MARKER).exists());
+        start(files())
+            .await
+            .expect("sqlite to files")
+            .shutdown()
+            .await;
+        assert_eq!(
+            std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap(),
+            "files\n"
+        );
+        start(files()).await.expect("files again").shutdown().await;
+
+        for other in [
+            BlobStore::Sqlite,
+            BlobStore::Files {
+                dir: Some(data_dir.path().join("elsewhere")),
+            },
+        ] {
+            let error = start(other.clone())
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{other:?} after files starts"));
+            assert!(error.contains("not supported yet"), "{error}");
+        }
     }
 
     #[tokio::test]

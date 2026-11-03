@@ -269,8 +269,10 @@ find "$data/bin" -name 'jazz-tools-*' ! -name "jazz-tools-$version" -delete
 printf '%s\\n' "$version" > "$run/jazz.version"
 echo $$ > "$run/jazz.pid"
 exec 9>&-
-# The core admits only the deploying function's own workload.
-exec "$bin" server "$app_id" --port ${VERCEL_CORE_PORT} --data-dir "$data/store" \\
+# The core admits only the deploying function's own workload. Large values
+# stay in its SQLite file until blob stores reach the Sandbox (they can move
+# out from there later).
+exec "$bin" server "$app_id" --port ${VERCEL_CORE_PORT} --data-dir "$data/store" --blobs sqlite \\
   --trusted-workload-issuer ${q(trust.issuer)} \\
   --trusted-workload-audience ${q(trust.audience)} \\
   --trusted-workload-subject ${q(trust.subject)}
