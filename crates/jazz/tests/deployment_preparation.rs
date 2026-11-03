@@ -371,6 +371,7 @@ fn allows_backward_activation_but_rejects_cycles_and_disconnected_stored_schemas
         schemas: vec![base.clone(), next.clone()],
         migrations: vec![edge.clone()],
         active_schema_hash: Some(SchemaHash::compute(&next)),
+        ..Default::default()
     };
     prepare_deployment(&stored, request(&base, &[], vec![])).unwrap();
     let reverse = Lens::new(edge.target_hash, edge.source_hash, edge.backward.clone());
@@ -401,6 +402,7 @@ fn rejects_missing_artifacts_bad_hashes_and_conflicting_migrations() {
         schemas: vec![base.clone(), next.clone()],
         migrations: vec![edge.clone()],
         active_schema_hash: Some(SchemaHash::compute(&base)),
+        ..Default::default()
     };
     assert!(matches!(
         prepare_deployment(
