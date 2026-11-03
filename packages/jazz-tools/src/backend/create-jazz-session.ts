@@ -1,6 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { clientScope } from "../runtime/client-scope.js";
 import { admitBackendSecret } from "./admission.js";
+import {
+  credentialedTransport,
+  type BackendClientCredential,
+} from "../runtime/credentialed-transport.js";
+import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
 import type { BackendRequestOptions } from "./request-auth.js";
 import { NapiDb } from "jazz-napi";
 import { mintLocalFirstTokenFromSeed } from "../runtime/local-first-token.js";
@@ -54,6 +59,7 @@ export type JazzSessionConfig = Omit<
   | "cookieSession"
   | "adminSecret"
   | "serverUrl"
+  | "webSocket"
   | "appId"
 > & {
   /** Leave out to act as a browser client, scoped by `serverUrl`. */
@@ -65,6 +71,17 @@ export type JazzSessionConfig = Omit<
   serverUrl: string;
   store?: AccountStore;
   initial?: "local-first" | BackendAuth;
+  /**
+   * For a backend client (a machine that syncs through an app's main backend,
+   * not a browser): its workload's OIDC token, or a function that returns a
+   * fresh one. It is sent as `Authorization: Bearer` on every request and
+   * socket to `serverUrl`, and the main backend trusts it with
+   * `trustWorkload` (see `createJazz`'s `backendClients`). The session opens
+   * as whatever the main backend trusts the token as: a trusted machine with
+   * backend authority, a scoped machine as its user. It fails when the main
+   * backend trusts the token as neither. Not with `initial`.
+   */
+  credential?: BackendClientCredential;
 };
 
 export interface JazzClient extends SharedJazzClient {
@@ -100,7 +117,7 @@ class NodeUserRuntimeSource extends RuntimeSource {
     // Native writes already cross the local durability boundary when committed.
   }
   constructor(
-    private readonly host: JazzSessionConfig,
+    private readonly host: JazzSessionConfig & { webSocket?: WebSocketConstructor },
     private readonly account: AccountHandle,
   ) {
     super();
@@ -150,6 +167,7 @@ class NodeUserRuntimeSource extends RuntimeSource {
           : {}),
         selfSignedClientProof: selfSignedClientProofFromConfig(config, session),
         readAuthorizationHost: "client-local",
+        webSocket: this.host.webSocket,
         slowQueryLog: { appId: this.host.appId, thresholdMs: this.host.slowQueryThresholdMs },
         migrations,
       },
@@ -159,6 +177,9 @@ class NodeUserRuntimeSource extends RuntimeSource {
     return RuntimeClient.connectWithRuntime(runtime, context, { onAuthFailure });
   }
 }
+
+/** What a trusted backend client states as its secret: its token, not this, states its access. */
+const BACKEND_CLIENT_STAND_IN_SECRET = "stated-by-backend-credential";
 
 function memoryAccountStore(): AccountStore {
   let value: string | null = null;
@@ -178,8 +199,22 @@ function memoryAccountStore(): AccountStore {
  * across process restarts; service secrets are never persisted there.
  */
 export async function createJazzSession(
-  config: JazzSessionConfig,
+  input: JazzSessionConfig,
 ): Promise<JazzSession<JazzClient>> {
+  if (Object.hasOwn(input, "webSocket")) throw new Error("Use credential instead of webSocket");
+  if (input.credential !== undefined && input.initial !== undefined) {
+    throw new Error(
+      "createJazzSession: a backend client's credential decides how it opens; leave out initial",
+    );
+  }
+  const transport =
+    input.credential === undefined
+      ? undefined
+      : credentialedTransport(input.serverUrl, input.credential);
+  const config: JazzSessionConfig & { webSocket?: WebSocketConstructor } = {
+    ...input,
+    webSocket: transport?.WebSocket,
+  };
   for (const key of ["backendSecret", "jwtToken", "cookieSession", "adminSecret"]) {
     if (Object.hasOwn(config, key))
       throw new Error(`Use session account actions instead of ${key}`);
@@ -197,6 +232,7 @@ export async function createJazzSession(
     appId: clientScope(config),
     registry,
     store: config.store ?? memoryAccountStore(),
+    fetch: transport?.fetch,
     mintToken: (secret, audience) =>
       mintLocalFirstTokenFromSeed(authSecretSeedForMinting(secret), audience, 3600),
     backend: {
@@ -204,14 +240,33 @@ export async function createJazzSession(
         await admitBackendSecret(
           `${registry.slice(0, -"/accounts".length)}/backend/admit`,
           backendSecret,
+          { fetch: transport?.fetch },
         );
         return { nodeId: backendNodeId(config) };
       },
     },
   });
-  return createJazzSessionOwner({
+  // A backend client opens as what its credential is trusted as: a trusted
+  // machine is admitted as a backend, a scoped one signs in as its user.
+  let initial = config.initial;
+  let signInAsUser = false;
+  if (transport) {
+    try {
+      await admitBackendSecret(
+        `${registry.slice(0, -"/accounts".length)}/backend/admit`,
+        BACKEND_CLIENT_STAND_IN_SECRET,
+        { fetch: transport.fetch },
+      );
+      initial = { backendSecret: BACKEND_CLIENT_STAND_IN_SECRET };
+    } catch (error) {
+      const status = (error as { status?: number }).status;
+      if (status !== 401 && status !== 404) throw error;
+      signInAsUser = true;
+    }
+  }
+  const session = await createJazzSessionOwner({
     accounts,
-    initial: config.initial,
+    initial,
     openClient: async (account) => {
       const backend = getBackendAuth(account, registry);
       if (!backend) {
@@ -361,6 +416,20 @@ export async function createJazzSession(
       return backendClient;
     },
   });
+  if (signInAsUser) {
+    try {
+      await session.loginWithBackend();
+    } catch (error) {
+      await session.close();
+      // Only a refusal means the credential isn't trusted; an outage stays itself.
+      if ((error as { status?: number }).status !== 401) throw error;
+      throw new Error(
+        "createJazzSession: the main backend trusts this backend client's credential neither as a trusted machine nor as a user (see trustWorkload in its backendClients)",
+        { cause: error },
+      );
+    }
+  }
+  return session;
 }
 
 const sessionScopes = new WeakMap<object, (session: Session, attribution: boolean) => Db>();
