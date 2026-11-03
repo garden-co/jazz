@@ -21,8 +21,8 @@ Jazz is that whole data layer in one piece, running inside the backend you alrea
   dashboard or a shared list updates the moment someone adds, edits or removes a row, including
   rows that start or stop matching a filter. When a screen needs instant writes or offline support,
   switch that client to local-first, with the same schema, queries and policies.
-- **Streams and files in the same model.** Files, streams and mergeable text are columns in your
-  tables, so they sync, version and follow permissions like every other value. Edit metadata
+- **Streams and files in the same model.** Files, streams and mergeable text live in Jazz too, so
+  they sync and follow your permissions like every other value. Edit metadata
   (`$createdBy`, `$updatedAt`, …), history, drafts and branches come with every row.
 - **One set of permissions.** Policies live next to your schema in TypeScript and apply the same way
   to backend code, thin clients, local-first clients, files and streams. They're verbose, but agents
