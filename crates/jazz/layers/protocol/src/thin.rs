@@ -200,7 +200,10 @@ pub enum ThinOp {
         /// JSON write options.
         #[serde(with = "serde_bytes")]
         options: Vec<u8>,
-        /// The open transaction the finished value is staged in.
+        /// The open transaction the finished value is staged in. Postcard
+        /// fields are positional, so this changes the frame layout; that is
+        /// fine only because thin frames ship unreleased, client and server
+        /// in lockstep, with alpha.60 (see the corpus test below).
         transaction: Option<String>,
     },
     /// The next chunk of upload `stream`. Answered with [`ThinBody::Ok`]
@@ -442,6 +445,7 @@ mod tests {
                     column: "body".to_owned(),
                     mutation: "insert".to_owned(),
                     options: options("{}"),
+                    transaction: tx(),
                 },
             ),
             (

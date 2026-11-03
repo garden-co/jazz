@@ -65,6 +65,26 @@ describe("streaming inside a transaction", () => {
     }
   }, 30_000);
 
+  it("fails the commit when a source throws mid-stream", async () => {
+    const testApp = await createPolicyTestApp(app, permissions, expect);
+    try {
+      const db = testApp.as(uploader);
+      async function* failing(): AsyncGenerator<Uint8Array> {
+        yield expected.subarray(0, 50_000);
+        throw new Error("source broke");
+      }
+      const tx = db.beginTransaction();
+      tx.insert(app.files, { name: "sibling", data: new Uint8Array([1]) });
+      await expect(
+        tx.insertStreaming(app.files, { name: "broken", data: failing() }),
+      ).rejects.toThrow("source broke");
+      await expect(tx.commit().wait({ tier: "local" })).rejects.toThrow();
+      expect(await db.all(app.files)).toEqual([]);
+    } finally {
+      await testApp.shutdown();
+    }
+  }, 30_000);
+
   it("streams into a row in a serializable transaction callback", async () => {
     const testApp = await createPolicyTestApp(app, permissions, expect);
     try {

@@ -371,6 +371,22 @@ describe("thin client", () => {
     await discarded.rollback();
     expect((await db.all(app.files)).map((row) => row.name)).toEqual(["in a transaction"]);
   }, 60_000);
+
+  it("fails the commit when a source throws mid-stream inside a transaction", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    async function* failing(): AsyncGenerator<Uint8Array> {
+      yield new Uint8Array(40_000).fill(7);
+      throw new Error("source broke");
+    }
+    const tx = db.beginTransaction();
+    tx.insert(app.files, { name: "sibling", data: new Uint8Array([1]) });
+    await expect(
+      tx.insertStreaming(app.files, { name: "broken", data: failing() }),
+    ).rejects.toThrow("source broke");
+    await expect(tx.commit().wait({ tier: "global" })).rejects.toThrow();
+    expect(await db.all(app.files)).toEqual([]);
+  }, 60_000);
 });
 
 /** Renew the credential with itself: a thin client reconnects for a new one. */
