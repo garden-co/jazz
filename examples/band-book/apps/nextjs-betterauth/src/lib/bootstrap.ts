@@ -90,7 +90,7 @@ export async function ensureDemoWorkspace(
           tx.insert(
             app.songSheets,
             { workspaceId, pageId, body: page.sheet },
-            { id: id(`sheet:${page.key}`), ...at() },
+            { id: pageId, ...at() },
           );
           (page.comments ?? []).forEach((comment, index) =>
             tx.insert(

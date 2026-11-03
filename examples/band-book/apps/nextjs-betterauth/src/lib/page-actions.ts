@@ -27,11 +27,12 @@ export async function createSongSheet(
       title: input.title ?? "",
       kind: "song",
     });
-    tx.insert(app.songSheets, {
-      workspaceId: input.workspaceId,
-      pageId: page.id,
-      body: input.body ?? "",
-    });
+    // The sheet takes its page's id: a page has one.
+    tx.insert(
+      app.songSheets,
+      { workspaceId: input.workspaceId, pageId: page.id, body: input.body ?? "" },
+      { id: page.id },
+    );
     return page;
   });
   return result.value;

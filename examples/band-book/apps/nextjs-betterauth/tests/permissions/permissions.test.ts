@@ -520,11 +520,11 @@ describe("song sheets", () => {
     await addMember(owner, band.id, "crew", "viewer");
     const song = await page(owner, band.id, "Night bus home", null, "song");
     const sheet = await owner
-      .insert(app.songSheets, {
-        workspaceId: band.id,
-        pageId: song.id,
-        body: "the windows fogged and gold",
-      })
+      .insert(
+        app.songSheets,
+        { workspaceId: band.id, pageId: song.id, body: "the windows fogged and gold" },
+        { id: song.id },
+      )
       .wait(global);
 
     // Crew read the sheet but cannot change its text...
@@ -562,8 +562,6 @@ describe("song sheets", () => {
         workspaceId: band.id,
         pageId: song.id,
         account: accountFor("crew"),
-        name: "crew",
-        color: "var(--color-icon-blue)",
         cursor,
         selection: null,
         seenAt: 1,
@@ -580,7 +578,7 @@ describe("song sheets", () => {
     const band = await createBand(owner, "owner");
     const doc = await page(owner, band.id, "Setlist");
     await owner.expectDenied((db) =>
-      db.insert(app.songSheets, { workspaceId: band.id, pageId: doc.id, body: "" }),
+      db.insert(app.songSheets, { workspaceId: band.id, pageId: doc.id, body: "" }, { id: doc.id }),
     );
   });
 });

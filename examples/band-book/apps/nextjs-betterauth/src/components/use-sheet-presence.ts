@@ -32,7 +32,10 @@ function colorFor(account: string): string {
  * Who else has this song sheet open, and where their cursors are. Each open
  * editor keeps one presence row: written as the selection moves (at most
  * every 150 ms), refreshed every 10 s while it stays open and deleted when it
- * closes. Rows not refreshed for 30 s belong to editors that went away.
+ * closes. A row this client has not seen refreshed for 30 s belongs to an
+ * editor that went away; timing it by this client's clock, not the writer's,
+ * keeps a wrong clock elsewhere from hiding or keeping anyone. Names and
+ * colours come from the row's account, never from what the row says.
  */
 export function useSheetPresence(pageId: string) {
   const db = useDb();
@@ -56,8 +59,6 @@ export function useSheetPresence(pageId: string) {
         workspaceId: workspace.id,
         pageId,
         account: me,
-        name: memberName(members, me),
-        color: colorFor(me),
         ...values,
       }).value.id;
     }
@@ -96,19 +97,37 @@ export function useSheetPresence(pageId: string) {
   };
 
   const { data: rows } = useAll(app.sheetPresence.where({ pageId }));
-  const collaborators = useMemo<Collaborator[]>(
-    () =>
-      (rows ?? [])
-        .filter((row) => row.id !== rowId.current && now - row.seenAt < STALE_MS)
-        .map((row) => ({
-          id: row.id,
-          name: row.name,
-          color: row.color,
-          cursor: row.cursor as unknown as TextAnchor,
-          selection: (row.selection ?? undefined) as unknown as TextRange | undefined,
-        })),
-    [rows, now],
-  );
+
+  // Rows this editor left behind (a closed laptop, a crashed tab) were
+  // timed by this clock, so they can be told apart from a live tab's.
+  useEffect(() => {
+    for (const row of rows ?? []) {
+      if (row.account === me && row.id !== rowId.current && Date.now() - row.seenAt > STALE_MS) {
+        db.delete(app.sheetPresence, row.id);
+      }
+    }
+  }, [rows, me, db]);
+
+  // When this client last saw each row change.
+  const seen = useRef(new Map<string, { seenAt: number; at: number }>());
+  const collaborators = useMemo<Collaborator[]>(() => {
+    const live: Collaborator[] = [];
+    for (const row of rows ?? []) {
+      const last = seen.current.get(row.id);
+      if (!last || last.seenAt !== row.seenAt) {
+        seen.current.set(row.id, { seenAt: row.seenAt, at: Date.now() });
+      }
+      if (row.id === rowId.current || now - seen.current.get(row.id)!.at > STALE_MS) continue;
+      live.push({
+        id: row.id,
+        name: memberName(members, row.account),
+        color: colorFor(row.account),
+        cursor: row.cursor as unknown as TextAnchor,
+        selection: (row.selection ?? undefined) as unknown as TextRange | undefined,
+      });
+    }
+    return live;
+  }, [rows, now, members]);
   return { collaborators, report };
 }
 // #endregion rich-text-presence

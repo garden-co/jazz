@@ -6,6 +6,7 @@ import type { TextRange } from "jazz-tools";
 import {
   applyMarkdown,
   captureRange,
+  isRemoteChange,
   markdownSync,
   overlays,
   type Overlay,
@@ -40,7 +41,9 @@ import { memberName, useWorkspace } from "./workspace-context";
  * else's cursors and a comment sidebar drawn over it.
  */
 export function SongSheet({ pageId, editable }: { pageId: string; editable: boolean }) {
-  const { data: sheets } = useAll(app.songSheets.where({ pageId }));
+  // A page's sheet has the page's id (see createSongSheet), so it is one
+  // row even when two editors create it at once.
+  const { data: sheets } = useAll(app.songSheets.where({ id: pageId, pageId }));
   const sheet = sheets?.[0];
   if (!sheet) return <Skeleton height={240} />;
   return <SheetEditor key={sheet.id} sheet={sheet} editable={editable} />;
@@ -56,6 +59,8 @@ function SheetEditor({ sheet, editable }: { sheet: SongSheetRow; editable: boole
   const presence = useSheetPresence(sheet.pageId);
   const report = useRef(presence.report);
   report.current = presence.report;
+  const canEdit = useRef(editable);
+  canEdit.current = editable;
 
   // #region rich-text-editor
   useEffect(() => {
@@ -74,12 +79,14 @@ function SheetEditor({ sheet, editable }: { sheet: SongSheetRow; editable: boole
           overlays({ anchors: () => db.textAnchors(), onPlaced: setPlaced }),
         ],
       }),
-      editable: () => editable,
+      editable: () => canEdit.current,
       dispatchTransaction(tr) {
         const next = editor.state.apply(tr);
         editor.updateState(next);
         setState(next);
-        if (tr.selectionSet || tr.docChanged) report.current(next);
+        // Presence is stored by its text, so a merged value arriving does
+        // not move it; only this user's own edits and selections do.
+        if ((tr.selectionSet || tr.docChanged) && !isRemoteChange(tr)) report.current(next);
       },
     });
     setView(editor);
@@ -87,9 +94,13 @@ function SheetEditor({ sheet, editable }: { sheet: SongSheetRow; editable: boole
     return () => editor.destroy();
   }, [db, sheet.id]);
 
+  // Whether the editor takes input follows the current permission.
+  useEffect(() => {
+    view?.setProps({ editable: () => editable });
+  }, [view, editable]);
+
   // A newer value (someone else's edit, merged by the authority) is applied
-  // as the smallest change, so the cursor stays on the text it was on, and
-  // edits typed since the last write are kept on top of it.
+  // as the smallest change, so the cursor stays on the text it was on.
   useEffect(() => {
     if (!view) return;
     const tr = applyMarkdown(view.state, sheet.body);
@@ -201,6 +212,7 @@ function SheetEditor({ sheet, editable }: { sheet: SongSheetRow; editable: boole
         placed={placed}
         workspaceId={workspace.id}
         pageId={sheet.pageId}
+        canModerate={editable}
         name={(account) => memberName(members, account)}
       />
     </div>
@@ -215,6 +227,8 @@ function CommentSidebar(props: {
   placed: readonly PlacedOverlay[];
   workspaceId: string;
   pageId: string;
+  /** Page editors may resolve anyone's comment; others only their own. */
+  canModerate: boolean;
   name: (account: string) => string;
 }) {
   const db = useDb();
@@ -298,12 +312,14 @@ function CommentSidebar(props: {
                       }}
                     />
                   )}
-                  <Button
-                    label="Resolve"
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => db.update(app.sheetComments, comment.id, { resolved: true })}
-                  />
+                  {(props.canModerate || comment.author === me) && (
+                    <Button
+                      label="Resolve"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => db.update(app.sheetComments, comment.id, { resolved: true })}
+                    />
+                  )}
                 </HStack>
               </VStack>
             </Card>

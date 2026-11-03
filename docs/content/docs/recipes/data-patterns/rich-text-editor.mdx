@@ -29,8 +29,12 @@ text after) instead of character offsets, so they survive edits that move the te
 ## Reading Markdown into the editor
 
 The editor's document model must round-trip through Markdown: loading a value and saving it again
-without edits has to give back the same string. Using `prosemirror-markdown`'s CommonMark schema
-and parser guarantees that; `jazz-tools/prosemirror` serializes to the same canonical form.
+without edits has to give back the same string. `jazz-tools/prosemirror` writes canonical Markdown
+that `prosemirror-markdown`'s CommonMark parser reads back into the same document, including empty
+paragraphs and lines that start with spaces (their first space is written as `&#32;`). It has
+writers for the CommonMark schema's nodes and marks; give it writers for any others your schema
+adds. A stored value written differently (by another tool, or by hand) is read into the same
+document and written back in canonical form only where someone edits it.
 
 <include cwd lang="ts" meta='title="song-editor.ts"'>
   ../examples/band-book/apps/nextjs-betterauth/src/lib/song-editor.ts#rich-text-parse
@@ -88,13 +92,17 @@ as comments.
 </include>
 
 Presence rows are written a few times a second and keep their history like any row. Throttle the
-writes, refresh the row on an interval while the editor is open, delete it on close, and ignore
-rows that have not been refreshed for a while.
+writes, and skip them when only a merged value arrived: presence is stored by its text, so it
+still finds its place. Refresh the row on an interval while the editor is open and delete it on
+close. Treat a row as gone when this client has not seen it refreshed for a while (timed by this
+client's clock, so a wrong clock elsewhere hides nobody), and delete your own rows left behind by a
+closed tab. Take names and colours from the row's account, not from the row.
 
 ## Permissions
 
 Comments and presence carry their own `pageId`, so they can follow the page's permissions while
-having rules of their own: anyone who can read the page may comment and be seen, while only the
-author edits a comment and only its owner moves a cursor. See the `songSheets`, `sheetComments`
+having rules of their own: anyone who can read the page may comment and be seen. A comment is
+edited, resolved or removed by its author or by the page's editors, and only its owner moves a
+cursor. See the `songSheets`, `sheetComments`
 and `sheetPresence` policies in BandBook's
 [permissions.ts](https://github.com/garden-co/jazz/blob/main/examples/band-book/apps/nextjs-betterauth/permissions.ts).

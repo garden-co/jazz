@@ -198,7 +198,7 @@ const bandBookPermissions = definePermissions(
       allOf([{ author: me }, allowedTo.read("page"), onSongPage(comment)]),
     );
     policy.sheetComments.allowUpdate
-      .whereOld((comment) => anyOf([{ author: me }, allowedTo.update("page")]))
+      .whereOld(anyOf([{ author: me }, allowedTo.update("page")]))
       .whereNew((comment) =>
         allOf([
           allowedTo.read("page"),
@@ -210,9 +210,7 @@ const bandBookPermissions = definePermissions(
           }),
         ]),
       );
-    policy.sheetComments.allowDelete.where((comment) =>
-      anyOf([{ author: me }, allowedTo.update("page")]),
-    );
+    policy.sheetComments.allowDelete.where(anyOf([{ author: me }, allowedTo.update("page")]));
 
     policy.sheetPresence.allowRead.where(allowedTo.read("page"));
     policy.sheetPresence.allowInsert.where((presence) =>
@@ -229,9 +227,7 @@ const bandBookPermissions = definePermissions(
       ]),
     );
     // Page editors can clear presence too, so deleting a page leaves nothing.
-    policy.sheetPresence.allowDelete.where((presence) =>
-      anyOf([{ account: me }, allowedTo.update("page")]),
-    );
+    policy.sheetPresence.allowDelete.where(anyOf([{ account: me }, allowedTo.update("page")]));
 
     // Issues ------------------------------------------------------------------
     policy.issues.allowRead.where(allowedTo.read("page"));

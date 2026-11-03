@@ -98,10 +98,22 @@ function blockActive(type: NodeType, attrs?: Record<string, unknown>) {
 }
 
 /** Wraps the selection in a link, or removes the link it is in. */
+/** Whether `href` is safe to link to: web and mail links, and links within
+ * the app. Anything else (`javascript:`, `data:`) runs code or hides it. */
+export function isSafeHref(href: string): boolean {
+  const trimmed = href.trim();
+  if (/^(\/|#|\?)/.test(trimmed)) return true;
+  try {
+    return ["http:", "https:", "mailto:"].includes(new URL(trimmed).protocol);
+  } catch {
+    return false;
+  }
+}
+
 export function toggleLink(href: string | null): Command {
   return (state, dispatch) => {
     const { from, to, empty } = state.selection;
-    if (empty) return false;
+    if (empty || (href !== null && !isSafeHref(href))) return false;
     if (dispatch) {
       const tr = state.tr.removeMark(from, to, marks.link);
       if (href) tr.addMark(from, to, marks.link.create({ href }));

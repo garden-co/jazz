@@ -127,8 +127,6 @@ const schema = {
         workspaceId: s.uuid(),
         pageId: s.uuid(),
         account: s.uuid(),
-        name: s.string(),
-        color: s.string(),
         cursor: s.json(),
         selection: s.json().optional(),
         seenAt: s.float(),
