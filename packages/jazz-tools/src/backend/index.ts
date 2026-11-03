@@ -27,6 +27,7 @@ export {
   SnapshotRefFormatError,
   UnsupportedSnapshotError,
 } from "../runtime/snapshot-ref.js";
+export { trustWorkload, type BackendClientTrust } from "./backend-clients.js";
 export {
   createJazz,
   memory,
