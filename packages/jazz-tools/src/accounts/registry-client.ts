@@ -1,3 +1,4 @@
+import { fetchFor } from "../runtime/in-process-transport.js";
 import { withAuthRequestDeadline } from "../runtime/auth-request-deadline.js";
 import type { AccountIdentity } from "./state.js";
 
@@ -18,7 +19,7 @@ export async function requestAccountRegistry(
   path: string,
   token: string,
   body?: unknown,
-  fetcher: typeof fetch = globalThis.fetch,
+  fetcher: typeof fetch = fetchFor(registry),
 ): Promise<unknown> {
   return withAuthRequestDeadline(async (signal) => {
     const response = await fetcher(`${registry}/${path}`, {
@@ -27,6 +28,71 @@ export async function requestAccountRegistry(
       credentials: "omit",
       redirect: "error",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const code = await response.text();
+      throw new AccountAuthError(
+        /^[a-z_]{1,80}$/.test(code) ? code : "account_request_failed",
+        response.status,
+      );
+    }
+    return response.json();
+  }, new AccountAuthError("account_request_timeout"));
+}
+
+/**
+ * Sign in through the app's backend (`createJazz`), same-origin with the app's
+ * cookies: the backend's `authenticate` decides, and the answer carries the
+ * account, identity and claims but no credential. With `link`, a local-first
+ * guest's proof for a challenge the backend issued (see
+ * {@link requestBackendLinkChallenge}): the backend links that guest to the
+ * user it names.
+ */
+export async function requestBackendSignIn(
+  registry: string,
+  fetcher: typeof fetch = fetchFor(registry),
+  options: { link?: { challenge: string; proof: string; audience?: string } } = {},
+): Promise<unknown> {
+  return backendRequest(
+    registry,
+    options.link ? "backend-link" : "backend-sign-in",
+    fetcher,
+    options.link,
+  );
+}
+
+/**
+ * A challenge from the app's backend for a local-first guest to sign before
+ * it links to the user the backend names. It names that user, expires
+ * quickly and links once.
+ */
+export async function requestBackendLinkChallenge(
+  registry: string,
+  fetcher: typeof fetch = fetchFor(registry),
+): Promise<string> {
+  const value = (await backendRequest(registry, "backend-link/challenge", fetcher)) as {
+    challenge?: unknown;
+  } | null;
+  if (typeof value?.challenge !== "string" || !value.challenge) {
+    throw new AccountAuthError("invalid_link_challenge");
+  }
+  return value.challenge;
+}
+
+async function backendRequest(
+  registry: string,
+  path: string,
+  fetcher: typeof fetch,
+  body?: unknown,
+): Promise<unknown> {
+  return withAuthRequestDeadline(async (signal) => {
+    const response = await fetcher(`${registry}/${path}`, {
+      signal,
+      method: "POST",
+      credentials: "same-origin",
+      redirect: "error",
+      headers: { "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     if (!response.ok) {

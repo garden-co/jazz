@@ -1,3 +1,4 @@
+import { clientScope } from "../runtime/client-scope.js";
 import { createClientConfigKey } from "../runtime/client-config-key.js";
 import { acquireClient, releaseClient } from "../runtime/client-registry.js";
 import type { Db, ShutdownOptions } from "../runtime/db.js";
@@ -19,7 +20,7 @@ async function createJazzClientInternal(config: AccountDbConfig): Promise<JazzCl
 
 /** @internal Wrap an already admitted runtime for framework observers. */
 export function createJazzClientFromDb(db: Db): Promise<JazzClient> {
-  return createObservedJazzClient(db, db.getConfig().appId, registerWindowJazzStorageClient);
+  return createObservedJazzClient(db, clientScope(db.getConfig()), registerWindowJazzStorageClient);
 }
 
 function configKey(config: AccountDbConfig): string {

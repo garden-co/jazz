@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import type { JazzSession } from "../session/state.js";
 import {
   connectAuthProvider,
@@ -36,18 +36,13 @@ export function useBetterAuth<Client>(session: JazzSession<Client>, auth: Better
   );
   return { ...state, logout: () => connection?.logout() ?? Promise.resolve() };
 }
-/** Bridge providers whose state is exposed through a React hook (for example WorkOS). */
-export function useAuthProvider<Client>(
-  session: JazzSession<Client>,
-  state: AuthProviderState,
-  options: { getToken(): Promise<string> },
-) {
-  const latest = useRef(options);
-  latest.current = options;
-  const { connection, ...snapshot } = useConnection(
-    () => connectAuthProvider(session, { getToken: () => latest.current.getToken() }),
-    [session],
-  );
+/**
+ * Bridge providers whose state is exposed through a React hook (for example
+ * WorkOS). The app's backend (`createJazz`) reads the provider's session in
+ * `authenticate`; `state.key` only tells Jazz when the signed-in user changes.
+ */
+export function useAuthProvider<Client>(session: JazzSession<Client>, state: AuthProviderState) {
+  const { connection, ...snapshot } = useConnection(() => connectAuthProvider(session), [session]);
   useEffect(() => {
     connection?.update(state);
   }, [connection, state.key, state.isPending, state.error]);
