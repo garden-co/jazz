@@ -51,6 +51,10 @@
       "types": "./dist/client/index.d.ts",
       "default": "./dist/client/index.js"
     },
+    "./thin": {
+      "types": "./dist/thin/index.d.ts",
+      "default": "./dist/thin/index.js"
+    },
     "./react": {
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
