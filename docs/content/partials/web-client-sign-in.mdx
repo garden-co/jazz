@@ -1,0 +1,7 @@
+## Sign-in
+
+Both clients sign in the same way: pass your auth library's current user as `user` (`undefined`
+while it loads, `null` when signed out, a stable id when signed in). Jazz then signs in through
+your main backend at `/jazz`, with your app's own session cookie, and your backend's `authenticate`
+decides who that user is. The browser never holds a Jazz key or token. See
+[How Auth Works](/docs/setup/auth/backend).

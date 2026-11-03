@@ -3,20 +3,16 @@ title: Thin Client
 description: "Learn how to set up the thin browser client, which talks to your backend with no local database."
 ---
 
-<Callout type="info">
-  Preview: this page is a rough outline for the server-first docs restructure. The thin client is
-  still being built; this page describes it once it ships. It follows the same structure as the
-  [Local-First Client](/docs/setup/web-client/local-first-client), with less to set up.
-</Callout>
+The default browser client: about 86 KB gzipped, with no Wasm and no local storage. Your main
+backend runs every query under the signed-in user's policies and sends finished rows, and writes
+commit on the server.
 
-The default web client: about 86 KB gzipped, no Wasm, no local storage. The server runs every query under the signed-in session's policies and sends finished rows; writes commit on the server.
+<include>../../../partials/web-client-choose.mdx</include>
 
-## Configure one session
+## Connect
 
-The thin client is the default: `JazzProvider` in React, or `createClient` from `jazz-tools/thin`, opens it
-with nothing to choose. It signs in through your [main backend](/docs/setup/deployment) at
-`/jazz`, with your app's own session cookie, and returns the same `Db` as the local-first client:
-queries, `subscribe`, insert, update, upsert, delete and the framework hooks all work.
+The thin client is what you get with no choice made: `JazzProvider` in React, or `createClient`
+from `jazz-tools/thin`.
 
 <Tabs groupId="jazz-framework" items={["React", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
@@ -54,17 +50,20 @@ queries, `subscribe`, insert, update, upsert, delete and the framework hooks all
   </Tab>
 </Tabs>
 
-Who the user is always comes from your backend's `authenticate`; see
-[How Auth Works](/docs/setup/auth/backend).
+<include>../../../partials/web-client-sign-in.mdx</include>
 
-## Client config options
+<include>../../../partials/web-client-reads-writes.mdx</include>
 
-| Option              | Default              | What it does                                                                        |
-| :------------------ | :------------------- | :---------------------------------------------------------------------------------- |
-| `serverUrl`         | `/jazz`              | Where your main backend mounts Jazz. Set it only if you mount it somewhere else     |
-| `user`              | asks your backend    | Your auth library's current user: `undefined` while loading, `null` when signed out |
-| `reconnectDelaysMs` | a short backoff      | Delays between reconnect attempts, in ms; the last one repeats                      |
-| `WebSocket`         | the global WebSocket | A WebSocket implementation, for runtimes without a global one                       |
+## Options
+
+<include>../../../partials/web-client-shared-options.mdx</include>
+
+The thin client also takes:
+
+| Option              | Default              | What it does                                                   |
+| :------------------ | :------------------- | :------------------------------------------------------------- |
+| `reconnectDelaysMs` | a short backoff      | Delays between reconnect attempts, in ms; the last one repeats |
+| `WebSocket`         | the global WebSocket | A WebSocket implementation, for runtimes without a global one  |
 
 There is no `driver` option, since the thin client keeps nothing locally.
 
