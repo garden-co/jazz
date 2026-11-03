@@ -8,6 +8,8 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { createAccountManager, createClient, upgradeToLocalFirst } from "./index.js";
 import { ThinRuntime } from "./thin-runtime.js";
+import { JazzClient } from "../runtime/client.js";
+import type { Session } from "../runtime/context.js";
 import { LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
 import { parseSnapshotRef, serializeSnapshotRef } from "../runtime/snapshot-ref.js";
 
@@ -347,6 +349,28 @@ describe("thin client", () => {
     expect(() => anonymous.insert("notes", {} as never, session)).toThrow(
       /not supported in thin mode/,
     );
+  }, 60_000);
+
+  it("serves a cookie-session client's own session once it resolves", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.all(app.notes);
+    const schema = (db.currentRuntime() as unknown as { schema: never }).schema;
+    // A cookie-session client knows no session when it connects.
+    const runtime = new ThinRuntime(schema);
+    const client = JazzClient.connectWithRuntime(runtime, { appId: server.appId, schema });
+    const mine = { issuer: "urn:test", user_id: "cookie-user" } as Session;
+    const other = JSON.stringify({ issuer: "urn:test", user_id: "someone-else" });
+    const values = {} as never;
+    expect(() => runtime.insert("notes", values, JSON.stringify(mine))).toThrow(
+      /not supported in thin mode/,
+    );
+    // Its session resolves later; calls naming it are its own (and fail
+    // only on these placeholder values).
+    client.updateCookieSession(mine);
+    expect(() => runtime.insert("notes", values, JSON.stringify(mine))).toThrow(/encoding error/);
+    expect(() => runtime.insert("notes", values, other)).toThrow(/not supported in thin mode/);
+    runtime.close();
   }, 60_000);
 
   it("streams a large value into a row", async () => {
