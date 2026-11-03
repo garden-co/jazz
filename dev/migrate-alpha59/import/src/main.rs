@@ -8,6 +8,7 @@
 //! original author and timestamp. Nothing is written into the SQLite files
 //! directly.
 
+mod active;
 mod verify;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -98,6 +99,8 @@ async fn main() -> ExitCode {
 #[derive(Default)]
 struct Head {
     runtime_schemas: Vec<dump::Schema>,
+    runtime_lenses: Vec<dump::Lens>,
+    active_schema: Option<[u8; 16]>,
     admin: Vec<dump::AdminEntry>,
     accounts: Vec<dump::Account>,
 }
@@ -128,9 +131,9 @@ async fn run(args: &Args) -> Result<Json, String> {
             dump::Record::Schema(schema) => head.runtime_schemas.push(schema),
             dump::Record::AdminEntry(entry) => head.admin.push(entry),
             dump::Record::Account(account) => head.accounts.push(account),
-            dump::Record::Lens(_)
-            | dump::Record::ActiveSchema { .. }
-            | dump::Record::AccountLogin { .. } => {}
+            dump::Record::Lens(lens) => head.runtime_lenses.push(lens),
+            dump::Record::ActiveSchema { schema } => head.active_schema = Some(schema),
+            dump::Record::AccountLogin { .. } => {}
             dump::Record::Version(version) => {
                 first_version = Some(version);
                 break;
@@ -158,10 +161,20 @@ async fn run(args: &Args) -> Result<Json, String> {
         let runtime = state
             .runtime()
             .ok_or("the dump has rows but its catalogue never activated a schema")?;
-        let views = match_schemas(
+        let to_head = active::ToHead::new(
+            head.active_schema
+                .ok_or("the dump has rows but no active schema")?,
             &head.runtime_schemas,
-            runtime.migrate_import_schemas().await?,
+            std::mem::take(&mut head.runtime_lenses),
         )?;
+        let active: Vec<_> = head
+            .runtime_schemas
+            .iter()
+            .filter(|schema| schema.id == to_head.head)
+            .cloned()
+            .collect();
+        let views = match_schemas(&active, runtime.migrate_import_schemas().await?)?;
+        rows.to_head = Some(to_head);
         let mut batch = vec![first];
         while let Some(record) = reader.next_record().map_err(err)? {
             match record {
@@ -193,112 +206,93 @@ async fn run(args: &Args) -> Result<Json, String> {
         "versions_in_dump": footer.versions,
         "versions_written": rows.written,
         "versions_skipped_rejected": rows.rejected,
+        "versions_dropped_with_their_table": rows.table_gone,
         "shutdown": format!("{phase:?}"),
     }))
 }
 
 // ---- admin catalogue -------------------------------------------------------
 
-/// Replay the permissions history as deployments, oldest first. Each one
-/// carries every schema and migration, and activates one bundle's schema
-/// with its permissions, as `jazz-tools deploy` would have.
+/// Deploy the active schema with its permissions, as one fresh
+/// `jazz-tools deploy` would. Old schemas, migrations and permission
+/// revisions are left behind: the SQLite store starts from the active schema
+/// alone, and every row is brought to it (see [`active`]).
 async fn replay_admin_catalogue(
     state: &Arc<ServerState>,
     entries: &[dump::AdminEntry],
 ) -> Result<usize, String> {
-    let mut schemas = Vec::new();
-    let mut migrations = Vec::new();
-    let mut bundles: HashMap<String, Json> = HashMap::new();
-    let mut head: Option<Json> = None;
-    let mut rehashed = HashMap::new();
+    let Some(deployment) = active_deployment(entries)? else {
+        return Ok(0);
+    };
+    migrate_import_deploy(state, deployment)
+        .await
+        .map_err(|error| format!("active schema: {error}"))?;
+    Ok(1)
+}
+
+/// The deploy request for the admin catalogue's active schema, or `None`
+/// when nothing was ever published.
+pub(crate) fn active_deployment(entries: &[dump::AdminEntry]) -> Result<Option<Json>, String> {
+    let payload = |entry: &dump::AdminEntry| -> Result<Json, String> {
+        serde_json::from_str(&entry.payload_json).map_err(err)
+    };
     for entry in entries {
-        let payload: Json = serde_json::from_str(&entry.payload_json).map_err(err)?;
-        let meta = |key: &str| {
-            entry
-                .metadata
-                .get(key)
-                .cloned()
-                .ok_or(format!("{} entry is missing {key}", entry.object_type))
-        };
-        match entry.object_type.as_str() {
-            "catalogue_schema" => {
-                let hash = schema_hash(&payload)?;
-                rehashed.insert(meta("schema_hash")?, hash.clone());
-                schemas.push(json!({ "hash": hash, "schema": payload }));
-            }
-            "catalogue_lens" => {
-                if payload["draft_ops"]
-                    .as_array()
-                    .is_some_and(|ops| !ops.is_empty())
-                {
-                    // alpha.59 never put a draft lens on its migration graph.
-                    continue;
-                }
-                migrations.push(migration_request(
-                    meta("source_hash")?,
-                    meta("target_hash")?,
-                    &payload,
-                )?);
-            }
-            "catalogue_permissions_bundle" => {
-                bundles.insert(uuid_string(entry.object_id), payload);
-            }
-            "catalogue_permissions_head" => {
-                let newer = head.as_ref().is_none_or(|current| {
-                    current["version"].as_u64() < payload["version"].as_u64()
-                });
-                if newer {
-                    head = Some(payload);
-                }
-            }
-            other => return Err(format!("unknown admin catalogue entry type {other}")),
+        if !matches!(
+            entry.object_type.as_str(),
+            "catalogue_schema"
+                | "catalogue_lens"
+                | "catalogue_permissions_bundle"
+                | "catalogue_permissions_head"
+        ) {
+            return Err(format!(
+                "unknown admin catalogue entry type {}",
+                entry.object_type
+            ));
         }
     }
-    let rehash = |hash: &Json| -> Result<Json, String> {
-        let hash = hash.as_str().ok_or("schema hash is not a string")?;
-        rehashed
-            .get(hash)
-            .map(|hash| json!(hash))
-            .ok_or(format!("schema {hash} is missing from the dump"))
-    };
-    for migration in &mut migrations {
-        migration["fromHash"] = rehash(&migration["fromHash"])?;
-        migration["toHash"] = rehash(&migration["toHash"])?;
+    let mut head: Option<Json> = None;
+    for entry in entries
+        .iter()
+        .filter(|e| e.object_type == "catalogue_permissions_head")
+    {
+        let candidate = payload(entry)?;
+        if head
+            .as_ref()
+            .is_none_or(|current| current["version"].as_u64() < candidate["version"].as_u64())
+        {
+            head = Some(candidate);
+        }
     }
     let Some(head) = head else {
-        if schemas.is_empty() {
-            return Ok(0);
+        if entries.iter().any(|e| e.object_type == "catalogue_schema") {
+            return Err("schemas were published but never activated: not supported yet".to_owned());
         }
-        return Err("schemas were published but never activated: not supported yet".to_owned());
+        return Ok(None);
     };
-    // The head's ancestry, oldest first. A bundle off that chain lost a
-    // compare-and-set race and was never active.
-    let mut chain = Vec::new();
-    let mut next = head["bundle_object_id"].as_str().map(str::to_owned);
-    while let Some(id) = next {
-        let bundle = bundles
-            .get(&id)
-            .ok_or(format!("permissions bundle {id} is missing"))?;
-        next = bundle["parent_bundle_object_id"]
-            .as_str()
-            .map(str::to_owned);
-        chain.push(bundle.clone());
-    }
-    chain.reverse();
-    for bundle in &chain {
-        migrate_import_deploy(
-            state,
-            json!({
-                "targetSchemaHash": rehash(&bundle["schema_hash"])?,
-                "schemas": schemas,
-                "migrations": migrations,
-                "permissions": bundle["permissions"],
-            }),
-        )
-        .await
-        .map_err(|error| format!("permissions bundle v{}: {error}", bundle["version"]))?;
-    }
-    Ok(chain.len())
+    let bundle = entries
+        .iter()
+        .find(|entry| {
+            entry.object_type == "catalogue_permissions_bundle"
+                && Some(uuid_string(entry.object_id).as_str()) == head["bundle_object_id"].as_str()
+        })
+        .ok_or("the active permissions bundle is missing from the dump")?;
+    let bundle = payload(bundle)?;
+    let schema = entries
+        .iter()
+        .find(|entry| {
+            entry.object_type == "catalogue_schema"
+                && entry.metadata.get("schema_hash").map(String::as_str)
+                    == bundle["schema_hash"].as_str()
+        })
+        .ok_or("the active schema is missing from the dump")?;
+    let schema = payload(schema)?;
+    let hash = schema_hash(&schema)?;
+    Ok(Some(json!({
+        "targetSchemaHash": hash,
+        "schemas": [{ "hash": hash, "schema": schema }],
+        "migrations": [],
+        "permissions": bundle["permissions"],
+    })))
 }
 
 /// A schema's hash as the SQLite engine computes it. alpha.59's catalogue
@@ -307,70 +301,6 @@ pub(crate) fn schema_hash(schema: &Json) -> Result<String, String> {
     let schema: jazz::tools::public_schema::Schema =
         serde_json::from_value(schema.clone()).map_err(|error| format!("schema: {error}"))?;
     Ok(jazz::tools::public_schema::SchemaHash::compute(&schema).to_string())
-}
-
-/// alpha.59's admin `LensTransform` back into the `POST /admin/migrations`
-/// request that produced it: ops grouped by the table they name.
-fn migration_request(from: String, to: String, transform: &Json) -> Result<Json, String> {
-    let mut tables: Vec<(String, Json)> = Vec::new();
-    fn entry<'a>(tables: &'a mut Vec<(String, Json)>, name: &str) -> &'a mut Json {
-        let index = match tables.iter().position(|(table, _)| table == name) {
-            Some(index) => index,
-            None => {
-                tables.push((
-                    name.to_owned(),
-                    json!({ "table": name, "added": false, "removed": false, "renamedFrom": null, "operations": [] }),
-                ));
-                tables.len() - 1
-            }
-        };
-        &mut tables[index].1
-    }
-    let mut ops = Vec::new();
-    for op in transform["ops"].as_array().into_iter().flatten() {
-        let (kind, body) = op
-            .as_object()
-            .and_then(|op| op.iter().next())
-            .ok_or(format!("unreadable lens op {op}"))?;
-        ops.push((kind.clone(), body.clone()));
-    }
-    for (kind, body) in ops {
-        let name = |key: &str| body[key].as_str().unwrap_or_default().to_owned();
-        match kind.as_str() {
-            "RenameTable" => {
-                entry(&mut tables, &name("new_name"))["renamedFrom"] = json!(name("old_name"));
-            }
-            "AddTable" => {
-                entry(&mut tables, &name("table"))["added"] = json!(true);
-            }
-            "RemoveTable" => {
-                entry(&mut tables, &name("table"))["removed"] = json!(true);
-            }
-            "AddColumn" | "RemoveColumn" => {
-                entry(&mut tables, &name("table"))["operations"]
-                    .as_array_mut()
-                    .expect("operations")
-                    .push(json!({
-                        "type": if kind == "AddColumn" { "introduce" } else { "drop" },
-                        "column": body["column"],
-                        "column_type": body["column_type"],
-                        "value": body["default"],
-                    }));
-            }
-            "RenameColumn" => {
-                entry(&mut tables, &name("table"))["operations"]
-                    .as_array_mut()
-                    .expect("operations")
-                    .push(json!({ "type": "rename", "column": body["old_name"], "value": body["new_name"] }));
-            }
-            other => return Err(format!("admin lens op {other} is not supported yet")),
-        }
-    }
-    Ok(json!({
-        "fromHash": from,
-        "toHash": to,
-        "forward": tables.into_iter().map(|(_, table)| table).collect::<Vec<_>>(),
-    }))
 }
 
 // ---- rows --------------------------------------------------------------------
@@ -433,9 +363,11 @@ struct Write {
 
 #[derive(Default)]
 struct RowImport {
+    to_head: Option<active::ToHead>,
     seen: HashSet<[u8; 16]>,
     written: u64,
     rejected: u64,
+    table_gone: u64,
 }
 
 impl RowImport {
@@ -458,6 +390,14 @@ impl RowImport {
                     version.table
                 ));
             }
+            let to_head = self.to_head.as_ref().ok_or("rows before the catalogue")?;
+            let version = match to_head.translate(version)? {
+                active::Translated::Kept(version) => version,
+                active::Translated::TableGone => {
+                    self.table_gone += 1;
+                    continue;
+                }
+            };
             let op = match version.deletion {
                 Some(dump::Deletion::Deleted) => Op::Delete,
                 Some(dump::Deletion::Restored) => Op::Restore,

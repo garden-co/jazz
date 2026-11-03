@@ -26,7 +26,10 @@ use jazz_server::{ServerBuilder, ServerState, StorageBackend};
 use migrate_alpha59_dump as dump;
 use serde_json::{Value as Json, json};
 
-use crate::{Args, convert_author, convert_value, err, match_schemas, schema_hash, uuid_string};
+use crate::active::{ToHead, Translated};
+use crate::{
+    Args, active_deployment, convert_author, convert_value, err, match_schemas, uuid_string,
+};
 
 const MAX_REPORTED: usize = 20;
 
@@ -65,18 +68,35 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
     let file = std::fs::File::open(&args.dump).map_err(err)?;
     let (mut reader, _) = dump::Reader::open(std::io::BufReader::new(file)).map_err(err)?;
     let mut runtime_schemas = Vec::new();
+    let mut runtime_lenses = Vec::new();
+    let mut active_schema = None;
+    let mut to_head: Option<ToHead> = None;
     let mut admin = Vec::new();
     let mut logins = Vec::new();
     let mut rows: HashMap<[u8; 16], Expected> = HashMap::new();
     while let Some(record) = reader.next_record().map_err(err)? {
         match record {
             dump::Record::Schema(schema) => runtime_schemas.push(schema),
+            dump::Record::Lens(lens) => runtime_lenses.push(lens),
+            dump::Record::ActiveSchema { schema } => active_schema = Some(schema),
             dump::Record::AdminEntry(entry) => admin.push(entry),
             dump::Record::AccountLogin {
                 principal_json,
                 login_json,
             } => logins.push((principal_json, login_json)),
             dump::Record::Version(version) if !version.fate.starts_with("rejected") => {
+                if to_head.is_none() {
+                    to_head = Some(ToHead::new(
+                        active_schema.ok_or("the dump has rows but no active schema")?,
+                        &runtime_schemas,
+                        std::mem::take(&mut runtime_lenses),
+                    )?);
+                }
+                let to_head = to_head.as_ref().expect("set above");
+                let version = match to_head.translate(version)? {
+                    Translated::Kept(version) => version,
+                    Translated::TableGone => continue,
+                };
                 let previous = rows.remove(&version.row);
                 let deleted = version.deletion == Some(dump::Deletion::Deleted);
                 let cells = match (version.deletion, previous) {
@@ -134,7 +154,13 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
         let runtime = state
             .runtime()
             .ok_or("the migrated server has no runtime")?;
-        let views = match_schemas(&runtime_schemas, runtime.migrate_import_schemas().await?)?;
+        let head = to_head.as_ref().expect("rows imply a head").head;
+        let active: Vec<_> = runtime_schemas
+            .iter()
+            .filter(|schema| schema.id == head)
+            .cloned()
+            .collect();
+        let views = match_schemas(&active, runtime.migrate_import_schemas().await?)?;
         verify_rows(&runtime, &views, rows, &mut report).await?;
     }
     built.shutdown().await;
@@ -151,47 +177,22 @@ fn verify_permissions(
     admin: &[dump::AdminEntry],
     report: &mut Report,
 ) -> Result<(), String> {
-    let payload = |entry: &dump::AdminEntry| serde_json::from_str::<Json>(&entry.payload_json);
-    let head = admin
-        .iter()
-        .filter(|entry| entry.object_type == "catalogue_permissions_head")
-        .map(payload)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(err)?
-        .into_iter()
-        .max_by_key(|head| head["version"].as_u64());
-    let expected = match head {
+    // The revision number restarts with the one deployment the import makes.
+    let expected = match active_deployment(admin)? {
         None => Json::Null,
-        Some(head) => {
-            let bundle = admin
-                .iter()
-                .find(|entry| {
-                    entry.object_type == "catalogue_permissions_bundle"
-                        && Some(uuid_string(entry.object_id).as_str())
-                            == head["bundle_object_id"].as_str()
-                })
-                .ok_or("the head's permissions bundle is missing from the dump")?;
-            let bundle = payload(bundle).map_err(err)?;
-            let schema = admin
-                .iter()
-                .filter(|entry| entry.object_type == "catalogue_schema")
-                .find(|entry| {
-                    entry.metadata.get("schema_hash").map(String::as_str)
-                        == bundle["schema_hash"].as_str()
-                })
-                .ok_or("the head's schema is missing from the dump")?;
-            json!({
-                "schema_hash": schema_hash(&payload(schema).map_err(err)?)?,
-                "version": bundle["version"],
-                "permissions": bundle["permissions"],
-            })
-        }
+        Some(deployment) => json!({
+            "schema_hash": deployment["targetSchemaHash"],
+            "permissions": deployment["permissions"],
+        }),
     };
-    let actual = migrate_import_active_permissions(state)?;
+    let mut actual = migrate_import_active_permissions(state)?;
+    if let Some(actual) = actual.as_object_mut() {
+        actual.remove("version");
+    }
     report.check("permissions head", actual == expected, || {
         format!(
-            "alpha.59 schema {} v{}, SQLite schema {} v{}",
-            expected["schema_hash"], expected["version"], actual["schema_hash"], actual["version"]
+            "alpha.59 schema {}, SQLite schema {}",
+            expected["schema_hash"], actual["schema_hash"]
         )
     });
     Ok(())

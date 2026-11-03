@@ -26,15 +26,18 @@ order with its authors and timestamps. It ends with a BLAKE3 digest.
 
 Import:
 
-- **Admin catalogue:** the permissions history replayed as one
-  deployment per bundle, oldest first (the code `POST /admin/deploy` runs).
-  Content-addressed ids come out identical.
+- **Admin catalogue:** only the active schema and its permissions, as one
+  fresh deployment (the code `POST /admin/deploy` runs). Old schemas,
+  migrations and permission revisions stay behind, so the store matches a
+  client that ships only the current schema. Schema hashes are recomputed
+  with the SQLite engine's own hash function.
 - **Accounts:** the journal replayed command by command.
-- **Rows:** every version written through the public Db API, under the
-  schema version it was written with, as `WriteIdentity::Attribution` of its
-  original author with its original timestamp.
+- **Rows:** every version, brought forward to the active schema along
+  alpha.59's own runtime lenses (columns those lenses dropped stay dropped),
+  then written through the public Db API as `WriteIdentity::Attribution` of
+  its original author with its original timestamp.
 
-`sqlite-import verify` checks the permissions head, every login answer,
+`sqlite-import verify` checks the active schema and its permissions, every login answer,
 and every row's deleted flag, cells and created/updated provenance. It
 prints row ids and column names only, never values or authors.
 
@@ -58,9 +61,8 @@ them.
 
 ## Not supported yet (fails loudly)
 
-Branched rows, schemas published but never activated, and admin lens ops
-other than add/remove/rename column and add/remove/rename table. Runtime
-CopyColumn/TransformColumn lenses can't be created by any shipped alpha.59
-tool; `dump-census` reports them under `unsupported_by_sqlite`. Verify does
-not yet compare history depth per row or permissions as seen by each
-account.
+Branched rows, schemas published but never activated, rows with no lens
+path to the active schema, and TransformColumn lens ops (no shipped alpha.59
+tool creates them; `dump-census` reports them under `unsupported_by_sqlite`).
+Verify does not yet compare history depth per row or permissions as seen by
+each account.

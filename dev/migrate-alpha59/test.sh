@@ -34,6 +34,20 @@ grep -q '"unsupported_by_sqlite":\[\]' "$work/census.json"
 "$t60/release/sqlite-import" --dump "$work/dump" --data-dir "$work/a60" --app-id "$app"
 "$t60/release/sqlite-import" verify --dump "$work/dump" --data-dir "$work/a60" --app-id "$app"
 
+# Only the active schema came over, and rows written under v1 read under
+# v2's names: no `title` column, every document has a `heading`.
+python3 - "$work/a60/jazz.sqlite" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+assert c.execute("select count(*) from _jazz_lenses").fetchone()[0] == 0, "old lenses came over"
+assert c.execute("select count(*) from _jazz_schemas").fetchone()[0] == 1, "old schemas came over"
+cols = [r[1].split("~")[0] for r in c.execute("pragma table_info(documents)")]
+assert "title" not in cols and "heading" in cols, cols
+heading = next(r[1] for r in c.execute("pragma table_info(documents)") if r[1].split("~")[0] == "heading")
+missing = c.execute(f'select count(*) from documents where "{heading}" is null').fetchone()[0]
+assert missing == 0, f"{missing} documents lost their title"
+PY
+
 # Boot check: the real alpha.60 server starts on the migrated dir and serves
 # the migrated permissions.
 cp -R "$work/a60" "$work/boot"
@@ -42,7 +56,7 @@ port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); pr
   >"$work/boot.log" 2>&1 &
 server=$!
 for _ in $(seq 1 100); do curl -sf "localhost:$port/health" >/dev/null && break; sleep 0.1; done
-curl -sf -H "X-Jazz-Admin-Secret: test" "localhost:$port/apps/$app/admin/permissions" | grep -q '"version":2'
+curl -sf -H "X-Jazz-Admin-Secret: test" "localhost:$port/apps/$app/admin/permissions" | grep -q '"version":1'
 kill -TERM "$server"
 wait "$server" || true
 
