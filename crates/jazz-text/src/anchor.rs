@@ -25,7 +25,7 @@ const SEARCH_WHOLE_BELOW: f64 = 0.75;
 
 /// The most candidate positions a resolve scores, nearest the old position
 /// first.
-const MAX_CANDIDATES: usize = 64;
+pub(crate) const MAX_CANDIDATES: usize = 64;
 
 /// Which text an anchor sticks to when someone types exactly at it.
 #[cfg_attr(
@@ -108,7 +108,7 @@ impl Anchor {
     /// `text`, the value at `version`.
     pub fn capture(text: &str, version: Option<u64>, position: usize, side: Side) -> Self {
         let units: Vec<u16> = text.encode_utf16().collect();
-        let position = position.min(units.len());
+        let position = char_boundary(&units, position.min(units.len()));
         Self {
             version,
             position: Some(position),
@@ -131,8 +131,8 @@ impl Anchor {
                 ambiguous: false,
             };
         }
-        let before: Vec<u16> = self.before.encode_utf16().collect();
-        let after: Vec<u16> = self.after.encode_utf16().collect();
+        let before = last_units(&self.before, CONTEXT_UNITS);
+        let after = first_units(&self.after, CONTEXT_UNITS);
         let search = Search {
             text: &text,
             before: &before,
@@ -177,6 +177,38 @@ pub(crate) fn within_then_whole<T: Copy>(
     }
 }
 
+/// `position`, moved back off the second half of a surrogate pair so that
+/// no captured text splits a character.
+pub(crate) fn char_boundary(units: &[u16], position: usize) -> usize {
+    if position > 0 && position < units.len() && is_low_surrogate(units[position]) {
+        position - 1
+    } else {
+        position
+    }
+}
+
+/// The last `limit` UTF-16 units of `text`, not splitting a character: an
+/// authored context may be longer than a captured one, but only this much
+/// of it is compared.
+pub(crate) fn last_units(text: &str, limit: usize) -> Vec<u16> {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let mut start = units.len().saturating_sub(limit);
+    if start > 0 && start < units.len() && is_low_surrogate(units[start]) {
+        start += 1;
+    }
+    units[start..].to_vec()
+}
+
+/// The first `limit` UTF-16 units of `text`, not splitting a character.
+pub(crate) fn first_units(text: &str, limit: usize) -> Vec<u16> {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let mut end = limit.min(units.len());
+    if end < units.len() && is_low_surrogate(units[end]) {
+        end -= 1;
+    }
+    units[..end].to_vec()
+}
+
 /// Where a captured context before `position` starts: up to
 /// [`CONTEXT_UNITS`] back, not splitting a surrogate pair.
 pub(crate) fn context_start(units: &[u16], position: usize) -> usize {
@@ -197,10 +229,14 @@ pub(crate) fn context_end(units: &[u16], position: usize) -> usize {
 }
 
 /// The best of scored candidates, flagged ambiguous when another one
-/// elsewhere scores about as well.
+/// elsewhere scores about as well. With a hint (`from_hint` says how far a
+/// candidate is from where it was), the nearer of two equally good places
+/// is the one meant: a rival only makes it ambiguous when it is about as
+/// near, so a repeated chorus does not hide a caret in a long document.
 pub(crate) fn pick<T: Copy>(
     scored: impl IntoIterator<Item = (T, f64)>,
     distance: impl Fn(&T, &T) -> usize,
+    from_hint: Option<&dyn Fn(&T) -> usize>,
 ) -> Option<(T, f64, bool)> {
     let scored: Vec<(T, f64)> = scored.into_iter().collect();
     let (best, score) = scored
@@ -212,7 +248,10 @@ pub(crate) fn pick<T: Copy>(
         })?;
     // A rival within a unit is the same place, found twice.
     let ambiguous = scored.iter().any(|(other, other_score)| {
-        distance(other, &best) > 1 && *other_score >= score - AMBIGUOUS_WITHIN
+        distance(other, &best) > 1
+            && *other_score >= score - AMBIGUOUS_WITHIN
+            && from_hint
+                .is_none_or(|from_hint| from_hint(other) <= from_hint(&best) + CONTEXT_UNITS)
     });
     let confidence = if ambiguous {
         score * AMBIGUOUS_SHARE
@@ -243,17 +282,30 @@ impl Search<'_> {
         let joined: Vec<u16> = [self.before, self.after].concat();
         if !self.before.is_empty() && !self.after.is_empty() {
             candidates.extend(
-                occurrences(self.text, start, end, &joined).map(|at| at + self.before.len()),
+                occurrences(self.text, start, end, &joined)
+                    .into_iter()
+                    .map(|at| at + self.before.len()),
             );
         }
         candidates.extend(occurrences(self.text, start, end, self.after));
         candidates.extend(
-            occurrences(self.text, start, end, self.before).map(|at| at + self.before.len()),
+            occurrences(self.text, start, end, self.before)
+                .into_iter()
+                .map(|at| at + self.before.len()),
         );
-        for at in fuzzy_ends(self.text, start, end, self.before) {
-            candidates.push(at);
+        candidates.extend(shortlist(
+            fuzzy_ends(self.text, start, end, self.before),
+            self.text.len(),
+            self.hint,
+        ));
+        // Repetitive text can match a context at every step: only the
+        // matches nearest the hint are widened into candidates.
+        let mut after_ends = fuzzy_ends_with_distance(self.text, start, end, self.after);
+        if let Some(hint) = self.hint {
+            after_ends.sort_by_key(|&(at, _)| (at.abs_diff(hint), at));
         }
-        for (at, distance) in fuzzy_ends_with_distance(self.text, start, end, self.after) {
+        after_ends.truncate(MAX_CANDIDATES);
+        for (at, distance) in after_ends {
             // The match ends at `at`; its start is within `distance` of a
             // pattern's length before.
             let from = at.saturating_sub(self.after.len() + distance);
@@ -270,9 +322,11 @@ impl Search<'_> {
             candidates.push(start);
         }
         let candidates = shortlist(candidates, self.text.len(), self.hint);
+        let from_hint = self.hint.map(|hint| move |at: &usize| at.abs_diff(hint));
         let (position, confidence, ambiguous) = pick(
             candidates.into_iter().map(|at| (at, self.score(at))),
             |a, b| a.abs_diff(*b),
+            from_hint.as_ref().map(|f| f as &dyn Fn(&usize) -> usize),
         )
         .expect("there is always a candidate");
         Resolved {
@@ -458,25 +512,39 @@ pub(crate) fn edit_distance(a: &[u16], b: &[u16]) -> usize {
     row[b.len()]
 }
 
-/// Where `pattern` starts in `text[start..end]`, exactly.
-pub(crate) fn occurrences<'a>(
-    text: &'a [u16],
-    start: usize,
-    end: usize,
-    pattern: &'a [u16],
-) -> impl Iterator<Item = usize> + 'a {
+/// Where `pattern` starts in `text[start..end]`, exactly, in time linear
+/// in both (Knuth-Morris-Pratt), however repetitive the text.
+pub(crate) fn occurrences(text: &[u16], start: usize, end: usize, pattern: &[u16]) -> Vec<usize> {
     let span = &text[start..end];
-    let windows = if pattern.is_empty() || pattern.len() > span.len() {
-        None
-    } else {
-        Some(span.windows(pattern.len()))
-    };
-    windows
-        .into_iter()
-        .flatten()
-        .enumerate()
-        .filter(move |(_, window)| *window == pattern)
-        .map(move |(at, _)| start + at)
+    if pattern.is_empty() || pattern.len() > span.len() {
+        return Vec::new();
+    }
+    let mut fail = vec![0usize; pattern.len()];
+    let mut k = 0;
+    for i in 1..pattern.len() {
+        while k > 0 && pattern[i] != pattern[k] {
+            k = fail[k - 1];
+        }
+        if pattern[i] == pattern[k] {
+            k += 1;
+        }
+        fail[i] = k;
+    }
+    let mut found = Vec::new();
+    let mut k = 0;
+    for (i, &unit) in span.iter().enumerate() {
+        while k > 0 && unit != pattern[k] {
+            k = fail[k - 1];
+        }
+        if unit == pattern[k] {
+            k += 1;
+        }
+        if k == pattern.len() {
+            found.push(start + i + 1 - pattern.len());
+            k = fail[k - 1];
+        }
+    }
+    found
 }
 
 /// Where the closest approximate matches of `pattern` end in
@@ -579,5 +647,57 @@ mod tests {
         );
         let found = anchor.resolve("Intro. Outro.", Some(2));
         assert!(found.confidence < 0.6, "{found:?}");
+    }
+
+    #[test]
+    fn a_caret_in_a_repeated_chorus_is_not_ambiguous() {
+        let chorus = "Ride it to the end of the line\nEvery stop is a reason to stay\n\n";
+        let verse = |n: usize| format!("Verse {n} goes somewhere new each night, words {n}.\n\n");
+        let text: String = (0..40).map(|n| format!("{}{chorus}", verse(n))).collect();
+        let position = text.rfind("reason").unwrap();
+        let anchor = Anchor::capture(&text, None, position, Side::Before);
+        // An edit far away; the chorus near the caret is still the one.
+        let edited = text.replacen("Verse 3 goes", "Verse three goes", 1);
+        let found = anchor.resolve(&edited, None);
+        assert_eq!(found.position, edited.rfind("reason").unwrap());
+        assert!(!found.ambiguous, "{found:?}");
+    }
+
+    #[test]
+    fn a_capture_inside_a_character_keeps_it_whole() {
+        let text = "Tour 🚐 starts";
+        // Inside the van emoji's surrogate pair.
+        let inside = "Tour ".encode_utf16().count() + 1;
+        let anchor = Anchor::capture(text, None, inside, Side::After);
+        assert!(!anchor.before.contains('\u{FFFD}') && !anchor.after.contains('\u{FFFD}'));
+        assert_eq!(anchor.after, "🚐 starts");
+    }
+
+    #[test]
+    fn resolving_in_a_large_repetitive_value_stays_fast() {
+        let text = "la ".repeat(70_000);
+        let anchor = Anchor::capture(&text, None, 100_000, Side::After);
+        let range = crate::Range::capture(&text, None, 50_000, 60_000);
+        let gone = Anchor {
+            version: None,
+            position: Some(1_000),
+            side: Side::After,
+            before: "nothing like this ".repeat(10),
+            after: "is in the value at all".repeat(10),
+        };
+        let edited = format!("{} and {}", &text[..90_000], &text[90_000..]);
+        let started = std::time::Instant::now();
+        anchor.resolve(&edited, None);
+        range.resolve(&edited, None);
+        let orphan = gone.resolve(&edited, None);
+        assert!(orphan.confidence < 0.6, "{orphan:?}");
+        // About 0.1 s in an optimised build; unbounded work would take
+        // minutes here.
+        let limit = if cfg!(debug_assertions) { 30 } else { 2 };
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(limit),
+            "{elapsed:?}"
+        );
     }
 }
