@@ -221,6 +221,7 @@ jobs:
         # dev/gates/test/examples-e2e.test.mjs).
         variant:
           - band-chat
+          - band-chat-hono
           - jamazon
           - stage-plan-sveltekit
           - jamazon-warehouse
