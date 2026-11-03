@@ -218,7 +218,7 @@ pub(crate) fn stored_table(version: &SchemaVersionId, name: &str) -> String {
 }
 
 fn stored_name(kind: &[u8], version: &SchemaVersionId, name: &str) -> String {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = jazz_types::sha256::Hasher::new();
     for part in [kind, version.as_bytes(), name.as_bytes()] {
         hasher.update(&(part.len() as u64).to_le_bytes());
         hasher.update(part);
@@ -231,7 +231,7 @@ fn stored_name(kind: &[u8], version: &SchemaVersionId, name: &str) -> String {
 /// A digest of where a version stores its tables and columns: equal on
 /// two stores that name it alike.
 pub(crate) fn names_digest(names: &StoredNames) -> [u8; 16] {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = jazz_types::sha256::Hasher::new();
     for (table, (stored, columns)) in &names.tables {
         for part in [table, stored] {
             hasher.update(&(part.len() as u64).to_le_bytes());
