@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node ../../dev/examples/with-local-core.mjs next dev",
+    "dev": "next dev",
     "build": "node ../../packages/jazz-tools/dist/cli.js validate && next build",
     "start": "next start",
     "test": "pnpm test:config-security && pnpm test:e2e",
