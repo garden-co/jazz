@@ -65,10 +65,10 @@ import { createJazz, remote } from "jazz-tools/backend";
 import { app, permissions } from "./schema";
 
 export const jazz = await createJazz({
-  appId: process.env.JAZZ_APP_ID!,
   app,
   permissions,
   store: remote({
+    appId: process.env.JAZZ_APP_ID!,
     url: process.env.JAZZ_SERVER_URL!, // your sync server, or https://v2.sync.jazz.tools
     secret: process.env.JAZZ_ADMIN_SECRET!, // the app's admin secret
   }),

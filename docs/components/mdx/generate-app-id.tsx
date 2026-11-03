@@ -27,9 +27,9 @@ function CredentialsBlock({ app }: { app: GeneratedApp }) {
 function ConfigBlock({ app }: { app: GeneratedApp }) {
   const code = [
     `createJazz({`,
-    `  appId: process.env.JAZZ_APP_ID!,`,
     `  // app, permissions, authenticate ...`,
     `  store: remote({`,
+    `    appId: process.env.JAZZ_APP_ID!,`,
     `    url: process.env.JAZZ_SERVER_URL!,`,
     `    secret: process.env.JAZZ_ADMIN_SECRET!,`,
     `  }),`,
