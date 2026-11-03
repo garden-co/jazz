@@ -10,7 +10,10 @@ import { getJazzServerInfo, createJazzServerTransportControl } from "./testing-s
 // The same rules are pinned in Rust (tests/binding_host.rs), for NAPI, and for
 // React Native foregrounds over the native relay.
 
-const app = schema.defineApp({ entries: schema.table({ title: schema.string() }, {}) });
+const app = schema.defineApp(
+  { entries: schema.table({ title: schema.string() }, {}) },
+  { migrations: "none" },
+);
 const permissions = schema.definePermissions(app, ({ policy }) => [
   policy.entries.allowRead.always(),
   policy.entries.allowInsert.always(),

@@ -494,6 +494,25 @@ impl RuntimeSchema {
             &self.canonical_bytes(),
         ))
     }
+
+    /// An id shared by every version whose rows pass unchanged between
+    /// them: the same tables and columns, whatever their order, merge
+    /// strategies and indexes. Deployment connects such versions with an
+    /// empty lens; stored names derived from this id agree across them,
+    /// whichever of them a store admits first.
+    pub fn compatibility_id(&self) -> SchemaVersionId {
+        let mut schema = Self {
+            tables: self.tables.clone(),
+        };
+        for table in &mut schema.tables {
+            table.columns.sort_by(|a, b| a.name.cmp(&b.name));
+            table.merge_strategies.clear();
+            table.composite_indexes.clear();
+        }
+        let mut bytes = b"jazz-schema-compatibility".to_vec();
+        bytes.extend(canonical_schema_bytes(&schema));
+        SchemaVersionId(uuid::Uuid::new_v5(&SCHEMA_VERSION_NAMESPACE, &bytes))
+    }
 }
 
 /// Per-column strategy used when upstream nodes merge concurrent content heads.

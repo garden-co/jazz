@@ -1,3 +1,4 @@
+import { fetchFor } from "../runtime/in-process-transport.js";
 import { runtimeSchemaJsonReplacer } from "../drivers/schema-wire.js";
 import type {
   ColumnType,
@@ -241,9 +242,16 @@ export interface DeploymentArtifacts {
   schemas: Array<{ hash: string; schema: WasmSchema }>;
   migrations: Array<{ fromHash: string; toHash: string; forward: PublishedTableLens[] }>;
   permissions: CompiledPermissionsMap;
+  /**
+   * Make the target and its permissions current (the default, `/deploy`), or
+   * only publish them as a bundle that sessions are pinned to (createJazz,
+   * `/bundles`). A core that predates bundles has no `/bundles` route, so it
+   * refuses such a publish instead of activating it.
+   */
+  activate?: boolean;
 }
 
-export interface DeploymentRequest extends Omit<DeploymentArtifacts, "schemas"> {
+export interface DeploymentRequest extends Omit<DeploymentArtifacts, "schemas" | "activate"> {
   schemas: Array<{ hash: string; schema: { tables: WasmSchema } }>;
 }
 
@@ -253,6 +261,8 @@ export interface DeploymentResponse {
     schemas: string[];
     migrations: Array<{ fromHash: string; toHash: string }>;
   };
+  /** The published bundle's id, for a deployment that activates nothing. */
+  bundle?: string;
 }
 
 export class DeploymentError extends Error {
@@ -271,7 +281,12 @@ export async function publishDeployment(
   serverUrl: string,
   options: { appId: string; adminSecret: string } & DeploymentArtifacts,
 ): Promise<DeploymentResponse> {
-  const response = await fetch(appScopedUrl(serverUrl, options.appId, "admin/deploy"), {
+  const deployUrl = appScopedUrl(
+    serverUrl,
+    options.appId,
+    options.activate === false ? "admin/bundles" : "admin/deploy",
+  );
+  const response = await fetchFor(deployUrl)(deployUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

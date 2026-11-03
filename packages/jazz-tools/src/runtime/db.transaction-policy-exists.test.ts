@@ -10,10 +10,13 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 // same transaction inserts or updates, so the server accepts the transaction the
 // client already applied optimistically. A committed row the transaction deletes
 // still counts; a row it both inserts and deletes never does.
-const app = s.defineApp({
-  shows: s.table({ chiefAccount: s.uuid() }, {}),
-  tasks: s.table({ showId: s.uuid(), title: s.string() }, { show: s.rel("shows", "showId") }),
-});
+const app = s.defineApp(
+  {
+    shows: s.table({ chiefAccount: s.uuid() }, {}),
+    tasks: s.table({ showId: s.uuid(), title: s.string() }, { show: s.rel("shows", "showId") }),
+  },
+  { migrations: "none" },
+);
 const permissions = definePermissions(app, ({ policy, session }) => {
   policy.shows.allowRead.where({ chiefAccount: session.user.account });
   policy.shows.allowInsert.where({ chiefAccount: session.user.account });

@@ -1682,11 +1682,10 @@ fn server_titles(server: &Db, draft: &BranchSelector, main: &BranchSelector) -> 
 }
 
 /// Alice read main's x once; then a view hides the draft's x from her.
-/// Main's x stays current in her store, and Bob's later draft edits send
-/// her nothing, however she keeps main's x (a one-shot read or her own
-/// write).
+/// Main's x stays cold until Alice subscribes to main too. Bob's later
+/// draft edits send her nothing, even after another one-shot read or write.
 #[test]
-fn hiding_the_drafts_version_keeps_the_main_row_current_and_quiet() {
+fn hiding_the_drafts_version_keeps_main_cold_until_subscribed() {
     for via_commit in [false, true] {
         let (server, client, shipped) = connected();
         let b = if via_commit { 0xb1 } else { 0xb3 };
@@ -1712,6 +1711,11 @@ fn hiding_the_drafts_version_keeps_the_main_row_current_and_quiet() {
             &main,
             &[("title", Value::String("x main v2".into()))],
         );
+        pump(&server, &client);
+        assert_eq!(titles(&client, &by_rank(), on_main.clone()), ["x", "y"]);
+        // The draft view does not keep its hidden main row current.
+        // Explicitly subscribing to main refreshes it and retains its watch.
+        let _main = block_on(client.subscribe(&all, on_main.clone())).unwrap();
         pump(&server, &client);
         assert_eq!(
             titles(&client, &by_rank(), on_main.clone()),
@@ -1848,10 +1852,10 @@ fn an_insert_with_an_id_onto_a_hidden_version_is_refused() {
 }
 
 /// Alice loses main's x, gets it back through a grant (shipped by her
-/// subscription), drops the subscription, and loses it again: the second
-/// loss still reaches her, though her own write keeps x watched.
+/// subscription), drops the subscription, and loses it again. Her own
+/// settled write does not keep x watched; another remote read evicts it.
 #[test]
-fn a_row_regained_through_a_subscription_is_evicted_again() {
+fn a_regained_row_goes_cold_after_unsubscribe_and_is_evicted_on_read() {
     let (server, client, _) = connected();
     let main = branch(0xbb);
     put(&server, &main, 0x45, "x", 1);
@@ -1894,14 +1898,23 @@ fn a_row_regained_through_a_subscription_is_evicted_again() {
         &[("title", Value::String("bob secret".into()))],
     );
     pump(&server, &client);
+    assert_eq!(
+        titles(&client, &by_rank(), on_main.clone()),
+        ["x alice", "y"],
+        "settled writes do not keep a dropped subscription alive"
+    );
+    let mut remote = on_main.clone();
+    remote.tier = ReadTier::Remote;
+    read_once(&server, &client, &by_rank(), remote);
     assert_eq!(titles(&client, &by_rank(), on_main), ["y"]);
 }
 
 /// A tab writes main's x through its worker; Bob writes a draft version of
-/// x the tab may not read. The tab's main x stays current through the
-/// worker, with or without a view of the draft (#4484).
+/// x the tab may not read. Main's x stays cold after settlement, with or
+/// without a draft view. A live main read refreshes it through the worker
+/// and keeps later main edits current despite the unreadable draft (#4484).
 #[test]
-fn a_tabs_own_row_stays_current_through_its_worker_after_an_unreadable_draft_version() {
+fn a_tabs_settled_row_needs_a_live_read_to_stay_current_through_its_worker() {
     for open_view in [false, true] {
         let server = open(0x01, AuthorSubject::SYSTEM);
         server.set_authority();
@@ -1941,8 +1954,26 @@ fn a_tabs_own_row_stays_current_through_its_worker_after_an_unreadable_draft_ver
         tick();
         let on_main = ReadOpts::default().branch_view(main.clone(), None);
         assert!(
-            titles(&tab, &by_rank(), on_main).contains(&"x main v2".to_owned()),
-            "open_view {open_view}"
+            titles(&tab, &by_rank(), on_main.clone()).contains(&"x".to_owned()),
+            "settled row stays cold, open_view {open_view}"
+        );
+        let _main = block_on(tab.subscribe(&all, on_main.clone())).unwrap();
+        tick();
+        assert!(
+            titles(&tab, &by_rank(), on_main.clone()).contains(&"x main v2".to_owned()),
+            "subscription refreshes main, open_view {open_view}"
+        );
+        set(
+            &server,
+            0x45,
+            &main,
+            &main,
+            &[("title", Value::String("x main v3".into()))],
+        );
+        tick();
+        assert!(
+            titles(&tab, &by_rank(), on_main).contains(&"x main v3".to_owned()),
+            "subscription keeps main current, open_view {open_view}"
         );
     }
 }

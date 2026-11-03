@@ -24,8 +24,8 @@ const STARTERS = {
     "starters/sveltekit-hybrid",
   ],
   react: ["starters/react-betterauth", "starters/react-localfirst", "starters/react-hybrid"],
-  ts: ["starters/ts-betterauth", "starters/ts-localfirst", "starters/ts-hybrid"],
-  effect: ["starters/ts-effect-betterauth", "starters/ts-effect-localfirst"],
+  ts: ["starters/ts-localfirst", "starters/ts-hybrid"],
+  effect: ["starters/ts-effect-localfirst"],
 };
 
 // File → the relative path within each starter, keyed by framework.
@@ -68,10 +68,7 @@ const CROSS_FRAMEWORK_FILES = [
 // Starter pairs that both run a Hono + BetterAuth dev server on port 3001.
 // The server-side files in each pair must be byte-identical so an auth
 // or server change can't drift across them.
-const HONO_SERVER_PAIRS = [
-  ["starters/react-hybrid", "starters/ts-hybrid"],
-  ["starters/react-betterauth", "starters/ts-betterauth"],
-];
+const HONO_SERVER_PAIRS = [["starters/react-hybrid", "starters/ts-hybrid"]];
 const HONO_SERVER_FILES = [
   "server/app.ts",
   "server/auth.ts",

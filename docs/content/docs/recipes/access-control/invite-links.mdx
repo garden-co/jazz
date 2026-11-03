@@ -33,14 +33,14 @@ you can audit or revoke individual memberships later.
 A user can read a chat once they have a membership row. A chat creator can bootstrap their own
 membership and create or revoke invite links, but no client can write a membership for somebody
 else. The only way for an invitee to join is the server route below. The server has a
-[backend identity](/docs/getting-started/server-setup#backend-identity-pattern) and inserts the row
+[backend identity](/docs/setup/backend/trusted#backend-identity-pattern) and inserts the row
 on their behalf after validating the join code.
 
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-permissions
 </include>
 
-See [Permissions](/docs/auth/permissions) for more on `exists.where`, `allOf`, and `anyOf`, and [Session identity and authorship](/docs/auth/sessions#session-identity-and-authorship) for how the backend stamps the user as the row's author while keeping backend permissions.
+See [Permissions](/docs/schemas/policies) for more on `exists.where`, `allOf`, and `anyOf`, and [Session identity and authorship](/docs/setup/auth/sessions#session-identity-and-authorship) for how the backend stamps the user as the row's author while keeping backend permissions.
 
 ## Generating a link
 
@@ -82,7 +82,7 @@ cannot both succeed. If the authority rejects the transaction because another re
 race, report that failure to the client and let it retry only if that remains appropriate for your
 UI.
 
-The `client` referenced below is the ready backend Jazz client for your app&hairsp;—&hairsp;see [Backend context setup](/docs/getting-started/server-setup#backend-context-setup) for how to create one.
+The `client` referenced below is the ready backend Jazz client for your app&hairsp;—&hairsp;see [Backend context setup](/docs/setup/backend/trusted#backend-context-setup) for how to create one.
 
 <include cwd lang="ts" meta='title="api/invite/redeem.ts"'>
   ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-redeem-route

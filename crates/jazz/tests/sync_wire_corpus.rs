@@ -27,8 +27,9 @@ use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
     Acting, CorpusReader, Db, DbConfig, DbIdentity, FrameJoiner, InsertOptions, Outcome, ReadOpts,
-    ReadSpan, ReadTier, Reason, SyncMessage, Transport, UpdateOptions, WireError as SyncWireError,
-    WriteIdentity, block_on, encode_frames, validate_frame_batch_for_corpus,
+    ReadSpan, ReadTier, Reason, RemoteLinkHint, SyncMessage, Transport, UpdateOptions,
+    WireError as SyncWireError, WireKind, WriteIdentity, block_on, encode_frames,
+    validate_frame_batch_for_corpus,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::model::transaction::OpenTransactionId;
@@ -53,7 +54,7 @@ const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 /// Every `SyncMessage` variant, in declaration order. A message too
 /// large for one frame travels in parts below the message layer
 /// (binding_host's frame-split test covers it).
-const VARIANTS: [&str; 19] = [
+const VARIANTS: [&str; 20] = [
     "Read",
     "Unsubscribe",
     "ResendWhole",
@@ -68,11 +69,12 @@ const VARIANTS: [&str; 19] = [
     "Fate",
     "CheckAllowed",
     "CheckAllowedResult",
-    "Schema",
     "SchemaAdmission",
     "Stored",
-    "KnownCatalogue",
+    "Join",
     "Catalogue",
+    "Welcome",
+    "ConnectionSettled",
 ];
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -317,10 +319,10 @@ impl Transport for Recording {
         for frame in encode_frames(message).unwrap() {
             let decoded: SyncMessage = postcard::from_bytes(&frame).unwrap();
             // The pinned Commit is the first that relays a session's write
-            // built on an unsettled commit (bases, origin), else the first.
+            // built on an unsettled commit, else the first.
             let relayed = matches!(
                 &decoded,
-                SyncMessage::Commit { ops, origin: Some(_), .. }
+                SyncMessage::Commit { ops, .. }
                     if ops.iter().flat_map(|op| &op.bases).any(|base| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
             );
             let mut recorded = self.recorded.borrow_mut();
@@ -347,7 +349,7 @@ impl Transport for Recording {
                 .or_insert_with(|| (self.peer.to_owned(), frame.clone()));
             let pinned_relayed = matches!(
                 postcard::from_bytes(&pinned.1),
-                Ok(SyncMessage::Commit { ops, origin: Some(_), .. })
+                Ok(SyncMessage::Commit { ops, .. })
                     if ops.iter().flat_map(|op: &jazz::db::WireOp| &op.bases).any(|base| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
             );
             if relayed && !pinned_relayed {
@@ -365,14 +367,15 @@ impl Transport for Recording {
 }
 
 /// Message shapes the one frame per variant leaves unpinned: a one-shot
-/// `Read` (as of a seq or a snapshot), `Rows` carrying the commits behind
+/// `Read` (fresh, resumed, or historical), `Rows` carrying the commits behind
 /// history versions, a `Catalogue` carrying versions with their stored
 /// names and a lens's cells, a trusted link's `Commit`s acting as an
 /// attributed author and as a session, a live `Read` in a branch view
 /// over a live base, over a frozen base, and of a head alone, and a hidden
 /// `AccessLost` (a branch view's row whose head version the reader may not
-/// read).
-const SHAPES: [&str; 9] = [
+/// read), and serializable `Commit`s with a snapshot the authority served
+/// and one a worker with no server numbered.
+const SHAPES: [&str; 13] = [
     "Read/once",
     "Rows/tx_ids",
     "Catalogue/versions",
@@ -382,18 +385,37 @@ const SHAPES: [&str; 9] = [
     "Read/live-branch-view-frozen",
     "Read/live-branch-head",
     "AccessLost/hidden",
+    "Commit/serializable",
+    "Rows/pending",
+    "Read/once-resumed",
+    "Read/once-historical",
 ];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
     match message {
         SyncMessage::Read {
-            span: ReadSpan::Once { .. },
+            since,
+            span: ReadSpan::Once { at },
             ..
-        } => Some(SHAPES[0]),
+        } if since.is_some() && at.is_none() => Some(SHAPES[11]),
+        SyncMessage::Read {
+            span: ReadSpan::Once { at },
+            ..
+        } if at.is_some() => Some(SHAPES[12]),
+        SyncMessage::Read {
+            since,
+            span: ReadSpan::Once { at },
+            ..
+        } if since.is_none() && at.is_none() => Some(SHAPES[0]),
         SyncMessage::Rows { tx_ids, .. } if !tx_ids.is_empty() => Some(SHAPES[1]),
-        SyncMessage::Catalogue {
-            versions, cells, ..
-        } if !versions.is_empty() && !cells.is_empty() => Some(SHAPES[2]),
+        SyncMessage::Rows { images, .. } if images.iter().any(|image| !image.at.accepted()) => {
+            Some(SHAPES[10])
+        }
+        SyncMessage::Catalogue(catalogue)
+            if !catalogue.versions.is_empty() && !catalogue.cells.is_empty() =>
+        {
+            Some(SHAPES[2])
+        }
         SyncMessage::Commit {
             acting: Acting::Attributed { author },
             ..
@@ -404,7 +426,7 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
         } if !claims.is_empty() => Some(SHAPES[4]),
         SyncMessage::Read {
             view,
-            span: ReadSpan::Live { .. },
+            span: ReadSpan::Live,
             ..
         } if matches!(
             **view,
@@ -418,7 +440,7 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
         }
         SyncMessage::Read {
             view,
-            span: ReadSpan::Live { .. },
+            span: ReadSpan::Live,
             ..
         } => match **view {
             ReadViewSourceSpec::BranchView {
@@ -429,6 +451,10 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
             _ => None,
         },
         SyncMessage::AccessLost { hidden: true, .. } => Some(SHAPES[8]),
+        SyncMessage::Commit {
+            kind: WireKind::Serializable { .. },
+            ..
+        } => Some(SHAPES[9]),
         _ => None,
     }
 }
@@ -589,8 +615,8 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     .unwrap();
     block_on(server.update("notes", shared, note(1, large(2)), UpdateOptions::default())).unwrap();
 
-    // Schema, SchemaAdmission, Read (live), Rows, Settled, ChunkRequests,
-    // Chunks: a client subscribes and pulls the large value it reads.
+    // Join, Welcome, Read (live), Rows, Settled, ChunkRequests, Chunks: a
+    // client subscribes and pulls the large value it reads.
     let alice = open(0x51, user(1), false);
     connect(&alice, &server, user(1), &recorded);
     let notes = alice.prepare_query(&Query::from("notes")).unwrap();
@@ -683,6 +709,50 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     );
     alice.abandon_transaction_handle(open_tx).unwrap();
 
+    // Commit (serializable): a transaction that read the notes writes one,
+    // at the snapshot the authority served.
+    let open_tx = OpenTransactionId::new();
+    block_on(alice.begin_serializable(open_tx)).unwrap();
+    let _ = drive(
+        &[&alice, &server, &alice],
+        alice.tx_ref(open_tx).all_prepared(&notes),
+    );
+    drive(
+        &[&alice, &server, &alice],
+        alice
+            .tx_ref(open_tx)
+            .insert("notes", note(1, vec![9]), InsertOptions::default()),
+    )
+    .unwrap();
+    drive(
+        &[&alice, &server, &alice],
+        alice.commit_serializable_handle(open_tx),
+    )
+    .unwrap();
+    pump(&[&alice, &server, &alice]);
+
+    // Rows (a relay's unsettled version): a worker with no server keeps
+    // its own write pending, and ships it to its tab in its own band.
+    let wendy = open(0x57, user(1), false);
+    wendy.set_remote_link_hint(RemoteLinkHint::NoServer);
+    let tab = open(0x58, user(1), false);
+    tab.set_non_durable_client();
+    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    connect(&tab, &wendy, user(1), &recorded);
+    let tab_notes = tab.prepare_query(&Query::from("notes")).unwrap();
+    // Read (once, fresh): the tab's first read has no checkpoint to resume.
+    let open_tx = OpenTransactionId::new();
+    block_on(tab.begin_serializable(open_tx)).unwrap();
+    let _ = drive(
+        &[&tab, &wendy, &tab],
+        tab.tx_ref(open_tx).all_prepared(&tab_notes),
+    );
+    tab.abandon_transaction_handle(open_tx).unwrap();
+    let _tab_stream = block_on(tab.subscribe(&tab_notes, ReadOpts::default())).unwrap();
+    pump(&[&tab, &wendy, &tab]);
+    block_on(wendy.insert("notes", note(1, vec![10]), InsertOptions::default())).unwrap();
+    pump(&[&tab, &wendy, &tab]);
+
     // A history subscription ships superseded versions, with the commits
     // behind them.
     let history = alice
@@ -723,8 +793,8 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     connect(&alice, &server, user(1), &recorded);
     pump(&[&alice, &server, &alice]);
 
-    // SchemaAdmission: a client on a schema version the server has not
-    // admitted is told so.
+    // A Welcome tells a client on a schema version the server has not
+    // admitted so.
     let bob = open(0x52, user(2), true);
     connect(&bob, &server, user(2), &recorded);
     pump(&[&bob, &server, &bob]);
@@ -785,15 +855,41 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         }],
     )
     .unwrap();
-    block_on(server.activate_schema_with_lenses(copied, &[lens])).unwrap();
+    block_on(server.activate_schema_with_lenses(copied.clone(), &[lens])).unwrap();
     pump(&[&alice, &server, &alice]);
+
+    // Schema: alice writes through a view of the version she just
+    // mirrored, so her commit uploads under it, between switches.
+    let view = block_on(alice.register_schema_view(copied)).unwrap();
+    let mut copied_note = note(1, vec![8]);
+    copied_note.insert("first_owner".to_owned(), subject(1));
+    block_on(view.insert("notes", copied_note, InsertOptions::default())).unwrap();
+    pump(&[&alice, &server, &alice]);
+
+    // SchemaAdmission: the server admits the draft bob declared.
+    let draft = schema(true);
+    let adds_title = MigrationLens::new(
+        schema(false).version_id(),
+        draft.version_id(),
+        vec![TableLens {
+            source_table: "notes".into(),
+            target_table: "notes".into(),
+            ops: vec![LensOp::AddColumn {
+                column: "title".into(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    )
+    .unwrap();
+    block_on(server.admit_schema_with_lenses(draft, &[adds_title])).unwrap();
+    pump(&[&bob, &server, &bob]);
 
     // Refused: a subscription the server cannot serve. No replica sends
     // one (it prepares queries against the same schema), so a raw session
-    // does, on the schema version alice announced.
-    let schema = postcard::from_bytes::<SyncMessage>(&recorded.borrow()["Schema"].1).unwrap();
+    // does, joining on the schema version alice announced.
+    let join = postcard::from_bytes::<SyncMessage>(&recorded.borrow()["Join"].1).unwrap();
     let inbound = Rc::new(RefCell::new(VecDeque::from([
-        schema,
+        join,
         SyncMessage::Read {
             id: 1,
             query: Box::new(Query::from("missing")),
@@ -802,7 +898,8 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
             tier: ReadTier::LocalFirst,
             wait: None,
             view: Box::new(ReadViewSourceSpec::Current),
-            span: ReadSpan::Live { since: None },
+            since: None,
+            span: ReadSpan::Live,
         },
     ])));
     server
@@ -830,6 +927,19 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         .insert("ResendWhole".to_owned(), ("server".to_owned(), frame));
 
     hidden_in_a_view(&recorded);
+
+    // Alice's fresh client records a plain one-shot, then repeats it using
+    // the checkpoint saved from the first response.
+    let alice = open(0x59, user(1), false);
+    connect(&alice, &server, user(1), &recorded);
+    let notes = alice.prepare_query(&Query::from("notes")).unwrap();
+    for _ in 0..2 {
+        drive(
+            &[&alice, &server, &alice],
+            alice.all(&notes, ReadOpts::for_read_tier(ReadTier::Remote)),
+        )
+        .unwrap();
+    }
     recorded.borrow().clone()
 }
 

@@ -17,9 +17,7 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use duplex_transport::duplex;
-use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, LOCAL_BASE, ReadOpts, block_on,
-};
+use jazz::db::{Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query};
 use jazz::records::Value;
@@ -120,7 +118,10 @@ fn reopening_restores_rows_history_and_the_commit_seq() {
     let next = block_on(db.insert("items", item(100), Default::default()))
         .unwrap()
         .mergeable_tx_id();
-    assert_eq!(next, before + 1, "the commit seq continues");
+    assert!(
+        next > before,
+        "the commit seq continues above what it numbered"
+    );
     // History survived: an as-of read of the superseded image.
     let open = OpenTransactionId::new();
     block_on(db.begin_serializable(open)).unwrap();
@@ -308,7 +309,7 @@ fn a_replicas_pending_uploads_survive_a_restart_and_are_resent() {
         "every recovered upload reached the server"
     );
     for tx in txs {
-        assert!(tx > LOCAL_BASE);
+        assert!(tx > 0);
         drive(
             &[&client, &server, &client],
             client.wait_for_transaction(tx, DurabilityTier::Global),

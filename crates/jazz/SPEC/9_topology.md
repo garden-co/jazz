@@ -206,9 +206,8 @@ worker, or a native relay, ch. 19) that talks to Core directly; the clients
 behind a relay are non-durable foreground sessions. Relays are not chained, a
 durable replica never attaches behind a relay, and no relay serves more than
 one auth scope. Requirements below are stated for this shape only; other
-shapes are not supported (`INV-SYNC-50`), and supporting one would need new
-design (for example versions named by origin rather than by local seq), not
-just new wiring.
+shapes are not supported, and supporting one would need new design, not just
+new wiring.
 
 Relays provide unopinionated transport and caching. A relay link uses
 `PeerRole::Relay` with an explicit relay transport capability and no permission

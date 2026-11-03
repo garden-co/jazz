@@ -2251,6 +2251,8 @@ describe("broker worker context initialization", () => {
       false,
       initOptions.initialSyncFlushEvery,
       undefined,
+      // No app migrations bundle in these options.
+      undefined,
     ]);
     expect(mocks.openBrowser.mock.calls[0]?.[0]).toBe(mocks.pageStores[0]);
     expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(config);

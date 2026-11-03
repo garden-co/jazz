@@ -16,7 +16,7 @@ use jazz::tools::{
     TableSchemaBuilder,
 };
 
-use common::{allow_all_policies, compile_schema};
+use common::{allow_all_policies, compile_schema, physical_column};
 
 fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::noop();
@@ -3635,12 +3635,13 @@ fn a_branch_move_carries_json_stored_under_an_earlier_schema() {
     assert_eq!(moved[0].cell("payload"), Some(payload));
 }
 
-/// `_st` of `row`'s current version on the branch `selector(byte)` names,
+/// `_state` of `row`'s current version on the branch `selector(byte)` names,
 /// read raw from the store file.
 fn stored_state(directory: &std::path::Path, row: RowUuid, byte: u8) -> i64 {
     let conn = rusqlite::Connection::open(directory.join("jazz.sqlite")).unwrap();
+    let branch = physical_column(&conn, "todos", "branch_id");
     conn.query_row(
-        "SELECT _st FROM todos WHERE id = ?1 AND branch_id = ?2",
+        &format!("SELECT _state FROM todos WHERE id = ?1 AND {branch} = ?2"),
         rusqlite::params![row.0.as_bytes().to_vec(), [byte; 16].to_vec()],
         |r| r.get(0),
     )

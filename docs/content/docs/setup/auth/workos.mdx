@@ -1,0 +1,55 @@
+---
+title: WorkOS
+description: "Use WorkOS AuthKit on your backend: keep its sealed session in a cookie, and let Jazz's authenticate read it."
+---
+
+[WorkOS](https://workos.com/) AuthKit hosts the sign-in pages. Run its server-side flow in the
+backend that hosts Jazz: the callback stores a sealed session cookie, and `authenticate` loads it.
+
+```ts title="server.ts"
+import { WorkOS } from "@workos-inc/node";
+import { createJazz, remote } from "jazz-tools/backend";
+
+const workos = new WorkOS(process.env.WORKOS_API_KEY, { clientId: WORKOS_CLIENT_ID });
+const cookiePassword = process.env.WORKOS_COOKIE_PASSWORD!;
+
+// GET /auth/callback: exchange the code and set the `wos_session` cookie.
+const { sealedSession } = await workos.userManagement.authenticateWithCode({
+  code,
+  clientId: WORKOS_CLIENT_ID,
+  session: { sealSession: true, cookiePassword },
+});
+
+export const jazz = await createJazz({
+  appId: "my-app",
+  app,
+  permissions,
+  store: remote({ url, secret: adminSecret }),
+  authenticate: async (request) => {
+    const sessionData = readCookie(request, "wos_session");
+    if (!sessionData) return null;
+    const session = await workos.userManagement
+      .loadSealedSession({ sessionData, cookiePassword })
+      .authenticate();
+    return session.authenticated
+      ? { userId: session.user.id, claims: { role: session.role ?? "" } }
+      : null;
+  },
+});
+```
+
+WorkOS access tokens inside the session are short-lived. Refresh an expired session once
+(`session.refresh()`) and write the new cookie on your next HTTP response; the example shows one
+way to share the refreshed session with sync sockets, which can't set cookies.
+
+## Client
+
+Ask your backend who is signed in, and pass that to Jazz:
+
+<include cwd lang="tsx" meta='title="App.tsx"'>
+  ../examples/auth-workos-chat/src/docs/recipe-snippet.tsx#workos-jazz-react
+</include>
+
+For a full working example, see the [WorkOS chat example](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat).
+
+See [Other / Custom](/docs/setup/auth/custom) for the general bindings, guests, and backend request contexts.

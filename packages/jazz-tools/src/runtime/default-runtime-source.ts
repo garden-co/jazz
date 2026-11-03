@@ -1,3 +1,5 @@
+import { clientScope } from "./client-scope.js";
+import type { ClientMigrations } from "./client-migrations.js";
 import { JazzClient, type ConnectRuntimeOptions } from "./client.js";
 import { loadWasmModule, type WasmModule } from "./wasm-loader.js";
 import { textAnchorsFrom, type TextAnchors } from "./text-anchors.js";
@@ -42,21 +44,12 @@ import {
   createBrowserWorkerFingerprint,
 } from "./browser-worker-config.js";
 import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
-import { deterministicBytes } from "./deterministic-bytes.js";
+import { randomNodeUuidBytes } from "./runtime-entropy.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
 function setGlobalWasmLogLevel(level?: DbConfig["logLevel"]): void {
   (globalThis as any).__JAZZ_WASM_LOG_LEVEL = level ?? DEFAULT_WASM_LOG_LEVEL;
-}
-
-function randomBytes(): Uint8Array {
-  const bytes = new Uint8Array(16);
-  if (globalThis.crypto?.getRandomValues) {
-    globalThis.crypto.getRandomValues(bytes);
-    return bytes;
-  }
-  return deterministicBytes(`${Date.now()}:${Math.random()}`);
 }
 
 function sessionFromConfig(config: DbConfig) {
@@ -132,7 +125,7 @@ export function selfSignedClientProofFromConfig(
   }
   return {
     token: config.jwtToken,
-    appId: config.appId,
+    appId: clientScope(config),
     claimedAuthor: canonicalAuthorSubject(session.issuer, session.user_id, session.account_id),
   };
 }
@@ -181,6 +174,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
   override createClient({
     config,
     schema,
+    migrations,
     onAuthFailure,
     foregroundNodeLease,
   }: RuntimeClientContext<DbConfig>): JazzClient {
@@ -198,7 +192,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     // identity. Reusing a deterministic node across independently opened tabs
     // would let their fresh HLC registers mint the same TxId before either has
     // observed the other's first commit.
-    const node = foregroundNodeLease?.node.slice() ?? randomBytes();
+    const node = foregroundNodeLease?.node.slice() ?? randomNodeUuidBytes();
     const author = authorBytesForSession(runtimeAuthorFromConfig(config));
     const flushEvery = initialSyncFlushEvery(config);
     const browserMode = isPersistentBrowserConfig(config);
@@ -210,7 +204,8 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       !browserMode,
       selfSignedClientProof,
       backendMode,
-      { appId: config.appId, thresholdMs: config.slowQueryThresholdMs },
+      { appId: clientScope(config), thresholdMs: config.slowQueryThresholdMs },
+      migrations,
     );
     if (foregroundNodeLease) {
       mainThreadPeerRuntime.seedForegroundTxTimeHighWater(foregroundNodeLease.confirmedTxTime);
@@ -223,7 +218,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     }
 
     const context: AppContext = {
-      appId: config.appId,
+      appId: clientScope(config),
       accountId: config.accountId,
       schema,
       driver: config.driver,
@@ -272,7 +267,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const { acquireNodeForegroundNodeLease } =
       await import("./native-runtime/node-foreground-node-lease.js");
     return await acquireNodeForegroundNodeLease({
-      appId: config.appId,
+      appId: clientScope(config),
       env: config.env ?? "dev",
       authScope: createBrowserAuthSessionKey(config),
     });
@@ -331,11 +326,14 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         author,
         selfSignedClientProof,
         initialSyncFlushEvery: initialSyncFlushEvery(config),
-        appId: config.appId,
+        migrations: runtime.migrations,
+        appId: clientScope(config),
         slowQueryThresholdMs: config.slowQueryThresholdMs,
         storageOwner: createBrowserStorageOwner(config),
         authSessionKey: createBrowserAuthSessionKey(config),
-        serverUrl: config.serverUrl ? httpUrlToWs(config.serverUrl, config.appId) : undefined,
+        serverUrl: config.serverUrl
+          ? httpUrlToWs(config.serverUrl, clientScope(config))
+          : undefined,
         authJson: JSON.stringify(browserWorkerTransportAuth(config)),
         sessionClaims: sessionFromConfig(config)?.claims ?? {},
         logLevel: config.logLevel,
@@ -395,6 +393,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     selfSignedClientProof?: NativeSelfSignedClientProof,
     backendMode = false,
     slowQueryLog?: SlowQueryLogOptions,
+    migrations?: ClientMigrations,
   ): NativeRuntimeAdapter {
     if (!this.ownerRuntime || this.ownerRuntime.isClosed()) {
       this.ownerRuntime = new NativeRuntimeAdapter(
@@ -404,13 +403,19 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         author,
         1,
         historyComplete,
-        { initialSyncFlushEvery: flushEvery, selfSignedClientProof, backendMode, slowQueryLog },
+        {
+          initialSyncFlushEvery: flushEvery,
+          selfSignedClientProof,
+          backendMode,
+          slowQueryLog,
+          migrations,
+        },
       );
       return this.ownerRuntime;
     }
     return Object.keys(schema).length === 0
       ? this.ownerRuntime
-      : this.ownerRuntime.registerSchemaView(schema);
+      : this.ownerRuntime.registerSchemaView(schema, migrations);
   }
 
   override installTelemetry({
@@ -423,15 +428,6 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       collectorUrl,
       runtimeThread,
     });
-  }
-
-  override mintLocalFirstToken(options: RuntimeTokenOptions): string {
-    return this.wasmModule.mintLocalFirstToken(
-      options.secret,
-      options.audience,
-      options.ttlSeconds,
-      options.nowSeconds,
-    );
   }
 
   override textAnchors(): TextAnchors {

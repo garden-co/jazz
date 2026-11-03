@@ -557,7 +557,8 @@ mod tests {
         CurrentRow {
             table: Arc::from("todos"),
             id: RowUuid::from_bytes([id; 16]),
-            seq: id as u64,
+            seq: crate::db::Pos::at(id as u64),
+            writer: None,
             deleted: false,
             cells: Arc::new(vec![
                 (

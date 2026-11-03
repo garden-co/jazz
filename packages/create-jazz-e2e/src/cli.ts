@@ -76,8 +76,8 @@ async function main(): Promise<void> {
   }
 
   const repoRoot = findRepoRoot();
-  if (cancelReopenSubscriptionProbe && (targets.length !== 1 || targets[0] !== "ts-betterauth")) {
-    console.error(pc.red("--cancel-reopen-subscription-probe requires only ts-betterauth"));
+  if (cancelReopenSubscriptionProbe && (targets.length !== 1 || targets[0] !== "ts-hybrid")) {
+    console.error(pc.red("--cancel-reopen-subscription-probe requires only ts-hybrid"));
     usage();
   }
   const results: RunStarterResult[] = [];

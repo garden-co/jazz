@@ -1,27 +1,17 @@
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { jazzPlugin } from "jazz-tools/dev/vite";
-import { WORKOS_CLIENT_ID } from "./constants.js";
 
-export default defineConfig(({ mode }) => {
-  const { WORKOS_JWT_ISSUER } = loadEnv(mode, process.cwd(), "");
-
-  if (!WORKOS_JWT_ISSUER) {
-    throw new Error(
-      "WORKOS_JWT_ISSUER must exactly match the iss claim in WorkOS access tokens, including any trailing slash or custom AuthKit domain.",
-    );
-  }
-
-  return {
-    plugins: [
-      react(),
-      jazzPlugin({
-        server: {
-          jwksUrl: `https://api.workos.com/sso/jwks/${WORKOS_CLIENT_ID}`,
-          jwtIssuer: WORKOS_JWT_ISSUER,
-          jwtAudience: WORKOS_CLIENT_ID,
-        },
-      }),
-    ],
-  };
+// WorkOS sign-in and Jazz both run in server/server.ts; the browser reaches them on this origin.
+const backend = { target: "http://127.0.0.1:3001", changeOrigin: false };
+export default defineConfig({
+  plugins: [react(), jazzPlugin({ server: false })],
+  server: {
+    host: "127.0.0.1",
+    proxy: {
+      "/auth": backend,
+      "/api/auth": backend,
+      "/jazz": { ...backend, ws: true },
+    },
+  },
 });

@@ -588,6 +588,11 @@ fn a_clean_handoff_reuses_the_node_above_its_high_water() {
     let capability = fixture.admit(&directory.path().join("handoff.sqlite"), "alice", 0xc1);
     let first = fixture.open(&capability);
     let node = fixture.metadata_node(first);
+    assert_eq!(
+        (node[6] >> 4, node[8] >> 6),
+        (4, 0b10),
+        "the pool mints random version-4 nodes"
+    );
     let first_tx = fixture.insert_todo(first, [0xd1; 16], "first lease holder");
     fixture.close(first);
 
@@ -838,12 +843,13 @@ fn pending_upload_count_has_pinned_bytes_and_answers() {
     let fixture = Fixture::new();
     let capability = fixture.admit(&directory.path().join("alice.sqlite"), "alice", 0x11);
     let foreground = fixture.open(&capability);
-    // Without a server nothing is ever uploaded.
+    // A relay with no server decides nothing: the commit stays pending
+    // until a server is added and accepts it.
     fixture.insert_todo(foreground, [0xa1; 16], "local only");
     fixture.tick(foreground);
     assert_eq!(
         fixture.execute(foreground, ForegroundDbCommandRequest::PendingUploadCount),
-        ForegroundDbCommandResponse::PendingUploadCount { count: 0 }
+        ForegroundDbCommandResponse::PendingUploadCount { count: 1 }
     );
     fixture.close(foreground);
 }

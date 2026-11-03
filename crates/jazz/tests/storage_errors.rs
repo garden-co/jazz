@@ -345,7 +345,8 @@ fn a_reopened_replica_resumes_its_subscription_from_its_stored_watermark() {
     );
     let since = sent.iter().find_map(|m| match m {
         SyncMessage::Read {
-            span: ReadSpan::Live { since },
+            since,
+            span: ReadSpan::Live,
             ..
         } => Some(*since),
         _ => None,

@@ -1,4 +1,3 @@
-import { isProvisionalAccount } from "../accounts/enrollment.js";
 import type { JazzSession } from "./state.js";
 import { createListeners, toError } from "../runtime/util.js";
 
@@ -26,62 +25,64 @@ export interface AuthProviderConnection {
   dispose(): void;
 }
 const owners = new WeakMap<object, AuthProviderConnection>();
+/** Where a session keeps the provider key it last admitted, across reloads. */
+export interface ProviderKeyMemory {
+  get(): string | null | undefined;
+  set(key: string | null): void;
+}
+const memories = new WeakMap<object, ProviderKeyMemory>();
+/** @internal Hosts give a session durable memory of its last admitted provider key. */
+export function rememberProviderKeys(session: object, memory: ProviderKeyMemory): void {
+  memories.set(session, memory);
+}
 const releases = new WeakMap<object, Promise<void>>();
 /** @internal Whether an auth provider connection currently drives this session's logins. */
 export function hasAuthProviderConnection(session: object): boolean {
   return owners.has(session);
 }
 
-/** Reconcile a provider with an externally owned Jazz session.
- * Signup, login and restoration atomically login-or-register. For linking an
- * existing local-first account, use manual session.linkJWT without this connector.
+/**
+ * Reconcile your auth's signed-in user with an externally owned Jazz session:
+ * each change of `key` signs in again through the app's backend
+ * (`session.loginWithBackend()`), and `key: null` logs out. To keep a
+ * local-first guest's account on sign-up, call `session.linkWithBackend()`
+ * without this connector.
  */
-export function connectAuthProvider<Client>(
-  session: JazzSession<Client>,
-  options: {
-    getToken(): Promise<string>;
-  },
-): AuthProviderConnection {
+export function connectAuthProvider<Client>(session: JazzSession<Client>): AuthProviderConnection {
   if (owners.has(session)) throw new Error("Jazz session already has an auth provider connection");
   const predecessor = releases.get(session);
   let desired: AuthProviderState = { key: null, isPending: true };
   let snapshot: AuthProviderSnapshot = { ready: false, isPending: true };
   let admitted: string | null | undefined;
+  // The provider key last admitted, even before a reload: a change from it
+  // to another key is a user switch.
+  const memory = memories.get(session);
+  let lastKey: string | null | undefined = memory?.get();
+  const remember = (key: string | null) => {
+    lastKey = key;
+    try {
+      memory?.set(key);
+    } catch {
+      // Storage unavailable; the in-memory key still works.
+    }
+  };
   let attempted: string | null | undefined;
   let generation = 0;
   let disposed = false;
   let running: Promise<void> | undefined;
   let signOut: (() => unknown) | undefined;
   let failure: Error | undefined;
-  /** The retained account an in-flight admission is revalidating in place. */
-  let revalidating: object | undefined;
   const listeners = createListeners();
   function publish() {
     if (disposed) return;
     const current = session.getSnapshot();
     const error = failure ?? desired.error ?? current.error;
-    // A retained account opens before the provider has hydrated. Keep it
-    // usable while the provider hydrates and while its first admission
-    // revalidates it in place; a signed-out provider or a different identity
-    // replaces it through an ordinary transition instead.
-    const provisional =
-      !signOut &&
-      !error &&
-      current.status === "ready" &&
-      current.account !== undefined &&
-      (desired.isPending
-        ? isProvisionalAccount(current.account)
-        : desired.key !== null &&
-          !!running &&
-          attempted === desired.key &&
-          revalidating === current.account);
     const ready =
-      provisional ||
-      (!signOut &&
-        !desired.isPending &&
-        !error &&
-        admitted === desired.key &&
-        (desired.key === null ? current.status === "signed-out" : current.status === "ready"));
+      !signOut &&
+      !desired.isPending &&
+      !error &&
+      admitted === desired.key &&
+      (desired.key === null ? current.status === "signed-out" : current.status === "ready");
     const isPending = !!desired.isPending || !!running || (!error && admitted !== desired.key);
     if (
       snapshot.key === desired.key &&
@@ -108,15 +109,6 @@ export function connectAuthProvider<Client>(
     attempted = key;
     admitted = undefined;
     failure = undefined;
-    const opened = session.getSnapshot();
-    revalidating =
-      key !== null &&
-      opened.status === "ready" &&
-      opened.account !== undefined &&
-      isProvisionalAccount(opened.account)
-        ? opened.account
-        : undefined;
-    let established = false;
     const operation = Promise.resolve().then(async () => {
       await predecessor;
       if (disposed || token !== generation) return;
@@ -124,27 +116,29 @@ export function connectAuthProvider<Client>(
         // A delayed provider notification can acknowledge an already completed logout.
         const current = session.getSnapshot();
         if (current.status !== "signed-out" || current.error) await session.logout();
-      } else
-        await session.loginOrRegisterJWT({
-          async getToken() {
-            if (
-              (!established && (disposed || token !== generation)) ||
-              desired.key !== key ||
-              desired.isPending
-            )
-              throw new Error("Auth provider session changed");
-            const jwt = await options.getToken();
-            if (
-              (!established && (disposed || token !== generation)) ||
-              desired.key !== key ||
-              desired.isPending
-            )
-              throw new Error("Auth provider session changed while fetching a token");
-            return jwt;
-          },
-        });
-      established = true;
-      if (!disposed && token === generation) admitted = key;
+      } else {
+        if (desired.key !== key || desired.isPending)
+          throw new Error("Auth provider session changed");
+        // Switching straight from one signed-in user to another signs the
+        // first one out, so their client closes the way a sign-out does
+        // (and `clearOnSignOut` wipes their storage).
+        const current = session.getSnapshot();
+        const identity = current.account?.identity;
+        const switching =
+          current.status === "ready" &&
+          identity !== undefined &&
+          identity.issuer !== "urn:jazz:local-first" &&
+          identity.issuer !== "urn:jazz:system" &&
+          typeof lastKey === "string" &&
+          lastKey !== key;
+        if (switching) await session.logout();
+        if (disposed || token !== generation) return;
+        await session.loginWithBackend();
+      }
+      if (!disposed && token === generation) {
+        admitted = key;
+        remember(key);
+      }
     });
     const task = operation
       .catch((cause) => {
@@ -153,7 +147,6 @@ export function connectAuthProvider<Client>(
       .finally(() => {
         if (running !== task) return;
         running = undefined;
-        revalidating = undefined;
         publish();
         if (!disposed && token !== generation) void reconcile();
       });
@@ -214,7 +207,10 @@ export function connectAuthProvider<Client>(
         signOut = undefined;
         // Providers may emit null after signOut resolves. Do not re-admit stale state.
         attempted = desired.key === leavingKey || desired.key === null ? desired.key : undefined;
-        if (desired.key === null) admitted = null;
+        if (desired.key === null) {
+          admitted = null;
+          remember(null);
+        }
       });
       running = operation
         .catch((cause) => {

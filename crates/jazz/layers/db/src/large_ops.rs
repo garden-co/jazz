@@ -237,17 +237,20 @@ impl Inner {
     }
 
     /// `delta(a, b)` (SPEC 19.6) between the values `column` of `row` holds
-    /// in its versions `from` and `to`, for a reader allowed to read both.
+    /// in its versions `from` and `to`, for a reader allowed to read both by
+    /// `policies` (a pinned session's bundle, or the current schema).
     /// Only the chunks in changed regions are read.
     pub(crate) fn value_delta(
         &self,
         table: &str,
         row: RowUuid,
         column: &str,
-        (from, to): (u64, u64),
+        (from, to): (sync::Rank, sync::Rank),
         reader: Option<AuthorSubject>,
+        policies: &Schema,
     ) -> Result<Vec<LargeValueDeltaSplice>, Error> {
         let t = self.schema.table(table)?;
+        let governed = policies.table(table)?;
         if !t.branch_by.is_empty() {
             return Err(unsupported("large-value deltas on branched tables"));
         }
@@ -258,7 +261,7 @@ impl Inner {
         let text = crate::large::kind(col) != lv::LargeValueKind::Bytes;
         // Losing read access takes effect at once, for earlier versions too.
         if let Some(author) = reader
-            && !self.check(t, row, &[], author, Operation::Select)?
+            && !self.check_in(policies, governed, row, &[], author, Operation::Select)?
         {
             return Err(Error::new(
                 ErrorCode::NotObserved,
@@ -266,16 +269,24 @@ impl Inner {
             ));
         }
         let mut cells = Vec::with_capacity(2);
-        for seq in [from, to] {
+        for at in [from, to] {
             if let Some(author) = reader
-                && !self.check_version(t, row, &[], seq, author, Operation::Select)?
+                && !self.check_version(
+                    policies,
+                    governed,
+                    row,
+                    &[],
+                    at,
+                    author,
+                    Operation::Select,
+                )?
             {
                 return Err(Error::new(
                     ErrorCode::NotObserved,
-                    format!("version {seq} of the row is not readable"),
+                    format!("version {} of the row is not readable", at.0.seq),
                 ));
             }
-            cells.push(self.version_cell(t, row, &col.stored, seq)?);
+            cells.push(self.version_cell(t, row, &col.stored, at)?);
         }
         fn logical<'a>(chunks: &crate::large::Chunks, cell: &'a Sql) -> Result<Logical<'a>, Error> {
             match cell {
@@ -316,31 +327,49 @@ impl Inner {
         }])
     }
 
-    /// The stored cell `stored` of `row`'s version `seq`, current or in
-    /// history.
-    fn version_cell(&self, t: &Table, row: RowUuid, stored: &str, seq: u64) -> Result<Sql, Error> {
+    /// The stored cell `stored` of `row`'s version at `at`, current or in
+    /// history: a pending one by its writer too, when given, as two
+    /// writers' can share a position.
+    fn version_cell(
+        &self,
+        t: &Table,
+        row: RowUuid,
+        stored: &str,
+        at: sync::Rank,
+    ) -> Result<Sql, Error> {
+        let writer = at.1.filter(|_| !at.0.accepted());
         for table in [t.stored.clone(), format!("{}__h", t.stored)] {
-            let sql = format!(
-                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
-                quote(stored),
-                quote(&table)
-            );
-            let cell: Option<Sql> = self
-                .conn
-                .cached_row(
-                    &sql,
-                    rusqlite::params![row.0.as_bytes().to_vec(), Vec::<u8>::new(), seq as i64],
+            let id = row.0.as_bytes().to_vec();
+            let cell: Option<Sql> = match writer {
+                Some((node, tx)) => self.conn.cached_row(
+                    &format!(
+                        "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3 AND _writer = ?4",
+                        quote(stored),
+                        quote(&table)
+                    ),
+                    rusqlite::params![id, Vec::<u8>::new(), at.0.t(), sync::writer_bytes(node, tx)],
                     |r| r.get(0),
-                )
-                .optional()
-                .map_err(storage)?;
+                ),
+                None => self.conn.cached_row(
+                    &format!(
+                        "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3 \
+                         ORDER BY _writer DESC LIMIT 1",
+                        quote(stored),
+                        quote(&table)
+                    ),
+                    rusqlite::params![id, Vec::<u8>::new(), at.0.t()],
+                    |r| r.get(0),
+                ),
+            }
+            .optional()
+            .map_err(storage)?;
             if let Some(cell) = cell {
                 return Ok(cell);
             }
         }
         Err(Error::new(
             ErrorCode::NotObserved,
-            format!("version {seq} of the row is not held"),
+            format!("version {} of the row is not held", at.0.seq),
         ))
     }
 
@@ -607,12 +636,19 @@ impl Db {
         table: &str,
         row: RowUuid,
         column: &str,
-        from: u64,
-        to: u64,
+        from: Pos,
+        to: Pos,
     ) -> Result<Vec<LargeValueDeltaSplice>, Error> {
         self.fetching(|| {
             let inner = self.inner();
-            inner.value_delta(table, row, column, (from, to), inner.reader())
+            inner.value_delta(
+                table,
+                row,
+                column,
+                ((from, None), (to, None)),
+                inner.reader(),
+                &inner.schema,
+            )
         })
         .await
     }
@@ -1486,7 +1522,11 @@ impl TxRef<'_> {
             StagedOp::Update(table.to_owned(), row, patch, opts),
             edits,
         )?;
-        Ok(WriteHandle { row, seq: 0 })
+        Ok(WriteHandle {
+            row,
+            seq: Pos::default(),
+            tx: 0,
+        })
     }
 }
 
