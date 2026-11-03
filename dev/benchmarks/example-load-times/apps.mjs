@@ -15,8 +15,7 @@ export const generated = join(here, ".generated");
 const next = (dir, port, jwt = {}) => ({ kind: "next", dir, port, jwt });
 const vite = (dir, port) => ({ kind: "vite", dir, port });
 
-// The withJazz / jazzPlugin server options of each app (see its next/vite
-// config), in the docs page's order.
+// The local sync server options of each app, in the docs page's order.
 export const apps = {
   "band-book": next("examples/band-book/apps/nextjs-betterauth", 3461),
   "band-chat": next("examples/band-chat/apps/nextjs-betterauth", 3465, {

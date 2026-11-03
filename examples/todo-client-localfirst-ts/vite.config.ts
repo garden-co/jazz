@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
-import { jazzPlugin } from "jazz-tools/dev/vite";
 
 export default defineConfig({
-  plugins: [jazzPlugin()],
+  // jazz-wasm is wasm-bindgen output, which Vite's dependency pre-bundler cannot handle.
+  optimizeDeps: { exclude: ["jazz-wasm"] },
 });

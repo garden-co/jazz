@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./index.js",
   "scripts": {
-    "start": "expo start --clear",
+    "start": "node ../../examples/with-local-core.mjs expo start --clear",
     "android": "expo run:android",
     "ios": "expo run:ios",
     "build": "jazz-tools validate && tsc --noEmit",
