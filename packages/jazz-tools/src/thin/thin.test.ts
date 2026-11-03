@@ -389,6 +389,47 @@ describe("thin client", () => {
     expect(row?.name).toBe("blob");
     expect(row?.data).toEqual(expected);
   }, 60_000);
+
+  it("streams a large value inside a transaction", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    const size = 150 * 1024;
+    const expected = new Uint8Array(size).map((_, index) => index % 241);
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      for (let offset = 0; offset < size; offset += 40_000) {
+        yield expected.subarray(offset, offset + 40_000);
+      }
+    }
+    const tx = db.beginTransaction();
+    const { id } = await tx.insertStreaming(app.files, {
+      name: "in a transaction",
+      data: chunks(),
+    });
+    expect(await db.all(app.files)).toEqual([]);
+    await tx.commit().wait({ tier: "global" });
+    expect((await db.one(app.files.where({ id })))?.data).toEqual(expected);
+
+    const discarded = db.beginTransaction();
+    await discarded.insertStreaming(app.files, { name: "discarded", data: chunks() });
+    await discarded.rollback();
+    expect((await db.all(app.files)).map((row) => row.name)).toEqual(["in a transaction"]);
+  }, 60_000);
+
+  it("fails the commit when a source throws mid-stream inside a transaction", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    async function* failing(): AsyncGenerator<Uint8Array> {
+      yield new Uint8Array(40_000).fill(7);
+      throw new Error("source broke");
+    }
+    const tx = db.beginTransaction();
+    tx.insert(app.files, { name: "sibling", data: new Uint8Array([1]) });
+    await expect(
+      tx.insertStreaming(app.files, { name: "broken", data: failing() }),
+    ).rejects.toThrow("source broke");
+    await expect(tx.commit().wait({ tier: "global" })).rejects.toThrow();
+    expect(await db.all(app.files)).toEqual([]);
+  }, 60_000);
 });
 
 /** Renew the credential with itself: a thin client reconnects for a new one. */
