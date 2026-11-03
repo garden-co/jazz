@@ -49,6 +49,10 @@ after the first load, with live queries carried over:
   </Tab>
 </Tabs>
 
+A browser that has upgraded this account before opens it local-first straight away, so the app
+works offline on later visits. If a background upgrade fails, the app stays on the thin client and
+logs a warning.
+
 The `import()` stays in your code, so the local-first client and its Wasm are a separate chunk. To
 upgrade only on demand, call `useDb().upgradeToLocalFirst(() => import("jazz-tools/local-first"))`
 instead; see [Upgrading to local-first](/docs/setup/web-client/thin-client#upgrading-to-local-first).
