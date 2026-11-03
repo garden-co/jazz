@@ -34,7 +34,9 @@ const CANONICAL = [
   "> - quoted\n> - list",
   "&#32;   indented by four",
   "&#9;tab first",
-  "First\n\n&#32;\n\nafter an empty paragraph",
+  "First\n\n&#32;\n\nafter a paragraph holding a space",
+  "First\n\n[]()\n\nafter an empty paragraph",
+  "- []()\n- item after an empty one",
   "- item\n- &#32;two spaces",
 ];
 
@@ -118,11 +120,22 @@ describe("toMarkdown", () => {
     const text = toMarkdown(doc).text;
     const back = parse(text);
     expect(back.childCount).toBe(4);
-    expect(back.child(1).textContent.trim()).toBe("");
+    expect(back.child(1).content.size).toBe(0);
+    expect(back.eq(doc)).toBe(true);
     expect(back.child(2).type.name).toBe("paragraph");
     expect(back.child(2).textContent).toBe("    code-like");
     expect(back.child(3).textContent).toBe("\tTabbed");
     expect(toMarkdown(back).text).toBe(text);
+  });
+
+  it("types into an empty paragraph without a stray space", () => {
+    const p = (text?: string) => schema.node("paragraph", null, text ? [schema.text(text)] : []);
+    const typed = schema.node("doc", null, [p("First"), p("Hello"), p("Last")]);
+    const empty = toMarkdown(schema.node("doc", null, [p("First"), p(), p("Last")]));
+    expect(empty.text).toBe("First\n\n[]()\n\nLast");
+    expect(empty.toDoc(empty.text.indexOf("[]()"))).toBe(8);
+    expect(toMarkdown(parse(empty.text)).text).toBe(empty.text);
+    expect(toMarkdown(typed).text).toBe("First\n\nHello\n\nLast");
   });
 
   it("maps an empty document", () => {

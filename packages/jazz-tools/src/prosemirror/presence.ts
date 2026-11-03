@@ -35,21 +35,26 @@ export function capturePresence(state: EditorState, anchors: TextAnchors): Selec
   return empty ? { cursor } : { cursor, selection: captureRange(state, anchors, from, to) };
 }
 
-/** Whether two presences point at the same place, to skip needless writes.
- * Only the text around them counts: when someone else's edit moves the
- * text, the stored presence still finds it. */
+/** Whether two presences point at the same place, to skip needless writes:
+ * the same text around them at the same position. Moving between two places
+ * with the same surroundings is a change. Call it only for this user's own
+ * edits and selections; a merged value moves the positions without moving
+ * the presence, which still finds its text. */
 export function samePresence(a: SelectionPresence | undefined, b: SelectionPresence): boolean {
   if (!a) return false;
-  const text = (presence: SelectionPresence) =>
+  const key = (presence: SelectionPresence) =>
     JSON.stringify([
       presence.cursor.side,
+      presence.cursor.position,
       presence.cursor.before,
       presence.cursor.after,
+      presence.selection?.start,
+      presence.selection?.end,
       presence.selection?.before,
       presence.selection?.matched,
       presence.selection?.after,
     ]);
-  return text(a) === text(b);
+  return key(a) === key(b);
 }
 
 /** Overlays for collaborators' carets (with their name) and selections. */

@@ -90,6 +90,42 @@ describe("overlays", () => {
     expect(state.doc.textBetween(decoration!.from, decoration!.to)).toBe("5pm");
   });
 
+  it("keeps untouched overlays on their text when a merged value follows local typing", async () => {
+    const wasm = textAnchorsFrom(await loadWasmModule());
+    let resolves = 0;
+    const anchors: TextAnchors = {
+      ...wasm,
+      resolveRange: (...args) => {
+        resolves++;
+        return wasm.resolveRange(...args);
+      },
+    };
+    let state = editor("Load-in at noon.\n\nDoors at eight.", anchors);
+    const range = (text: string) => {
+      const from = docPosition(state, "Load-in at noon.\n\nDoors at eight.".indexOf(text));
+      return captureRange(state, anchors, from, from + text.length);
+    };
+    state = state.apply(
+      setOverlays(state.tr, [
+        { id: "noon", range: range("noon"), attrs: { class: "c" } },
+        { id: "eight", range: range("eight"), attrs: { class: "c" } },
+      ]),
+    );
+    state = state.apply(state.tr.insertText("Final ", 1));
+    expect(covered(state)).toEqual({ noon: "noon", eight: "eight" });
+
+    resolves = 0;
+    state = state.apply(
+      applyMarkdown(state, "Final Load-in at noon.\n\nDoors at eight.\n\nBring water.")!,
+    );
+    expect(resolves).toBe(0);
+    expect(covered(state)).toEqual({ noon: "noon", eight: "eight" });
+    expect(overlaysOf(state).map((d) => state.doc.textBetween(d.from, d.to))).toEqual([
+      "noon",
+      "eight",
+    ]);
+  });
+
   it("draws a collaborator's caret and selection", async () => {
     const anchors = textAnchorsFrom(await loadWasmModule());
     let theirs = editor("Doors open at 8pm.", anchors);

@@ -75,6 +75,13 @@ describe("markdownSync", () => {
     expect(ed.written).toEqual(["Hello world"]);
   });
 
+  it("types into an empty paragraph as plain text", () => {
+    const ed = editor("First\n\n‸[]()\n\nLast");
+    expect(ed.state.doc.child(1).content.size).toBe(0);
+    ed.local((s) => s.tr.insertText("Hello"));
+    expect(ed.written).toEqual(["First\n\nHello\n\nLast"]);
+  });
+
   it("applies a remote change elsewhere and keeps the cursor", () => {
     const ed = editor("# Notes\n\nFirst paragraph.\n\nSecond ‸paragraph.");
     expect(ed.remote("# Notes\n\nFirst paragraph, edited remotely.\n\nSecond paragraph.")).toBe(

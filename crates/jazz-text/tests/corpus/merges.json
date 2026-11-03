@@ -988,7 +988,7 @@
   {
     "name": "both sides move one block to different places",
     "format": "markdown",
-    "intent": "a block both moved ends up once, nothing else lost, no stray markup (known: a heading marker and full stop are left behind)",
+    "intent": "a block both moved ends up once, nothing else lost, no stray markup (known failure #4646: a heading marker and full stop are left behind)",
     "base": "## Monday\nRehearsal at the studio.\n\n## Tuesday\nRadio interview at noon.\n\n## Wednesday\nTravel to Leeds by van.\n",
     "steps": [
       {
