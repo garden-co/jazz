@@ -8,7 +8,7 @@ import type { ClientMigrations } from "jazz-tools";
 export const migrations: ClientMigrations = {
   "schemas": [
     {
-      "hash": "87e8a46f8c0aa005474006068c148b1d818e4ed43282cd579601f69efb2df7c1",
+      "hash": "8acd8a85eef5015347cfc6ee0024ea14148aebb59869345c4d53a8e390bc6b88",
       "schema": {
         "tables": {
           "better_auth_user": {

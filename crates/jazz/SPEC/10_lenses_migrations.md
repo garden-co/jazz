@@ -657,7 +657,7 @@ schema version.
   that version `v` introduces (a column of a new table, one a lens adds or
   copies, one whose type changed, one added without a lens that continues
   no stored column) is stored as `name~` and the first six hex digits of
-  BLAKE3 over the length-prefixed parts `"column"`, the 16 bytes of `v`'s
+  SHA-256 over the length-prefixed parts `"column"`, the 16 bytes of `v`'s
   compatibility id, and `name`. A table a lens adds is stored as `name~`
   and the same hash over `"table"`, `v`'s compatibility id and `name`. The
   compatibility id is the version id of `v` with its columns sorted by
