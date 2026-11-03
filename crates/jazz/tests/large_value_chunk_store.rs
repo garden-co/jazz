@@ -881,8 +881,8 @@ fn fetched_chunks_are_served_even_when_the_puts_beside_them_fail() {
     }
 }
 
-/// Alice retires her owner before the host asks for another chunk batch.
-/// A new owner for the same file remains able to run its own batch.
+/// Alice retires an in-memory owner with no external chunk store before the
+/// host asks for a no-work batch. Bob's separate live owner remains usable.
 #[test]
 fn retired_owner_refuses_new_host_chunk_io() {
     let (_dir, path) = scratch();
