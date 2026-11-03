@@ -81,7 +81,7 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(read("data/app-id")).toBe("app-1");
     // The server runs as the app and trusts only the workload.
     expect(read("servers.log")).toBe(
-      `1.0.0 server app-1 --port 1625 --data-dir ${root}/data/store ` +
+      `1.0.0 server app-1 --port 1625 --data-dir ${root}/data/store --blobs sqlite ` +
         `--trusted-workload-issuer ${trust.issuer} --trusted-workload-audience ${trust.audience} ` +
         `--trusted-workload-subject ${trust.subject}`,
     );

@@ -22,7 +22,7 @@ import type {
   ColumnBuilderInitValue,
   ColumnTransform,
 } from "./dsl.js";
-import { blake3 } from "@noble/hashes/blake3.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { hasExternalProvenanceNameAllowance, isComputedColumn } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
@@ -2334,7 +2334,7 @@ function derivedUnionArmLabel(relation: BuiltRelation): string {
   // Hash the typed canonical relation instead of embedding JSON: Date, bigint
   // and byte values have non-JSON semantics, and a large literal must not turn
   // a valid array union into an overlong inferred label.
-  return `derived:${bytesToHex(blake3(utf8.encode(canonicalUnionRelation(relation))))}`;
+  return `derived:${bytesToHex(sha256(utf8.encode(canonicalUnionRelation(relation))))}`;
 }
 
 function canonicalUnionRelation(relation: BuiltRelation): string {

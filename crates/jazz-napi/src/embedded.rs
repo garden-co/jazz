@@ -7,7 +7,9 @@
 use std::sync::{Arc, Mutex};
 
 use jazz::tools::AppId;
-use jazz_server::{AuthConfig, EmbeddedOutgoing, EmbeddedServer, ServerBuilder, StorageBackend};
+use jazz_server::{
+    AuthConfig, BlobStore, EmbeddedOutgoing, EmbeddedServer, ServerBuilder, StorageBackend,
+};
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
@@ -21,6 +23,11 @@ struct JazzCoreOpenOptions {
     admin_secret: String,
     data_dir: Option<String>,
     in_memory: Option<bool>,
+    /// `"files"` or `"sqlite"` (the default): where settled large-value
+    /// bytes of a persistent core live.
+    blobs: Option<String>,
+    /// The directory for `blobs: "files"`; defaults to `<dataDir>/blobs`.
+    blobs_dir: Option<String>,
     jwt_public_key: Option<String>,
     jwt_issuer: Option<String>,
     jwt_audience: Option<String>,
@@ -57,7 +64,7 @@ impl JazzCore {
     /// Open the core's storage and serve it in this process.
     #[napi(
         factory,
-        ts_args_type = "options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; jwtPublicKey?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }",
+        ts_args_type = "options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: \"files\" | \"sqlite\"; blobsDir?: string; jwtPublicKey?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }",
         ts_return_type = "Promise<JazzCore>"
     )]
     pub async fn open(options: serde_json::Value) -> napi::Result<Self> {
@@ -88,9 +95,26 @@ impl JazzCore {
                 path: data_dir.into(),
             }
         };
+        let blobs = match (opts.blobs.as_deref(), opts.blobs_dir) {
+            (None | Some("sqlite"), None) => BlobStore::Sqlite,
+            (Some("files"), dir) => BlobStore::Files {
+                dir: dir.map(Into::into),
+            },
+            (Some("sqlite") | None, Some(_)) => {
+                return Err(napi::Error::from_reason(
+                    "JazzCore: blobsDir needs blobs: \"files\"",
+                ));
+            }
+            (Some(other), _) => {
+                return Err(napi::Error::from_reason(format!(
+                    "JazzCore: blobs must be \"files\" or \"sqlite\", not {other:?}"
+                )));
+            }
+        };
         let built = ServerBuilder::new(app_id)
             .with_auth_config(auth_config)
             .with_storage(storage)
+            .with_blob_store(blobs)
             .build()
             .await
             .map_err(napi::Error::from_reason)?;

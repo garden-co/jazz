@@ -1,4 +1,4 @@
-import { blake3 } from "@noble/hashes/blake3.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import type { WasmRow } from "../drivers/types.js";
@@ -29,7 +29,7 @@ it("pins windowed UNION labels while retaining the legacy unmodified label", () 
     const expected = fixture.cases[index]!;
     const bytes = Buffer.from(expected.utf8_hex, "hex");
     expect(bytes.toString("utf8")).toBe(expected.preimage);
-    expect(`derived:${Buffer.from(blake3(bytes)).toString("hex")}`).toBe(expected.label);
+    expect(`derived:${Buffer.from(sha256(bytes)).toString("hex")}`).toBe(expected.label);
     expect(JSON.parse(app.union([seed])._build()).union.inputs[0].label).toBe(expected.label);
   }
 });

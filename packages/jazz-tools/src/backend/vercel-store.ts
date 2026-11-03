@@ -90,7 +90,7 @@ export interface SandboxHandle {
 /** The shape `createJazz` drives a core through (see `Core` in create-jazz.ts). */
 export interface VercelCore {
   /** The app id the core runs as (see `VercelStoreOptions.appId`). */
-  readonly appId?: string;
+  readonly appId: string;
   readonly serverUrl: string;
   readonly adminSecret: string;
   readonly backendSecret: string;
@@ -269,8 +269,10 @@ find "$data/bin" -name 'jazz-tools-*' ! -name "jazz-tools-$version" -delete
 printf '%s\\n' "$version" > "$run/jazz.version"
 echo $$ > "$run/jazz.pid"
 exec 9>&-
-# The core admits only the deploying function's own workload.
-exec "$bin" server "$app_id" --port ${VERCEL_CORE_PORT} --data-dir "$data/store" \\
+# The core admits only the deploying function's own workload. Large values
+# stay in its SQLite file until blob stores reach the Sandbox (they can move
+# out from there later).
+exec "$bin" server "$app_id" --port ${VERCEL_CORE_PORT} --data-dir "$data/store" --blobs sqlite \\
   --trusted-workload-issuer ${q(trust.issuer)} \\
   --trusted-workload-audience ${q(trust.audience)} \\
   --trusted-workload-subject ${q(trust.subject)}
@@ -397,8 +399,6 @@ async function installedVersion(): Promise<string> {
 }
 
 export interface OpenVercelCoreOptions {
-  /** Used when the store has no `appId` of its own. */
-  appId?: string;
   options: VercelStoreOptions;
   openRemote: OpenRemote;
   sdk?: SandboxSdk;
@@ -408,7 +408,7 @@ export interface OpenVercelCoreOptions {
 
 export async function openVercelCore(params: OpenVercelCoreOptions): Promise<VercelCore> {
   const { options, openRemote } = params;
-  const appId = options.appId ?? params.appId;
+  const appId = options.appId;
   const env = params.env ?? process.env;
   const sdk =
     params.sdk ??

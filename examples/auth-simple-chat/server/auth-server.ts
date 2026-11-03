@@ -54,10 +54,11 @@ export async function startAuthServer(options: AuthServerOptions = {}): Promise<
   // 2. Jazz runs inside this server. `authenticate` reads the same cookie,
   // so the browser never holds a Jazz credential; the role becomes a claim.
   const jazz = await createJazz({
-    appId: options.appId ?? DEFAULT_APP_ID,
     app: schema,
     permissions,
-    store: options.dataDir ? sqlite({ path: options.dataDir }) : memory(),
+    store: options.dataDir
+      ? sqlite({ path: options.dataDir, appId: options.appId ?? DEFAULT_APP_ID })
+      : memory({ appId: options.appId ?? DEFAULT_APP_ID }),
     authenticate: (request) => {
       const user = userFromCookie(request.headers.get("cookie"));
       return user ? { userId: user.userId, claims: { role: user.role } } : null;
