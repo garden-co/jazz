@@ -210,6 +210,7 @@ async fn replay_admin_catalogue(
     let mut migrations = Vec::new();
     let mut bundles: HashMap<String, Json> = HashMap::new();
     let mut head: Option<Json> = None;
+    let mut rehashed = HashMap::new();
     for entry in entries {
         let payload: Json = serde_json::from_str(&entry.payload_json).map_err(err)?;
         let meta = |key: &str| {
@@ -221,7 +222,9 @@ async fn replay_admin_catalogue(
         };
         match entry.object_type.as_str() {
             "catalogue_schema" => {
-                schemas.push(json!({ "hash": meta("schema_hash")?, "schema": payload }));
+                let hash = schema_hash(&payload)?;
+                rehashed.insert(meta("schema_hash")?, hash.clone());
+                schemas.push(json!({ "hash": hash, "schema": payload }));
             }
             "catalogue_lens" => {
                 if payload["draft_ops"]
@@ -251,6 +254,17 @@ async fn replay_admin_catalogue(
             other => return Err(format!("unknown admin catalogue entry type {other}")),
         }
     }
+    let rehash = |hash: &Json| -> Result<Json, String> {
+        let hash = hash.as_str().ok_or("schema hash is not a string")?;
+        rehashed
+            .get(hash)
+            .map(|hash| json!(hash))
+            .ok_or(format!("schema {hash} is missing from the dump"))
+    };
+    for migration in &mut migrations {
+        migration["fromHash"] = rehash(&migration["fromHash"])?;
+        migration["toHash"] = rehash(&migration["toHash"])?;
+    }
     let Some(head) = head else {
         if schemas.is_empty() {
             return Ok(0);
@@ -275,7 +289,7 @@ async fn replay_admin_catalogue(
         migrate_import_deploy(
             state,
             json!({
-                "targetSchemaHash": bundle["schema_hash"],
+                "targetSchemaHash": rehash(&bundle["schema_hash"])?,
                 "schemas": schemas,
                 "migrations": migrations,
                 "permissions": bundle["permissions"],
@@ -285,6 +299,14 @@ async fn replay_admin_catalogue(
         .map_err(|error| format!("permissions bundle v{}: {error}", bundle["version"]))?;
     }
     Ok(chain.len())
+}
+
+/// A schema's hash as the SQLite engine computes it. alpha.59's catalogue
+/// keys schemas by its own hash function, which need not be the same.
+pub(crate) fn schema_hash(schema: &Json) -> Result<String, String> {
+    let schema: jazz::tools::public_schema::Schema =
+        serde_json::from_value(schema.clone()).map_err(|error| format!("schema: {error}"))?;
+    Ok(jazz::tools::public_schema::SchemaHash::compute(&schema).to_string())
 }
 
 /// alpha.59's admin `LensTransform` back into the `POST /admin/migrations`

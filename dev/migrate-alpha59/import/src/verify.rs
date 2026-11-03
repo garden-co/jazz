@@ -26,7 +26,7 @@ use jazz_server::{ServerBuilder, ServerState, StorageBackend};
 use migrate_alpha59_dump as dump;
 use serde_json::{Value as Json, json};
 
-use crate::{Args, convert_author, convert_value, err, match_schemas, uuid_string};
+use crate::{Args, convert_author, convert_value, err, match_schemas, schema_hash, uuid_string};
 
 const MAX_REPORTED: usize = 20;
 
@@ -172,8 +172,16 @@ fn verify_permissions(
                 })
                 .ok_or("the head's permissions bundle is missing from the dump")?;
             let bundle = payload(bundle).map_err(err)?;
+            let schema = admin
+                .iter()
+                .filter(|entry| entry.object_type == "catalogue_schema")
+                .find(|entry| {
+                    entry.metadata.get("schema_hash").map(String::as_str)
+                        == bundle["schema_hash"].as_str()
+                })
+                .ok_or("the head's schema is missing from the dump")?;
             json!({
-                "schema_hash": bundle["schema_hash"],
+                "schema_hash": schema_hash(&payload(schema).map_err(err)?)?,
                 "version": bundle["version"],
                 "permissions": bundle["permissions"],
             })
