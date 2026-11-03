@@ -990,11 +990,14 @@ impl ServerRuntimeHandle {
         self.inner.activity.send_modify(|n| *n = n.wrapping_add(1));
     }
 
-    /// Admit an authenticated session.
+    /// Admit an authenticated session, pinned to `bundle` when its backend
+    /// pinned it (see [`jazz::catalogue`]).
+    #[allow(clippy::too_many_arguments)]
     pub async fn open_with_session_context(
         &self,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
+        bundle: Option<jazz::catalogue::BundleId>,
         trust: CommitUnitTrust,
         _negotiated_features: WireFeatures,
         _session_context: Option<ConnectionSessionContext>,
@@ -1031,7 +1034,9 @@ impl ServerRuntimeHandle {
             },
         );
         let opened = self
-            .run(move |owner| owner.open_session(session, served_as, claims, output, egress))
+            .run(move |owner| {
+                owner.open_session(session, served_as, claims, bundle, output, egress)
+            })
             .await;
         if opened.is_err() {
             self.edges()?.remove(&session);
@@ -1334,8 +1339,9 @@ struct Owner {
 struct OwnerSession {
     subscriber: SubscriberId,
     /// A session under its own identity (not a trusted backend or
-    /// authority link).
-    untrusted: bool,
+    /// authority link) and not pinned to a bundle: its reads wait for the
+    /// permissions head.
+    awaits_permissions: bool,
     /// Reads held until the permissions head is published, in order.
     held: VecDeque<SyncMessage>,
     /// The parts of a message split across frames, until its last part.
@@ -1646,6 +1652,7 @@ impl Owner {
         session: ServerSession,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
+        bundle: Option<jazz::catalogue::BundleId>,
         output: tokio_mpsc::UnboundedSender<Outbound>,
         egress: Arc<AtomicUsize>,
     ) -> Result<(), String> {
@@ -1663,17 +1670,20 @@ impl Owner {
         });
         let subscriber = self
             .db
-            .accept_subscriber_with_claims(
+            .accept_pinned_subscriber(
                 Box::new(SessionTransport(Rc::clone(&queues))),
                 identity,
                 claims,
+                bundle,
             )
             .map_err(|error| error.to_string())?;
         self.sessions.insert(
             session,
             OwnerSession {
                 subscriber,
-                untrusted: identity != AuthorSubject::SYSTEM,
+                // A pinned session's bundle is published already: it does
+                // not wait for the current permissions.
+                awaits_permissions: identity != AuthorSubject::SYSTEM && bundle.is_none(),
                 held: VecDeque::new(),
                 // An untrusted peer's split message must fit the budget
                 // its frames are admitted against (SPEC 8.1).
@@ -1696,7 +1706,7 @@ impl Owner {
         let Some(owner_session) = self.sessions.get(&session) else {
             return;
         };
-        let gated = self.awaiting_permissions && owner_session.untrusted;
+        let gated = self.awaiting_permissions && owner_session.awaits_permissions;
         let Some(owner_session) = self.sessions.get_mut(&session) else {
             return;
         };
@@ -2004,6 +2014,7 @@ mod tests {
                 ServerSession(1),
                 AuthorSubject::SYSTEM,
                 BTreeMap::new(),
+                None,
                 output,
                 Arc::default(),
             )?;
