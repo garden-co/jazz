@@ -89,8 +89,6 @@ export async function createAccountManager(config: AccountManagerConfig) {
     appId: scope,
     registry,
     store,
-    // A thin client has no local data to reopen before the provider answers.
-    retainAccountAssignment: false,
     mintToken(secret, audience) {
       return mintSelfSignedToken(LOCAL_FIRST_ISSUER, {
         secret: authSecretSeedForMinting(secret),
