@@ -230,6 +230,7 @@ jobs:
           - poster-shop
           - record-player
           - music-agent
+          - music-agent-hono
           - big-label
     steps:
       - name: Skip if variant doesn't match dispatch filter
