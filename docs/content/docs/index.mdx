@@ -3,6 +3,8 @@ title: Overview
 description: "Get a first glimpse of how to set Jazz up and how to use it from the server and clients."
 ---
 
+Jazz is a relational database that runs inside your backend, with real-time queries and permissions built in. Query and update data from your server or directly from your frontend, using a thin client or a local-first client for offline support.
+
 Every Jazz app is defined first by its database schema and permission policies. They're verbose, but agents are good at writing and checking them.
 
 ```ts title="schema.ts"
@@ -240,7 +242,7 @@ Set up the client: [Thin Client](/docs/setup/web-client/thin-client) (the defaul
   Preview: rough sketches of each scenario; each will link to a short path through the docs.
 </Callout>
 
-- **A backend with live data.** Your API or server components read and write through Jazz instead of an ORM, with permissions checked per user and live queries pushed to the browser. Path: [Quickstart](/docs/setup/run-locally) → [User-scoped backend](/docs/setup/backend/user-scoped) → [Policies](/docs/schemas/policies) → [Thin client](/docs/setup/web-client/thin-client).
+- **A backend with live data.** Your API or server components read from and write to Jazz directly, with permissions checked per user and live queries pushed to the browser. Path: [Quickstart](/docs/setup/run-locally) → [User-scoped backend](/docs/setup/backend/user-scoped) → [Policies](/docs/schemas/policies) → [Thin client](/docs/setup/web-client/thin-client).
 - **A collaborative app.** Shared lists, boards or documents that several people edit at once, with mergeable text and edit history. Path: [Mergeable text](/docs/writing/text) → [Shared access](/docs/recipes/access-control/shared-access) → [Edit metadata](/docs/reading/metadata).
 - **An app that works offline.** Field tools, note-taking or mobile apps that keep working without a connection. Path: start thin, then [go local-first](/docs/recipes/local-first) on the screens that need it, or use the [React Native client](/docs/setup/react-native).
 - **Agents and automations.** Background jobs and AI agents that read and write the same data as your users, attributed and permission-checked. Path: [Backend Client](/docs/setup/backend-client) → [How Auth Works](/docs/setup/auth/backend#the-session) → [CLI & MCP](/docs/tooling/cli-and-mcp).
