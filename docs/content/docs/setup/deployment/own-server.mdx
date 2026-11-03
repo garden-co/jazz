@@ -120,9 +120,6 @@ it contains. If your app uses a separate application session cookie, resolve it 
 and obtain an admitted account handle from its JWT. Pass that handle to `await client.forAccount(account)`;
 `forRequest` accepts bearer headers and does not parse application session cookies.
 
-If you prefer to start the database server programmatically, you can use `startLocalJazzServer` from `jazz-tools/dev`.
-It expects similar arguments as the CLI.
-
 See [Monitoring](/docs/operating/monitoring) for heap profiling and diagnostics.
 
 ## Edge-style Wasm setup
