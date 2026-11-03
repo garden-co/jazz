@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, vi } from "vitest";
 import { structuralSchemaHash } from "../../src/dev/schema-utils.js";
-import { createMigration as rawCreateMigration, deploy as rawDeploy } from "../../src/cli.js";
+import { createMigration as rawCreateMigration } from "../../src/cli.js";
 
 export function createCliFixtures(moduleUrl: string) {
   const dslPath = fileURLToPath(new URL("./dsl.ts", moduleUrl));
@@ -31,8 +31,6 @@ export function createCliFixtures(moduleUrl: string) {
 
   const createMigration = (options: Parameters<typeof rawCreateMigration>[0]) =>
     rawCreateMigration(withAppId(options));
-  const deploy = (options: Omit<Parameters<typeof rawDeploy>[0], "appId"> & { appId?: string }) =>
-    rawDeploy(withAppId(options));
 
   afterEach(async () => {
     vi.unstubAllGlobals();
@@ -678,7 +676,6 @@ export default {
     tempRoots,
     APP_ID,
     createMigration,
-    deploy,
     withAppId,
     createWorkspace,
     fileExists,
