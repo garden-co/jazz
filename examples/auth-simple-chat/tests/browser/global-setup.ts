@@ -3,6 +3,7 @@ import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-t
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
 import { TEST_ADMIN_SECRET, TEST_APP_ID } from "./test-constants.js";
+import { TEST_JWT_AUDIENCE, TEST_JWT_ISSUER } from "./jwt.js";
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -42,6 +43,8 @@ export async function setup(): Promise<void> {
     port: jazzPort,
     adminSecret: TEST_ADMIN_SECRET,
     jwksUrl,
+    jwtIssuer: TEST_JWT_ISSUER,
+    jwtAudience: TEST_JWT_AUDIENCE,
   });
 
   const handle = await jazzServer;

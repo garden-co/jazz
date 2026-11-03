@@ -1,3 +1,5 @@
+import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
+import { clientScope } from "../runtime/client-scope.js";
 import { accountRegistryUrl } from "../accounts/context.js";
 import { NapiDb } from "jazz-napi";
 import type { JWK } from "jose";
@@ -89,6 +91,8 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver"> & {
    * backend can create local-first accounts.
    */
   allowLocalFirstAuth?: boolean;
+  /** @internal How the runtime opens its server socket (a backend client's credentialed one). */
+  webSocket?: WebSocketConstructor;
 } & BackendContextSchemaConfig;
 
 type ResolvedBackendContextConfig = BackendContextConfig & {
@@ -232,6 +236,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
         readAuthorizationHost: "trusted-serving",
         backendMode: true,
         systemNode,
+        webSocket: this.config.webSocket,
         slowQueryLog: {
           appId: this.config.appId,
           thresholdMs: this.config.slowQueryThresholdMs,
@@ -248,7 +253,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     this.client = JazzClient.connectWithRuntime(
       this.runtime,
       {
-        appId: config.appId,
+        appId: clientScope(config),
         schema,
         serverUrl: config.serverUrl,
         env: config.env,

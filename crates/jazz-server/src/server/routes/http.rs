@@ -398,10 +398,36 @@ pub(super) async fn deploy_handler(
         axum::extract::rejection::JsonRejection,
     >,
 ) -> Response {
+    deploy_route(state, headers, body, true).await
+}
+
+/// `/bundles`: publish a deployment as a permissions bundle that sessions
+/// are pinned to, activating nothing (createJazz). A server that predates
+/// bundles answers 404 here instead of activating it.
+pub(super) async fn publish_bundle_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    body: Result<
+        Json<crate::server::deployment::DeployRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    deploy_route(state, headers, body, false).await
+}
+
+async fn deploy_route(
+    state: Arc<ServerState>,
+    headers: HeaderMap,
+    body: Result<
+        Json<crate::server::deployment::DeployRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+    activate: bool,
+) -> Response {
     if let Err(response) = require_admin(&state, &headers) {
         return response;
     }
-    let request = match body {
+    let mut request = match body {
         Ok(Json(request)) => request,
         Err(error) => {
             let status = if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
@@ -412,6 +438,7 @@ pub(super) async fn deploy_handler(
             return (status, Json(ErrorResponse::bad_request(error.body_text()))).into_response();
         }
     };
+    request.activate = activate;
     match tokio::spawn(crate::server::deployment::deploy(state, request)).await {
         Ok(Ok(response)) => (StatusCode::OK, Json(response)).into_response(),
         Ok(Err(error)) => (error.status, Json(error.body)).into_response(),

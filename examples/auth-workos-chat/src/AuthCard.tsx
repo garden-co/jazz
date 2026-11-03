@@ -1,10 +1,10 @@
-import type { User } from "@workos-inc/authkit-react";
+import type { WorkOSUser } from "./session.js";
 import { CHAT_ID } from "../constants.js";
 
 export type AuthCardProps = {
   role: string | null;
   statusDetail: string;
-  user: User | null;
+  user: WorkOSUser | null;
   onSignIn: () => void | Promise<void>;
   onSignOut: () => void | Promise<void>;
 };

@@ -34,9 +34,9 @@ When Alice inserts a task it appears in her UI instantly, syncs to the server, a
 
 <Accordions type="single">
 <Accordion title="How sync and conflicts work">
-When two users edit the same row concurrently, Jazz merges per column. Each column resolves independently, so if Alice updates `title` while Bob updates `done`, both changes are preserved. If they both update `title` from the same starting point, [the edit the server receives first wins](/docs/concepts/how-sync-works#concurrent-edits) and the other is kept in the row's history.
+When two users edit the same row concurrently, Jazz merges per column. Each column resolves independently, so if Alice updates `title` while Bob updates `done`, both changes are preserved. If they both update `title` from the same starting point, [the edit the server receives first wins](/docs/recipes/local-first/local-first-data-model#concurrent-edits) and the other is kept in the row's history.
 
-For most applications this is the right default. See [How sync works](/docs/concepts/how-sync-works) for more detail.
+For most applications this is the right default. See [How sync works](/docs/how-jazz-works) for more detail.
 
 </Accordion>
 </Accordions>

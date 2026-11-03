@@ -34,10 +34,7 @@ async function fixture(fail: false | "unknown" | "graceful" = false) {
   const accounts = new AccountManager(
     {
       createLocalFirst: () => account,
-      registerJWT: async () => account,
-      loginJWT: async () => account,
-      loginOrRegisterJWT: async () => account,
-      linkJWT: async () => account,
+      loginWithBackend: async () => account,
     },
     account,
   );
@@ -93,7 +90,6 @@ describe("Vue ergonomic app", () => {
     const { session } = await fixture();
     mocks.factory.mockReset().mockResolvedValue(session);
     const version = shallowRef(0);
-    const getToken = vi.fn(async () => "token");
     const logout = vi.fn();
     const node = document.createElement("div");
     const app = createApp({
@@ -101,7 +97,7 @@ describe("Vue ergonomic app", () => {
         h(JazzProvider, {
           appId: `test-${version.value}`,
           autoAttachDevTools: false,
-          auth: { kind: "jwt", key: null, isPending: true, getToken, logout },
+          auth: { kind: "backend", key: null, isPending: true, logout },
         }),
     });
     app.mount(node);
@@ -111,7 +107,6 @@ describe("Vue ergonomic app", () => {
     expect(mocks.factory).toHaveBeenCalledTimes(1);
     expect(mocks.factory.mock.calls[0][0].appId).toBe("test-0");
     expect(mocks.factory.mock.calls[0][0].initial).toBeUndefined();
-    expect(getToken).not.toHaveBeenCalled();
     expect(node.textContent).toContain("Loading Jazz");
     app.unmount();
     await flush();
@@ -171,10 +166,9 @@ it("hides private render before pending prop commits", async () => {
           appId: "test",
           autoAttachDevTools: false,
           auth: {
-            kind: "jwt",
+            kind: "backend",
             key: "a",
             isPending: pending.value,
-            getToken: async () => "token",
             logout: () => {},
           },
         },
@@ -195,4 +189,51 @@ it("hides private render before pending prop commits", async () => {
   expect(seen).not.toContain(true);
   app.unmount();
   await flush();
+});
+
+it("follows the `user` prop: loading, signed in, signed out", async () => {
+  mocks.factory.mockReset();
+  let backendUser = "";
+  const handle = (id: string) =>
+    ({ id, identity: { issuer: "test", subject: id } }) as AccountHandle;
+  const session = await createJazzSessionOwner({
+    accounts: new AccountManager({
+      logout: () => {},
+      loginWithBackend: async () => handle(backendUser),
+    } as never),
+    openClient: async () =>
+      ({
+        db: { onAuthChanged: () => () => {} } as never,
+        session: null,
+        shutdown: async () => {},
+      }) as JazzClient,
+  });
+  mocks.factory.mockResolvedValue(session);
+  const user = shallowRef<string | null | undefined>(undefined);
+  const node = document.createElement("div");
+  const app = createApp({
+    render: () =>
+      h(
+        JazzProvider,
+        { user: user.value, autoAttachDevTools: false },
+        {
+          default: () => h("p", "PRIVATE"),
+          signedOut: () => h("p", "SIGN IN"),
+          loading: () => h("p", "WAIT"),
+        },
+      ),
+  });
+  app.mount(node);
+  await flush();
+  expect(node.textContent).toBe("WAIT");
+  expect(mocks.factory).toHaveBeenCalledWith(expect.objectContaining({ initial: undefined }));
+  backendUser = "a";
+  user.value = "a";
+  await flush();
+  expect(node.textContent).toBe("PRIVATE");
+  expect(session.getSnapshot().account?.identity.subject).toBe("a");
+  user.value = null;
+  await flush();
+  expect(node.textContent).toBe("SIGN IN");
+  app.unmount();
 });

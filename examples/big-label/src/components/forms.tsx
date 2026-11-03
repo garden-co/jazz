@@ -6,7 +6,6 @@ import { useAll, useDb } from "jazz-tools/react";
 import { app } from "../../schema";
 import { artistStatuses, genres, releaseFormats, releaseStatuses, searchKey } from "../fixtures";
 import { nextCatalogNumber, saveRelease } from "../lib/mutations";
-import { getJwtFromBetterAuth } from "../lib/auth-client";
 import { useOrganization } from "../lib/organization";
 import { useWrite } from "../lib/use-write";
 import { roleLabels, type Role } from "../roles";
@@ -353,11 +352,11 @@ const addMemberErrors: Record<string, string> = {
 
 /** Returns an error message, or nothing when the member was added. */
 async function addMember(input: { organizationId: string; email: string; role: Role }) {
-  const token = await getJwtFromBetterAuth();
-  if (!token) return "Your session has expired. Sign in again.";
+  // The session cookie is the only credential the route needs.
   const response = await fetch("/api/members", {
     method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    credentials: "same-origin",
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
   });
   if (response.ok) return undefined;
