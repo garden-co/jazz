@@ -83,6 +83,9 @@ pub enum BlobStore {
     /// and prefix belong to this data directory alone: a store deletes the
     /// values it reclaims.
     S3(crate::s3::S3Options),
+    /// As private blobs in a Vercel Blob store ([`crate::vercel_blob`]),
+    /// under a prefix that belongs to this data directory alone.
+    VercelBlob(crate::vercel_blob::VercelBlobOptions),
 }
 
 /// Records which [`BlobStore`] a data directory was started with.
@@ -360,6 +363,11 @@ impl ServerBuilder {
                         options.prefix = format!("jazz/{}/{}/", self.app_id, store_id(path)?);
                         BlobStore::S3(options)
                     }
+                    BlobStore::VercelBlob(options) if options.prefix.is_empty() => {
+                        let mut options = options.clone();
+                        options.prefix = format!("jazz/{}/{}/", self.app_id, store_id(path)?);
+                        BlobStore::VercelBlob(options)
+                    }
                     blobs => blobs.clone(),
                 };
                 let plan = plan_blob_store(path, &blobs)?;
@@ -371,6 +379,18 @@ impl ServerBuilder {
                     (None, BlobStore::S3(options)) => {
                         warn_on_distant_bucket(options);
                         let store = crate::s3::S3ChunkStore::new(options.clone(), store_id(path)?)?;
+                        StorageConfig::data_dir(path).with_blobs(crate::runtime::Blobs::Network(
+                            crate::runtime::NetworkChunkStore {
+                                store: Arc::new(store),
+                                name: options.describe(),
+                            },
+                        ))
+                    }
+                    (None, BlobStore::VercelBlob(options)) => {
+                        let store = crate::vercel_blob::VercelBlobChunkStore::new(
+                            options.clone(),
+                            store_id(path)?,
+                        )?;
                         StorageConfig::data_dir(path).with_blobs(crate::runtime::Blobs::Network(
                             crate::runtime::NetworkChunkStore {
                                 store: Arc::new(store),
@@ -443,6 +463,7 @@ fn plan_blob_store(data_dir: &Path, blobs: &BlobStore) -> Result<BlobStorePlan, 
             (named, Some(dir))
         }
         BlobStore::S3(options) => (options.describe(), None),
+        BlobStore::VercelBlob(options) => (options.describe(), None),
     };
     if recorded == wanted {
         return Ok(BlobStorePlan {
@@ -1005,6 +1026,36 @@ mod tests {
             recorded.push(marker);
         }
         assert_ne!(recorded[0], recorded[1]);
+    }
+
+    /// A Blob store's default prefix is the data dir's own too.
+    #[tokio::test]
+    async fn a_vercel_blob_store_without_a_prefix_gets_one_per_data_dir() {
+        let app = AppId::from_name("vercel-blob-prefix");
+        let blobs = BlobStore::VercelBlob(crate::vercel_blob::VercelBlobOptions {
+            store_id: "abc".to_owned(),
+            prefix: String::new(),
+            credentials: crate::vercel_blob::VercelBlobCredentials::ReadWriteToken("t".to_owned()),
+            api_url: "http://127.0.0.1:9".to_owned(),
+            blob_url: Some("http://127.0.0.1:9".to_owned()),
+        });
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        ServerBuilder::new(app)
+            .with_storage(StorageBackend::Persistent {
+                path: data_dir.path().to_path_buf(),
+            })
+            .with_blob_store(blobs)
+            .build()
+            .await
+            .expect("start")
+            .shutdown()
+            .await;
+        let id = std::fs::read_to_string(data_dir.path().join(STORE_ID_FILE)).unwrap();
+        let marker = std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap();
+        assert_eq!(
+            marker,
+            format!("vercel-blob abc/jazz/{app}/{}/\n", id.trim())
+        );
     }
 
     #[tokio::test]

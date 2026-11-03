@@ -54,6 +54,62 @@ export function s3(options: Omit<S3BlobStore, "kind"> = {}): S3BlobStore {
   return { kind: "s3", ...Object.fromEntries(set) };
 }
 
+/** A Vercel Blob store for large-value bytes; see {@link vercelBlob}. */
+export interface VercelBlobStore {
+  readonly kind: "vercel-blob";
+  /** Defaults to `BLOB_STORE_ID`, set when a Blob store is connected to the project. */
+  readonly storeId?: string;
+  /**
+   * Prepended to every blob's pathname. Defaults to `jazz/<appId>/<store id>/`,
+   * one per core, so preview and production cores sharing a Blob store never
+   * share blobs. A prefix is claimed by the first core that uses it.
+   */
+  readonly prefix?: string;
+}
+
+/**
+ * Large-value bytes in a Vercel Blob store, for a `vercel()` core (and its
+ * default whenever a Blob store is connected to the project). The core
+ * writes and reads every blob itself, through the app's `/jazz` route, so
+ * nothing but connecting a Blob store is needed: it authenticates with the
+ * function's own OIDC token, and the Sandbox holds only the store's id.
+ * Blobs are private, and each is checked against its SHA-256 when read.
+ */
+export function vercelBlob(options: Omit<VercelBlobStore, "kind"> = {}): VercelBlobStore {
+  const set = Object.entries(options).filter(([, value]) => value !== undefined);
+  return { kind: "vercel-blob", ...Object.fromEntries(set) };
+}
+
+/** What a `vercel()` core is started with for `vercelBlob()`. */
+export interface VercelBlob {
+  storeId: string;
+  prefix?: string;
+}
+
+/**
+ * The Blob store connected to the project: `BLOB_STORE_ID`, or the store a
+ * read-write token is for (`vercel_blob_rw_<store>_<secret>`). Only the id
+ * ever reaches the core, never the token.
+ */
+export function connectedBlobStore(env: Record<string, string | undefined>): string | undefined {
+  const id = env.BLOB_STORE_ID || env.BLOB_READ_WRITE_TOKEN?.split("_")[3] || undefined;
+  return id?.replace(/^store_/, "");
+}
+
+/** Resolve `vercelBlob()` for a `vercel()` core from its options and the function's environment. */
+export function resolveVercelBlob(
+  blobs: VercelBlobStore,
+  env: Record<string, string | undefined>,
+): VercelBlob {
+  const storeId = blobs.storeId?.replace(/^store_/, "") ?? connectedBlobStore(env);
+  if (!storeId) {
+    throw new Error(
+      "vercel({ blobs: vercelBlob() }): BLOB_STORE_ID is not set. Connect a Blob store to this project (Storage tab in the Vercel dashboard), or pass vercelBlob({ storeId }).",
+    );
+  }
+  return { storeId, ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }) };
+}
+
 /** The AWS region a Vercel region runs in. */
 export function awsRegionOfVercel(region: string): string | undefined {
   return VERCEL_TO_AWS[region];

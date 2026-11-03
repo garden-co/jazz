@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolveVercelS3, s3 } from "./blobs.js";
+import { connectedBlobStore, resolveVercelBlob, resolveVercelS3, s3, vercelBlob } from "./blobs.js";
+import { resolveCoreBlobs } from "./vercel-store.js";
 
 describe("s3()", () => {
   it("keeps only the options given", () => {
@@ -28,5 +29,30 @@ describe("s3()", () => {
     expect(() => resolveVercelS3(s3(), "iad1", {})).toThrow(
       /S3_BUCKET_NAME .*AWS_REGION .*AWS_ROLE_ARN not set.*Vercel Marketplace/,
     );
+  });
+});
+
+describe("vercelBlob()", () => {
+  it("finds the project's Blob store by id, never passing a token on", () => {
+    expect(connectedBlobStore({ BLOB_STORE_ID: "store_abc" })).toBe("abc");
+    expect(connectedBlobStore({ BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_xyz_secret" })).toBe("xyz");
+    expect(connectedBlobStore({})).toBeUndefined();
+    expect(resolveVercelBlob(vercelBlob(), { BLOB_STORE_ID: "abc" })).toEqual({ storeId: "abc" });
+    expect(
+      resolveVercelBlob(vercelBlob({ storeId: "store_own", prefix: "p/" }), {
+        BLOB_STORE_ID: "abc",
+      }),
+    ).toEqual({ storeId: "own", prefix: "p/" });
+    expect(() => resolveVercelBlob(vercelBlob(), {})).toThrow(/BLOB_STORE_ID is not set/);
+  });
+
+  it("is a vercel() core's default once a Blob store is connected", () => {
+    const warn = vi.fn();
+    expect(resolveCoreBlobs({}, { BLOB_STORE_ID: "abc" }, warn)).toEqual({ storeId: "abc" });
+    expect(resolveCoreBlobs({ blobs: "sqlite" }, { BLOB_STORE_ID: "abc" }, warn)).toBeUndefined();
+    expect(warn).not.toHaveBeenCalled();
+    // Without one, large values stay in SQLite, and the core says how to move them.
+    expect(resolveCoreBlobs({}, {}, warn)).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/no Blob store is connected/));
   });
 });
