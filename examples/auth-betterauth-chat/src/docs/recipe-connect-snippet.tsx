@@ -10,7 +10,7 @@ export function App() {
   return (
     <JazzProvider
       appId="my-app"
-      serverUrl="wss://your-jazz-server.example.com"
+      serverUrl="/jazz"
       auth={betterAuth(authClient)}
       signedOut={<p>Sign in to continue.</p>}
     >

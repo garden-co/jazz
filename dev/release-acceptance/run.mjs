@@ -253,10 +253,11 @@ try {
   );
   const cliJS = join(dirname(require.resolve("jazz-tools")), "cli.js");
   await command(process.execPath, [cliJS, "validate", "--schema-dir", fixture], "validate.log");
+  // Publishing twice proves a repeated deployment is a no-op.
   for (const attempt of [1, 2])
     await command(
       process.execPath,
-      [cliJS, "deploy", c.appId, "--schema-dir", fixture, "--server-url", c.serverUrl],
+      [join(ownDir, "deploy-fixture.mjs"), dirname(dirname(cliJS)), c.appId, fixture, c.serverUrl],
       `deploy-${attempt}.log`,
       { JAZZ_ADMIN_SECRET: c.adminSecret },
     );

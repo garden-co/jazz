@@ -145,8 +145,41 @@ impl ServerBuilder {
     }
 
     pub async fn build(self) -> Result<BuiltServer, String> {
-        let auth_config = self.auth_config.clone();
+        let mut auth_config = self.auth_config.clone();
         validate_server_config(&auth_config)?;
+        // A trusted workload replaces shared secrets: the server holds random
+        // ones only internally, and a verified token stands in for them.
+        // Otherwise the admin secret doubles as a backend credential, so a
+        // backend needs only that one secret; backend access through it gets
+        // the backend secret, or an internal one when none is configured.
+        use crate::middleware::workload::{BackendCredential, InternalSecrets, WorkloadVerifier};
+        let (backend_credential, workload_secrets) = match (
+            auth_config.trusted_workload.clone(),
+            auth_config.admin_secret.clone(),
+        ) {
+            (Some(workload), _) => {
+                let secrets = InternalSecrets::generate();
+                auth_config.admin_secret = Some(secrets.admin.clone());
+                auth_config.backend_secret = Some(secrets.backend.clone());
+                (
+                    Some(Arc::new(BackendCredential::Workload(Box::new(
+                        WorkloadVerifier::new(workload),
+                    )))),
+                    Some(secrets),
+                )
+            }
+            (None, Some(admin)) => {
+                let backend = auth_config
+                    .backend_secret
+                    .get_or_insert_with(|| InternalSecrets::generate().backend)
+                    .clone();
+                (
+                    Some(Arc::new(BackendCredential::AdminSecret(admin.clone()))),
+                    Some(InternalSecrets { admin, backend }),
+                )
+            }
+            (None, None) => (None, None),
+        };
         if self.max_websocket_connections == 0 {
             return Err("max websocket connections must be at least 1".to_owned());
         }
@@ -174,6 +207,8 @@ impl ServerBuilder {
             app_id: self.app_id,
             auth_config,
             jwt_verifier,
+            backend_credential,
+            workload_secrets,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
             websocket_admissions: Arc::new(
                 crate::server::routes::WebSocketAdmissionState::default(),
@@ -409,6 +444,23 @@ fn validate_server_config(auth_config: &AuthConfig) -> Result<(), String> {
         _ => {}
     }
 
+    if let Some(workload) = &auth_config.trusted_workload {
+        if auth_config.admin_secret.is_some() || auth_config.backend_secret.is_some() {
+            return Err(
+                "a trusted workload replaces the admin and backend secrets; configure one or the other"
+                    .to_owned(),
+            );
+        }
+        for (name, value) in [
+            ("issuer", &workload.issuer),
+            ("audience", &workload.audience),
+            ("subject", &workload.subject),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("trusted workload {name} cannot be empty"));
+            }
+        }
+    }
     if auth_config
         .admin_secret
         .as_deref()
@@ -523,6 +575,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn builder_refuses_shared_secrets_next_to_a_trusted_workload() {
+        let workload = crate::middleware::workload::TrustedWorkload {
+            issuer: "https://oidc.example".to_owned(),
+            audience: "aud".to_owned(),
+            subject: "sub".to_owned(),
+        };
+        let config = AuthConfig {
+            trusted_workload: Some(workload.clone()),
+            backend_secret: Some("shared".to_owned()),
+            ..AuthConfig::default()
+        };
+        assert!(
+            validate_server_config(&config)
+                .unwrap_err()
+                .contains("trusted workload")
+        );
+        let blank = AuthConfig {
+            trusted_workload: Some(crate::middleware::workload::TrustedWorkload {
+                subject: " ".to_owned(),
+                ..workload
+            }),
+            ..AuthConfig::default()
+        };
+        assert!(
+            validate_server_config(&blank)
+                .unwrap_err()
+                .contains("subject")
+        );
     }
 
     #[tokio::test]

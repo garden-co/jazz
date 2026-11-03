@@ -51,18 +51,19 @@ An application-scoped account manager provides:
 - `createLocalFirst(): AccountHandle`: synchronous offline founding and selection.
 - `getLoggedIn(): AccountHandle | undefined`: local selected state, not a fresh
   remote admission guarantee.
-- `registerJWT(auth): Promise<AccountHandle>`: explicit registration and selection.
-- `loginJWT(auth): Promise<AccountHandle>`: existing active assignment and selection.
-- `loginOrRegisterJWT(auth): Promise<AccountHandle>`: atomically resolve or create
-  an external identity's account and select it. Shared JazzSession exposes the
-  same action through its graceful shutdown and replacement lifecycle.
-- `linkJWT(auth): Promise<AccountHandle>`: link to the selected account and select
-  a new handle acting as the linked principal.
+- `loginWithBackend(): Promise<AccountHandle>`: the app's backend names the
+  signed-in user (its `authenticate`), and the core resolves or creates that
+  identity's account and selects it. The client receives no credential.
+- `linkWithBackend(guest): Promise<AccountHandle>`: link the selected
+  local-first guest to the user the backend names, and select a handle acting
+  as that user.
+- `registerJWT`, `loginJWT` and `loginOrRegisterJWT` remain as
+  internal test fixtures for cores that trust a test JWT; applications do not
+  use them.
 - `logout()`: clear selection and stop credential use without remote revocation
   or silently deleting recoverable local-first credentials.
 
 Async failures reject with typed errors and preserve the previous selection.
-Credential inputs support refresh; plain JWT strings are a convenience.
 Concurrent operations cannot restore a login after logout or overwrite a newer
 selection. Successful remote side effects remain discoverable through login
 when the initiating UI operation was canceled.
@@ -70,7 +71,7 @@ when the initiating UI operation was canceled.
 Default provider integrations use login-or-register for signup, signin and
 restoration. Linking is an explicit alternative before enrollment: a hybrid
 application must not automatically register the incoming identity before calling
-`linkJWT`. The core primitive does not infer linking or merge accounts. Existing
+`linkWithBackend`. The core primitive does not infer linking or merge accounts. Existing
 strict login and registration operations retain their original semantics.
 
 The ordered owner performs login-or-register by looking up current admission and,
@@ -185,7 +186,7 @@ sessions. Two registries assigning identical account UUIDs must never alias
 local storage. Applications cannot supply or override this internal authority
 field separately from the opaque handle.
 
-Enrollment has no dependency on an open database or a framework. `linkJWT`
+Enrollment has no dependency on an open database or a framework. `linkWithBackend`
 operates on the selected handle's credential and the core registry only; it
 never enumerates contexts, drains uploads, or rewrites transaction authors.
 
@@ -194,7 +195,7 @@ The application or local-first auth helper uses the general lifecycle sequence:
 1. Stop admitting application work and call `oldContext.shutdown({ waitForSync: true })`.
 2. If synchronization fails, retain the existing selection and usable context;
    do not proceed to linking.
-3. Call `accounts.linkJWT(externalCredential)` outside any Jazz context.
+3. Call `accounts.linkWithBackend(guest)` outside any Jazz context.
 4. Open a new context with the returned handle. If linking fails, a new context
    may be opened with the manager's unchanged previous handle.
 

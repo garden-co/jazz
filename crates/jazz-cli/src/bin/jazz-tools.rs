@@ -169,6 +169,36 @@ enum Commands {
         #[arg(long, env = "JAZZ_ALLOW_LOCAL_FIRST_AUTH")]
         allow_local_first_auth: bool,
 
+        /// Trust only this OIDC workload instead of shared secrets: every
+        /// request and session must carry its token in
+        /// X-Jazz-Backend-Credential, and states its access in
+        /// X-Jazz-Backend-Access. Needs the subject and audience flags too;
+        /// replaces the backend and admin secrets. Graceful shutdown then
+        /// goes through SIGTERM.
+        #[arg(
+            long,
+            env = "JAZZ_TRUSTED_WORKLOAD_ISSUER",
+            requires_all = ["trusted_workload_audience", "trusted_workload_subject"],
+            conflicts_with_all = ["backend_secret", "admin_secret"]
+        )]
+        trusted_workload_issuer: Option<String>,
+
+        /// Audience a trusted workload token must target.
+        #[arg(
+            long,
+            env = "JAZZ_TRUSTED_WORKLOAD_AUDIENCE",
+            requires = "trusted_workload_issuer"
+        )]
+        trusted_workload_audience: Option<String>,
+
+        /// Exact subject a trusted workload token must carry.
+        #[arg(
+            long,
+            env = "JAZZ_TRUSTED_WORKLOAD_SUBJECT",
+            requires = "trusted_workload_issuer"
+        )]
+        trusted_workload_subject: Option<String>,
+
         /// Secret for backend session impersonation
         #[arg(long, env = "JAZZ_BACKEND_SECRET")]
         backend_secret: Option<String>,
@@ -294,6 +324,9 @@ async fn run() {
             allow_local_first_auth,
             backend_secret,
             admin_secret,
+            trusted_workload_issuer,
+            trusted_workload_audience,
+            trusted_workload_subject,
             shutdown_timeout_secs,
             max_connections,
             memory_limit_bytes,
@@ -338,6 +371,13 @@ async fn run() {
                 allow_local_first_auth,
                 backend_secret,
                 admin_secret,
+                trusted_workload: trusted_workload_issuer.map(|issuer| {
+                    jazz_server::middleware::workload::TrustedWorkload {
+                        issuer,
+                        audience: trusted_workload_audience.unwrap_or_default(),
+                        subject: trusted_workload_subject.unwrap_or_default(),
+                    }
+                }),
                 ..Default::default()
             };
             if let Err(e) = jazz_server::run(
