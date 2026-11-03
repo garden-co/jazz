@@ -272,47 +272,21 @@ impl JazzCoreSocket {
 /// too, and it goes away with the process, so a crash or `docker stop`
 /// never leaves the directory locked.
 fn lock_data_dir(dir: &std::path::Path) -> napi::Result<std::fs::File> {
-    use std::io::Write;
-    std::fs::create_dir_all(dir).map_err(|error| {
-        napi::Error::from_reason(format!("sqlite(): {}: {error}", dir.display()))
-    })?;
-    let path = dir.join("jazz.lock");
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&path)
-        .map_err(|error| {
-            napi::Error::from_reason(format!("sqlite(): {}: {error}", path.display()))
-        })?;
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => {
-            let holder = std::fs::read_to_string(&path).unwrap_or_default();
-            let holder = holder.trim();
-            return Err(napi::Error::from_reason(format!(
-                "sqlite(): {} is already open{}. One core per directory: create Jazz once and reuse it \
-                 (cache it on globalThis across hot reloads), and give each process its own directory or use remote().",
-                dir.display(),
-                if holder.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({holder})")
-                },
-            )));
+    jazz_server::lock_data_dir(dir).map_err(|error| match error {
+        jazz_server::DataDirLockError::Held(holder) => napi::Error::from_reason(format!(
+            "sqlite(): {} is already open{}. One core per directory: create Jazz once and reuse it \
+             (cache it on globalThis across hot reloads), and give each process its own directory or use remote().",
+            dir.display(),
+            if holder.is_empty() {
+                String::new()
+            } else {
+                format!(" ({holder})")
+            },
+        )),
+        jazz_server::DataDirLockError::Io(error) => {
+            napi::Error::from_reason(format!("sqlite(): {error}"))
         }
-        Err(std::fs::TryLockError::Error(error)) => {
-            return Err(napi::Error::from_reason(format!(
-                "sqlite(): could not lock {}: {error}",
-                path.display()
-            )));
-        }
-    }
-    // Who holds it, for the message above; the lock itself is what counts.
-    let _ = file.set_len(0);
-    let _ = write!(file, "process {}", std::process::id());
-    Ok(file)
+    })
 }
 
 fn pairs(headers: &[Vec<String>]) -> Vec<(String, String)> {
