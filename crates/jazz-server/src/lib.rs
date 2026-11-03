@@ -11,7 +11,8 @@ mod tcp;
 
 pub use middleware::AuthConfig;
 pub use server::{
-    BuiltServer, ServerBuilder, ServerState, ShutdownController, ShutdownPhase, StorageBackend,
+    BlobStore, BuiltServer, ServerBuilder, ServerState, ShutdownController, ShutdownPhase,
+    StorageBackend,
 };
 #[cfg(feature = "embedded-server")]
 pub use server::{
@@ -41,6 +42,7 @@ pub async fn run(
     port: u16,
     data_dir: &str,
     in_memory: bool,
+    blobs: BlobStore,
     auth_config: AuthConfig,
     bound_port_file: Option<String>,
     shutdown_timeout: Duration,
@@ -56,6 +58,15 @@ pub async fn run(
         info!("Storage mode: in-memory");
     } else {
         info!("Data directory: {}", data_dir);
+        match &blobs {
+            BlobStore::Sqlite => info!("Large values: in jazz.sqlite"),
+            BlobStore::Files { dir } => info!(
+                "Large values: files in {}",
+                dir.as_ref()
+                    .map(|dir| dir.display().to_string())
+                    .unwrap_or_else(|| format!("{data_dir}/blobs"))
+            ),
+        }
     }
     match limits.memory_limit_bytes {
         Some(limit) => info!("Memory limit: {} MiB", limit / (1024 * 1024)),
@@ -102,6 +113,7 @@ pub async fn run(
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.into(),
             })
+            .with_blob_store(blobs)
             .build()
             .await
     }
