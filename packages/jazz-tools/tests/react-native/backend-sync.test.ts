@@ -2,12 +2,13 @@ import { expect, it } from "vitest";
 import { schema } from "../../src/schema-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
 import * as nativeCommands from "jazz-rn/relay";
-import type { NativeForegroundModule } from "../../src/react-native/native-foreground-db.js";
+import {
+  NativeForegroundDb,
+  type NativeForegroundModule,
+} from "../../src/react-native/native-foreground-db.js";
+import { encodeCellsForRow } from "../../src/runtime/native-runtime/native-runtime-adapter.js";
 import { startTestJazz } from "../../src/testing/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
-
-const { encodeNativeForegroundCommand, decodeNativeForegroundResponse } =
-  nativeCommands as unknown as NativeForegroundModule;
 
 const app = schema.defineApp(
   { todos: schema.table({ title: schema.string() }, {}) },
@@ -63,31 +64,36 @@ it("counts offline writes as pending until the app's backend accepts them", asyn
       app,
       permissions,
       async (fixture) => {
-        const db = await fixture.createDb();
-        const pending = () => {
-          const foreground = fixture.nativeHost.openAttached(fixture.capability);
-          try {
-            const response = decodeNativeForegroundResponse(
-              foreground.execute(encodeNativeForegroundCommand({ type: "pendingUploadCount" })),
-            );
-            if (response.type !== "pendingUploadCount") throw new Error(response.type);
-            return response.count;
-          } finally {
-            foreground.close();
+        const observer = await fixture.createDb();
+        // Warm the upstream: the session is admitted and in sync.
+        expect(await observer.all(app.todos, { tier: ReadTier.Remote })).toEqual([]);
+        const native = new NativeForegroundDb(
+          fixture.nativeHost.openAttached(fixture.capability),
+          nativeCommands as unknown as NativeForegroundModule,
+        );
+        try {
+          expect(native.pendingUploadCount()).toBe(0);
+          native.disconnectNativeUpstream();
+          for (const title of ["offline one", "offline two"]) {
+            await native
+              .insert(
+                "todos",
+                encodeCellsForRow(app.wasmSchema.todos!, { title: { type: "Text", value: title } }),
+              )
+              .wait("local");
           }
-        };
-        expect(await db.all(app.todos, { tier: ReadTier.Remote })).toEqual([]);
-        expect(pending()).toBe(0);
+          await expect.poll(() => native.pendingUploadCount()).toBe(2);
 
-        await db.disconnect();
-        await db.insert(app.todos, { title: "offline one" }).wait({ tier: "local" });
-        const second = db.insert(app.todos, { title: "offline two" });
-        await second.wait({ tier: "local" });
-        await expect.poll(pending).toBe(2);
-
-        await db.reconnect();
-        await second.wait({ tier: "global" });
-        await expect.poll(pending, { timeout: 15_000 }).toBe(0);
+          native.reconnectNativeUpstream();
+          await expect.poll(() => native.pendingUploadCount(), { timeout: 15_000 }).toBe(0);
+          await expect
+            .poll(async () => (await observer.all(app.todos, { tier: ReadTier.Remote })).length, {
+              timeout: 15_000,
+            })
+            .toBe(2);
+        } finally {
+          native.close();
+        }
       },
       { appId: backend.appId, upstream: { backend, userId: "native-pending" } },
     );
