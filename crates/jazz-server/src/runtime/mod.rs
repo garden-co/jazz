@@ -1125,11 +1125,13 @@ impl ServerRuntimeHandle {
 
     /// Admit an authenticated thin client connection (SPEC 8.14). It is
     /// served as its session, or as SYSTEM for a trusted link, like a sync
-    /// session, and takes its output from [`Self::open_wire_stream`].
+    /// session, pinned to `bundle` when its backend pinned it, and takes
+    /// its output from [`Self::open_wire_stream`].
     pub async fn open_thin_session(
         &self,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
+        bundle: Option<jazz::catalogue::BundleId>,
         trust: CommitUnitTrust,
     ) -> Result<ServerSession, String> {
         let served_as = match trust {
@@ -1151,8 +1153,7 @@ impl ServerRuntimeHandle {
         );
         let opened = self
             .run(move |owner| {
-                owner.open_thin_session(session, served_as, claims, output, egress);
-                Ok(())
+                owner.open_thin_session(session, served_as, claims, bundle, output, egress)
             })
             .await;
         if opened.is_err() {
