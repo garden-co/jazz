@@ -1,8 +1,8 @@
 //! Subscription fan-out: shared execution and keyed invalidation.
 //!
-//! Subscriptions whose compiled SQL and parameters are identical share one
-//! live result (a `Group`); a session-independent shape (a public feed) is
-//! one group however many identities watch it. Each group declares
+//! Subscriptions with the same governance, compiled SQL and parameters share
+//! one live result (a `Group`); within one governance a session-independent
+//! shape is one group however many identities watch it. Each group declares
 //! `Watch`es: the tables it reads, narrowed where the query or its read
 //! policy pins a column to one value (a root filter `room = R`, a policy
 //! `EXISTS memberships WHERE member = session.user`). A commit's changed
@@ -27,6 +27,7 @@ enum Watch {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct GroupKey {
+    governance: Option<crate::catalogue::BundleId>,
     /// The renamed tables and columns of the schema naming the rows:
     /// versions on either side of a rename compile to the same SQL but
     /// label rows differently.
@@ -314,6 +315,7 @@ impl Inner {
         self.check_splices(&prepared.query, &read.splices)?;
         let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
         let key = GroupKey {
+            governance: read.governance.key(),
             renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
             sql: compiled.sql.clone(),
             params: format!("{:?}", compiled.params),
@@ -474,19 +476,7 @@ impl Inner {
         Ok(out)
     }
 
-    /// The stored tables a read of `prepared` as `identity` depends on: what
-    /// its live subscription would watch, its compiled SQL reads, and what
-    /// those tables' read policies read. A write to any other table cannot
-    /// change its result.
-    pub(super) fn read_dependencies(
-        &self,
-        prepared: &PreparedQuery,
-        identity: Option<AuthorSubject>,
-    ) -> Result<BTreeSet<String>, Error> {
-        self.read_dependencies_in(prepared, identity, &ReadSpec::default())
-    }
-
-    /// [`Self::read_dependencies`] of a read in `read`'s view.
+    /// Tables a read and its policies depend on under its execution context.
     pub(super) fn read_dependencies_in(
         &self,
         prepared: &PreparedQuery,
@@ -503,10 +493,8 @@ impl Inner {
             }
         }
         if let Some(author) = identity {
-            let policies = prepared
-                .schema
-                .as_ref()
-                .map_or(&*self.owner, |schema| schema.policy_schema());
+            let policies = read.governance.policies(self);
+            let policies = policies.as_ref();
             for table in tables.clone() {
                 // Internal tables (history, branches) carry no policy.
                 if policies.by_stored(&table).is_some() {
@@ -524,8 +512,9 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<(Compiled, bool), Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
+        let schema = self.read_schema(prepared, read);
         let compiled = self
-            .read_ctx(prepared, policy.as_ref(), &claims, read)
+            .read_ctx(prepared, &schema, policy.as_ref(), &claims, read)
             .compile_query(&prepared.query, read.include_deleted)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
         Ok((compiled, used))
@@ -539,7 +528,7 @@ impl Inner {
         read: &ReadSpec,
         compiled: &Compiled,
     ) -> Result<Vec<Watch>, Error> {
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        let schema = self.read_schema(prepared, read);
         // Watches name stored tables and columns: changed rows do.
         let stored = |name: &str| schema.stored_table(name).map(str::to_owned);
         // Under a branch view, inherited rows read with the head's branch
@@ -808,15 +797,8 @@ impl Inner {
             .collect();
         for (gid, group) in groups {
             let mut group = group.borrow_mut();
-            // A schema the current one governs (a sync session's) takes the
-            // policies of whichever schema is current now.
-            if reset
-                && let Some(pinned) = &group.prepared.schema
-                && pinned.policies_from.is_some()
-                && let Some(governed) = self.governed(pinned.jazz.version_id())
-            {
-                group.prepared.schema = Some(governed);
-            }
+            // Group.read retains explicit admission governance. Compilation
+            // refreshes CurrentOwner and preserves Selected; names stay intact.
             let old = std::mem::take(&mut group.watches);
             self.fan.unindex(gid, &old);
             let watches = self
@@ -1380,18 +1362,14 @@ impl Inner {
                 }
                 // Read access is by the group's own policies: a pinned
                 // session's bundle, not the current schema.
-                let policies = group
-                    .prepared
-                    .schema
-                    .as_ref()
-                    .map_or(&*self.owner, |schema| schema.policy_schema());
+                let policies = self.read_schema(&group.prepared, &group.read);
                 if let Ok(splices) = self.value_delta(
                     &group.prepared.query.table,
                     out.row.id,
                     column,
                     (from, to),
                     group.identity,
-                    policies,
+                    &policies,
                 ) {
                     out.splices.push((column.clone(), splices));
                 }
@@ -1610,6 +1588,7 @@ pub(crate) fn view_masks<'t>(
         .then(|| schema.stored_table(&query.table).ok().map(str::to_owned))
         .flatten();
     let base_read = ReadSpec {
+        governance: read.governance.clone(),
         position: Position::Current,
         include_deleted: read.include_deleted,
         settled_only: read.settled_only,
