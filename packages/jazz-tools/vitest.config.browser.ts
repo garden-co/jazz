@@ -21,6 +21,9 @@ import { resolve } from "node:path";
 import { playwright } from "@vitest/browser-playwright";
 import { readCorrectnessArtifactSnapshot } from "../../dev/artifacts/test-artifact-store.mjs";
 import {
+  jazzAppFront,
+  jazzAppUser,
+  jazzAppRequest,
   jazzServerInfo,
   jazzServerJwtForUser,
   stopJazzServerByUrl,
@@ -183,6 +186,10 @@ export default defineConfig({
           console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
         },
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
+        jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
+        jazzAppUser: async (_context, frontUrl, userId, claims) =>
+          jazzAppUser(frontUrl, userId, claims),
+        jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
         jazzServerTransportControlCreate: async (_context, serverUrl) =>
           createJazzServerTransportControl(serverUrl),

@@ -11,7 +11,6 @@ export interface RemoteBrowserDbCreateInput {
   queryJson?: string;
   schemaJson: string;
   serverUrl?: string;
-  jwtToken?: string;
   adminSecret?: string;
   localFirstSecret?: string;
   logLevel?: DbConfig["logLevel"];
@@ -81,11 +80,7 @@ export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): 
     appId: input.appId,
     driver: { type: "persistent", dbName: input.dbName },
     serverUrl: input.serverUrl,
-    ...(input.jwtToken
-      ? { jwtToken: input.jwtToken }
-      : input.localFirstSecret
-        ? { secret: input.localFirstSecret }
-        : {}),
+    ...(input.localFirstSecret ? { secret: input.localFirstSecret } : {}),
     logLevel: input.logLevel,
   });
 

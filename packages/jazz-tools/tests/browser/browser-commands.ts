@@ -1,10 +1,21 @@
 import { commands } from "vitest/browser";
 
 import type { JazzServerInfo } from "./testing-server.js";
+import type { WasmSchema } from "../../src/drivers/types.js";
+import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
 
 export interface JazzServerBrowserCommands {
   jazzServerInfo(appId?: string): Promise<JazzServerInfo>;
   jazzServerStop(serverUrl: string): Promise<void>;
+  jazzAppFront(
+    coreUrl: string,
+    app: { schema: WasmSchema; permissions: CompiledPermissionsMap; pageOrigin: string },
+  ): Promise<string>;
+  jazzAppUser(frontUrl: string, userId: string, claims?: Record<string, unknown>): Promise<string>;
+  jazzAppRequest(
+    url: string,
+    init: { method: string; headers: [string, string][]; body: string | null },
+  ): Promise<{ status: number; headers: [string, string][]; body: string }>;
   jazzServerJwtForUser(
     userId: string,
     claims?: Record<string, unknown>,
@@ -60,6 +71,9 @@ function isJazzServerBrowserCommands(value: unknown): value is JazzServerBrowser
     value !== null &&
     hasFunction(value, "jazzServerInfo") &&
     hasFunction(value, "jazzServerStop") &&
+    hasFunction(value, "jazzAppFront") &&
+    hasFunction(value, "jazzAppUser") &&
+    hasFunction(value, "jazzAppRequest") &&
     hasFunction(value, "jazzServerJwtForUser")
   );
 }
