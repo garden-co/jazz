@@ -1,56 +1,47 @@
 import {
-  connectAuthProvider,
-  type AuthProviderConnection,
-  type AuthProviderState,
-} from "./auth-provider.js";
-import { connectBetterAuth, type BetterAuthClient } from "./better-auth.js";
-import {
   attachJazzSessionConsumer,
   type JazzSession,
   type JazzSessionActions,
   type JazzSessionSnapshot,
   type JazzSessionConsumer,
 } from "./state.js";
+import type { AccountHandle } from "../accounts/state.js";
 import { createListeners, toError } from "../runtime/util.js";
 
-export type JazzAuth =
-  | { readonly kind: "better-auth"; readonly client: BetterAuthClient }
-  | ({ readonly kind: "backend"; logout(): unknown } & AuthProviderState);
 /**
- * Better Auth's client session drives sign-in; the backend reads it in
- * `authenticate`. Prefer passing `authClient.useSession()`'s user id to the
- * provider's `user` prop.
+ * Who your backend says is signed in: its `authenticate` answer, as Jazz
+ * last received it.
  */
-export const betterAuth = (client: BetterAuthClient): JazzAuth => ({ kind: "better-auth", client });
-/**
- * Sign in through the app's own backend (`createJazz`): its `authenticate`
- * decides who the user is. `key` is your signed-in user's id, or null when
- * signed out; Jazz signs in again whenever it changes. `logout` signs out of
- * your auth and must then report `key: null`. Prefer the provider's `user`
- * prop, which is this without `logout`.
- */
-export const backendAuth = (
-  options: Omit<Extract<JazzAuth, { kind: "backend" }>, "kind">,
-): JazzAuth => ({ kind: "backend", ...options });
-/**
- * The auth a provider's `user` prop stands for. `user` is who your auth
- * library says is signed in: `undefined` while it loads, `null` when signed
- * out, the user's stable id when signed in. `hasUser` is whether the prop was
- * passed at all, since `user={undefined}` (loading) differs from no prop.
- */
-export function authForUser(
-  hasUser: boolean,
-  user: string | null | undefined,
-  auth: JazzAuth | undefined,
-): JazzAuth | undefined {
-  if (!hasUser) return auth;
-  if (auth) throw new Error("Pass JazzProvider either `user` or `auth`, not both");
-  return { kind: "backend", key: user ?? null, isPending: user === undefined, logout: () => {} };
+export interface JazzUser {
+  /** Your user's id (`authenticate`'s `userId`). */
+  readonly id: string;
+  /** The issuer Jazz records for your backend's users. */
+  readonly issuer: string;
+  /** The extra claims `authenticate` returned (`session.claims` in permissions). */
+  readonly claims: Readonly<Record<string, unknown>>;
 }
+
+const LOCAL_FIRST_ISSUER = "urn:jazz:local-first";
+const SYSTEM_ISSUER = "urn:jazz:system";
+
+/** The backend user an account belongs to, or null for a guest or the system. */
+export function userOfAccount(account: AccountHandle | undefined): JazzUser | null {
+  const identity = account?.identity;
+  if (!identity || identity.issuer === LOCAL_FIRST_ISSUER || identity.issuer === SYSTEM_ISSUER)
+    return null;
+  return Object.freeze({
+    id: identity.subject,
+    issuer: identity.issuer,
+    claims: account?.claims ?? Object.freeze({}),
+  });
+}
+
 export interface JazzAppSnapshot<Client> {
   readonly status: "starting" | "signed-out" | "transitioning" | "ready" | "error";
   readonly client?: Client;
   readonly account?: JazzSessionSnapshot<Client>["account"];
+  /** Who your backend says is signed in; null for a guest or when no one is. */
+  readonly user: JazzUser | null;
   readonly error?: Error;
   /** Action retries repeat a failed enrollment; session retries only recover the selected client. */
   readonly recovery?: "action" | "session";
@@ -59,7 +50,11 @@ export interface JazzApp<Client> {
   getSnapshot(): JazzAppSnapshot<Client>;
   subscribe(listener: () => void): () => void;
   start(): Promise<void>;
-  updateAuth(auth: JazzAuth | undefined): void;
+  /**
+   * Your auth changed: ask your backend who is signed in now and follow its
+   * answer. Call it after your own sign-in, sign-out or account switch.
+   */
+  reauthenticate(): Promise<void>;
   retry(): Promise<void>;
   logout(): Promise<void>;
   dispose(): Promise<void>;
@@ -68,25 +63,19 @@ export interface JazzApp<Client> {
   attachConsumer(): { acknowledge(snapshot: JazzAppSnapshot<Client>): void; release(): void };
 }
 
-/** Host-independent owner. Configuration is captured once; auth state may update in place. */
+type ReauthenticatingSession = { reauthenticate?(): Promise<void> };
+
+/**
+ * Host-independent owner. Configuration is captured once; your backend
+ * decides who is signed in (see `JazzApp.reauthenticate`).
+ */
 export function createJazzAppOwner<Config, Client>(
-  config: Config & { auth?: JazzAuth },
+  hostConfig: Config,
   factory: (config: Config) => Promise<JazzSession<Client>>,
   options: { start?: boolean } = {},
 ): JazzApp<Client> {
-  // Auth descriptors contain callbacks and provider clients. They belong to
-  // this owner, never to the host configuration sent across runtime boundaries.
-  const { auth: initialAuth, ...hostConfig } = config;
-  let auth = initialAuth;
   let session: JazzSession<Client> | undefined;
-  let connection:
-    | (Omit<AuthProviderConnection, "update" | "logout"> & {
-        logout(action?: () => unknown): Promise<void>;
-      })
-    | undefined;
-  let backendConnection: AuthProviderConnection | undefined;
   let unsubscribeSession: (() => void) | undefined;
-  let unsubscribeConnection: (() => void) | undefined;
   let pending: Promise<void> | undefined;
   let disposal: Promise<void> | undefined;
   let disposed = false;
@@ -98,6 +87,7 @@ export function createJazzAppOwner<Config, Client>(
   let retrying: Promise<void> | undefined;
   let snapshot: JazzAppSnapshot<Client> = Object.freeze({
     status: "starting",
+    user: null,
   });
   const versions = new WeakMap<object, JazzSessionSnapshot<Client>>();
   const listeners = createListeners("Jazz app observer failed");
@@ -105,16 +95,14 @@ export function createJazzAppOwner<Config, Client>(
   function publish(force = false) {
     if (disposed && !force) return;
     const current = session?.getSnapshot();
-    const provider = connection?.getSnapshot();
-    const error = failure ?? provider?.error ?? current?.error;
-    const ready = !disposed && current?.status === "ready" && (!auth || provider?.ready);
+    const error = failure ?? current?.error;
     const status: JazzAppSnapshot<Client>["status"] = error
       ? "error"
       : !current
         ? "starting"
-        : ready
+        : !disposed && current.status === "ready"
           ? "ready"
-          : current.status === "signed-out" && (!auth || provider?.ready)
+          : current.status === "signed-out"
             ? "signed-out"
             : "transitioning";
     const recovery: JazzAppSnapshot<Client>["recovery"] = error
@@ -128,9 +116,10 @@ export function createJazzAppOwner<Config, Client>(
       recovery,
       client: status === "ready" ? current?.client : undefined,
       account: current?.account,
+      user: snapshot.account === current?.account ? snapshot.user : userOfAccount(current?.account),
       error,
     };
-    // Keep the raw snapshot version even when a provider hides a still-ready client.
+    // Keep the raw snapshot version even when the app hides a still-ready client.
     if (
       snapshot.status === next.status &&
       snapshot.client === next.client &&
@@ -143,23 +132,6 @@ export function createJazzAppOwner<Config, Client>(
     snapshot = Object.freeze(next);
     if (current) versions.set(snapshot, current);
     listeners.notify();
-  }
-  function disconnect() {
-    unsubscribeConnection?.();
-    unsubscribeConnection = undefined;
-    connection?.dispose();
-    connection = undefined;
-    backendConnection = undefined;
-  }
-  function connect() {
-    if (!session || !auth || disposed) return;
-    if (auth.kind === "better-auth") connection = connectBetterAuth(session, auth.client);
-    else {
-      backendConnection = connectAuthProvider(session);
-      connection = backendConnection;
-      backendConnection.update(auth);
-    }
-    unsubscribeConnection = connection.subscribe(publish);
   }
   const requireSession = () => {
     if (disposed) throw new Error("Jazz app is disposed");
@@ -175,7 +147,6 @@ export function createJazzAppOwner<Config, Client>(
     "linkWithBackend",
   ] as const) {
     (sessionActions as any)[name] = async (...args: unknown[]) => {
-      if (auth) throw new Error("Manual session actions require an app without managed auth");
       const current = requireSession();
       if (manualActionPending || pendingLogouts)
         throw new Error("A Jazz session operation is already pending");
@@ -229,7 +200,6 @@ export function createJazzAppOwner<Config, Client>(
           session = created;
           for (const consumer of consumers) consumer.lease = attachJazzSessionConsumer(created);
           unsubscribeSession = created.subscribe(() => publish(disposed));
-          connect();
           publish();
         })
         .catch((cause) => {
@@ -243,21 +213,21 @@ export function createJazzAppOwner<Config, Client>(
       pending = task;
       return task;
     },
-    updateAuth(next) {
-      if (disposed) return;
-      const same =
-        auth?.kind === next?.kind &&
-        (auth?.kind !== "better-auth" ||
-          (next?.kind === "better-auth" && auth.client === next.client));
-      auth = next;
-      if (session) failure = undefined;
-      if (same && next?.kind === "backend") {
-        backendConnection?.update(next);
-      } else if (!same) {
-        disconnect();
-        connect();
+    async reauthenticate() {
+      const current = requireSession() as JazzSession<Client> & ReauthenticatingSession;
+      failure = undefined;
+      try {
+        if (!current.reauthenticate)
+          throw new Error(
+            "This Jazz session does not follow a backend: reauthenticate is not supported",
+          );
+        await current.reauthenticate();
+      } catch (cause) {
+        failure = toError(cause);
+        throw cause;
+      } finally {
+        publish();
       }
-      publish();
     },
     retry() {
       if (disposed) return Promise.reject(new Error("Jazz app is disposed"));
@@ -270,8 +240,7 @@ export function createJazzAppOwner<Config, Client>(
         .then(async () => {
           if (disposed || generation !== actionGeneration) return;
           try {
-            if (connection) await connection.retry();
-            else if (manualRetry && snapshot.recovery === "action") await manualRetry();
+            if (manualRetry && snapshot.recovery === "action") await manualRetry();
             else {
               await current.retry();
               manualRetry = undefined;
@@ -296,16 +265,10 @@ export function createJazzAppOwner<Config, Client>(
       manualRetry = undefined;
       failure = undefined;
       try {
-        if (backendConnection) {
-          const leaving = auth;
-          await backendConnection.logout(() =>
-            leaving?.kind === "backend" ? leaving.logout() : undefined,
-          );
-        } else if (connection) await connection.logout();
-        else await current.logout();
+        await current.logout();
         if (generation === actionGeneration) manualRetry = undefined;
       } catch (cause) {
-        if (!connection && generation === actionGeneration) manualRetry = app.logout;
+        if (generation === actionGeneration) manualRetry = app.logout;
         if (generation === actionGeneration) failure = toError(cause);
         throw cause;
       } finally {
@@ -318,7 +281,6 @@ export function createJazzAppOwner<Config, Client>(
       disposed = true;
       ++actionGeneration;
       manualRetry = undefined;
-      disconnect();
       publish(true);
       disposal = (async () => {
         try {

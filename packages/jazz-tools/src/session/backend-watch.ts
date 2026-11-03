@@ -1,6 +1,5 @@
 import type { AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
-import { hasAuthProviderConnection } from "./auth-provider.js";
 import type { JazzSession } from "./state.js";
 
 const LOCAL_FIRST_ISSUER = "urn:jazz:local-first";
@@ -20,6 +19,12 @@ export interface BackendWatch {
   authRefused(): void;
   /** The sync link is connected again (resets the reconnect backoff). */
   connected(): void;
+  /**
+   * The app's own auth changed (it signed in, out or as someone else): ask the
+   * backend now, and follow its answer without waiting for a second one.
+   * Resolves once the session follows that answer.
+   */
+  reauthenticate(): Promise<void>;
   stop(): void;
 }
 
@@ -34,7 +39,8 @@ export interface BackendWatch {
  *   doesn't sign anyone out (or, with `clearOnSignOut`, wipe their writes).
  * - A local-first guest stays a guest until someone signs in.
  *
- * While a `user` prop or `setUser` drives the session, the watch stays quiet.
+ * The app calls `reauthenticate` after its own sign-in or sign-out, so the
+ * session follows at once.
  *
  * A sync server refusing the sign-in (`authRefused`) asks the backend too, but
  * only to reconnect, with backoff, while it still names the same user. It
@@ -80,17 +86,22 @@ export function watchBackendUser<Client>(
   };
   let stopped = false;
   let checking: Promise<void> | undefined;
-  // Checks asked for while one runs: a plain one (may sign out) and a
-  // refused one (only reconnects) are kept apart.
-  let again: { plain: boolean; refused: boolean } | undefined;
+  // Checks asked for while one runs: a plain one (may sign out), a refused
+  // one (only reconnects) and an asked one (the app's auth changed: no
+  // confirming second answer) are kept apart.
+  let again: { plain: boolean; refused: boolean; asked: boolean } | undefined;
+  // `reauthenticate` callers, settled once no check runs or waits.
+  let waiters: Array<() => void> = [];
   let announced = session.getSnapshot().account;
 
   const settled = () => {
     const snapshot = session.getSnapshot();
     return snapshot.status === "ready" || snapshot.status === "signed-out";
   };
-  const quiet = (refused: boolean) =>
-    stopped || !settled() || (!refused && hasAuthProviderConnection(session));
+  // A failed sign-in leaves the session in error; the app asking again after
+  // its auth changed is how it recovers.
+  const askable = () => settled() || session.getSnapshot().status === "error";
+  const quiet = (asked = false) => stopped || !(asked ? askable() : settled());
   async function ask(): Promise<AccountIdentity | null | "unknown"> {
     try {
       return await probe();
@@ -99,10 +110,10 @@ export function watchBackendUser<Client>(
       return "unknown";
     }
   }
-  async function once(refused: boolean) {
-    if (quiet(refused)) return;
+  async function once(refused: boolean, asked = false) {
+    if (quiet(asked)) return;
     let signedIn = await ask();
-    if (signedIn === "unknown" || quiet(refused)) return;
+    if (signedIn === "unknown" || quiet(asked)) return;
     const current = session.getSnapshot().account?.identity;
     if (current?.issuer === SYSTEM_ISSUER) return;
     const backendUser = current !== undefined && current.issuer !== LOCAL_FIRST_ISSUER;
@@ -113,10 +124,8 @@ export function watchBackendUser<Client>(
         return;
       }
       if (refused) return;
-      // A provider's `user` decides who signs in; the watch only signs out.
-      if (hasAuthProviderConnection(session)) return;
       if (backendUser) await session.logout().catch(() => {});
-      if (quiet(refused)) return;
+      if (quiet(asked)) return;
       await session.loginWithBackend().catch(() => {});
       return;
     }
@@ -131,11 +140,22 @@ export function watchBackendUser<Client>(
         }, refusedConfirmMs);
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, confirmMs));
-    if (quiet(refused)) return;
-    signedIn = await ask();
-    if (signedIn !== null || quiet(refused)) return;
+    if (!asked) {
+      await new Promise((resolve) => setTimeout(resolve, confirmMs));
+      if (quiet()) return;
+      signedIn = await ask();
+      if (signedIn !== null || quiet()) return;
+    }
     await session.logout().catch(() => {});
+  }
+  /** Run `run` once the session is no longer mid-transition (or now). */
+  function whenSettled(run: () => void) {
+    if (stopped || askable()) return run();
+    const stop = session.subscribe(() => {
+      if (!stopped && !askable()) return;
+      stop();
+      run();
+    });
   }
   function scheduleReconnect() {
     if (reconnectTimer || stopped) return;
@@ -152,21 +172,30 @@ export function watchBackendUser<Client>(
     if (wait <= 0) reconnect();
     else reconnectTimer = setTimeout(reconnect, wait);
   }
-  function check(refused = false) {
-    if (stopped) return;
+  function settle() {
+    const done = waiters;
+    waiters = [];
+    for (const resolve of done) resolve();
+  }
+  function check(refused = false, asked = false) {
+    if (stopped) return settle();
     if (checking) {
       again = {
-        plain: !refused || !!again?.plain,
+        plain: (!refused && !asked) || !!again?.plain,
         refused: refused || !!again?.refused,
+        asked: asked || !!again?.asked,
       };
       return;
     }
-    checking = once(refused).finally(() => {
+    checking = once(refused, asked).finally(() => {
       checking = undefined;
       const next = again;
       again = undefined;
-      if (next?.plain) check(false);
+      // An asked check answers a plain one too.
+      if (next?.asked) check(false, true);
+      else if (next?.plain) check(false);
       if (next?.refused) check(true);
+      if (!checking) settle();
     });
   }
   const unsubscribe = session.subscribe(() => {
@@ -179,7 +208,7 @@ export function watchBackendUser<Client>(
   });
   const stopFocus = events.onFocus(() => check());
   const stopCrossTab = events.crossTab?.listen(() => check());
-  // Let a provider that drives the session attach first.
+  // Ask on start, once the host has finished setting up.
   const start = setTimeout(() => check(), 0);
   const watch: BackendWatch = {
     authRefused() {
@@ -187,9 +216,15 @@ export function watchBackendUser<Client>(
       check(true);
     },
     connected: resetRefusal,
+    reauthenticate() {
+      const done = new Promise<void>((resolve) => waiters.push(resolve));
+      whenSettled(() => check(false, true));
+      return done;
+    },
     stop() {
       if (stopped) return;
       stopped = true;
+      settle();
       clearTimeout(start);
       resetRefusal();
       unsubscribe();

@@ -1,8 +1,12 @@
-import { JazzProvider, betterAuth, useJazzAuth } from "jazz-tools/react";
+import { JazzProvider, useJazzAuth } from "jazz-tools/react";
 import { authClient } from "../lib/auth-client";
 function YourApp() {
-  const { logout } = useJazzAuth();
-  return <button onClick={() => void logout()}>Sign out</button>;
+  const { reauthenticate } = useJazzAuth();
+  async function signOut() {
+    await authClient.signOut();
+    await reauthenticate();
+  }
+  return <button onClick={() => void signOut()}>Sign out</button>;
 }
 
 // #region betterauth-jazz-react
@@ -11,12 +15,14 @@ export function App() {
     <JazzProvider
       appId="my-app"
       serverUrl="/jazz"
-      auth={betterAuth(authClient)}
+      initial="signed-out"
       signedOut={<p>Sign in to continue.</p>}
     >
       <YourApp />
     </JazzProvider>
   );
 }
-// Forms only call authClient.signUp / signIn. Jazz follows automatically.
+// Your backend's `authenticate` decides who is signed in. After your forms
+// call authClient.signUp / signIn / signOut, call `reauthenticate()` from
+// `useJazzAuth()` and Jazz follows the backend's answer.
 // #endregion betterauth-jazz-react

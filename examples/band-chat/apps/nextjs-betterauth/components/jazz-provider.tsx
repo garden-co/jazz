@@ -1,5 +1,5 @@
 "use client";
-import { JazzProvider as Jazz, betterAuth, useJazzAuth } from "jazz-tools/react";
+import { JazzProvider as Jazz, useJazzAuth } from "jazz-tools/react";
 import { Banner, Button, Center, Spinner } from "@astryxdesign/core";
 import { authClient } from "@/src/lib/auth-client";
 
@@ -8,17 +8,16 @@ import { authClient } from "@/src/lib/auth-client";
 const loadLocalFirst = () => import("jazz-tools/local-first");
 
 const APP_ID = process.env.NEXT_PUBLIC_JAZZ_APP_ID;
-// Better Auth's session drives sign-in; BandChat's backend (`createJazz` in
-// src/lib/jazz.server.ts) reads it in `authenticate`.
-const auth = betterAuth(authClient);
-
+// Better Auth signs users in; BandChat's backend (`createJazz` in
+// src/lib/jazz.server.ts) reads its session in `authenticate`.
 type AuthActions = { signOut(): Promise<void> };
 export function useBandChatLifecycle(): AuthActions {
-  const { logout } = useJazzAuth();
+  const { reauthenticate } = useJazzAuth();
   return {
     async signOut() {
-      // Signs out of Jazz first (flushing local writes), then of Better Auth.
-      await logout();
+      // Signs out of Better Auth, then Jazz follows the backend's answer.
+      await authClient.signOut();
+      await reauthenticate();
       window.location.assign("/");
     },
   };
@@ -42,7 +41,7 @@ export function JazzProvider({ children }: React.PropsWithChildren) {
       appId={APP_ID}
       serverUrl="/jazz"
       client={loadLocalFirst}
-      auth={auth}
+      initial="signed-out"
       loading={<LoadingScreen label="Connecting BandChat…" />}
       signedOut={<LoadingScreen label="Signing in…" />}
       error={(state) => (

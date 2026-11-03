@@ -92,11 +92,14 @@ async function tokenFor(auth: JWTAuth): Promise<string> {
 }
 class EnrolledAccount {
   readonly identity: AccountIdentity;
+  readonly claims?: Readonly<Record<string, unknown>>;
   constructor(
     readonly id: string,
     identity: AccountIdentity,
+    claims?: Readonly<Record<string, unknown>>,
   ) {
     this.identity = Object.freeze({ ...identity });
+    if (claims) this.claims = claims;
     Object.freeze(this);
   }
 }
@@ -349,15 +352,14 @@ export function createAccountManagerWithRuntime(options: {
     )
       throw new AccountAuthError("invalid_account_response");
     const id = readAccountAssignment(value, identity);
-    const handle = new EnrolledAccount(id, identity) as AccountHandle;
+    const delegatedClaims =
+      claims && typeof claims === "object" && !Array.isArray(claims)
+        ? Object.freeze({ ...(claims as Record<string, unknown>) })
+        : Object.freeze({});
+    const handle = new EnrolledAccount(id, identity, delegatedClaims) as AccountHandle;
     credentials.set(handle, {
       registry,
-      delegated: Object.freeze({
-        claims:
-          claims && typeof claims === "object" && !Array.isArray(claims)
-            ? Object.freeze({ ...(claims as Record<string, unknown>) })
-            : Object.freeze({}),
-      }),
+      delegated: Object.freeze({ claims: delegatedClaims }),
       invalidated: new Set(),
     });
     return retain(handle);

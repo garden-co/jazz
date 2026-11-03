@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { JazzProvider, betterAuth, useJazzAuth, useSession } from "jazz-tools/react";
+import { JazzProvider, useJazzAuth, useSession } from "jazz-tools/react";
 import {
   Banner,
   Button,
@@ -21,7 +21,6 @@ const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
 // Better Auth's session drives sign-in; BigLabel's backend (`createJazz` in
 // src/lib/jazz.server.ts) reads it in `authenticate`. Signing up creates the
 // user's Jazz account, signing in opens it again.
-const auth = betterAuth(authClient);
 
 function toError(cause: unknown) {
   return cause instanceof Error ? cause : new Error(String(cause));
@@ -34,6 +33,7 @@ function SignIn() {
   const [password, setPassword] = React.useState("big-label-demo");
   const [error, setError] = React.useState<string | null>(null);
   const [pending, setPending] = React.useState(false);
+  const { reauthenticate } = useJazzAuth();
   async function authenticate() {
     setPending(true);
     setError(null);
@@ -43,6 +43,8 @@ function SignIn() {
         : await authClient.signUp.email({ email, password, name: name.trim() || email });
     setPending(false);
     if (result.error) setError(result.error.message ?? "Authentication failed");
+    // Jazz asks the backend who is signed in now and opens their account.
+    else await reauthenticate();
   }
   return (
     <AuthScreen>
@@ -137,7 +139,7 @@ export default function Page() {
     <JazzProvider
       appId={appId}
       serverUrl="/jazz"
-      auth={auth}
+      initial="signed-out"
       signedOut={<SignIn />}
       loading={<Waiting message="Preparing your personal label…" />}
       error={(state) => (
@@ -155,7 +157,7 @@ export default function Page() {
 function AccountApp() {
   const account = useSession()?.user.account;
   const email = authClient.useSession().data?.user.email ?? "";
-  const { logout } = useJazzAuth();
+  const { reauthenticate } = useJazzAuth();
   const [bootstrapping, setBootstrapping] = React.useState(false);
   // A failed background bootstrap is shown as a banner over the working app,
   // not the full-screen failure: the account and its local data are fine.
@@ -191,8 +193,11 @@ function AccountApp() {
           ? { message: bootstrapError.message, retry: () => setAttempt((value) => value + 1) }
           : null
       }
-      // Signs out of Jazz first (flushing local writes), then of Better Auth.
-      onSignOut={() => void logout()}
+      // Signs out of Better Auth, then Jazz follows the backend's answer.
+      onSignOut={async () => {
+        await authClient.signOut();
+        await reauthenticate();
+      }}
     />
   );
 }

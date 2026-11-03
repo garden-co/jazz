@@ -1,7 +1,7 @@
 import "@garden-co/design/jazz/tokens.css";
 import "@garden-co/design/jazz/fonts.css";
 import "./styles.css";
-import { betterAuth, createJazzApp } from "jazz-tools/client";
+import { createJazzApp } from "jazz-tools/client";
 import { Jazz } from "jazz-tools/effect";
 import { authClient } from "./auth-client";
 import { h } from "./dom";
@@ -21,7 +21,7 @@ const status = (message: string, error = false) =>
 const jazz = createJazzApp({
   appId: import.meta.env.VITE_JAZZ_APP_ID,
   serverUrl: "/jazz",
-  auth: betterAuth(authClient),
+  initial: "signed-out",
 });
 
 let shown: { key: string; dispose?(): void } | undefined;
@@ -34,15 +34,20 @@ function show(key: string, render: () => HTMLElement | { element: HTMLElement; d
 }
 
 async function signOut() {
-  // Signs out of Jazz first (flushing local writes), then of Better Auth.
-  await jazz.logout();
+  // Signs out of Better Auth, then Jazz follows the backend's answer.
+  await authClient.signOut();
+  await jazz.reauthenticate();
   window.location.assign("/");
 }
 
 function update() {
   const session = authClient.$store.atoms.session!.get();
   if (session.isPending) return show("loading", () => status("Opening StagePlan…"));
-  if (!session.data) return show("signed-out", signInScreen);
+  if (!session.data)
+    return show("signed-out", () =>
+      // A failure shows as Jazz's error state below.
+      signInScreen(() => jazz.reauthenticate().catch(() => {})),
+    );
   const snapshot = jazz.getSnapshot();
   if (snapshot.status === "error")
     return show(`error:${snapshot.error?.message}`, () =>

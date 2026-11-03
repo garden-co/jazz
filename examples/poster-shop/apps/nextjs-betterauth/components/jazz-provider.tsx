@@ -2,8 +2,7 @@
 
 import { Banner, Button, Spinner } from "@astryxdesign/core";
 import { CenteredPage } from "@/components/centered-page";
-import { JazzProvider as Jazz, betterAuth } from "jazz-tools/react";
-import { authClient } from "@/src/lib/auth-client";
+import { JazzProvider as Jazz } from "jazz-tools/react";
 import { LOCAL_DEFAULTS } from "@/src/lib/build-config.mjs";
 
 // Start on the thin client; load the local-first one (WASM, local storage,
@@ -11,10 +10,8 @@ import { LOCAL_DEFAULTS } from "@/src/lib/build-config.mjs";
 const loadLocalFirst = () => import("jazz-tools/local-first");
 
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID || LOCAL_DEFAULTS.appId;
-// Better Auth's session drives sign-in; PosterShop's backend (`createJazz` in
-// src/lib/jazz.server.ts) reads it in `authenticate`.
-const auth = betterAuth(authClient);
-
+// Better Auth signs users in; PosterShop's backend (`createJazz` in
+// src/lib/jazz.server.ts) reads its session in `authenticate`.
 /**
  * Signed-in visitors get the studio's Jazz client; signed-out ones see the
  * page as is (the sign-in form, which needs no Jazz).
@@ -25,7 +22,7 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
       appId={appId}
       serverUrl="/jazz"
       client={loadLocalFirst}
-      auth={auth}
+      initial="signed-out"
       signedOut={children}
       loading={
         <CenteredPage>

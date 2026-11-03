@@ -1,7 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle, type AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
-import { connectAuthProvider, rememberProviderKeys } from "./auth-provider.js";
 import { watchBackendUser } from "./backend-watch.js";
 import { followUser } from "./follow-user.js";
 import { createJazzSessionOwner } from "./state.js";
@@ -156,31 +155,46 @@ it("doesn't sign out, or wipe with clearOnSignOut, on one signed-out answer", as
   await t.session.close();
 });
 
-it("stays quiet while a `user` prop or setUser drives the session, and only reconnects on a refusal", async () => {
+it("follows the backend at once on reauthenticate, and only reconnects on a refusal", async () => {
   const t = await setup(user("alice"));
   t.signIn(user("alice"));
-  const connection = connectAuthProvider(t.session);
   await settle();
-  // The provider attached before the first check.
-  expect(t.probe).not.toHaveBeenCalled();
-  t.signIn(user("bob"));
-  t.focus();
-  t.otherTab();
-  await settle();
-  expect(t.probe).not.toHaveBeenCalled();
+  expect(t.probe).toHaveBeenCalledOnce();
   expect(t.loginWithBackend).not.toHaveBeenCalled();
 
   // The sync server refused the sign-in and the backend still names her: reconnect.
-  t.signIn(user("alice"));
   t.watch.authRefused();
   await settle();
   expect(t.reconnect).toHaveBeenCalledOnce();
-  // Refused, and the backend says no one is signed in: the provider decides.
+  // Refused, and the backend says no one is signed in: a refusal alone signs no one out.
   t.signIn(null);
   t.watch.authRefused();
   await settle(30);
   expect(t.session.getSnapshot().status).toBe("ready");
-  connection.dispose();
+
+  // The app signed out and says so: no second answer is needed.
+  await t.watch.reauthenticate();
+  expect(t.session.getSnapshot().status).toBe("signed-out");
+  expect(t.events).toEqual(["close:alice"]);
+  // The app signed someone in.
+  t.signIn(user("bob"));
+  await t.watch.reauthenticate();
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("bob");
+  t.watch.stop();
+  // A stopped watch answers at once.
+  await t.watch.reauthenticate();
+  await t.session.close();
+});
+
+it("waits for a running check before following a reauthenticate", async () => {
+  const t = await setup(undefined);
+  await settle();
+  t.signIn(user("alice"));
+  t.focus();
+  const asked = t.watch.reauthenticate();
+  await asked;
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("alice");
+  expect(t.loginWithBackend).toHaveBeenCalledOnce();
   t.watch.stop();
   await t.session.close();
 });
@@ -192,10 +206,14 @@ it("stops when there is no backend to ask", async () => {
   await t.session.close();
 });
 
-it("setUser signs users in and out, and clearOnSignOut wipes on a direct switch", async () => {
+it("reauthenticate signs users in and out, and clearOnSignOut wipes on a direct switch", async () => {
   let backendUser: AccountHandle | null = null;
   const events: string[] = [];
-  const fetch = vi.fn(async () => new Response("signed_out", { status: 401 }));
+  const fetch = vi.fn(async () =>
+    backendUser
+      ? Response.json({ account: backendUser.id, identity: backendUser.identity })
+      : new Response("signed_out", { status: 401 }),
+  );
   const following = await createJazzSessionOwner({
     accounts: new AccountManager({
       createLocalFirst: () => guest,
@@ -215,25 +233,21 @@ it("setUser signs users in and out, and clearOnSignOut wipes on a direct switch"
       shutdown: async () => void events.push(`close:${account.identity.subject}`),
     }),
   });
-  following.setUser(undefined);
   await settle();
-  // setUser took over before the first check.
-  expect(fetch).not.toHaveBeenCalled();
+  expect(fetch).toHaveBeenCalledOnce();
   expect(following.getSnapshot().status).toBe("signed-out");
 
   backendUser = user("alice");
-  following.setUser("alice");
-  await settle();
+  await following.reauthenticate();
   expect(following.getSnapshot().account?.identity.subject).toBe("alice");
 
   backendUser = user("bob");
-  following.setUser("bob");
-  await settle();
+  await following.reauthenticate();
   expect(following.getSnapshot().account?.identity.subject).toBe("bob");
   expect(events).toEqual(["wipe:alice", "close:alice"]);
 
-  following.setUser(null);
-  await settle();
+  backendUser = null;
+  await following.reauthenticate();
   expect(following.getSnapshot().status).toBe("signed-out");
   expect(events).toEqual(["wipe:alice", "close:alice", "wipe:bob", "close:bob"]);
   await following.close();
@@ -269,35 +283,6 @@ it("signs out after a refusal only once a check after focus agrees, and backs of
   await t.session.close();
 });
 
-it("doesn't sign a reloaded user out when the provider's id isn't the backend's", async () => {
-  const restored = user("internal-42");
-  let backendUser: AccountHandle = restored;
-  const events: string[] = [];
-  const session = await createJazzSessionOwner({
-    accounts: new AccountManager(
-      { createLocalFirst: () => guest, logout() {}, loginWithBackend: async () => backendUser },
-      restored,
-    ),
-    clearOnSignOut: true,
-    openClient: async (account) => ({
-      db: { deleteClientStorage: async () => void events.push(`wipe:${account.identity.subject}`) },
-      shutdown: async () => void events.push(`close:${account.identity.subject}`),
-    }),
-  });
-  const connection = connectAuthProvider(session);
-  connection.update({ key: "alice@example.com" });
-  await settle();
-  expect(session.getSnapshot().account?.identity.subject).toBe("internal-42");
-  expect(events).toEqual(["close:internal-42"]);
-  // A real switch between provider keys does sign out first.
-  backendUser = user("internal-43");
-  connection.update({ key: "bob@example.com" });
-  await settle();
-  expect(events).toEqual(["close:internal-42", "wipe:internal-42", "close:internal-42"]);
-  connection.dispose();
-  await session.close();
-});
-
 it("signs out a revoked user in a visible tab once a later check agrees", async () => {
   const t = await setup(user("alice"), { visible: true });
   t.signIn(user("alice"));
@@ -329,32 +314,4 @@ it("runs a focus check that arrives during a refused check as its own check", as
   expect(t.session.getSnapshot().status).toBe("signed-out");
   t.watch.stop();
   await t.session.close();
-});
-
-it("treats a reload whose first provider key differs from the remembered one as a switch", async () => {
-  const restored = user("internal-42");
-  let backendUser: AccountHandle = restored;
-  const events: string[] = [];
-  const session = await createJazzSessionOwner({
-    accounts: new AccountManager(
-      { createLocalFirst: () => guest, logout() {}, loginWithBackend: async () => backendUser },
-      restored,
-    ),
-    clearOnSignOut: true,
-    openClient: async (account) => ({
-      db: { deleteClientStorage: async () => void events.push(`wipe:${account.identity.subject}`) },
-      shutdown: async () => void events.push(`close:${account.identity.subject}`),
-    }),
-  });
-  let stored: string | null | undefined = "alice@example.com";
-  rememberProviderKeys(session, { get: () => stored, set: (key) => (stored = key) });
-  backendUser = user("internal-43");
-  const connection = connectAuthProvider(session);
-  connection.update({ key: "bob@example.com" });
-  await settle();
-  expect(session.getSnapshot().account?.identity.subject).toBe("internal-43");
-  expect(events).toEqual(["wipe:internal-42", "close:internal-42"]);
-  expect(stored).toBe("bob@example.com");
-  connection.dispose();
-  await session.close();
 });

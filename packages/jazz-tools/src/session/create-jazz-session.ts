@@ -22,13 +22,18 @@ import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
 import { clientScope, DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
 import { accountRegistryUrl } from "../accounts/context.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
-import { browserProviderKeyMemory, followUser, type UserFollowingSession } from "./follow-user.js";
+import { followUser, type UserFollowingSession } from "./follow-user.js";
 
 export type { LocalFirstLoader };
 
 export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
   AccountManagerConfig & {
-    initial?: "local-first" | BackendAuth;
+    /**
+     * Who the app starts as before your backend names a user: a
+     * `"local-first"` guest (the providers' default), or `"signed-out"` for
+     * an app where only your backend's users have accounts.
+     */
+    initial?: "local-first" | "signed-out" | BackendAuth;
     /**
      * On sign-out (or a switch to another user), wipe the account's local
      * storage instead of keeping it for that user's next sign-in. For shared
@@ -133,7 +138,6 @@ export async function createJazzSession(config: JazzSessionConfig): Promise<Brow
     decorate: followUser({
       registry,
       events: browserBackendWatchEvents(`jazz-account:${registry}`),
-      providerKeys: browserProviderKeyMemory(registry),
     }),
   });
   if (loadLocalFirst) upgradeInBackground(session, loadLocalFirst);

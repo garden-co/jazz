@@ -12,7 +12,12 @@ import {
 
 export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
   AccountManagerConfig & {
-    initial?: "local-first";
+    /**
+     * Who the app starts as before your backend names a user: a
+     * `"local-first"` guest (the default), or `"signed-out"` for an app where
+     * only your backend's users have accounts.
+     */
+    initial?: "local-first" | "signed-out";
   };
 
 /** Prepare the host account store once and own client replacement across authentication. */

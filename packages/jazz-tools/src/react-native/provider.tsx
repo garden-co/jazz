@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
 import { View, Text, Pressable } from "react-native";
 import { ConfiguredJazzAppProvider, type JazzAppViewProps } from "../react-core/app.js";
-import { authForUser, type JazzAuth } from "../session/app.js";
 import type { JazzSession } from "../session/state.js";
 import { createJazzSession, type JazzSessionConfig } from "./create-jazz-session.js";
 import type { PublicSession } from "../runtime/context.js";
@@ -33,12 +32,7 @@ export type LegacyJazzProviderProps = {
   children: ReactNode;
 };
 
-export type JazzAppProviderProps = JazzSessionConfig &
-  JazzAppViewProps<CreatedJazzClient> & {
-    auth?: JazzAuth;
-    /** Who your auth says is signed in: `undefined` loading, `null` signed out, else the user's id. */
-    user?: string | null;
-  };
+export type JazzAppProviderProps = JazzSessionConfig & JazzAppViewProps<CreatedJazzClient>;
 export type JazzProviderProps = LegacyJazzProviderProps | JazzAppProviderProps;
 
 export function JazzProvider(props: JazzProviderProps) {
@@ -63,30 +57,26 @@ export { useSession };
 export type { JazzClientContextValue };
 
 function ApplicationJazzProvider(props: JazzAppProviderProps) {
-  const { auth: explicitAuth, user, children, signedOut, loading, error, ...config } = props;
-  const auth = authForUser(Object.hasOwn(props, "user"), user, explicitAuth);
-  const view = { auth, children, signedOut, loading, error };
+  const { children, signedOut, loading, error, ...config } = props;
+  const view = { children, signedOut, loading, error };
   return <NativeJazzAppProvider {...view} config={config} createJazzSession={createJazzSession} />;
 }
 
 /** The app shell shared by React Native and Expo, with native default loading and error views. */
 export function NativeJazzAppProvider<Config extends { initial?: unknown }>({
   config,
-  auth,
   createJazzSession,
   loading,
   error,
   ...view
 }: JazzAppViewProps<CreatedJazzClient> & {
   config: Config;
-  auth?: JazzAuth;
   createJazzSession: (config: Config) => Promise<JazzSession<CreatedJazzClient>>;
 }) {
   return (
     <ConfiguredJazzAppProvider
       {...view}
-      config={{ ...config, initial: config.initial ?? (auth ? undefined : "local-first") }}
-      auth={auth}
+      config={{ ...config, initial: config.initial ?? "local-first" }}
       createJazzSession={createJazzSession}
       loading={
         loading === undefined ? (
