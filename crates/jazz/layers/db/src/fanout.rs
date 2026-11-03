@@ -379,7 +379,7 @@ impl Inner {
         }
         // A replica missing chunks the result needs opens it once they
         // arrive. Its cut is decided over its relations' tables too.
-        let tables = self.with_relation_tables(prepared, &compiled.tables)?;
+        let tables = self.with_relation_tables(prepared, identity, &read, &compiled.tables)?;
         let visible = self.visible_read(&read, &tables);
         let applied = cut_of(&visible);
         let run = match &visible {
@@ -579,18 +579,7 @@ impl Inner {
             Ok(())
         }
         joins(&mut structural, &query.joins, &stored)?;
-        fn arrays(
-            out: &mut BTreeSet<String>,
-            list: &[crate::query::ArraySubquery],
-            stored: &dyn Fn(&str) -> Result<String, Error>,
-        ) -> Result<(), Error> {
-            for array in list {
-                out.insert(stored(&array.table)?);
-                arrays(out, &array.nested_arrays, stored)?;
-            }
-            Ok(())
-        }
-        arrays(&mut structural, &query.array_subqueries, &stored)?;
+        structural.extend(self.relation_read_tables(prepared, identity, read)?);
         for source in query.flat_join.iter().flat_map(|flat| &flat.sources) {
             let table = &source.table;
             structural.insert(stored(history_source_table(table).unwrap_or(table))?);
@@ -792,15 +781,14 @@ impl Inner {
 
     /// `author`'s claims changed: re-run only the groups whose policy or
     /// claim operands read them. A group with no policy identity takes its
-    /// claims from this node's own author; one with request claims carries
-    /// its own and is unaffected.
+    /// claims from this node's own author. Only request claims matching
+    /// that effective author are fixed; unrelated scopes still use the registry.
     pub(super) fn refresh_identity(&mut self, author: AuthorSubject) {
         let own = self.identity.author;
         self.refresh_where(
             |group| {
-                group.prepared.request_claims.is_none()
-                    && (group.identity == Some(author)
-                        || (group.identity.is_none() && author == own))
+                let effective = group.identity.unwrap_or(own);
+                effective == author && group.prepared.fixed_claims_for(effective).is_none()
             },
             false,
         );
@@ -841,7 +829,12 @@ impl Inner {
                         )?
                         .to_owned();
                     let watches = self.watches(prepared, group.identity, read, &compiled)?;
-                    let tables = self.with_relation_tables(prepared, &compiled.tables)?;
+                    let tables = self.with_relation_tables(
+                        prepared,
+                        group.identity,
+                        read,
+                        &compiled.tables,
+                    )?;
                     let includes =
                         self.output_only_includes(prepared, group.identity, read, &compiled)?;
                     let branches = view_branches(&schema, read, &watches);

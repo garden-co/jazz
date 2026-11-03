@@ -107,6 +107,13 @@ pub struct PreparedQuery {
 }
 
 impl PreparedQuery {
+    /// An unrelated requested subject does not replace the executing author's registry.
+    fn fixed_claims_for(&self, author: AuthorSubject) -> Option<&BTreeMap<String, Value>> {
+        self.request_claims
+            .as_ref()
+            .and_then(|(requested, claims)| (*requested == author).then_some(claims))
+    }
+
     /// The same query without its window (limit and offset).
     pub(crate) fn unwindowed(&self) -> PreparedQuery {
         let mut query = self.query.clone();
@@ -3767,11 +3774,9 @@ impl Inner {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
     ) -> (Option<Session>, Session) {
-        let claims_for = |author: AuthorSubject| match &prepared.request_claims {
-            Some((requested, claims)) if *requested == author => {
-                Session::for_author(author, claims.clone())
-            }
-            _ => self.session(author),
+        let claims_for = |author: AuthorSubject| match prepared.fixed_claims_for(author) {
+            Some(claims) => Session::for_author(author, claims.clone()),
+            None => self.session(author),
         };
         let policy = identity.map(claims_for);
         let claims = policy
@@ -3844,7 +3849,7 @@ impl Inner {
         let mut compiled = self.compile(prepared, identity, read)?;
         // Array relations are part of a subscription's dependencies, and
         // of the tables its cut is decided over.
-        let tables = self.with_relation_tables(prepared, &compiled.tables)?;
+        let tables = self.with_relation_tables(prepared, identity, read, &compiled.tables)?;
         let visible = self.visible_read(read, &tables);
         if let std::borrow::Cow::Owned(visible) = &visible {
             compiled = self.compile(prepared, identity, visible)?;
@@ -3853,28 +3858,48 @@ impl Inner {
         Ok((rows, tables))
     }
 
-    /// `tables` (a compiled root's) and the stored tables of `prepared`'s
-    /// array relations, nested ones too: what a read's cut is decided
-    /// over, so its relations read as of the same position as its roots.
+    /// Compile every child shape under the executing context, without reading
+    /// rows. Nested filters and SELECT policies contribute their real tables.
+    fn relation_read_tables(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+    ) -> Result<BTreeSet<String>, Error> {
+        let schema = self.read_schema(prepared, read);
+        let (policy, claims) = self.read_sessions(prepared, identity);
+        let mut pending: Vec<_> = prepared
+            .query
+            .array_subqueries
+            .iter()
+            .map(|array| (prepared.query.table.as_str(), array))
+            .collect();
+        let mut tables = BTreeSet::new();
+        while let Some((parent, array)) = pending.pop() {
+            tables.extend(
+                self.read_ctx(prepared, &schema, policy.as_ref(), &claims, read)
+                    .child_read_tables(parent, array)?,
+            );
+            pending.extend(
+                array
+                    .nested_arrays
+                    .iter()
+                    .map(|nested| (array.table.as_str(), nested)),
+            );
+        }
+        Ok(tables)
+    }
+
+    /// Root and recursively compiled relation dependencies share one visibility cut.
     pub(crate) fn with_relation_tables(
         &self,
         prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
         tables: &BTreeSet<String>,
     ) -> Result<BTreeSet<String>, Error> {
-        fn arrays(
-            schema: &Schema,
-            out: &mut BTreeSet<String>,
-            list: &[crate::query::ArraySubquery],
-        ) -> Result<(), Error> {
-            for array in list {
-                out.insert(schema.stored_table(&array.table)?.to_owned());
-                arrays(schema, out, &array.nested_arrays)?;
-            }
-            Ok(())
-        }
         let mut out = tables.clone();
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
-        arrays(schema, &mut out, &prepared.query.array_subqueries)?;
+        out.extend(self.relation_read_tables(prepared, identity, read)?);
         Ok(out)
     }
 
@@ -4068,7 +4093,7 @@ impl Inner {
         let visible;
         let read = if read.position != Position::Current && read.cut.is_none() {
             let compiled = self.compile(prepared, identity, read)?;
-            let tables = self.with_relation_tables(prepared, &compiled.tables)?;
+            let tables = self.with_relation_tables(prepared, identity, read, &compiled.tables)?;
             visible = self.visible_read(read, &tables).into_owned();
             &visible
         } else {

@@ -237,3 +237,6 @@ mod governance_ordinary;
 
 #[path = "../accepted_staged_policy_reads.rs"]
 mod accepted_staged_policy_reads;
+
+#[path = "../governance_review.rs"]
+mod governance_review;
