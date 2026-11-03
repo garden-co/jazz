@@ -23,7 +23,7 @@ export function agentProvider(): AgentProvider {
 
 /**
  * The label the UI shows for replies from the configured provider. A bad
- * configuration throws here too; instrumentation.ts validates it at boot so
+ * configuration throws here too; server/index.ts validates it at boot so
  * the server never starts with a provider it can't run.
  */
 export function agentLabel(): string {

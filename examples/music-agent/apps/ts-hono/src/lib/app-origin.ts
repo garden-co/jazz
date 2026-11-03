@@ -1,7 +1,6 @@
 /**
- * The app's public origin: Better Auth's JWT issuer and audience, the Jazz
- * server's expected issuer and audience, and the JWKS host. One constant so
- * they cannot drift. Production must set it; development uses the local port.
+ * The app's public origin: Better Auth's base URL and its one trusted origin.
+ * Production must set it; development uses the local port.
  */
 function readAppOrigin(): string {
   const configured = process.env.APP_ORIGIN;
