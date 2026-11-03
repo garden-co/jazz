@@ -4,15 +4,17 @@ export const LOCAL_ORIGIN = "http://127.0.0.1:3000";
 
 /**
  * StagePlan's server configuration. It fails closed: the local defaults apply
- * only outside production. A production server must name its origin, its Jazz
- * app and a Better Auth secret, and a remote sync server needs the app's admin secret.
+ * only to a local run, a non-production process on a loopback origin.
+ * Anything else is a deployment and must name its origin, its Jazz app and a
+ * Better Auth secret; a remote sync server needs the app's admin secret.
  */
 export function serverConfig(env = process.env) {
   const production = env.NODE_ENV === "production";
+  const local = !production && isLoopback(env.APP_ORIGIN ?? LOCAL_ORIGIN);
   const missing: string[] = [];
-  const required = (name: string, value: string | undefined, local?: string) => {
+  const required = (name: string, value: string | undefined, fallback?: string) => {
     if (value) return value;
-    if (!production && local !== undefined) return local;
+    if (local && fallback !== undefined) return fallback;
     missing.push(name);
     return "";
   };
@@ -23,7 +25,7 @@ export function serverConfig(env = process.env) {
     betterAuthSecret: required(
       "BETTER_AUTH_SECRET",
       env.BETTER_AUTH_SECRET,
-      // Development only; never used by a production server.
+      // Local runs only; never used by a deployment.
       "stage-plan-local-development-secret-not-for-deployments",
     ),
     remote: env.JAZZ_SERVER_URL
@@ -36,4 +38,9 @@ export function serverConfig(env = process.env) {
   };
   if (missing.length) throw new Error(`StagePlan must be started with ${missing.join(", ")}.`);
   return config;
+}
+
+function isLoopback(origin: string) {
+  const { hostname } = new URL(origin);
+  return hostname === "127.0.0.1" || hostname === "localhost";
 }
