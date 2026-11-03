@@ -51,9 +51,9 @@ describe("renderBrief", () => {
 
 describe("renderFetchError", () => {
   it("names the URL so the agent can fetch it itself", () => {
-    const out = renderFetchError("https://jazz.tools/agent-brief.md", new Error("HTTP 503"));
+    const out = renderFetchError("https://jazz.tools/quickstart.md", new Error("HTTP 503"));
     expect(out).toContain("HTTP 503");
-    expect(out).toContain("Fetch https://jazz.tools/agent-brief.md directly");
+    expect(out).toContain("Fetch https://jazz.tools/quickstart.md directly");
   });
 });
 
@@ -65,7 +65,7 @@ describe("create-jazz bin", () => {
   beforeAll(async () => {
     execFileSync("pnpm", ["build"], { cwd: packageDir });
     server = createServer((req, res) => {
-      if (req.url === "/agent-brief.md") {
+      if (req.url === "/quickstart.md") {
         res.writeHead(200, { "content-type": "text/markdown; charset=utf-8" });
         res.end(`${BRIEF}\n`);
       } else {
@@ -95,7 +95,7 @@ describe("create-jazz bin", () => {
   }
 
   it("prints the fetched brief and ignores arguments", async () => {
-    const result = await runBin(`${baseUrl}/agent-brief.md`, ["my-app", "--starter", "x"]);
+    const result = await runBin(`${baseUrl}/quickstart.md`, ["my-app", "--starter", "x"]);
     expect(result).toEqual({ code: 0, stdout: `${BRIEF}\n`, stderr: "" });
   });
 
