@@ -1,107 +1,124 @@
 import express from "express";
 import type { Request, Response } from "express";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { randomUUID } from "node:crypto";
 import { createServer, type Server as HttpServer } from "node:http";
-import { AUTH_JWT_KID } from "../constants.ts";
-import { findUser, createUser } from "./users.ts";
+import type { Jazz } from "jazz-tools/backend";
+import { DEFAULT_APP_ID } from "../constants.ts";
+import { app as schema } from "../schema.ts";
+import permissions from "../permissions.ts";
+import { findUser, createUser, type User } from "./users.ts";
+
+// This is a workaround to resolve correctly NAPI modules in the monorepo
+// Real-world apps should just `import { createJazz } from "jazz-tools/backend"`
+import { createRequire } from "node:module";
+const { createJazz, memory, sqlite } = createRequire(import.meta.url)(
+  "jazz-tools/backend",
+) as typeof import("jazz-tools/backend");
 
 export interface AuthServerOptions {
   port?: number;
-  jwtKid?: string;
-  issuer?: string;
+  appId?: string;
+  /** Keep Jazz's data in this directory; in memory when omitted. */
+  dataDir?: string;
 }
 
 export interface AuthServerHandle {
   port: number;
   url: string;
+  jazz: Jazz;
   stop: () => Promise<void>;
 }
 
-const JWA_ALGORITHM = "ES256";
+const SESSION_COOKIE = "chat_session";
 
 export async function startAuthServer(options: AuthServerOptions = {}): Promise<AuthServerHandle> {
   const port = options.port ?? 3001;
-  const issuer = options.issuer ?? `http://127.0.0.1:${port}`;
-  const kid = options.jwtKid ?? AUTH_JWT_KID;
+
+  // 1. The app's own sessions: an opaque id in an HttpOnly cookie.
+  // In production, keep them in your database instead of process memory.
+  const sessions = new Map<string, User>();
+  function userFromCookie(cookieHeader: string | null | undefined): User | null {
+    const id = cookieHeader
+      ?.split(";")
+      .map((part) => part.trim().split("="))
+      .find(([name]) => name === SESSION_COOKIE)?.[1];
+    return (id && sessions.get(id)) || null;
+  }
+  function startSession(res: Response, user: User) {
+    const id = randomUUID();
+    sessions.set(id, user);
+    res.setHeader("Set-Cookie", `${SESSION_COOKIE}=${id}; HttpOnly; Path=/; SameSite=Lax`);
+    res.json({ username: user.username, role: user.role });
+  }
+
+  // 2. Jazz runs inside this server. `authenticate` reads the same cookie,
+  // so the browser never holds a Jazz credential; the role becomes a claim.
+  const jazz = await createJazz({
+    appId: options.appId ?? DEFAULT_APP_ID,
+    app: schema,
+    permissions,
+    store: options.dataDir ? sqlite({ path: options.dataDir }) : memory(),
+    authenticate: (request) => {
+      const user = userFromCookie(request.headers.get("cookie"));
+      return user ? { userId: user.userId, claims: { role: user.role } } : null;
+    },
+  });
 
   const app = express();
+  app.use((req, res, next) => jazz.nodeHandler(req, res, next));
   app.use(express.json());
-  app.use((req, _res, next) => {
-    console.log(`[auth-server] ${req.method} ${req.url}`);
-    next();
-  });
 
   app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok" });
   });
 
-  // 1. Generate a fresh ES256 key pair on startup.
-  // In production, load the private key from a secure secret store instead.
-  const { privateKey, publicKey } = await generateKeyPair(JWA_ALGORITHM);
-  const publicJwk = await exportJWK(publicKey);
-
-  // 2. Expose the public key as a JWKS endpoint.
-  app.get("/.well-known/jwks.json", (_req: Request, res: Response) => {
-    res.json({
-      keys: [{ ...publicJwk, kid, alg: JWA_ALGORITHM }],
-    });
+  app.get("/api/auth/session", (req: Request, res: Response) => {
+    const user = userFromCookie(req.headers.cookie);
+    res.json(user ? { username: user.username, role: user.role } : null);
   });
 
-  async function issueToken(userId: string, username: string, role: string): Promise<string> {
-    return new SignJWT({ username, claims: { role } })
-      .setProtectedHeader({ alg: JWA_ALGORITHM, kid })
-      .setSubject(userId)
-      .setExpirationTime("10m")
-      .setIssuer(issuer)
-      .setIssuedAt()
-      .sign(privateKey);
-  }
-
-  // 3a. Sign in — returns a JWT for an existing account.
-  app.post("/api/auth/sign-in", async (req: Request, res: Response) => {
-    const { email, password } = req.body as {
-      email?: string;
-      password?: string;
-    };
-
+  // 3a. Sign in to an existing account.
+  app.post("/api/auth/sign-in", (req: Request, res: Response) => {
+    const { email, password } = req.body as { email?: string; password?: string };
     if (!email?.trim() || !password) {
       res.status(400).json({ error: "Email and password are required." });
       return;
     }
-
     const user = findUser(email.trim(), password);
     if (!user) {
       res.status(401).json({ error: "Invalid email or password." });
       return;
     }
-
-    const token = await issueToken(user.userId, user.username, user.role);
-    res.json({ token, username: user.username });
+    startSession(res, user);
   });
 
-  // 3b. Sign up — creates a new account and returns a JWT.
-  app.post("/api/auth/sign-up", async (req: Request, res: Response) => {
-    const { email, password } = req.body as {
-      email?: string;
-      password?: string;
-    };
-
+  // 3b. Sign up: creates a new account.
+  app.post("/api/auth/sign-up", (req: Request, res: Response) => {
+    const { email, password } = req.body as { email?: string; password?: string };
     if (!email?.trim() || !password) {
       res.status(400).json({ error: "Email and password are required." });
       return;
     }
-
     const user = createUser(email.trim(), password);
     if (!user) {
       res.status(409).json({ error: "An account with this email already exists." });
       return;
     }
+    startSession(res, user);
+  });
 
-    const token = await issueToken(user.userId, user.username, user.role);
-    res.json({ token, username: user.username });
+  app.post("/api/auth/sign-out", (req: Request, res: Response) => {
+    const id = req.headers.cookie
+      ?.split(";")
+      .map((part) => part.trim().split("="))
+      .find(([name]) => name === SESSION_COOKIE)?.[1];
+    if (id) sessions.delete(id);
+    res.setHeader("Set-Cookie", `${SESSION_COOKIE}=; HttpOnly; Path=/; Max-Age=0`);
+    res.json({});
   });
 
   const server: HttpServer = createServer(app);
+  await jazz.attach(server); // WebSocket sync on /jazz
   await new Promise<void>((resolve, reject) => {
     server.listen(port, "127.0.0.1", (error?: unknown) => {
       if (error) reject(error);
@@ -111,13 +128,17 @@ export async function startAuthServer(options: AuthServerOptions = {}): Promise<
 
   return {
     port,
-    url: issuer,
-    stop: () =>
-      new Promise<void>((resolve, reject) => {
+    url: `http://127.0.0.1:${port}`,
+    jazz,
+    stop: async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => {
         server.close((error) => {
           if (error) reject(error);
           else resolve();
         });
-      }),
+      });
+      await jazz.close();
+    },
   };
 }

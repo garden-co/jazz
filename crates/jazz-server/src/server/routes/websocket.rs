@@ -15,7 +15,7 @@ use crate::runtime::{
 };
 use axum::{
     extract::State,
-    extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
+    extract::ws::{CloseFrame, Message, WebSocketUpgrade, close_code},
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
@@ -40,6 +40,28 @@ const WS_MAX_MESSAGE_BYTES: usize = WS_MAX_FRAME_BYTES;
 const WS_AT_CAPACITY_RETRY_AFTER_SECS: u64 = 5;
 const WS_KEEPALIVE_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 const WS_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A message-level duplex the sync session runs over: the axum WebSocket a
+/// listener upgraded, or a socket an embedding host carries (see
+/// `server::embedded`). Both speak the same WebSocket messages, so the session
+/// loop and its wire format don't depend on which one it is.
+pub(crate) trait SyncSocket:
+    futures::Stream<Item = Result<Message, axum::Error>>
+    + futures::Sink<Message, Error = axum::Error>
+    + Unpin
+    + Send
+    + 'static
+{
+}
+
+impl<T> SyncSocket for T where
+    T: futures::Stream<Item = Result<Message, axum::Error>>
+        + futures::Sink<Message, Error = axum::Error>
+        + Unpin
+        + Send
+        + 'static
+{
+}
 
 #[derive(Debug)]
 pub(crate) struct WebSocketAdmissionState {
@@ -248,6 +270,11 @@ struct WebSocketPrelude {
     /// own immutable admitted relay capability or rejects the connection.
     #[serde(default)]
     requested_link: RequestedWebSocketLink,
+    /// The audience a trusted backend verified the client's local-first
+    /// proof against; honoured only with that backend's secret (see
+    /// [`crate::middleware::auth::LOCAL_FIRST_AUDIENCE_HEADER`]).
+    #[serde(default)]
+    local_first_audience: Option<String>,
 }
 
 /// The only client-selectable *request* at the WebSocket boundary.  This is
@@ -301,7 +328,30 @@ async fn ws_admission(
 ) -> Result<WebSocketAdmission, super::accounts::AdmissionError> {
     let peer_identity = ws_peer_identity(&prelude.peer_identity)?;
     let requested_link = prelude.requested_link;
-    let auth = prelude.auth;
+    let local_first_audience = prelude.local_first_audience;
+    let mut auth = prelude.auth;
+    // On a socket whose upgrade carried a backend credential (the HTTP gate
+    // checked it), the prelude's own secret slots never count: the access
+    // the backend stated decides which secrets the socket gets. A server
+    // that trusts a workload admits only such sockets, guests included.
+    if let (Some(check), Some(secrets)) = (
+        state.backend_credential.as_deref(),
+        state.workload_secrets.as_ref(),
+    ) {
+        match crate::middleware::workload::vouched(request_headers, secrets) {
+            Some(access) => {
+                let (admin, backend) = access.secrets(secrets);
+                auth.admin_secret = admin;
+                auth.backend_secret = backend;
+            }
+            None if check.required() => {
+                return Err("this server admits only sockets its trusted workload opens"
+                    .to_owned()
+                    .into());
+            }
+            None => {}
+        }
+    }
 
     if let Some(admin_secret) = auth.admin_secret.as_deref() {
         crate::middleware::auth::validate_admin_secret(Some(admin_secret), &state.auth_config)
@@ -328,6 +378,11 @@ async fn ws_admission(
         let value = axum::http::HeaderValue::from_str(secret)
             .map_err(|error| format!("invalid backend_secret header value: {error}"))?;
         headers.insert("X-Jazz-Backend-Secret", value);
+    }
+    if let Some(audience) = local_first_audience.as_deref() {
+        let value = axum::http::HeaderValue::from_str(audience)
+            .map_err(|error| format!("invalid local_first_audience value: {error}"))?;
+        headers.insert(crate::middleware::auth::LOCAL_FIRST_AUDIENCE_HEADER, value);
     }
     if let Some(session_value) = auth.backend_session.as_ref() {
         use base64::Engine as _;
@@ -614,14 +669,14 @@ fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|addr| addr.is_loopback())
 }
 
-async fn read_ws_auth_prelude(
-    socket: &mut WebSocket,
+async fn read_ws_auth_prelude<S: SyncSocket>(
+    socket: &mut S,
     shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
     state: &ServerState,
 ) -> Option<Vec<u8>> {
     tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, async {
         tokio::select! {
-            msg = socket.recv() => match msg {
+            msg = socket.next() => match msg {
                 Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
                 Some(Ok(Message::Text(text))) => Some(text.as_bytes().to_vec()),
                 _ => None,
@@ -638,14 +693,14 @@ async fn read_ws_auth_prelude(
     .unwrap_or_default()
 }
 
-async fn read_ws_frame_batch(
-    socket: &mut WebSocket,
+async fn read_ws_frame_batch<S: SyncSocket>(
+    socket: &mut S,
     shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
     state: &ServerState,
 ) -> Option<Vec<u8>> {
     tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, async {
         tokio::select! {
-            msg = socket.recv() => match msg {
+            msg = socket.next() => match msg {
                 Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
                 _ => None,
             },
@@ -661,8 +716,8 @@ async fn read_ws_frame_batch(
     .unwrap_or_default()
 }
 
-async fn handle_ws_connection(
-    mut socket: WebSocket,
+pub(crate) async fn handle_ws_connection<S: SyncSocket>(
+    mut socket: S,
     state: Arc<ServerState>,
     request_headers: HeaderMap,
     _websocket_guard: ActiveWebSocketGuard,
@@ -762,7 +817,7 @@ async fn handle_ws_connection(
         } else {
             match state.catalogue.known_schema_hashes(&state.catalogue_store) {
                 Ok(hashes) if hashes.is_empty() => {
-                    "no schema has been published for this app; deploy a schema with `jazz-tools deploy <appId>` before connecting"
+                    "no schema has been published for this app; start the app's createJazz backend, which publishes its schema, before connecting"
                 }
                 _ => "runtime is not ready to accept client connections; retry shortly",
             }
@@ -1136,8 +1191,8 @@ fn decode_ws_encoded_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard:
     jazz::wire::decode_websocket_frame_batch(bytes)
 }
 
-async fn send_ws_encoded_frames(
-    socket: &mut WebSocket,
+async fn send_ws_encoded_frames<S: SyncSocket>(
+    socket: &mut S,
     frames: &[Vec<u8>],
 ) -> Result<(), axum::Error> {
     for batch in encode_ws_frame_batches(frames).map_err(axum::Error::new)? {
@@ -1146,11 +1201,14 @@ async fn send_ws_encoded_frames(
     Ok(())
 }
 
-async fn send_ws_error(socket: &mut WebSocket, error: WireError) {
+async fn send_ws_error<S: SyncSocket>(socket: &mut S, error: WireError) {
     let _ = send_ws_frames(socket, &[WireFrame::Error(error)]).await;
 }
 
-async fn send_ws_frames(socket: &mut WebSocket, frames: &[WireFrame]) -> Result<(), axum::Error> {
+async fn send_ws_frames<S: SyncSocket>(
+    socket: &mut S,
+    frames: &[WireFrame],
+) -> Result<(), axum::Error> {
     let encoded = frames
         .iter()
         .map(encode_frame)
@@ -1185,7 +1243,7 @@ pub(crate) fn encode_ws_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>
     Ok(batches)
 }
 
-async fn close_ws_for_shutdown(socket: &mut WebSocket) {
+async fn close_ws_for_shutdown<S: SyncSocket>(socket: &mut S) {
     let _ = socket
         .send(Message::Close(Some(CloseFrame {
             code: close_code::RESTART,
@@ -1522,6 +1580,7 @@ mod tests {
                 backend_session: Some(serde_json::json!({ "attacker": true })),
                 ..Default::default()
             },
+            local_first_audience: None,
         };
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1666,6 +1725,7 @@ mod tests {
                     })),
                     ..Default::default()
                 },
+                local_first_audience: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1708,6 +1768,7 @@ mod tests {
                     backend_secret: Some("backend-secret".to_owned()),
                     ..Default::default()
                 },
+                local_first_audience: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1746,6 +1807,7 @@ mod tests {
                     admin_secret: Some("admin-secret".to_owned()),
                     ..Default::default()
                 },
+                local_first_audience: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1768,6 +1830,7 @@ mod tests {
                     admin_secret: Some("admin-secret".to_owned()),
                     ..Default::default()
                 },
+                local_first_audience: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1789,6 +1852,7 @@ mod tests {
                     backend_secret: Some("backend-secret".to_owned()),
                     ..Default::default()
                 },
+                local_first_audience: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1823,6 +1887,7 @@ mod tests {
                 })),
                 ..Default::default()
             },
+            local_first_audience: None,
         };
 
         let error = ws_admission(prelude, &HeaderMap::new(), &state)
@@ -1866,6 +1931,7 @@ mod tests {
                 })),
                 ..Default::default()
             },
+            local_first_audience: None,
         };
 
         let admission = ws_admission(prelude, &HeaderMap::new(), &state)
@@ -1935,7 +2001,7 @@ mod tests {
     #[tokio::test]
     async fn ws_blank_core_reports_schema_deployment_required() {
         assert_blank_runtime_diagnostic(
-            "no schema has been published for this app; deploy a schema with `jazz-tools deploy <appId>` before connecting",
+            "no schema has been published for this app; start the app's createJazz backend, which publishes its schema, before connecting",
         )
         .await;
     }
@@ -2218,6 +2284,72 @@ mod tests {
             .is_err(),
             "unknown requested_link is an authority request, not an ignored extension"
         );
+    }
+
+    /// A backend that presents the admin secret as its credential and states
+    /// backend access gets a backend session whatever its prelude's secret
+    /// slot says.
+    #[tokio::test]
+    async fn websocket_backend_credential_grants_the_stated_access() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let prelude = serde_json::json!({
+            "peer_identity": AuthorSubject::SYSTEM.canonical(),
+            "auth": { "backend_secret": "a stand-in" },
+        })
+        .to_string();
+        let mut open = Vec::new();
+        for _ in 0..3 {
+            let mut request = ws_url(addr, state.app_id).into_client_request().unwrap();
+            let headers = request.headers_mut();
+            headers.insert("X-Jazz-Backend-Credential", "admin-secret".parse().unwrap());
+            headers.insert("X-Jazz-Backend-Access", "backend".parse().unwrap());
+            let (mut ws, _) = connect_async(request).await.expect("connect websocket");
+            ws.send(WsMessage::Text(prelude.clone().into()))
+                .await
+                .expect("send prelude");
+            expect_ws_server_hello(&mut ws, 0).await;
+            open.push(ws);
+        }
+    }
+
+    /// A socket whose credential states session access gets no secret, even
+    /// when its prelude carries the real admin secret.
+    #[tokio::test]
+    async fn websocket_backend_credential_stating_session_ignores_prelude_secrets() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let prelude = serde_json::json!({
+            "peer_identity": AuthorSubject::SYSTEM.canonical(),
+            "auth": { "admin_secret": "admin-secret", "backend_secret": "backend-secret" },
+        })
+        .to_string();
+        let mut request = ws_url(addr, state.app_id).into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("X-Jazz-Backend-Credential", "admin-secret".parse().unwrap());
+        let (mut ws, _) = connect_async(request).await.expect("connect websocket");
+        ws.send(WsMessage::Text(prelude.into()))
+            .await
+            .expect("send prelude");
+        let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("admission resolves")
+            .expect("response")
+            .expect("wire response");
+        let WsMessage::Binary(bytes) = response else {
+            panic!("expected an admission error, got {response:?}")
+        };
+        let frames: Vec<Vec<u8>> = postcard::from_bytes(&bytes).expect("frame batch");
+        assert!(matches!(
+            decode_frame(&frames[0]).expect("error frame"),
+            WireFrame::Error(WireError {
+                code: WireErrorCode::AuthFailed,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -3356,6 +3488,119 @@ mod tests {
         })
         .await;
         assert!(closed.is_ok(), "the revoked socket must close");
+        core.shutdown().await;
+    }
+
+    /// A browser without an app id signs its local-first proof for the
+    /// endpoint it syncs with. Its backend verifies that audience and vouches
+    /// for it with the backend secret; the core then admits the founder, with
+    /// the account id namespaced by that audience. Without the backend secret
+    /// the vouched audience is refused, and the bare proof fails the app-id
+    /// audience check.
+    #[cfg(feature = "embedded-server")]
+    #[tokio::test]
+    async fn a_backend_vouched_audience_admits_an_endpoint_scoped_local_first_founder() {
+        use crate::server::testing::JazzServer;
+
+        let schema = SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .policies(public_table_policies()),
+            )
+            .build();
+        let core = JazzServer::start_with_schema(schema)
+            .await
+            .expect("start test server");
+        let endpoint = "https://app.example.com/jazz";
+        let token = jazz::tools::identity::mint_jazz_self_signed_token(
+            &[0x5a; 32],
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            endpoint,
+            3600,
+        )
+        .expect("mint endpoint-scoped proof");
+        let verified = jazz::tools::identity::verify_jazz_self_signed_proof(&token, endpoint)
+            .expect("verify endpoint-scoped proof");
+        let account = jazz::account_registry::local_first_account_id(
+            *crate::middleware::auth::local_first_founding_app(endpoint).uuid(),
+            &verified.user_id,
+        );
+        let identity = AuthorSubject::reserved(verified.issuer, &verified.user_id)
+            .expect("local-first author")
+            .with_account(account);
+
+        async fn first_frames(core: &JazzServer, prelude: serde_json::Value) -> Vec<WireFrame> {
+            let (mut ws, _) = connect_async(format!(
+                "ws://127.0.0.1:{}/apps/{}/ws",
+                core.port(),
+                core.app_id()
+            ))
+            .await
+            .expect("connect");
+            ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
+                .await
+                .expect("send prelude");
+            ws.send(WsMessage::Binary(
+                ws_client_hello_batch_with_features(current_wire_features()).into(),
+            ))
+            .await
+            .expect("send hello");
+            match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
+                Ok(Some(Ok(message))) => decode_ws_message(&message),
+                _ => Vec::new(),
+            }
+        }
+        let admitted = |frames: &[WireFrame]| matches!(frames, [WireFrame::Hello(_), ..]);
+
+        let unvouched = first_frames(
+            &core,
+            serde_json::json!({
+                "peer_identity": identity.canonical(),
+                "auth": { "jwt_token": token },
+            }),
+        )
+        .await;
+        assert!(!admitted(&unvouched), "the app id is the default audience");
+
+        let forged = first_frames(
+            &core,
+            serde_json::json!({
+                "peer_identity": identity.canonical(),
+                "auth": { "jwt_token": token },
+                "local_first_audience": endpoint,
+            }),
+        )
+        .await;
+        assert!(
+            !admitted(&forged),
+            "only the backend can name another audience"
+        );
+
+        let vouched = first_frames(
+            &core,
+            serde_json::json!({
+                "peer_identity": identity.canonical(),
+                "auth": { "jwt_token": token, "backend_secret": JazzServer::BACKEND_SECRET },
+                "local_first_audience": endpoint,
+            }),
+        )
+        .await;
+        assert!(admitted(&vouched), "{vouched:?}");
+
+        let elsewhere = first_frames(
+            &core,
+            serde_json::json!({
+                "peer_identity": identity.canonical(),
+                "auth": { "jwt_token": token, "backend_secret": JazzServer::BACKEND_SECRET },
+                "local_first_audience": "https://other.example.com/jazz",
+            }),
+        )
+        .await;
+        assert!(
+            !admitted(&elsewhere),
+            "the proof is bound to its own endpoint"
+        );
         core.shutdown().await;
     }
 

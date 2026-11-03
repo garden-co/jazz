@@ -10,20 +10,44 @@ import {
   type JazzSessionActions,
   type JazzSessionSnapshot,
   type JazzSessionConsumer,
-  type NeedsLoginState,
 } from "./state.js";
 import { createListeners, toError } from "../runtime/util.js";
 
 export type JazzAuth =
   | { readonly kind: "better-auth"; readonly client: BetterAuthClient }
-  | ({ readonly kind: "jwt"; getToken(): Promise<string>; logout(): unknown } & AuthProviderState);
+  | ({ readonly kind: "backend"; logout(): unknown } & AuthProviderState);
+/**
+ * Better Auth's client session drives sign-in; the backend reads it in
+ * `authenticate`. Prefer passing `authClient.useSession()`'s user id to the
+ * provider's `user` prop.
+ */
 export const betterAuth = (client: BetterAuthClient): JazzAuth => ({ kind: "better-auth", client });
-/** The logout callback must clear provider state and eventually publish key: null. */
-export const jwtAuth = (options: Omit<Extract<JazzAuth, { kind: "jwt" }>, "kind">): JazzAuth => ({
-  kind: "jwt",
-  ...options,
-});
-export interface JazzAppSnapshot<Client> extends NeedsLoginState {
+/**
+ * Sign in through the app's own backend (`createJazz`): its `authenticate`
+ * decides who the user is. `key` is your signed-in user's id, or null when
+ * signed out; Jazz signs in again whenever it changes. `logout` signs out of
+ * your auth and must then report `key: null`. Prefer the provider's `user`
+ * prop, which is this without `logout`.
+ */
+export const backendAuth = (
+  options: Omit<Extract<JazzAuth, { kind: "backend" }>, "kind">,
+): JazzAuth => ({ kind: "backend", ...options });
+/**
+ * The auth a provider's `user` prop stands for. `user` is who your auth
+ * library says is signed in: `undefined` while it loads, `null` when signed
+ * out, the user's stable id when signed in. `hasUser` is whether the prop was
+ * passed at all, since `user={undefined}` (loading) differs from no prop.
+ */
+export function authForUser(
+  hasUser: boolean,
+  user: string | null | undefined,
+  auth: JazzAuth | undefined,
+): JazzAuth | undefined {
+  if (!hasUser) return auth;
+  if (auth) throw new Error("Pass JazzProvider either `user` or `auth`, not both");
+  return { kind: "backend", key: user ?? null, isPending: user === undefined, logout: () => {} };
+}
+export interface JazzAppSnapshot<Client> {
   readonly status: "starting" | "signed-out" | "transitioning" | "ready" | "error";
   readonly client?: Client;
   readonly account?: JazzSessionSnapshot<Client>["account"];
@@ -60,8 +84,7 @@ export function createJazzAppOwner<Config, Client>(
         logout(action?: () => unknown): Promise<void>;
       })
     | undefined;
-  let jwtConnection: AuthProviderConnection | undefined;
-  let jwtSource: { value: Extract<JazzAuth, { kind: "jwt" }> } | undefined;
+  let backendConnection: AuthProviderConnection | undefined;
   let unsubscribeSession: (() => void) | undefined;
   let unsubscribeConnection: (() => void) | undefined;
   let pending: Promise<void> | undefined;
@@ -75,7 +98,6 @@ export function createJazzAppOwner<Config, Client>(
   let retrying: Promise<void> | undefined;
   let snapshot: JazzAppSnapshot<Client> = Object.freeze({
     status: "starting",
-    needsLogin: false,
   });
   const versions = new WeakMap<object, JazzSessionSnapshot<Client>>();
   const listeners = createListeners("Jazz app observer failed");
@@ -106,7 +128,6 @@ export function createJazzAppOwner<Config, Client>(
       recovery,
       client: status === "ready" ? current?.client : undefined,
       account: current?.account,
-      needsLogin: !!current?.needsLogin,
       error,
     };
     // Keep the raw snapshot version even when a provider hides a still-ready client.
@@ -114,7 +135,6 @@ export function createJazzAppOwner<Config, Client>(
       snapshot.status === next.status &&
       snapshot.client === next.client &&
       snapshot.account === next.account &&
-      snapshot.needsLogin === next.needsLogin &&
       snapshot.error === next.error &&
       snapshot.recovery === next.recovery &&
       (!current || versions.get(snapshot) === current)
@@ -129,18 +149,15 @@ export function createJazzAppOwner<Config, Client>(
     unsubscribeConnection = undefined;
     connection?.dispose();
     connection = undefined;
-    jwtConnection = undefined;
-    jwtSource = undefined;
+    backendConnection = undefined;
   }
   function connect() {
     if (!session || !auth || disposed) return;
     if (auth.kind === "better-auth") connection = connectBetterAuth(session, auth.client);
     else {
-      const source = { value: auth };
-      jwtSource = source;
-      jwtConnection = connectAuthProvider(session, { getToken: () => source.value.getToken() });
-      connection = jwtConnection;
-      jwtConnection.update(auth);
+      backendConnection = connectAuthProvider(session);
+      connection = backendConnection;
+      backendConnection.update(auth);
     }
     unsubscribeConnection = connection.subscribe(publish);
   }
@@ -154,10 +171,8 @@ export function createJazzAppOwner<Config, Client>(
     "createLocalFirst",
     "restoreLocalFirst",
     "becomeBackend",
-    "registerJWT",
-    "loginJWT",
-    "loginOrRegisterJWT",
-    "linkJWT",
+    "loginWithBackend",
+    "linkWithBackend",
   ] as const) {
     (sessionActions as any)[name] = async (...args: unknown[]) => {
       if (auth) throw new Error("Manual session actions require an app without managed auth");
@@ -236,9 +251,8 @@ export function createJazzAppOwner<Config, Client>(
           (next?.kind === "better-auth" && auth.client === next.client));
       auth = next;
       if (session) failure = undefined;
-      if (same && next?.kind === "jwt") {
-        if (jwtSource) jwtSource.value = next;
-        jwtConnection?.update(next);
+      if (same && next?.kind === "backend") {
+        backendConnection?.update(next);
       } else if (!same) {
         disconnect();
         connect();
@@ -282,10 +296,10 @@ export function createJazzAppOwner<Config, Client>(
       manualRetry = undefined;
       failure = undefined;
       try {
-        if (jwtConnection) {
+        if (backendConnection) {
           const leaving = auth;
-          await jwtConnection.logout(() =>
-            leaving?.kind === "jwt" ? leaving.logout() : undefined,
+          await backendConnection.logout(() =>
+            leaving?.kind === "backend" ? leaving.logout() : undefined,
           );
         } else if (connection) await connection.logout();
         else await current.logout();
