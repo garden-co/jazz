@@ -5,6 +5,7 @@ import { exportJWK, generateKeyPair, SignJWT, type JWTPayload } from "jose";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { createJazz, createJazzSession, memory, trustWorkload, type Jazz } from "./index.js";
+import { backendDbForSession } from "./create-jazz-session.js";
 
 const app = s.defineApp(
   {
@@ -330,26 +331,84 @@ describe("trusted backend clients", () => {
     expect(code).toBe(1008);
   });
 
-  it("can't act for a user", async () => {
-    const { appId, origin } = await appWith([
+  it("may act for a user, like the main backend", async () => {
+    const { appId, jazz, origin } = await appWith([
       trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
     ]);
-    const token = await sign({ sub: "ops" });
-    for (const stated of [
-      { backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" } },
-      { auth: { backend_secret: "stand-in", user_id: "alice" } },
-    ]) {
-      const socket = new WebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
-        headers: { authorization: `Bearer ${token}` },
-      } as never);
-      socket.addEventListener("open", () =>
-        socket.send(JSON.stringify({ peer_identity: "x", backend_secret: "stand-in", ...stated })),
-      );
-      const code = await new Promise<number>((resolve) =>
-        socket.addEventListener("close", (event) => resolve(event.code)),
-      );
-      expect(code).toBe(1008);
-    }
+    const alice = await jazz.accountFor(
+      new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
+    );
+    // A prelude stating alice's session is admitted on the machine's token.
+    const socket = new WebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
+      headers: { authorization: `Bearer ${await sign({ sub: "ops" })}` },
+    } as never);
+    socket.addEventListener("open", () =>
+      socket.send(
+        JSON.stringify({
+          peer_identity: "x",
+          backend_secret: "stand-in",
+          backend_session: {
+            issuer: `jazz:app:${appId}`,
+            user_id: "alice",
+            account_id: alice,
+            claims: {},
+            authMode: "external",
+          },
+        }),
+      ),
+    );
+    const answered = await new Promise<string>((resolve) => {
+      socket.addEventListener("message", () => resolve("message"));
+      socket.addEventListener("close", (event) => resolve(`closed ${event.code}`));
+    });
+    socket.close();
+    expect(answered).toBe("message");
+    // Through its client: a write as alice carries her identity and is
+    // checked against her policies.
+    const session = await createJazzSession({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      credential: () => sign({ sub: "ops" }),
+    });
+    cleanups.push(() => session.close());
+    const { client } = session.getSnapshot();
+    const asAlice = backendDbForSession(client!, {
+      issuer: `jazz:app:${appId}`,
+      user_id: "alice",
+      account_id: alice!,
+      claims: {},
+      authMode: "external",
+    });
+    const row = await asAlice
+      .insert(app.todos, { title: "as alice", owner: alice! })
+      .wait({ tier: "global" });
+    const [written] = await jazz.db.all(
+      app.todos.where({ id: row.id }).select("title", "$createdBy"),
+    );
+    expect(written?.$createdBy).toMatchObject({ account: alice });
+    await expect(
+      asAlice
+        .insert(app.todos, { title: "not alice's", owner: randomUUID() })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
+    // Without its token, the same prelude is refused.
+    const bare = new WebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`);
+    bare.addEventListener("open", () =>
+      bare.send(
+        JSON.stringify({
+          peer_identity: "x",
+          backend_secret: "stand-in",
+          backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
+        }),
+      ),
+    );
+    const code = await new Promise<number>((resolve) =>
+      bare.addEventListener("close", (event) => resolve(event.code)),
+    );
+    expect(code).toBe(1008);
   });
 
   it("a key outage is a 503, never read as a refusal", async () => {

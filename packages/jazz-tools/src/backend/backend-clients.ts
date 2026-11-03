@@ -31,8 +31,9 @@ export interface BackendClientTrust {
  *
  * `as` decides what the backend client may do:
  * - `"backend"`: a trusted machine. It syncs with the main backend's own
- *   authority, as the system: your permissions are not checked, and its
- *   writes are attributed to the system identity. It can't act for a user.
+ *   authority: your permissions are not checked, and it may act on behalf
+ *   of any user, like the main backend itself (writes it makes as a user
+ *   are checked against that user's permissions).
  * - a callback from the token's claims to a user: a scoped machine. It acts
  *   as that user, with that user's permissions, exactly as if `authenticate`
  *   had named the user. Return null to refuse the token.
