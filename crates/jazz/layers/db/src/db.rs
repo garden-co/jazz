@@ -7988,6 +7988,7 @@ impl Db {
             );
         }
         {
+            let policies = self.view_policies();
             let inner = self.inner();
             for (schema, op) in &batch.ops {
                 if let Some(row) = op.row()
@@ -8007,7 +8008,7 @@ impl Db {
                 };
                 let governed;
                 let prepared = if read.accepted_evidence {
-                    governed = inner.governed_accepted_query(&read.prepared)?;
+                    governed = inner.governed_accepted_query(&read.prepared, policies.clone())?;
                     &governed
                 } else {
                     &read.prepared

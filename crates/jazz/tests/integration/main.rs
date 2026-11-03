@@ -221,3 +221,6 @@ mod accepted_evidence_wire;
 
 #[path = "../accepted_transaction_reads.rs"]
 mod accepted_transaction_reads;
+
+#[path = "../accepted_bundle_reads.rs"]
+mod accepted_bundle_reads;
