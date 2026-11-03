@@ -6,11 +6,8 @@ project is and what the user wants, explain how Jazz fits their existing tech ch
 options for open choices, or just make the choices needed to get things running quickly. Every
 choice below has a default you can take when the user has no preference.
 
-All docs links are paths on https://jazz.tools. Append `.md` to any docs page for Markdown.
-
-Before writing Jazz code, add this line to AGENTS.md (create it if missing) and follow it yourself:
-"Jazz: before writing Jazz code, fetch https://jazz.tools/llms.txt and the relevant page (append
-.md for Markdown). The installed jazz-tools types win over the docs."
+All docs links are paths on https://jazz.tools. Append `.md` to any docs page for Markdown. The
+full docs index is https://jazz.tools/llms.txt.
 
 ## Decide
 
