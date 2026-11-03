@@ -1,0 +1,111 @@
+{
+  "format": "jazz-thin-wire-corpus-v1",
+  "requests": [
+    {
+      "name": "schema",
+      "frame_hex": "040100027b7d"
+    },
+    {
+      "name": "subscribe",
+      "frame_hex": "04020103010203167b2274696572223a226c6f63616c2d6669727374227d"
+    },
+    {
+      "name": "unsubscribe",
+      "frame_hex": "040302ac02"
+    },
+    {
+      "name": "query",
+      "frame_hex": "04040303010203117b2274696572223a2272656d6f7465227d010474782d31"
+    },
+    {
+      "name": "insert",
+      "frame_hex": "04050405746f646f730204051d7b227570646174656441744d73223a313730303030303030303030307d00"
+    },
+    {
+      "name": "update",
+      "frame_hex": "04060505746f646f73111111111111111111111111111111110106027b7d010474782d31"
+    },
+    {
+      "name": "upsert",
+      "frame_hex": "04070605746f646f73111111111111111111111111111111110107027b7d00"
+    },
+    {
+      "name": "delete",
+      "frame_hex": "04080705746f646f7311111111111111111111111111111111027b7d010474782d31"
+    },
+    {
+      "name": "restore",
+      "frame_hex": "04090805746f646f7311111111111111111111111111111111010108027b7d00"
+    },
+    {
+      "name": "updateLargeValues",
+      "frame_hex": "040a0905746f646f73111111111111111111111111111111110109025b5d0180d095ffbc31010474782d31"
+    },
+    {
+      "name": "begin",
+      "frame_hex": "040b0a0474782d310c73657269616c697a61626c65"
+    },
+    {
+      "name": "commit",
+      "frame_hex": "040c0b0474782d31"
+    },
+    {
+      "name": "rollback",
+      "frame_hex": "040d0c0474782d31"
+    },
+    {
+      "name": "captureSnapshot",
+      "frame_hex": "040e0d"
+    },
+    {
+      "name": "beginStream",
+      "frame_hex": "040f0e05746f646f7311111111111111111111111111111111010a04626f647906696e73657274027b7d"
+    },
+    {
+      "name": "streamChunk",
+      "frame_hex": "04100f07056368756e6b"
+    },
+    {
+      "name": "finishStream",
+      "frame_hex": "04111007"
+    },
+    {
+      "name": "abortStream",
+      "frame_hex": "04121107"
+    }
+  ],
+  "responses": [
+    {
+      "name": "ok",
+      "frame_hex": "050100"
+    },
+    {
+      "name": "rows",
+      "frame_hex": "05020102010201"
+    },
+    {
+      "name": "event",
+      "frame_hex": "0503020103010006676c6f62616c"
+    },
+    {
+      "name": "closed",
+      "frame_hex": "050403"
+    },
+    {
+      "name": "staged",
+      "frame_hex": "05050411111111111111111111111111111111"
+    },
+    {
+      "name": "snapshot",
+      "frame_hex": "05060504736e6170"
+    },
+    {
+      "name": "written",
+      "frame_hex": "05070611111111111111111111111111111111ac02"
+    },
+    {
+      "name": "error",
+      "frame_hex": "05080708417267756d656e74026e6f"
+    }
+  ]
+}
