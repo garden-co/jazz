@@ -6,7 +6,7 @@ import type { Db } from "../runtime/db.js";
 import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
-import { createAccountManager, createDb, upgradeToLocalFirst } from "./index.js";
+import { createAccountManager, createClient, upgradeToLocalFirst } from "./index.js";
 import { LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
 import { parseSnapshotRef, serializeSnapshotRef } from "../runtime/snapshot-ref.js";
 
@@ -65,7 +65,7 @@ async function thinDb(server: LocalJazzServerHandle, secret?: string): Promise<D
       },
     },
   });
-  const db = await createDb({
+  const db = await createClient({
     appId: server.appId,
     serverUrl: server.url,
     account: secret ? accounts.restoreLocalFirst(secret) : accounts.createLocalFirst(),
