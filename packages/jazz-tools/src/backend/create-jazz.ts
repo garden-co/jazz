@@ -60,7 +60,14 @@ import {
 export type { VercelStoreOptions } from "./vercel-store.js";
 
 import { files, type BlobStore } from "./blobs.js";
-export { files, s3, type BlobStore, type S3BlobStore } from "./blobs.js";
+export {
+  files,
+  s3,
+  vercelBlob,
+  type BlobStore,
+  type S3BlobStore,
+  type VercelBlobStore,
+} from "./blobs.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
