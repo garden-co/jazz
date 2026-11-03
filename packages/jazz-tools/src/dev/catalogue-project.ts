@@ -188,15 +188,18 @@ export async function validateProject(
 ): Promise<ValidateProjectResult> {
   const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
   await validateSchemaAndPermissions(compiled.wasmSchema, compiled.permissions);
-  await writeLocalClientMigrations(
-    options.schemaDir,
-    resolvedMigrationsDir(options.schemaDir, options.migrationsDir),
-  );
+  const migrationsDir = resolvedMigrationsDir(options.schemaDir, options.migrationsDir);
+  const retired = await retireLegacyMigrations(migrationsDir, compiled.wasmSchema);
+  await writeLocalClientMigrations(options.schemaDir, migrationsDir);
   return {
     schemaFile: compiled.schemaFile,
     permissionsFile: compiled.permissionsFile,
     tableCount: compiled.schema.tables.length,
     warnings: [
+      ...retired.map(
+        (fileName) =>
+          `Moved ${fileName} to ${LEGACY_MIGRATIONS_DIR}/: it names schema versions by the hashes Jazz used before alpha.60 switched schema hashes to SHA-256, so it no longer applies. The app runs on schema.ts as it is; delete the legacy folder once you no longer need it.`,
+      ),
       ...collectConventionalProvenanceDiagnostics(compiled.schema),
       ...collectMissingExplicitPolicyDiagnostics(
         compiled.schema.tables.map((table) => table.name),
@@ -1387,6 +1390,7 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
   emit(options, { type: "schema-loaded", schemaFile: compiled.schemaFile });
   emit(options, { type: "permissions-loaded", permissionsFile: compiled.permissionsFile });
   const toHash = await computeSchemaHash(compiled.wasmSchema);
+  await assertNoLegacyMigrations(migrationsDir, compiled.wasmSchema);
   const graph = await fetchMigrationGraph(options);
   if (await pathExists(migrationsDir)) await assertNoSymlinkComponents(migrationsDir);
   const files = ((await pathExists(migrationsDir)) ? await readdir(migrationsDir) : [])
@@ -1584,6 +1588,104 @@ async function writeClientMigrations(
  * Write the app's migrations module from what this project holds locally:
  * schema.ts, its snapshots and its migration files.
  */
+/** Where `validate` moves migrations that predate SHA-256 schema hashes. */
+export const LEGACY_MIGRATIONS_DIR = "legacy";
+
+const SNAPSHOT_NAME_HASH = /([0-9a-f]{12})\.json$/i;
+const SNAPSHOT_HASH_PREFIX = 12;
+
+/**
+ * Schema hashes changed from BLAKE3 to SHA-256 in alpha.60. A snapshot's hash
+ * is recomputed from its contents, but its file name and every migration
+ * written against it still carry the old short hash. Old-hash snapshots are
+ * renamed to their current hash (their contents are exact), and migrations
+ * whose filename names an old hash that no current version answers are
+ * listed as legacy: their edges can't be resolved, and an app upgrading to
+ * alpha.60 starts again from its current schema.
+ */
+async function findLegacyMigrations(
+  migrationsDir: string,
+  currentSchema: WasmSchema,
+  options: { renameSnapshots: boolean },
+): Promise<string[]> {
+  if (!(await pathExists(migrationsDir))) return [];
+  await assertNoSymlinkComponents(migrationsDir);
+  const storage = new MigrationStorage(migrationsDir);
+  const snapshots = await storage.listSnapshots();
+  const known = [
+    ...new Set([...snapshots.map(({ hash }) => hash), await computeSchemaHash(currentSchema)]),
+  ];
+  const stale = new Set<string>();
+  for (const snapshot of snapshots) {
+    const named = snapshot.fileName.match(SNAPSHOT_NAME_HASH)?.[1]?.toLowerCase();
+    const current = shortSchemaHash(snapshot.hash);
+    if (!named || named === current) continue;
+    stale.add(named);
+    if (options.renameSnapshots) {
+      const renamed = join(
+        dirname(snapshot.filePath),
+        snapshot.fileName.replace(SNAPSHOT_NAME_HASH, `${current}.json`),
+      );
+      if (await pathExists(renamed)) await rm(snapshot.filePath);
+      else await rename(snapshot.filePath, renamed);
+    }
+  }
+  if (stale.size === 0) return [];
+  const resolves = (hash: string) => {
+    try {
+      resolveKnownSchemaHash(hash, "schema hash", known);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const legacy = [];
+  for (const fileName of (await readdir(migrationsDir)).filter(isMigrationFile).sort()) {
+    let named;
+    try {
+      named = migrationHashesFromFileName(fileName);
+    } catch {
+      continue;
+    }
+    const old = (hash: string) =>
+      stale.has(hash.slice(0, SNAPSHOT_HASH_PREFIX).toLowerCase()) && !resolves(hash);
+    if (old(named.from) || old(named.to)) legacy.push(fileName);
+  }
+  return legacy;
+}
+
+/** Move legacy migrations ({@link findLegacyMigrations}) to `legacy/`; returns their names. */
+async function retireLegacyMigrations(
+  migrationsDir: string,
+  currentSchema: WasmSchema,
+): Promise<string[]> {
+  const legacy = await findLegacyMigrations(migrationsDir, currentSchema, {
+    renameSnapshots: true,
+  });
+  if (legacy.length === 0) return [];
+  const legacyDir = join(migrationsDir, LEGACY_MIGRATIONS_DIR);
+  await mkdir(legacyDir, { recursive: true });
+  await assertNoSymlinkComponents(legacyDir);
+  for (const fileName of legacy) {
+    await rename(join(migrationsDir, fileName), join(legacyDir, fileName));
+  }
+  return legacy;
+}
+
+/** Refuse to deploy while legacy migrations are in place, pointing at `validate`. */
+async function assertNoLegacyMigrations(
+  migrationsDir: string,
+  currentSchema: WasmSchema,
+): Promise<void> {
+  const legacy = await findLegacyMigrations(migrationsDir, currentSchema, {
+    renameSnapshots: false,
+  });
+  if (legacy.length === 0) return;
+  throw new Error(
+    `${legacy.join(", ")} ${legacy.length === 1 ? "names" : "name"} schema versions by the hashes Jazz used before alpha.60 switched schema hashes to SHA-256. Run \`jazz-tools validate\` to move ${legacy.length === 1 ? "it" : "them"} to ${LEGACY_MIGRATIONS_DIR}/ and deploy schema.ts as it is.`,
+  );
+}
+
 async function writeLocalClientMigrations(schemaDir: string, migrationsDir: string): Promise<void> {
   const compiled = await loadCompiledSchema(schemaDir);
   if (!(await importsClientMigrations(compiled.schemaFile))) return;

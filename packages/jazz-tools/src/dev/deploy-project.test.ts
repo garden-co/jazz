@@ -198,3 +198,45 @@ it("leaves an app that does not import its migrations module without one", async
   await validateProject({ schemaDir: root });
   expect(existsSync(join(root, "migrations", "index.ts"))).toBe(false);
 });
+
+/** The fixture as an alpha.59 project left it: its snapshot and migration
+ * name schema versions by pre-SHA-256 hashes. */
+async function legacyFixture() {
+  const project = await fixture();
+  const [oldFrom, oldTo] = ["a0a0a0a0a0a0", "b1b1b1b1b1b1"];
+  const snapshots = join(project.migrationsDir, "snapshots");
+  const [snapshot] = await readdir(snapshots);
+  await rename(join(snapshots, snapshot!), join(snapshots, `20260925T000000-${oldFrom}.json`));
+  const legacyName = `20260925T000001-${oldFrom}-${oldTo}.ts`;
+  await rm(project.file);
+  await writeFile(
+    join(project.migrationsDir, legacyName),
+    project.source
+      .replace(/fromHash:"[0-9a-f]+"/, `fromHash:"${oldFrom}"`)
+      .replace(/toHash:"[0-9a-f]+"/, `toHash:"${oldTo}"`),
+  );
+  return { ...project, legacyName, snapshot: snapshot! };
+}
+
+it("moves migrations written with pre-SHA-256 schema hashes to legacy/", async () => {
+  const { root, migrationsDir, legacyName, snapshot } = await legacyFixture();
+  const result = await validateProject({ schemaDir: root });
+  expect(existsSync(join(migrationsDir, legacyName))).toBe(false);
+  expect(existsSync(join(migrationsDir, "legacy", legacyName))).toBe(true);
+  // The snapshot's contents are exact: it is renamed to its current hash.
+  expect(await readdir(join(migrationsDir, "snapshots"))).toEqual([snapshot]);
+  expect(result.warnings.some((warning) => warning.includes(`Moved ${legacyName}`))).toBe(true);
+  expect((await importMigrations(migrationsDir)).migrations).toEqual([]);
+  // Validating again finds nothing more to move.
+  expect((await validateProject({ schemaDir: root })).warnings).toEqual(
+    result.warnings.filter((warning) => !warning.includes("Moved")),
+  );
+});
+
+it("refuses to deploy legacy migrations and points at validate", async () => {
+  const { root, legacyName, fetchMock } = await legacyFixture();
+  await expect(deploy({ ...options, schemaDir: root })).rejects.toThrow(
+    new RegExp(`${legacyName}.*jazz-tools validate`),
+  );
+  expect(fetchMock).not.toHaveBeenCalled();
+});
