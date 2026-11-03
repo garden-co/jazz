@@ -23,6 +23,13 @@
 //!   seq at which the read policies last changed when it was activated, and
 //!   `read_digest` a digest of them (both `NULL` until activated).
 //!
+//! - `_jazz_bundles`: each permissions bundle a backend published, by its
+//!   content id (see [`bundle_id`]): the write schema it selects and its
+//!   per-table policies. Bundles are never activated: a session is pinned
+//!   to the bundle of the backend that admitted it and is governed by its
+//!   policies, so two deployments of one app can serve at once and a
+//!   rollback is publishing the older bundle again (a no-op).
+//!
 //! An authority's server writes these in the same transaction as the
 //! admission they describe, so a deploy is never half written. A store
 //! with no server writes schemas and permissions as it admits and
@@ -49,7 +56,9 @@ pub(crate) const DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_lenses (source BLOB NOT NULL, target BLOB NOT NULL, \
      published_at INTEGER NOT NULL, def TEXT NOT NULL, PRIMARY KEY (source, target)) WITHOUT ROWID;\
     CREATE TABLE IF NOT EXISTS _jazz_permissions (revision INTEGER PRIMARY KEY, hash BLOB NOT NULL, \
-     published_at INTEGER, activated_seq INTEGER, read_digest INTEGER, def TEXT NOT NULL);";
+     published_at INTEGER, activated_seq INTEGER, read_digest INTEGER, def TEXT NOT NULL);\
+    CREATE TABLE IF NOT EXISTS _jazz_bundles (id BLOB PRIMARY KEY, hash BLOB NOT NULL, \
+     published_at INTEGER NOT NULL, def TEXT NOT NULL) WITHOUT ROWID;";
 
 /// A table's policies, by table name.
 pub type Permissions = BTreeMap<TableName, TablePolicies>;
@@ -91,13 +100,76 @@ pub struct PermissionsRevision {
     pub permissions: Permissions,
 }
 
+/// A permissions bundle's content id: what it selects and allows, hashed.
+/// Equal bundles have equal ids on every store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BundleId(pub [u8; 32]);
+
+impl BundleId {
+    pub fn to_hex(&self) -> String {
+        self.0.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    pub fn from_hex(text: &str) -> Option<Self> {
+        if text.len() != 64 || !text.is_ascii() {
+            return None;
+        }
+        let mut bytes = [0u8; 32];
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).ok()?;
+        }
+        Some(Self(bytes))
+    }
+}
+
+impl std::fmt::Display for BundleId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_hex())
+    }
+}
+
+/// The content id of the bundle that selects write schema `schema` with
+/// `permissions` (tables left at the default policies do not count).
+pub fn bundle_id(schema: &SchemaHash, permissions: &Permissions) -> Result<BundleId, Error> {
+    let def = canonical_json(&without_defaults(permissions))?;
+    Ok(BundleId(*bundle_hash(schema, &def).as_bytes()))
+}
+
+fn bundle_hash(schema: &SchemaHash, def: &str) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"jazz-bundle-v1\0");
+    hasher.update(schema.as_bytes());
+    hasher.update(def.as_bytes());
+    hasher.finalize()
+}
+
+fn without_defaults(permissions: &Permissions) -> Permissions {
+    permissions
+        .iter()
+        .filter(|(_, policies)| **policies != TablePolicies::default())
+        .map(|(name, policies)| (*name, policies.clone()))
+        .collect()
+}
+
+/// One published permissions bundle.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CatalogueBundle {
+    pub id: BundleId,
+    /// The write schema it selects (structural hash).
+    pub schema: SchemaHash,
+    /// Unix milliseconds, when this store first had it.
+    pub published_at: u64,
+    pub permissions: Permissions,
+}
+
 /// Everything in the catalogue, each list in key order (permissions by
-/// revision).
+/// revision, bundles by id).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CatalogueRows {
     pub schemas: Vec<CatalogueSchema>,
     pub lenses: Vec<CatalogueLens>,
     pub permissions: Vec<PermissionsRevision>,
+    pub bundles: Vec<CatalogueBundle>,
 }
 
 impl CatalogueRows {
@@ -129,11 +201,17 @@ pub struct CataloguePut {
     /// Revisions to record; one already recorded is replaced, keeping its
     /// activation.
     pub permissions: Vec<(u64, SchemaHash, Permissions, u64)>,
+    /// Bundles to publish: (write schema, permissions, publication time).
+    /// One already published keeps its first publication time.
+    pub bundles: Vec<(SchemaHash, Permissions, u64)>,
 }
 
 impl CataloguePut {
     pub fn is_empty(&self) -> bool {
-        self.schemas.is_empty() && self.lenses.is_empty() && self.permissions.is_empty()
+        self.schemas.is_empty()
+            && self.lenses.is_empty()
+            && self.permissions.is_empty()
+            && self.bundles.is_empty()
     }
 }
 
@@ -214,6 +292,11 @@ fn structural(schema: &PublicSchema) -> PublicSchema {
     schema
 }
 
+/// The structural hash of `schema` (its policies cleared).
+pub(crate) fn structural_hash(schema: &PublicSchema) -> SchemaHash {
+    SchemaHash::compute(&structural(schema))
+}
+
 /// The structural hash of `schema` and its definition.
 fn structural_def(schema: &PublicSchema) -> Result<(SchemaHash, String), Error> {
     let schema = structural(schema);
@@ -230,7 +313,7 @@ pub fn permissions_of(schema: &PublicSchema) -> Permissions {
         .collect()
 }
 
-fn now_millis() -> u64 {
+pub(crate) fn now_millis() -> u64 {
     web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
@@ -290,7 +373,71 @@ pub(crate) fn put(conn: &Connection, put: &CataloguePut) -> Result<(), Error> {
         })
         .map_err(storage)?;
     }
+    for (schema, permissions, published_at) in &put.bundles {
+        let def = canonical_json(&without_defaults(permissions))?;
+        let id = bundle_hash(schema, &def);
+        conn.prepare_cached(
+            "INSERT INTO _jazz_bundles (id, hash, published_at, def) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .and_then(|mut statement| {
+            statement.execute(params![
+                id.as_bytes().to_vec(),
+                schema.as_bytes().to_vec(),
+                *published_at as i64,
+                def
+            ])
+        })
+        .map_err(storage)?;
+    }
     Ok(())
+}
+
+fn has_bundles(conn: &Connection) -> Result<bool, Error> {
+    conn.cached_row(
+        "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '_jazz_bundles'",
+        [],
+        |r| r.get(0),
+    )
+    .map_err(storage)
+}
+
+/// Whether this store has published any permissions bundle: its app is
+/// served through createJazz, which pins every session it opens.
+pub(crate) fn serves_bundles(conn: &Connection) -> Result<bool, Error> {
+    if !has_bundles(conn)? {
+        return Ok(false);
+    }
+    conn.cached_row("SELECT EXISTS (SELECT 1 FROM _jazz_bundles)", [], |r| {
+        r.get(0)
+    })
+    .map_err(storage)
+}
+
+/// The published bundle `id`: its write schema and permissions.
+pub(crate) fn bundle(
+    conn: &Connection,
+    id: &BundleId,
+) -> Result<Option<(SchemaHash, Permissions)>, Error> {
+    if !has_bundles(conn)? {
+        return Ok(None);
+    }
+    let found: Option<(Vec<u8>, String)> = conn
+        .cached_row(
+            "SELECT hash, def FROM _jazz_bundles WHERE id = ?1",
+            [id.0.to_vec()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(storage)?;
+    found
+        .map(|(hash, def)| {
+            Ok((
+                hash_of(hash, "_jazz_bundles")?,
+                decode(&def, format_args!("bundle {id} in _jazz_bundles"))?,
+            ))
+        })
+        .transpose()
 }
 
 fn exists(conn: &Connection) -> Result<bool, Error> {
@@ -425,6 +572,32 @@ pub(crate) fn read(conn: &Connection) -> Result<CatalogueRows, Error> {
                 format_args!("permissions revision {revision} in _jazz_permissions"),
             )?,
         });
+    }
+    drop(statement);
+    if has_bundles(conn)? {
+        let mut statement = conn
+            .prepare("SELECT id, hash, published_at, def FROM _jazz_bundles ORDER BY id")
+            .map_err(storage)?;
+        let found = statement
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(storage)?;
+        for row in found {
+            let (id, hash, published_at, def) = row.map_err(storage)?;
+            let id = BundleId(*hash_of(id, "_jazz_bundles")?.as_bytes());
+            rows.bundles.push(CatalogueBundle {
+                id,
+                schema: hash_of(hash, "_jazz_bundles")?,
+                published_at: published_at as u64,
+                permissions: decode(&def, format_args!("bundle {id} in _jazz_bundles"))?,
+            });
+        }
     }
     Ok(rows)
 }

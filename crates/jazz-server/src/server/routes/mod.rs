@@ -31,8 +31,8 @@ use crate::server::{MAX_CATALOGUE_REQUEST_BODY_BYTES, ServerState};
 
 use http::{
     admin_subscription_introspection_handler, deploy_handler, health_handler,
-    internal_shutdown_handler, migration_graph_handler, permissions_handler, schema_handler,
-    schema_hashes_handler,
+    internal_shutdown_handler, migration_graph_handler, permissions_handler,
+    publish_bundle_handler, schema_handler, schema_hashes_handler,
 };
 use utils::parse_app_id_param;
 pub(crate) use websocket::WebSocketAdmissionState;
@@ -88,6 +88,7 @@ async fn app_shutdown_gate(
 pub fn create_router(state: Arc<ServerState>) -> Router {
     let admin_routes = Router::new()
         .route("/deploy", post(deploy_handler))
+        .route("/bundles", post(publish_bundle_handler))
         .route("/accounts/resolve", post(accounts::resolve_for_admin))
         .route(
             "/accounts/login-or-register",
