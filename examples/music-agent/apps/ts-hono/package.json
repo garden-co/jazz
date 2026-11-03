@@ -1,0 +1,34 @@
+{
+  "name": "music-agent-ts-hono",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently --kill-others-on-fail --names server,vite \"pnpm dev:server\" \"pnpm dev:vite\"",
+    "dev:server": "tsx watch server/index.ts",
+    "dev:vite": "wait-on --timeout 30000 http-get://127.0.0.1:3001/health && vite",
+    "build": "jazz-tools validate && vite build",
+    "start": "NODE_ENV=production tsx server/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.129.0",
+    "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
+    "@hono/node-server": "^1.19.11",
+    "better-auth": "1.7.1",
+    "hono": "^4.12.9",
+    "jazz-napi": "workspace:*",
+    "jazz-tools": "workspace:*",
+    "tsx": "^4.21.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/node": "catalog:default",
+    "concurrently": "^9.1.0",
+    "typescript": "catalog:default",
+    "vite": "catalog:default",
+    "wait-on": "^8.0.2"
+  }
+}
