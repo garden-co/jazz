@@ -12,6 +12,12 @@ export interface JazzServerBrowserCommands {
     app: { schema: WasmSchema; permissions: CompiledPermissionsMap; pageOrigin: string },
   ): Promise<string>;
   jazzAppUser(frontUrl: string, userId: string, claims?: Record<string, unknown>): Promise<string>;
+  /** Optional: only configs whose tests write as the backend register it. */
+  jazzAppBackendInsert?(
+    frontUrl: string,
+    table: string,
+    row: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
   jazzAppRequest(
     url: string,
     init: { method: string; headers: [string, string][]; body: string | null },

@@ -68,6 +68,22 @@ export function jazzAppUserUrl(
  * The page's origin is not the backend's and the backend answers no CORS (an
  * app serves its backend on its own origin), so Node sends them.
  */
+/**
+ * Insert a row with the app backend's own authority (from
+ * {@link startJazzApp}), as the app's server code writes what no client may.
+ * Resolves once the core has it.
+ */
+export async function insertAsJazzAppBackend<T>(
+  app: JazzServerInfo,
+  table: { _table: string; _rowType: T },
+  row: Record<string, unknown>,
+): Promise<T> {
+  const insert = jazzServerBrowserCommands().jazzAppBackendInsert;
+  if (!insert)
+    throw new Error("This browser test config does not register the jazzAppBackendInsert command");
+  return (await insert(app.serverUrl, table._table, row)) as T;
+}
+
 export const jazzAppFetch: typeof fetch = async (input, init) => {
   const request = new Request(input, init);
   const response = await jazzServerBrowserCommands().jazzAppRequest(request.url, {
@@ -91,29 +107,49 @@ export function jazzAppUser(
   return signInWithJazzApp(createAccountManager, app, userId, claims);
 }
 
+/** An account manager factory: this package's or an example's own `createAccountManager`. */
+export type AccountManagerFactory<Account> = (config: {
+  appId: string;
+  serverUrl: string;
+  fetch: typeof fetch;
+  store: AccountStore;
+}) => Promise<{ loginWithBackend(): Promise<Account> }>;
+
 /**
  * {@link jazzAppUser} with the caller's own `createAccountManager`, so an
  * example's account handles come from (and stay in) its own copy of Jazz.
  */
 export async function signInWithJazzApp<Account>(
-  createManager: (config: {
-    appId: string;
-    serverUrl: string;
-    fetch: typeof fetch;
-    store: AccountStore;
-  }) => Promise<{ loginWithBackend(): Promise<Account> }>,
+  createManager: AccountManagerFactory<Account>,
   app: JazzServerInfo,
   userId: string,
   claims?: Record<string, unknown>,
 ): Promise<{ appId: string; serverUrl: string; account: Account }> {
   const serverUrl = await jazzAppUserUrl(app, userId, claims);
-  const accounts = await createManager({
+  return {
     appId: app.appId,
     serverUrl,
+    account: await loginAtJazzAppUser(app.appId, serverUrl, createManager),
+  };
+}
+
+/**
+ * Sign in again at a user's own origin (from {@link jazzAppUserUrl}): the
+ * same account each time, e.g. to reopen that user's persistent client.
+ * Defaults to this package's own account manager.
+ */
+export async function loginAtJazzAppUser<Account = AccountHandle>(
+  appId: string,
+  userUrl: string,
+  createManager: AccountManagerFactory<Account> = createAccountManager as never,
+): Promise<Account> {
+  const accounts = await createManager({
+    appId,
+    serverUrl: userUrl,
     fetch: jazzAppFetch,
     store: memoryAccountStore(),
   });
-  return { appId: app.appId, serverUrl, account: await accounts.loginWithBackend() };
+  return accounts.loginWithBackend();
 }
 
 function memoryAccountStore(): AccountStore {

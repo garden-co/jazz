@@ -47,6 +47,14 @@ export interface TestJazz {
    */
   bearer(userId: string, claims?: Record<string, unknown>): string;
   /**
+   * Sign requests that reach the app with Host `host` in as the user whose
+   * origin is `userUrl` (from {@link as}): for a proxy in front of their
+   * origin, such as a transport control, which forwards their browser's
+   * requests unchanged. Returns false (and signs nothing in) when `userUrl`
+   * is not one of this app's user origins.
+   */
+  proxyOrigin(userUrl: string, host: string): boolean;
+  /**
    * Deploy a new version of the app, as a real redeploy does: publish it to
    * the core (with its migration), then restart the app's Jazz on it. Every
    * origin keeps its port, so clients reconnect where they were.
@@ -156,6 +164,12 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
       const token = `test-bearer-${randomUUID()}`;
       bearers.set(token, { userId, claims });
       return token;
+    },
+    proxyOrigin(userUrl, host) {
+      const user = users.get(new URL(userUrl).host);
+      if (!user) return false;
+      users.set(host, user);
+      return true;
     },
     async as(userId, claims) {
       const host = await serve();

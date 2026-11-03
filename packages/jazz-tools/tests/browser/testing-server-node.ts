@@ -15,6 +15,8 @@ interface StartedJazzServer {
   server: LocalJazzServerHandle;
   /** The app's backend (createJazz) in front of the core, once a test deploys. */
   front?: TestJazz;
+  /** The schema the app backend runs (from its latest `jazzAppFront`). */
+  frontSchema?: WasmSchema;
   appId: string;
   serverUrl: string;
   adminSecret: string;
@@ -112,7 +114,30 @@ export async function jazzAppFront(
     // The test page is served from the browser runner's own origin.
     jazz: { allowedOrigins: [app.pageOrigin] },
   });
+  started.frontSchema = app.schema;
   return started.front.url;
+}
+
+/**
+ * Insert `row` into `table` with the app backend's own authority, as the
+ * app's server code does (e.g. a bootstrap route writing what no client may),
+ * and return the row once the core has it.
+ */
+export async function jazzAppBackendInsert(
+  frontUrl: string,
+  table: string,
+  row: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const started = (await startedFor(frontUrl))?.[1];
+  if (!started?.front || started.front.url !== frontUrl || !started.frontSchema)
+    throw new Error(`No Jazz app backend is running at ${frontUrl}`);
+  const proxy = {
+    _table: table,
+    _schema: started.frontSchema,
+    _rowType: {} as Record<string, unknown>,
+    _initType: {} as Record<string, unknown>,
+  };
+  return started.front.jazz.db.insert(proxy, row).wait({ tier: "global" });
 }
 
 /** Sign `userId` in to the app backend at `frontUrl`: their own origin's `/jazz` URL. */
@@ -174,9 +199,18 @@ function transportControl(url: string): TransportControl {
   return control;
 }
 
+/**
+ * A transport control in front of `serverUrl`. In front of a user's origin of
+ * an app backend (from `jazzAppUser`), it carries that user's sign-in, as the
+ * browser behind it would.
+ */
 export async function createJazzServerTransportControl(serverUrl: string): Promise<string> {
   const control = await createTransportControl(serverUrl);
   transportControls.set(control.url, control);
+  for (const runningServer of jazzServerPromises.values()) {
+    const front = (await runningServer.catch(() => undefined))?.front;
+    if (front?.proxyOrigin(serverUrl, new URL(control.url).host)) break;
+  }
   return control.url;
 }
 
