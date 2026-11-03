@@ -212,7 +212,7 @@ release uses sync-before-switch; it does not add cross-author replay authority.
 ## Native account roots and advisory admission
 
 The RN platform supplies its absolute application storage directory; JavaScript
-supplies no filename or path. The native account filename is lowercase BLAKE3
+supplies no filename or path. The native account filename is lowercase SHA-256
 hex plus `.sqlite`, over these exact bytes in order:
 
 - ASCII `jazz-native-account-root-v1` followed by one NUL byte;

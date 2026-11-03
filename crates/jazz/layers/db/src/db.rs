@@ -102,7 +102,7 @@ impl PreparedQuery {
         let mut query = self.query.clone();
         query.limit = None;
         query.offset = 0;
-        let shape = blake3::hash(format!("{:?}unwindowed", self.shape.0).as_bytes());
+        let shape = jazz_types::sha256::hash(format!("{:?}unwindowed", self.shape.0).as_bytes());
         PreparedQuery {
             query,
             shape: Shape(short(shape)),
@@ -120,7 +120,7 @@ impl PreparedQuery {
                 .map(|id| Operand::Literal(Value::Uuid(id.0)))
                 .collect(),
         ));
-        let shape = blake3::hash(format!("{query:?}").as_bytes());
+        let shape = jazz_types::sha256::hash(format!("{query:?}").as_bytes());
         PreparedQuery {
             query,
             shape: Shape(short(shape)),
@@ -146,7 +146,7 @@ impl PreparedQuery {
         author: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Self {
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = jazz_types::sha256::Hasher::new();
         hasher.update(&self.binding_id.0);
         hasher.update(format!("{author:?}{claims:?}").as_bytes());
         self.binding_id = Binding(short(hasher.finalize()));
@@ -155,7 +155,7 @@ impl PreparedQuery {
     }
 }
 
-fn short(hash: blake3::Hash) -> [u8; 16] {
+fn short(hash: jazz_types::sha256::Hash) -> [u8; 16] {
     hash.as_bytes()[..16].try_into().expect("16 bytes")
 }
 
@@ -2042,9 +2042,10 @@ impl Db {
         // included, so their metadata columns are accepted).
         let session = Session::system();
         Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, true)?;
-        let shape =
-            blake3::hash(format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes());
-        let bound = blake3::hash(format!("{binding:?}").as_bytes());
+        let shape = jazz_types::sha256::hash(
+            format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes(),
+        );
+        let bound = jazz_types::sha256::hash(format!("{binding:?}").as_bytes());
         Ok(PreparedQuery {
             query: query.clone(),
             binding,
@@ -2785,7 +2786,7 @@ impl Db {
                 inner.owner = Rc::new(target);
                 // Read policies that changed may read differently from
                 // here: a subscription resuming from before opens fresh.
-                let mut digest = blake3::Hasher::new();
+                let mut digest = jazz_types::sha256::Hasher::new();
                 for table in &inner.owner.jazz.runtime().tables {
                     digest.update(format!("{}{:?}", table.name, table.read_policy).as_bytes());
                 }
@@ -3750,7 +3751,7 @@ impl Inner {
                 // A group's key: the group-by cell, a chunked one by its
                 // identity (SPEC 19.11).
                 let key = format!("{:?}", Sql::from(row.get_ref(0).map_err(storage)?));
-                blake3::hash(key.as_bytes()).as_bytes()[..16].to_vec()
+                jazz_types::sha256::hash(key.as_bytes()).as_bytes()[..16].to_vec()
             } else {
                 row.get(0).map_err(storage)?
             };
@@ -6813,7 +6814,10 @@ impl SchemaViewId {
     fn for_schema(schema: &JazzSchema) -> Self {
         let bytes =
             serde_json::to_vec(schema.public_schema()).expect("public schema always serializes");
-        Self(blake3::derive_key("jazz typed schema view id v1", &bytes))
+        Self(jazz_types::sha256::derive_key(
+            "jazz typed schema view id v1",
+            &bytes,
+        ))
     }
 }
 

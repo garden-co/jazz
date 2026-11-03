@@ -779,7 +779,7 @@ fn echo_digest(image: &Image) -> [u8; 16] {
         cells,
     ))
     .expect("postcard encodes images");
-    let hash = blake3::hash(&bytes);
+    let hash = jazz_types::sha256::hash(&bytes);
     hash.as_bytes()[..16].try_into().expect("16 bytes")
 }
 
@@ -4950,7 +4950,7 @@ fn watermark_key(
     view: &ReadViewSourceSpec,
     author: AuthorSubject,
 ) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = jazz_types::sha256::Hasher::new();
     // A current-state read keeps the key it had before views were part of
     // it, so its resume point survives the upgrade.
     match view {
