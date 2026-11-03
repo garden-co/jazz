@@ -56,6 +56,40 @@ switches to an HTTP stream on its own.
 
 <include>../../../partials/main-backend-use.mdx</include>
 
+## Large values
+
+Large values, such as files and long streams, are stored in chunks outside the core's database.
+On Vercel, `vercel()` picks where they go:
+
+- **Vercel Blob**, when a Blob store is connected to the project (the Storage tab in the Vercel
+  dashboard sets `BLOB_STORE_ID`). Nothing else to set up: browsers send and fetch large values
+  through your `/jazz` route, and the core reads and writes the blobs itself with your function's
+  OIDC token. Blobs are private, and each is checked against its SHA-256 when read.
+- **The core's SQLite file** on its Drive, when no Blob store is connected. This works, but the
+  file grows with every large value, and the backend logs a warning saying how to connect one.
+
+To choose yourself, pass `blobs`:
+
+```ts title="jazz.server.ts"
+import { s3, vercel, vercelBlob } from "jazz-tools/backend";
+
+vercel(); // Vercel Blob if a Blob store is connected, otherwise SQLite
+vercel({ blobs: vercelBlob({ storeId: "store_..." }) }); // a specific Blob store
+vercel({ blobs: s3() }); // an S3 bucket connected through the Vercel Marketplace
+vercel({ blobs: "sqlite" }); // always the core's SQLite file
+```
+
+`s3()` reads `S3_BUCKET_NAME`, `AWS_REGION` and `AWS_ROLE_ARN`, which the Marketplace's AWS
+integration sets, and the core assumes that role with your function's OIDC token. Put the bucket in
+the AWS region your Sandbox runs in; the backend warns when they differ. Its options are the same
+as for [your own server](/docs/setup/deployment/own-server#large-values).
+
+Both `vercelBlob()` and `s3()` take a `prefix`, by default `jazz/<appId>/<store id>/`, so production
+and every preview core can share one Blob store or bucket without sharing objects.
+
+A core that started on SQLite can move to Vercel Blob or S3 later: connect a store and redeploy.
+Moving back, or between Vercel Blob and S3, is not supported yet and refuses to start.
+
 ## Local development
 
 Outside Vercel, `vercel()` uses a local store instead, by default `sqlite({ path: ".jazz/local" })`.
@@ -76,6 +110,7 @@ All options are optional.
 | `maxDriveBytes`    | 10 GiB                                                               | The most data the environment's Drive holds                      |
 | `idleMs`           | 5 minutes                                                            | How long the Sandbox stays up without traffic                    |
 | `serverTarballUrl` | the npm package of your installed `jazz-tools` version               | Which Jazz server build the Sandbox runs                         |
+| `blobs`            | `vercelBlob()` if a Blob store is connected, otherwise `"sqlite"`    | Where large values go; see [Large values](#large-values)         |
 | `local`            | `sqlite({ path: ".jazz/local" })`                                    | The store used outside Vercel                                    |
 
 The default `name` uses Vercel's system environment variables, which are exposed by default. If

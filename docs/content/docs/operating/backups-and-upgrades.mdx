@@ -11,6 +11,6 @@ description: "Learn how to keep the data in your backend's Jazz directory safe a
 - What the data dir holds: the SQLite database, `store-id`, `blob-store`, and the large values in
   `blobs/` (or the directory you passed to `files({ dir })`)
 - Back up all of it together, with the backend stopped
-- Restoring to a new place: the copy needs its own blob dir, without the old `store-id` and `blob-store`
+- Restoring to a new place: the copy needs its own blob dir or `s3()` prefix, without the old `store-id` and `blob-store`
 - Backups and restores per platform
 - Upgrading between releases, and the alpha.59 to SQLite migration

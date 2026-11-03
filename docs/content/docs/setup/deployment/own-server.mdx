@@ -28,22 +28,51 @@ export const jazz = await createJazz({
 
 ### Large values
 
-By default `sqlite()` keeps large values, such as files and long streams, as files in
-`<path>/blobs` and keeps everything else in SQLite. Choose where they go with `blobs`:
+Large values, such as files and long streams, are stored in chunks. Rows and the chunk index always
+stay in SQLite. By default `sqlite()` keeps the chunks as files in `<path>/blobs`. Choose where they
+go with `blobs`:
 
 ```ts
-import { files, sqlite } from "jazz-tools/backend";
+import { files, s3, sqlite } from "jazz-tools/backend";
 
-sqlite({ path: "./data/jazz" }); // large values in ./data/jazz/blobs
+sqlite({ path: "./data/jazz" }); // chunks in ./data/jazz/blobs
 sqlite({ path: "./data/jazz", blobs: files({ dir: "/mnt/blobs" }) }); // a directory of your choice
-sqlite({ path: "./data/jazz", blobs: "sqlite" }); // everything inside the SQLite database
+sqlite({ path: "./data/jazz", blobs: s3() }); // an S3-compatible bucket
+sqlite({ path: "./data/jazz", blobs: "sqlite" }); // inside the SQLite database (not recommended)
 ```
 
+`"sqlite"` works, but the database file grows with every large value.
+
+`s3()` works with AWS S3, Cloudflare R2 and MinIO. All its options are optional:
+
+| Option     | Default                    | What it does                                 |
+| :--------- | :------------------------- | :------------------------------------------- |
+| `bucket`   | `S3_BUCKET_NAME`           | The bucket                                   |
+| `region`   | `AWS_REGION`               | The bucket's region; `auto` for R2           |
+| `endpoint` | AWS                        | Another S3-compatible endpoint, such as R2's |
+| `prefix`   | `jazz/<appId>/<store id>/` | Prepended to every object name               |
+
+```ts
+// Cloudflare R2
+s3({
+  bucket: "my-app",
+  region: "auto",
+  endpoint: "https://<account>.r2.cloudflarestorage.com",
+});
+```
+
+The backend reads its credentials from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, or from
+`AWS_ROLE_ARN` with `AWS_WEB_IDENTITY_TOKEN_FILE`. Each chunk is uploaded with its SHA-256, so the
+bucket rejects a corrupted upload. One bucket can serve many apps and environments: each data
+directory keeps its objects under its own prefix, claims that prefix the first time it uses it, and
+deletes the chunks it no longer needs. Another data directory is refused on a prefix that is
+already claimed.
+
 The data directory records its choice in `<path>/blob-store`. You can move an existing directory
-from `"sqlite"` to files later; any other switch is not supported yet and refuses to start. A blob
-directory belongs to exactly one data directory, so two data directories can't share one.
-To copy a data directory, give the copy its own blob directory and delete its `store-id` and
-`blob-store` files before it first starts, or it claims the original's blob directory.
+from `"sqlite"` to `files()` or `s3()` later; any other switch is not supported yet and refuses to
+start. A blob directory belongs to exactly one data directory, so two data directories can't share
+one. To copy a data directory, give the copy its own blob directory or prefix and delete its
+`store-id` and `blob-store` files before it first starts, or it claims the original's.
 
 <include>../../../partials/main-backend-mount.mdx</include>
 
