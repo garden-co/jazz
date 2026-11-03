@@ -582,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual producer: run for a thin wire layout change"]
+    #[ignore = "#1787: manual wire corpus producer; run for a thin wire layout change"]
     fn produce_thin_wire_corpus_v1() {
         assert_eq!(
             std::env::var("JAZZ_WRITE_THIN_WIRE_CORPUS").as_deref(),
