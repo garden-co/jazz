@@ -1,91 +1,138 @@
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { accountRegistryUrl, createAccountManager, createDb, type Db } from "jazz-tools";
-import { resolveRequestSession } from "jazz-tools/backend";
-import {
-  startLocalJazzServer,
-  startTestJwtIssuer,
-  type LocalJazzServerHandle,
-  type TestJwtIssuerHandle,
-} from "jazz-tools/testing";
+import type { Db } from "jazz-tools";
+import { startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import { app } from "../schema";
 import permissions from "../permissions";
 
-// The browser's side of the app: a user signed in with an app JWT (as Better
-// Auth issues it), reading under the app's permissions what the server seeded
-// with backend authority for the account /api/bootstrap resolves.
-let issuer: TestJwtIssuerHandle;
+// The browser's side of the app: a user signed in with Better Auth, syncing
+// through the app's own `/jazz` route (as the browser does), and reading under
+// the app's permissions what the server seeded with backend authority for the
+// account the app's Jazz resolves for them.
 let server: LocalJazzServerHandle;
+const httpServers: Server[] = [];
+const closers: Array<() => Promise<void>> = [];
 let user: Db;
 let accountId: string;
 let other: Db;
 let otherAccountId: string;
 
-// Signs a Better Auth user in as the browser does and returns their Jazz
-// client and the account id the server resolves for their token.
-async function signIn(sub: string) {
-  let stored: string | null = null;
-  const accounts = await createAccountManager({
-    appId: server.appId,
-    serverUrl: server.url,
-    store: {
-      read: async () => stored,
-      update: async (transform) => {
-        stored = transform(stored);
-      },
-    },
-  });
-  const token = issuer.jwtForUser(sub);
-  const account = await accounts.registerJWT({ getToken: async () => token });
-  const session = await resolveRequestSession(
-    new Request("http://app.test/api/bootstrap", { headers: { authorization: `Bearer ${token}` } }),
-    {
-      appId: server.appId,
-      accountRegistry: accountRegistryUrl(server.url, server.appId),
-      jwksUrl: issuer.jwksUrl,
-      jwtIssuer: issuer.issuer,
-      jwtAudience: issuer.audience,
-    },
+// Each signed-in browser reaches the app on its own origin, so the cookie of
+// the right user rides every request and socket to it, as it would in a tab.
+const cookies = new Map<string, string>();
+const realFetch = globalThis.fetch;
+const RealWebSocket = globalThis.WebSocket;
+function installBrowserCookies() {
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(input, init);
+    const cookie = cookies.get(new URL(request.url).host);
+    if (cookie) request.headers.set("cookie", cookie);
+    return realFetch(request);
+  }) as typeof fetch;
+  globalThis.WebSocket = class extends RealWebSocket {
+    constructor(url: string | URL, options?: { headers?: Record<string, string> }) {
+      const cookie = cookies.get(new URL(url).host);
+      super(url, {
+        ...options,
+        headers: { ...options?.headers, ...(cookie ? { cookie } : {}) },
+      } as never);
+    }
+  } as typeof WebSocket;
+}
+
+// The app's Next route, served the way `app/jazz/[...path]/route.ts` mounts it.
+async function serveApp(): Promise<string> {
+  const { backendJazzClient } = await import("../src/lib/backend-jazz-client");
+  const jazz = await backendJazzClient();
+  const http = createServer((req, res) =>
+    jazz.nodeHandler(req, res, () => {
+      res.statusCode = 404;
+      res.end();
+    }),
   );
-  expect(session.account_id).toBe(account.id);
-  const db = await createDb({
+  await jazz.attach(http);
+  await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
+  httpServers.push(http);
+  return `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
+}
+
+// Signs a user up with Better Auth as the browser does and returns their Jazz
+// client and the account the app's Jazz resolves for their session.
+async function signIn(email: string, name: string) {
+  const { auth } = await import("../src/lib/auth");
+  const signUp = await auth.api.signUpEmail({
+    body: { email, password: "correct horse battery", name },
+    asResponse: true,
+  });
+  expect(signUp.ok).toBe(true);
+  const cookie = signUp.headers
+    .getSetCookie()
+    .map((line) => line.split(";")[0])
+    .join("; ");
+  const origin = await serveApp();
+  cookies.set(new URL(origin).host, cookie);
+
+  const { backendJazzClient } = await import("../src/lib/backend-jazz-client");
+  const jazz = await backendJazzClient();
+  const session = await auth.api.getSession({ headers: new Headers({ cookie }) });
+  const account = await jazz.accountFor(
+    new Request(`${origin}/api/bootstrap`, { headers: { cookie } }),
+  );
+  if (!account) throw new Error(`the app's Jazz resolves no account for ${email}`);
+
+  const { createJazzSession } = await import("jazz-tools/backend");
+  const browser = await createJazzSession({
     appId: server.appId,
-    serverUrl: server.url,
-    account,
+    app,
+    permissions,
+    serverUrl: `${origin}/jazz`,
     driver: { type: "memory" },
   });
-  return { db, accountId: session.account_id! };
+  closers.push(() => browser.close());
+  await browser.loginWithBackend();
+  const { client, status, error } = browser.getSnapshot();
+  if (status !== "ready") throw error ?? new Error(status);
+  expect(client!.session!.user!.account).toBe(account);
+  return { db: client!.db, accountId: account, userId: session!.user.id };
 }
+let userId: string;
+let otherUserId: string;
 beforeAll(async () => {
-  issuer = await startTestJwtIssuer();
-  server = await startLocalJazzServer({
-    inMemory: true,
-    schema: app,
-    permissions,
-    jwksUrl: issuer.jwksUrl,
-    jwtIssuer: issuer.issuer,
-    jwtAudience: issuer.audience,
-  });
-  process.env.NEXT_PUBLIC_JAZZ_SERVER_URL = server.url;
+  server = await startLocalJazzServer({ inMemory: true, schema: app, permissions });
+  // The app's Jazz fronts this test server with remote().
+  process.env.JAZZ_SERVER_URL = server.url;
+  process.env.JAZZ_ADMIN_SECRET = server.adminSecret;
   process.env.NEXT_PUBLIC_JAZZ_APP_ID = server.appId;
   process.env.BACKEND_SECRET = server.backendSecret;
   process.env.BETTER_AUTH_SECRET = "music-agent-test-better-auth-secret-0123456789";
   process.env.MUSIC_AGENT_PROVIDER = "scripted";
   process.env.SCRIPTED_AGENT_TOKEN_DELAY_MS = "0";
+  installBrowserCookies();
 
-  ({ db: user, accountId } = await signIn("auth-user-1"));
-  ({ db: other, accountId: otherAccountId } = await signIn("auth-user-2"));
+  ({ db: user, accountId, userId } = await signIn("sam@example.test", "Sam"));
+  ({
+    db: other,
+    accountId: otherAccountId,
+    userId: otherUserId,
+  } = await signIn("alex@example.test", "Alex"));
 });
 afterAll(async () => {
-  await user?.shutdown();
-  await other?.shutdown();
+  for (const close of closers) await close();
+  for (const http of httpServers) {
+    http.closeAllConnections();
+    await new Promise((resolve) => http.close(resolve));
+  }
+  globalThis.fetch = realFetch;
+  globalThis.WebSocket = RealWebSocket;
+  await (await (await import("../src/lib/backend-jazz-client")).backendJazzClient()).close();
   await server?.stop();
-  await issuer?.stop();
 });
 
 describe("MusicAgent workspace access", () => {
   test("a user sees the workspace the server seeded for their account", async () => {
     const { bootstrapWorkspace } = await import("../src/server/bootstrap");
-    const firstReply = await bootstrapWorkspace(accountId, "auth-user-1", "Sam");
+    const firstReply = await bootstrapWorkspace(accountId, userId, "Sam");
     expect(firstReply).toBeDefined();
 
     await expect
@@ -109,7 +156,7 @@ describe("MusicAgent workspace access", () => {
 
   test("a second user sees none of it and cannot build on it", async () => {
     const { bootstrapWorkspace } = await import("../src/server/bootstrap");
-    await bootstrapWorkspace(otherAccountId, "auth-user-2", "Alex");
+    await bootstrapWorkspace(otherAccountId, otherUserId, "Alex");
     await expect
       .poll(async () => (await other.all(app.artists, { tier: "remote" })).length, {
         timeout: 30_000,

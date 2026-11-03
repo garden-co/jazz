@@ -105,6 +105,7 @@ import {
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
   policyClaimsForAdmittedWebSocket,
+  type WebSocketConstructor,
   type WebSocketNegotiation,
   type WireError,
   wireAuthFailureReason,
@@ -879,6 +880,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private peerUpstreamAttached = false;
   private nonDurableClient = false;
   private serverCarrier: WebSocketCarrier | null = null;
+  private readonly webSocket: WebSocketConstructor | undefined;
   private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
   private serverConnectionAttempt: ServerConnectionAttempt | null = null;
   private serverReplacementRetirement: Promise<void> | null = null;
@@ -1026,6 +1028,8 @@ export class NativeRuntimeAdapter implements Runtime {
       owner?: NativeRuntimeAdapter;
       /** Where slow queries are reported (`console.warn`): see {@link SlowQueryLogOptions}. */
       slowQueryLog?: SlowQueryLogOptions;
+      /** How this runtime opens its server socket, when not the platform's own WebSocket. */
+      webSocket?: WebSocketConstructor;
       /** The app's versions and migrations: see {@link ClientMigrations}. */
       migrations?: ClientMigrations;
     },
@@ -1045,6 +1049,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.trustedBackend = (opts?.owner?.trustedBackend ?? opts?.backendMode) === true;
     this.selfSignedClientProof = opts?.selfSignedClientProof;
     this.scopeIsolatedRelay = opts?.scopeIsolatedRelay === true;
+    this.webSocket = opts?.webSocket;
     this.configBytes = openConfig(
       node,
       author,
@@ -2815,6 +2820,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.endLinkAttempt(attempt, new Error(error.message), failure);
     };
     const carrier = new WebSocketCarrier({
+      WebSocket: this.webSocket,
       endpointUrl: url,
       peerIdentity: transportIdentity,
       features,

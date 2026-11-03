@@ -192,6 +192,7 @@
     "pack:dry-run": "npm pack --dry-run"
   },
   "dependencies": {
+    "@noble/curves": "2.0.1",
     "@noble/hashes": "2.0.1",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-logs-otlp-http": "^0.216.0",
@@ -199,7 +200,7 @@
     "@opentelemetry/resources": "^2.7.1",
     "@opentelemetry/sdk-logs": "^0.216.0",
     "@opentelemetry/sdk-trace-base": "^2.7.1",
-    "@scure/bip39": "^2.0.1",
+    "@scure/bip39": "2.0.1",
     "@standard-schema/spec": "^1.1.0",
     "esbuild": "^0.27.0",
     "fs-native-extensions": "1.5.0",
@@ -218,6 +219,7 @@
     "@types/node": "catalog:default",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/ws": "^8.5.12",
     "@vitejs/plugin-react": "catalog:default",
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
@@ -239,9 +241,12 @@
     "vite-plugin-wasm": "catalog:default",
     "vitest": "catalog:default",
     "vue": "^3.5.22",
+    "ws": "^8.18.0",
     "zod": "^4.3.6"
   },
   "peerDependencies": {
+    "@vercel/functions": ">=3.10.0",
+    "@vercel/sandbox": ">=3.9.0",
     "better-auth": "1.7.1",
     "effect": "^4.0.0-rc.118",
     "expo": ">=54",
@@ -252,7 +257,8 @@
     "react-native": ">=0.76",
     "solid-js": ">=1.9.13",
     "svelte": "^5.0.0",
-    "vue": "^3.5.0"
+    "vue": "^3.5.0",
+    "ws": "^8.18.0"
   },
   "peerDependenciesMeta": {
     "better-auth": {
@@ -286,6 +292,15 @@
       "optional": true
     },
     "vue": {
+      "optional": true
+    },
+    "ws": {
+      "optional": true
+    },
+    "@vercel/functions": {
+      "optional": true
+    },
+    "@vercel/sandbox": {
       "optional": true
     }
   },

@@ -146,7 +146,7 @@ impl AccountSessionRequest {
         Ok(PendingPrivateSession {
             scope,
             sqlite_path: storage_root
-                .join(format!("{}.sqlite", blake3::hash(&root).to_hex()))
+                .join(format!("{}.sqlite", jazz::sha256::hash(&root).to_hex()))
                 .display()
                 .to_string(),
             identity: fresh_client_identity(author).map_err(relay_status)?,
@@ -508,7 +508,7 @@ mod tests {
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            "248c40d90d29c2c916e1e96dc490075b2b6b7fe0c4976bab8803929fdddde263.sqlite"
+            "e72c6bbe2a297083794db28b9a713187d28274e4af741f21b705b7944f584eb6.sqlite"
         );
         assert_eq!(alice.sqlite_path, bob.sqlite_path);
         assert_ne!(alice.scope.auth_scope, bob.scope.auth_scope);

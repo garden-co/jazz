@@ -1,34 +1,23 @@
-import { AuthKitProvider, useAuth } from "@workos-inc/authkit-react";
-import { JazzProvider, jwtAuth, useJazzAuth } from "jazz-tools/react";
+import { JazzProvider, backendAuth, useJazzAuth } from "jazz-tools/react";
+import { useWorkOSSession } from "../session.js";
 function YourApp() {
   const { logout } = useJazzAuth();
   return <button onClick={() => void logout()}>Sign out</button>;
 }
 
 // #region workos-jazz-react
-function JazzWithWorkOS() {
-  const { user, isLoading, getAccessToken, signIn, signOut } = useAuth();
+export function App() {
+  // Your backend's own endpoint, reading the AuthKit session cookie.
+  const { user, isLoading, signIn, signOut } = useWorkOSSession();
   return (
     <JazzProvider
       appId="my-app"
-      serverUrl="wss://your-jazz-server.example.com"
-      auth={jwtAuth({
-        key: user?.id ?? null,
-        isPending: isLoading,
-        getToken: () => getAccessToken({ forceRefresh: true }),
-        logout: () => signOut(),
-      })}
+      serverUrl="/jazz"
+      auth={backendAuth({ key: user?.email ?? null, isPending: isLoading, logout: signOut })}
       signedOut={<button onClick={() => void signIn()}>Sign in</button>}
     >
       <YourApp />
     </JazzProvider>
-  );
-}
-export function App() {
-  return (
-    <AuthKitProvider clientId="client_01ABC...">
-      <JazzWithWorkOS />
-    </AuthKitProvider>
   );
 }
 // #endregion workos-jazz-react

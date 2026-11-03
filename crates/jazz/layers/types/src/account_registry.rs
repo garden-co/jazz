@@ -298,6 +298,11 @@ fn request_link<S: AccountState>(
     expires_at: u64,
 ) -> Result<(), S::Error> {
     candidate.validate(false)?;
+    // A used nonce is refused before anything else is decided, so a replayed
+    // intent never reads as a link that merely already exists.
+    if state.link(nonce)?.is_some() {
+        return Err(AccountError::IdentifierCollision.into());
+    }
     let assignment = login(state, approver)?;
     if !assignment.manage_identities {
         return Err(AccountError::NotAuthorized.into());
@@ -307,9 +312,6 @@ fn request_link<S: AccountState>(
     }
     if state.assignment(candidate)?.is_some() {
         return Err(AccountError::AlreadyAssigned.into());
-    }
-    if state.link(nonce)?.is_some() {
-        return Err(AccountError::IdentifierCollision.into());
     }
     state.prune_links(now)?;
     state.put_link(
