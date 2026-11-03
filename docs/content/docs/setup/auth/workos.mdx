@@ -21,9 +21,10 @@ const { sealedSession } = await workos.userManagement.authenticateWithCode({
 });
 
 export const jazz = await createJazz({
+  appId,
   app,
   permissions,
-  store: remote({ appId, url, secret }),
+  store: remote({ url, secret }),
   authenticate: async (request) => {
     const sessionData = readCookie(request, "wos_session");
     if (!sessionData) return null;
