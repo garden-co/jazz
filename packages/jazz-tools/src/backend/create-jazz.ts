@@ -46,6 +46,11 @@ import {
 } from "./create-jazz-session.js";
 import type { BackendSchemaInput } from "./create-jazz-context.js";
 import {
+  BackendClientsUnavailable,
+  backendClientVerifier,
+  type BackendClientTrust,
+} from "./backend-clients.js";
+import {
   onVercelDeployment,
   onVercelHost,
   openVercelCore,
@@ -237,6 +242,17 @@ export interface CreateJazzOptions {
    * know this on their own.
    */
   upgradesSockets?: boolean;
+  /**
+   * Backend clients: machines outside this main backend (a CI job, a worker
+   * elsewhere, a partner's service) that sync through it with their
+   * platform's OIDC token instead of a user's session. Each is trusted with
+   * {@link trustWorkload}, either as a trusted machine (backend authority,
+   * your permissions not checked) or as a scoped machine acting as a user.
+   * A request carrying a token from one of these issuers is decided here
+   * alone: a token that doesn't verify is refused, never passed on to
+   * `authenticate`.
+   */
+  backendClients?: BackendClientTrust[];
 }
 
 /** A WebSocket as the `ws` package (and Vercel's `upgradeWebSocket`) hands it over. */
@@ -312,7 +328,10 @@ const STREAM_KEY_HEADER = "x-jazz-stream-key";
 const PUBLIC_APP_ROUTES = /^\/apps\/[^/]+\/(schemas|schema\/[^/]+)$/;
 // What a browser can't hand the core: secrets, a backend credential or the
 // access it states, or the core's own mark for sockets a credential vouched for.
+// Nor a bearer token: this backend decides who a request is (`authenticate`,
+// backend clients), never the core.
 const STRIPPED_HEADERS = [
+  "authorization",
   "x-jazz-backend-secret",
   "x-jazz-admin-secret",
   "x-jazz-session",
@@ -930,7 +949,15 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
   const backend = opened.client;
 
+  const backendClients = backendClientVerifier(options.backendClients ?? []);
+
+  /**
+   * Who sent `request`: a scoped backend client's user, or the user the
+   * app's own `authenticate` names. A trusted backend client has no user.
+   */
   async function authenticate(request: Request): Promise<JazzUser | null> {
+    const client = await backendClients.resolve(request);
+    if (client !== null) return client !== "refused" && client.kind === "user" ? client.user : null;
     if (!options.authenticate) return null;
     return (await options.authenticate(request)) ?? null;
   }
@@ -1183,6 +1210,8 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     close(): void;
     /** The user the session was admitted as, once it is. */
     readonly userId: string | undefined;
+    /** Whether a trusted backend client opened it. */
+    readonly trusted: boolean;
   }
 
   function openClientSession(
@@ -1196,6 +1225,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     let socket: CoreSocket | undefined;
     let ended = false;
     let userId: string | undefined;
+    let trusted = false;
     let recheck: ReturnType<typeof setInterval> | undefined;
     // A session that never sends its prelude ends too.
     let expiry: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
@@ -1226,9 +1256,15 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         return false;
       }
       userId = admitted.userId;
+      trusted = admitted.trusted;
       if (expiry) clearTimeout(expiry);
-      const ttl = (options.sessionTtlSeconds ?? 3600) * 1000;
-      expiry = setTimeout(end, ttl);
+      // A backend client's session ends with its token, so it reconnects
+      // with a fresh one.
+      const ttl = Math.min(
+        (options.sessionTtlSeconds ?? 3600) * 1000,
+        admitted.expiresAt === undefined ? Infinity : admitted.expiresAt * 1000 - Date.now(),
+      );
+      expiry = setTimeout(end, Math.max(ttl, 0));
       (expiry as unknown as { unref?: () => void }).unref?.();
       const every = (options.recheckSeconds ?? 60) * 1000;
       if (userId !== undefined && every > 0) {
@@ -1280,6 +1316,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       get userId() {
         return userId;
       },
+      get trusted() {
+        return trusted;
+      },
     };
   }
 
@@ -1293,7 +1332,13 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   async function admitPrelude(
     request: Request,
     prelude: Uint8Array,
-  ): Promise<{ prelude: Uint8Array; userId: string | undefined; access: BackendAccess } | null> {
+  ): Promise<{
+    prelude: Uint8Array;
+    userId: string | undefined;
+    access: BackendAccess;
+    trusted: boolean;
+    expiresAt?: number;
+  } | null> {
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(new TextDecoder().decode(prelude)) as Record<string, unknown>;
@@ -1304,6 +1349,28 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       string,
       unknown
     >;
+    const client = await backendClients.resolve(request);
+    if (client === "refused") return null;
+    if (client?.kind === "backend") {
+      // A trusted backend client syncs with this backend's authority: it
+      // states a backend secret (any stand-in) and, to act for a user, that
+      // user's session, as the main backend's own client does (the user's
+      // policies then apply to those writes at the core). Never an admin
+      // secret or a token of its own.
+      for (const key of ["admin_secret", "jwt_token"]) {
+        if (parsed[key] != null || auth[key] != null) return null;
+      }
+      if (parsed.backend_secret == null && auth.backend_secret == null) return null;
+      const vouched = { backend_secret: core.backendSecret };
+      const rewritten = { ...parsed, ...vouched, auth: { ...auth, ...vouched } };
+      return {
+        prelude: new TextEncoder().encode(JSON.stringify(rewritten)),
+        userId: undefined,
+        access: "backend",
+        trusted: true,
+        expiresAt: client.expiresAt,
+      };
+    }
     const others = ["backend_secret", "admin_secret", "backend_session"];
     // Browser worker transports send `jwt_token: null` alongside a backend
     // session; only a real token counts as one.
@@ -1314,6 +1381,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       const alone = others.every((key) => parsed[key] == null && auth[key] == null);
       if (!localFirst || !alone || parsed.local_first_audience != null) return null;
       // A guest has no user here: its session is bound to its own key.
+      if (client) return null;
       const audience = guestAudience(request, token);
       if (!audience) return null;
       if (audience.endpoint === undefined) {
@@ -1324,6 +1392,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
           prelude: new TextEncoder().encode(JSON.stringify(pinned)),
           userId: undefined,
           access: "session",
+          trusted: false,
         };
       }
       // Signed for this endpoint, which the core can't know: vouch for it.
@@ -1338,6 +1407,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         prelude: new TextEncoder().encode(JSON.stringify(vouched)),
         userId: undefined,
         access: "backend",
+        trusted: false,
       };
     }
     const stated = auth.backend_session as { user_id?: unknown } | undefined;
@@ -1353,6 +1423,8 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       prelude: new TextEncoder().encode(JSON.stringify(rewritten)),
       userId: user.userId,
       access: "backend",
+      trusted: false,
+      expiresAt: client?.expiresAt,
     };
   }
 
@@ -1436,7 +1508,12 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       return new Response("not this stream's client", { status: 403 });
     }
     const socket = entry.session;
-    if (socket.userId !== undefined) {
+    if (socket.trusted) {
+      const client = await backendClients.resolve(request);
+      if (client === null || client === "refused" || client.kind !== "backend") {
+        return new Response("not this backend client", { status: 403 });
+      }
+    } else if (socket.userId !== undefined) {
       const user = await authenticate(request);
       if (user?.userId !== socket.userId) return new Response("not signed in", { status: 403 });
     }
@@ -1529,6 +1606,29 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase() ||
       new URL(request.url).protocol.replace(/:$/, "");
     return !(requestScheme === "https" && parsed.protocol === "http:");
+  }
+
+  /**
+   * A trusted backend client asks to sync as a backend (what a backend's
+   * own client asks its core first). Only its token admits it: the core is
+   * asked with this backend's secret. Anyone else gets the 404 this route
+   * has without backend clients.
+   */
+  async function admitBackendClient(request: Request): Promise<Response> {
+    const client = await backendClients.resolve(request);
+    if (client === null) return new Response("Not found", { status: 404 });
+    if (client === "refused" || client.kind !== "backend") {
+      return new Response("not a trusted backend client", { status: 401 });
+    }
+    if (request.method !== "POST") return new Response(null, { status: 405 });
+    const response = await core.handle(
+      "POST",
+      `/apps/${encodeURIComponent(accountAppId(appId))}/backend/admit`,
+      [["x-jazz-backend-secret", core.backendSecret]],
+      new Uint8Array(0),
+      "backend",
+    );
+    return new Response(null, { status: response.status === 204 ? 204 : 502 });
   }
 
   /**
@@ -1643,6 +1743,20 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
    * the socket path is told.
    */
   async function handle(request: Request, upgrades = upgradesSockets): Promise<Response> {
+    try {
+      return await route(request, upgrades);
+    } catch (error) {
+      if (!(error instanceof BackendClientsUnavailable)) throw error;
+      // The reason stays in the backend's logs.
+      console.error(error);
+      return new Response("backend client keys unavailable", {
+        status: 503,
+        headers: { "Retry-After": "5" },
+      });
+    }
+  }
+
+  async function route(request: Request, upgrades: boolean): Promise<Response> {
     const path = innerPath(request);
     if (path === null) return new Response("Not found", { status: 404 });
     if (request.method !== "GET" && request.method !== "HEAD" && !originAllowed(request)) {
@@ -1650,6 +1764,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     }
     if (/^\/apps\/[^/]+\/accounts\/backend-sign-in$/.test(path)) {
       return backendSignIn(request);
+    }
+    if (/^\/apps\/[^/]+\/backend\/admit$/.test(path)) {
+      return admitBackendClient(request);
     }
     if (/^\/apps\/[^/]+\/accounts\/backend-link$/.test(path)) {
       return backendLink(request);
