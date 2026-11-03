@@ -10,7 +10,7 @@ export const auth = betterAuth({
   trustedOrigins: [appOrigin],
   secret: serverSecret(
     "BETTER_AUTH_SECRET",
-    "2SNhYRceYvKf1HnJ7mQxB3aWd6LeP9tR4uCg8Vz0Ds5FiOoAbXkMwZq",
+    "music-agent-local-development-secret-not-for-deployments",
   ),
   database: jazzAdapter({ db: async () => (await backendJazzClient()).db, schema: app.wasmSchema }),
   emailAndPassword: {
