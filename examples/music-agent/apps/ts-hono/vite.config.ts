@@ -1,5 +1,4 @@
 import { fileURLToPath } from "node:url";
-import { jazzPlugin } from "jazz-tools/dev/vite";
 import { defineConfig } from "vite";
 
 // The Hono server (server/index.ts) runs Jazz, Better Auth and the agent. In
@@ -16,7 +15,8 @@ function jazzAppId(mode: string) {
 }
 
 export default defineConfig(({ mode }) => ({
-  plugins: [jazzPlugin({ server: false })],
+  // jazz-wasm is wasm-bindgen output, which Vite's dependency pre-bundler cannot handle.
+  optimizeDeps: { exclude: ["jazz-wasm"] },
   resolve: { alias: { "@": fileURLToPath(new URL(".", import.meta.url)) } },
   define: { "import.meta.env.VITE_JAZZ_APP_ID": JSON.stringify(jazzAppId(mode)) },
   worker: { format: "es" },
