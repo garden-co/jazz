@@ -58,11 +58,13 @@ use crate::values::{
 pub use accepted_read::{AcceptedRead, AcceptedRowEvidence, AcceptedVersion};
 pub use sync::{
     ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
-    FrameJoiner, Image, MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction,
-    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
-    TransportError, TxName, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError,
-    WireKind, WireOp, WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite,
-    WriteConflict, decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
+    FrameJoiner, Image, LocalEvidenceProvenance, LocalObservation, LocalObservationCut,
+    LocalSubmissionExport, LocalSubmissionRoute, MAX_SEQ, Outcome, PENDING, Pos, ReadSpan,
+    RejectedTransaction, RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId,
+    SyncMessage, Transport, TransportError, TxName, Upstream, WireBase, WireChunk, WireChunkRef,
+    WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport,
+    WireTransportAdapter, WireWrite, WriteConflict, decode_message, duplex, encode_frames,
+    validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -2096,6 +2098,7 @@ impl Db {
     }
 
     pub async fn close(&self) -> Result<(), Error> {
+        self.retire_local_observation_capabilities();
         self.tick().await
     }
 
@@ -2109,6 +2112,7 @@ impl Db {
     /// an in-memory shutdown phase, not a stored policy or storage retirement;
     /// a new storage owner starts with mutation admission open.
     pub fn stop_mutation_admission(&self) {
+        self.retire_local_observation_capabilities();
         self.inner().mutation_admission_closed = true;
     }
 
@@ -7375,11 +7379,15 @@ struct Overlay {
 /// The store behind its one gate: every borrow first undoes a transaction
 /// handle's overlay, so nothing but that handle's next stage or read sees
 /// it.
-struct Store(RefCell<Inner>);
+struct Store(
+    RefCell<Inner>,
+    // Invalidates owner-local observation cuts and trusted in-process routes.
+    std::cell::Cell<u64>,
+);
 
 impl Store {
     fn new(inner: Inner) -> Self {
-        Self(RefCell::new(inner))
+        Self(RefCell::new(inner), std::cell::Cell::new(0))
     }
 
     fn borrow_mut(&self) -> std::cell::RefMut<'_, Inner> {
@@ -7406,6 +7414,8 @@ impl Store {
 struct Batch {
     kind: BatchKind,
     ops: Vec<(Rc<Schema>, StagedOp)>,
+    /// Original scope captured at each successful stage, before names lower.
+    observation_provenance: Vec<Option<sync::SubmissionProvenance>>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
@@ -7911,6 +7921,7 @@ impl Db {
             Batch {
                 kind,
                 ops: Vec::new(),
+                observation_provenance: Vec::new(),
                 edits: LargeEdits::default(),
                 uploads: Vec::new(),
             },
@@ -8153,7 +8164,15 @@ impl Db {
             .iter()
             .map(|(schema, op)| self.inner().stored_op(op.clone(), schema))
             .collect::<Result<Vec<_>, _>>()
-            .and_then(|ops| self.record_stored_upload(ops, seq, kind, None));
+            .and_then(|ops| {
+                self.record_stored_upload_with_provenance(
+                    ops,
+                    seq,
+                    kind,
+                    None,
+                    Some(&batch.observation_provenance),
+                )
+            });
         if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
@@ -8336,12 +8355,10 @@ impl Db {
             .map_err(|error| self.serializable_write_conflict(id, &op, error))?;
         let mut inner = self.inner.staging();
         let schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
-        inner
-            .batches
-            .get_mut(&id)
-            .expect("validated")
-            .ops
-            .push((schema, op));
+        let provenance = inner.observation_submission(&schema, &op, &self.governance);
+        let batch = inner.batches.get_mut(&id).expect("validated");
+        batch.ops.push((schema, op));
+        batch.observation_provenance.push(provenance);
         Ok(())
     }
 

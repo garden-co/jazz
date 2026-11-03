@@ -67,6 +67,14 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 
+#[path = "local_observation.rs"]
+mod local_observation;
+pub(super) use local_observation::SubmissionProvenance;
+pub use local_observation::{
+    LocalEvidenceProvenance, LocalObservation, LocalObservationCut, LocalSubmissionExport,
+    LocalSubmissionRoute,
+};
+
 #[path = "large_delta.rs"]
 mod large_delta;
 pub use crate::options::{FirstLoad, RemoteLinkHint};
@@ -2120,6 +2128,8 @@ pub(crate) struct Session {
     /// different claims (two tokens), so its reads and writes evaluate
     /// policies with these, not the identity's latest.
     claims: Option<BTreeMap<String, Value>>,
+    // One opaque local companion; ordinary wire messages cannot construct it.
+    local_submission: Option<LocalSubmissionExport>,
     /// Per client subscription: its queue, its group, whether it is
     /// windowed, and whether its opening's row ids were sent.
     subs: BTreeMap<u64, (fanout::Queue, Weak<RefCell<fanout::Group>>, bool, bool)>,
@@ -2255,6 +2265,7 @@ impl Session {
             transport,
             identity,
             claims: None,
+            local_submission: None,
             subs: BTreeMap::new(),
             outbox: Vec::new(),
             touched: BTreeSet::new(),
@@ -7000,12 +7011,21 @@ impl Db {
         kind: Kind,
         relayed: Option<Relayed>,
     ) -> Result<(), Error> {
-        let ops = {
+        let (ops, provenance) = {
             let mut inner = self.inner.borrow_mut();
             if inner.client.is_none() {
                 return Ok(());
             }
             let schema = inner.schema.clone();
+            let provenance: Vec<_> = ops
+                .iter()
+                .map(|op| {
+                    relayed
+                        .is_none()
+                        .then(|| inner.observation_submission(&schema, op, &self.governance))
+                        .flatten()
+                })
+                .collect();
             let ops = ops
                 .into_iter()
                 .map(|op| inner.stored_op(op, &schema))
@@ -7014,9 +7034,9 @@ impl Db {
                 inner.capture.extend(ops);
                 return Ok(());
             }
-            ops
+            (ops, provenance)
         };
-        self.record_stored_upload(ops, seq, kind, relayed)
+        self.record_stored_upload_with_provenance(ops, seq, kind, relayed, Some(&provenance))
     }
 
     /// [`Db::record_upload`] of ops already named by stored names.
@@ -7027,6 +7047,18 @@ impl Db {
         kind: Kind,
         relayed: Option<Relayed>,
     ) -> Result<(), Error> {
+        self.record_stored_upload_with_provenance(ops, seq, kind, relayed, None)
+    }
+
+    /// Known original operation scopes captured before stored-name lowering.
+    pub(crate) fn record_stored_upload_with_provenance(
+        &self,
+        ops: Vec<StagedOp>,
+        seq: u64,
+        kind: Kind,
+        relayed: Option<Relayed>,
+        provenance: Option<&[Option<SubmissionProvenance>]>,
+    ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_none() {
             return Ok(());
@@ -7035,7 +7067,7 @@ impl Db {
         let view = inner.stored_view();
         let active = std::mem::replace(&mut inner.schema, view);
         drop(inner);
-        let recorded = self.record_upload_under_stored_view(ops, seq, kind, relayed);
+        let recorded = self.record_upload_under_stored_view(ops, seq, kind, relayed, provenance);
         self.inner.borrow_mut().schema = active;
         recorded
     }
@@ -7046,6 +7078,7 @@ impl Db {
         seq: u64,
         kind: Kind,
         relayed: Option<Relayed>,
+        provenance: Option<&[Option<SubmissionProvenance>]>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.tx.is_some() {
@@ -7205,7 +7238,9 @@ impl Db {
                     rows: rows.clone(),
                     expected: Some(expected),
                 });
-                let persisted = inner.persist_pending(seq, &commit, &rows);
+                let persisted = inner
+                    .persist_pending(seq, &commit, &rows)
+                    .and_then(|()| inner.persist_observation_submission(seq, provenance));
                 if let Err(error) = persisted {
                     let client = inner.client.as_mut().expect("client");
                     client.unsent.pop();
@@ -8349,6 +8384,9 @@ impl Db {
                         let result = outcome.result();
                         let accepted = matches!(outcome, Outcome::Accepted { .. });
                         let landed = Pos::at(through);
+                        if accepted && global {
+                            inner.observe_global_submission(tx, id, through)?;
+                        }
                         // Accepted past what this replica knows, its own
                         // commit is named by tx until the connection's
                         // position covers it.
@@ -11760,6 +11798,16 @@ impl Db {
                 ops,
                 acting,
             } => {
+                let provenance = self.local_submission_for(
+                    index,
+                    &SyncMessage::Commit {
+                        id,
+                        clock,
+                        kind: kind.clone(),
+                        ops: ops.clone(),
+                        acting: acting.clone(),
+                    },
+                )?;
                 let (node, tx) = (*id.node.as_bytes(), id.time.0);
                 // A commit keeps its writer's id at every hop: a link may
                 // send one only as a node its identity writes as. A
@@ -11856,6 +11904,7 @@ impl Db {
                                     (node, tx),
                                     clock,
                                     possession,
+                                    provenance.as_deref(),
                                 )
                             })
                         }) {
@@ -11904,6 +11953,7 @@ impl Db {
                     _ => None,
                 };
                 let session = &mut inner.sessions[index];
+                session.local_submission = None;
                 if result.is_ok() {
                     session
                         .committed
@@ -12299,6 +12349,7 @@ impl Db {
         id: ([u8; 16], u64),
         clock: u64,
         possession: crate::large::Possession,
+        provenance: Option<&[Option<SubmissionProvenance>]>,
     ) -> Result<(Vec<RowKey>, Vec<Echoable>), (Error, Vec<RowKey>)> {
         // A clock past what this store counts (its own plus the offset
         // bound) is held there: the commit stores, relays and orders at the
@@ -12586,7 +12637,7 @@ impl Db {
         // The authority keeps what each version was built on (INV-HIST-21);
         // a relay passes the bases on instead.
         let finished = if relay {
-            self.record_stored_upload(
+            self.record_stored_upload_with_provenance(
                 ops.clone(),
                 seq,
                 upload,
@@ -12595,6 +12646,7 @@ impl Db {
                     clock,
                     bases,
                 }),
+                provenance,
             )
         } else {
             Ok(())
