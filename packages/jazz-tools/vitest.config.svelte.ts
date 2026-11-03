@@ -10,7 +10,7 @@ export default defineConfig({
   plugins: [svelte()],
   resolve: {
     conditions: ["browser"],
-    alias: (sealedWasmPackage ? { "jazz-wasm": resolve(sealedWasmPackage, "jazz_wasm.js") } : {}),
+    alias: sealedWasmPackage ? { "jazz-wasm": resolve(sealedWasmPackage, "jazz_wasm.js") } : {},
   },
   test: {
     environment: "jsdom",
