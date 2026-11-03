@@ -102,7 +102,7 @@ impl PreparedQuery {
         let mut query = self.query.clone();
         query.limit = None;
         query.offset = 0;
-        let shape = blake3::hash(format!("{:?}unwindowed", self.shape.0).as_bytes());
+        let shape = jazz_types::sha256::hash(format!("{:?}unwindowed", self.shape.0).as_bytes());
         PreparedQuery {
             query,
             shape: Shape(short(shape)),
@@ -120,7 +120,7 @@ impl PreparedQuery {
                 .map(|id| Operand::Literal(Value::Uuid(id.0)))
                 .collect(),
         ));
-        let shape = blake3::hash(format!("{query:?}").as_bytes());
+        let shape = jazz_types::sha256::hash(format!("{query:?}").as_bytes());
         PreparedQuery {
             query,
             shape: Shape(short(shape)),
@@ -146,7 +146,7 @@ impl PreparedQuery {
         author: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Self {
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = jazz_types::sha256::Hasher::new();
         hasher.update(&self.binding_id.0);
         hasher.update(format!("{author:?}{claims:?}").as_bytes());
         self.binding_id = Binding(short(hasher.finalize()));
@@ -155,7 +155,7 @@ impl PreparedQuery {
     }
 }
 
-fn short(hash: blake3::Hash) -> [u8; 16] {
+fn short(hash: jazz_types::sha256::Hash) -> [u8; 16] {
     hash.as_bytes()[..16].try_into().expect("16 bytes")
 }
 
@@ -523,6 +523,12 @@ struct Inner {
     /// Where each admitted version stores its tables and columns.
     names: crate::names::Names,
     views: BTreeMap<SchemaViewId, JazzSchema>,
+    /// Published bundles sessions are pinned to, resolved: the write
+    /// version each selects and the schema its policies govern by.
+    bundles: HashMap<crate::catalogue::BundleId, (crate::ids::SchemaVersionId, Rc<Schema>)>,
+    /// Views governed by a bundle's policies (see `Inner::governed_view`),
+    /// by bundle, with the view each was built from.
+    bundle_views: RefCell<HashMap<crate::catalogue::BundleId, (Rc<Schema>, Rc<Schema>)>>,
     /// Open transaction batches, by id.
     batches: HashMap<OpenTransactionId, Batch>,
     identity: DbIdentity,
@@ -1395,6 +1401,8 @@ impl Db {
                 },
                 names,
                 views: BTreeMap::new(),
+                bundles: HashMap::new(),
+                bundle_views: RefCell::default(),
                 batches: HashMap::new(),
                 system_node: config.system_node.unwrap_or(config.identity.node),
                 identity: config.identity,
@@ -2042,9 +2050,10 @@ impl Db {
         // included, so their metadata columns are accepted).
         let session = Session::system();
         Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, true)?;
-        let shape =
-            blake3::hash(format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes());
-        let bound = blake3::hash(format!("{binding:?}").as_bytes());
+        let shape = jazz_types::sha256::hash(
+            format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes(),
+        );
+        let bound = jazz_types::sha256::hash(format!("{binding:?}").as_bytes());
         Ok(PreparedQuery {
             query: query.clone(),
             binding,
@@ -2687,6 +2696,29 @@ impl Db {
         result
     }
 
+    /// Publish the bundle that selects `schema`'s structure as the write
+    /// schema, with `schema`'s policies, and return its id (see
+    /// [`crate::catalogue::bundle_id`]). Nothing is activated: sessions
+    /// pinned to it are governed by it. Publishing it again changes nothing.
+    pub async fn publish_bundle(
+        &self,
+        schema: &jazz_model::model::public_schema::Schema,
+    ) -> Result<crate::catalogue::BundleId, Error> {
+        let hash = crate::catalogue::structural_hash(schema);
+        let permissions = crate::catalogue::permissions_of(schema);
+        let id = crate::catalogue::bundle_id(&hash, &permissions)?;
+        let published_at = crate::catalogue::now_millis();
+        self.apply_catalogue(crate::catalogue::CatalogueChange {
+            put: crate::catalogue::CataloguePut {
+                bundles: vec![(hash, permissions, published_at)],
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await?;
+        Ok(id)
+    }
+
     /// The current schema, with its policies.
     pub fn current_schema(&self) -> JazzSchema {
         self.inner().owner.jazz.clone()
@@ -2785,7 +2817,7 @@ impl Db {
                 inner.owner = Rc::new(target);
                 // Read policies that changed may read differently from
                 // here: a subscription resuming from before opens fresh.
-                let mut digest = blake3::Hasher::new();
+                let mut digest = jazz_types::sha256::Hasher::new();
                 for table in &inner.owner.jazz.runtime().tables {
                     digest.update(format!("{}{:?}", table.name, table.read_policy).as_bytes());
                 }
@@ -3320,6 +3352,41 @@ impl Inner {
     }
 
     /// An admitted schema under the names this store keeps it by.
+    /// Published bundle `id`, resolved: the write version it selects and
+    /// that version governed by the bundle's policies. `None` when this
+    /// store has no such bundle, or has not admitted its write schema.
+    pub(crate) fn bundle(
+        &mut self,
+        id: &crate::catalogue::BundleId,
+    ) -> Result<Option<(crate::ids::SchemaVersionId, Rc<Schema>)>, Error> {
+        if let Some(found) = self.bundles.get(id) {
+            return Ok(Some(found.clone()));
+        }
+        let Some((hash, permissions)) = crate::catalogue::bundle(&self.conn, id)? else {
+            return Ok(None);
+        };
+        let Some((version, structural)) = self
+            .admitted
+            .iter()
+            .find(|(_, schema)| crate::catalogue::structural_hash(schema.public_schema()) == hash)
+        else {
+            return Ok(None);
+        };
+        let mut public = structural.public_schema().clone();
+        for (name, table) in public.iter_mut() {
+            table.policies = permissions.get(name).cloned().unwrap_or_default();
+        }
+        let governing = JazzSchema::new(&public).map_err(|error| {
+            Error::new(
+                ErrorCode::Schema,
+                format!("bundle {id} does not compile: {error}"),
+            )
+        })?;
+        let resolved = (*version, Rc::new(self.named(&governing)));
+        self.bundles.insert(*id, resolved.clone());
+        Ok(Some(resolved))
+    }
+
     fn named(&self, schema: &JazzSchema) -> Schema {
         match self.names.get(&schema.version_id()) {
             Some(names) => Schema::stored_as(schema, names, self.names.tags()),
@@ -3750,7 +3817,7 @@ impl Inner {
                 // A group's key: the group-by cell, a chunked one by its
                 // identity (SPEC 19.11).
                 let key = format!("{:?}", Sql::from(row.get_ref(0).map_err(storage)?));
-                blake3::hash(key.as_bytes()).as_bytes()[..16].to_vec()
+                jazz_types::sha256::hash(key.as_bytes()).as_bytes()[..16].to_vec()
             } else {
                 row.get(0).map_err(storage)?
             };
@@ -4266,9 +4333,22 @@ impl Inner {
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<(String, Vec<Sql>, OverlayRead), Error> {
+        self.policy_check_in(&self.schema, table, row, key, cut, policy)
+    }
+
+    /// [`Inner::policy_check`], its policy compiled in `schema`.
+    fn policy_check_in(
+        &self,
+        schema: &Schema,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        cut: Option<Cut>,
+        policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
+    ) -> Result<(String, Vec<Sql>, OverlayRead), Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(cut, false);
+        let mut ctx = Ctx::new(schema, None, &claims, &binding).with_cut(cut, false);
         let condition = policy(&mut ctx)?;
         let read = OverlayRead {
             rows: ctx.overlaid_rows,
@@ -4327,6 +4407,7 @@ impl Inner {
     /// the policy's other rows are each read as of `cut`.
     fn holds_as_of(
         &self,
+        schema: &Schema,
         table: &Table,
         row: RowUuid,
         key: &[u8],
@@ -4335,7 +4416,7 @@ impl Inner {
     ) -> Result<bool, Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(Some(cut), false);
+        let mut ctx = Ctx::new(schema, None, &claims, &binding).with_cut(Some(cut), false);
         let condition = policy(&mut ctx)?;
         let source = ctx.source(table)?;
         let mut params = ctx.params;
@@ -4356,8 +4437,12 @@ impl Inner {
 
     /// Whether `author` may `operation` the version of `row` at `at`, with
     /// the policy's other rows as they stood then too.
+    /// Whether `author` may `operation` the version of `row` at `at`, by
+    /// `schema`'s policies (`table` is `schema`'s).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn check_version(
         &self,
+        schema: &Schema,
         table: &Table,
         row: RowUuid,
         key: &[u8],
@@ -4376,7 +4461,7 @@ impl Inner {
             },
             None => Cut::at(at.0),
         };
-        self.holds_as_of(table, row, key, cut, |ctx| {
+        self.holds_as_of(schema, table, row, key, cut, |ctx| {
             ctx.operation_policy(table, operation, "a", &session)
         })
     }
@@ -4389,10 +4474,28 @@ impl Inner {
         author: AuthorSubject,
         operation: Operation,
     ) -> Result<bool, Error> {
+        self.check_in(&self.schema, table, row, key, author, operation)
+    }
+
+    /// [`Inner::check`] by `schema`'s policies (`table` is `schema`'s).
+    pub(crate) fn check_in(
+        &self,
+        schema: &Schema,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        author: AuthorSubject,
+        operation: Operation,
+    ) -> Result<bool, Error> {
         let session = self.session(author);
-        self.holds(table, row, key, |ctx| {
+        let (sql, params, _) = self.policy_check_in(schema, table, row, key, None, |ctx| {
             ctx.operation_policy(table, operation, "a", &session)
-        })
+        })?;
+        let value: i64 = self
+            .conn
+            .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+            .map_err(storage)?;
+        Ok(value != 0)
     }
 
     /// Check a write's own policy as SPEC 7 has it: on committed state
@@ -6813,7 +6916,10 @@ impl SchemaViewId {
     fn for_schema(schema: &JazzSchema) -> Self {
         let bytes =
             serde_json::to_vec(schema.public_schema()).expect("public schema always serializes");
-        Self(blake3::derive_key("jazz typed schema view id v1", &bytes))
+        Self(jazz_types::sha256::derive_key(
+            "jazz typed schema view id v1",
+            &bytes,
+        ))
     }
 }
 
@@ -6887,6 +6993,33 @@ impl Db {
             inner: self.inner.clone(),
             view: Some(view),
         })
+    }
+
+    /// [`Self::governed_view`] for a session pinned to published bundle
+    /// `bundle` (see [`Self::check_session_pin`]): governed by the
+    /// bundle's policies instead of the current schema's. Without a bundle
+    /// it is [`Self::governed_view`]. `None` while `version` is not
+    /// admitted or the bundle does not resolve.
+    pub fn pinned_view(
+        &self,
+        version: crate::ids::SchemaVersionId,
+        bundle: Option<&crate::catalogue::BundleId>,
+    ) -> Result<Option<Db>, Error> {
+        let Some(bundle) = bundle else {
+            return Ok(self.governed_view(version));
+        };
+        let mut inner = self.inner.borrow_mut();
+        let Some((_, governing)) = inner.bundle(bundle)? else {
+            return Ok(None);
+        };
+        let Some(view) = inner.governed_by(version, governing) else {
+            return Ok(None);
+        };
+        drop(inner);
+        Ok(Some(Db {
+            inner: self.inner.clone(),
+            view: Some(view),
+        }))
     }
 
     /// Ship more of the app's versions and lenses (see

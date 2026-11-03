@@ -138,6 +138,9 @@ struct WebSocketAdmission {
     trust: CommitUnitTrust,
     credential: WebSocketCredential,
     requested_link: RequestedWebSocketLink,
+    /// The published permissions bundle the backend pinned this session
+    /// to (see [`jazz::catalogue`]).
+    bundle: Option<jazz::catalogue::BundleId>,
 }
 
 /// Authentication class selected by the prelude, independently of the
@@ -275,6 +278,12 @@ struct WebSocketPrelude {
     /// [`crate::middleware::auth::LOCAL_FIRST_AUDIENCE_HEADER`]).
     #[serde(default)]
     local_first_audience: Option<String>,
+    /// The published permissions bundle (hex id) the backend that opened
+    /// this socket serves with; honoured only on that backend's word (its
+    /// credential on the upgrade, or its secret here), as a client could
+    /// otherwise pick an older bundle's laxer policies.
+    #[serde(default)]
+    bundle: Option<String>,
 }
 
 /// The only client-selectable *request* at the WebSocket boundary.  This is
@@ -329,6 +338,15 @@ async fn ws_admission(
     let peer_identity = ws_peer_identity(&prelude.peer_identity)?;
     let requested_link = prelude.requested_link;
     let local_first_audience = prelude.local_first_audience;
+    let bundle = prelude
+        .bundle
+        .as_deref()
+        .map(|text| {
+            jazz::catalogue::BundleId::from_hex(text)
+                .ok_or_else(|| format!("invalid permissions bundle id: {text}"))
+        })
+        .transpose()?;
+    let mut vouched_upgrade = false;
     let mut auth = prelude.auth;
     // On a socket whose upgrade carried a backend credential (the HTTP gate
     // checked it), the prelude's own secret slots never count: the access
@@ -340,6 +358,7 @@ async fn ws_admission(
     ) {
         match crate::middleware::workload::vouched(request_headers, secrets) {
             Some(access) => {
+                vouched_upgrade = true;
                 let (admin, backend) = access.secrets(secrets);
                 auth.admin_secret = admin;
                 auth.backend_secret = backend;
@@ -365,6 +384,9 @@ async fn ws_admission(
             trust,
             credential: WebSocketCredential::Admin,
             requested_link: RequestedWebSocketLink::OrdinarySession,
+            // Served with full access; sessions it acts for are governed by
+            // the bundle.
+            bundle,
         });
     }
 
@@ -416,7 +438,22 @@ async fn ws_admission(
             trust: CommitUnitTrust::TrustedBackend,
             credential: WebSocketCredential::Backend,
             requested_link: RequestedWebSocketLink::OrdinarySession,
+            // The backend's own link: the sessions it acts for (its
+            // `forRequest` reads and writes) are governed by its bundle.
+            bundle,
         });
+    }
+    let backend_vouched = vouched_upgrade
+        || matches!(
+            (
+                state.auth_config.backend_secret.as_deref(),
+                backend_secret,
+            ),
+            (Some(expected), Some(provided))
+                if crate::middleware::workload::constant_time_eq(expected, provided)
+        );
+    if bundle.is_some() && !backend_vouched {
+        return Err("a permissions bundle pin needs the backend's credential".into());
     }
 
     if !has_jwt
@@ -469,6 +506,7 @@ async fn ws_admission(
             WebSocketCredential::Session
         },
         requested_link,
+        bundle,
     })
 }
 
@@ -860,13 +898,19 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     let thin = negotiated.features & jazz::wire::FEATURE_THIN_RESULTS != 0;
     let opened = if thin {
         core_server_shell
-            .open_thin_session(admission.identity, admission.claims, admission.trust)
+            .open_thin_session(
+                admission.identity,
+                admission.claims,
+                admission.bundle,
+                admission.trust,
+            )
             .await
     } else {
         core_server_shell
             .open_with_session_context(
                 admission.identity,
                 admission.claims,
+                admission.bundle,
                 admission.trust,
                 negotiated.features,
                 session_context,
@@ -1581,6 +1625,7 @@ mod tests {
                 ..Default::default()
             },
             local_first_audience: None,
+            bundle: None,
         };
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1726,6 +1771,7 @@ mod tests {
                     ..Default::default()
                 },
                 local_first_audience: None,
+                bundle: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1769,6 +1815,7 @@ mod tests {
                     ..Default::default()
                 },
                 local_first_audience: None,
+                bundle: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1808,6 +1855,7 @@ mod tests {
                     ..Default::default()
                 },
                 local_first_audience: None,
+                bundle: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1831,6 +1879,7 @@ mod tests {
                     ..Default::default()
                 },
                 local_first_audience: None,
+                bundle: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1853,6 +1902,7 @@ mod tests {
                     ..Default::default()
                 },
                 local_first_audience: None,
+                bundle: None,
             },
             &HeaderMap::new(),
             &state,
@@ -1888,6 +1938,7 @@ mod tests {
                 ..Default::default()
             },
             local_first_audience: None,
+            bundle: None,
         };
 
         let error = ws_admission(prelude, &HeaderMap::new(), &state)
@@ -1906,6 +1957,102 @@ mod tests {
     // observable through a public websocket client helper, so this pins
     // the security invariant at the route admission point that feeds
     // ServerRuntimeHandle::open(identity, claims, trust).
+
+    fn pinned_prelude(identity: AuthorSubject, backend_secret: Option<&str>) -> WebSocketPrelude {
+        let (issuer, user_id) = issuer_and_subject(identity);
+        WebSocketPrelude {
+            peer_identity: identity.canonical().to_owned(),
+            bootstrap_catalogue: false,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
+            auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+                backend_secret: backend_secret.map(str::to_owned),
+                backend_session: Some(serde_json::json!({
+                    "account_id": identity.account_id(),
+                    "issuer": issuer,
+                    "user_id": user_id,
+                    "claims": {},
+                    "authMode": "external",
+                })),
+                ..Default::default()
+            },
+            local_first_audience: None,
+            bundle: Some("ab".repeat(32)),
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_backend_pins_its_sessions_to_a_bundle() {
+        let state = make_ws_test_state().await;
+        let identity = AuthorSubject::for_test_bytes([0x62; 16]);
+        let admission = ws_admission(
+            pinned_prelude(identity, Some("backend-secret")),
+            &HeaderMap::new(),
+            &state,
+        )
+        .await
+        .expect("a pinned backend session is admitted");
+        assert_eq!(admission.trust, CommitUnitTrust::Session);
+        assert_eq!(
+            admission.bundle,
+            Some(jazz::catalogue::BundleId([0xab; 32]))
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_a_workload_vouched_upgrade_may_pin_its_session() {
+        use crate::middleware::workload::{BackendAccess, VOUCHED_HEADER, vouched_value};
+        let state = make_ws_test_state().await;
+        let secrets = state.workload_secrets.as_ref().expect("internal secrets");
+        let identity = AuthorSubject::for_test_bytes([0x64; 16]);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            VOUCHED_HEADER,
+            vouched_value(secrets, BackendAccess::Backend)
+                .parse()
+                .unwrap(),
+        );
+        // The vouched upgrade stands in for the backend secret.
+        let admission = ws_admission(pinned_prelude(identity, None), &headers, &state)
+            .await
+            .expect("a vouched upgrade pins its session");
+        assert_eq!(
+            admission.bundle,
+            Some(jazz::catalogue::BundleId([0xab; 32]))
+        );
+
+        // A vouch the gate did not issue counts for nothing.
+        let mut forged = HeaderMap::new();
+        forged.insert(VOUCHED_HEADER, "not-the-backend session".parse().unwrap());
+        let Err(error) = ws_admission(pinned_prelude(identity, None), &forged, &state).await else {
+            panic!("a forged vouch may not pin a session");
+        };
+        assert!(
+            format!("{error:?}").contains("bundle pin needs"),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_bundle_pin_without_the_backend_credential_is_refused() {
+        let state = make_ws_test_state().await;
+        let identity = AuthorSubject::for_test_bytes([0x63; 16]);
+        for secret in [None, Some("not-the-secret")] {
+            let Err(error) =
+                ws_admission(pinned_prelude(identity, secret), &HeaderMap::new(), &state).await
+            else {
+                panic!("a client may not pick its own bundle");
+            };
+            let message = format!("{error:?}");
+            assert!(message.contains("bundle pin needs"), "{message}");
+        }
+        let mut malformed = pinned_prelude(identity, Some("backend-secret"));
+        malformed.bundle = Some("nope".to_owned());
+        let Err(error) = ws_admission(malformed, &HeaderMap::new(), &state).await else {
+            panic!("a malformed bundle id is refused");
+        };
+        assert!(format!("{error:?}").contains("invalid permissions bundle id"));
+    }
+
     #[tokio::test]
     async fn ws_backend_session_admits_session_claims_for_policy_reads() {
         let state = make_ws_test_state().await;
@@ -1932,6 +2079,7 @@ mod tests {
                 ..Default::default()
             },
             local_first_audience: None,
+            bundle: None,
         };
 
         let admission = ws_admission(prelude, &HeaderMap::new(), &state)
@@ -5089,6 +5237,143 @@ mod tests {
         assert!(
             titles_of(jazz::binding_codec::decode_rows(&rows).unwrap()).is_empty(),
             "bob must not see alice's private doc"
+        );
+    }
+
+    /// Publish the docs schema as a bundle whose docs read by `select`
+    /// (createJazz's `/bundles`); its hex id.
+    async fn publish_docs_bundle(
+        addr: std::net::SocketAddr,
+        state: &Arc<ServerState>,
+        schema: &Schema,
+        select: PolicyExpr,
+    ) -> String {
+        let hash = jazz::tools::public_schema::SchemaHash::compute(schema).to_string();
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}/apps/{}/admin/bundles", state.app_id))
+            .header("X-Jazz-Admin-Secret", "admin-secret")
+            .header("Content-Type", "application/json")
+            .body(
+                serde_json::json!({
+                    "targetSchemaHash": hash,
+                    "schemas": [{ "hash": hash, "schema": schema }],
+                    "migrations": [],
+                    "permissions": { "docs": public_table_policies().with_select(select) },
+                })
+                .to_string(),
+            )
+            .send()
+            .await
+            .expect("publish bundle");
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.expect("bundle response");
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        body["bundle"].as_str().expect("bundle id").to_owned()
+    }
+
+    fn pinned_thin_prelude(identity: AuthorSubject, bundle: Option<&str>) -> Vec<u8> {
+        let mut prelude: serde_json::Value =
+            serde_json::from_slice(&ws_session_prelude(identity)).unwrap();
+        if let Some(bundle) = bundle {
+            prelude["bundle"] = serde_json::json!(bundle);
+        }
+        prelude.to_string().into_bytes()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_sessions_pinned_to_a_bundle_are_governed_by_its_policies() {
+        // A createJazz app's store: its backend publishes every deployment
+        // as a bundle, starting from no schema.
+        let schema = private_docs_public_schema();
+        let state = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build bundle test state")
+            .state;
+        let addr = start_ws_test_server(state.clone()).await;
+        // Two deployments publish their own policies: one reads every doc,
+        // one none.
+        let open = publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await;
+        let closed = publish_docs_bundle(addr, &state, &schema, PolicyExpr::False).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+        let features = jazz::wire::FEATURE_THIN_RESULTS;
+
+        let mut alice_ws = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(alice, Some(&closed)),
+            features,
+        )
+        .await;
+        bind_thin_schema(&mut alice_ws, &schema).await;
+        send_thin(
+            &mut alice_ws,
+            1,
+            jazz::thin::ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells("alice's", alice),
+                options: Vec::new(),
+                transaction: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut alice_ws, 1).await,
+            jazz::thin::ThinBody::Written { .. }
+        ));
+        assert!(
+            thin_titles(&mut alice_ws, 2, None).await.is_empty(),
+            "the closed bundle reads nothing, not even alice's own doc"
+        );
+
+        let mut bob_ws = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(bob, Some(&open)),
+            features,
+        )
+        .await;
+        bind_thin_schema(&mut bob_ws, &schema).await;
+        assert_eq!(
+            thin_titles(&mut bob_ws, 1, None).await,
+            vec!["alice's".to_owned()],
+            "the open bundle reads alice's doc"
+        );
+
+        // Once bundles are published, an unpinned user session is refused,
+        // as a sync session is.
+        let (mut unpinned, _) = connect_async(ws_url(addr, state.app_id))
+            .await
+            .expect("connect websocket");
+        unpinned
+            .send(WsMessage::Binary(pinned_thin_prelude(bob, None).into()))
+            .await
+            .unwrap();
+        unpinned
+            .send(WsMessage::Binary(
+                ws_client_hello_batch_with_features(features).into(),
+            ))
+            .await
+            .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(5), unpinned.next())
+            .await
+            .expect("an answer")
+            .expect("a frame")
+            .expect("a message");
+        let frames = decode_ws_message(&message);
+        assert!(
+            matches!(
+                frames.as_slice(),
+                [WireFrame::Error(error)] if error.message.contains("served through createJazz")
+            ),
+            "{frames:?}"
         );
     }
 

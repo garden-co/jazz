@@ -284,7 +284,7 @@ fn header(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn vouched_value(secrets: &InternalSecrets, access: BackendAccess) -> String {
+pub(crate) fn vouched_value(secrets: &InternalSecrets, access: BackendAccess) -> String {
     format!("{} {}", secrets.backend, access.as_str())
 }
 

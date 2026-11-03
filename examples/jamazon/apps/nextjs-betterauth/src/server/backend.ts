@@ -25,10 +25,11 @@ declare global {
 export function backend(): Promise<Jazz> {
   const { remote: sync } = serverConfig;
   const pending = (globalThis.__jamazonJazz ??= createJazz({
-    appId: serverConfig.appId,
     app,
     permissions,
-    store: sync ? remote(sync) : sqlite({ path: serverConfig.dataPath }),
+    store: sync
+      ? remote({ ...sync, appId: serverConfig.appId })
+      : sqlite({ path: serverConfig.dataPath, appId: serverConfig.appId }),
     // Better Auth's session cookie decides who the shopper is. Guests have
     // no Better Auth session: they stay on their local-first account.
     authenticate: async (request) => {
