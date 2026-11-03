@@ -93,6 +93,17 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(line).toContain("--blobs s3 --s3-role-from-workload --s3-prefix it's/");
   });
 
+  it("starts a core whose large values go to the project's Blob store", async () => {
+    installFake("1.0.0");
+    expect(await start("1.0.0", undefined, trust, { storeId: "abc", prefix: "it's/" })).toBe(
+      "running",
+    );
+    expect(read("servers.log")).toContain(
+      "--blobs vercel-blob --vercel-blob-token-from-workload --vercel-blob-store-id abc " +
+        "--vercel-blob-prefix it's/ --trusted-workload-issuer",
+    );
+  });
+
   it("starts once, leaves the same version alone, and upgrades to a newer one", async () => {
     installFake("1.0.0");
     expect(await start("1.0.0")).toBe("running");

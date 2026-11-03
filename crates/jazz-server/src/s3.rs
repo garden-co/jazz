@@ -51,7 +51,7 @@ impl std::fmt::Debug for WebIdentityToken {
 }
 
 impl WebIdentityToken {
-    fn read(&self) -> Result<String, String> {
+    pub(crate) fn read(&self) -> Result<String, String> {
         match self {
             Self::File(path) => std::fs::read_to_string(path)
                 .map(|token| token.trim().to_owned())
@@ -745,7 +745,7 @@ fn xml_field(xml: &str, name: &str) -> Option<String> {
 }
 
 /// RFC 3986 encoding as SigV4 wants it; `/` kept unless `slash`.
-fn uri_encode(value: &str, slash: bool) -> String {
+pub(crate) fn uri_encode(value: &str, slash: bool) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {
