@@ -31,8 +31,19 @@ untrusted length declarations.
 paired frames, including positions above JavaScript's safe integer range and
 u64::MAX. The row bytes are manually assembled from the existing postcard row
 contract; committed transaction identities were independently calculated from
-its domain-separated BLAKE3 contract. Rust compares encoder bytes to the
-fixtures; TypeScript decodes them and exercises malformed variants.
+main's domain-separated SHA256 contract, using Python `hashlib` independently
+of the Rust encoder. The preimage is the 26-byte UTF-8 context
+`jazz committed batch id v1`, prefixed by its length as a little-endian u64,
+followed by the transaction time as a big-endian u64 and the 16 node bytes.
+The first 16 digest bytes form the lowercase hexadecimal identity. State uses
+time 2 and sixteen `02` node bytes, yielding
+`eb2d19deaa082a76aa19b6b5305e9135`; content uses time 1 and sixteen `01` node
+bytes, yielding `1b4ec6169db167137f4dee6f8a76dc43`.
+
+This baseline update changes the fixture's committed identities and their JSON
+and frame bytes to match main. It preserves v1 framing, fixed schema and row
+bytes, and all coordinate limits. UUIDv5 and E2EE keyed BLAKE2b are unchanged.
+Rust compares encoder bytes to the fixtures; TypeScript decodes them and exercises malformed variants.
 
 The host method `acceptedRead(query, id, includeDeleted, timeoutMs, author?,
 claims?)` admits synchronously into the existing serializable read queue. Its
