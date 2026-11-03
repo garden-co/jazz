@@ -7,7 +7,7 @@ import {
   type Transaction,
 } from "prosemirror-state";
 import { type MappedMarkdown, type MarkdownSpec, type Side, toMarkdown } from "./markdown.js";
-import { changedMiddle, mapOffset } from "./text-map.js";
+import { changedMiddle, mapOffset, mapOffsetExactly } from "./text-map.js";
 
 export interface MarkdownSyncOptions {
   /** Parses a stored value into a document of the editor's schema, for
@@ -21,9 +21,6 @@ export interface MarkdownSyncOptions {
    * the authority merges each write, and a merged value always includes the
    * writes this client made before it. */
   onChange?(markdown: string): void;
-  /** How many values this editor wrote are remembered, so that their echoes
-   * are not applied as changes. */
-  rememberWrites?: number;
 }
 
 interface SyncState {
@@ -32,8 +29,8 @@ interface SyncState {
 
 interface SyncConfig {
   options: MarkdownSyncOptions;
-  written: string[];
-  /** The column's value as this editor last wrote or applied it. */
+  /** The column's value as this editor last wrote or applied it. A value
+   * read from the column that equals it is that write's echo. */
   base: string | null;
 }
 
@@ -49,7 +46,7 @@ const mappedDocs = new WeakMap<Node, MappedMarkdown>();
  * text went.
  */
 export function markdownSync(options: MarkdownSyncOptions): Plugin<SyncState> {
-  const config: SyncConfig = { options, written: [], base: null };
+  const config: SyncConfig = { options, base: null };
   const plugin: Plugin<SyncState> = new Plugin<SyncState>({
     key,
     state: {
@@ -63,7 +60,7 @@ export function markdownSync(options: MarkdownSyncOptions): Plugin<SyncState> {
           if (view.state.doc === previous.doc || key.getState(view.state)?.remote) return;
           const markdown = ownChanges(config, markdownOf(view.state).text);
           if (markdown === config.base) return;
-          remember(config, markdown);
+          config.base = markdown;
           options.onChange?.(markdown);
         },
       };
@@ -78,7 +75,9 @@ export function markdownSync(options: MarkdownSyncOptions): Plugin<SyncState> {
  * value the column had: only the text this editor changed is rewritten.
  * Where that value is written differently than this editor would write it
  * (a trailing space someone is typing, another editor's markup), a write
- * leaves it as it is instead of undoing it for everyone.
+ * leaves it as it is instead of undoing it for everyone. When the edit's
+ * place in that value cannot be found exactly, the canonical markdown is
+ * written whole: splicing at a guess would delete the text in between.
  */
 function ownChanges(config: SyncConfig, markdown: string): string {
   const base = config.base;
@@ -86,20 +85,10 @@ function ownChanges(config: SyncConfig, markdown: string): string {
   const canonical = toMarkdown(config.options.parse(base), config.options.spec).text;
   if (canonical === base || canonical === markdown) return canonical === base ? markdown : base;
   const { start, endBefore, endAfter } = changedMiddle(canonical, markdown);
-  return (
-    base.slice(0, mapOffset(canonical, base, start, "before")) +
-    markdown.slice(start, endAfter) +
-    base.slice(mapOffset(canonical, base, endBefore, "after"))
-  );
-}
-
-function remember(config: SyncConfig, markdown: string) {
-  const limit = config.options.rememberWrites ?? 64;
-  const index = config.written.indexOf(markdown);
-  if (index >= 0) config.written.splice(index, 1);
-  config.written.push(markdown);
-  if (config.written.length > limit) config.written.shift();
-  config.base = markdown;
+  const from = mapOffsetExactly(canonical, base, start, "before");
+  const to = mapOffsetExactly(canonical, base, endBefore, "after");
+  if (from === null || to === null || to < from) return markdown;
+  return base.slice(0, from) + markdown.slice(start, endAfter) + base.slice(to);
 }
 
 /** Whether `tr` applied a value read from the text column, rather than a
@@ -137,8 +126,10 @@ function configOf(state: EditorState): SyncConfig {
 
 /**
  * The transaction that brings the editor to `markdown`, a value read from
- * the text column, or null when it already shows it or it is one this
- * editor wrote. Only the top-level blocks the change reaches are parsed
+ * the text column, or null when it already shows it. The local store shows
+ * an editor's writes as soon as it makes them, so the only echo is of its
+ * latest write; any other value is applied, even one equal to an earlier
+ * write (someone deleted what this editor just typed). Only the top-level blocks the change reaches are parsed
  * into the editor, so what markdown cannot say elsewhere (such as trailing
  * spaces being typed) stays as it is. The transaction stays out of the
  * undo history.
@@ -146,7 +137,10 @@ function configOf(state: EditorState): SyncConfig {
 export function applyMarkdown(state: EditorState, markdown: string): Transaction | null {
   const config = configOf(state);
   const current = markdownOf(state);
-  if (markdown === current.text || config.written.includes(markdown)) return null;
+  if (markdown === config.base || markdown === current.text) {
+    config.base = markdown;
+    return null;
+  }
   config.base = markdown;
   const doc = config.options.parse(markdown);
   const next = toMarkdown(doc, config.options.spec);

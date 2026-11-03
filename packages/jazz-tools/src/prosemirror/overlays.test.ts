@@ -53,6 +53,33 @@ describe("overlays", () => {
     expect(covered(state)).toEqual({ keys: "the red van keys", sam: "orphaned" });
   });
 
+  it("finds again only the overlays a merged value touched", async () => {
+    const wasm = textAnchorsFrom(await loadWasmModule());
+    let resolves = 0;
+    const anchors: TextAnchors = {
+      ...wasm,
+      resolveRange: (...args) => {
+        resolves++;
+        return wasm.resolveRange(...args);
+      },
+    };
+    let state = editor("Load-in at noon.\n\nDoors at eight.", anchors);
+    const range = (text: string) => {
+      const from = docPosition(state, "Load-in at noon.\n\nDoors at eight.".indexOf(text));
+      return captureRange(state, anchors, from, from + text.length);
+    };
+    state = state.apply(
+      setOverlays(state.tr, [
+        { id: "noon", range: range("noon"), attrs: { class: "c" } },
+        { id: "eight", range: range("eight"), attrs: { class: "c" } },
+      ]),
+    );
+    resolves = 0;
+    state = state.apply(applyMarkdown(state, "Load-in at noon.\n\nDoors at half eight.")!);
+    expect(resolves).toBe(1);
+    expect(covered(state)).toEqual({ noon: "noon", eight: "eight" });
+  });
+
   it("moves drawn overlays with local typing", async () => {
     const anchors = textAnchorsFrom(await loadWasmModule());
     let state = editor("Soundcheck at 5pm.", anchors);

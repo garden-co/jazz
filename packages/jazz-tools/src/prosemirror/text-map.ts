@@ -1,7 +1,6 @@
 import type { Side } from "./markdown.js";
 
-/** Past this many cells, the changed part of two values is not diffed and
- * offsets in it snap to its edges. */
+/** Past this many cells, the changed part of two values is not diffed. */
 const DIFF_CELLS = 1 << 20;
 
 /**
@@ -9,9 +8,22 @@ const DIFF_CELLS = 1 << 20;
  * one value. Offsets outside the changed middle shift with it; inside, they
  * follow the characters both versions keep. At a place where text was
  * inserted, `"before"` stays ahead of the insert and `"after"` moves past
- * it.
+ * it. Where the changed middle is too large to diff, offsets in it snap to
+ * its edges; {@link mapOffsetExactly} says so instead.
  */
 export function mapOffset(before: string, after: string, offset: number, side: Side): number {
+  const { start, endAfter } = changedMiddle(before, after);
+  return mapOffsetExactly(before, after, offset, side) ?? (side === "before" ? start : endAfter);
+}
+
+/** {@link mapOffset}, or null when the offset lies in a changed middle too
+ * large to diff. */
+export function mapOffsetExactly(
+  before: string,
+  after: string,
+  offset: number,
+  side: Side,
+): number | null {
   const { start, endBefore, endAfter } = changedMiddle(before, after);
   if (offset < start || (offset === start && side === "before")) return offset;
   if (offset > endBefore || (offset === endBefore && side === "after")) {
@@ -19,7 +31,7 @@ export function mapOffset(before: string, after: string, offset: number, side: S
   }
   const a = before.slice(start, endBefore);
   const b = after.slice(start, endAfter);
-  if (a.length * b.length > DIFF_CELLS) return side === "before" ? start : endAfter;
+  if (a.length * b.length > DIFF_CELLS) return null;
   return start + mapThroughDiff(a, b, offset - start, side);
 }
 
