@@ -17,8 +17,8 @@ app.get("/health", (c) => c.text("ok"));
 // Better Auth owns sign-up, sign-in and the session cookie.
 app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 // Sync and sign-in for the browser, on this app's own origin.
-app.all("/jazz", async (c) => (await jazz()).fetch(c.req.raw));
-app.all("/jazz/*", async (c) => (await jazz()).fetch(c.req.raw));
+app.all("/jazz", async (c) => (await jazz()).handle(c.req.raw));
+app.all("/jazz/*", async (c) => (await jazz()).handle(c.req.raw));
 if (production) {
   app.use("/*", serveStatic({ root: "./dist" }));
   // A single-page app: every other path renders index.html.

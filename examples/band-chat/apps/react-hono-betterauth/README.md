@@ -6,7 +6,7 @@ README for what BandChat demonstrates; this one only differs in how it is
 wired.
 
 - `server/jazz.ts` calls `createJazz`, and `server/index.ts` mounts it under
-  `/jazz` (plain requests through `jazz.fetch`, sync sockets through
+  `/jazz` (plain requests through `jazz.handle`, sync sockets through
   `jazz.attach(server)`), next to Better Auth at `/api/auth/*`. The browser
   talks only to this app's own origin.
 - Better Auth's tables live in BandChat's own Jazz (`jazz.db`), and
