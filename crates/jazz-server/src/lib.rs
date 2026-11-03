@@ -36,6 +36,39 @@ use tracing::info;
 const STANDALONE_INSPECTOR_URL: &str = "https://jazz2-inspector.vercel.app/";
 
 /// Run the native Jazz server process shell.
+/// Lock `<dir>/jazz.lock`, the lock embedded cores take too, so two servers
+/// (a restart racing the old process, two replicas on one volume) never
+/// open one data dir. The lock is the OS's on the open file.
+fn lock_data_dir(dir: &std::path::Path) -> Result<std::fs::File, String> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let path = dir.join("jazz.lock");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let holder = std::fs::read_to_string(&path).unwrap_or_default();
+            return Err(format!(
+                "data dir '{}' is already open ({}); give each server its own data dir",
+                dir.display(),
+                holder.trim()
+            ));
+        }
+        Err(std::fs::TryLockError::Error(e)) => {
+            return Err(format!("lock {}: {e}", path.display()));
+        }
+    }
+    let _ = file.set_len(0);
+    let _ = write!(file, "process {}", std::process::id());
+    Ok(file)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     app_id_str: &str,
@@ -99,6 +132,13 @@ pub async fn run(
             .cache_budget_governor()
             .map(|governor| AbortOnDrop(tokio::spawn(govern_cache_budget(governor)))),
     );
+    // One process per data dir: held until this function returns, and
+    // dropped by the kernel however the process exits.
+    let _data_dir_lock = if in_memory {
+        None
+    } else {
+        Some(lock_data_dir(std::path::Path::new(data_dir))?)
+    };
     let mut builder = ServerBuilder::new(app_id)
         .with_auth_config(auth_config)
         .with_shutdown_timeout(shutdown_timeout)
@@ -436,5 +476,18 @@ mod tests {
             let _activity = runtime.subscribe_activity();
             runtime.notify_activity();
         };
+    }
+}
+
+#[cfg(test)]
+mod data_dir_lock_tests {
+    #[test]
+    fn a_second_server_on_one_data_dir_is_refused_until_the_first_lets_go() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let first = super::lock_data_dir(dir.path()).expect("first");
+        let error = super::lock_data_dir(dir.path()).expect_err("second refused");
+        assert!(error.contains("already open"), "{error}");
+        drop(first);
+        super::lock_data_dir(dir.path()).expect("free again");
     }
 }
