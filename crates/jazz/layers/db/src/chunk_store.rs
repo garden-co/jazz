@@ -220,20 +220,48 @@ const CONCURRENCY: usize = 16;
 /// move out of SQLite and reclaimed ones to delete. [`crate::db::Db::tick`]
 /// runs each batch itself, unless the store was opened
 /// [`crate::options::DbConfig::with_host_chunk_io`]: then the host takes it
-/// with [`crate::db::Db::take_chunk_io`], runs it with [`ChunkIo::run`]
-/// wherever it likes and hands the result to
+/// with [`crate::db::Db::take_chunk_io`], runs it (with [`ChunkIo::run`],
+/// or op by op through [`ChunkIo::fetches`], [`ChunkIo::puts`] and
+/// [`ChunkIo::deletes`] and then [`ChunkIo::done`]) and hands the result to
 /// [`crate::db::Db::finish_chunk_io`]. One batch is out at a time, so a
-/// delete never overtakes the put it undoes; until its result is back, no
-/// further batch is handed out.
+/// delete never overtakes the put it undoes; until it is back, no further
+/// batch is handed out.
 ///
 /// It is plain data (`Send`): the puts' marks are committed before it is
-/// handed out, so the host may run it on another thread, and a host that
-/// loses it (a crash) loses nothing the store does not redo on reopen.
-#[derive(Debug, Default)]
+/// handed out, so the host may run it on another thread. A batch (or its
+/// [`ChunkIoDone`]) that is dropped instead of finished ends there: its
+/// fetches go to the next batch, its puts are picked again and its
+/// deletes stay queued, so a host that loses one loses nothing.
+#[derive(Debug)]
 pub struct ChunkIo {
     pub(crate) fetch: Vec<ChunkRequest>,
     pub(crate) puts: Vec<(NodeKey, Vec<u8>)>,
     pub(crate) deletes: Vec<NodeKey>,
+    /// The store's claim on this batch; `None` for the fetches a read
+    /// runs itself, which no host sees.
+    pub(crate) lease: Option<Lease>,
+}
+
+/// A batch's hold on the store that handed it out: dropping it ends the
+/// batch, and the fetches it still names go to the next one.
+pub(crate) struct Lease {
+    pub(crate) chunks: std::sync::Weak<crate::large::Chunks>,
+    pub(crate) batch: u64,
+    pub(crate) unfetched: Vec<ChunkRequest>,
+}
+
+impl std::fmt::Debug for Lease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Lease").field("batch", &self.batch).finish()
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        if let Some(chunks) = self.chunks.upgrade() {
+            chunks.end_fetch(self.batch, std::mem::take(&mut self.unfetched));
+        }
+    }
 }
 
 /// What running a [`ChunkIo`] came to, for
@@ -247,6 +275,16 @@ pub struct ChunkIoDone {
 }
 
 impl ChunkIo {
+    /// Fetches a read runs itself, outside any batch.
+    pub(crate) fn unleased(fetch: Vec<ChunkRequest>) -> Self {
+        Self {
+            fetch,
+            puts: Vec::new(),
+            deletes: Vec::new(),
+            lease: None,
+        }
+    }
+
     /// Whether the batch has nothing to do.
     pub fn is_empty(&self) -> bool {
         self.fetch.is_empty() && self.puts.is_empty() && self.deletes.is_empty()
@@ -257,13 +295,55 @@ impl ChunkIo {
         (self.fetch.len(), self.puts.len(), self.deletes.len())
     }
 
+    /// The nodes to get from the store, in order.
+    pub fn fetches(&self) -> impl ExactSizeIterator<Item = NodeKey> + '_ {
+        self.fetch.iter().map(NodeKey::from)
+    }
+
+    /// The leaves to put in the store, with their bytes, in order.
+    pub fn puts(&self) -> &[(NodeKey, Vec<u8>)] {
+        &self.puts
+    }
+
+    /// The leaves to delete from the store, in order.
+    pub fn deletes(&self) -> &[NodeKey] {
+        &self.deletes
+    }
+
+    /// The outcome of a batch a host ran op by op: one result per entry of
+    /// [`Self::fetches`], [`Self::puts`] and [`Self::deletes`], in their
+    /// order. Counts that do not match are refused, which ends the batch.
+    pub fn done(
+        self,
+        fetched: Vec<Result<Option<Bytes>, Error>>,
+        put: Vec<Result<(), Error>>,
+        deleted: Vec<Result<(), Error>>,
+    ) -> Result<ChunkIoDone, Error> {
+        let given = (fetched.len(), put.len(), deleted.len());
+        if given != self.counts() {
+            return Err(Error::new(
+                crate::options::ErrorCode::Protocol,
+                format!(
+                    "chunk I/O: a batch of {:?} fetches, puts and deletes was handed back with {given:?} results",
+                    self.counts()
+                ),
+            ));
+        }
+        Ok(ChunkIoDone {
+            io: self,
+            fetched,
+            put,
+            deleted,
+        })
+    }
+
     /// Run the batch against `store`, up to 16 operations of each kind at
-    /// once. A
-    /// batch never holds a node in two lists, so the order among them does
-    /// not matter.
+    /// once. A batch never holds a node in two lists (a reclaimed leaf
+    /// leaves the put queue; one stored again leaves the delete queue), so
+    /// the order among them does not matter.
     pub async fn run(self, store: &dyn ChunkStore) -> ChunkIoDone {
         use futures::StreamExt;
-        let keys: Vec<NodeKey> = self.fetch.iter().map(NodeKey::from).collect();
+        let keys: Vec<NodeKey> = self.fetches().collect();
         let fetched = futures::stream::iter(keys.iter().map(|key| store.get(key)))
             .buffered(CONCURRENCY)
             .collect::<Vec<_>>();

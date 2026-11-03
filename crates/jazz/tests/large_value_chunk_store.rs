@@ -158,6 +158,8 @@ struct Objects {
     deletes: usize,
     /// Puts fail while set, as an unreachable bucket does.
     failing: bool,
+    /// Gets fail while set.
+    failing_gets: bool,
 }
 
 /// A chunk store that answers only asynchronously, as S3 or R2 do: every
@@ -204,6 +206,12 @@ impl ChunkStore for Remote {
     fn get<'a>(&'a self, node: &'a NodeKey) -> StoreFuture<'a, Option<Bytes>> {
         later(move || {
             let mut objects = self.objects();
+            if objects.failing_gets {
+                return Err(jazz::db::Error::new(
+                    ErrorCode::Storage,
+                    "bucket unreachable",
+                ));
+            }
             objects.gets += 1;
             Ok(objects
                 .map
@@ -510,21 +518,15 @@ fn a_host_batch_that_fails_is_retried_by_the_next() {
     assert_eq!(body(&db, 1), value);
 }
 
-/// A server whose host runs the chunk I/O holds a replica's chunk
-/// requests until a batch has fetched the leaves, then serves them when
-/// the batch is finished, without another tick.
-#[test]
-fn a_server_with_host_io_serves_chunk_requests_once_a_batch_fetched_them() {
-    let (_dir, path) = scratch();
-    let remote = Remote::default();
-    let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
-    let value = text(58, LARGE);
-    {
-        let server = open(&path, Some(store.clone())).unwrap();
-        insert(&server, 1, &value);
-        block_on(server.tick()).unwrap();
-    }
-    let server = open_host_io(&path, store.clone());
+/// Alice, subscribed to a server's docs; what the server sends her waits
+/// in the returned queue until her next tick.
+struct Subscriber {
+    alice: Db,
+    down: Rc<RefCell<VecDeque<SyncMessage>>>,
+    _stream: Box<dyn std::any::Any>,
+}
+
+fn subscribe_to(server: &Db) -> Subscriber {
     let alice = block_on(Db::open(config(1, user(1)))).unwrap();
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
@@ -535,29 +537,346 @@ fn a_server_with_host_io_serves_chunk_requests_once_a_batch_fetched_them() {
     server
         .accept_subscriber(
             Box::new(Pipe {
-                out: down,
+                out: down.clone(),
                 inbound: up,
             }),
             user(1),
         )
         .unwrap();
-    let _stream = block_on(alice.subscribe(
+    let stream = block_on(alice.subscribe(
         &alice.prepare_query(&Query::from("docs")).unwrap(),
         ReadOpts::default(),
     ))
     .unwrap();
+    Subscriber {
+        alice,
+        down,
+        _stream: Box::new(stream),
+    }
+}
+
+/// A store at `path` whose leaves are all in `store`.
+fn moved_to(path: &Path, store: &Arc<dyn ChunkStore>, value: &str) {
+    let server = open(path, Some(store.clone())).unwrap();
+    insert(&server, 1, value);
+    block_on(server.tick()).unwrap();
+}
+
+/// A server whose host runs the chunk I/O holds a replica's chunk
+/// requests until a batch has fetched the leaves, then serves them as the
+/// batch is finished, without another tick.
+#[test]
+fn a_server_with_host_io_serves_chunk_requests_once_a_batch_fetched_them() {
+    let (_dir, path) = scratch();
+    let remote = Remote::default();
+    let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
+    let value = text(58, LARGE);
+    moved_to(&path, &store, &value);
+    let server = open_host_io(&path, store.clone());
+    let sub = subscribe_to(&server);
     let mut fetched = 0;
     for _ in 0..16 {
-        block_on(alice.tick()).unwrap();
+        block_on(sub.alice.tick()).unwrap();
         block_on(server.tick()).unwrap();
         if let Some(io) = server.take_chunk_io().unwrap() {
-            fetched += io.counts().0;
+            let fetches = io.counts().0;
+            fetched += fetches;
+            let served = sub.down.borrow().len();
             server
                 .finish_chunk_io(run_elsewhere(io, store.clone()))
                 .unwrap();
+            if fetches > 0 {
+                assert!(sub.down.borrow().len() > served, "served by the finish");
+            }
         }
     }
-    block_on(alice.tick()).unwrap();
+    block_on(sub.alice.tick()).unwrap();
     assert!(fetched > 0, "the host fetched the leaves");
-    assert_eq!(body(&alice, 1), value);
+    assert_eq!(body(&sub.alice, 1), value);
+}
+
+/// A batch the host drops (a crashed task, a cancelled future) ends
+/// there: the next batch puts the same leaves, and fetches what the
+/// dropped one was to fetch. So does a batch dropped once it ran.
+///
+/// ```
+/// take ──► drop ──► take (same puts) ──► run ──► drop ──► take ──► finish ✓
+/// ```
+#[test]
+fn a_dropped_batch_ends_and_the_next_one_redoes_it() {
+    let (_dir, path) = scratch();
+    let remote = Remote::default();
+    let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
+    let value = text(59, LARGE);
+    let db = open_host_io(&path, store.clone());
+    insert(&db, 1, &value);
+    let first = db.take_chunk_io().unwrap().expect("a batch");
+    let puts = first.counts().1;
+    assert!(puts > 2, "{puts}");
+    drop(first);
+    let second = db
+        .take_chunk_io()
+        .unwrap()
+        .expect("the dropped batch ended");
+    assert_eq!(second.counts().1, puts, "its puts are picked again");
+    drop(run_elsewhere(second, store.clone()));
+    assert_eq!(
+        file_node_bytes(&path).1,
+        0,
+        "a dropped outcome moves nothing"
+    );
+    let done = run_elsewhere(db.take_chunk_io().unwrap().unwrap(), store.clone());
+    db.finish_chunk_io(done).unwrap();
+    assert_eq!(file_node_bytes(&path).1 as usize, puts);
+
+    // A dropped batch's fetches go to the next one.
+    drop(db);
+    let server = open_host_io(&path, store.clone());
+    let sub = subscribe_to(&server);
+    let mut dropped = 0;
+    for _ in 0..16 {
+        block_on(sub.alice.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+        let Some(io) = server.take_chunk_io().unwrap() else {
+            continue;
+        };
+        if dropped == 0 && io.counts().0 > 0 {
+            dropped = io.counts().0;
+            drop(io);
+            let again = server.take_chunk_io().unwrap().unwrap();
+            assert!(again.counts().0 >= dropped, "{:?}", again.counts());
+            server
+                .finish_chunk_io(run_elsewhere(again, store.clone()))
+                .unwrap();
+            continue;
+        }
+        server
+            .finish_chunk_io(run_elsewhere(io, store.clone()))
+            .unwrap();
+    }
+    block_on(sub.alice.tick()).unwrap();
+    assert!(dropped > 0);
+    assert_eq!(body(&sub.alice, 1), value);
+}
+
+/// Only the store that handed a batch out finishes it, and only while it
+/// is the batch that is out; an outcome with the wrong number of results
+/// is refused. A store whose tick runs its own I/O hands out none. A
+/// refused outcome is dropped, which ends its batch.
+#[test]
+fn a_batch_is_finished_only_by_the_store_that_handed_it_out() {
+    let (_dir_a, path_a) = scratch();
+    let (_dir_b, path_b) = scratch();
+    let store: Arc<dyn ChunkStore> = Arc::new(Remote::default());
+    let a = open_host_io(&path_a, store.clone());
+    let b = open_host_io(&path_b, store.clone());
+    insert(&a, 1, &text(60, LARGE));
+    insert(&b, 1, &text(61, LARGE));
+    let protocol = |error: jazz::db::Error, says: &str| {
+        assert_eq!(error.code, ErrorCode::Protocol);
+        assert!(error.message.contains(says), "{}", error.message);
+    };
+
+    let from_a = run_elsewhere(a.take_chunk_io().unwrap().unwrap(), store.clone());
+    protocol(b.finish_chunk_io(from_a).unwrap_err(), "no batch is out");
+    let from_a = run_elsewhere(
+        a.take_chunk_io().unwrap().expect("the refused batch ended"),
+        store.clone(),
+    );
+    let out_at_b = b.take_chunk_io().unwrap().unwrap();
+    protocol(
+        b.finish_chunk_io(from_a).unwrap_err(),
+        "not the batch that is out",
+    );
+    b.finish_chunk_io(run_elsewhere(out_at_b, store.clone()))
+        .unwrap();
+    assert!(file_node_bytes(&path_b).1 > 2);
+
+    let io = a.take_chunk_io().unwrap().unwrap();
+    let counts = io.counts();
+    protocol(
+        io.done(Vec::new(), Vec::new(), Vec::new()).unwrap_err(),
+        &format!("{counts:?}"),
+    );
+    let io = a.take_chunk_io().unwrap().expect("that batch ended too");
+    a.finish_chunk_io(run_elsewhere(io, store.clone())).unwrap();
+    assert!(file_node_bytes(&path_a).1 > 2);
+
+    let (_dir_c, path_c) = scratch();
+    let ticked = open(&path_c, Some(store)).unwrap();
+    protocol(
+        ticked.take_chunk_io().unwrap_err(),
+        "runs its chunk I/O itself",
+    );
+}
+
+/// A host that runs a batch op by op, as a JavaScript host awaiting
+/// IndexedDB does, hands back one result per op.
+#[test]
+fn a_host_may_run_a_batch_op_by_op() {
+    let (_dir, path) = scratch();
+    let remote = Remote::default();
+    let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
+    let value = text(62, LARGE);
+    let db = open_host_io(&path, store.clone());
+    insert(&db, 1, &value);
+    let io = db.take_chunk_io().unwrap().unwrap();
+    assert_eq!(io.fetches().len(), 0);
+    let put: Vec<_> = io
+        .puts()
+        .iter()
+        .map(|(key, bytes)| block_on(store.put(key, bytes)))
+        .collect();
+    let deleted: Vec<_> = io
+        .deletes()
+        .iter()
+        .map(|key| block_on(store.delete(key)))
+        .collect();
+    db.finish_chunk_io(io.done(Vec::new(), put, deleted).unwrap())
+        .unwrap();
+    assert!(file_node_bytes(&path).1 > 2);
+    drop(db);
+    let db = open_host_io(&path, store);
+    assert_eq!(body(&db, 1), value);
+}
+
+/// Leave every large value in the file at `path` unreferenced, as a row's
+/// last version going does. White-box: no public write unreferences a
+/// committed value without history keeping it.
+fn unreference_all(path: &Path) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute("UPDATE _jazz_lv_root SET refs = 0", [])
+        .unwrap();
+}
+
+fn leaves_in(path: &Path) -> i64 {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.query_row("SELECT count(*) FROM _jazz_lv_node", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// A host deletes reclaimed leaves from the bucket, after the reclamation
+/// committed; a leaf reclaimed while its put is out is deleted by the next
+/// batch, once the put landed.
+///
+/// ```
+/// take (puts) ──► reclaim ──► finish (puts landed) ──► take (deletes) ──► finish
+/// ```
+#[test]
+fn a_host_deletes_reclaimed_leaves_even_while_their_put_is_out() {
+    let (_dir, path) = scratch();
+    let remote = Remote::default();
+    let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
+    let db = open_host_io(&path, store.clone());
+    insert(&db, 1, &text(63, LARGE));
+    let out = db.take_chunk_io().unwrap().unwrap();
+    let puts = out.counts().1;
+    assert!(puts > 2);
+    unreference_all(&path);
+    // A write of the store's own, so its next tick runs a reclaim pass.
+    insert(&db, 2, "small");
+    block_on(db.tick()).unwrap();
+    assert_eq!(leaves_in(&path), 0, "reclaimed while the puts are out");
+    db.finish_chunk_io(run_elsewhere(out, store.clone()))
+        .unwrap();
+    assert_eq!(remote.objects().map.len(), puts, "the puts landed");
+    let io = db.take_chunk_io().unwrap().unwrap();
+    assert_eq!(io.counts(), (0, 0, puts));
+    db.finish_chunk_io(run_elsewhere(io, store.clone()))
+        .unwrap();
+    assert!(remote.objects().map.is_empty(), "and were deleted after");
+
+    // Leaves that had moved are deleted the same way.
+    insert(&db, 3, &text(64, LARGE));
+    let io = db.take_chunk_io().unwrap().unwrap();
+    let moved = io.counts().1;
+    db.finish_chunk_io(run_elsewhere(io, store.clone()))
+        .unwrap();
+    assert_eq!(remote.objects().map.len(), moved);
+    drop(db);
+    unreference_all(&path);
+    let db = open_host_io(&path, store.clone());
+    block_on(db.tick()).unwrap();
+    let io = db.take_chunk_io().unwrap().unwrap();
+    assert_eq!(io.counts(), (0, 0, moved));
+    db.finish_chunk_io(run_elsewhere(io, store)).unwrap();
+    assert!(remote.objects().map.is_empty());
+    assert!(db.take_chunk_io().unwrap().unwrap().is_empty());
+}
+
+/// A fetch that fails is reported by the finish; the request waiting on it
+/// asks again, and a later batch serves it.
+#[test]
+fn a_host_fetch_that_fails_is_asked_again() {
+    let (_dir, path) = scratch();
+    let remote = Remote::default();
+    let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
+    let value = text(65, LARGE);
+    moved_to(&path, &store, &value);
+    let server = open_host_io(&path, store.clone());
+    let sub = subscribe_to(&server);
+    remote.objects().failing_gets = true;
+    let mut failed = 0;
+    for _ in 0..32 {
+        block_on(sub.alice.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+        let Some(io) = server.take_chunk_io().unwrap() else {
+            continue;
+        };
+        if let Err(error) = server.finish_chunk_io(run_elsewhere(io, store.clone())) {
+            assert_eq!(error.code, ErrorCode::Storage);
+            failed += 1;
+            if failed == 2 {
+                remote.objects().failing_gets = false;
+            }
+        }
+    }
+    block_on(sub.alice.tick()).unwrap();
+    assert!(failed >= 2, "{failed}");
+    assert_eq!(body(&sub.alice, 1), value);
+}
+
+/// Fetches that succeed are served at once even when the batch's puts
+/// fail: the finish reports the put failure, and the replica has its
+/// chunks without another tick. The tick-run path serves them before its
+/// puts start.
+#[test]
+fn fetched_chunks_are_served_even_when_the_puts_beside_them_fail() {
+    for host in [true, false] {
+        let (_dir, path) = scratch();
+        let remote = Remote::default();
+        let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
+        let value = text(66, LARGE);
+        moved_to(&path, &store, &value);
+        let server = if host {
+            open_host_io(&path, store.clone())
+        } else {
+            open(&path, Some(store.clone())).unwrap()
+        };
+        let sub = subscribe_to(&server);
+        insert(&server, 2, &text(67, LARGE));
+        remote.objects().failing = true;
+        let mut served_with_failed_puts = false;
+        for _ in 0..16 {
+            block_on(sub.alice.tick()).unwrap();
+            let gets = remote.objects().gets;
+            let ticked = block_on(server.tick());
+            let finished = match server.take_chunk_io() {
+                Ok(Some(io)) => server.finish_chunk_io(run_elsewhere(io, store.clone())),
+                _ => Ok(()),
+            };
+            let fetched = remote.objects().gets > gets;
+            if fetched && (ticked.is_err() || finished.is_err()) {
+                assert!(!sub.down.borrow().is_empty(), "host: {host}");
+                served_with_failed_puts = true;
+            }
+        }
+        block_on(sub.alice.tick()).unwrap();
+        assert!(served_with_failed_puts, "host: {host}");
+        assert_eq!(body(&sub.alice, 1), value, "host: {host}");
+        assert_eq!(
+            file_node_bytes(&path).1 as usize,
+            remote.objects().map.len()
+        );
+    }
 }
