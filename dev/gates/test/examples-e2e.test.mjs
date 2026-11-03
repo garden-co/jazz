@@ -105,3 +105,13 @@ test("every variant is a standalone project the gate can build, start and drive"
     assert.match(config, /JAZZ_E2E_PROD/, `${variant.dir} Playwright config has a production mode`);
   }
 });
+
+test("a run filtered to one variant cannot pass the workflow", () => {
+  const workflow = fs.readFileSync(path.join(root, ".github/workflows/examples-e2e.yml"), "utf8");
+  const job = workflow.split(/\n  all-variants:\n/)[1];
+  assert.ok(job, "examples-e2e.yml has a final all-variants job");
+  assert.match(job, /needs: \[prepare, e2e\]/);
+  assert.match(job, /always\(\)/, "it runs even when the matrix failed or was skipped");
+  assert.match(job, /FILTER: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.variant/);
+  assert.match(job, /if \[ -n "\$FILTER" \]; then[\s\S]*?exit 1/, "a filtered run fails");
+});
