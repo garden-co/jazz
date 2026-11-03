@@ -517,8 +517,12 @@ pub(crate) struct Chunks {
     store: Option<Arc<dyn ChunkStore>>,
     /// The host runs chunk-store I/O ([`crate::db::Db::take_chunk_io`]),
     /// not the tick.
-    host_io: std::sync::atomic::AtomicBool,
+    host_io: bool,
 }
+
+/// Batch ids, unique in the process, so a batch handed back to a store
+/// that did not hand it out is refused.
+static NEXT_BATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 struct State {
     nodes: HashMap<[u8; 32], Cached>,
@@ -542,9 +546,9 @@ struct State {
     fetch: BTreeSet<ChunkRequest>,
     /// Offloaded nodes the chunk store answered it does not hold.
     lost: BTreeSet<ChunkRequest>,
-    /// A fetch is running: one at a time, so a delete never overtakes the
-    /// put it undoes.
-    pumping: bool,
+    /// The batch of chunk-store work that is out, if one is: one at a
+    /// time, so a delete never overtakes the put it undoes.
+    batch: Option<u64>,
 }
 
 /// Where a node's verified bytes are.
@@ -586,6 +590,7 @@ impl Chunks {
     pub(crate) fn install(
         path: Option<(&std::path::Path, Option<&'static str>)>,
         store: Option<Arc<dyn ChunkStore>>,
+        host_io: bool,
     ) -> Result<Arc<Self>, Error> {
         let reader = match path {
             None => None,
@@ -612,10 +617,10 @@ impl Chunks {
                 spans: HashMap::new(),
                 fetch: BTreeSet::new(),
                 lost: BTreeSet::new(),
-                pumping: false,
+                batch: None,
             }),
             store,
-            host_io: std::sync::atomic::AtomicBool::new(false),
+            host_io,
         });
         Ok(chunks)
     }
@@ -647,15 +652,9 @@ impl Chunks {
         self.store.as_ref()
     }
 
-    /// Have the host run chunk-store I/O instead of the tick.
-    pub(crate) fn set_host_io(&self, host: bool) {
-        self.host_io
-            .store(host, std::sync::atomic::Ordering::Relaxed);
-    }
-
     /// Whether the host runs chunk-store I/O.
     pub(crate) fn host_io(&self) -> bool {
-        self.host_io.load(std::sync::atomic::Ordering::Relaxed)
+        self.host_io
     }
 
     /// The chunk store settled leaves move to, if they move: a store in
@@ -676,22 +675,26 @@ impl Chunks {
         !self.state.lock().expect("chunk cache").fetch.is_empty()
     }
 
-    /// Start a fetch: the nodes reads are waiting on, or `None` if another
-    /// fetch is running. With nothing waiting, nodes kept for earlier
-    /// waiting reads may be evicted again.
-    pub(crate) fn begin_fetch(&self) -> Option<Vec<ChunkRequest>> {
+    /// Start a batch: its id and the nodes reads are waiting on, or `None`
+    /// if another batch is out. With nothing waiting, nodes kept for
+    /// earlier waiting reads may be evicted again.
+    pub(crate) fn begin_fetch(&self) -> Option<(u64, Vec<ChunkRequest>)> {
         let mut state = self.state.lock().expect("chunk cache");
-        if state.pumping {
+        if state.batch.is_some() {
             return None;
         }
-        state.pumping = true;
+        let batch = NEXT_BATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        state.batch = Some(batch);
         if state.fetch.is_empty() {
             for node in state.nodes.values_mut() {
                 node.held = false;
             }
             state.evict();
         }
-        Some(std::mem::take(&mut state.fetch).into_iter().collect())
+        Some((
+            batch,
+            std::mem::take(&mut state.fetch).into_iter().collect(),
+        ))
     }
 
     /// The nodes reads wait on, for a read that fetches them itself. Unlike
@@ -702,9 +705,22 @@ impl Chunks {
         std::mem::take(&mut state.fetch).into_iter().collect()
     }
 
-    /// End a fetch [`Self::begin_fetch`] started.
-    pub(crate) fn end_fetch(&self) {
-        self.state.lock().expect("chunk cache").pumping = false;
+    /// The batch that is out, if one is.
+    pub(crate) fn outstanding(&self) -> Option<u64> {
+        self.state.lock().expect("chunk cache").batch
+    }
+
+    /// End `batch`, which [`Self::begin_fetch`] started; `unfetched` (what
+    /// it was to fetch and did not) is fetched by the next one. Puts it
+    /// marked are picked again by the next batch, and deletes stay queued
+    /// until one succeeds, so a batch that ends without running loses
+    /// nothing.
+    pub(crate) fn end_fetch(&self, batch: u64, unfetched: Vec<ChunkRequest>) {
+        let mut state = self.state.lock().expect("chunk cache");
+        if state.batch == Some(batch) {
+            state.batch = None;
+            state.fetch.extend(unfetched);
+        }
     }
 
     /// Install what the chunk store answered for an offloaded node.
@@ -2184,7 +2200,7 @@ mod tests {
 
     fn chunks() -> (Connection, Arc<Chunks>) {
         let conn = Connection::open_in_memory().unwrap();
-        let chunks = Chunks::install(None, None).unwrap();
+        let chunks = Chunks::install(None, None, false).unwrap();
         conn.execute_batch(DDL).unwrap();
         (conn, chunks)
     }
@@ -2725,7 +2741,7 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         let store: Arc<dyn ChunkStore> =
             Arc::new(crate::chunk_store::FileChunkStore::new(dir.join("chunks")).unwrap());
-        let chunks = Chunks::install(Some((&path, None)), Some(store.clone())).unwrap();
+        let chunks = Chunks::install(Some((&path, None)), Some(store.clone()), false).unwrap();
         conn.execute_batch(DDL).unwrap();
         open_offload(&conn, &chunks).unwrap();
         conn.execute_batch(
@@ -2850,7 +2866,7 @@ mod tests {
             leaves
         );
         assert_eq!(o.count("SELECT count(*) FROM _jazz_lv_offload"), 0);
-        let cold = Chunks::install(Some((&o.path, None)), Some(o.store.clone())).unwrap();
+        let cold = Chunks::install(Some((&o.path, None)), Some(o.store.clone()), false).unwrap();
         assert_eq!(cold.materialize(cell.as_ref()).unwrap(), logical);
         assert!(cold.take_demand().is_empty());
         // A second value keeps its leaves when the first goes.
@@ -2927,7 +2943,7 @@ mod tests {
         let cell = o.insert(2, &prepared);
         assert!(o.delete_pending().is_empty());
         assert_eq!(keys(&begin_offload(&o.conn, 1_000).unwrap()), keys(&batch));
-        let cold = Chunks::install(Some((&o.path, None)), Some(o.store.clone())).unwrap();
+        let cold = Chunks::install(Some((&o.path, None)), Some(o.store.clone()), false).unwrap();
         assert_eq!(cold.materialize(cell.as_ref()).unwrap(), logical);
     }
 

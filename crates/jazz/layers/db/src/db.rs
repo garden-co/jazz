@@ -629,6 +629,15 @@ const RECLAIM_NODES_PER_TICK: usize = 256;
 /// Leaves one tick may move to, or delete from, the chunk store.
 const CHUNK_STORE_NODES_PER_TICK: usize = 256;
 
+/// [`Db::take_chunk_io`] or [`Db::finish_chunk_io`] on a store whose tick
+/// runs its chunk I/O itself.
+fn not_host_run() -> Error {
+    Error::new(
+        ErrorCode::Protocol,
+        "chunk I/O: this store runs its chunk I/O itself; open it with DbConfig::with_host_chunk_io to run it from the host",
+    )
+}
+
 /// File store settings.
 #[derive(Clone, Copy, Debug)]
 pub struct FileOptions {
@@ -1281,8 +1290,8 @@ impl Db {
         names.check_types(&schema)?;
         // Variants are tagged before any DDL: an enum default is its tag.
         names.mint(&conn, &schema)?;
-        let chunks = crate::large::Chunks::install(path, config.chunk_store.clone())?;
-        chunks.set_host_io(config.host_chunk_io);
+        let chunks =
+            crate::large::Chunks::install(path, config.chunk_store.clone(), config.host_chunk_io)?;
         // Statements are keyed per table and verb; the default 16 entries
         // thrash as soon as a schema has a few tables.
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
@@ -1649,8 +1658,10 @@ impl Db {
 
     /// Fetch the offloaded nodes reads wait on, move settled leaves to the
     /// chunk store and delete reclaimed ones from it ([`crate::chunk_store`]),
-    /// unless the host runs that I/O. A failed operation is retried next
-    /// tick; the first failure is returned once the rest ran.
+    /// unless the host runs that I/O. The fetches run first, so messages
+    /// held for those nodes are served before the puts start. A failed
+    /// operation is retried next tick; the first failure is returned once
+    /// the rest ran.
     async fn pump_chunk_store(&self) -> Result<(), Error> {
         let chunks = self.inner().chunks.clone();
         if chunks.host_io() {
@@ -1659,20 +1670,34 @@ impl Db {
         let Some(store) = chunks.store().cloned() else {
             return Ok(());
         };
-        let Some(io) = self.begin_chunk_io(&chunks)? else {
+        let Some(mut io) = self.begin_chunk_io(&chunks)? else {
             return Ok(());
         };
+        let wanted = std::mem::take(&mut io.fetch);
+        let any = !wanted.is_empty();
+        let mut fetched = self.fetch_from(&chunks, &*store, wanted).await;
+        if let Some(lease) = &mut io.lease {
+            // Fetched (or failed, and asked again by the read that needs it).
+            lease.unfetched.clear();
+        }
+        if any && fetched.is_ok() {
+            fetched = self.sync_tick();
+        }
         let done = io.run(&*store).await;
-        self.end_chunk_io(&chunks, done)
+        let applied = self.end_chunk_io(&chunks, done);
+        fetched.and(applied)
     }
 
     /// The next batch of chunk-store work, for a store opened
     /// [`crate::options::DbConfig::with_host_chunk_io`]: `None` while the
     /// last one is out or without a chunk store. Hand what running it came
-    /// to back with [`Self::finish_chunk_io`], which every batch taken
-    /// needs before the next is handed out.
+    /// to back with [`Self::finish_chunk_io`]; a batch dropped instead ends
+    /// there, and its work goes to the next one.
     pub fn take_chunk_io(&self) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
         let chunks = self.inner().chunks.clone();
+        if !chunks.host_io() {
+            return Err(not_host_run());
+        }
         if chunks.store().is_none() {
             return Ok(None);
         }
@@ -1683,9 +1708,27 @@ impl Db {
     /// installed and the reads and requests waiting on them run again,
     /// moved leaves leave SQLite, deleted ones leave the queue. Failed
     /// operations are retried in a later batch; the first failure is
-    /// returned once the rest are applied.
+    /// returned once the rest are applied. A batch this store did not hand
+    /// out, or not the one out now, is refused.
     pub fn finish_chunk_io(&self, done: crate::chunk_store::ChunkIoDone) -> Result<(), Error> {
         let chunks = self.inner().chunks.clone();
+        if !chunks.host_io() {
+            return Err(not_host_run());
+        }
+        let outstanding = chunks.outstanding();
+        let ours = done.io.lease.as_ref().is_some_and(|lease| {
+            std::ptr::eq(lease.chunks.as_ptr(), std::sync::Arc::as_ptr(&chunks))
+                && Some(lease.batch) == outstanding
+        });
+        if !ours {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                match outstanding {
+                    None => "chunk I/O: no batch is out to finish",
+                    Some(_) => "chunk I/O: this is not the batch that is out",
+                },
+            ));
+        }
         self.end_chunk_io(&chunks, done)
     }
 
@@ -1694,43 +1737,41 @@ impl Db {
     /// settled leaves to put and reclaimed ones to delete.
     fn begin_chunk_io(
         &self,
-        chunks: &crate::large::Chunks,
+        chunks: &std::sync::Arc<crate::large::Chunks>,
     ) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
-        let Some(fetch) = chunks.begin_fetch() else {
+        let Some((batch, fetch)) = chunks.begin_fetch() else {
             return Ok(None);
         };
-        let picked = (|| {
+        // From here the lease ends the batch however this returns.
+        let lease = crate::chunk_store::Lease {
+            chunks: std::sync::Arc::downgrade(chunks),
+            batch,
+            unfetched: fetch.clone(),
+        };
+        let mut io = crate::chunk_store::ChunkIo::unleased(fetch);
+        io.lease = Some(lease);
+        if chunks.offload_store().is_some() {
             let inner = self.inner();
-            let mut io = crate::chunk_store::ChunkIo {
-                fetch,
-                ..Default::default()
-            };
-            if chunks.offload_store().is_some() {
-                if inner.conn.is_autocommit() {
-                    io.puts = crate::large::begin_offload(&inner.conn, CHUNK_STORE_NODES_PER_TICK)?;
-                }
-                io.deletes =
-                    crate::large::pending_deletes(&inner.conn, CHUNK_STORE_NODES_PER_TICK)?;
+            if inner.conn.is_autocommit() {
+                io.puts = crate::large::begin_offload(&inner.conn, CHUNK_STORE_NODES_PER_TICK)?;
             }
-            Ok(io)
-        })();
-        match picked {
-            Ok(io) => Ok(Some(io)),
-            Err(error) => {
-                chunks.end_fetch();
-                Err(error)
-            }
+            io.deletes = crate::large::pending_deletes(&inner.conn, CHUNK_STORE_NODES_PER_TICK)?;
         }
+        Ok(Some(io))
     }
 
-    /// End a batch [`Self::begin_chunk_io`] started.
+    /// End a batch [`Self::begin_chunk_io`] started, once it is applied.
     fn end_chunk_io(
         &self,
         chunks: &crate::large::Chunks,
-        done: crate::chunk_store::ChunkIoDone,
+        mut done: crate::chunk_store::ChunkIoDone,
     ) -> Result<(), Error> {
+        let lease = done.io.lease.take();
         let applied = self.apply_chunk_io(chunks, done);
-        chunks.end_fetch();
+        if let Some(mut lease) = lease {
+            // Fetches that failed are asked again by the reads that need them.
+            lease.unfetched.clear();
+        }
         applied
     }
 
@@ -1746,9 +1787,10 @@ impl Db {
             deleted,
         } = done;
         let mut first = None;
+        let mut fetch_failed = None;
         let any = !io.fetch.is_empty();
         if any {
-            self.install_fetched(chunks, &io.fetch, fetched, &mut first);
+            self.install_fetched(chunks, &io.fetch, fetched, &mut fetch_failed);
         }
         {
             let inner = self.inner();
@@ -1779,11 +1821,11 @@ impl Db {
                 })?;
             }
         }
-        if any && first.is_none() {
+        if any && fetch_failed.is_none() {
             // Messages held for those nodes are served now, not a tick later.
             self.sync_tick()?;
         }
-        first.map_or(Ok(()), Err)
+        fetch_failed.or(first).map_or(Ok(()), Err)
     }
 
     /// Install what the chunk store answered for `wanted`; reads waiting
@@ -1814,12 +1856,9 @@ impl Db {
         if wanted.is_empty() {
             return Ok(());
         }
-        let done = crate::chunk_store::ChunkIo {
-            fetch: wanted,
-            ..Default::default()
-        }
-        .run(store)
-        .await;
+        let done = crate::chunk_store::ChunkIo::unleased(wanted)
+            .run(store)
+            .await;
         let mut first = None;
         self.install_fetched(chunks, &done.io.fetch, done.fetched, &mut first);
         first.map_or(Ok(()), Err)
@@ -1852,7 +1891,9 @@ impl Db {
                         return Err(error);
                     };
                     if chunks.host_io() {
-                        // Beside the host's batch, which may be out.
+                        // Beside the host's batch, which may be out: a
+                        // node a read waits on is referenced, so no
+                        // delete in that batch removes it.
                         let wanted = chunks.take_fetch();
                         if wanted.is_empty() {
                             return Err(error);
@@ -1860,12 +1901,16 @@ impl Db {
                         self.fetch_from(&chunks, &*store, wanted).await?;
                         continue;
                     }
-                    let Some(wanted) = chunks.begin_fetch() else {
+                    let Some((batch, wanted)) = chunks.begin_fetch() else {
                         return Err(error);
                     };
-                    let fetched = self.fetch_from(&chunks, &*store, wanted).await;
-                    chunks.end_fetch();
-                    fetched?;
+                    // Ends the batch even if this future is dropped.
+                    let _lease = crate::chunk_store::Lease {
+                        chunks: std::sync::Arc::downgrade(&chunks),
+                        batch,
+                        unfetched: Vec::new(),
+                    };
+                    self.fetch_from(&chunks, &*store, wanted).await?;
                 }
                 result => return result,
             }
