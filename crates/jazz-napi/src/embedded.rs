@@ -23,11 +23,17 @@ struct JazzCoreOpenOptions {
     admin_secret: String,
     data_dir: Option<String>,
     in_memory: Option<bool>,
-    /// `"files"` or `"sqlite"` (the default): where settled large-value
-    /// bytes of a persistent core live.
+    /// `"files"`, `"s3"` or `"sqlite"` (the default): where settled
+    /// large-value bytes of a persistent core live.
     blobs: Option<String>,
     /// The directory for `blobs: "files"`; defaults to `<dataDir>/blobs`.
     blobs_dir: Option<String>,
+    /// For `blobs: "s3"`, each defaulting to the environment
+    /// (`S3_BUCKET_NAME`, `AWS_REGION`; credentials always come from it).
+    s3_bucket: Option<String>,
+    s3_region: Option<String>,
+    s3_endpoint: Option<String>,
+    s3_prefix: Option<String>,
     jwt_public_key: Option<String>,
     jwt_issuer: Option<String>,
     jwt_audience: Option<String>,
@@ -64,7 +70,7 @@ impl JazzCore {
     /// Open the core's storage and serve it in this process.
     #[napi(
         factory,
-        ts_args_type = "options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: \"files\" | \"sqlite\"; blobsDir?: string; jwtPublicKey?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }",
+        ts_args_type = "options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: \"files\" | \"s3\" | \"sqlite\"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; jwtPublicKey?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }",
         ts_return_type = "Promise<JazzCore>"
     )]
     pub async fn open(options: serde_json::Value) -> napi::Result<Self> {
@@ -100,14 +106,23 @@ impl JazzCore {
             (Some("files"), dir) => BlobStore::Files {
                 dir: dir.map(Into::into),
             },
-            (Some("sqlite") | None, Some(_)) => {
+            (Some("s3"), None) => BlobStore::S3(
+                jazz_server::s3::S3Options::from_env(
+                    opts.s3_bucket,
+                    opts.s3_region,
+                    opts.s3_endpoint,
+                    opts.s3_prefix,
+                )
+                .map_err(|error| napi::Error::from_reason(format!("JazzCore: {error}")))?,
+            ),
+            (Some("sqlite" | "s3") | None, Some(_)) => {
                 return Err(napi::Error::from_reason(
                     "JazzCore: blobsDir needs blobs: \"files\"",
                 ));
             }
             (Some(other), _) => {
                 return Err(napi::Error::from_reason(format!(
-                    "JazzCore: blobs must be \"files\" or \"sqlite\", not {other:?}"
+                    "JazzCore: blobs must be \"files\", \"s3\" or \"sqlite\", not {other:?}"
                 )));
             }
         };

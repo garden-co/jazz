@@ -135,15 +135,39 @@ enum Commands {
         in_memory: bool,
 
         /// Where large values' bytes live once they settle: `files` (the
-        /// `blobs/` directory next to the data, or --blobs-dir) or `sqlite`
-        /// (inside the database file). A data directory keeps its choice,
-        /// except that `sqlite` may later move to `files`.
-        #[arg(long, default_value = "files", value_parser = ["files", "sqlite"])]
+        /// `blobs/` directory next to the data, or --blobs-dir), `s3` (an
+        /// S3-compatible bucket, see --s3-*) or `sqlite` (inside the database
+        /// file). A data directory keeps its choice, except that `sqlite`
+        /// may later move to `files` or `s3`.
+        #[arg(long, default_value = "files", value_parser = ["files", "s3", "sqlite"])]
         blobs: String,
 
         /// Directory for `--blobs files` (defaults to `<data-dir>/blobs`).
         #[arg(long)]
         blobs_dir: Option<String>,
+
+        /// Bucket for `--blobs s3` (defaults to S3_BUCKET_NAME). Credentials
+        /// come from AWS_ROLE_ARN with an OIDC token, or AWS_ACCESS_KEY_ID
+        /// and AWS_SECRET_ACCESS_KEY.
+        #[arg(long)]
+        s3_bucket: Option<String>,
+
+        /// The bucket's region (defaults to AWS_REGION; `auto` for R2).
+        #[arg(long)]
+        s3_region: Option<String>,
+
+        /// An S3-compatible endpoint other than AWS, e.g. R2's.
+        #[arg(long)]
+        s3_endpoint: Option<String>,
+
+        /// Prefix for every object name, to share a bucket between stores.
+        #[arg(long)]
+        s3_prefix: Option<String>,
+
+        /// Assume AWS_ROLE_ARN with the trusted workload's own OIDC token
+        /// (as a `vercel()` core does), not AWS_WEB_IDENTITY_TOKEN_FILE.
+        #[arg(long)]
+        s3_role_from_workload: bool,
 
         /// URL to fetch JWKS keys for JWT validation (production)
         #[arg(long, env = "JAZZ_JWKS_URL")]
@@ -328,6 +352,11 @@ async fn run() {
             in_memory,
             blobs,
             blobs_dir,
+            s3_bucket,
+            s3_region,
+            s3_endpoint,
+            s3_prefix,
+            s3_role_from_workload,
             jwks_url,
             jwt_public_key,
             jwt_issuer,
@@ -393,17 +422,44 @@ async fn run() {
                 }),
                 ..Default::default()
             };
+            let blobs = match blobs.as_str() {
+                "sqlite" => jazz_server::BlobStore::Sqlite,
+                "s3" => {
+                    let options = jazz_server::s3::S3Options::from_env(
+                        s3_bucket,
+                        s3_region,
+                        s3_endpoint,
+                        s3_prefix,
+                    )
+                    .and_then(|mut options| {
+                        if s3_role_from_workload {
+                            let jazz_server::s3::S3Credentials::WebIdentity { token, .. } =
+                                &mut options.credentials
+                            else {
+                                return Err("--s3-role-from-workload needs AWS_ROLE_ARN".to_owned());
+                            };
+                            *token = jazz_server::s3::WebIdentityToken::Workload;
+                        }
+                        Ok(options)
+                    });
+                    match options {
+                        Ok(options) => jazz_server::BlobStore::S3(options),
+                        Err(error) => {
+                            eprintln!("Error: {error}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                _ => jazz_server::BlobStore::Files {
+                    dir: blobs_dir.map(Into::into),
+                },
+            };
             if let Err(e) = jazz_server::run(
                 &app_id,
                 port,
                 &data_dir,
                 in_memory,
-                match blobs.as_str() {
-                    "sqlite" => jazz_server::BlobStore::Sqlite,
-                    _ => jazz_server::BlobStore::Files {
-                        dir: blobs_dir.map(Into::into),
-                    },
-                },
+                blobs,
                 auth_config,
                 bound_port_file,
                 std::time::Duration::from_secs(shutdown_timeout_secs),

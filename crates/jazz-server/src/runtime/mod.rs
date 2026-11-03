@@ -53,30 +53,67 @@ pub enum StorageConfig {
     SQLite {
         /// The database file.
         path: PathBuf,
-        /// Where settled large-value bytes live: files in this directory
-        /// ([`jazz::chunk_store::FileChunkStore`]), or the database file
-        /// itself when `None`.
-        blobs: Option<PathBuf>,
+        /// Where settled large-value bytes live.
+        blobs: Blobs,
     },
 }
+
+/// Where a SQLite store keeps settled large-value bytes.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum Blobs {
+    /// In the database file itself.
+    #[default]
+    InFile,
+    /// As files in this directory ([`jazz::chunk_store::FileChunkStore`]).
+    Files(PathBuf),
+    /// In a store reached over the network, such as an S3 bucket
+    /// ([`crate::s3::S3ChunkStore`]). Its I/O runs beside the store thread,
+    /// so a slow bucket never stalls sync.
+    Network(NetworkChunkStore),
+}
+
+/// A chunk store reached over the network, for [`Blobs::Network`].
+#[derive(Clone)]
+pub struct NetworkChunkStore {
+    pub store: Arc<dyn jazz::chunk_store::ChunkStore>,
+    /// What it is, for logs.
+    pub name: String,
+}
+
+impl std::fmt::Debug for NetworkChunkStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NetworkChunkStore({})", self.name)
+    }
+}
+
+impl PartialEq for NetworkChunkStore {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.store, &other.store)
+    }
+}
+
+impl Eq for NetworkChunkStore {}
 
 impl StorageConfig {
     /// The durable store inside a server data directory.
     pub fn data_dir(path: impl Into<PathBuf>) -> Self {
         Self::SQLite {
             path: path.into().join("jazz.sqlite"),
-            blobs: None,
+            blobs: Blobs::InFile,
         }
     }
 
     /// The same store, with settled large-value bytes kept as files in
     /// `dir` instead of in the database file. In memory it changes nothing.
     pub fn with_blob_dir(self, dir: impl Into<PathBuf>) -> Self {
+        self.with_blobs(Blobs::Files(dir.into()))
+    }
+
+    /// The same store, with settled large-value bytes in `blobs`. In memory
+    /// it changes nothing.
+    pub fn with_blobs(self, blobs: Blobs) -> Self {
         match self {
-            Self::SQLite { path, .. } => Self::SQLite {
-                path,
-                blobs: Some(dir.into()),
-            },
+            Self::SQLite { path, .. } => Self::SQLite { path, blobs },
             Self::InMemory => Self::InMemory,
         }
     }
@@ -238,9 +275,8 @@ struct StoreThread {
 /// The file a store lives in.
 #[derive(Clone)]
 enum Source {
-    /// The database file, and the directory its large-value bytes live in
-    /// when they are not in the file.
-    File(PathBuf, Option<PathBuf>),
+    /// The database file, and where its large-value bytes live.
+    File(PathBuf, Blobs),
     /// An in-memory store shared by name within this process.
     Memory(String),
 }
@@ -282,11 +318,20 @@ impl Source {
 
     /// The chunk store the runtime's large-value bytes go to, if not the
     /// database file.
-    fn chunk_store(&self) -> Result<Option<Arc<dyn jazz::chunk_store::ChunkStore>>, String> {
+    fn chunk_store(&self) -> Result<Option<ChunkStoreChoice>, String> {
         match self {
-            Self::File(_, Some(dir)) => jazz::chunk_store::FileChunkStore::new(dir)
-                .map(|store| Some(Arc::new(store) as Arc<dyn jazz::chunk_store::ChunkStore>))
+            Self::File(_, Blobs::Files(dir)) => jazz::chunk_store::FileChunkStore::new(dir)
+                .map(|store| {
+                    Some(ChunkStoreChoice {
+                        store: Arc::new(store),
+                        network: false,
+                    })
+                })
                 .map_err(|error| format!("open large-value directory {}: {error}", dir.display())),
+            Self::File(_, Blobs::Network(network)) => Ok(Some(ChunkStoreChoice {
+                store: Arc::clone(&network.store),
+                network: true,
+            })),
             _ => Ok(None),
         }
     }
@@ -300,11 +345,100 @@ impl Source {
     }
 }
 
+/// The chunk store a runtime opens with, and whether its I/O runs beside
+/// the store thread ([`ChunkIoRunner`]).
+#[derive(Clone)]
+struct ChunkStoreChoice {
+    store: Arc<dyn jazz::chunk_store::ChunkStore>,
+    network: bool,
+}
+
+/// Runs a network chunk store's batches ([`jazz::db::Db::take_chunk_io`])
+/// on a thread of its own and hands each outcome back to the store thread
+/// as runtime work, which applies it and ticks. One batch is out at a time.
+struct ChunkIoRunner {
+    store: Arc<dyn jazz::chunk_store::ChunkStore>,
+    batches: std_mpsc::Sender<jazz::chunk_store::ChunkIo>,
+    out: Arc<AtomicBool>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl ChunkIoRunner {
+    fn start(
+        store: Arc<dyn jazz::chunk_store::ChunkStore>,
+        work: std_mpsc::Sender<Work>,
+    ) -> Result<Self, String> {
+        let (batches, receiver) = std_mpsc::channel::<jazz::chunk_store::ChunkIo>();
+        let out = Arc::new(AtomicBool::new(false));
+        let thread_store = Arc::clone(&store);
+        let join = thread::Builder::new()
+            .name("jazz-chunk-io".to_owned())
+            .spawn(move || {
+                for io in receiver {
+                    let done = block_on(io.run(&*thread_store));
+                    let finish: Job =
+                        Box::new(move |owner: &mut Owner| owner.finish_chunk_io(done));
+                    if work.send(Work::Owner(finish)).is_err() {
+                        return;
+                    }
+                }
+            })
+            .map_err(|error| format!("start chunk I/O thread: {error}"))?;
+        Ok(Self {
+            store,
+            batches,
+            out,
+            join: Some(join),
+        })
+    }
+
+    /// Hand the runtime's next batch over, unless one is out.
+    fn pump(&self, owner: &Owner) {
+        if self.out.load(Ordering::Acquire) {
+            return;
+        }
+        match owner.db.take_chunk_io() {
+            Ok(Some(io)) if io.is_empty() => {
+                // Nothing to do: an empty batch runs no I/O, so it goes
+                // straight back.
+                if let Err(error) = owner.db.finish_chunk_io(block_on(io.run(&*self.store))) {
+                    tracing::warn!(%error, "large-value store I/O failed");
+                }
+            }
+            Ok(Some(io)) => {
+                self.out.store(true, Ordering::Release);
+                if self.batches.send(io).is_err() {
+                    tracing::error!("the chunk I/O thread is gone");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "take large-value store I/O"),
+        }
+    }
+
+    /// A batch came back.
+    fn returned(&self) {
+        self.out.store(false, Ordering::Release);
+    }
+}
+
+impl Drop for ChunkIoRunner {
+    fn drop(&mut self) {
+        // Closing the channel ends the thread once its batch (if any) ran.
+        let (closed, _) = std_mpsc::channel();
+        drop(std::mem::replace(&mut self.batches, closed));
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
 impl AppStore {
     /// Open the store `storage` names on its own thread.
     pub fn open(storage: &StorageConfig) -> Result<Self, String> {
         let source = Source::new(storage);
         let (work, receiver) = std_mpsc::channel::<Work>();
+        let thread_wake = work.clone();
         let (host, host_jobs) = std_mpsc::channel::<HostJob>();
         let (opened_tx, opened_rx) = std_mpsc::channel();
         let tick_queued = Arc::new(AtomicBool::new(false));
@@ -336,6 +470,7 @@ impl AppStore {
                 StoreLoop {
                     source: thread_source,
                     work: receiver,
+                    wake: thread_wake,
                     host: host_jobs,
                     backlog: VecDeque::new(),
                     tick_queued: thread_ticks,
@@ -617,6 +752,9 @@ impl Unavailable {
 struct StoreLoop {
     source: Source,
     work: std_mpsc::Receiver<Work>,
+    /// Hands runtime work back to this loop (a network chunk store's
+    /// finished batches).
+    wake: std_mpsc::Sender<Work>,
     host: std_mpsc::Receiver<HostJob>,
     /// Host work taken off the queue but not run yet (a tick slice ended).
     backlog: VecDeque<HostJob>,
@@ -773,6 +911,7 @@ impl StoreLoop {
                     runtime.schema.clone(),
                     file,
                     self.source.chunk_store()?,
+                    self.wake.clone(),
                     runtime.any_stored_catalogue,
                     runtime.awaiting_permissions,
                     self.app.lock().ok().and_then(|app| app.clone()),
@@ -1365,6 +1504,8 @@ struct Owner {
     awaiting_permissions: bool,
     /// The app this store serves, named in slow-query reports.
     app: Option<String>,
+    /// Runs a network chunk store's I/O beside this thread.
+    chunk_io: Option<ChunkIoRunner>,
 }
 
 struct OwnerSession {
@@ -1589,7 +1730,8 @@ impl Owner {
     fn open(
         schema: JazzSchema,
         file: StoreFile,
-        chunk_store: Option<Arc<dyn jazz::chunk_store::ChunkStore>>,
+        chunk_store: Option<ChunkStoreChoice>,
+        wake: std_mpsc::Sender<Work>,
         any_stored_catalogue: bool,
         awaiting_permissions: bool,
         app: Option<String>,
@@ -1620,9 +1762,16 @@ impl Owner {
             (None, Some(genesis)) => compile(&genesis.hash)?,
             (None, None) => schema,
         };
-        let config = match chunk_store {
-            Some(store) => config(current).with_chunk_store(store),
+        let config = match &chunk_store {
+            Some(choice) if choice.network => config(current)
+                .with_chunk_store(Arc::clone(&choice.store))
+                .with_host_chunk_io(),
+            Some(choice) => config(current).with_chunk_store(Arc::clone(&choice.store)),
             None => config(current),
+        };
+        let chunk_io = match chunk_store {
+            Some(choice) if choice.network => Some(ChunkIoRunner::start(choice.store, wake)?),
+            _ => None,
         };
         let db = block_on(Db::open_file(config, file))
             .map_err(|error| format!("open server store: {error}"))?;
@@ -1637,6 +1786,7 @@ impl Owner {
             catalogue,
             awaiting_permissions: awaiting_permissions && head.is_none(),
             app,
+            chunk_io,
         })
     }
 
@@ -1822,6 +1972,17 @@ impl Owner {
     /// session's inbound messages are taken a bounded number per tick, so a
     /// large batch gets its first answers out early and other sessions are
     /// served between its parts.
+    /// A network chunk store's batch came back: apply it (the tick that
+    /// follows this job hands the next one over).
+    fn finish_chunk_io(&mut self, done: jazz::chunk_store::ChunkIoDone) {
+        if let Some(runner) = &self.chunk_io {
+            runner.returned();
+        }
+        if let Err(error) = self.db.finish_chunk_io(done) {
+            tracing::warn!(%error, app = self.app.as_deref().unwrap_or("?"), "large-value store I/O failed; retrying");
+        }
+    }
+
     fn tick(&mut self) {
         start_tick(self.sessions.values().map(|session| &*session.queues));
         let started = std::time::Instant::now();
@@ -1829,6 +1990,9 @@ impl Owner {
         self.slice.ticked(started.elapsed());
         if let Err(error) = ticked {
             tracing::error!(%error, "server runtime tick failed");
+        }
+        if let Some(runner) = &self.chunk_io {
+            runner.pump(self);
         }
         self.report_slow_queries();
         for (subscriber, error) in self.db.take_closed_subscribers() {
@@ -2298,5 +2462,195 @@ mod tests {
             slice.ticked(TICK_SLICE * 3);
         }
         assert_eq!(slice.cap.get(), 1, "a tick always takes at least one");
+    }
+
+    /// A bucket over HTTP that checks what S3 checks of a put: the body
+    /// matches its signed `x-amz-checksum-sha256`, and the request is signed.
+    struct MockBucket {
+        objects: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+        gets: Arc<AtomicU64>,
+        endpoint: String,
+        _runtime: tokio::runtime::Runtime,
+    }
+
+    impl MockBucket {
+        fn start() -> Self {
+            use axum::{
+                body::Bytes,
+                extract::Path,
+                http::{HeaderMap, StatusCode},
+                routing::put,
+            };
+            use base64::Engine as _;
+            use sha2::Digest as _;
+            let objects: Arc<Mutex<BTreeMap<String, Vec<u8>>>> = Arc::default();
+            let gets = Arc::new(AtomicU64::new(0));
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let listener = runtime
+                .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+                .unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let (put_objects, get_objects, delete_objects, counted) = (
+                Arc::clone(&objects),
+                Arc::clone(&objects),
+                Arc::clone(&objects),
+                Arc::clone(&gets),
+            );
+            let app = axum::Router::new().route(
+                "/{*key}",
+                put(
+                    move |Path(key): Path<String>, headers: HeaderMap, body: Bytes| {
+                        let objects = Arc::clone(&put_objects);
+                        async move {
+                            if !headers.contains_key("authorization") {
+                                return StatusCode::FORBIDDEN;
+                            }
+                            let digest = base64::engine::general_purpose::STANDARD
+                                .encode(sha2::Sha256::digest(&body));
+                            let signed = headers
+                                .get("x-amz-checksum-sha256")
+                                .and_then(|value| value.to_str().ok());
+                            if signed != Some(digest.as_str()) {
+                                return StatusCode::BAD_REQUEST;
+                            }
+                            objects.lock().unwrap().insert(key, body.to_vec());
+                            StatusCode::OK
+                        }
+                    },
+                )
+                .get(move |Path(key): Path<String>| {
+                    let objects = Arc::clone(&get_objects);
+                    counted.fetch_add(1, Ordering::Relaxed);
+                    async move {
+                        match objects.lock().unwrap().get(&key) {
+                            Some(bytes) => (StatusCode::OK, bytes.clone()),
+                            None => (StatusCode::NOT_FOUND, Vec::new()),
+                        }
+                    }
+                })
+                .delete(move |Path(key): Path<String>| {
+                    let objects = Arc::clone(&delete_objects);
+                    async move {
+                        objects.lock().unwrap().remove(&key);
+                        StatusCode::NO_CONTENT
+                    }
+                }),
+            );
+            runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
+            Self {
+                objects,
+                gets,
+                endpoint,
+                _runtime: runtime,
+            }
+        }
+
+        fn blobs(&self) -> Blobs {
+            let store = crate::s3::S3ChunkStore::new(crate::s3::S3Options {
+                bucket: "bucket".to_owned(),
+                region: "auto".to_owned(),
+                endpoint: Some(self.endpoint.clone()),
+                prefix: "app/".to_owned(),
+                path_style: true,
+                credentials: crate::s3::S3Credentials::Static(crate::s3::Keys {
+                    access_key_id: "test".to_owned(),
+                    secret_access_key: "test".to_owned(),
+                    session_token: None,
+                }),
+            })
+            .unwrap();
+            Blobs::Network(NetworkChunkStore {
+                store: Arc::new(store),
+                name: "mock bucket".to_owned(),
+            })
+        }
+    }
+
+    fn docs() -> JazzSchema {
+        JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchema::builder("docs").column("body", ColumnType::Bytea))
+                .build(),
+        )
+        .unwrap()
+    }
+
+    fn read_body(db: &Db) -> Option<Vec<u8>> {
+        use jazz::query::Query;
+        let rows = block_on(db.all(
+            &db.prepare_query(&Query::from("docs")).unwrap(),
+            jazz::db::ReadOpts {
+                tier: jazz::db::ReadTier::LocalOnly,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        rows.first().and_then(|row| {
+            row.cells()
+                .find(|(name, _)| *name == "body")
+                .and_then(|(_, value)| match value {
+                    Some(jazz::records::Value::Bytes(bytes)) => Some(bytes.clone()),
+                    _ => None,
+                })
+        })
+    }
+
+    /// A store whose large values live in a bucket: settled leaves move
+    /// there off the store thread (the bucket checks each one's checksum),
+    /// and a reopened store reads them back from it.
+    #[test]
+    fn large_values_move_to_an_s3_bucket_and_read_back() {
+        let bucket = MockBucket::start();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = || StorageConfig::data_dir(dir.path()).with_blobs(bucket.blobs());
+        let value: Vec<u8> = (0..400 * 1024u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        {
+            let store = AppStore::open(&storage()).unwrap();
+            let runtime = store
+                .start_runtime(docs(), NodeRole::Core, false, false)
+                .unwrap();
+            let written = value.clone();
+            block_on(runtime.run(move |owner| {
+                block_on(owner.db.insert(
+                    "docs",
+                    BTreeMap::from([("body".to_owned(), jazz::records::Value::Bytes(written))]),
+                    Default::default(),
+                ))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            }))
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            // 400 KiB of bytes is at least two leaves.
+            while bucket.objects.lock().unwrap().len() < 2 {
+                assert!(Instant::now() < deadline, "leaves never reached the bucket");
+                // Each job is followed by a tick, which hands the next batch over.
+                block_on(runtime.run(|_| Ok(()))).unwrap();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                bucket
+                    .objects
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .all(|key| key.starts_with("bucket/app/")),
+                "objects live under the bucket and prefix"
+            );
+            store.close().unwrap();
+        }
+        let store = AppStore::open(&storage()).unwrap();
+        let runtime = store
+            .start_runtime(docs(), NodeRole::Core, false, false)
+            .unwrap();
+        let read = block_on(runtime.run(|owner| Ok(read_body(&owner.db)))).unwrap();
+        assert_eq!(read.as_deref(), Some(value.as_slice()));
+        assert!(
+            bucket.gets.load(Ordering::Relaxed) > 0,
+            "read from the bucket"
+        );
+        store.close().unwrap();
     }
 }
