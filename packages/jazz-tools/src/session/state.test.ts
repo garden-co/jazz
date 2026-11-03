@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
-import { attachJazzSessionConsumer, createJazzSessionOwner } from "./state.js";
+import {
+  attachJazzSessionConsumer,
+  createJazzSessionOwner,
+  replaceJazzSessionClient,
+} from "./state.js";
 import type { JWTAuth } from "../accounts/enrollment.js";
 import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 const handle = (id: string) =>
@@ -358,4 +362,45 @@ it("clearOnSignOut wipes the signed-out account's storage instead of syncing it"
   expect(calls).toEqual(["wipe", "shutdown"]);
   expect(session.getSnapshot().status).toBe("signed-out");
   await session.close();
+});
+
+describe("replacing the signed-in client", () => {
+  it("publishes the new client, then shuts the old one down after its writes sync", async () => {
+    const { session, clients, old } = await setup();
+    const current = session.getSnapshot().client!;
+    const replacement = { account: old, shutdown: vi.fn(async () => {}) };
+    await replaceJazzSessionClient(session, async (client, account) => {
+      expect(client).toBe(current);
+      expect(account).toBe(old);
+      return replacement;
+    });
+    expect(session.getSnapshot()).toMatchObject({ status: "ready", client: replacement });
+    expect(clients[0]!.shutdown).toHaveBeenCalledWith({ waitForSync: true });
+    // The session now owns the replacement: logging out shuts it down.
+    await session.logout();
+    expect(replacement.shutdown).toHaveBeenCalled();
+  });
+
+  it("drops the new client when the session logs out while it opens", async () => {
+    const { session, clients } = await setup();
+    const opening = deferred<{ shutdown: ReturnType<typeof vi.fn> }>();
+    const replacing = replaceJazzSessionClient(session, () => opening.promise as never);
+    await tick();
+    const logout = session.logout();
+    const replacement = { shutdown: vi.fn(async () => {}) };
+    opening.resolve(replacement);
+    await expect(replacing).rejects.toThrow("superseded");
+    await logout;
+    expect(replacement.shutdown).toHaveBeenCalled();
+    expect(clients[0]!.shutdown).toHaveBeenCalled();
+    expect(session.getSnapshot().status).toBe("signed-out");
+  });
+
+  it("refuses without a signed-in client", async () => {
+    const { session } = await setup();
+    await session.logout();
+    await expect(
+      replaceJazzSessionClient(session, async () => ({ shutdown: async () => {} })),
+    ).rejects.toThrow("no signed-in client");
+  });
 });

@@ -11,15 +11,11 @@
  * Upgrade to the local-first client for offline use.
  */
 import type { AccountManagerConfig } from "../accounts/create-account-manager.js";
-import {
-  accountRegistryUrl,
-  createAccountDbWithRuntimeSource,
-  type AccountDbConfig,
-} from "../accounts/context.js";
-import { prepareAccountManager, type AccountStore } from "../accounts/persistence.js";
-import { clientScope, DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
+import { createAccountDbWithRuntimeSource, type AccountDbConfig } from "../accounts/context.js";
+import { createAccountManagerWithMinter } from "../accounts/account-manager-core.js";
 import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
 import type { Db } from "../runtime/db.js";
+import { isThinDb, markThinDb } from "../runtime/local-first-upgrade.js";
 import { LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
 import { ThinRuntimeSource } from "./thin-runtime-source.js";
 import { ThinRuntime, type ThinRuntimeOptions } from "./thin-runtime.js";
@@ -39,16 +35,19 @@ export type {
 export { AccountAuthError, type JWTAuth } from "../accounts/enrollment.js";
 export type { AccountStore } from "../accounts/persistence.js";
 export type { Db } from "../runtime/db.js";
+export type { LocalFirstLoader, LocalFirstModule } from "../runtime/local-first-upgrade.js";
 
 export type ThinDbConfig = AccountDbConfig & { thin?: ThinRuntimeOptions };
 
 /** Open a thin `Db` for a signed-in account. `serverUrl` is required. */
 export async function createDb(config: ThinDbConfig): Promise<Db> {
   const { thin, ...dbConfig } = config;
-  return await createAccountDbWithRuntimeSource(
+  const db = await createAccountDbWithRuntimeSource(
     { ...dbConfig, driver: { type: "memory" } },
     new ThinRuntimeSource(thin),
   );
+  markThinDb(db);
+  return db;
 }
 
 /**
@@ -61,13 +60,10 @@ export async function createDb(config: ThinDbConfig): Promise<Db> {
  * the thin one.
  */
 export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Promise<Db> {
-  const runtime = thin.currentRuntime();
-  if (runtime !== null && !(runtime instanceof ThinRuntime)) {
-    throw new Error("upgradeToLocalFirst takes a Db created by jazz-tools/thin");
-  }
+  thinRuntimeOf(thin);
   const next = await open();
   try {
-    if (runtime) await next.prefetchRuntimeQueries(runtime.schema, runtime.liveQueryJsons());
+    await prefetchThinQueries(thin, next);
   } catch (error) {
     await next.shutdown();
     throw error;
@@ -76,44 +72,34 @@ export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Pr
   return next;
 }
 
+/** @internal Read every query `thin` is subscribed to into `next` from the server. */
+export async function prefetchThinQueries(thin: Db, next: Db): Promise<void> {
+  const runtime = thinRuntimeOf(thin);
+  if (runtime) await next.prefetchRuntimeQueries(runtime.schema, runtime.liveQueryJsons());
+}
+
+function thinRuntimeOf(thin: Db): ThinRuntime | null {
+  const runtime = thin.currentRuntime();
+  if (!isThinDb(thin) || (runtime !== null && !(runtime instanceof ThinRuntime))) {
+    throw new Error("upgradeToLocalFirst takes a Db created by jazz-tools/thin");
+  }
+  return runtime;
+}
+
 /**
  * The account manager of `jazz-tools`, signing local-first identities in
  * JavaScript instead of WASM.
  */
 export async function createAccountManager(config: AccountManagerConfig) {
-  const serverUrl = config.serverUrl ?? DEFAULT_SERVER_URL;
-  const scope = clientScope({ ...config, serverUrl });
-  const registry = accountRegistryUrl(serverUrl, scope);
-  const store = config.store ?? browserAccountStore(registry, config.env ?? "dev");
-  return prepareAccountManager({
-    appId: scope,
-    registry,
-    store,
-    mintToken(secret, audience) {
-      return mintSelfSignedToken(LOCAL_FIRST_ISSUER, {
-        secret: authSecretSeedForMinting(secret),
-        audience,
-        ttlSeconds: 3600,
-        nowSeconds: BigInt(Math.floor(Date.now() / 1000)),
-      });
-    },
-  });
+  return createAccountManagerWithMinter(config, mintLocalFirstTokenInJs);
 }
 
-function browserAccountStore(registry: string, env: string): AccountStore {
-  if (typeof localStorage === "undefined") {
-    throw new Error("createAccountManager requires an AccountStore outside the browser");
-  }
-  const key = `jazz-account-selection-v1:${encodeURIComponent(registry)}:${encodeURIComponent(env)}`;
-  return {
-    async read() {
-      return localStorage.getItem(key);
-    },
-    async update(transform) {
-      const write = () => localStorage.setItem(key, transform(localStorage.getItem(key)));
-      if (typeof navigator !== "undefined" && navigator.locks)
-        await navigator.locks.request(key, write);
-      else write();
-    },
-  };
+/** @internal Sign a local-first token in JS, byte-identical to the WASM runtime. */
+export function mintLocalFirstTokenInJs(secret: string, audience: string): string {
+  return mintSelfSignedToken(LOCAL_FIRST_ISSUER, {
+    secret: authSecretSeedForMinting(secret),
+    audience,
+    ttlSeconds: 3600,
+    nowSeconds: BigInt(Math.floor(Date.now() / 1000)),
+  });
 }
