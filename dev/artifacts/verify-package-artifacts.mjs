@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * The starter E2E prepare job packs jazz-tools and jazz-wasm separately.  A
+ * Release and examples E2E jobs pack jazz-tools and jazz-wasm separately.  A
  * Jazz Tools build must therefore be compiled after the generated runtime
  * fingerprint sources are staged from the exact native artifacts being packed.
- * Check that hand-off before the matrix can turn it into twelve opaque browser
+ * Check that hand-off before the matrix can turn it into opaque browser
  * timeouts.
  */
 import { readFileSync } from "node:fs";
@@ -59,7 +59,7 @@ function napiFingerprints(root) {
   };
 }
 
-export async function verifyStarterE2EArtifacts(
+export async function verifyPackageArtifacts(
   root = repositoryRoot,
   loadWasmFingerprint = wasmFingerprint,
   loadNapiFingerprints = napiFingerprints,
@@ -84,13 +84,13 @@ export async function verifyStarterE2EArtifacts(
   for (const kind of ["wasm", "napi"]) {
     if (compiled[kind] !== expected[kind])
       throw new Error(
-        `starter E2E ${kind.toUpperCase()} package hand-off mismatch: jazz-tools expects ${compiled[kind]}, native artifact is ${expected[kind]}. Re-stage native fingerprints and rebuild jazz-tools.`,
+        `${kind.toUpperCase()} package hand-off mismatch: jazz-tools expects ${compiled[kind]}, native artifact is ${expected[kind]}. Re-stage native fingerprints and rebuild jazz-tools.`,
       );
   }
   const actualWasm = await loadWasmFingerprint(root);
   if (actualWasm !== expected.wasm)
     throw new Error(
-      `starter E2E WASM package hand-off mismatch: manifest expects ${expected.wasm}, module returns ${actualWasm}.`,
+      `WASM package hand-off mismatch: manifest expects ${expected.wasm}, module returns ${actualWasm}.`,
     );
   const napi = await loadNapiFingerprints(root);
   if (
@@ -99,11 +99,11 @@ export async function verifyStarterE2EArtifacts(
     napi.actual !== compiled.napi
   )
     throw new Error(
-      `starter E2E NAPI package hand-off mismatch: manifest and jazz-tools expect ${expected.napi}, pointer expects ${napi.expected}, module returns ${napi.actual}.`,
+      `NAPI package hand-off mismatch: manifest and jazz-tools expect ${expected.napi}, pointer expects ${napi.expected}, module returns ${napi.actual}.`,
     );
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  await verifyStarterE2EArtifacts();
-  console.log("starter E2E package hand-off: jazz-tools matches release WASM and NAPI artifacts");
+  await verifyPackageArtifacts();
+  console.log("package hand-off: jazz-tools matches release WASM and NAPI artifacts");
 }

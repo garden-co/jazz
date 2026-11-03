@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { fetchBrief, renderBrief, renderFetchError } from "./brief.js";
+import { MAX_BRIEF_BYTES, fetchBrief, renderBrief, renderFetchError } from "./brief.js";
 
 const BRIEF = "Set up Jazz (https://jazz.tools) in this project.";
 
@@ -29,6 +29,11 @@ describe("fetchBrief", () => {
 
   it("rejects an empty body", async () => {
     await expect(fetchBrief("https://example.test", respond("  \n"))).rejects.toThrow("empty");
+  });
+
+  it("rejects a body far larger than a brief", async () => {
+    const huge = respond("x".repeat(MAX_BRIEF_BYTES + 1));
+    await expect(fetchBrief("https://example.test", huge)).rejects.toThrow(/larger than/);
   });
 });
 

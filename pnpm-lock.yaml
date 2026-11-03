@@ -87,6 +87,9 @@ importers:
       playwright:
         specifier: ^1.58.2
         version: 1.58.2
+      tsx:
+        specifier: ^4.21.0
+        version: 4.21.0
       turbo:
         specifier: ^2.0.0
         version: 2.8.12
