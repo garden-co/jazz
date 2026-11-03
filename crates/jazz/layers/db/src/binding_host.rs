@@ -33,11 +33,11 @@ use serde::{Deserialize, Serialize};
 use crate::binding_args;
 use crate::db::{
     Db, DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, FirstLoad,
-    InsertOptions, LargeValueStagingPolicy, LargeValueUpdate, ReadOpts, ReadTier, RemoteLinkHint,
-    RestoreOptions, SeededRowIdSource, SerializedReadResult, StreamingMutationKind,
-    StreamingValueUpload, SubscriberId, SubscriptionEvent, SubscriptionStream, TransportError,
-    UpdateOptions, UpsertOptions, Upstream, WireTransport, WireTransportAdapter, WriteHandle,
-    WriteIdentity, block_on,
+    FrameJoiner, InsertOptions, LargeValueStagingPolicy, LargeValueUpdate, ReadOpts, ReadTier,
+    RemoteLinkHint, RestoreOptions, SeededRowIdSource, SerializedReadResult, StreamingMutationKind,
+    StreamingValueUpload, SubscriberId, SubscriptionEvent, SubscriptionStream, SyncMessage,
+    Transport, TransportError, UpdateOptions, UpsertOptions, Upstream, WriteHandle, WriteIdentity,
+    block_on,
 };
 
 /// Named cells, as the binding codec decodes them.
@@ -1690,9 +1690,10 @@ impl Binding {
     /// out on the next tick.
     pub fn connect_upstream(&self) -> Link {
         let queues = WireQueues::default();
-        let transport = Box::new(WireTransportAdapter::current(QueueTransport {
+        let transport = Box::new(QueueTransport {
             queues: queues.clone(),
-        }));
+            failed: None,
+        });
         let upstream = block_on(self.db.connect_upstream(transport));
         self.hooks.schedule_tick();
         Link {
@@ -1707,9 +1708,10 @@ impl Binding {
     /// [`Db::accept_subscriber`]).
     pub fn accept_subscriber(&self, identity: AuthorSubject, claims: Cells) -> HostResult<Link> {
         let queues = WireQueues::default();
-        let transport = Box::new(WireTransportAdapter::current(QueueTransport {
+        let transport = Box::new(QueueTransport {
             queues: queues.clone(),
-        }));
+            failed: None,
+        });
         let subscriber = self.db.accept_subscriber(transport, identity)?;
         self.db.set_identity_claims(identity, claims);
         Ok(Link {
@@ -1915,26 +1917,45 @@ impl StreamingMutation {
 /// The frame queues between a link and its host carrier.
 #[derive(Clone, Default)]
 pub struct WireQueues {
-    inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    inbound: Rc<RefCell<VecDeque<Result<SyncMessage, TransportError>>>>,
+    inbound_joiner: Rc<RefCell<FrameJoiner>>,
     outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound_ready: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
 struct QueueTransport {
     queues: WireQueues,
+    failed: Option<Option<TransportError>>,
 }
 
-impl WireTransport for QueueTransport {
-    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
-        self.queues.outbound.borrow_mut().push_back(frame);
-        if let Some(ready) = self.queues.outbound_ready.borrow().as_ref() {
-            ready();
+impl Transport for QueueTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        for frame in crate::db::encode_frames(message)
+            .map_err(|error| TransportError::Failed(error.to_string()))?
+        {
+            self.queues.outbound.borrow_mut().push_back(frame);
+            if let Some(ready) = self.queues.outbound_ready.borrow().as_ref() {
+                ready();
+            }
         }
         Ok(())
     }
 
-    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-        self.queues.inbound.borrow_mut().pop_front()
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        if self.failed.is_some() {
+            return None;
+        }
+        match self.queues.inbound.borrow_mut().pop_front()? {
+            Ok(message) => Some(message),
+            Err(error) => {
+                self.failed = Some(Some(error));
+                None
+            }
+        }
+    }
+
+    fn take_failure(&mut self) -> Option<TransportError> {
+        self.failed.as_mut().and_then(Option::take)
     }
 }
 
@@ -1962,8 +1983,46 @@ impl Link {
 
     /// Frames received from the peer; applied on the next tick.
     pub fn receive(&self, frames: impl IntoIterator<Item = Vec<u8>>) {
-        self.queues.inbound.borrow_mut().extend(frames);
+        let mut joiner = self.queues.inbound_joiner.borrow_mut();
+        let mut inbound = self.queues.inbound.borrow_mut();
+        for frame in frames {
+            match joiner.push(&frame) {
+                Ok(Some(message)) => inbound.push_back(Ok(message)),
+                Ok(None) => {}
+                Err(error) => {
+                    inbound.push_back(Err(error));
+                    break;
+                }
+            }
+        }
+        drop(inbound);
+        drop(joiner);
         self.binding.hooks.schedule_tick();
+    }
+
+    /// Join and canonically decode the whole host batch before admitting any
+    /// prefix. Stage partial bytes too, so a rejected batch cannot change the
+    /// link's previous reassembly state. Completed messages are decoded once.
+    pub fn receive_checked(
+        &self,
+        frames: impl IntoIterator<Item = impl AsRef<[u8]>>,
+    ) -> Result<(), Error> {
+        let mut staged = self.queues.inbound_joiner.borrow().clone();
+        let mut decoded = Vec::new();
+        for frame in frames {
+            if let Some(message) = staged.push(frame.as_ref()).map_err(|error| {
+                Error::new(
+                    ErrorCode::Protocol,
+                    format!("invalid SQLite sync frame: {error}"),
+                )
+            })? {
+                decoded.push(Ok(message));
+            }
+        }
+        *self.queues.inbound_joiner.borrow_mut() = staged;
+        self.queues.inbound.borrow_mut().extend(decoded);
+        self.binding.hooks.schedule_tick();
+        Ok(())
     }
 
     /// Frames to send to the peer, oldest first.
