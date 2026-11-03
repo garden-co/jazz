@@ -24,9 +24,13 @@ describe("samePresence", () => {
   const at = (position: number, before = "the windows ", after = "fogged and gold") =>
     ({ cursor: { side: "before", position, before, after } }) as unknown as SelectionPresence;
 
-  it("counts only the text around it, not where that text now is", () => {
-    expect(samePresence(at(10), at(42))).toBe(true);
+  it("compares the text around it and where it is", () => {
+    expect(samePresence(at(10), at(10))).toBe(true);
     expect(samePresence(at(10), at(10, "the window"))).toBe(false);
     expect(samePresence(undefined, at(10))).toBe(false);
+  });
+
+  it("counts a move between places with the same surroundings", () => {
+    expect(samePresence(at(10), at(42))).toBe(false);
   });
 });

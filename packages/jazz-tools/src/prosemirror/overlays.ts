@@ -83,7 +83,11 @@ export function overlays(options: OverlayOptions): Plugin<OverlayState> {
         const remote = isRemoteChange(tr);
         if (set === undefined && !remote) {
           if (!tr.docChanged) return value;
-          return { ...value, decorations: value.decorations.map(tr.mapping, tr.doc) };
+          return {
+            ...value,
+            placed: value.placed.map((old) => mapPlaced(tr, old)),
+            decorations: value.decorations.map(tr.mapping, tr.doc),
+          };
         }
         const list = set ?? value.overlays;
         // A merged value moves overlays it did not touch along with their
@@ -94,7 +98,7 @@ export function overlays(options: OverlayOptions): Plugin<OverlayState> {
             ? value.placed.map((old) =>
                 old.orphaned || touches(tr, old.from, old.to)
                   ? place(state, anchors(), old.overlay, options)
-                  : { ...old, from: tr.mapping.map(old.from, 1), to: tr.mapping.map(old.to, -1) },
+                  : mapPlaced(tr, old),
               )
             : list.map((overlay) => place(state, anchors(), overlay, options));
         placedChanged = true;
@@ -151,6 +155,16 @@ function place(
     orphaned,
     drifted: !orphaned && found.confidence < drift,
   };
+}
+
+/** Moves a placed overlay along with its text through `tr`. */
+function mapPlaced(tr: Transaction, old: PlacedOverlay): PlacedOverlay {
+  if (old.orphaned) return old;
+  // The same sides as the decorations: a point (a widget with side 1) and a
+  // range's start stay after text typed at them, a range's end before it.
+  const from = tr.mapping.map(old.from, 1);
+  const to = old.from === old.to ? from : Math.max(from, tr.mapping.map(old.to, -1));
+  return { ...old, from, to };
 }
 
 /** Whether `tr` changed anything in or right at `from..to`. */

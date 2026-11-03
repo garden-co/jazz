@@ -378,9 +378,13 @@ export const commonMarkSpec: Required<MarkdownSpec> = {
     doc: (out, node) => out.blocks(node, 0),
     paragraph: (out, node, pos) => {
       out.inline(node, pos + 1);
-      // Markdown has no empty paragraph: one holding only a space (written
-      // as a reference) keeps its place. An empty document stays empty.
-      if (node.content.size === 0 && !out.emptyDocument) out.content(" ", pos + 1);
+      // A blank line is no paragraph in markdown, but an empty link is one
+      // with no text: CommonMark reads `[]()` back as an empty paragraph.
+      // An empty document stays empty.
+      if (node.content.size === 0 && !out.emptyDocument) {
+        out.point(pos + 1);
+        out.write("[]()");
+      }
     },
     heading: (out, node, pos) => {
       out.write("#".repeat(node.attrs.level ?? 1) + " ");
