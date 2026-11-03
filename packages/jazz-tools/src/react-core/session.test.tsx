@@ -20,10 +20,8 @@ async function setup() {
   const enrollment = {
     createLocalFirst: () => makeFakeAccount(),
     restoreLocalFirst: () => makeFakeAccount(),
-    registerJWT: vi.fn(async () => makeFakeAccount()),
-    loginJWT: vi.fn(async () => makeFakeAccount()),
-    loginOrRegisterJWT: vi.fn(async () => makeFakeAccount()),
-    linkJWT: vi.fn(async () => makeFakeAccount()),
+    loginWithBackend: vi.fn(async () => makeFakeAccount()),
+    linkWithBackend: vi.fn(async () => makeFakeAccount()),
     logout: vi.fn(),
   };
   const accounts = new AccountManager(enrollment, account);
@@ -142,7 +140,7 @@ describe("JazzSessionProvider", () => {
 
   it("shows a recoverable transition error and permits a later operation", async () => {
     const { session, enrollment } = await setup();
-    enrollment.linkJWT.mockRejectedValueOnce(new Error("link rejected"));
+    enrollment.linkWithBackend.mockRejectedValueOnce(new Error("link rejected"));
     const view = render(
       <JazzSessionProvider session={session} fallback={<Status />}>
         <Status />
@@ -150,7 +148,7 @@ describe("JazzSessionProvider", () => {
     );
     let operation!: Promise<void>;
     act(() => {
-      operation = latest.linkJWT("token");
+      operation = latest.linkWithBackend();
     });
     await act(async () => {
       await expect(operation).rejects.toThrow("link rejected");

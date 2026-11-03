@@ -4,6 +4,7 @@
   import { createJazzApp, type JazzAppConfig } from "../session/create-jazz-app.js";
   import JazzSvelteClientProvider from "./JazzSvelteClientProvider.svelte";
   import { setJazzAuth } from "./auth-state.js";
+  import { authForUser } from "../session/app.js";
 
   type Props = JazzAppConfig & {
     children: Snippet;
@@ -12,7 +13,9 @@
     error?: Snippet<[Error, () => Promise<void>]>;
     autoAttachDevTools?: boolean;
   };
+  // `user` stays in `config` so its presence is visible: `user={undefined}` (loading) is not no prop.
   let { children, signedOut, loading, error, autoAttachDevTools = true, auth, ...config }: Props = $props();
+  const currentAuth = () => authForUser("user" in config, config.user, auth);
   // Configuration belongs to one mounted provider. Key the provider to replace it.
   const app = untrack(() => createJazzApp({ ...config, auth }, { start: false }));
   const snapshotStore = writable(app.getSnapshot());
@@ -34,7 +37,7 @@
       void app.dispose().catch(console.error);
     };
   });
-  $effect.pre(() => { app.updateAuth(auth); });
+  $effect.pre(() => { app.updateAuth(currentAuth()); });
 </script>
 
 {#snippet pending()}

@@ -10,7 +10,7 @@ import {
   type CreateJazzClient,
 } from "../react-core/provider.js";
 import { ConfiguredJazzAppProvider, type JazzAppViewProps } from "../react-core/app.js";
-import type { JazzAuth } from "../session/app.js";
+import { authForUser, type JazzAuth } from "../session/app.js";
 import { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
 import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import { DevToolsAutoAttach } from "./devtools-auto-attach.js";
@@ -43,6 +43,14 @@ type JazzProviderCommonProps = {
 
 export type JazzAppProviderProps = JazzSessionConfig &
   JazzAppViewProps<CreatedJazzClient> & {
+    /**
+     * Who your auth library says is signed in: `undefined` while it loads,
+     * `null` when signed out, and the user's stable id when signed in. When it
+     * changes, Jazz signs in again through your backend, whose `authenticate`
+     * decides who the user is; `null` closes the account's client and shows
+     * `signedOut`.
+     */
+    user?: string | null;
     auth?: JazzAuth;
     autoAttachDevTools?: boolean;
   };
@@ -99,16 +107,19 @@ export { useSession };
 
 export type { JazzClientContextValue };
 
-function ApplicationJazzProvider({
-  auth,
-  children,
-  signedOut,
-  loading,
-  error,
-  autoAttachDevTools,
-  ...config
-}: JazzAppProviderProps) {
+function ApplicationJazzProvider(props: JazzAppProviderProps) {
+  const {
+    auth: explicitAuth,
+    user,
+    children,
+    signedOut,
+    loading,
+    error,
+    autoAttachDevTools,
+    ...config
+  } = props;
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
+  const auth = authForUser(Object.hasOwn(props, "user"), user, explicitAuth);
   return (
     <ConfiguredJazzAppProvider
       config={{ ...config, initial: config.initial ?? (auth ? undefined : "local-first") }}
