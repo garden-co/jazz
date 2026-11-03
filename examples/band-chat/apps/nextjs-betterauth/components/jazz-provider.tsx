@@ -3,6 +3,10 @@ import { JazzProvider as Jazz, betterAuth, useJazzAuth } from "jazz-tools/react"
 import { Banner, Button, Center, Spinner } from "@astryxdesign/core";
 import { authClient } from "@/src/lib/auth-client";
 
+// Start on the thin client; load the local-first one (WASM, local storage,
+// offline writes) in its own chunk once the page has loaded.
+const loadLocalFirst = () => import("jazz-tools/local-first");
+
 const APP_ID = process.env.NEXT_PUBLIC_JAZZ_APP_ID;
 // Better Auth's session drives sign-in; BandChat's backend (`createJazz` in
 // src/lib/jazz.server.ts) reads it in `authenticate`.
@@ -37,6 +41,7 @@ export function JazzProvider({ children }: React.PropsWithChildren) {
     <Jazz
       appId={APP_ID}
       serverUrl="/jazz"
+      client={loadLocalFirst}
       auth={auth}
       loading={<LoadingScreen label="Connecting BandChat…" />}
       signedOut={<LoadingScreen label="Signing in…" />}

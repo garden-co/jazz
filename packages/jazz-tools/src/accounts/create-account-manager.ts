@@ -1,9 +1,9 @@
 import { DefaultRuntimeSource } from "../runtime/default-runtime-source.js";
 import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
 import type { RuntimeSourcesConfig } from "../runtime/context.js";
-import { accountRegistryUrl } from "./context.js";
 import { clientScope, DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
-import { prepareAccountManager, type AccountStore } from "./persistence.js";
+import type { AccountStore } from "./persistence.js";
+import { createAccountManagerWithMinter } from "./account-manager-core.js";
 
 export interface AccountManagerConfig {
   /**
@@ -27,43 +27,15 @@ export interface AccountManagerConfig {
 
 /** Prepare crypto and restore selection; createLocalFirst() is synchronous afterward. */
 export async function createAccountManager(config: AccountManagerConfig) {
-  const serverUrl = config.serverUrl ?? DEFAULT_SERVER_URL;
-  const scope = clientScope({ ...config, serverUrl });
-  const registry = accountRegistryUrl(serverUrl, scope);
+  const scope = clientScope({ ...config, serverUrl: config.serverUrl ?? DEFAULT_SERVER_URL });
   const source = new DefaultRuntimeSource();
   await source.load({ appId: scope, runtimeSources: config.runtimeSources });
-  const store = config.store ?? browserAccountStore(registry, config.env ?? "dev");
-  return prepareAccountManager({
-    appId: scope,
-    registry,
-    store,
-    mintToken(secret, audience) {
-      return source.mintLocalFirstToken({
-        secret: authSecretSeedForMinting(secret),
-        audience,
-        ttlSeconds: 3600,
-        nowSeconds: BigInt(Math.floor(Date.now() / 1000)),
-      });
-    },
-  });
-}
-
-function browserAccountStore(registry: string, env: string): AccountStore {
-  if (typeof localStorage === "undefined") {
-    throw new Error("createAccountManager requires an AccountStore outside the browser");
-  }
-  if (typeof navigator === "undefined" || !navigator.locks) {
-    throw new Error("The browser account store requires Web Locks; supply an atomic AccountStore");
-  }
-  const key = `jazz-account-selection-v1:${encodeURIComponent(registry)}:${encodeURIComponent(env)}`;
-  return {
-    async read() {
-      return localStorage.getItem(key);
-    },
-    async update(transform) {
-      await navigator.locks.request(key, () => {
-        localStorage.setItem(key, transform(localStorage.getItem(key)));
-      });
-    },
-  };
+  return createAccountManagerWithMinter(config, (secret, audience) =>
+    source.mintLocalFirstToken({
+      secret: authSecretSeedForMinting(secret),
+      audience,
+      ttlSeconds: 3600,
+      nowSeconds: BigInt(Math.floor(Date.now() / 1000)),
+    }),
+  );
 }
