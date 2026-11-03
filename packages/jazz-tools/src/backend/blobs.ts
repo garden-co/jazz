@@ -69,10 +69,11 @@ export interface VercelBlobStore {
 
 /**
  * Large-value bytes in a Vercel Blob store, for a `vercel()` core (and its
- * default whenever a Blob store is connected to the project). The core
- * writes and reads every blob itself, through the app's `/jazz` route, so
- * nothing but connecting a Blob store is needed: it authenticates with the
- * function's own OIDC token, and the Sandbox holds only the store's id.
+ * default whenever `BLOB_STORE_ID` is set). Browsers send and fetch large
+ * values through the app's `/jazz` route; the core writes and reads the
+ * blobs itself, so nothing but connecting a Blob store is needed. It
+ * authenticates with the function's own OIDC token, which reaches it with
+ * each request, and the Sandbox holds only the store's id.
  * Blobs are private, and each is checked against its SHA-256 when read.
  */
 export function vercelBlob(options: Omit<VercelBlobStore, "kind"> = {}): VercelBlobStore {
@@ -87,13 +88,13 @@ export interface VercelBlob {
 }
 
 /**
- * The Blob store connected to the project: `BLOB_STORE_ID`, or the store a
- * read-write token is for (`vercel_blob_rw_<store>_<secret>`). Only the id
- * ever reaches the core, never the token.
+ * The Blob store connected to the project for OIDC: `BLOB_STORE_ID`. A
+ * connection with only `BLOB_READ_WRITE_TOKEN` does not count: the core
+ * authenticates with the function's OIDC token alone, and the token never
+ * reaches it.
  */
 export function connectedBlobStore(env: Record<string, string | undefined>): string | undefined {
-  const id = env.BLOB_STORE_ID || env.BLOB_READ_WRITE_TOKEN?.split("_")[3] || undefined;
-  return id?.replace(/^store_/, "");
+  return env.BLOB_STORE_ID?.replace(/^store_/, "") || undefined;
 }
 
 /** Resolve `vercelBlob()` for a `vercel()` core from its options and the function's environment. */

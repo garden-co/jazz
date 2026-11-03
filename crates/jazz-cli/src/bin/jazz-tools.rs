@@ -472,37 +472,15 @@ async fn run() {
                     }
                 }
                 "vercel-blob" => {
-                    let options = if vercel_blob_token_from_workload {
-                        vercel_blob_store_id
-                            .or_else(|| std::env::var("BLOB_STORE_ID").ok())
-                            .filter(|id| !id.is_empty())
-                            .ok_or_else(|| {
-                                "--vercel-blob-token-from-workload needs --vercel-blob-store-id or BLOB_STORE_ID"
-                                    .to_owned()
-                            })
-                            .map(|store_id| jazz_server::vercel_blob::VercelBlobOptions {
-                                store_id: store_id
-                                    .strip_prefix("store_")
-                                    .unwrap_or(&store_id)
-                                    .to_owned(),
-                                prefix: vercel_blob_prefix.unwrap_or_default(),
-                                credentials: jazz_server::vercel_blob::VercelBlobCredentials::Oidc(
-                                    jazz_server::s3::WebIdentityToken::Workload,
-                                ),
-                                api_url: std::env::var("VERCEL_BLOB_API_URL")
-                                    .ok()
-                                    .filter(|url| !url.is_empty())
-                                    .unwrap_or_else(|| {
-                                        jazz_server::vercel_blob::DEFAULT_API_URL.to_owned()
-                                    }),
-                                blob_url: None,
-                            })
-                    } else {
-                        jazz_server::vercel_blob::VercelBlobOptions::from_env(
-                            vercel_blob_store_id,
-                            vercel_blob_prefix,
-                        )
-                    };
+                    let options = jazz_server::vercel_blob::VercelBlobOptions::from_env(
+                        vercel_blob_store_id,
+                        vercel_blob_prefix,
+                        vercel_blob_token_from_workload.then_some(
+                            jazz_server::vercel_blob::VercelBlobCredentials::Oidc(
+                                jazz_server::s3::WebIdentityToken::Workload,
+                            ),
+                        ),
+                    );
                     match options {
                         Ok(options) => jazz_server::BlobStore::VercelBlob(options),
                         Err(error) => {

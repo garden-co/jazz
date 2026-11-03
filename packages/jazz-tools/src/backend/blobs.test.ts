@@ -33,9 +33,12 @@ describe("s3()", () => {
 });
 
 describe("vercelBlob()", () => {
-  it("finds the project's Blob store by id, never passing a token on", () => {
+  it("finds the project's Blob store by BLOB_STORE_ID only", () => {
     expect(connectedBlobStore({ BLOB_STORE_ID: "store_abc" })).toBe("abc");
-    expect(connectedBlobStore({ BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_xyz_secret" })).toBe("xyz");
+    // A read-write token alone is not enough: the core authenticates with OIDC.
+    expect(
+      connectedBlobStore({ BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_xyz_secret" }),
+    ).toBeUndefined();
     expect(connectedBlobStore({})).toBeUndefined();
     expect(resolveVercelBlob(vercelBlob(), { BLOB_STORE_ID: "abc" })).toEqual({ storeId: "abc" });
     expect(

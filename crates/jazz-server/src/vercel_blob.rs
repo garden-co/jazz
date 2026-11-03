@@ -76,8 +76,13 @@ pub struct VercelBlobOptions {
 impl VercelBlobOptions {
     /// A store named by the environment, filling in what the arguments
     /// leave out: `BLOB_STORE_ID` (or the store a read-write token names),
-    /// and `VERCEL_OIDC_TOKEN` or else `BLOB_READ_WRITE_TOKEN`.
-    pub fn from_env(store_id: Option<String>, prefix: Option<String>) -> Result<Self, String> {
+    /// and `credentials`, by default `VERCEL_OIDC_TOKEN` or else
+    /// `BLOB_READ_WRITE_TOKEN`.
+    pub fn from_env(
+        store_id: Option<String>,
+        prefix: Option<String>,
+        credentials: Option<VercelBlobCredentials>,
+    ) -> Result<Self, String> {
         let env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
         let read_write = env("BLOB_READ_WRITE_TOKEN");
         let store_id = store_id
@@ -86,12 +91,13 @@ impl VercelBlobOptions {
             .ok_or(
                 "vercel blobs: no store (set BLOB_STORE_ID, or connect a Blob store to the project)",
             )?;
-        let credentials = match (env("VERCEL_OIDC_TOKEN"), read_write) {
-            (Some(_), _) => {
+        let credentials = match (credentials, env("VERCEL_OIDC_TOKEN"), read_write) {
+            (Some(credentials), _, _) => credentials,
+            (None, Some(_), _) => {
                 VercelBlobCredentials::Oidc(WebIdentityToken::Env("VERCEL_OIDC_TOKEN".to_owned()))
             }
-            (None, Some(token)) => VercelBlobCredentials::ReadWriteToken(token),
-            (None, None) => {
+            (None, None, Some(token)) => VercelBlobCredentials::ReadWriteToken(token),
+            (None, None, None) => {
                 return Err(
                     "vercel blobs: no credentials (set VERCEL_OIDC_TOKEN or BLOB_READ_WRITE_TOKEN)"
                         .to_owned(),
@@ -115,7 +121,11 @@ impl VercelBlobOptions {
     fn blob_base(&self) -> String {
         match &self.blob_url {
             Some(url) => url.trim_end_matches('/').to_owned(),
-            None => format!("https://{}.private.blob.vercel-storage.com", self.store_id),
+            // Host names are lower case, as the URLs Blob hands out are.
+            None => format!(
+                "https://{}.private.blob.vercel-storage.com",
+                self.store_id.to_ascii_lowercase()
+            ),
         }
     }
 }
@@ -251,7 +261,7 @@ impl Inner {
         format!("{}{name}", self.options.prefix)
     }
 
-    /// The blob's URL, as reads and deletes name it.
+    /// The blob's URL, where it is read.
     fn blob_url(&self, name: &str) -> String {
         format!(
             "{}/{}",
@@ -310,7 +320,8 @@ impl Inner {
     }
 
     /// The blob `name`, or `None` if there is none. Reads of the owner
-    /// blob skip Vercel's cache; leaves never change once written.
+    /// blob skip Vercel's cache (`?cache=0`, what `@vercel/blob`'s
+    /// `useCache: false` sends); leaves never change once written.
     async fn download(
         &self,
         name: &str,
@@ -337,6 +348,14 @@ impl Inner {
     /// Check, once per process, that the prefix belongs to this store,
     /// claiming it if no store has yet. A failed check answers every
     /// operation for a moment and is then tried again.
+    ///
+    /// The claim is a put with `x-allow-overwrite: 0`, read back. Unlike
+    /// S3's `If-None-Match: *`, Vercel does not document that put as an
+    /// atomic create-if-absent, so two stores that claim one prefix in the
+    /// same instant might both pass. That needs two data dirs given the
+    /// same explicit prefix and started together: the default prefix holds
+    /// the data dir's own id. The claim is there to catch a prefix reused
+    /// by mistake, which it does whatever the put's semantics.
     async fn claim(&self) -> Result<(), String> {
         if let Some((at, error)) = self.claim_failed.lock().unwrap().as_ref()
             && at.elapsed() < CLAIM_FAILURE_HOLD
@@ -416,9 +435,11 @@ impl Inner {
     async fn delete(&self, node: &NodeKey) -> Result<(), String> {
         self.claim().await?;
         let name = node.object_name();
+        // The API takes pathnames as well as URLs (`@vercel/blob`'s `del`
+        // passes either through), so no host has to match.
         let request = self
             .api(reqwest::Method::POST, "/delete")?
-            .json(&serde_json::json!({ "urls": [self.blob_url(&name)] }));
+            .json(&serde_json::json!({ "urls": [self.pathname(&name)] }));
         let response = self.send(request, &format!("delete {name}")).await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(());
@@ -599,6 +620,35 @@ mod tests {
         block(beside.put(&key, &bytes)).unwrap();
     }
 
+    /// Of two stores claiming one prefix at once, one gets it; the owner
+    /// is read past the CDN, which may still remember there was none.
+    #[test]
+    fn of_two_stores_claiming_a_prefix_at_once_one_gets_it() {
+        for _ in 0..20 {
+            let blob = mock::MockBlob::start();
+            let (key, bytes) = node(6);
+            // The CDN has seen the prefix unclaimed.
+            let owner = format!("p/{OWNER_OBJECT}");
+            blob.state.cached.lock().unwrap().insert(owner, None);
+            let a = VercelBlobChunkStore::new(blob.options("p/"), "store-a".to_owned()).unwrap();
+            let b = VercelBlobChunkStore::new(blob.options("p/"), "store-b".to_owned()).unwrap();
+            let (first, second) = jazz::db::block_on(futures::future::join(
+                a.put(&key, &bytes),
+                b.put(&key, &bytes),
+            ));
+            assert!(first.is_ok() != second.is_ok(), "{first:?} {second:?}");
+            let winner = if first.is_ok() { "store-a" } else { "store-b" };
+            assert_eq!(blob.owner("p/").as_deref(), Some(winner));
+            let loser = first.err().or(second.err()).unwrap();
+            assert!(
+                loser
+                    .message
+                    .contains(&format!("belongs to store {winner}")),
+                "{loser}"
+            );
+        }
+    }
+
     /// The OIDC token is read for every request, so a fresh one (in a
     /// Sandbox, the latest the function presented) is used as it arrives.
     #[test]
@@ -636,23 +686,23 @@ mod tests {
 pub(crate) mod mock {
     use super::*;
     use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[derive(Default)]
     pub(crate) struct Calls {
         pub gets: AtomicU64,
         pub puts: AtomicU64,
-        pub deletes: AtomicU64,
     }
 
     pub(crate) struct State {
         /// Blobs by pathname.
         pub blobs: Mutex<BTreeMap<String, Vec<u8>>>,
         pub calls: Calls,
+        /// What the CDN serves for reads without `?cache=0`: the first
+        /// answer for each pathname, stale or not.
+        pub cached: Mutex<BTreeMap<String, Option<Vec<u8>>>>,
         /// The one bearer token accepted.
         pub token: Mutex<String>,
-        /// Every request fails with 503 while set.
-        pub failing: AtomicBool,
     }
 
     pub(crate) struct MockBlob {
@@ -666,8 +716,8 @@ pub(crate) mod mock {
             let state = Arc::new(State {
                 blobs: Mutex::default(),
                 calls: Calls::default(),
+                cached: Mutex::default(),
                 token: Mutex::new("vercel_blob_rw_mockstore_secret".to_owned()),
-                failing: AtomicBool::new(false),
             });
             let runtime = tokio::runtime::Runtime::new().unwrap();
             let listener = runtime
@@ -753,9 +803,6 @@ pub(crate) mod mock {
         use axum::http::StatusCode;
         let (parts, body) = request.into_parts();
         let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
-        if state.failing.load(Ordering::Relaxed) {
-            return error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
-        }
         let header = |name: &str| {
             parts
                 .headers
@@ -770,8 +817,21 @@ pub(crate) mod mock {
         let mut blobs = state.blobs.lock().unwrap();
         if let Some(pathname) = path.strip_prefix("/blobs/") {
             state.calls.gets.fetch_add(1, Ordering::Relaxed);
-            return match blobs.get(&decode(pathname)) {
-                Some(bytes) => (StatusCode::OK, bytes.clone()),
+            let pathname = decode(pathname);
+            let current = blobs.get(&pathname).cloned();
+            let served = if parts.uri.query() == Some("cache=0") {
+                current
+            } else {
+                state
+                    .cached
+                    .lock()
+                    .unwrap()
+                    .entry(pathname)
+                    .or_insert(current)
+                    .clone()
+            };
+            return match served {
+                Some(bytes) => (StatusCode::OK, bytes),
                 None => (StatusCode::NOT_FOUND, b"Not Found".to_vec()),
             };
         }
@@ -794,8 +854,10 @@ pub(crate) mod mock {
                 {
                     return error(StatusCode::BAD_REQUEST, "bad_request");
                 }
+                // The status Vercel answers here is undocumented; the
+                // claim reads the owner back rather than rely on it.
                 if header("x-allow-overwrite") != Some("1") && blobs.contains_key(&pathname) {
-                    return error(StatusCode::BAD_REQUEST, "bad_request");
+                    return error(StatusCode::CONFLICT, "blob_already_exists");
                 }
                 blobs.insert(pathname.clone(), body.to_vec());
                 (
@@ -806,12 +868,9 @@ pub(crate) mod mock {
                 )
             }
             ("POST", "/api/blob/delete") => {
-                state.calls.deletes.fetch_add(1, Ordering::Relaxed);
                 let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                for url in request["urls"].as_array().unwrap() {
-                    let url = url.as_str().unwrap();
-                    let pathname = url.split("/blobs/").nth(1).unwrap();
-                    blobs.remove(&decode(pathname));
+                for pathname in request["urls"].as_array().unwrap() {
+                    blobs.remove(pathname.as_str().unwrap());
                 }
                 (StatusCode::OK, b"{}".to_vec())
             }
