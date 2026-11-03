@@ -2,7 +2,7 @@ use super::*;
 use uuid::Uuid;
 
 fn descriptor_hash(descriptor: &RowDescriptor) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = jazz_types::sha256::Hasher::new();
     hash_row_descriptor(&mut hasher, descriptor);
     *hasher.finalize().as_bytes()
 }
@@ -649,7 +649,7 @@ fn schema_hash_matches_v9_default_index_fixture() {
 
     assert_eq!(
         SchemaHash::compute(&schema).to_string(),
-        "ca27c6e72893cc1819ea2583bd2c450cda8dc6498b2b06dc882c06e5fcf9bc1e",
+        "0a458c0de89c376d9c4ba504f853340705ffe05de9233494417f11c61ad26c3f",
     );
 }
 

@@ -123,6 +123,11 @@ impl Db {
         let scope = {
             let inner = self.inner();
             let session = &inner.sessions[index];
+            // The upstream link cannot authenticate this downstream pin. Do
+            // not turn a pinned request into an unpinned delegated read.
+            if inner.client.is_some() && session.bundle.is_some() {
+                return Err(unsupported("accepted reads through a pinned relay session"));
+            }
             let authenticated = || AcceptedReadScope {
                 author: session.identity,
                 claims: connection_claims.unwrap_or_else(|| {
@@ -159,15 +164,20 @@ impl Db {
                 },
             );
         }
-        let view = self
-            .inner()
-            .governed(crate::ids::SchemaVersionId::from_bytes(schema))
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorCode::Schema,
-                    "accepted-read schema is not admitted by the authority",
+        let view = {
+            let inner = self.inner();
+            inner
+                .governed_by(
+                    crate::ids::SchemaVersionId::from_bytes(schema),
+                    inner.session_policies(index),
                 )
-            })?;
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Schema,
+                        "accepted-read schema is not admitted by the authority",
+                    )
+                })?
+        };
         let db = Db {
             inner: self.inner.clone(),
             view: Some(view),
