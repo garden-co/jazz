@@ -3,7 +3,7 @@
  *
  * The server evaluates every query under the signed-in session and sends
  * finished results; writes run on the server. The `Db` it returns has the
- * same query and write API as `jazz-tools`' local-first `createDb`, without
+ * same query and write API as the local-first client's `Db`, without
  * WASM, workers or local storage.
  *
  * Transactions, branch and snapshot views and large-value streaming run on
@@ -43,7 +43,7 @@ export type { Db } from "../runtime/db.js";
 export type ThinDbConfig = AccountDbConfig & { thin?: ThinRuntimeOptions };
 
 /** Open a thin `Db` for a signed-in account. `serverUrl` is required. */
-export async function createDb(config: ThinDbConfig): Promise<Db> {
+export async function createClient(config: ThinDbConfig): Promise<Db> {
   const { thin, ...dbConfig } = config;
   return await createAccountDbWithRuntimeSource(
     { ...dbConfig, driver: { type: "memory" } },
