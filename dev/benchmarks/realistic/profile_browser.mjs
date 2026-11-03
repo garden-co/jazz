@@ -915,6 +915,11 @@ function buildB5Cleanup() {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  // The profiled clients synced as a minted-JWT user with the core's admin
+  // secret, straight to the core. A core now admits only its app's backend.
+  throw new Error(
+    "The browser profile is not supported yet: its clients need porting to an app backend (createJazz).",
+  );
   const outDir = args.outDir;
   await mkdir(outDir, { recursive: true });
 
