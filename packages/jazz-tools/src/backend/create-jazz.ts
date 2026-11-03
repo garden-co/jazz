@@ -8,6 +8,8 @@ import { accountAppId, localFirstAccountId } from "../accounts/local-first.js";
 import { LOCAL_FIRST_JWT_ISSUER, parseJwtPayload } from "../runtime/client-session.js";
 import { verifyLocalFirstToken } from "../runtime/local-first-token.js";
 import { endpointScope } from "../runtime/client-scope.js";
+import { PostcardWriter } from "../runtime/native-runtime/native-codec.js";
+import { encodeWebSocketFrameBatch } from "../runtime/native-runtime/websocket.js";
 import type {
   BrowserWebSocket,
   WebSocketConstructor,
@@ -168,9 +170,12 @@ export interface CreateJazzOptions {
    * The URL browsers reach Jazz at, when a proxy in front of this backend
    * changes the host or path (e.g. pages call `https://app.example.com/api/jazz`
    * and the proxy forwards to `/jazz` here). A browser client is scoped by the
-   * URL it uses, so its guests' proofs name that URL. Without this, Jazz
-   * accepts the page's own origin (or an `allowedOrigins` entry) and this
-   * request's Host, each under `basePath`.
+   * URL it uses, so its guests' proofs name that URL. Recommended in
+   * production: without it, Jazz accepts the page's own origin (or an
+   * `allowedOrigins` entry) and this request's Host, each under `basePath`,
+   * and a caller that reaches the backend directly can name any Host. When
+   * set, only these URLs are accepted, so list your dev URL too if a dev
+   * server uses this backend.
    */
   publicUrl?: string | string[];
   /**
@@ -178,6 +183,13 @@ export interface CreateJazzOptions {
    * again (the client reconnects on its own). Defaults to one hour.
    */
   sessionTtlSeconds?: number;
+  /**
+   * How often `authenticate` is asked again for each open sync session of a
+   * signed-in user. When it no longer names that user (they signed out, in
+   * another tab or anywhere else, or their session expired or was revoked),
+   * the session ends as signed out. Defaults to 60 seconds; 0 turns it off.
+   */
+  recheckSeconds?: number;
   /**
    * What happens to a local-first guest's key once the guest links to a
    * signed-in user (`linkWithBackend()`):
@@ -1115,6 +1127,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     let socket: CoreSocket | undefined;
     let ended = false;
     let userId: string | undefined;
+    let recheck: ReturnType<typeof setInterval> | undefined;
     // A session that never sends its prelude ends too.
     let expiry: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
       onEvent(null, { kind: "close", code: 1008, reason: "no sign-in in time" });
@@ -1125,11 +1138,20 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       if (ended) return;
       ended = true;
       if (expiry) clearTimeout(expiry);
+      if (recheck) clearInterval(recheck);
       socket?.close();
     };
     const admit = async (prelude: Uint8Array): Promise<boolean> => {
       const admitted = await admitPrelude(request, prelude);
       if (!admitted || ended) {
+        // An auth failure, not a dropped link: the client stops retrying and
+        // reports `offline: auth`, and its session asks the backend whether
+        // anyone is still signed in.
+        if (!ended)
+          onEvent(null, {
+            kind: "message",
+            data: authFailedBatch("session missing: not signed in"),
+          });
         onEvent(null, { kind: "close", code: 1008, reason: "not signed in" });
         end();
         return false;
@@ -1139,6 +1161,35 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       const ttl = (options.sessionTtlSeconds ?? 3600) * 1000;
       expiry = setTimeout(end, ttl);
       (expiry as unknown as { unref?: () => void }).unref?.();
+      const every = (options.recheckSeconds ?? 60) * 1000;
+      if (userId !== undefined && every > 0) {
+        const admittedUser = userId;
+        let checking = false;
+        recheck = setInterval(() => {
+          if (checking || ended) return;
+          checking = true;
+          void Promise.resolve()
+            .then(() => authenticate(request))
+            .then(
+              (user) => {
+                if (ended || user?.userId === admittedUser) return;
+                // The socket's request carries the cookies it opened with, so
+                // this may only mean they expired. The client reconnects with
+                // fresh ones; if no one is signed in, that admission fails as
+                // an auth failure (above).
+                onEvent(null, { kind: "close", code: 1008, reason: "authenticate again" });
+                end();
+              },
+              // A failing `authenticate` (its database is down) is not a
+              // sign-out; the next check asks again.
+              () => {},
+            )
+            .finally(() => {
+              checking = false;
+            });
+        }, every);
+        (recheck as unknown as { unref?: () => void }).unref?.();
+      }
       socket = core.openSocket(headerPairs(request.headers), onEvent, admitted.access);
       return socket.send(admitted.prelude);
     };
@@ -1419,10 +1470,10 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   function endpointAudiences(request: Request): string[] {
     if (publicUrls.length) return publicUrls;
     const audiences = new Set<string>();
-    // Only hosts a forged header can't name: the Host the request reached
-    // (or the platform's request URL) and the configured allowed origins.
-    // X-Forwarded-Host is not trusted here; set `publicUrl` behind a proxy
-    // that rewrites the host or path.
+    // The page origin when it is this Host or an allowed origin, and this
+    // Host. A browser can't forge Host, but a caller reaching this backend
+    // directly can, so production backends should set `publicUrl`.
+    // X-Forwarded-Host is never read here.
     const url = new URL(request.url);
     const host = request.headers.get("host") || url.host;
     const forwardedProto = request.headers
@@ -1450,6 +1501,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
 
   const warnedAudiences = new Set<string>();
+  let warnedHeaderAudience = false;
   /** Say once per audience why a guest's proof was refused, so a proxy mismatch is visible. */
   function warnUnknownAudience(token: string, accepted: string[], isAudience = false) {
     const audience = isAudience ? token : parseJwtPayload(token)?.aud;
@@ -1477,6 +1529,12 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     for (const endpoint of endpoints) {
       try {
         verifyLocalFirstToken(token, endpoint);
+        if (!publicUrls.length && !warnedHeaderAudience && !isLocalEndpoint(endpoint)) {
+          warnedHeaderAudience = true;
+          console.warn(
+            `createJazz: vouched for a local-first guest of ${endpoint}, taken from the request's headers. Set publicUrl to the URL browsers use so a caller can't name another host.`,
+          );
+        }
         return { endpoint };
       } catch {
         // Not this one.
@@ -1716,4 +1774,29 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       return closing;
     },
   };
+}
+
+/** A WireFrame::Error batch with code AuthFailed and retry Never. */
+function authFailedBatch(message: string): Buffer {
+  const frame = new PostcardWriter();
+  frame.u64(1); // WireFrame::Error
+  frame.u64(3); // WireErrorCode::AuthFailed
+  frame.u64(0); // WireRetry::Never
+  frame.string(message);
+  return Buffer.from(encodeWebSocketFrameBatch([frame.finish()]));
+}
+
+/** A development endpoint on this machine, where header-derived audiences are fine. */
+function isLocalEndpoint(endpoint: string): boolean {
+  try {
+    const host = new URL(endpoint).hostname;
+    return (
+      host === "localhost" ||
+      host.endsWith(".localhost") ||
+      host === "127.0.0.1" ||
+      host === "[::1]"
+    );
+  } catch {
+    return false;
+  }
 }

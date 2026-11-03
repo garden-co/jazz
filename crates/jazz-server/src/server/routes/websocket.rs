@@ -848,7 +848,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         } else {
             match state.catalogue.known_schema_hashes(&state.catalogue_store) {
                 Ok(hashes) if hashes.is_empty() => {
-                    "no schema has been published for this app; deploy a schema with `jazz-tools deploy <appId>` before connecting"
+                    "no schema has been published for this app; start the app's createJazz backend, which publishes its schema, before connecting"
                 }
                 _ => "runtime is not ready to accept client connections; retry shortly",
             }
@@ -2097,7 +2097,7 @@ mod tests {
     #[tokio::test]
     async fn ws_blank_core_reports_schema_deployment_required() {
         assert_blank_runtime_diagnostic(
-            "no schema has been published for this app; deploy a schema with `jazz-tools deploy <appId>` before connecting",
+            "no schema has been published for this app; start the app's createJazz backend, which publishes its schema, before connecting",
         )
         .await;
     }
