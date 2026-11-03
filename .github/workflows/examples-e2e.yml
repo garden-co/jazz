@@ -300,3 +300,29 @@ jobs:
           path: /tmp/examples-e2e-${{ matrix.variant }}-*/app/test-results/**
           if-no-files-found: ignore
           retention-days: 7
+
+  # The release gate (dev/scripts/release-test-gate.mjs) counts a successful
+  # run of this workflow. A dispatch filtered to one variant skips the others,
+  # and skipped matrix jobs read as success, so a filtered run must fail here
+  # rather than stand in for the whole matrix.
+  all-variants:
+    name: Every variant ran
+    needs: [prepare, e2e]
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/release') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the full matrix
+        env:
+          PREPARE: ${{ needs.prepare.result }}
+          E2E: ${{ needs.e2e.result }}
+          FILTER: ${{ github.event_name == 'workflow_dispatch' && inputs.variant || '' }}
+        run: |
+          if [ -n "$FILTER" ]; then
+            echo "::error::This run tested only $FILTER, so it does not count as an Examples E2E pass."
+            exit 1
+          fi
+          if [ "$PREPARE" != success ] || [ "$E2E" != success ]; then
+            echo "::error::prepare=$PREPARE e2e=$E2E"
+            exit 1
+          fi

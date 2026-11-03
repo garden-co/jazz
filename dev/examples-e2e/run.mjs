@@ -47,6 +47,17 @@ const SKIPPED_ENTRIES = new Set([
 
 export const ORIGIN = "http://localhost:3000";
 
+/**
+ * Per-phase limits, well inside the CI job's 25 minutes, so a hung install,
+ * build or server fails with the phase that hung instead of the job timeout.
+ */
+export const PHASE_TIMEOUT_MS = Object.freeze({
+  install: 8 * 60_000,
+  build: 8 * 60_000,
+  browsers: 5 * 60_000,
+  e2e: 15 * 60_000,
+});
+
 // ---------------------------------------------------------------------------
 // Manifest and workspace rewriting (pure, unit-tested)
 // ---------------------------------------------------------------------------
@@ -284,6 +295,10 @@ export async function runVariant(variant, opts) {
     await phase("install", () =>
       // --ignore-scripts: pnpm refuses unlisted postinstalls, and the few
       // dependencies with one (esbuild, sharp) ship binaries as optional deps.
+      // There is deliberately no lockfile: the variant resolves its
+      // third-party dependencies fresh, as an adopter copying it would, so
+      // upstream drift can fail the gate (UPSTREAM_PINS holds the known
+      // breakages until upstream fixes them).
       runChild(
         "pnpm",
         ["install", "--no-frozen-lockfile", "--prefer-offline", "--ignore-scripts"],
@@ -291,6 +306,7 @@ export async function runVariant(variant, opts) {
           cwd: appDir,
           verbose,
           description: `pnpm install (${variant.name})`,
+          timeoutMs: PHASE_TIMEOUT_MS.install,
         },
       ),
     );
@@ -301,6 +317,7 @@ export async function runVariant(variant, opts) {
         env,
         verbose,
         description: `pnpm build (${variant.name})`,
+        timeoutMs: PHASE_TIMEOUT_MS.build,
       }),
     );
     assertPackagedWorker(appDir);
@@ -309,6 +326,7 @@ export async function runVariant(variant, opts) {
         cwd: appDir,
         verbose,
         description: `playwright install (${variant.name})`,
+        timeoutMs: PHASE_TIMEOUT_MS.browsers,
       });
       await phase("e2e", () =>
         runChild("pnpm", ["test:e2e"], {
@@ -316,6 +334,7 @@ export async function runVariant(variant, opts) {
           env: { ...env, JAZZ_E2E_PROD: "1", CI: process.env.CI ?? "1" },
           verbose,
           description: `pnpm test:e2e (${variant.name})`,
+          timeoutMs: PHASE_TIMEOUT_MS.e2e,
         }),
       );
     }
