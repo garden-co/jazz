@@ -5,13 +5,28 @@ description: "See what sets Jazz apart, how it compares to the tools you might k
 
 ## For developers
 
-Jazz is a real-time, relational database that keeps your data right next to your app. You get tables, auth integration, permissions and a typed client for backend and frontend, with no API layer of your own to write and maintain. What sets it apart:
+A modern app's data layer is usually assembled by hand. There's a hosted database such as Supabase
+or Convex for tables, auth and an API. A sync engine sits next to it so screens update live and
+keep working on a flaky connection. Streams carry chat, presence or agent output, and a blob store
+holds files. Each piece has its own client, its own idea of who the user is and its own permission
+rules, and your team writes and maintains the glue that keeps them consistent.
 
-- **Embedded with your backend.** Jazz runs inside the backend you already have and plugs into whatever auth it uses. Backend code can act with full trusted access or as a specific user under that user's permissions. Clients sync over an authenticated, same-origin endpoint (`/jazz` by default) that uses your app's existing session.
-- **Live queries.** Subscribe to any query and your UI stays current on its own: a feed, a dashboard or a shared list updates the moment someone adds, edits or removes a row, including rows that start or stop matching a filter.
-- **Permissions as code.** Policies live next to your schema in TypeScript and apply the same way to backend, thin-client and local-first reads and writes. They're verbose, but agents are good at writing and checking them.
-- **Built-in collaboration.** Edit metadata (`$createdBy`, `$updatedAt`, …), history, drafts and branches, mergeable text, and files and streams, without bolting on extra services.
-- **Local-first when it pays off.** Start with server-first reads and writes. Switch a client to local-first for instant UI and offline support, with the same schema, queries and policies.
+Jazz is that whole data layer in one piece, running inside the backend you already have:
+
+- **One database inside your backend.** Tables, relations and a typed client for backend and
+  frontend, with no API layer to write. Jazz plugs into whatever auth your backend uses. Backend
+  code can act with full trusted access or as a specific user, and clients sync with your backend
+  over a same-origin endpoint (`/jazz` by default) using your app's existing session.
+- **Sync built in.** Subscribe to any query and your UI stays current on its own: a feed, a
+  dashboard or a shared list updates the moment someone adds, edits or removes a row, including
+  rows that start or stop matching a filter. When a screen needs instant writes or offline support,
+  switch that client to local-first, with the same schema, queries and policies.
+- **Streams and files in the same model.** Files, streams and mergeable text are columns in your
+  tables, so they sync, version and follow permissions like every other value. Edit metadata
+  (`$createdBy`, `$updatedAt`, …), history, drafts and branches come with every row.
+- **One set of permissions.** Policies live next to your schema in TypeScript and apply the same way
+  to backend code, thin clients, local-first clients, files and streams. They're verbose, but agents
+  are good at writing and checking them.
 
 ## Compared to
 
