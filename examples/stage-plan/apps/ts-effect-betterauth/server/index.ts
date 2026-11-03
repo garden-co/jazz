@@ -20,8 +20,8 @@ app.get("/health", (c) => c.text("ok"));
 app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 app.post("/api/shows/:id/checklist", (c) => checklistRoute(c.req.raw, c.req.param("id")));
 // Sync and sign-in for the browser, on this app's own origin.
-app.all("/jazz", async (c) => (await jazz()).fetch(c.req.raw));
-app.all("/jazz/*", async (c) => (await jazz()).fetch(c.req.raw));
+app.all("/jazz", async (c) => (await jazz()).handle(c.req.raw));
+app.all("/jazz/*", async (c) => (await jazz()).handle(c.req.raw));
 if (config.production) {
   app.use("/*", serveStatic({ root: "./dist" }));
   // A single-page app: every other path renders index.html.
