@@ -234,3 +234,6 @@ mod accepted_bundle_reads;
 
 #[path = "../governance_ordinary.rs"]
 mod governance_ordinary;
+
+#[path = "../accepted_staged_policy_reads.rs"]
+mod accepted_staged_policy_reads;
