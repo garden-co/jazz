@@ -99,10 +99,9 @@ async function serve(jazz: Jazz): Promise<string> {
 async function appWith(backendClients: Parameters<typeof createJazz>[0]["backendClients"]) {
   const appId = randomUUID();
   const jazz = await createJazz({
-    appId,
     app,
     permissions,
-    store: memory(),
+    store: memory({ appId }),
     authenticate,
     backendClients,
   });

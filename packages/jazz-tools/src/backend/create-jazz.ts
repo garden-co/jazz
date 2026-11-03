@@ -1623,7 +1623,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     if (request.method !== "POST") return new Response(null, { status: 405 });
     const response = await core.handle(
       "POST",
-      `/apps/${encodeURIComponent(accountAppId(options.appId))}/backend/admit`,
+      `/apps/${encodeURIComponent(accountAppId(appId))}/backend/admit`,
       [["x-jazz-backend-secret", core.backendSecret]],
       new Uint8Array(0),
       "backend",
