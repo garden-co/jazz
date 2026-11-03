@@ -343,9 +343,9 @@ impl Owner {
             });
         }
         if let ThinOp::Unsubscribe { subscription } = op {
-            thin.subscriptions.remove(&subscription);
+            let removed = thin.subscriptions.remove(&subscription).is_some();
             // The live query's own id hears that it ended.
-            if subscription != id {
+            if removed && subscription != id {
                 thin.held.push(ThinResponse {
                     id: subscription,
                     body: ThinBody::Closed,
@@ -375,48 +375,60 @@ impl Owner {
     }
 
     /// After a tick: every thin session's held answers and its live
-    /// queries' new events, up to its egress budget.
+    /// queries' new events, up to its egress budget. What does not fit
+    /// waits (answers in `held`, events in their streams) until the client
+    /// drains its socket, which queues the next tick.
     pub(super) fn pump_thin(&mut self) {
         let mut gone = Vec::new();
         for (session, thin) in &mut self.thin {
+            if !thin.has_room() {
+                continue;
+            }
             let mut batch = std::mem::take(&mut thin.held);
+            let mut bytes = batch.iter().map(response_bytes).sum::<usize>();
             let mut ended = Vec::new();
-            if thin.has_room() {
-                for (id, stream) in &mut thin.subscriptions {
-                    while let Some(event) = stream.try_next_event() {
-                        let body = match event_chunk(event) {
-                            Ok(EventChunk::Delta {
-                                delta,
-                                reset,
-                                settled,
-                                tier,
-                            }) => ThinBody::Event {
-                                delta,
-                                reset,
-                                settled,
-                                tier,
-                            },
-                            Ok(EventChunk::Closed) => {
-                                ended.push(*id);
-                                ThinBody::Closed
-                            }
-                            Ok(EventChunk::Rejected { detail }) => {
-                                ended.push(*id);
-                                ThinBody::Error {
-                                    code: "Rejected".to_owned(),
-                                    message: detail,
-                                }
-                            }
-                            Err(error) => {
-                                ended.push(*id);
-                                argument(format!("{error:?}"))
-                            }
-                        };
-                        let last = !matches!(body, ThinBody::Event { .. });
-                        batch.push(ThinResponse { id: *id, body });
-                        if last {
-                            break;
+            'streams: for (id, stream) in &mut thin.subscriptions {
+                loop {
+                    if thin.egress.load(Ordering::Acquire) + bytes >= SESSION_QUEUE_BUDGET {
+                        break 'streams;
+                    }
+                    let Some(event) = stream.try_next_event() else {
+                        break;
+                    };
+                    let body = match event_chunk(event) {
+                        Ok(EventChunk::Delta {
+                            delta,
+                            reset,
+                            settled,
+                            tier,
+                        }) => ThinBody::Event {
+                            delta,
+                            reset,
+                            settled,
+                            tier,
+                        },
+                        Ok(EventChunk::Closed) => {
+                            ended.push(*id);
+                            ThinBody::Closed
                         }
+                        Ok(EventChunk::Rejected { detail }) => {
+                            ended.push(*id);
+                            ThinBody::Error {
+                                code: "Rejected".to_owned(),
+                                message: detail,
+                            }
+                        }
+                        Err(error) => {
+                            ended.push(*id);
+                            argument(format!("{error:?}"))
+                        }
+                    };
+                    let last = !matches!(body, ThinBody::Event { .. });
+                    let response = ThinResponse { id: *id, body };
+                    bytes += response_bytes(&response);
+                    batch.push(response);
+                    if last {
+                        break;
                     }
                 }
             }
@@ -431,6 +443,19 @@ impl Owner {
             self.close_thin_session(session);
         }
     }
+}
+
+/// About what `response` takes on the wire, to keep a batch within the
+/// session's egress budget.
+fn response_bytes(response: &ThinResponse) -> usize {
+    const OVERHEAD: usize = 64;
+    OVERHEAD
+        + match &response.body {
+            ThinBody::Event { delta, .. } => delta.len(),
+            ThinBody::Rows { rows, .. } => rows.len(),
+            ThinBody::Error { code, message } => code.len() + message.len(),
+            _ => 0,
+        }
 }
 
 /// The open transaction `transaction` names, if this session began it.

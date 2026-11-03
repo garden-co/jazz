@@ -8,7 +8,7 @@
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { sha512 } from "@noble/hashes/sha2.js";
 import { sha1 } from "@noble/hashes/legacy.js";
-import { formatUuid } from "../runtime/native-runtime/native-runtime-adapter.js";
+import { formatUuid } from "../runtime/hex.js";
 
 export const LOCAL_FIRST_ISSUER = "urn:jazz:local-first";
 export const ANONYMOUS_ISSUER = "urn:jazz:anonymous";
