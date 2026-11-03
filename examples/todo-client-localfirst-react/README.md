@@ -10,7 +10,6 @@ Local-first todo app on React + Vite, anonymous auth via `useLocalFirstAuth`, In
 - Row-level permissions — `owner_id` enforced by `definePermissions`; mutations on rows you don't own surface as toast errors via `sonner`.
 - IndexedDB-backed persistence across reload, plus optional server sync when `VITE_JAZZ_SERVER_URL` is set.
 - `pnpm dev` starts a local Jazz core next to Vite (`dev/examples/with-local-core.mjs`) and passes its URL in `VITE_JAZZ_SERVER_URL`.
-- Embedded inspector integration via the Jazz Vite plugin.
 
 ## Schema
 
@@ -23,7 +22,7 @@ Local-first todo app on React + Vite, anonymous auth via `useLocalFirstAuth`, In
 pnpm dev
 ```
 
-`pnpm dev` starts the Jazz dev server and the Vite dev server together via the Jazz Vite plugin. The plugin writes `VITE_JAZZ_APP_ID` / `VITE_JAZZ_SERVER_URL` into the dev environment automatically.
+`pnpm dev` starts a local Jazz core and the Vite dev server together (`dev/examples/with-local-core.mjs`), which passes `VITE_JAZZ_APP_ID` / `VITE_JAZZ_SERVER_URL` to the dev environment.
 
 ## Tests
 
