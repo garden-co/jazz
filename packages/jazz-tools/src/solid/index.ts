@@ -1,4 +1,5 @@
-export { createJazzClient, type JazzClient } from "../web/create-jazz-client.js";
+export { createJazzClient } from "../web/lazy-local-first.js";
+export type { JazzClient } from "../web/registered-jazz-client.js";
 export {
   createSolidJazzClient,
   type PendingSolidJazzClient,
@@ -20,10 +21,8 @@ export { useOne, type UseOneResult } from "./use-one.js";
 export { useLocalFirstAuth, type UseLocalFirstAuth } from "./use-local-first-auth.js";
 export type { DurabilityTier, QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
 
-export {
-  createAccountManager,
-  type AccountManagerConfig,
-} from "../accounts/create-account-manager.js";
+export { createAccountManager } from "../web/lazy-local-first.js";
+export type { AccountManagerConfig } from "../accounts/create-account-manager.js";
 export { useSyncStatus } from "./use-sync-status.js";
 export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 export * from "../accounts/exports.js";

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -8,7 +8,15 @@ import { generateSecret, identityOf, signChallenge, signToken } from "../local-f
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
-import { createJazz, createJazzSession, memory, remote, sqlite, type Jazz } from "./index.js";
+import {
+  createJazz,
+  createJazzSession,
+  files,
+  memory,
+  remote,
+  sqlite,
+  type Jazz,
+} from "./index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 
 const app = s.defineApp(
@@ -843,6 +851,64 @@ describe("createJazz", () => {
     ).rejects.toThrow(/belongs to app/);
     const rows = await second.db.all(app.todos.where({ id: inserted.id }));
     expect(rows.map((todo) => todo.title)).toEqual(["kept"]);
+  }, 60_000);
+
+  it("keeps a sqlite store's large values as files, and keeps that choice", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-blobs-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const title = "large ".repeat(60_000);
+
+    const first = await createJazz({ app, permissions, store: sqlite({ path: dir }) });
+    const inserted = await first.db
+      .insert(app.todos, { title, owner: randomUUID() })
+      .wait({ tier: "global" });
+    // Settled leaves move out of the database on later ticks.
+    const blobFiles = async () =>
+      (await readdir(join(dir, "blobs"), { recursive: true })).filter((name) =>
+        /^[0-9a-f]{2}[\\/][0-9a-f]{64}$/.test(name),
+      );
+    await expect.poll(blobFiles, { timeout: 20_000 }).not.toHaveLength(0);
+    await first.close();
+
+    const second = await createJazz({ app, permissions, store: sqlite({ path: dir }) });
+    const rows = await second.db.all(app.todos.where({ id: inserted.id }));
+    expect(rows.map((todo) => todo.title)).toEqual([title]);
+    await second.close();
+
+    // Back into the database file is not supported yet.
+    await expect(
+      createJazz({ app, permissions, store: sqlite({ path: dir, blobs: "sqlite" }) }),
+    ).rejects.toThrow(/not supported yet/);
+  }, 60_000);
+
+  it("moves a sqlite store's large values out of the database file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-blobs-move-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const title = "moved ".repeat(60_000);
+
+    const inFile = await createJazz({
+      app,
+      permissions,
+      store: sqlite({ path: dir, blobs: "sqlite" }),
+    });
+    const inserted = await inFile.db
+      .insert(app.todos, { title, owner: randomUUID() })
+      .wait({ tier: "global" });
+    await inFile.close();
+    await expect(readdir(join(dir, "blobs"))).rejects.toThrow();
+
+    const custom = join(dir, "elsewhere");
+    const moved = await createJazz({
+      app,
+      permissions,
+      store: sqlite({ path: dir, blobs: files({ dir: custom }) }),
+    });
+    cleanups.push(() => moved.close());
+    await expect
+      .poll(async () => (await readdir(custom, { recursive: true })).length, { timeout: 20_000 })
+      .toBeGreaterThan(0);
+    const rows = await moved.db.all(app.todos.where({ id: inserted.id }));
+    expect(rows.map((todo) => todo.title)).toEqual([title]);
   }, 60_000);
 
   it("fronts a remote core: browsers reach only the backend, the core trusts it", async () => {

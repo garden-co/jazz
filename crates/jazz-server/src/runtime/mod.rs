@@ -13,6 +13,7 @@
 //! runtime's [`Db`] opens on the same connection once a schema is known.
 
 pub mod auth_admission;
+mod thin;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -53,14 +54,68 @@ pub enum StorageConfig {
     SQLite {
         /// The database file.
         path: PathBuf,
+        /// Where settled large-value bytes live.
+        blobs: Blobs,
     },
 }
+
+/// Where a SQLite store keeps settled large-value bytes.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum Blobs {
+    /// In the database file itself.
+    #[default]
+    InFile,
+    /// As files in this directory ([`jazz::chunk_store::FileChunkStore`]).
+    Files(PathBuf),
+    /// In a store reached over the network, such as an S3 bucket
+    /// ([`crate::s3::S3ChunkStore`]). Its I/O runs beside the store thread,
+    /// so a slow bucket never stalls sync.
+    Network(NetworkChunkStore),
+}
+
+/// A chunk store reached over the network, for [`Blobs::Network`].
+#[derive(Clone)]
+pub struct NetworkChunkStore {
+    pub store: Arc<dyn jazz::chunk_store::ChunkStore>,
+    /// What it is, for logs.
+    pub name: String,
+}
+
+impl std::fmt::Debug for NetworkChunkStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NetworkChunkStore({})", self.name)
+    }
+}
+
+impl PartialEq for NetworkChunkStore {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.store, &other.store)
+    }
+}
+
+impl Eq for NetworkChunkStore {}
 
 impl StorageConfig {
     /// The durable store inside a server data directory.
     pub fn data_dir(path: impl Into<PathBuf>) -> Self {
         Self::SQLite {
             path: path.into().join("jazz.sqlite"),
+            blobs: Blobs::InFile,
+        }
+    }
+
+    /// The same store, with settled large-value bytes kept as files in
+    /// `dir` instead of in the database file. In memory it changes nothing.
+    pub fn with_blob_dir(self, dir: impl Into<PathBuf>) -> Self {
+        self.with_blobs(Blobs::Files(dir.into()))
+    }
+
+    /// The same store, with settled large-value bytes in `blobs`. In memory
+    /// it changes nothing.
+    pub fn with_blobs(self, blobs: Blobs) -> Self {
+        match self {
+            Self::SQLite { path, .. } => Self::SQLite { path, blobs },
+            Self::InMemory => Self::InMemory,
         }
     }
 }
@@ -126,7 +181,7 @@ pub struct ServerSession(u64);
 /// Bytes a session may have queued in each direction. Inbound frames past
 /// it are refused (the peer ignored flow control); outbound messages past it
 /// wait in the engine until the socket catches up.
-const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
+pub(crate) const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
 /// The slow-query threshold: `JAZZ_SLOW_QUERY_MS` (0 turns the log off),
 /// else jazz-db's default.
 fn slow_query_threshold() -> Option<Duration> {
@@ -142,7 +197,7 @@ fn slow_query_threshold() -> Option<Duration> {
 
 /// How often the owner ticks with no traffic, for time-based engine work
 /// such as expiring staged large-value chunks.
-const IDLE_TICK: Duration = Duration::from_secs(1);
+pub(crate) const IDLE_TICK: Duration = Duration::from_secs(1);
 
 /// Inbound messages one session may have applied per round of ticks.
 const INBOUND_MESSAGES_PER_TICK: usize = 16;
@@ -221,7 +276,8 @@ struct StoreThread {
 /// The file a store lives in.
 #[derive(Clone)]
 enum Source {
-    File(PathBuf),
+    /// The database file, and where its large-value bytes live.
+    File(PathBuf, Blobs),
     /// An in-memory store shared by name within this process.
     Memory(String),
 }
@@ -235,14 +291,14 @@ impl Source {
                 std::process::id(),
                 NEXT_MEMORY_STORE.fetch_add(1, Ordering::Relaxed)
             )),
-            StorageConfig::SQLite { path } => Self::File(path.clone()),
+            StorageConfig::SQLite { path, blobs } => Self::File(path.clone(), blobs.clone()),
         }
     }
 
     fn open(&self) -> Result<StoreFile, String> {
         match self {
             Self::Memory(name) => StoreFile::shared_memory(name),
-            Self::File(path) => {
+            Self::File(path, _) => {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)
                         .map_err(|error| format!("create {}: {error}", parent.display()))?;
@@ -261,12 +317,160 @@ impl Source {
         .map_err(|error| format!("open server store: {error}"))
     }
 
+    /// The chunk store the runtime's large-value bytes go to, if not the
+    /// database file.
+    fn chunk_store(&self) -> Result<Option<ChunkStoreChoice>, String> {
+        match self {
+            Self::File(_, Blobs::Files(dir)) => jazz::chunk_store::FileChunkStore::new(dir)
+                .map(|store| {
+                    Some(ChunkStoreChoice {
+                        store: Arc::new(store),
+                        network: false,
+                    })
+                })
+                .map_err(|error| format!("open large-value directory {}: {error}", dir.display())),
+            Self::File(_, Blobs::Network(network)) => Ok(Some(ChunkStoreChoice {
+                store: Arc::clone(&network.store),
+                network: true,
+            })),
+            _ => Ok(None),
+        }
+    }
+
     fn reader(&self) -> Result<HostReader, String> {
         match self {
             Self::Memory(name) => HostReader::shared_memory(name),
-            Self::File(path) => HostReader::open(path, None),
+            Self::File(path, _) => HostReader::open(path, None),
         }
         .map_err(|error| format!("open server store reader: {error}"))
+    }
+}
+
+/// The chunk store a runtime opens with, and whether its I/O runs beside
+/// the store thread ([`ChunkIoRunner`]).
+#[derive(Clone)]
+struct ChunkStoreChoice {
+    store: Arc<dyn jazz::chunk_store::ChunkStore>,
+    network: bool,
+}
+
+/// Runs a network chunk store's batches ([`jazz::db::Db::take_chunk_io`])
+/// on a thread of its own and hands each outcome back to the store thread
+/// as runtime work, which applies it and ticks. One batch is out at a time.
+/// After a batch fails, the next waits (1 s, doubling up to a minute), so
+/// a bucket that refuses every request is not asked again on every tick.
+struct ChunkIoRunner {
+    batches: std_mpsc::Sender<jazz::chunk_store::ChunkIo>,
+    out: std::cell::Cell<bool>,
+    /// Consecutive failed batches, and when the next may start.
+    failures: std::cell::Cell<u32>,
+    not_before: std::cell::Cell<Option<std::time::Instant>>,
+    /// Dropped to cancel the batch in flight.
+    cancel: Option<futures::channel::oneshot::Sender<()>>,
+    /// Disconnects once the thread has ended.
+    ended: std_mpsc::Receiver<()>,
+}
+
+/// The first wait after a failed batch, and the longest.
+const CHUNK_IO_BACKOFF: (Duration, Duration) = (Duration::from_secs(1), Duration::from_secs(60));
+/// How long dropping a runner waits for its cancelled batch to stop.
+const CHUNK_IO_STOP: Duration = Duration::from_secs(5);
+
+impl ChunkIoRunner {
+    fn start(
+        store: Arc<dyn jazz::chunk_store::ChunkStore>,
+        work: std_mpsc::Sender<Work>,
+    ) -> Result<Self, String> {
+        let (batches, receiver) = std_mpsc::channel::<jazz::chunk_store::ChunkIo>();
+        let (cancel, mut cancelled) = futures::channel::oneshot::channel::<()>();
+        let (ended_tx, ended) = std_mpsc::channel::<()>();
+        thread::Builder::new()
+            .name("jazz-chunk-io".to_owned())
+            .spawn(move || {
+                let _ended = ended_tx;
+                for io in receiver {
+                    // A cancelled batch is dropped mid-flight: its requests
+                    // are aborted and its work goes to the store's next one.
+                    let run = io.run(&*store);
+                    let done =
+                        match block_on(futures::future::select(Box::pin(run), &mut cancelled)) {
+                            futures::future::Either::Left((done, _)) => done,
+                            futures::future::Either::Right(_) => return,
+                        };
+                    let finish: Job =
+                        Box::new(move |owner: &mut Owner| owner.finish_chunk_io(done));
+                    if work.send(Work::Owner(finish)).is_err() {
+                        return;
+                    }
+                }
+            })
+            .map_err(|error| format!("start chunk I/O thread: {error}"))?;
+        Ok(Self {
+            batches,
+            out: std::cell::Cell::new(false),
+            failures: std::cell::Cell::new(0),
+            not_before: std::cell::Cell::new(None),
+            cancel: Some(cancel),
+            ended,
+        })
+    }
+
+    /// Hand the runtime's next batch over, unless one is out or the last
+    /// failed too recently.
+    fn pump(&self, owner: &Owner) {
+        if self.out.get()
+            || self
+                .not_before
+                .get()
+                .is_some_and(|at| std::time::Instant::now() < at)
+        {
+            return;
+        }
+        match owner.db.take_chunk_io() {
+            // Nothing to do: dropping an empty batch ends it.
+            Ok(Some(io)) if io.is_empty() => {}
+            Ok(Some(io)) => {
+                self.out.set(true);
+                if self.batches.send(io).is_err() {
+                    tracing::error!("the chunk I/O thread is gone");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "take large-value store I/O"),
+        }
+    }
+
+    /// A batch came back; `failed` delays the next. Returns whether to log
+    /// the failure: the first of a run, then once the wait is at its longest.
+    fn returned(&self, failed: bool) -> bool {
+        self.out.set(false);
+        if !failed {
+            self.failures.set(0);
+            self.not_before.set(None);
+            return false;
+        }
+        let failures = self.failures.get().saturating_add(1);
+        self.failures.set(failures);
+        let (first, longest) = CHUNK_IO_BACKOFF;
+        let wait = first
+            .checked_mul(1 << (failures - 1).min(16))
+            .unwrap_or(longest)
+            .min(longest);
+        self.not_before.set(Some(std::time::Instant::now() + wait));
+        failures == 1 || wait == longest
+    }
+}
+
+impl Drop for ChunkIoRunner {
+    fn drop(&mut self) {
+        // Cancel the batch in flight and close the channel; wait a little
+        // for the thread to stop, and never for the bucket.
+        drop(self.cancel.take());
+        let (closed, _) = std_mpsc::channel();
+        drop(std::mem::replace(&mut self.batches, closed));
+        if let Err(std_mpsc::RecvTimeoutError::Timeout) = self.ended.recv_timeout(CHUNK_IO_STOP) {
+            tracing::warn!("the large-value store I/O thread did not stop in time; leaving it");
+        }
     }
 }
 
@@ -275,6 +479,7 @@ impl AppStore {
     pub fn open(storage: &StorageConfig) -> Result<Self, String> {
         let source = Source::new(storage);
         let (work, receiver) = std_mpsc::channel::<Work>();
+        let thread_wake = work.clone();
         let (host, host_jobs) = std_mpsc::channel::<HostJob>();
         let (opened_tx, opened_rx) = std_mpsc::channel();
         let tick_queued = Arc::new(AtomicBool::new(false));
@@ -306,6 +511,7 @@ impl AppStore {
                 StoreLoop {
                     source: thread_source,
                     work: receiver,
+                    wake: thread_wake,
                     host: host_jobs,
                     backlog: VecDeque::new(),
                     tick_queued: thread_ticks,
@@ -587,6 +793,9 @@ impl Unavailable {
 struct StoreLoop {
     source: Source,
     work: std_mpsc::Receiver<Work>,
+    /// Hands runtime work back to this loop (a network chunk store's
+    /// finished batches).
+    wake: std_mpsc::Sender<Work>,
     host: std_mpsc::Receiver<HostJob>,
     /// Host work taken off the queue but not run yet (a tick slice ended).
     backlog: VecDeque<HostJob>,
@@ -742,6 +951,8 @@ impl StoreLoop {
                 Owner::open(
                     runtime.schema.clone(),
                     file,
+                    self.source.chunk_store()?,
+                    self.wake.clone(),
                     runtime.any_stored_catalogue,
                     runtime.awaiting_permissions,
                     self.app.lock().ok().and_then(|app| app.clone()),
@@ -900,6 +1111,18 @@ fn session_closed_error(error: &jazz::db::Error) -> jazz::wire::WireError {
     jazz::wire::WireError::new(code, retry, format!("sync session closed: {error}"))
 }
 
+/// Take `bytes` the client read off `egress`. Crossing back under the
+/// budget queues a tick: output the owner held back can move again.
+fn release_egress(egress: &AtomicUsize, bytes: usize, runtime: &Weak<Inner>) {
+    let before = egress.fetch_sub(bytes, Ordering::AcqRel);
+    if before >= SESSION_QUEUE_BUDGET
+        && before - bytes < SESSION_QUEUE_BUDGET
+        && let Some(inner) = runtime.upgrade()
+    {
+        let _ = ServerRuntimeHandle { inner }.queue_tick();
+    }
+}
+
 /// One session's ordered outbound frame batches.
 pub struct ServerRuntimeFrameStream {
     receiver: tokio_mpsc::UnboundedReceiver<Outbound>,
@@ -911,14 +1134,7 @@ impl ServerRuntimeFrameStream {
     /// Receive the next batch of outbound frames.
     pub async fn recv(&mut self) -> Option<Result<Vec<AbiBytes>, jazz::wire::WireError>> {
         let (result, bytes) = self.receiver.recv().await?;
-        let before = self.egress.fetch_sub(bytes, Ordering::AcqRel);
-        if before >= SESSION_QUEUE_BUDGET
-            && before - bytes < SESSION_QUEUE_BUDGET
-            && let Some(inner) = self.runtime.upgrade()
-        {
-            // Output the owner held back for this session can move again.
-            let _ = ServerRuntimeHandle { inner }.queue_tick();
-        }
+        release_egress(&self.egress, bytes, &self.runtime);
         Some(result)
     }
 }
@@ -1089,6 +1305,104 @@ impl ServerRuntimeHandle {
             owner.receive(session, frames);
             ingress.fetch_sub(bytes, Ordering::AcqRel);
         }))
+    }
+
+    /// Admit an authenticated thin client connection (SPEC 8.14). It is
+    /// served as its session, or as SYSTEM for a trusted link, like a sync
+    /// session, pinned to `bundle` when its backend pinned it, and takes
+    /// its output from [`Self::open_wire_stream`].
+    pub async fn open_thin_session(
+        &self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        bundle: Option<jazz::catalogue::BundleId>,
+        trust: CommitUnitTrust,
+    ) -> Result<ServerSession, String> {
+        let served_as = match trust {
+            CommitUnitTrust::Session => identity,
+            CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => {
+                AuthorSubject::SYSTEM
+            }
+        };
+        let session = ServerSession(self.inner.next_session.fetch_add(1, Ordering::Relaxed));
+        let (output, receiver) = tokio_mpsc::unbounded_channel();
+        let egress = Arc::new(AtomicUsize::new(0));
+        self.edges()?.insert(
+            session,
+            Edge {
+                output: Some(receiver),
+                ingress: Arc::new(AtomicUsize::new(0)),
+                egress: Arc::clone(&egress),
+            },
+        );
+        let opened = self
+            .run(move |owner| {
+                owner.open_thin_session(session, served_as, claims, bundle, output, egress)
+            })
+            .await;
+        if opened.is_err() {
+            self.edges()?.remove(&session);
+        }
+        opened.map(|()| session)
+    }
+
+    /// Queue a thin client's request, `bytes` long on the wire, for the
+    /// owner. Refused when the session already has its budget queued, as
+    /// [`Self::receive_wire_frames`] refuses sync frames.
+    pub fn receive_thin_request(
+        &self,
+        session: ServerSession,
+        request: jazz::thin::ThinRequest,
+        bytes: usize,
+    ) -> Result<(), String> {
+        let ingress = self
+            .edges()?
+            .get(&session)
+            .map(|edge| Arc::clone(&edge.ingress))
+            .ok_or_else(|| "unknown server session".to_owned())?;
+        if ingress.fetch_add(bytes, Ordering::AcqRel) + bytes > SESSION_QUEUE_BUDGET {
+            ingress.fetch_sub(bytes, Ordering::AcqRel);
+            return Err("session ingress budget exceeded".to_owned());
+        }
+        self.send(Box::new(move |owner| {
+            owner.thin_request(session, request);
+            ingress.fetch_sub(bytes, Ordering::AcqRel);
+        }))
+    }
+
+    /// Count `bytes` against `session`'s egress budget as if they were
+    /// queued and never drained, to test output near the budget.
+    #[cfg(test)]
+    pub(crate) fn hold_egress_for_test(&self, session: ServerSession, bytes: usize) {
+        let edges = self.edges().expect("edges");
+        edges[&session].egress.fetch_add(bytes, Ordering::AcqRel);
+    }
+
+    /// Release `bytes` held by [`Self::hold_egress_for_test`], as the
+    /// client reading them would.
+    #[cfg(test)]
+    pub(crate) fn release_egress_for_test(&self, session: ServerSession, bytes: usize) {
+        let egress = Arc::clone(&self.edges().expect("edges")[&session].egress);
+        release_egress(&egress, bytes, &Arc::downgrade(&self.inner));
+    }
+
+    /// Make the owner wait for a published permissions head again, as a
+    /// store reopened over bundles published earlier does until its next
+    /// catalogue change.
+    #[cfg(test)]
+    pub(crate) async fn await_permissions_for_test(&self) {
+        self.run(|owner| {
+            owner.awaiting_permissions = true;
+            Ok(())
+        })
+        .await
+        .expect("owner");
+    }
+
+    /// Wait until the owner has run everything queued before this call.
+    #[cfg(test)]
+    pub(crate) async fn settle_for_test(&self) {
+        self.run(|_| Ok(())).await.expect("owner");
     }
 
     /// Ask the owner for a tick; requests coalesce. Output reaches every
@@ -1326,6 +1640,8 @@ impl From<CatalogueApplyError> for String {
 struct Owner {
     db: Db,
     sessions: HashMap<ServerSession, OwnerSession>,
+    /// Thin client connections (SPEC 8.14), which are not sync sessions.
+    thin: HashMap<ServerSession, thin::ThinSession>,
     /// The tick in progress's time slice, shared with every session's queues.
     slice: Rc<TickSlice>,
     catalogue: Catalogue,
@@ -1334,6 +1650,8 @@ struct Owner {
     awaiting_permissions: bool,
     /// The app this store serves, named in slow-query reports.
     app: Option<String>,
+    /// Runs a network chunk store's I/O beside this thread.
+    chunk_io: Option<ChunkIoRunner>,
 }
 
 struct OwnerSession {
@@ -1558,6 +1876,8 @@ impl Owner {
     fn open(
         schema: JazzSchema,
         file: StoreFile,
+        chunk_store: Option<ChunkStoreChoice>,
+        wake: std_mpsc::Sender<Work>,
         any_stored_catalogue: bool,
         awaiting_permissions: bool,
         app: Option<String>,
@@ -1588,7 +1908,18 @@ impl Owner {
             (None, Some(genesis)) => compile(&genesis.hash)?,
             (None, None) => schema,
         };
-        let db = block_on(Db::open_file(config(current), file))
+        let config = match &chunk_store {
+            Some(choice) if choice.network => config(current)
+                .with_chunk_store(Arc::clone(&choice.store))
+                .with_host_chunk_io(),
+            Some(choice) => config(current).with_chunk_store(Arc::clone(&choice.store)),
+            None => config(current),
+        };
+        let chunk_io = match chunk_store {
+            Some(choice) if choice.network => Some(ChunkIoRunner::start(choice.store, wake)?),
+            _ => None,
+        };
+        let db = block_on(Db::open_file(config, file))
             .map_err(|error| format!("open server store: {error}"))?;
         db.set_authority();
         db.track_closed_subscribers();
@@ -1597,10 +1928,12 @@ impl Owner {
         Ok(Self {
             db,
             sessions: HashMap::new(),
+            thin: HashMap::new(),
             slice: Rc::default(),
             catalogue,
             awaiting_permissions: awaiting_permissions && head.is_none(),
             app,
+            chunk_io,
         })
     }
 
@@ -1645,6 +1978,7 @@ impl Owner {
         for (_, session) in self.sessions.drain() {
             self.db.disconnect_subscriber(session.subscriber);
         }
+        self.thin.clear();
     }
 
     fn open_session(
@@ -1774,6 +2108,7 @@ impl Owner {
         if let Some(session) = self.sessions.remove(&session) {
             self.db.disconnect_subscriber(session.subscriber);
         }
+        self.close_thin_session(session);
     }
 
     fn inbound_pending(&self) -> bool {
@@ -1786,6 +2121,21 @@ impl Owner {
     /// session's inbound messages are taken a bounded number per tick, so a
     /// large batch gets its first answers out early and other sessions are
     /// served between its parts.
+    /// A network chunk store's batch came back: apply it (the tick that
+    /// follows this job hands the next one over).
+    fn finish_chunk_io(&mut self, done: jazz::chunk_store::ChunkIoDone) {
+        let finished = self.db.finish_chunk_io(done);
+        let log = match &self.chunk_io {
+            Some(runner) => runner.returned(finished.is_err()),
+            None => finished.is_err(),
+        };
+        if let Err(error) = finished
+            && log
+        {
+            tracing::warn!(%error, app = self.app.as_deref().unwrap_or("?"), "large-value store I/O failed; retrying with backoff");
+        }
+    }
+
     fn tick(&mut self) {
         start_tick(self.sessions.values().map(|session| &*session.queues));
         let started = std::time::Instant::now();
@@ -1793,6 +2143,9 @@ impl Owner {
         self.slice.ticked(started.elapsed());
         if let Err(error) = ticked {
             tracing::error!(%error, "server runtime tick failed");
+        }
+        if let Some(runner) = &self.chunk_io {
+            runner.pump(self);
         }
         self.report_slow_queries();
         for (subscriber, error) in self.db.take_closed_subscribers() {
@@ -1856,6 +2209,7 @@ impl Owner {
         for id in gone {
             self.close_session(id);
         }
+        self.pump_thin();
     }
 
     /// An activation at a revision older than the current one is stale: the
@@ -2262,5 +2616,238 @@ mod tests {
             slice.ticked(TICK_SLICE * 3);
         }
         assert_eq!(slice.cap.get(), 1, "a tick always takes at least one");
+    }
+
+    /// A network blob store on the mock bucket, under `prefix`.
+    fn bucket_blobs(bucket: &crate::s3::mock::MockS3, prefix: &str, owner: &str) -> Blobs {
+        let store = crate::s3::S3ChunkStore::new(bucket.options(prefix), owner.to_owned()).unwrap();
+        Blobs::Network(NetworkChunkStore {
+            store: Arc::new(store),
+            name: "mock bucket".to_owned(),
+        })
+    }
+
+    fn docs() -> JazzSchema {
+        JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchema::builder("docs").column("body", ColumnType::Bytea))
+                .build(),
+        )
+        .unwrap()
+    }
+
+    fn read_body(db: &Db) -> Option<Vec<u8>> {
+        use jazz::query::Query;
+        let rows = block_on(db.all(
+            &db.prepare_query(&Query::from("docs")).unwrap(),
+            jazz::db::ReadOpts {
+                tier: jazz::db::ReadTier::LocalOnly,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        rows.first().and_then(|row| {
+            row.cells()
+                .find(|(name, _)| *name == "body")
+                .and_then(|(_, value)| match value {
+                    Some(jazz::records::Value::Bytes(bytes)) => Some(bytes.clone()),
+                    _ => None,
+                })
+        })
+    }
+
+    /// A store whose large values live in a bucket: settled leaves move
+    /// there off the store thread (the bucket checks each one's checksum),
+    /// and a reopened store reads them back from it.
+    #[test]
+    fn large_values_move_to_an_s3_bucket_and_read_back() {
+        let bucket = crate::s3::mock::MockS3::start();
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            || StorageConfig::data_dir(dir.path()).with_blobs(bucket_blobs(&bucket, "app/", "me"));
+        let value: Vec<u8> = (0..400 * 1024u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        {
+            let store = AppStore::open(&storage()).unwrap();
+            let runtime = store
+                .start_runtime(docs(), NodeRole::Core, false, false)
+                .unwrap();
+            let written = value.clone();
+            block_on(runtime.run(move |owner| {
+                block_on(owner.db.insert(
+                    "docs",
+                    BTreeMap::from([("body".to_owned(), jazz::records::Value::Bytes(written))]),
+                    Default::default(),
+                ))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            }))
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            // 400 KiB of bytes is at least two leaves.
+            while bucket.names("app/").len() < 2 {
+                assert!(Instant::now() < deadline, "leaves never reached the bucket");
+                // Each job is followed by a tick, which hands the next batch over.
+                block_on(runtime.run(|_| Ok(()))).unwrap();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                bucket
+                    .state
+                    .objects
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .all(|key| key.starts_with("bucket/app/")),
+                "objects live under the bucket and prefix"
+            );
+            store.close().unwrap();
+        }
+        let store = AppStore::open(&storage()).unwrap();
+        let runtime = store
+            .start_runtime(docs(), NodeRole::Core, false, false)
+            .unwrap();
+        let read = block_on(runtime.run(|owner| Ok(read_body(&owner.db)))).unwrap();
+        assert_eq!(read.as_deref(), Some(value.as_slice()));
+        assert!(
+            bucket.state.calls.gets.load(Ordering::Relaxed) > 0,
+            "read from the bucket"
+        );
+        store.close().unwrap();
+    }
+
+    /// A bucket that refuses everything is asked again with backoff, not
+    /// on every tick; once it answers, the leaves move.
+    #[test]
+    fn a_failing_bucket_is_retried_with_backoff() {
+        let bucket = crate::s3::mock::MockS3::start();
+        bucket.state.failing.store(true, Ordering::Relaxed);
+        let dir = tempfile::tempdir().unwrap();
+        let store = AppStore::open(
+            &StorageConfig::data_dir(dir.path()).with_blobs(bucket_blobs(&bucket, "app/", "me")),
+        )
+        .unwrap();
+        let runtime = store
+            .start_runtime(docs(), NodeRole::Core, false, false)
+            .unwrap();
+        let value: Vec<u8> = (0..400 * 1024u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        block_on(runtime.run(move |owner| {
+            block_on(owner.db.insert(
+                "docs",
+                BTreeMap::from([("body".to_owned(), jazz::records::Value::Bytes(value))]),
+                Default::default(),
+            ))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        }))
+        .unwrap();
+        let tick_for = |how_long: Duration| {
+            let until = Instant::now() + how_long;
+            while Instant::now() < until {
+                block_on(runtime.run(|_| Ok(()))).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        tick_for(Duration::from_millis(2_500));
+        // Batches at 0 s, 1 s and 3 s at most, each failing at its claim.
+        let asked = bucket.state.calls.requests.load(Ordering::Relaxed);
+        assert!((1..=3).contains(&asked), "{asked} requests in 2.5 s");
+        bucket.state.failing.store(false, Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while bucket.names("app/").len() < 2 {
+            assert!(Instant::now() < deadline, "leaves never reached the bucket");
+            tick_for(Duration::from_millis(50));
+        }
+        store.close().unwrap();
+    }
+
+    /// The same through a Vercel Blob store: the core writes every leaf
+    /// itself, and a reopened store reads them back (each checked against
+    /// its hash, since Blob keeps no checksum).
+    #[test]
+    fn large_values_move_to_a_vercel_blob_store_and_read_back() {
+        let blob = crate::vercel_blob::mock::MockBlob::start();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = || {
+            let store = crate::vercel_blob::VercelBlobChunkStore::new(
+                blob.options("jazz/app/"),
+                "me".to_owned(),
+            )
+            .unwrap();
+            StorageConfig::data_dir(dir.path()).with_blobs(Blobs::Network(NetworkChunkStore {
+                store: Arc::new(store),
+                name: "mock blob".to_owned(),
+            }))
+        };
+        let value: Vec<u8> = (0..400 * 1024u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        {
+            let store = AppStore::open(&storage()).unwrap();
+            let runtime = store
+                .start_runtime(docs(), NodeRole::Core, false, false)
+                .unwrap();
+            let written = value.clone();
+            block_on(runtime.run(move |owner| {
+                block_on(owner.db.insert(
+                    "docs",
+                    BTreeMap::from([("body".to_owned(), jazz::records::Value::Bytes(written))]),
+                    Default::default(),
+                ))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            }))
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while blob.names("jazz/app/").len() < 2 {
+                assert!(Instant::now() < deadline, "leaves never reached the store");
+                block_on(runtime.run(|_| Ok(()))).unwrap();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            store.close().unwrap();
+        }
+        let store = AppStore::open(&storage()).unwrap();
+        let runtime = store
+            .start_runtime(docs(), NodeRole::Core, false, false)
+            .unwrap();
+        let read = block_on(runtime.run(|owner| Ok(read_body(&owner.db)))).unwrap();
+        assert_eq!(read.as_deref(), Some(value.as_slice()));
+        assert!(
+            blob.state.calls.gets.load(Ordering::Relaxed) > 0,
+            "read from the store"
+        );
+        store.close().unwrap();
+    }
+
+    #[test]
+    fn chunk_io_backoff_doubles_to_a_minute_and_resets() {
+        let (work, _work) = std_mpsc::channel();
+        let store: Arc<dyn jazz::chunk_store::ChunkStore> = Arc::new(
+            jazz::chunk_store::FileChunkStore::new(tempfile::tempdir().unwrap().keep()).unwrap(),
+        );
+        let runner = ChunkIoRunner::start(store, work).unwrap();
+        let wait = |runner: &ChunkIoRunner| {
+            runner.not_before.get().map(|at| {
+                at.saturating_duration_since(Instant::now())
+                    .as_secs_f64()
+                    .round() as u64
+            })
+        };
+        let mut logged = Vec::new();
+        let mut waits = Vec::new();
+        for _ in 0..9 {
+            logged.push(runner.returned(true));
+            waits.push(wait(&runner).unwrap());
+        }
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
+        assert_eq!(
+            logged,
+            [true, false, false, false, false, false, true, true, true]
+        );
+        assert!(!runner.returned(false));
+        assert_eq!(wait(&runner), None);
     }
 }

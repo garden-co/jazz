@@ -51,6 +51,14 @@
       "types": "./dist/client/index.d.ts",
       "default": "./dist/client/index.js"
     },
+    "./thin": {
+      "types": "./dist/thin/index.d.ts",
+      "default": "./dist/thin/index.js"
+    },
+    "./local-first": {
+      "types": "./dist/local-first/index.d.ts",
+      "default": "./dist/local-first/index.js"
+    },
     "./react": {
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
@@ -77,6 +85,10 @@
     "./effect/backend": {
       "types": "./dist/effect/backend/index.d.ts",
       "default": "./dist/effect/backend/index.js"
+    },
+    "./prosemirror": {
+      "types": "./dist/prosemirror/index.d.ts",
+      "default": "./dist/prosemirror/index.js"
     },
     "./react-core": {
       "types": "./dist/react-core/index.d.ts",
@@ -210,6 +222,10 @@
     "jsdom": "^26.0.0",
     "libsodium": "0.8.3",
     "libsodium-wrappers": "0.8.3",
+    "prosemirror-markdown": "^1.13.9",
+    "prosemirror-model": "^1.25.4",
+    "prosemirror-state": "^1.4.4",
+    "prosemirror-view": "^1.41.7",
     "react-dom": "^19.0.0",
     "solid-js": "^1.9.13",
     "svelte": "^5.0.0",
@@ -233,6 +249,9 @@
     "expo-crypto": ">=14.0.0",
     "expo-secure-store": ">=14.0.0",
     "jazz-rn": "workspace:*",
+    "prosemirror-model": "^1.22.0",
+    "prosemirror-state": "^1.4.0",
+    "prosemirror-view": "^1.33.0",
     "react": ">=19",
     "react-native": ">=0.76",
     "solid-js": ">=1.9.13",
@@ -257,6 +276,15 @@
       "optional": true
     },
     "jazz-rn": {
+      "optional": true
+    },
+    "prosemirror-model": {
+      "optional": true
+    },
+    "prosemirror-state": {
+      "optional": true
+    },
+    "prosemirror-view": {
       "optional": true
     },
     "react": {

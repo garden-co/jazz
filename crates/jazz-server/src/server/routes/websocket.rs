@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::runtime::ServerLinkAdmission;
-use crate::runtime::{CommitUnitTrust, ConnectionSessionContext};
+use crate::runtime::{
+    CommitUnitTrust, ConnectionSessionContext, ServerRuntimeHandle, ServerSession,
+};
 use axum::{
     extract::State,
     extract::ws::{CloseFrame, Message, WebSocketUpgrade, close_code},
@@ -814,7 +816,12 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         }
     };
 
-    let negotiated = match negotiate_wire(&remote_hello, current_wire_features()) {
+    // Thin clients (SPEC 8.14) are served on the same route: a client that
+    // advertises thin results is answered with results, not sync.
+    let negotiated = match negotiate_wire(
+        &remote_hello,
+        current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS,
+    ) {
         Ok(negotiated) => negotiated,
         Err(error) => {
             send_ws_error(&mut socket, error).await;
@@ -888,18 +895,52 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 return;
             }
         };
-    let session = match core_server_shell
-        .open_with_session_context(
-            admission.identity,
-            admission.claims,
-            admission.bundle,
-            admission.trust,
-            negotiated.features,
-            session_context,
+    let thin = negotiated.features & jazz::wire::FEATURE_THIN_RESULTS != 0;
+    // A thin connection is one session reading finished results: it holds
+    // no replica to relay for tabs, so it is never a client relay. An admin
+    // link is served as SYSTEM either way. `session_context` is for sync
+    // links alone.
+    if thin
+        && matches!(
             link_admission,
+            ServerLinkAdmission::ScopeIsolatedClientRelay { .. }
         )
-        .await
     {
+        send_ws_error(
+            &mut socket,
+            WireError::new(
+                WireErrorCode::UnsupportedFeature,
+                WireRetry::Never,
+                "a thin connection serves one session: it cannot relay for other tabs",
+            ),
+        )
+        .await;
+        let _ = socket.close().await;
+        return;
+    }
+    let opened = if thin {
+        core_server_shell
+            .open_thin_session(
+                admission.identity,
+                admission.claims,
+                admission.bundle,
+                admission.trust,
+            )
+            .await
+    } else {
+        core_server_shell
+            .open_with_session_context(
+                admission.identity,
+                admission.claims,
+                admission.bundle,
+                admission.trust,
+                negotiated.features,
+                session_context,
+                link_admission,
+            )
+            .await
+    };
+    let session = match opened {
         Ok(session) => session,
         Err(error) => {
             send_ws_error(
@@ -1097,6 +1138,13 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                             break;
                         }
                     };
+                    if thin {
+                        if let Err(error) = receive_thin_frames(&core_server_shell, session, frames) {
+                            queue_ws_error(&writer_tx, error);
+                            break 'connection;
+                        }
+                        continue;
+                    }
                     if let Err(error) = core_server_shell.receive_wire_frames(session, frames) {
                         queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
                         break 'connection;
@@ -1125,6 +1173,32 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         writer.abort();
         let _ = writer.await;
     }
+}
+
+/// Hand a thin client's requests to the runtime. A thin connection carries
+/// nothing else after its `Hello`.
+fn receive_thin_frames(
+    runtime: &ServerRuntimeHandle,
+    session: ServerSession,
+    frames: Vec<Vec<u8>>,
+) -> Result<(), WireError> {
+    for frame in frames {
+        match jazz::wire::decode_frame(&frame) {
+            Ok(WireFrame::ThinRequest(request)) => runtime
+                .receive_thin_request(session, request, frame.len())
+                .map_err(|error| {
+                    WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error)
+                })?,
+            _ => {
+                return Err(WireError::new(
+                    WireErrorCode::MalformedFrame,
+                    WireRetry::Never,
+                    "a thin connection sends only thin requests",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 // A cancelled socket task must not leave its writer owning the socket or queued catalogue.
@@ -2567,31 +2641,17 @@ mod tests {
             features,
         )
         .await;
-        let chunk_len = jazz::wire::channels::CHANNEL_CHUNK_BYTES;
+        // Leading parts of one split sync message (part marker 0xFF): the
+        // owner buffers them and waits for the rest, so the link stays open
+        // whenever the owner gets to the batch. Each part is well under the
+        // frame limit and all of them under the untrusted message ceiling;
+        // only the batch as a whole is above the legacy 1 MiB cap.
+        let part_len = 64 * 1024;
         let encoded = (0..24)
-            .map(|index| {
-                let envelope = jazz::wire::WireChannelEnvelope {
-                    protocol_version: WIRE_PROTOCOL_VERSION,
-                    features,
-                    session: None,
-                    extent: jazz::wire::channels::ChannelFrame {
-                        channel: 1,
-                        generation: 0,
-                        sequence: index,
-                        class: jazz::wire::channels::ChannelClass::Writes,
-                        first: index == 0,
-                        last: false,
-                        message_len: if index == 0 {
-                            (chunk_len * 32) as u32
-                        } else {
-                            0
-                        },
-                        decoded_len: chunk_len as u32,
-                        payload: vec![0x42; chunk_len],
-                    },
-                };
-                encode_frame(&WireFrame::Channel(envelope))
-                    .expect("encode large websocket channel batch")
+            .map(|_| {
+                let mut frame = vec![0xFF_u8];
+                frame.resize(part_len + 1, 0x42);
+                frame
             })
             .collect::<Vec<_>>();
         let batch = postcard::to_allocvec(&encoded).expect("encode large websocket batch");
@@ -4952,5 +5012,899 @@ mod tests {
             ),
             "idle websocket upgrade must close cleanly under shutdown; observed {outcome:?}"
         );
+    }
+
+    // ---- thin clients (SPEC 8.14) ----------------------------------------
+
+    type TestWs = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    fn private_docs_public_schema() -> Schema {
+        SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("docs")
+                    .column("title", ColumnType::Text)
+                    .column("owner", ColumnType::Text)
+                    .policies(public_table_policies().with_select(PolicyExpr::eq_session(
+                        "owner",
+                        vec![
+                            "user".to_owned(),
+                            "identity".to_owned(),
+                            "subject".to_owned(),
+                        ],
+                    ))),
+            )
+            .build()
+    }
+
+    async fn private_docs_state() -> (Arc<ServerState>, Schema) {
+        let source = private_docs_public_schema();
+        let schema = jazz::schema::JazzSchema::new(&source).expect("thin docs schema compiles");
+        let state = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(Schema::new())
+            .with_core_server_shell_schema(schema.clone())
+            .build()
+            .await
+            .expect("build thin test state")
+            .state;
+        (state, source)
+    }
+
+    async fn open_thin_ws(
+        addr: std::net::SocketAddr,
+        state: &Arc<ServerState>,
+        identity: AuthorSubject,
+    ) -> TestWs {
+        open_negotiated_ws_with_prelude_and_features(
+            addr,
+            state,
+            ws_session_prelude(identity),
+            jazz::wire::FEATURE_THIN_RESULTS,
+        )
+        .await
+    }
+
+    async fn send_thin(ws: &mut TestWs, id: u64, op: jazz::thin::ThinOp) {
+        let frame = encode_frame(&WireFrame::ThinRequest(jazz::thin::ThinRequest { id, op }))
+            .expect("encode thin request");
+        let batch = postcard::to_allocvec(&vec![frame]).expect("encode thin batch");
+        ws.send(WsMessage::Binary(batch.into()))
+            .await
+            .expect("send thin request");
+    }
+
+    /// Thin responses until `done` holds for the ones so far.
+    async fn thin_responses_until(
+        ws: &mut TestWs,
+        done: impl Fn(&[jazz::thin::ThinResponse]) -> bool,
+    ) -> Vec<jazz::thin::ThinResponse> {
+        let mut responses = Vec::new();
+        let start = tokio::time::Instant::now();
+        while !done(&responses) {
+            let remaining = WS_PUMP_DEADLINE.saturating_sub(start.elapsed());
+            let message = tokio::time::timeout(remaining, ws.next())
+                .await
+                .unwrap_or_else(|_| panic!("thin responses so far: {responses:?}"))
+                .expect("websocket open")
+                .expect("websocket message");
+            for frame in decode_ws_message(&message) {
+                match frame {
+                    WireFrame::ThinResponse(response) => responses.push(response),
+                    other => panic!("a thin connection received {other:?}"),
+                }
+            }
+        }
+        responses
+    }
+
+    async fn thin_answer(ws: &mut TestWs, id: u64) -> jazz::thin::ThinBody {
+        let responses =
+            thin_responses_until(ws, |responses| responses.iter().any(|r| r.id == id)).await;
+        responses
+            .into_iter()
+            .find(|response| response.id == id)
+            .expect("answer")
+            .body
+    }
+
+    fn doc_cells(title: &str, owner: AuthorSubject) -> Vec<u8> {
+        let (_, owner) = issuer_and_subject(owner);
+        let descriptor = jazz::records::RecordDescriptor::new([
+            ("title", jazz::records::ValueType::String),
+            ("owner", jazz::records::ValueType::String),
+        ]);
+        let record = jazz::records::OwnedRecord::new(
+            descriptor
+                .create(&[
+                    CoreValue::String(title.to_owned()),
+                    CoreValue::String(owner),
+                ])
+                .expect("doc record"),
+            descriptor,
+        );
+        jazz::binding_codec::encode_named_cells(&record).expect("encode doc cells")
+    }
+
+    fn docs_query() -> Vec<u8> {
+        postcard::to_allocvec(&jazz::query::Query::from("docs")).expect("encode docs query")
+    }
+
+    fn remote_read() -> Vec<u8> {
+        br#"{"tier":"remote"}"#.to_vec()
+    }
+
+    async fn thin_titles(ws: &mut TestWs, id: u64, transaction: Option<&str>) -> Vec<String> {
+        send_thin(
+            ws,
+            id,
+            jazz::thin::ThinOp::Query {
+                query: docs_query(),
+                options: remote_read(),
+                transaction: transaction.map(str::to_owned),
+            },
+        )
+        .await;
+        let jazz::thin::ThinBody::Rows { rows, .. } = thin_answer(ws, id).await else {
+            panic!("the query must answer rows");
+        };
+        titles_of(jazz::binding_codec::decode_rows(&rows).unwrap())
+    }
+
+    fn titles_of(batches: Vec<jazz::binding_codec::DecodedRowBatch>) -> Vec<String> {
+        let mut titles: Vec<String> = batches
+            .into_iter()
+            .flat_map(|batch| batch.rows)
+            .filter_map(|row| match row.cells.get("title") {
+                Some(CoreValue::String(title)) => Some(title.clone()),
+                _ => None,
+            })
+            .collect();
+        titles.sort();
+        titles
+    }
+
+    async fn bind_thin_schema(ws: &mut TestWs, schema: &Schema) {
+        send_thin(
+            ws,
+            0,
+            jazz::thin::ThinOp::Schema {
+                schema: serde_json::to_vec(schema).expect("encode public schema"),
+            },
+        )
+        .await;
+        assert_eq!(thin_answer(ws, 0).await, jazz::thin::ThinBody::Ok);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_client_reads_results_under_its_own_policies() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+
+        let mut alice_ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut alice_ws, &schema).await;
+        send_thin(
+            &mut alice_ws,
+            1,
+            ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells("alice private", alice),
+                options: Vec::new(),
+                transaction: None,
+            },
+        )
+        .await;
+        let ThinBody::Written { seq, .. } = thin_answer(&mut alice_ws, 1).await else {
+            panic!("alice's insert must commit");
+        };
+        assert!(seq > 0);
+
+        send_thin(
+            &mut alice_ws,
+            2,
+            ThinOp::Query {
+                query: docs_query(),
+                options: remote_read(),
+                transaction: None,
+            },
+        )
+        .await;
+        let ThinBody::Rows { rows, relation } = thin_answer(&mut alice_ws, 2).await else {
+            panic!("alice's query must answer rows");
+        };
+        assert!(!relation);
+        assert_eq!(
+            titles_of(jazz::binding_codec::decode_rows(&rows).unwrap()),
+            vec!["alice private".to_owned()]
+        );
+
+        let mut bob_ws = open_thin_ws(addr, &state, bob).await;
+        bind_thin_schema(&mut bob_ws, &schema).await;
+        send_thin(
+            &mut bob_ws,
+            1,
+            ThinOp::Query {
+                query: docs_query(),
+                options: remote_read(),
+                transaction: None,
+            },
+        )
+        .await;
+        let ThinBody::Rows { rows, .. } = thin_answer(&mut bob_ws, 1).await else {
+            panic!("bob's query must answer rows");
+        };
+        assert!(
+            titles_of(jazz::binding_codec::decode_rows(&rows).unwrap()).is_empty(),
+            "bob must not see alice's private doc"
+        );
+    }
+
+    /// Publish the docs schema as a bundle whose docs read by `select`
+    /// (createJazz's `/bundles`); its hex id.
+    async fn publish_docs_bundle(
+        addr: std::net::SocketAddr,
+        state: &Arc<ServerState>,
+        schema: &Schema,
+        select: PolicyExpr,
+    ) -> String {
+        let hash = jazz::tools::public_schema::SchemaHash::compute(schema).to_string();
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}/apps/{}/admin/bundles", state.app_id))
+            .header("X-Jazz-Admin-Secret", "admin-secret")
+            .header("Content-Type", "application/json")
+            .body(
+                serde_json::json!({
+                    "targetSchemaHash": hash,
+                    "schemas": [{ "hash": hash, "schema": schema }],
+                    "migrations": [],
+                    "permissions": { "docs": public_table_policies().with_select(select) },
+                })
+                .to_string(),
+            )
+            .send()
+            .await
+            .expect("publish bundle");
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.expect("bundle response");
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        body["bundle"].as_str().expect("bundle id").to_owned()
+    }
+
+    fn pinned_thin_prelude(identity: AuthorSubject, bundle: Option<&str>) -> Vec<u8> {
+        let mut prelude: serde_json::Value =
+            serde_json::from_slice(&ws_session_prelude(identity)).unwrap();
+        if let Some(bundle) = bundle {
+            prelude["bundle"] = serde_json::json!(bundle);
+        }
+        prelude.to_string().into_bytes()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_sessions_pinned_to_a_bundle_are_governed_by_its_policies() {
+        // A createJazz app's store: its backend publishes every deployment
+        // as a bundle, starting from no schema.
+        let schema = private_docs_public_schema();
+        let state = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build bundle test state")
+            .state;
+        let addr = start_ws_test_server(state.clone()).await;
+        // Two deployments publish their own policies: one reads every doc,
+        // one none.
+        let open = publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await;
+        let closed = publish_docs_bundle(addr, &state, &schema, PolicyExpr::False).await;
+        // As after a restart over these bundles, the store waits for a
+        // permissions head; sessions pinned to a published bundle are
+        // served regardless.
+        let runtime = state.runtime_for_client().expect("runtime");
+        runtime.await_permissions_for_test().await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+        let features = jazz::wire::FEATURE_THIN_RESULTS;
+
+        let mut alice_ws = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(alice, Some(&closed)),
+            features,
+        )
+        .await;
+        bind_thin_schema(&mut alice_ws, &schema).await;
+        send_thin(
+            &mut alice_ws,
+            1,
+            jazz::thin::ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells("alice's", alice),
+                options: Vec::new(),
+                transaction: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut alice_ws, 1).await,
+            jazz::thin::ThinBody::Written { .. }
+        ));
+        assert!(
+            thin_titles(&mut alice_ws, 2, None).await.is_empty(),
+            "the closed bundle reads nothing, not even alice's own doc"
+        );
+
+        let mut bob_ws = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(bob, Some(&open)),
+            features,
+        )
+        .await;
+        bind_thin_schema(&mut bob_ws, &schema).await;
+        assert_eq!(
+            thin_titles(&mut bob_ws, 1, None).await,
+            vec!["alice's".to_owned()],
+            "the open bundle reads alice's doc"
+        );
+
+        // Once bundles are published, an unpinned user session is refused,
+        // as a sync session is, and so is a pin to a bundle never published.
+        let refused = thin_refusal(addr, &state, pinned_thin_prelude(bob, None)).await;
+        assert!(refused.contains("served through createJazz"), "{refused}");
+        let unknown = "cd".repeat(32);
+        let refused = thin_refusal(addr, &state, pinned_thin_prelude(bob, Some(&unknown))).await;
+        assert!(
+            refused.contains("is not published on this store"),
+            "{refused}"
+        );
+    }
+
+    /// The error a thin connection opening with `prelude` is refused with.
+    async fn thin_refusal(
+        addr: std::net::SocketAddr,
+        state: &Arc<ServerState>,
+        prelude: Vec<u8>,
+    ) -> String {
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+            .await
+            .expect("connect websocket");
+        ws.send(WsMessage::Binary(prelude.into())).await.unwrap();
+        ws.send(WsMessage::Binary(
+            ws_client_hello_batch_with_features(jazz::wire::FEATURE_THIN_RESULTS).into(),
+        ))
+        .await
+        .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("an answer")
+            .expect("a frame")
+            .expect("a message");
+        match decode_ws_message(&message).as_slice() {
+            [WireFrame::Error(error)] => error.message.clone(),
+            frames => panic!("expected a refusal, got {frames:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_requests_wait_for_published_permissions() {
+        use crate::runtime::{ServerRuntimeHandle, StorageConfig};
+        use jazz::thin::{ThinBody, ThinOp, ThinRequest};
+        // A catalogue-driven store whose permissions head is not published
+        // serves a user's thin requests nothing yet; a trusted link is
+        // served as SYSTEM, which no permissions govern.
+        let source = private_docs_public_schema();
+        let runtime = ServerRuntimeHandle::start_awaiting_permissions(
+            JazzSchema::new(&source).unwrap(),
+            StorageConfig::InMemory,
+        )
+        .unwrap();
+        let schema = || ThinRequest {
+            id: 0,
+            op: ThinOp::Schema {
+                schema: serde_json::to_vec(&source).unwrap(),
+            },
+        };
+        let answer = |trust| {
+            let runtime = runtime.clone();
+            async move {
+                let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+                let session = runtime
+                    .open_thin_session(alice, BTreeMap::new(), None, trust)
+                    .await
+                    .unwrap();
+                let mut stream = runtime.open_wire_stream(session).unwrap();
+                runtime.receive_thin_request(session, schema(), 16).unwrap();
+                runtime.request_wire_tick(session).unwrap();
+                let frames = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+                    .await
+                    .expect("an answer")
+                    .expect("open")
+                    .expect("frames");
+                match decode_frame(&frames[0]).unwrap() {
+                    WireFrame::ThinResponse(response) => response.body,
+                    other => panic!("expected a thin response, got {other:?}"),
+                }
+            }
+        };
+        let ThinBody::Error { code, .. } = answer(CommitUnitTrust::Session).await else {
+            panic!("a user's thin request before any permissions must be refused");
+        };
+        assert_eq!(code, "NotReady");
+        assert_eq!(answer(CommitUnitTrust::TrustedBackend).await, ThinBody::Ok);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_output_held_at_the_egress_budget_drains_as_the_client_reads() {
+        // Answers and live-query events pile up while the session's egress
+        // budget is spent, then the client reads it back to `room` short of
+        // the budget. Everything held must then reach the client by its
+        // reading alone, before the idle tick, whatever the room is
+        // relative to the frames' sizes.
+        for room in [
+            1, 8, 16, 24, 32, 48, 64, 80, 96, 128, 160, 192, 256, 512, 4096,
+        ] {
+            drain_with_room(room).await;
+        }
+    }
+
+    async fn drain_with_room(room: usize) {
+        use crate::runtime::{IDLE_TICK, SESSION_QUEUE_BUDGET, ServerRuntimeHandle, StorageConfig};
+        use jazz::thin::{ThinBody, ThinOp, ThinRequest};
+        let source = private_docs_public_schema();
+        let runtime = ServerRuntimeHandle::start_with_storage(
+            JazzSchema::new(&source).unwrap(),
+            StorageConfig::InMemory,
+        )
+        .unwrap();
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let session = runtime
+            .open_thin_session(
+                alice,
+                BTreeMap::new(),
+                None,
+                CommitUnitTrust::TrustedBackend,
+            )
+            .await
+            .unwrap();
+        let mut stream = runtime.open_wire_stream(session).unwrap();
+        runtime.hold_egress_for_test(session, SESSION_QUEUE_BUDGET);
+        let mut requests = vec![
+            ThinOp::Schema {
+                schema: serde_json::to_vec(&source).unwrap(),
+            },
+            ThinOp::Subscribe {
+                query: docs_query(),
+                options: br#"{"tier":"local-first"}"#.to_vec(),
+            },
+        ];
+        for title in ["one", "two", "three"] {
+            requests.push(ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells(title, alice),
+                options: Vec::new(),
+                transaction: None,
+            });
+        }
+        for (id, op) in requests.into_iter().enumerate() {
+            runtime
+                .receive_thin_request(session, ThinRequest { id: id as u64, op }, 16)
+                .unwrap();
+            runtime.request_wire_tick(session).unwrap();
+            runtime.settle_for_test().await;
+        }
+        runtime.release_egress_for_test(session, room);
+        // Well before the idle tick, which would move a stalled session on
+        // regardless of the client's reading.
+        let deadline = tokio::time::Instant::now() + IDLE_TICK / 2;
+
+        let (mut answered, mut seen) = (Vec::new(), 0usize);
+        while answered.len() < 4 || seen < 3 {
+            let frames = tokio::time::timeout_at(deadline, stream.recv())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "output stalled with {room} bytes of room: answered {answered:?}, saw {seen} rows"
+                    )
+                })
+                .expect("open")
+                .expect("frames");
+            for frame in frames {
+                let WireFrame::ThinResponse(response) = decode_frame(&frame).unwrap() else {
+                    panic!("expected a thin response");
+                };
+                match response.body {
+                    ThinBody::Event { delta, .. } => {
+                        let (added, _) =
+                            jazz::binding_codec::decode_subscription_delta_rows(&delta).unwrap();
+                        seen += titles_of(added).len();
+                    }
+                    ThinBody::Ok | ThinBody::Written { .. } => answered.push(response.id),
+                    other => panic!("unexpected answer to {}: {other:?}", response.id),
+                }
+            }
+        }
+        answered.sort();
+        assert_eq!(answered, [0, 2, 3, 4], "with {room} bytes of room");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn trusted_backend_thin_connection_reads_as_system() {
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut alice_ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut alice_ws, &schema).await;
+        send_thin(
+            &mut alice_ws,
+            1,
+            jazz::thin::ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells("alice private", alice),
+                options: Vec::new(),
+                transaction: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut alice_ws, 1).await,
+            jazz::thin::ThinBody::Written { .. }
+        ));
+
+        // The backend's own link, with no user session, is served as SYSTEM.
+        let backend_prelude = serde_json::json!({
+            "peer_identity": AuthorSubject::SYSTEM.canonical(),
+            "auth": { "backend_secret": "backend-secret" },
+        })
+        .to_string()
+        .into_bytes();
+        let mut backend = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            backend_prelude,
+            jazz::wire::FEATURE_THIN_RESULTS,
+        )
+        .await;
+        bind_thin_schema(&mut backend, &schema).await;
+        assert_eq!(
+            thin_titles(&mut backend, 1, None).await,
+            vec!["alice private".to_owned()]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_requests_past_the_ingress_budget_are_refused() {
+        let (state, _) = private_docs_state().await;
+        let runtime = state.runtime_for_client().expect("runtime");
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let session = runtime
+            .open_thin_session(alice, BTreeMap::new(), None, CommitUnitTrust::Session)
+            .await
+            .expect("open thin session");
+        let request = |id| jazz::thin::ThinRequest {
+            id,
+            op: jazz::thin::ThinOp::CaptureSnapshot,
+        };
+        let budget = crate::runtime::SESSION_QUEUE_BUDGET;
+        let error = runtime
+            .receive_thin_request(session, request(1), budget + 1)
+            .expect_err("a request past the budget is refused");
+        assert!(error.contains("ingress budget"), "{error}");
+        runtime
+            .receive_thin_request(session, request(2), 16)
+            .expect("a request within the budget is queued");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_subscription_receives_results_for_writes_from_other_sessions() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+
+        let mut reader = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut reader, &schema).await;
+        send_thin(
+            &mut reader,
+            7,
+            ThinOp::Subscribe {
+                query: docs_query(),
+                options: br#"{"tier":"local-first"}"#.to_vec(),
+            },
+        )
+        .await;
+        let opening = thin_responses_until(&mut reader, |responses| {
+            responses
+                .iter()
+                .any(|r| r.id == 7 && matches!(r.body, ThinBody::Event { settled: true, .. }))
+        })
+        .await;
+        for response in &opening {
+            let ThinBody::Event { delta, .. } = &response.body else {
+                panic!("unexpected opening answer {response:?}");
+            };
+            let (added, _) = jazz::binding_codec::decode_subscription_delta_rows(delta).unwrap();
+            assert!(titles_of(added).is_empty());
+        }
+
+        // A second connection for the same user writes; the first one's
+        // live query hears of it.
+        let mut writer = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut writer, &schema).await;
+        send_thin(
+            &mut writer,
+            1,
+            ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells("from elsewhere", alice),
+                options: serde_json::to_vec(&serde_json::json!({ "rowId": vec![0x42_u8; 16] }))
+                    .unwrap(),
+                transaction: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut writer, 1).await,
+            ThinBody::Written { row, .. } if row == [0x42; 16]
+        ));
+
+        let update = thin_responses_until(&mut reader, |responses| {
+            responses.iter().any(|r| match &r.body {
+                ThinBody::Event { delta, .. } => {
+                    let (added, _) =
+                        jazz::binding_codec::decode_subscription_delta_rows(delta).unwrap();
+                    titles_of(added) == vec!["from elsewhere".to_owned()]
+                }
+                _ => false,
+            })
+        })
+        .await;
+        assert!(update.iter().all(|r| r.id == 7));
+
+        send_thin(&mut reader, 8, ThinOp::Unsubscribe { subscription: 7 }).await;
+        let closed =
+            thin_responses_until(&mut reader, |responses| responses.iter().any(|r| r.id == 8))
+                .await;
+        assert!(
+            closed
+                .iter()
+                .any(|r| r.id == 7 && r.body == ThinBody::Closed)
+        );
+        assert!(closed.iter().any(|r| r.id == 8 && r.body == ThinBody::Ok));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_client_must_declare_a_deployed_schema_first() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, _) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+
+        send_thin(
+            &mut ws,
+            1,
+            ThinOp::Query {
+                query: docs_query(),
+                options: remote_read(),
+                transaction: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut ws, 1).await,
+            ThinBody::Error { code, .. } if code == "Argument"
+        ));
+
+        send_thin(
+            &mut ws,
+            2,
+            // A schema this server never admitted.
+            ThinOp::Schema {
+                schema: serde_json::to_vec(
+                    &SchemaBuilder::new()
+                        .table(
+                            PublicTableSchema::builder("notes")
+                                .column("body", ColumnType::Text)
+                                .policies(public_table_policies()),
+                        )
+                        .build(),
+                )
+                .expect("encode public schema"),
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut ws, 2).await,
+            ThinBody::Error { code, .. } if code == "SchemaNotDeployed"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_transactions_commit_or_roll_back_as_one() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &schema).await;
+
+        for (kind, tx, title) in [
+            ("serializable", "0190f3e4000070008000000000000001", "kept"),
+            ("mergeable", "0190f3e4000070008000000000000002", "dropped"),
+        ] {
+            send_thin(
+                &mut ws,
+                1,
+                ThinOp::Begin {
+                    transaction: tx.to_owned(),
+                    kind: kind.to_owned(),
+                },
+            )
+            .await;
+            assert_eq!(thin_answer(&mut ws, 1).await, ThinBody::Ok);
+            send_thin(
+                &mut ws,
+                2,
+                ThinOp::Insert {
+                    table: "docs".to_owned(),
+                    cells: doc_cells(title, alice),
+                    options: Vec::new(),
+                    transaction: Some(tx.to_owned()),
+                },
+            )
+            .await;
+            assert!(matches!(
+                thin_answer(&mut ws, 2).await,
+                ThinBody::Staged { .. }
+            ));
+            // The transaction reads its own write; nobody else sees it yet.
+            assert!(
+                thin_titles(&mut ws, 3, Some(tx))
+                    .await
+                    .contains(&title.to_owned())
+            );
+            assert!(
+                !thin_titles(&mut ws, 4, None)
+                    .await
+                    .contains(&title.to_owned())
+            );
+            if kind == "serializable" {
+                send_thin(
+                    &mut ws,
+                    5,
+                    ThinOp::Commit {
+                        transaction: tx.to_owned(),
+                    },
+                )
+                .await;
+                assert!(matches!(
+                    thin_answer(&mut ws, 5).await,
+                    ThinBody::Written { .. }
+                ));
+            } else {
+                send_thin(
+                    &mut ws,
+                    5,
+                    ThinOp::Rollback {
+                        transaction: tx.to_owned(),
+                    },
+                )
+                .await;
+                assert_eq!(thin_answer(&mut ws, 5).await, ThinBody::Ok);
+            }
+        }
+        assert_eq!(thin_titles(&mut ws, 6, None).await, vec!["kept".to_owned()]);
+
+        // Another session cannot use a transaction it did not begin.
+        let mut other = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut other, &schema).await;
+        send_thin(
+            &mut ws,
+            7,
+            ThinOp::Begin {
+                transaction: "0190f3e4000070008000000000000003".to_owned(),
+                kind: "mergeable".to_owned(),
+            },
+        )
+        .await;
+        assert_eq!(thin_answer(&mut ws, 7).await, ThinBody::Ok);
+        send_thin(
+            &mut other,
+            1,
+            ThinOp::Commit {
+                transaction: "0190f3e4000070008000000000000003".to_owned(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut other, 1).await,
+            ThinBody::Error { code, .. } if code == "Argument"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_writes_cannot_choose_their_author() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &schema).await;
+        send_thin(
+            &mut ws,
+            1,
+            ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells("as bob", bob),
+                options: serde_json::to_vec(&serde_json::json!({
+                    "author": bob.canonical().as_bytes(),
+                }))
+                .unwrap(),
+                transaction: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut ws, 1).await,
+            ThinBody::Error { code, .. } if code == "Argument"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_client_captures_snapshots() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &schema).await;
+        send_thin(&mut ws, 1, ThinOp::CaptureSnapshot).await;
+        let ThinBody::Snapshot { snapshot } = thin_answer(&mut ws, 1).await else {
+            panic!("a snapshot must be captured");
+        };
+        assert!(!snapshot.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_connection_refuses_sync_frames() {
+        let (state, _) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        let hello = encode_frame(&WireFrame::Hello(WireHello::current(
+            WirePeerRole::Client,
+            0,
+        )))
+        .expect("encode hello");
+        let batch = postcard::to_allocvec(&vec![hello]).expect("encode batch");
+        ws.send(WsMessage::Binary(batch.into()))
+            .await
+            .expect("send");
+        let message = tokio::time::timeout(WS_PUMP_DEADLINE, ws.next())
+            .await
+            .expect("an answer")
+            .expect("open")
+            .expect("message");
+        assert!(matches!(
+            decode_ws_message(&message).as_slice(),
+            [WireFrame::Error(WireError {
+                code: WireErrorCode::MalformedFrame,
+                ..
+            })]
+        ));
     }
 }

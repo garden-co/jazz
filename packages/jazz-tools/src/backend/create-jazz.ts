@@ -59,9 +59,24 @@ import {
 
 export type { VercelStoreOptions } from "./vercel-store.js";
 
+import { files, type BlobStore } from "./blobs.js";
+export {
+  files,
+  s3,
+  vercelBlob,
+  type BlobStore,
+  type S3BlobStore,
+  type VercelBlobStore,
+} from "./blobs.js";
+
 /** Where the core keeps its data. */
 export type JazzStore =
-  | { readonly kind: "sqlite"; readonly path: string; readonly appId?: string }
+  | {
+      readonly kind: "sqlite";
+      readonly path: string;
+      readonly appId?: string;
+      readonly blobs: BlobStore;
+    }
   | { readonly kind: "memory"; readonly appId?: string }
   | {
       readonly kind: "remote";
@@ -78,19 +93,28 @@ export type JazzStore =
       readonly local: Extract<JazzStore, { kind: "sqlite" | "memory" }>;
     };
 
-/** A SQLite core in this process, kept in the directory `path`. */
 /**
  * A SQLite core in this process, kept in the directory `path`. It generates
  * its app id on first start and keeps it beside its data; set `appId` only
- * to keep the id of an existing app.
+ * to keep the id of an existing app. Large values' bytes go to `blobs`,
+ * by default `files()` in `<path>/blobs`.
  */
 export function sqlite(options: {
   path: string;
   appId?: string;
+  blobs?: BlobStore;
 }): Extract<JazzStore, { kind: "sqlite" }> {
+  const blobs = options.blobs ?? files();
+  if (
+    blobs !== "sqlite" &&
+    (typeof blobs !== "object" || (blobs.kind !== "files" && blobs.kind !== "s3"))
+  ) {
+    throw new Error('sqlite(): blobs must be files(), s3() or "sqlite"');
+  }
   return {
     kind: "sqlite",
     path: options.path,
+    blobs,
     ...(options.appId === undefined ? {} : { appId: options.appId }),
   };
 }
@@ -170,6 +194,27 @@ export function vercel(
 ): JazzStore {
   const { local, ...rest } = options;
   return { kind: "vercel", options: rest, local: local ?? sqlite({ path: ".jazz/local" }) };
+}
+
+function blobOptions(blobs: BlobStore): {
+  blobs: "files" | "s3" | "sqlite";
+  blobsDir?: string;
+  s3Bucket?: string;
+  s3Region?: string;
+  s3Endpoint?: string;
+  s3Prefix?: string;
+} {
+  if (blobs === "sqlite") return { blobs: "sqlite" };
+  if (blobs.kind === "s3") {
+    return {
+      blobs: "s3",
+      ...(blobs.bucket === undefined ? {} : { s3Bucket: blobs.bucket }),
+      ...(blobs.region === undefined ? {} : { s3Region: blobs.region }),
+      ...(blobs.endpoint === undefined ? {} : { s3Endpoint: blobs.endpoint }),
+      ...(blobs.prefix === undefined ? {} : { s3Prefix: blobs.prefix }),
+    };
+  }
+  return { blobs: "files", ...(blobs.dir === undefined ? {} : { blobsDir: blobs.dir }) };
 }
 
 /** Who the request's user is, as the app's own auth decides. */
@@ -616,7 +661,9 @@ async function openInProcessCore(
     appId,
     backendSecret,
     adminSecret,
-    ...(store.kind === "sqlite" ? { dataDir: store.path } : { inMemory: true }),
+    ...(store.kind === "sqlite"
+      ? { dataDir: store.path, ...blobOptions(store.blobs) }
+      : { inMemory: true }),
   });
   const handle = async (method: string, path: string, headers: string[][], body: Uint8Array) =>
     core.handle(method, path, headers, Buffer.from(body));

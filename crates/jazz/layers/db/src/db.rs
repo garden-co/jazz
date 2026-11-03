@@ -102,7 +102,7 @@ impl PreparedQuery {
         let mut query = self.query.clone();
         query.limit = None;
         query.offset = 0;
-        let shape = blake3::hash(format!("{:?}unwindowed", self.shape.0).as_bytes());
+        let shape = jazz_types::sha256::hash(format!("{:?}unwindowed", self.shape.0).as_bytes());
         PreparedQuery {
             query,
             shape: Shape(short(shape)),
@@ -120,7 +120,7 @@ impl PreparedQuery {
                 .map(|id| Operand::Literal(Value::Uuid(id.0)))
                 .collect(),
         ));
-        let shape = blake3::hash(format!("{query:?}").as_bytes());
+        let shape = jazz_types::sha256::hash(format!("{query:?}").as_bytes());
         PreparedQuery {
             query,
             shape: Shape(short(shape)),
@@ -146,7 +146,7 @@ impl PreparedQuery {
         author: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Self {
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = jazz_types::sha256::Hasher::new();
         hasher.update(&self.binding_id.0);
         hasher.update(format!("{author:?}{claims:?}").as_bytes());
         self.binding_id = Binding(short(hasher.finalize()));
@@ -155,7 +155,7 @@ impl PreparedQuery {
     }
 }
 
-fn short(hash: blake3::Hash) -> [u8; 16] {
+fn short(hash: jazz_types::sha256::Hash) -> [u8; 16] {
     hash.as_bytes()[..16].try_into().expect("16 bytes")
 }
 
@@ -629,8 +629,14 @@ const RECLAIM_NODES_PER_TICK: usize = 256;
 /// Leaves one tick may move to, or delete from, the chunk store.
 const CHUNK_STORE_NODES_PER_TICK: usize = 256;
 
-/// Chunk-store operations in flight at once.
-const CHUNK_STORE_CONCURRENCY: usize = 16;
+/// [`Db::take_chunk_io`] or [`Db::finish_chunk_io`] on a store whose tick
+/// runs its chunk I/O itself.
+fn not_host_run() -> Error {
+    Error::new(
+        ErrorCode::Protocol,
+        "chunk I/O: this store runs its chunk I/O itself; open it with DbConfig::with_host_chunk_io to run it from the host",
+    )
+}
 
 /// File store settings.
 #[derive(Clone, Copy, Debug)]
@@ -1284,7 +1290,8 @@ impl Db {
         names.check_types(&schema)?;
         // Variants are tagged before any DDL: an enum default is its tag.
         names.mint(&conn, &schema)?;
-        let chunks = crate::large::Chunks::install(path, config.chunk_store.clone())?;
+        let chunks =
+            crate::large::Chunks::install(path, config.chunk_store.clone(), config.host_chunk_io)?;
         // Statements are keyed per table and verb; the default 16 entries
         // thrash as soon as a schema has a few tables.
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
@@ -1650,119 +1657,210 @@ impl Db {
     }
 
     /// Fetch the offloaded nodes reads wait on, move settled leaves to the
-    /// chunk store and delete reclaimed ones from it ([`crate::chunk_store`]).
-    /// A failed operation is retried next tick; the first failure is
-    /// returned once the rest ran.
+    /// chunk store and delete reclaimed ones from it ([`crate::chunk_store`]),
+    /// unless the host runs that I/O. The fetches run first, so messages
+    /// held for those nodes are served before the puts start. A failed
+    /// operation is retried next tick; the first failure is returned once
+    /// the rest ran.
     async fn pump_chunk_store(&self) -> Result<(), Error> {
         let chunks = self.inner().chunks.clone();
+        if chunks.host_io() {
+            return Ok(());
+        }
         let Some(store) = chunks.store().cloned() else {
             return Ok(());
         };
-        let Some(wanted) = chunks.begin_fetch() else {
+        let Some(mut io) = self.begin_chunk_io(&chunks)? else {
             return Ok(());
         };
+        let wanted = std::mem::take(&mut io.fetch);
         let any = !wanted.is_empty();
         let mut fetched = self.fetch_from(&chunks, &*store, wanted).await;
+        if let Some(lease) = &mut io.lease {
+            // Fetched (or failed, and asked again by the read that needs it).
+            lease.unfetched.clear();
+        }
         if any && fetched.is_ok() {
-            // Messages held for those nodes are served now, not a tick later.
             fetched = self.sync_tick();
         }
-        let moved = match chunks.offload_store() {
-            Some(_) => self.offload_to(&*store).await,
-            None => Ok(()),
-        };
-        chunks.end_fetch();
-        fetched.and(moved)
+        let done = io.run(&*store).await;
+        let applied = self.end_chunk_io(&chunks, done);
+        fetched.and(applied)
     }
 
-    /// Install what the chunk store holds for `wanted`; reads waiting on
-    /// those nodes run again.
+    /// The next batch of chunk-store work, for a store opened
+    /// [`crate::options::DbConfig::with_host_chunk_io`]: `None` while the
+    /// last one is out or without a chunk store. Hand what running it came
+    /// to back with [`Self::finish_chunk_io`]; a batch dropped instead ends
+    /// there, and its work goes to the next one.
+    pub fn take_chunk_io(&self) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
+        let chunks = self.inner().chunks.clone();
+        if !chunks.host_io() {
+            return Err(not_host_run());
+        }
+        if chunks.store().is_none() {
+            return Ok(None);
+        }
+        self.begin_chunk_io(&chunks)
+    }
+
+    /// Apply a batch [`Self::take_chunk_io`] handed out: fetched nodes are
+    /// installed and the reads and requests waiting on them run again,
+    /// moved leaves leave SQLite, deleted ones leave the queue. Failed
+    /// operations are retried in a later batch; the first failure is
+    /// returned once the rest are applied. A batch this store did not hand
+    /// out, or not the one out now, is refused.
+    pub fn finish_chunk_io(&self, done: crate::chunk_store::ChunkIoDone) -> Result<(), Error> {
+        let chunks = self.inner().chunks.clone();
+        if !chunks.host_io() {
+            return Err(not_host_run());
+        }
+        let outstanding = chunks.outstanding();
+        let ours = done.io.lease.as_ref().is_some_and(|lease| {
+            std::ptr::eq(lease.chunks.as_ptr(), std::sync::Arc::as_ptr(&chunks))
+                && Some(lease.batch) == outstanding
+        });
+        if !ours {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                match outstanding {
+                    None => "chunk I/O: no batch is out to finish",
+                    Some(_) => "chunk I/O: this is not the batch that is out",
+                },
+            ));
+        }
+        self.end_chunk_io(&chunks, done)
+    }
+
+    /// Start a batch: what reads wait on, and (between SQLite transactions,
+    /// so the mark that a put may have landed is durable before it does)
+    /// settled leaves to put and reclaimed ones to delete.
+    fn begin_chunk_io(
+        &self,
+        chunks: &std::sync::Arc<crate::large::Chunks>,
+    ) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
+        let Some((batch, fetch)) = chunks.begin_fetch() else {
+            return Ok(None);
+        };
+        // From here the lease ends the batch however this returns.
+        let lease = crate::chunk_store::Lease {
+            chunks: std::sync::Arc::downgrade(chunks),
+            batch,
+            unfetched: fetch.clone(),
+        };
+        let mut io = crate::chunk_store::ChunkIo::unleased(fetch);
+        io.lease = Some(lease);
+        if chunks.offload_store().is_some() {
+            let inner = self.inner();
+            if inner.conn.is_autocommit() {
+                io.puts = crate::large::begin_offload(&inner.conn, CHUNK_STORE_NODES_PER_TICK)?;
+            }
+            io.deletes = crate::large::pending_deletes(&inner.conn, CHUNK_STORE_NODES_PER_TICK)?;
+        }
+        Ok(Some(io))
+    }
+
+    /// End a batch [`Self::begin_chunk_io`] started, once it is applied.
+    fn end_chunk_io(
+        &self,
+        chunks: &crate::large::Chunks,
+        mut done: crate::chunk_store::ChunkIoDone,
+    ) -> Result<(), Error> {
+        let lease = done.io.lease.take();
+        let applied = self.apply_chunk_io(chunks, done);
+        if let Some(mut lease) = lease {
+            // Fetches that failed are asked again by the reads that need them.
+            lease.unfetched.clear();
+        }
+        applied
+    }
+
+    fn apply_chunk_io(
+        &self,
+        chunks: &crate::large::Chunks,
+        done: crate::chunk_store::ChunkIoDone,
+    ) -> Result<(), Error> {
+        let crate::chunk_store::ChunkIoDone {
+            io,
+            fetched,
+            put,
+            deleted,
+        } = done;
+        let mut first = None;
+        let mut fetch_failed = None;
+        let any = !io.fetch.is_empty();
+        if any {
+            self.install_fetched(chunks, &io.fetch, fetched, &mut fetch_failed);
+        }
+        {
+            let inner = self.inner();
+            if !io.puts.is_empty() {
+                in_savepoint(&inner.conn, "jazz_lv_offloaded", || {
+                    for ((key, _), put) in io.puts.iter().zip(put) {
+                        match put {
+                            Ok(()) => crate::large::offloaded(&inner.conn, key)?,
+                            Err(error) => {
+                                first.get_or_insert(error);
+                            }
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+            if !io.deletes.is_empty() {
+                in_savepoint(&inner.conn, "jazz_lv_deleted", || {
+                    for (key, done) in io.deletes.iter().zip(deleted) {
+                        match done {
+                            Ok(()) => crate::large::deleted(&inner.conn, key)?,
+                            Err(error) => {
+                                first.get_or_insert(error);
+                            }
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+        if any && fetch_failed.is_none() {
+            // Messages held for those nodes are served now, not a tick later.
+            self.sync_tick()?;
+        }
+        fetch_failed.or(first).map_or(Ok(()), Err)
+    }
+
+    /// Install what the chunk store answered for `wanted`; reads waiting
+    /// on those nodes run again.
+    fn install_fetched(
+        &self,
+        chunks: &crate::large::Chunks,
+        wanted: &[jazz_types::large_values::chunks::ChunkRequest],
+        answers: Vec<Result<Option<bytes::Bytes>, Error>>,
+        first: &mut Option<Error>,
+    ) {
+        for (request, answer) in wanted.iter().zip(answers) {
+            if let Err(error) = answer.and_then(|bytes| chunks.install_from_store(request, bytes)) {
+                // Asked again by the next read that needs it.
+                first.get_or_insert(error);
+            }
+        }
+        self.inner().retry_awaiting();
+    }
+
+    /// Fetch `wanted` from the chunk store and install it.
     async fn fetch_from(
         &self,
         chunks: &crate::large::Chunks,
         store: &dyn crate::chunk_store::ChunkStore,
         wanted: Vec<jazz_types::large_values::chunks::ChunkRequest>,
     ) -> Result<(), Error> {
-        use futures::StreamExt;
         if wanted.is_empty() {
             return Ok(());
         }
-        let keys: Vec<_> = wanted
-            .iter()
-            .map(crate::chunk_store::NodeKey::from)
-            .collect();
-        let answers: Vec<_> = futures::stream::iter(keys.iter().map(|key| store.get(key)))
-            .buffered(CHUNK_STORE_CONCURRENCY)
-            .collect()
+        let done = crate::chunk_store::ChunkIo::unleased(wanted)
+            .run(store)
             .await;
         let mut first = None;
-        for (request, answer) in wanted.iter().zip(answers) {
-            match answer.and_then(|bytes| chunks.install_from_store(request, bytes)) {
-                Ok(()) => {}
-                Err(error) => {
-                    // Asked again by the next read that needs it.
-                    first.get_or_insert(error);
-                }
-            }
-        }
-        self.inner().retry_awaiting();
-        first.map_or(Ok(()), Err)
-    }
-
-    /// Move a batch of settled leaves to the chunk store, then delete a
-    /// batch of reclaimed ones from it. Puts start only between SQLite
-    /// transactions, so the mark that a put may have landed is durable
-    /// before it does.
-    async fn offload_to(&self, store: &dyn crate::chunk_store::ChunkStore) -> Result<(), Error> {
-        use futures::StreamExt;
-        let mut first = None;
-        let batch = {
-            let inner = self.inner();
-            if inner.conn.is_autocommit() {
-                crate::large::begin_offload(&inner.conn, CHUNK_STORE_NODES_PER_TICK)?
-            } else {
-                Vec::new()
-            }
-        };
-        if !batch.is_empty() {
-            let puts: Vec<_> =
-                futures::stream::iter(batch.iter().map(|(key, bytes)| store.put(key, bytes)))
-                    .buffered(CHUNK_STORE_CONCURRENCY)
-                    .collect()
-                    .await;
-            let inner = self.inner();
-            in_savepoint(&inner.conn, "jazz_lv_offloaded", || {
-                for ((key, _), put) in batch.iter().zip(puts) {
-                    match put {
-                        Ok(()) => crate::large::offloaded(&inner.conn, key)?,
-                        Err(error) => {
-                            first.get_or_insert(error);
-                        }
-                    }
-                }
-                Ok(())
-            })?;
-        }
-        let deletes =
-            crate::large::pending_deletes(&self.inner().conn, CHUNK_STORE_NODES_PER_TICK)?;
-        if !deletes.is_empty() {
-            let done: Vec<_> = futures::stream::iter(deletes.iter().map(|key| store.delete(key)))
-                .buffered(CHUNK_STORE_CONCURRENCY)
-                .collect()
-                .await;
-            let inner = self.inner();
-            in_savepoint(&inner.conn, "jazz_lv_deleted", || {
-                for (key, done) in deletes.iter().zip(done) {
-                    match done {
-                        Ok(()) => crate::large::deleted(&inner.conn, key)?,
-                        Err(error) => {
-                            first.get_or_insert(error);
-                        }
-                    }
-                }
-                Ok(())
-            })?;
-        }
+        self.install_fetched(chunks, &done.io.fetch, done.fetched, &mut first);
         first.map_or(Ok(()), Err)
     }
 
@@ -1792,12 +1890,27 @@ impl Db {
                     let Some(store) = chunks.store().cloned().filter(|_| chunks.has_fetch()) else {
                         return Err(error);
                     };
-                    let Some(wanted) = chunks.begin_fetch() else {
+                    if chunks.host_io() {
+                        // Beside the host's batch, which may be out: a
+                        // node a read waits on is referenced, so no
+                        // delete in that batch removes it.
+                        let wanted = chunks.take_fetch();
+                        if wanted.is_empty() {
+                            return Err(error);
+                        }
+                        self.fetch_from(&chunks, &*store, wanted).await?;
+                        continue;
+                    }
+                    let Some((batch, wanted)) = chunks.begin_fetch() else {
                         return Err(error);
                     };
-                    let fetched = self.fetch_from(&chunks, &*store, wanted).await;
-                    chunks.end_fetch();
-                    fetched?;
+                    // Ends the batch even if this future is dropped.
+                    let _lease = crate::chunk_store::Lease {
+                        chunks: std::sync::Arc::downgrade(&chunks),
+                        batch,
+                        unfetched: Vec::new(),
+                    };
+                    self.fetch_from(&chunks, &*store, wanted).await?;
                 }
                 result => return result,
             }
@@ -2050,9 +2163,10 @@ impl Db {
         // included, so their metadata columns are accepted).
         let session = Session::system();
         Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, true)?;
-        let shape =
-            blake3::hash(format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes());
-        let bound = blake3::hash(format!("{binding:?}").as_bytes());
+        let shape = jazz_types::sha256::hash(
+            format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes(),
+        );
+        let bound = jazz_types::sha256::hash(format!("{binding:?}").as_bytes());
         Ok(PreparedQuery {
             query: query.clone(),
             binding,
@@ -2816,7 +2930,7 @@ impl Db {
                 inner.owner = Rc::new(target);
                 // Read policies that changed may read differently from
                 // here: a subscription resuming from before opens fresh.
-                let mut digest = blake3::Hasher::new();
+                let mut digest = jazz_types::sha256::Hasher::new();
                 for table in &inner.owner.jazz.runtime().tables {
                     digest.update(format!("{}{:?}", table.name, table.read_policy).as_bytes());
                 }
@@ -3816,7 +3930,7 @@ impl Inner {
                 // A group's key: the group-by cell, a chunked one by its
                 // identity (SPEC 19.11).
                 let key = format!("{:?}", Sql::from(row.get_ref(0).map_err(storage)?));
-                blake3::hash(key.as_bytes()).as_bytes()[..16].to_vec()
+                jazz_types::sha256::hash(key.as_bytes()).as_bytes()[..16].to_vec()
             } else {
                 row.get(0).map_err(storage)?
             };
@@ -5486,7 +5600,7 @@ impl Inner {
         let cell = self.bind_cell(table, column, value, Cells::Authored)?;
         let incoming = self.logical_text(&column.name, value)?;
         let format = column.merge.text_format().expect("a text strategy");
-        let merged = crate::text_merge::merge3(format, &base, &current, &incoming);
+        let merged = jazz_text::merge3(format, &base, &current, &incoming);
         Ok((merged != incoming).then_some((merged, cell)))
     }
 
@@ -6915,7 +7029,10 @@ impl SchemaViewId {
     fn for_schema(schema: &JazzSchema) -> Self {
         let bytes =
             serde_json::to_vec(schema.public_schema()).expect("public schema always serializes");
-        Self(blake3::derive_key("jazz typed schema view id v1", &bytes))
+        Self(jazz_types::sha256::derive_key(
+            "jazz typed schema view id v1",
+            &bytes,
+        ))
     }
 }
 
@@ -6979,9 +7096,45 @@ fn same_tables(
 }
 
 impl Db {
-    /// Register a typed schema view. The handle shares this owner's store,
-    /// batches, clock and subscriptions; it reads and writes its own columns
-    /// of the physical tables, which hold the union of every admitted view.
+    /// A handle that reads and writes as a sync session declaring schema
+    /// `version` is served: by that admitted version's names, governed by
+    /// the current schema's policies. `None` while `version` is not
+    /// admitted.
+    pub fn governed_view(&self, version: crate::ids::SchemaVersionId) -> Option<Db> {
+        let view = self.inner.borrow().governed(version)?;
+        Some(Db {
+            inner: self.inner.clone(),
+            view: Some(view),
+        })
+    }
+
+    /// [`Self::governed_view`] for a session pinned to published bundle
+    /// `bundle` (see [`Self::check_session_pin`]): governed by the
+    /// bundle's policies instead of the current schema's. Without a bundle
+    /// it is [`Self::governed_view`]. `None` while `version` is not
+    /// admitted or the bundle does not resolve.
+    pub fn pinned_view(
+        &self,
+        version: crate::ids::SchemaVersionId,
+        bundle: Option<&crate::catalogue::BundleId>,
+    ) -> Result<Option<Db>, Error> {
+        let Some(bundle) = bundle else {
+            return Ok(self.governed_view(version));
+        };
+        let mut inner = self.inner.borrow_mut();
+        let Some((_, governing)) = inner.bundle(bundle)? else {
+            return Ok(None);
+        };
+        let Some(view) = inner.governed_by(version, governing) else {
+            return Ok(None);
+        };
+        drop(inner);
+        Ok(Some(Db {
+            inner: self.inner.clone(),
+            view: Some(view),
+        }))
+    }
+
     /// Ship more of the app's versions and lenses (see
     /// [`DbConfig::with_migrations`]): a client learns an app's migrations
     /// when it first sees the app, not only when it opens.
@@ -7010,6 +7163,9 @@ impl Db {
         }
     }
 
+    /// Register a typed schema view. The handle shares this owner's store,
+    /// batches, clock and subscriptions; it reads and writes its own columns
+    /// of the physical tables, which hold the union of every admitted view.
     pub async fn register_schema_view(&self, schema: JazzSchema) -> Result<Db, Error> {
         // A version the app's lenses lead to is admitted as the authority
         // admits it, not named against the current one.
@@ -7137,6 +7293,9 @@ struct Batch {
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
     edits: LargeEdits,
+    /// Leases of the streamed values the batch's writes hold: their chunks
+    /// stay until the batch commits or is dropped.
+    uploads: Vec<crate::db::large_ops::UploadLease>,
 }
 
 #[derive(Default)]
@@ -7636,6 +7795,7 @@ impl Db {
                 kind,
                 ops: Vec::new(),
                 edits: LargeEdits::default(),
+                uploads: Vec::new(),
             },
         );
         Ok(())
@@ -7839,6 +7999,7 @@ impl Db {
     }
 
     fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+        crate::db::large_ops::renew_upload_leases(&self.inner(), &batch.uploads)?;
         self.with_upload(|| self.commit_ops_now(batch, kind))
     }
 
@@ -8133,6 +8294,23 @@ impl Db {
             batch.edits.pending_nodes.truncate(marks.1);
         }
         staged
+    }
+
+    /// Keep a streamed value's upload lease for as long as batch `id` is
+    /// open.
+    pub(crate) fn hold_upload(
+        &self,
+        id: OpenTransactionId,
+        lease: crate::db::large_ops::UploadLease,
+    ) -> Result<(), Error> {
+        self.inner
+            .staging()
+            .batches
+            .get_mut(&id)
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?
+            .uploads
+            .push(lease);
+        Ok(())
     }
 
     fn record_read(

@@ -13,10 +13,8 @@ export {
   type BrowserAuthSecretStoreOptions,
 } from "../runtime/auth-secret-store.js";
 
-export {
-  createAccountManager,
-  type AccountManagerConfig,
-} from "../accounts/create-account-manager.js";
+export { createAccountManager } from "../web/lazy-local-first.js";
+export type { AccountManagerConfig } from "../accounts/create-account-manager.js";
 export * from "../accounts/exports.js";
 
 export { accountState } from "./account-state.js";

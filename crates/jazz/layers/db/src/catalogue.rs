@@ -139,8 +139,8 @@ pub fn bundle_id(schema: &SchemaHash, permissions: &Permissions) -> Result<Bundl
     Ok(BundleId(*bundle_hash(schema, &def).as_bytes()))
 }
 
-fn bundle_hash(schema: &SchemaHash, def: &str) -> blake3::Hash {
-    let mut hasher = blake3::Hasher::new();
+fn bundle_hash(schema: &SchemaHash, def: &str) -> jazz_types::sha256::Hash {
+    let mut hasher = jazz_types::sha256::Hasher::new();
     hasher.update(b"jazz-bundle-v1\0");
     hasher.update(schema.as_bytes());
     hasher.update(def.as_bytes());

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -69,8 +69,35 @@ pub enum StorageBackend {
     Persistent { path: PathBuf },
 }
 
+/// Where a persistent store keeps the bytes of large values once they
+/// settle (see [`jazz::chunk_store`]). The rows and the chunk metadata
+/// always stay in `jazz.sqlite`.
+#[derive(Debug, Clone)]
+pub enum BlobStore {
+    /// In `jazz.sqlite` itself. Simplest, but the file grows with every
+    /// large value.
+    Sqlite,
+    /// As files under `dir`; `None` is `blobs/` in the data directory.
+    Files { dir: Option<PathBuf> },
+    /// As objects in an S3-compatible bucket ([`crate::s3`]). The bucket
+    /// and prefix belong to this data directory alone: a store deletes the
+    /// values it reclaims.
+    S3(crate::s3::S3Options),
+    /// As private blobs in a Vercel Blob store ([`crate::vercel_blob`]),
+    /// under a prefix that belongs to this data directory alone.
+    VercelBlob(crate::vercel_blob::VercelBlobOptions),
+}
+
+/// Records which [`BlobStore`] a data directory was started with.
+const BLOB_STORE_MARKER: &str = "blob-store";
+/// A data directory's own id, which its blob directory is claimed for.
+const STORE_ID_FILE: &str = "store-id";
+/// In a blob directory: the id of the data directory that owns it.
+const BLOB_OWNER_FILE: &str = "owner";
+
 pub struct ServerBuilder {
     app_id: AppId,
+    blobs: BlobStore,
     auth_config: AuthConfig,
     schema_mode: ServerSchemaMode,
     storage_backend: StorageBackend,
@@ -89,6 +116,7 @@ impl ServerBuilder {
                 ..Default::default()
             },
             schema_mode: ServerSchemaMode::Dynamic,
+            blobs: BlobStore::Sqlite,
             storage_backend: StorageBackend::Persistent {
                 path: PathBuf::from("./data"),
             },
@@ -122,6 +150,15 @@ impl ServerBuilder {
 
     pub fn with_storage(mut self, backend: StorageBackend) -> Self {
         self.storage_backend = backend;
+        self
+    }
+
+    /// Where a persistent store keeps settled large-value bytes. Defaults to
+    /// [`BlobStore::Sqlite`]. A data directory keeps the blob store it was
+    /// started with, except that one whose blobs are in SQLite may move
+    /// them out (they move on later ticks).
+    pub fn with_blob_store(mut self, blobs: BlobStore) -> Self {
+        self.blobs = blobs;
         self
     }
 
@@ -191,7 +228,12 @@ impl ServerBuilder {
 
         // One store per app: the catalogue and the account registry are host
         // tables in the file the runtime's rows live in, all on its thread.
-        let store = AppStore::open(&self.build_core_server_shell_storage_config()?)?;
+        let (storage_config, blob_store_record) = self.build_core_server_shell_storage_config()?;
+        let store = AppStore::open(&storage_config)?;
+        // Only a store that opened is recorded as having moved its blobs.
+        if let Some(record) = blob_store_record {
+            record.write()?;
+        }
         store.set_app(self.app_id.to_string());
         let (catalogue_store, latest_catalogue_schema) = self.build_catalogue_store(&store)?;
         let core_server_shell = self.build_core_server_shell(latest_catalogue_schema, &store)?;
@@ -304,13 +346,61 @@ impl ServerBuilder {
         Ok(Some(store.start_runtime(schema, role, dynamic, dynamic)?))
     }
 
-    fn build_core_server_shell_storage_config(&self) -> Result<StorageConfig, String> {
+    /// The storage to open, and the blob-store record to write once it has
+    /// opened (if it changes).
+    fn build_core_server_shell_storage_config(
+        &self,
+    ) -> Result<(StorageConfig, Option<BlobStoreRecord>), String> {
         match &self.storage_backend {
-            StorageBackend::InMemory => Ok(StorageConfig::InMemory),
+            StorageBackend::InMemory => Ok((StorageConfig::InMemory, None)),
             StorageBackend::Persistent { path } => {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
-                Ok(StorageConfig::data_dir(path))
+                let blobs = match &self.blobs {
+                    // A bucket's default prefix is this store's own.
+                    BlobStore::S3(options) if options.prefix.is_empty() => {
+                        let mut options = options.clone();
+                        options.prefix = format!("jazz/{}/{}/", self.app_id, store_id(path)?);
+                        BlobStore::S3(options)
+                    }
+                    BlobStore::VercelBlob(options) if options.prefix.is_empty() => {
+                        let mut options = options.clone();
+                        options.prefix = format!("jazz/{}/{}/", self.app_id, store_id(path)?);
+                        BlobStore::VercelBlob(options)
+                    }
+                    blobs => blobs.clone(),
+                };
+                let plan = plan_blob_store(path, &blobs)?;
+                let config = match (&plan.blob_dir, &blobs) {
+                    (Some(dir), _) => {
+                        claim_blob_dir(path, dir)?;
+                        StorageConfig::data_dir(path).with_blob_dir(dir.clone())
+                    }
+                    (None, BlobStore::S3(options)) => {
+                        warn_on_distant_bucket(options);
+                        let store = crate::s3::S3ChunkStore::new(options.clone(), store_id(path)?)?;
+                        StorageConfig::data_dir(path).with_blobs(crate::runtime::Blobs::Network(
+                            crate::runtime::NetworkChunkStore {
+                                store: Arc::new(store),
+                                name: options.describe(),
+                            },
+                        ))
+                    }
+                    (None, BlobStore::VercelBlob(options)) => {
+                        let store = crate::vercel_blob::VercelBlobChunkStore::new(
+                            options.clone(),
+                            store_id(path)?,
+                        )?;
+                        StorageConfig::data_dir(path).with_blobs(crate::runtime::Blobs::Network(
+                            crate::runtime::NetworkChunkStore {
+                                store: Arc::new(store),
+                                name: options.describe(),
+                            },
+                        ))
+                    }
+                    (None, _) => StorageConfig::data_dir(path),
+                };
+                Ok((config, plan.record))
             }
         }
     }
@@ -319,6 +409,309 @@ impl ServerBuilder {
     fn local_durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Global
     }
+}
+
+/// Where a data directory's large values go, and the record of that choice
+/// still to be written.
+struct BlobStorePlan {
+    /// `None` keeps them in SQLite.
+    blob_dir: Option<PathBuf>,
+    record: Option<BlobStoreRecord>,
+}
+
+/// A data directory's blob-store record, written once its store has opened.
+struct BlobStoreRecord {
+    marker: PathBuf,
+    contents: String,
+}
+
+impl BlobStoreRecord {
+    fn write(&self) -> Result<(), String> {
+        write_durably(&self.marker, self.contents.as_bytes())
+    }
+}
+
+/// Refuse to start `data_dir` with a blob store other than the one it was
+/// started with. A directory with no record keeps its blobs in SQLite (every
+/// store did before blob stores), and may move them out.
+///
+/// The record names the blob directory relative to the data directory when
+/// it is inside it (so the two move together) and absolute otherwise, so a
+/// relative `dir` means the same directory whatever the working directory.
+fn plan_blob_store(data_dir: &Path, blobs: &BlobStore) -> Result<BlobStorePlan, String> {
+    let marker = data_dir.join(BLOB_STORE_MARKER);
+    let recorded = match std::fs::read_to_string(&marker) {
+        Ok(recorded) => recorded.trim_end_matches('\n').to_owned(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "sqlite".to_owned(),
+        Err(error) => return Err(format!("read {}: {error}", marker.display())),
+    };
+    let data_dir = absolute(data_dir)?;
+    let (wanted, blob_dir) = match blobs {
+        BlobStore::Sqlite => ("sqlite".to_owned(), None),
+        BlobStore::Files { dir } => {
+            let dir = match dir {
+                Some(dir) => absolute(dir)?,
+                None => data_dir.join("blobs"),
+            };
+            let named = if dir == data_dir.join("blobs") {
+                "files".to_owned()
+            } else if let Ok(inside) = dir.strip_prefix(&data_dir) {
+                format!("files {}", inside.display())
+            } else {
+                format!("files {}", dir.display())
+            };
+            (named, Some(dir))
+        }
+        BlobStore::S3(options) => (options.describe(), None),
+        BlobStore::VercelBlob(options) => (options.describe(), None),
+    };
+    if recorded == wanted {
+        return Ok(BlobStorePlan {
+            blob_dir,
+            record: None,
+        });
+    }
+    if recorded != "sqlite" {
+        return Err(format!(
+            "data dir '{}' keeps its large values in {recorded:?}; moving them to {wanted:?} is not supported yet",
+            data_dir.display(),
+        ));
+    }
+    Ok(BlobStorePlan {
+        blob_dir,
+        record: Some(BlobStoreRecord {
+            marker,
+            contents: format!("{wanted}\n"),
+        }),
+    })
+}
+
+/// Vercel functions and Sandboxes run in AWS regions: a bucket in another
+/// region pays transfer both ways and adds latency to every cold read.
+fn warn_on_distant_bucket(options: &crate::s3::S3Options) {
+    if options.endpoint.is_some() {
+        return;
+    }
+    let Some(vercel) = std::env::var("VERCEL_REGION").ok() else {
+        return;
+    };
+    if let Some(aws) = aws_region_of_vercel(&vercel)
+        && aws != options.region
+    {
+        tracing::warn!(
+            bucket = %options.bucket,
+            bucket_region = %options.region,
+            vercel_region = %vercel,
+            "the large-value bucket is in {}, but this deployment runs in {vercel} ({aws}): \
+             put the bucket in {aws} to avoid cross-region transfer",
+            options.region,
+        );
+    }
+}
+
+/// The AWS region a Vercel region runs in.
+pub fn aws_region_of_vercel(vercel: &str) -> Option<&'static str> {
+    Some(match vercel {
+        "iad1" => "us-east-1",
+        "cle1" => "us-east-2",
+        "sfo1" => "us-west-1",
+        "pdx1" => "us-west-2",
+        "yul1" => "ca-central-1",
+        "gru1" => "sa-east-1",
+        "dub1" => "eu-west-1",
+        "lhr1" => "eu-west-2",
+        "cdg1" => "eu-west-3",
+        "fra1" => "eu-central-1",
+        "arn1" => "eu-north-1",
+        "cpt1" => "af-south-1",
+        "dxb1" => "me-central-1",
+        "bom1" => "ap-south-1",
+        "sin1" => "ap-southeast-1",
+        "syd1" => "ap-southeast-2",
+        "hkg1" => "ap-east-1",
+        "hnd1" => "ap-northeast-1",
+        "icn1" => "ap-northeast-2",
+        "kix1" => "ap-northeast-3",
+        _ => return None,
+    })
+}
+
+/// Claim `blob_dir` for `data_dir`, or refuse it if another data directory
+/// owns it: a store deletes the values it reclaims, so two stores sharing a
+/// directory would delete each other's values. The claim is exclusive: the
+/// owner file is created only if none exists, so of two data dirs claiming
+/// one blob dir at once, one wins and the other reads its id.
+fn claim_blob_dir(data_dir: &Path, blob_dir: &Path) -> Result<(), String> {
+    let id = store_id(data_dir)?;
+    std::fs::create_dir_all(blob_dir)
+        .map_err(|e| format!("failed to create blob dir '{}': {e}", blob_dir.display()))?;
+    let owner_file = blob_dir.join(BLOB_OWNER_FILE);
+    if !owner_file.exists() {
+        create_exclusively(&owner_file, format!("{id}\n").as_bytes())?;
+    }
+    let owner = read_owner(&owner_file)?;
+    if owner != id {
+        return Err(format!(
+            "blob dir '{}' belongs to another data dir; give each data dir its own blob dir",
+            blob_dir.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Create `path` holding `contents`, unless it already exists (which is
+/// not an error: the caller reads who won). A synced temporary file is
+/// hard-linked into place, so the file appears whole. Where the file system
+/// has no hard links (FAT, SMB, some FUSE and NFS mounts), it is created
+/// with `O_EXCL` and then written, and readers wait out the moment it is
+/// empty.
+fn create_exclusively(path: &Path, contents: &[u8]) -> Result<(), String> {
+    use std::io::{ErrorKind, Write};
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let claim = temporary_beside(path);
+    write_synced(&claim, contents)?;
+    let linked = std::fs::hard_link(&claim, path);
+    let _ = std::fs::remove_file(&claim);
+    match linked {
+        Ok(()) => return sync_dir(parent),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => return Ok(()),
+        // No hard links here; any real failure surfaces from the create below.
+        Err(_) => {}
+    }
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => return Err(format!("claim {}: {error}", path.display())),
+    };
+    file.write_all(contents)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    sync_dir(parent)
+}
+
+/// The id in an owner file, waiting briefly while one created without hard
+/// links is still empty.
+fn read_owner(owner_file: &Path) -> Result<String, String> {
+    for _ in 0..50 {
+        let owner = std::fs::read_to_string(owner_file)
+            .map_err(|e| format!("read {}: {e}", owner_file.display()))?;
+        if owner.ends_with('\n') {
+            return Ok(owner.trim().to_owned());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Err(format!(
+        "{} is incomplete; if no other data dir uses this blob dir, delete it and start again",
+        owner_file.display()
+    ))
+}
+
+/// The data directory's id, made on first use.
+fn store_id(data_dir: &Path) -> Result<String, String> {
+    let file = data_dir.join(STORE_ID_FILE);
+    match std::fs::read_to_string(&file) {
+        Ok(id) => return Ok(id.trim().to_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("read {}: {error}", file.display())),
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    write_durably(&file, format!("{id}\n").as_bytes())?;
+    Ok(id)
+}
+
+/// `path` as one name per directory, read the way the file system reads it:
+/// each part that exists is canonicalized as it is reached (so a symlink,
+/// and a `..` after it, resolve as they would on disk), and parts that do
+/// not exist yet are appended, with `.` and `..` resolved as written.
+fn absolute(path: &Path) -> Result<PathBuf, String> {
+    let path =
+        std::path::absolute(path).map_err(|e| format!("resolve '{}': {e}", path.display()))?;
+    let mut resolved = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            std::path::Component::Normal(name) => {
+                resolved.push(name);
+                match std::fs::canonicalize(&resolved) {
+                    Ok(on_disk) => resolved = without_verbatim_prefix(on_disk),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("resolve '{}': {error}", resolved.display()));
+                    }
+                }
+            }
+            // The drive or share, and the root: kept as written.
+            other => resolved.push(other),
+        }
+    }
+    Ok(resolved)
+}
+
+/// Windows' canonical paths are verbatim (`\\?\C:\x`, `\\?\UNC\host\share\x`);
+/// the plain spelling (`C:\x`, `\\host\share\x`) names the same file and is
+/// the one people write, so it is the one recorded.
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            if rest.as_bytes().get(1) == Some(&b':') {
+                return PathBuf::from(rest);
+            }
+        }
+    }
+    path
+}
+
+/// Write `path` so that a crash leaves either the old file or the whole
+/// new one: a synced temporary file renamed into place, then the directory
+/// synced.
+fn write_durably(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let temporary = temporary_beside(path);
+    let written = write_synced(&temporary, contents).and_then(|()| {
+        std::fs::rename(&temporary, path)
+            .map_err(|e| format!("rename {}: {e}", temporary.display()))
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written?;
+    sync_dir(path.parent().unwrap_or(Path::new(".")))
+}
+
+/// A temporary name next to `path`, unique to this write.
+fn temporary_beside(path: &Path) -> PathBuf {
+    path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()))
+}
+
+fn write_synced(path: &Path, contents: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut file =
+        std::fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+    let written = file
+        .write_all(contents)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("write {}: {e}", path.display()));
+    if written.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    written
+}
+
+fn sync_dir(dir: &Path) -> Result<(), String> {
+    std::fs::File::open(dir)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| format!("sync {}: {e}", dir.display()))
 }
 
 fn refuse_pre_sqlite_data_dir(path: &std::path::Path) -> Result<(), String> {
@@ -651,6 +1044,302 @@ mod tests {
             tiers,
             std::collections::HashSet::from([DurabilityTier::Global])
         );
+    }
+
+    #[tokio::test]
+    async fn a_data_dir_keeps_its_blob_store_except_moving_out_of_sqlite() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let start = |blobs: BlobStore| {
+            ServerBuilder::new(AppId::from_name("blob-store-pin"))
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .with_blob_store(blobs)
+                .build()
+        };
+        let files = || BlobStore::Files { dir: None };
+
+        // A store from before blob stores keeps its blobs in SQLite, and may
+        // move them out.
+        start(BlobStore::Sqlite)
+            .await
+            .expect("sqlite")
+            .shutdown()
+            .await;
+        assert!(!data_dir.path().join(BLOB_STORE_MARKER).exists());
+        start(files())
+            .await
+            .expect("sqlite to files")
+            .shutdown()
+            .await;
+        assert_eq!(
+            std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap(),
+            "files\n"
+        );
+        start(files()).await.expect("files again").shutdown().await;
+
+        for other in [
+            BlobStore::Sqlite,
+            BlobStore::Files {
+                dir: Some(data_dir.path().join("elsewhere")),
+            },
+        ] {
+            let error = start(other.clone())
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{other:?} after files starts"));
+            assert!(error.contains("not supported yet"), "{error}");
+        }
+    }
+
+    /// Without a prefix, each data dir gets its own under the app's, so two
+    /// stores sharing a bucket (preview and production) never share keys.
+    #[tokio::test]
+    async fn a_bucket_without_a_prefix_gets_one_per_data_dir() {
+        let app = AppId::from_name("blob-store-prefix");
+        let blobs = BlobStore::S3(crate::s3::S3Options {
+            bucket: "jazz".to_owned(),
+            region: "auto".to_owned(),
+            endpoint: Some("http://127.0.0.1:9".to_owned()),
+            prefix: String::new(),
+            path_style: true,
+            credentials: crate::s3::S3Credentials::Static(crate::s3::Keys {
+                access_key_id: "k".to_owned(),
+                secret_access_key: "s".to_owned(),
+                session_token: None,
+            }),
+            sts_endpoint: None,
+        });
+        let mut recorded = Vec::new();
+        for _ in 0..2 {
+            let data_dir = tempfile::TempDir::new().expect("temp data dir");
+            ServerBuilder::new(app)
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .with_blob_store(blobs.clone())
+                .build()
+                .await
+                .expect("start")
+                .shutdown()
+                .await;
+            let id = std::fs::read_to_string(data_dir.path().join(STORE_ID_FILE)).unwrap();
+            let marker = std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap();
+            assert_eq!(
+                marker,
+                format!("s3 http://127.0.0.1:9 jazz/jazz/{app}/{}/\n", id.trim())
+            );
+            recorded.push(marker);
+        }
+        assert_ne!(recorded[0], recorded[1]);
+    }
+
+    /// A Blob store's default prefix is the data dir's own too.
+    #[tokio::test]
+    async fn a_vercel_blob_store_without_a_prefix_gets_one_per_data_dir() {
+        let app = AppId::from_name("vercel-blob-prefix");
+        let blobs = BlobStore::VercelBlob(crate::vercel_blob::VercelBlobOptions {
+            store_id: "abc".to_owned(),
+            prefix: String::new(),
+            credentials: crate::vercel_blob::VercelBlobCredentials::ReadWriteToken("t".to_owned()),
+            api_url: "http://127.0.0.1:9".to_owned(),
+            blob_url: Some("http://127.0.0.1:9".to_owned()),
+        });
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        ServerBuilder::new(app)
+            .with_storage(StorageBackend::Persistent {
+                path: data_dir.path().to_path_buf(),
+            })
+            .with_blob_store(blobs)
+            .build()
+            .await
+            .expect("start")
+            .shutdown()
+            .await;
+        let id = std::fs::read_to_string(data_dir.path().join(STORE_ID_FILE)).unwrap();
+        let marker = std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap();
+        assert_eq!(
+            marker,
+            format!("vercel-blob abc/jazz/{app}/{}/\n", id.trim())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_data_dir_may_move_its_blobs_from_sqlite_to_a_bucket_and_keeps_it() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let bucket = |prefix: &str| {
+            BlobStore::S3(crate::s3::S3Options {
+                bucket: "jazz".to_owned(),
+                region: "auto".to_owned(),
+                endpoint: Some("http://127.0.0.1:9".to_owned()),
+                prefix: prefix.to_owned(),
+                path_style: true,
+                credentials: crate::s3::S3Credentials::Static(crate::s3::Keys {
+                    access_key_id: "k".to_owned(),
+                    secret_access_key: "s".to_owned(),
+                    session_token: None,
+                }),
+                sts_endpoint: None,
+            })
+        };
+        let start = |blobs: BlobStore| {
+            ServerBuilder::new(AppId::from_name("blob-store-s3"))
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .with_blob_store(blobs)
+                .build()
+        };
+        start(BlobStore::Sqlite)
+            .await
+            .expect("sqlite")
+            .shutdown()
+            .await;
+        start(bucket("a/"))
+            .await
+            .expect("sqlite to s3")
+            .shutdown()
+            .await;
+        assert_eq!(
+            std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap(),
+            "s3 http://127.0.0.1:9 jazz/a/\n"
+        );
+        start(bucket("a/"))
+            .await
+            .expect("the same bucket")
+            .shutdown()
+            .await;
+        for other in [
+            bucket("b/"),
+            BlobStore::Files { dir: None },
+            BlobStore::Sqlite,
+        ] {
+            let error = start(other.clone())
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{other:?} after s3 starts"));
+            assert!(error.contains("not supported yet"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_blob_dir_is_named_the_same_however_it_is_spelled() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let start = |dir: PathBuf| {
+            ServerBuilder::new(AppId::from_name("blob-dir-spelling"))
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .with_blob_store(BlobStore::Files { dir: Some(dir) })
+                .build()
+        };
+        // The default, spelled out with a trailing separator, is the default.
+        let spelled_out = PathBuf::from(format!("{}/blobs/", data_dir.path().display()));
+        start(spelled_out)
+            .await
+            .expect("default spelled out")
+            .shutdown()
+            .await;
+        assert_eq!(
+            std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap(),
+            "files\n"
+        );
+        start(data_dir.path().join("x/../blobs"))
+            .await
+            .expect("default through ..")
+            .shutdown()
+            .await;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_blob_dir_through_a_symlink_is_the_directory_it_points_to() {
+        let root = tempfile::TempDir::new().expect("temp root");
+        let data_dir = root.path().join("data");
+        std::fs::create_dir_all(data_dir.join("deep")).unwrap();
+        std::os::unix::fs::symlink(data_dir.join("deep"), root.path().join("link")).unwrap();
+        // `link/..` is `data`, not `root`, on disk.
+        let through_link = root.path().join("link/../blobs");
+        let plan = plan_blob_store(
+            &data_dir,
+            &BlobStore::Files {
+                dir: Some(through_link),
+            },
+        )
+        .expect("plan");
+        assert_eq!(plan.record.expect("a record").contents, "files\n");
+    }
+
+    #[test]
+    fn two_data_dirs_claiming_one_blob_dir_at_once_leave_one_owner() {
+        let blobs = tempfile::TempDir::new().expect("temp blob dir");
+        let dirs: Vec<_> = (0..8).map(|_| tempfile::TempDir::new().unwrap()).collect();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(dirs.len()));
+        let claims: Vec<_> = dirs
+            .iter()
+            .map(|dir| {
+                let (data, blob) = (dir.path().to_path_buf(), blobs.path().to_path_buf());
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    let id = store_id(&data).unwrap();
+                    start.wait();
+                    (id, claim_blob_dir(&data, &blob).is_ok())
+                })
+            })
+            .collect();
+        let winners: Vec<String> = claims
+            .into_iter()
+            .map(|claim| claim.join().unwrap())
+            .filter_map(|(id, won)| won.then_some(id))
+            .collect();
+        assert_eq!(winners.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(blobs.path().join(BLOB_OWNER_FILE)).unwrap(),
+            format!("{}\n", winners[0])
+        );
+    }
+
+    #[test]
+    fn a_blob_dir_inside_the_data_dir_is_recorded_relative_to_it() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let outside = tempfile::TempDir::new().expect("temp blob dir");
+        let plan = |dir: PathBuf| {
+            plan_blob_store(data_dir.path(), &BlobStore::Files { dir: Some(dir) })
+                .expect("plan")
+                .record
+                .expect("a record to write")
+                .contents
+        };
+        assert_eq!(plan(data_dir.path().join("large")), "files large\n");
+        assert_eq!(
+            plan(outside.path().to_path_buf()),
+            format!("files {}\n", absolute(outside.path()).unwrap().display())
+        );
+    }
+
+    #[tokio::test]
+    async fn two_data_dirs_cannot_share_a_blob_dir() {
+        let first = tempfile::TempDir::new().expect("temp data dir");
+        let second = tempfile::TempDir::new().expect("temp data dir");
+        let blobs = tempfile::TempDir::new().expect("temp blob dir");
+        let start = |data_dir: &tempfile::TempDir| {
+            ServerBuilder::new(AppId::from_name("shared-blob-dir"))
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .with_blob_store(BlobStore::Files {
+                    dir: Some(blobs.path().to_path_buf()),
+                })
+                .build()
+        };
+        start(&first).await.expect("first").shutdown().await;
+        let error = start(&second).await.err().expect("second refused");
+        assert!(error.contains("belongs to another data dir"), "{error}");
+        assert!(
+            !second.path().join(BLOB_STORE_MARKER).exists(),
+            "a refused start records nothing"
+        );
+        start(&first).await.expect("first again").shutdown().await;
     }
 
     #[tokio::test]
