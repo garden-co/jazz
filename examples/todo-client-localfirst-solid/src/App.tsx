@@ -6,10 +6,8 @@ import { TodoList } from "./TodoList.js";
 
 type AppProps = { config?: Partial<DbConfig>; fallback?: JSX.Element };
 export function App(props: AppProps = {}) {
-  const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
+  // The app's backend serves Jazz on this origin (`/jazz`), so the client needs no URL.
   const config = (): JazzAppConfig => ({
-    appId: env?.VITE_JAZZ_APP_ID ?? env?.JAZZ_APP_ID ?? "",
-    serverUrl: env?.VITE_JAZZ_SERVER_URL ?? env?.JAZZ_SERVER_URL,
     env: "dev",
     ...props.config,
   });
