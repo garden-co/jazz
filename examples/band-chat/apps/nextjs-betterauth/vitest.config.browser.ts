@@ -6,8 +6,10 @@ import { playwright } from "@vitest/browser-playwright";
 import topLevelAwait from "vite-plugin-top-level-await";
 import wasm from "vite-plugin-wasm";
 import {
+  jazzAppFront,
+  jazzAppRequest,
+  jazzAppUser,
   jazzServerInfo,
-  jazzServerJwtForUser,
   stopJazzServerByUrl,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
@@ -47,8 +49,10 @@ export default defineConfig({
         jazzBrowserTopologyLog,
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
-        jazzServerJwtForUser: async (_context, userId, claims, appId) =>
-          jazzServerJwtForUser(userId, claims, appId),
+        jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
+        jazzAppUser: async (_context, frontUrl, userId, claims) =>
+          jazzAppUser(frontUrl, userId, claims),
+        jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),
       },
     },
     include: ["tests/browser/**/*.test.tsx"],

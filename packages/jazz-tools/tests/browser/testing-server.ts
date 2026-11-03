@@ -83,13 +83,31 @@ export const jazzAppFetch: typeof fetch = async (input, init) => {
  * return the Db config fields for syncing as them: their own origin's URL
  * and a `loginWithBackend()` account from it.
  */
-export async function jazzAppUser(
+export function jazzAppUser(
   app: JazzServerInfo,
   userId: string,
   claims?: Record<string, unknown>,
 ): Promise<{ appId: string; serverUrl: string; account: AccountHandle }> {
+  return signInWithJazzApp(createAccountManager, app, userId, claims);
+}
+
+/**
+ * {@link jazzAppUser} with the caller's own `createAccountManager`, so an
+ * example's account handles come from (and stay in) its own copy of Jazz.
+ */
+export async function signInWithJazzApp<Account>(
+  createManager: (config: {
+    appId: string;
+    serverUrl: string;
+    fetch: typeof fetch;
+    store: AccountStore;
+  }) => Promise<{ loginWithBackend(): Promise<Account> }>,
+  app: JazzServerInfo,
+  userId: string,
+  claims?: Record<string, unknown>,
+): Promise<{ appId: string; serverUrl: string; account: Account }> {
   const serverUrl = await jazzAppUserUrl(app, userId, claims);
-  const accounts = await createAccountManager({
+  const accounts = await createManager({
     appId: app.appId,
     serverUrl,
     fetch: jazzAppFetch,
