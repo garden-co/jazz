@@ -1,5 +1,5 @@
 // Browser receipt for the running app: `pnpm dev` in one terminal, then
-// `pnpm test:e2e`. Drives real Better Auth sign-up, the server bootstrap, the
+// `pnpm screenshots`. Drives real Better Auth sign-up, the server bootstrap, the
 // editor and an invite link across two isolated browser contexts. Set
 // SCREENSHOTS=<dir> to also capture the main screens at 1280 and 375 px in
 // light and dark mode.
