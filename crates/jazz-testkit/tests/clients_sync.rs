@@ -849,3 +849,46 @@ async fn jazz_tools_cli_two_different_users_sync_values_impl() {
     client_bob.shutdown().await.expect("shutdown bob client");
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn remote_nullable_self_join_delivers_cross_row_witnesses() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            use jazz::tools::ReadTier;
+            use jazz::tools::test_support::{AllowAll, ordinary_rows};
+            let schema = SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("items")
+                        .nullable_column("source", ColumnType::Integer)
+                        .nullable_column("target", ColumnType::Integer),
+                )
+                .allow_all()
+                .build();
+            let server = JazzServer::start_with_schema(schema.clone()).await.unwrap();
+            let client =
+                jazz_testkit::connect(server.make_client_context_for_user(schema, "nullable-join"))
+                    .await
+                    .unwrap();
+            let mut ids = Vec::new();
+            for (source, target) in [(7, 9), (2, 7)] {
+                let (id, _, tx) = client
+                    .insert("items", row_input!("source" => source, "target" => target))
+                    .unwrap();
+                client
+                    .wait_for_transaction(tx.unwrap(), DurabilityTier::GlobalServer)
+                    .await
+                    .unwrap();
+                ids.push(id);
+            }
+            let query =
+                jazz::query::Query::from("items").join_via_column("items", "target", "source", []);
+            let rows = ordinary_rows(client.query(query, ReadTier::Remote).await.unwrap());
+            assert_eq!(
+                rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+                vec![ids[0]]
+            );
+            client.shutdown().await.unwrap();
+            server.shutdown().await;
+        })
+        .await;
+}

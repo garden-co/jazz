@@ -373,7 +373,15 @@ fn relation_membership_graph(
         if lowered.nullable_fields.contains(join_key)
             && unwrapped_join_keys.insert(join_key.clone())
         {
-            relation_graph = unwrap_nullable_join_key(relation_graph, join_key.clone(), 1);
+            relation_graph = unwrap_nullable_join_key(
+                relation_graph,
+                join_key.clone(),
+                lowered
+                    .nullable_field_depths
+                    .get(join_key)
+                    .copied()
+                    .unwrap_or(1),
+            );
         }
     }
     Ok(
