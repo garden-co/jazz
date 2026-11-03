@@ -44,7 +44,12 @@ export type JazzAppViewProps<Client = CoreJazzClient> = {
 type AuthAdmission =
   | { kind: "manual" }
   | { kind: "better-auth"; client: Extract<JazzAuth, { kind: "better-auth" }>["client"] }
-  | { kind: "jwt"; key: string | null; isPending: boolean; error: Error | undefined };
+  | {
+      kind: "backend";
+      key: string | null;
+      isPending: boolean;
+      error: Error | undefined;
+    };
 
 function authAdmission(auth: JazzAuth | undefined): AuthAdmission {
   if (!auth) return { kind: "manual" };
@@ -57,7 +62,7 @@ function sameAdmission(left: AuthAdmission, right: AuthAdmission): boolean {
   if (left.kind === "better-auth")
     return right.kind === "better-auth" && left.client === right.client;
   return (
-    right.kind === "jwt" &&
+    right.kind === left.kind &&
     left.key === right.key &&
     left.isPending === right.isPending &&
     left.error === right.error
@@ -79,11 +84,11 @@ export function ConfiguredJazzAppProvider<Config, Client extends CoreJazzClient>
   const [app] = useState(() =>
     createJazzAppOwner({ ...config, auth }, createJazzSession, { start: false }),
   );
-  const jwt = auth?.kind === "jwt" ? auth : undefined;
+  const backend = auth?.kind === "backend" ? auth : undefined;
   const betterAuthClient = auth?.kind === "better-auth" ? auth.client : undefined;
   const requestedAdmission = useMemo(
     () => authAdmission(auth),
-    [auth?.kind, jwt?.key, jwt?.isPending, jwt?.error, betterAuthClient],
+    [auth?.kind, backend?.key, backend?.isPending, backend?.error, betterAuthClient],
   );
   const [appliedAdmission, setAppliedAdmission] = useState(() => requestedAdmission);
   useEffect(() => {
@@ -110,7 +115,7 @@ export function ConfiguredJazzAppProvider<Config, Client extends CoreJazzClient>
     <JazzAppView
       app={app}
       admissionPending={!sameAdmission(appliedAdmission, requestedAdmission)}
-      admissionError={auth?.kind === "jwt" ? auth.error : undefined}
+      admissionError={auth?.kind === "backend" ? auth.error : undefined}
       {...view}
     />
   );
@@ -169,7 +174,6 @@ function JazzAppView<Client extends CoreJazzClient>({
         ? {
             status: admissionError ? ("error" as const) : ("transitioning" as const),
             error: admissionError,
-            needsLogin: false,
           }
         : snapshot),
       ...actions,

@@ -22,8 +22,7 @@ function TestAppProvider(
 }
 const fixture = vi.hoisted(() => ({
   session: undefined as JazzSession<ReturnType<typeof makeFakeClient>> | undefined,
-  stored: null as { token: string; username: string } | null,
-  token: null as string | null,
+  signedIn: false,
   signOutCalls: 0,
   failSignOut: false,
   mounts: 0,
@@ -44,43 +43,46 @@ vi.mock("jazz-tools/react", async () => ({
     <TestAppProvider children={children} signedOut={signedOut} loading={loading} error={error} />
   ),
 }));
+function providerSignOut() {
+  fixture.signOutCalls++;
+  if (fixture.failSignOut) {
+    fixture.failSignOut = false;
+    return false;
+  }
+  fixture.signedIn = false;
+  return true;
+}
 vi.mock("../../../../examples/auth-simple-chat/src/api.js", () => ({
-  requestSignIn: async () => ({ token: "provider-token", username: "member" }),
-  requestSignUp: async () => ({ token: "provider-token", username: "member" }),
-}));
-vi.mock("../../../../examples/auth-simple-chat/src/auth-storage.js", () => ({
-  readStoredAuthSession: () => fixture.stored,
-  writeStoredAuthSession: (_app: string, value: typeof fixture.stored) => {
-    fixture.stored = value;
+  fetchSignedInUser: async () => (fixture.signedIn ? { username: "member", role: "member" } : null),
+  requestSignIn: async () => {
+    fixture.signedIn = true;
+    return { username: "member", role: "member" };
   },
-  clearStoredAuthSession: () => {
-    fixture.signOutCalls++;
-    if (fixture.failSignOut) {
-      fixture.failSignOut = false;
-      throw new Error("provider signout unavailable");
-    }
-    fixture.stored = null;
+  requestSignUp: async () => {
+    fixture.signedIn = true;
+    return { username: "member", role: "member" };
+  },
+  requestSignOut: async () => {
+    if (!providerSignOut()) throw new Error("provider signout unavailable");
   },
 }));
 vi.mock("../../../../examples/auth-betterauth-chat/src/lib/auth-client", () => ({
-  getJwtFromBetterAuth: async () => fixture.token,
   authClient: {
-    signIn: { email: async () => ({}) },
-    signUp: {
+    getSession: async () => ({ data: fixture.signedIn ? { user: { id: "member" } } : null }),
+    signIn: {
       email: async () => {
-        fixture.token = "provider-token";
+        fixture.signedIn = true;
         return {};
       },
     },
-    signOut: async () => {
-      fixture.signOutCalls++;
-      if (fixture.failSignOut) {
-        fixture.failSignOut = false;
-        return { error: { message: "provider signout unavailable" } };
-      }
-      fixture.token = null;
-      return {};
+    signUp: {
+      email: async () => {
+        fixture.signedIn = true;
+        return {};
+      },
     },
+    signOut: async () =>
+      providerSignOut() ? {} : { error: { message: "provider signout unavailable" } },
   },
 }));
 function AuthCard({
@@ -118,12 +120,11 @@ const betterAuthEntry = new URL(
   "../../../../examples/auth-betterauth-chat/app/page.tsx",
   import.meta.url,
 ).pathname;
-const { App: CustomJWTApp }: { App: React.ComponentType } = await import(customEntry);
+const { App: CustomAuthApp }: { App: React.ComponentType } = await import(customEntry);
 const { default: BetterAuthApp }: { default: React.ComponentType } = await import(betterAuthEntry);
 
 beforeEach(() => {
-  fixture.stored = null;
-  fixture.token = null;
+  fixture.signedIn = false;
   fixture.signOutCalls = 0;
   fixture.failSignOut = false;
   fixture.mounts = 0;
@@ -142,10 +143,8 @@ async function setup() {
     {
       createLocalFirst: createLocal,
       restoreLocalFirst: () => account,
-      registerJWT: enroll,
-      loginJWT: enroll,
-      loginOrRegisterJWT: enroll,
-      linkJWT: link,
+      loginWithBackend: enroll,
+      linkWithBackend: link,
       logout() {},
     },
     account,
@@ -159,7 +158,7 @@ async function setup() {
   return { enroll, link, createLocal };
 }
 for (const [name, App] of [
-  ["custom JWT", CustomJWTApp],
+  ["custom auth", CustomAuthApp],
   ["Better Auth", BetterAuthApp],
 ] as const) {
   describe(`${name} actual app with JazzProvider`, () => {

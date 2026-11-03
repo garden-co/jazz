@@ -53,6 +53,10 @@ pub enum StorageConfig {
     SQLite {
         /// The database file.
         path: PathBuf,
+        /// Where settled large-value bytes live: files in this directory
+        /// ([`jazz::chunk_store::FileChunkStore`]), or the database file
+        /// itself when `None`.
+        blobs: Option<PathBuf>,
     },
 }
 
@@ -61,6 +65,19 @@ impl StorageConfig {
     pub fn data_dir(path: impl Into<PathBuf>) -> Self {
         Self::SQLite {
             path: path.into().join("jazz.sqlite"),
+            blobs: None,
+        }
+    }
+
+    /// The same store, with settled large-value bytes kept as files in
+    /// `dir` instead of in the database file. In memory it changes nothing.
+    pub fn with_blob_dir(self, dir: impl Into<PathBuf>) -> Self {
+        match self {
+            Self::SQLite { path, .. } => Self::SQLite {
+                path,
+                blobs: Some(dir.into()),
+            },
+            Self::InMemory => Self::InMemory,
         }
     }
 }
@@ -221,7 +238,9 @@ struct StoreThread {
 /// The file a store lives in.
 #[derive(Clone)]
 enum Source {
-    File(PathBuf),
+    /// The database file, and the directory its large-value bytes live in
+    /// when they are not in the file.
+    File(PathBuf, Option<PathBuf>),
     /// An in-memory store shared by name within this process.
     Memory(String),
 }
@@ -235,14 +254,14 @@ impl Source {
                 std::process::id(),
                 NEXT_MEMORY_STORE.fetch_add(1, Ordering::Relaxed)
             )),
-            StorageConfig::SQLite { path } => Self::File(path.clone()),
+            StorageConfig::SQLite { path, blobs } => Self::File(path.clone(), blobs.clone()),
         }
     }
 
     fn open(&self) -> Result<StoreFile, String> {
         match self {
             Self::Memory(name) => StoreFile::shared_memory(name),
-            Self::File(path) => {
+            Self::File(path, _) => {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)
                         .map_err(|error| format!("create {}: {error}", parent.display()))?;
@@ -261,10 +280,21 @@ impl Source {
         .map_err(|error| format!("open server store: {error}"))
     }
 
+    /// The chunk store the runtime's large-value bytes go to, if not the
+    /// database file.
+    fn chunk_store(&self) -> Result<Option<Arc<dyn jazz::chunk_store::ChunkStore>>, String> {
+        match self {
+            Self::File(_, Some(dir)) => jazz::chunk_store::FileChunkStore::new(dir)
+                .map(|store| Some(Arc::new(store) as Arc<dyn jazz::chunk_store::ChunkStore>))
+                .map_err(|error| format!("open large-value directory {}: {error}", dir.display())),
+            _ => Ok(None),
+        }
+    }
+
     fn reader(&self) -> Result<HostReader, String> {
         match self {
             Self::Memory(name) => HostReader::shared_memory(name),
-            Self::File(path) => HostReader::open(path, None),
+            Self::File(path, _) => HostReader::open(path, None),
         }
         .map_err(|error| format!("open server store reader: {error}"))
     }
@@ -742,6 +772,7 @@ impl StoreLoop {
                 Owner::open(
                     runtime.schema.clone(),
                     file,
+                    self.source.chunk_store()?,
                     runtime.any_stored_catalogue,
                     runtime.awaiting_permissions,
                     self.app.lock().ok().and_then(|app| app.clone()),
@@ -990,11 +1021,14 @@ impl ServerRuntimeHandle {
         self.inner.activity.send_modify(|n| *n = n.wrapping_add(1));
     }
 
-    /// Admit an authenticated session.
+    /// Admit an authenticated session, pinned to `bundle` when its backend
+    /// pinned it (see [`jazz::catalogue`]).
+    #[allow(clippy::too_many_arguments)]
     pub async fn open_with_session_context(
         &self,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
+        bundle: Option<jazz::catalogue::BundleId>,
         trust: CommitUnitTrust,
         _negotiated_features: WireFeatures,
         _session_context: Option<ConnectionSessionContext>,
@@ -1031,7 +1065,9 @@ impl ServerRuntimeHandle {
             },
         );
         let opened = self
-            .run(move |owner| owner.open_session(session, served_as, claims, output, egress))
+            .run(move |owner| {
+                owner.open_session(session, served_as, claims, bundle, output, egress)
+            })
             .await;
         if opened.is_err() {
             self.edges()?.remove(&session);
@@ -1334,8 +1370,9 @@ struct Owner {
 struct OwnerSession {
     subscriber: SubscriberId,
     /// A session under its own identity (not a trusted backend or
-    /// authority link).
-    untrusted: bool,
+    /// authority link) and not pinned to a bundle: its reads wait for the
+    /// permissions head.
+    awaits_permissions: bool,
     /// Reads held until the permissions head is published, in order.
     held: VecDeque<SyncMessage>,
     /// The parts of a message split across frames, until its last part.
@@ -1552,6 +1589,7 @@ impl Owner {
     fn open(
         schema: JazzSchema,
         file: StoreFile,
+        chunk_store: Option<Arc<dyn jazz::chunk_store::ChunkStore>>,
         any_stored_catalogue: bool,
         awaiting_permissions: bool,
         app: Option<String>,
@@ -1582,7 +1620,11 @@ impl Owner {
             (None, Some(genesis)) => compile(&genesis.hash)?,
             (None, None) => schema,
         };
-        let db = block_on(Db::open_file(config(current), file))
+        let config = match chunk_store {
+            Some(store) => config(current).with_chunk_store(store),
+            None => config(current),
+        };
+        let db = block_on(Db::open_file(config, file))
             .map_err(|error| format!("open server store: {error}"))?;
         db.set_authority();
         db.track_closed_subscribers();
@@ -1646,6 +1688,7 @@ impl Owner {
         session: ServerSession,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
+        bundle: Option<jazz::catalogue::BundleId>,
         output: tokio_mpsc::UnboundedSender<Outbound>,
         egress: Arc<AtomicUsize>,
     ) -> Result<(), String> {
@@ -1663,17 +1706,20 @@ impl Owner {
         });
         let subscriber = self
             .db
-            .accept_subscriber_with_claims(
+            .accept_pinned_subscriber(
                 Box::new(SessionTransport(Rc::clone(&queues))),
                 identity,
                 claims,
+                bundle,
             )
             .map_err(|error| error.to_string())?;
         self.sessions.insert(
             session,
             OwnerSession {
                 subscriber,
-                untrusted: identity != AuthorSubject::SYSTEM,
+                // A pinned session's bundle is published already: it does
+                // not wait for the current permissions.
+                awaits_permissions: identity != AuthorSubject::SYSTEM && bundle.is_none(),
                 held: VecDeque::new(),
                 // An untrusted peer's split message must fit the budget
                 // its frames are admitted against (SPEC 8.1).
@@ -1696,7 +1742,7 @@ impl Owner {
         let Some(owner_session) = self.sessions.get(&session) else {
             return;
         };
-        let gated = self.awaiting_permissions && owner_session.untrusted;
+        let gated = self.awaiting_permissions && owner_session.awaits_permissions;
         let Some(owner_session) = self.sessions.get_mut(&session) else {
             return;
         };
@@ -2004,6 +2050,7 @@ mod tests {
                 ServerSession(1),
                 AuthorSubject::SYSTEM,
                 BTreeMap::new(),
+                None,
                 output,
                 Arc::default(),
             )?;
