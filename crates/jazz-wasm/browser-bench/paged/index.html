@@ -1,0 +1,30 @@
+<!doctype html><meta charset="utf-8" />
+<script type="module">
+  let w, port, pending;
+  window.start = (shared) => {
+    if (shared) {
+      w = new SharedWorker("./worker.js", { type: "module" });
+      port = w.port;
+      port.start();
+    } else {
+      w = new Worker("./worker.js", { type: "module" });
+      port = w;
+    }
+    port.onmessage = (m) => pending(m.data);
+    if (w.onerror !== undefined)
+      w.onerror = (e) => pending({ ok: false, error: "worker error " + (e.message || "") });
+  };
+  window.call = (msg) =>
+    new Promise((r) => {
+      pending = r;
+      port.postMessage(msg);
+    });
+  window.memory = async () => {
+    const m = await performance.measureUserAgentSpecificMemory();
+    const workers = m.breakdown
+      .filter((b) => b.types.some((t) => /Worker/.test(t)))
+      .reduce((s, b) => s + b.bytes, 0);
+    return { totalBytes: m.bytes, workerBytes: workers };
+  };
+  window.ready = true;
+</script>
