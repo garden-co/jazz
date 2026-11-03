@@ -80,9 +80,12 @@ Chunking depends only on content, so two stores that build a tree over the
 same bytes build the same nodes, and an edit changes only the leaves around
 it and the path above them.
 
-A node is identified by its hash: BLAKE3 over its canonical encoding, in a
-domain fixed by the format version and the column kind (bytes, string, JSON).
-A JSON tree therefore never reads as a string tree. A leaf encodes its bytes;
+A node is identified by its hash: plain SHA-256 over its canonical encoding,
+which starts with the format version and the column kind (bytes, string,
+JSON). A JSON tree therefore never reads as a string tree. The encoding is
+also exactly the object a chunk store holds, so an object store that checks
+a SHA-256 checksum on upload (a presigned PUT that signs
+`x-amz-checksum-sha256`) verifies the node hash itself. A leaf encodes its bytes;
 a branch encodes, per child, the child's hash, byte length and (for strings)
 UTF-16 length. A node has no locator and no second identity.
 

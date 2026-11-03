@@ -12,9 +12,9 @@ pending uploads moved from one encoded message to a row per op, and
 watermarks became per-sequencer rows).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `775997e916743e83dc13ef9c3c3615e39459fe2b89d580e4719451e1d0284748`.
+  the SQLite file `7b504bb0b0fa11a4778b4887cffa564f81902aead75b688dd842270c85a28a0c`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `57645f326a73a5b27cce7bf9026e3b41817c4229659d95a9dc46b6e35de5ac48`.
+  `918d6032bbd060dc9b2130fc5240bb0386f82a955a730c8c4511cf8f24c6b096`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -131,3 +131,9 @@ Giving the reserved row columns descriptive names regenerated it the same
 way: `_b` is `_branch`, `_t` is `_clock` (index `__by_clock`), `_w` is
 `_writer`, `_st` is `_state` and `_cols` is `_touched`; `_base` keeps its
 name. History is keyed by `(id, _branch, _clock, _writer)`.
+
+Making a large-value node's object hash plain SHA-256 over its encoding
+(it was domain-separated BLAKE3), so an object store can verify a presigned
+upload against the node hash itself, regenerated it the same way: the
+node hashes in `_jazz_lv_node`, `_jazz_lv_edge`, `_jazz_lv_root` and the
+stored descriptors changed.
