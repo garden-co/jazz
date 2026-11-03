@@ -443,23 +443,76 @@ fn plan_blob_store(data_dir: &Path, blobs: &BlobStore) -> Result<BlobStorePlan, 
 
 /// Claim `blob_dir` for `data_dir`, or refuse it if another data directory
 /// owns it: a store deletes the values it reclaims, so two stores sharing a
-/// directory would delete each other's values.
+/// directory would delete each other's values. The claim is exclusive: the
+/// owner file is created only if none exists, so of two data dirs claiming
+/// one blob dir at once, one wins and the other reads its id.
 fn claim_blob_dir(data_dir: &Path, blob_dir: &Path) -> Result<(), String> {
     let id = store_id(data_dir)?;
     std::fs::create_dir_all(blob_dir)
         .map_err(|e| format!("failed to create blob dir '{}': {e}", blob_dir.display()))?;
     let owner_file = blob_dir.join(BLOB_OWNER_FILE);
-    match std::fs::read_to_string(&owner_file) {
-        Ok(owner) if owner.trim() == id => Ok(()),
-        Ok(_) => Err(format!(
+    if !owner_file.exists() {
+        create_exclusively(&owner_file, format!("{id}\n").as_bytes())?;
+    }
+    let owner = read_owner(&owner_file)?;
+    if owner != id {
+        return Err(format!(
             "blob dir '{}' belongs to another data dir; give each data dir its own blob dir",
             blob_dir.display()
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            write_durably(&owner_file, format!("{id}\n").as_bytes())
-        }
-        Err(error) => Err(format!("read {}: {error}", owner_file.display())),
+        ));
     }
+    Ok(())
+}
+
+/// Create `path` holding `contents`, unless it already exists (which is
+/// not an error: the caller reads who won). A synced temporary file is
+/// hard-linked into place, so the file appears whole. Where the file system
+/// has no hard links (FAT, SMB, some FUSE and NFS mounts), it is created
+/// with `O_EXCL` and then written, and readers wait out the moment it is
+/// empty.
+fn create_exclusively(path: &Path, contents: &[u8]) -> Result<(), String> {
+    use std::io::{ErrorKind, Write};
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let claim = temporary_beside(path);
+    write_synced(&claim, contents)?;
+    let linked = std::fs::hard_link(&claim, path);
+    let _ = std::fs::remove_file(&claim);
+    match linked {
+        Ok(()) => return sync_dir(parent),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => return Ok(()),
+        // No hard links here; any real failure surfaces from the create below.
+        Err(_) => {}
+    }
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => return Err(format!("claim {}: {error}", path.display())),
+    };
+    file.write_all(contents)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    sync_dir(parent)
+}
+
+/// The id in an owner file, waiting briefly while one created without hard
+/// links is still empty.
+fn read_owner(owner_file: &Path) -> Result<String, String> {
+    for _ in 0..50 {
+        let owner = std::fs::read_to_string(owner_file)
+            .map_err(|e| format!("read {}: {e}", owner_file.display()))?;
+        if owner.ends_with('\n') {
+            return Ok(owner.trim().to_owned());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Err(format!(
+        "{} is incomplete; if no other data dir uses this blob dir, delete it and start again",
+        owner_file.display()
+    ))
 }
 
 /// The data directory's id, made on first use.
@@ -475,42 +528,95 @@ fn store_id(data_dir: &Path) -> Result<String, String> {
     Ok(id)
 }
 
-/// `path` made absolute against the working directory, with `.` and `..`
-/// resolved and no trailing separator.
+/// `path` as one name per directory, read the way the file system reads it:
+/// each part that exists is canonicalized as it is reached (so a symlink,
+/// and a `..` after it, resolve as they would on disk), and parts that do
+/// not exist yet are appended, with `.` and `..` resolved as written.
 fn absolute(path: &Path) -> Result<PathBuf, String> {
     let path =
         std::path::absolute(path).map_err(|e| format!("resolve '{}': {e}", path.display()))?;
-    let mut normal = PathBuf::new();
+    let mut resolved = PathBuf::new();
     for part in path.components() {
         match part {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
-                normal.pop();
+                resolved.pop();
             }
-            other => normal.push(other),
+            std::path::Component::Normal(name) => {
+                resolved.push(name);
+                match std::fs::canonicalize(&resolved) {
+                    Ok(on_disk) => resolved = without_verbatim_prefix(on_disk),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("resolve '{}': {error}", resolved.display()));
+                    }
+                }
+            }
+            // The drive or share, and the root: kept as written.
+            other => resolved.push(other),
         }
     }
-    Ok(normal)
+    Ok(resolved)
+}
+
+/// Windows' canonical paths are verbatim (`\\?\C:\x`, `\\?\UNC\host\share\x`);
+/// the plain spelling (`C:\x`, `\\host\share\x`) names the same file and is
+/// the one people write, so it is the one recorded.
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            if rest.as_bytes().get(1) == Some(&b':') {
+                return PathBuf::from(rest);
+            }
+        }
+    }
+    path
 }
 
 /// Write `path` so that a crash leaves either the old file or the whole
 /// new one: a synced temporary file renamed into place, then the directory
 /// synced.
 fn write_durably(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let temporary = temporary_beside(path);
+    let written = write_synced(&temporary, contents).and_then(|()| {
+        std::fs::rename(&temporary, path)
+            .map_err(|e| format!("rename {}: {e}", temporary.display()))
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written?;
+    sync_dir(path.parent().unwrap_or(Path::new(".")))
+}
+
+/// A temporary name next to `path`, unique to this write.
+fn temporary_beside(path: &Path) -> PathBuf {
+    path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()))
+}
+
+fn write_synced(path: &Path, contents: &[u8]) -> Result<(), String> {
     use std::io::Write;
-    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-    let mut file = std::fs::File::create(&temporary)
-        .map_err(|e| format!("create {}: {e}", temporary.display()))?;
-    file.write_all(contents)
+    let mut file =
+        std::fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+    let written = file
+        .write_all(contents)
         .and_then(|()| file.sync_all())
-        .map_err(|e| format!("write {}: {e}", temporary.display()))?;
-    drop(file);
-    std::fs::rename(&temporary, path)
-        .map_err(|e| format!("rename {}: {e}", temporary.display()))?;
-    let parent = path.parent().unwrap_or(Path::new("."));
-    std::fs::File::open(parent)
+        .map_err(|e| format!("write {}: {e}", path.display()));
+    if written.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    written
+}
+
+fn sync_dir(dir: &Path) -> Result<(), String> {
+    std::fs::File::open(dir)
         .and_then(|dir| dir.sync_all())
-        .map_err(|e| format!("sync {}: {e}", parent.display()))
+        .map_err(|e| format!("sync {}: {e}", dir.display()))
 }
 
 fn refuse_pre_sqlite_data_dir(path: &std::path::Path) -> Result<(), String> {
@@ -918,6 +1024,54 @@ mod tests {
             .expect("default through ..")
             .shutdown()
             .await;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_blob_dir_through_a_symlink_is_the_directory_it_points_to() {
+        let root = tempfile::TempDir::new().expect("temp root");
+        let data_dir = root.path().join("data");
+        std::fs::create_dir_all(data_dir.join("deep")).unwrap();
+        std::os::unix::fs::symlink(data_dir.join("deep"), root.path().join("link")).unwrap();
+        // `link/..` is `data`, not `root`, on disk.
+        let through_link = root.path().join("link/../blobs");
+        let plan = plan_blob_store(
+            &data_dir,
+            &BlobStore::Files {
+                dir: Some(through_link),
+            },
+        )
+        .expect("plan");
+        assert_eq!(plan.record.expect("a record").contents, "files\n");
+    }
+
+    #[test]
+    fn two_data_dirs_claiming_one_blob_dir_at_once_leave_one_owner() {
+        let blobs = tempfile::TempDir::new().expect("temp blob dir");
+        let dirs: Vec<_> = (0..8).map(|_| tempfile::TempDir::new().unwrap()).collect();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(dirs.len()));
+        let claims: Vec<_> = dirs
+            .iter()
+            .map(|dir| {
+                let (data, blob) = (dir.path().to_path_buf(), blobs.path().to_path_buf());
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    let id = store_id(&data).unwrap();
+                    start.wait();
+                    (id, claim_blob_dir(&data, &blob).is_ok())
+                })
+            })
+            .collect();
+        let winners: Vec<String> = claims
+            .into_iter()
+            .map(|claim| claim.join().unwrap())
+            .filter_map(|(id, won)| won.then_some(id))
+            .collect();
+        assert_eq!(winners.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(blobs.path().join(BLOB_OWNER_FILE)).unwrap(),
+            format!("{}\n", winners[0])
+        );
     }
 
     #[test]
