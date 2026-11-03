@@ -9,7 +9,7 @@ export const handle: Handle = async ({ event, resolve }) => {
   // Sync and sign-in for the browser, on this app's own origin.
   const { pathname } = event.url;
   if (pathname === "/jazz" || pathname.startsWith("/jazz/")) {
-    return (await jazz()).fetch(event.request);
+    return (await jazz()).handle(event.request);
   }
   // Better Auth answers /api/auth/*; everything else is the app.
   return svelteKitHandler({ event, resolve, auth: auth(), building });
