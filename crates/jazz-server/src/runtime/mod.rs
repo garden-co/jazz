@@ -13,6 +13,7 @@
 //! runtime's [`Db`] opens on the same connection once a schema is known.
 
 pub mod auth_admission;
+mod thin;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -180,7 +181,7 @@ pub struct ServerSession(u64);
 /// Bytes a session may have queued in each direction. Inbound frames past
 /// it are refused (the peer ignored flow control); outbound messages past it
 /// wait in the engine until the socket catches up.
-const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
+pub(crate) const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
 /// The slow-query threshold: `JAZZ_SLOW_QUERY_MS` (0 turns the log off),
 /// else jazz-db's default.
 fn slow_query_threshold() -> Option<Duration> {
@@ -196,7 +197,7 @@ fn slow_query_threshold() -> Option<Duration> {
 
 /// How often the owner ticks with no traffic, for time-based engine work
 /// such as expiring staged large-value chunks.
-const IDLE_TICK: Duration = Duration::from_secs(1);
+pub(crate) const IDLE_TICK: Duration = Duration::from_secs(1);
 
 /// Inbound messages one session may have applied per round of ticks.
 const INBOUND_MESSAGES_PER_TICK: usize = 16;
@@ -1110,6 +1111,18 @@ fn session_closed_error(error: &jazz::db::Error) -> jazz::wire::WireError {
     jazz::wire::WireError::new(code, retry, format!("sync session closed: {error}"))
 }
 
+/// Take `bytes` the client read off `egress`. Crossing back under the
+/// budget queues a tick: output the owner held back can move again.
+fn release_egress(egress: &AtomicUsize, bytes: usize, runtime: &Weak<Inner>) {
+    let before = egress.fetch_sub(bytes, Ordering::AcqRel);
+    if before >= SESSION_QUEUE_BUDGET
+        && before - bytes < SESSION_QUEUE_BUDGET
+        && let Some(inner) = runtime.upgrade()
+    {
+        let _ = ServerRuntimeHandle { inner }.queue_tick();
+    }
+}
+
 /// One session's ordered outbound frame batches.
 pub struct ServerRuntimeFrameStream {
     receiver: tokio_mpsc::UnboundedReceiver<Outbound>,
@@ -1121,14 +1134,7 @@ impl ServerRuntimeFrameStream {
     /// Receive the next batch of outbound frames.
     pub async fn recv(&mut self) -> Option<Result<Vec<AbiBytes>, jazz::wire::WireError>> {
         let (result, bytes) = self.receiver.recv().await?;
-        let before = self.egress.fetch_sub(bytes, Ordering::AcqRel);
-        if before >= SESSION_QUEUE_BUDGET
-            && before - bytes < SESSION_QUEUE_BUDGET
-            && let Some(inner) = self.runtime.upgrade()
-        {
-            // Output the owner held back for this session can move again.
-            let _ = ServerRuntimeHandle { inner }.queue_tick();
-        }
+        release_egress(&self.egress, bytes, &self.runtime);
         Some(result)
     }
 }
@@ -1299,6 +1305,104 @@ impl ServerRuntimeHandle {
             owner.receive(session, frames);
             ingress.fetch_sub(bytes, Ordering::AcqRel);
         }))
+    }
+
+    /// Admit an authenticated thin client connection (SPEC 8.14). It is
+    /// served as its session, or as SYSTEM for a trusted link, like a sync
+    /// session, pinned to `bundle` when its backend pinned it, and takes
+    /// its output from [`Self::open_wire_stream`].
+    pub async fn open_thin_session(
+        &self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        bundle: Option<jazz::catalogue::BundleId>,
+        trust: CommitUnitTrust,
+    ) -> Result<ServerSession, String> {
+        let served_as = match trust {
+            CommitUnitTrust::Session => identity,
+            CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => {
+                AuthorSubject::SYSTEM
+            }
+        };
+        let session = ServerSession(self.inner.next_session.fetch_add(1, Ordering::Relaxed));
+        let (output, receiver) = tokio_mpsc::unbounded_channel();
+        let egress = Arc::new(AtomicUsize::new(0));
+        self.edges()?.insert(
+            session,
+            Edge {
+                output: Some(receiver),
+                ingress: Arc::new(AtomicUsize::new(0)),
+                egress: Arc::clone(&egress),
+            },
+        );
+        let opened = self
+            .run(move |owner| {
+                owner.open_thin_session(session, served_as, claims, bundle, output, egress)
+            })
+            .await;
+        if opened.is_err() {
+            self.edges()?.remove(&session);
+        }
+        opened.map(|()| session)
+    }
+
+    /// Queue a thin client's request, `bytes` long on the wire, for the
+    /// owner. Refused when the session already has its budget queued, as
+    /// [`Self::receive_wire_frames`] refuses sync frames.
+    pub fn receive_thin_request(
+        &self,
+        session: ServerSession,
+        request: jazz::thin::ThinRequest,
+        bytes: usize,
+    ) -> Result<(), String> {
+        let ingress = self
+            .edges()?
+            .get(&session)
+            .map(|edge| Arc::clone(&edge.ingress))
+            .ok_or_else(|| "unknown server session".to_owned())?;
+        if ingress.fetch_add(bytes, Ordering::AcqRel) + bytes > SESSION_QUEUE_BUDGET {
+            ingress.fetch_sub(bytes, Ordering::AcqRel);
+            return Err("session ingress budget exceeded".to_owned());
+        }
+        self.send(Box::new(move |owner| {
+            owner.thin_request(session, request);
+            ingress.fetch_sub(bytes, Ordering::AcqRel);
+        }))
+    }
+
+    /// Count `bytes` against `session`'s egress budget as if they were
+    /// queued and never drained, to test output near the budget.
+    #[cfg(test)]
+    pub(crate) fn hold_egress_for_test(&self, session: ServerSession, bytes: usize) {
+        let edges = self.edges().expect("edges");
+        edges[&session].egress.fetch_add(bytes, Ordering::AcqRel);
+    }
+
+    /// Release `bytes` held by [`Self::hold_egress_for_test`], as the
+    /// client reading them would.
+    #[cfg(test)]
+    pub(crate) fn release_egress_for_test(&self, session: ServerSession, bytes: usize) {
+        let egress = Arc::clone(&self.edges().expect("edges")[&session].egress);
+        release_egress(&egress, bytes, &Arc::downgrade(&self.inner));
+    }
+
+    /// Make the owner wait for a published permissions head again, as a
+    /// store reopened over bundles published earlier does until its next
+    /// catalogue change.
+    #[cfg(test)]
+    pub(crate) async fn await_permissions_for_test(&self) {
+        self.run(|owner| {
+            owner.awaiting_permissions = true;
+            Ok(())
+        })
+        .await
+        .expect("owner");
+    }
+
+    /// Wait until the owner has run everything queued before this call.
+    #[cfg(test)]
+    pub(crate) async fn settle_for_test(&self) {
+        self.run(|_| Ok(())).await.expect("owner");
     }
 
     /// Ask the owner for a tick; requests coalesce. Output reaches every
@@ -1536,6 +1640,8 @@ impl From<CatalogueApplyError> for String {
 struct Owner {
     db: Db,
     sessions: HashMap<ServerSession, OwnerSession>,
+    /// Thin client connections (SPEC 8.14), which are not sync sessions.
+    thin: HashMap<ServerSession, thin::ThinSession>,
     /// The tick in progress's time slice, shared with every session's queues.
     slice: Rc<TickSlice>,
     catalogue: Catalogue,
@@ -1822,6 +1928,7 @@ impl Owner {
         Ok(Self {
             db,
             sessions: HashMap::new(),
+            thin: HashMap::new(),
             slice: Rc::default(),
             catalogue,
             awaiting_permissions: awaiting_permissions && head.is_none(),
@@ -1871,6 +1978,7 @@ impl Owner {
         for (_, session) in self.sessions.drain() {
             self.db.disconnect_subscriber(session.subscriber);
         }
+        self.thin.clear();
     }
 
     fn open_session(
@@ -2000,6 +2108,7 @@ impl Owner {
         if let Some(session) = self.sessions.remove(&session) {
             self.db.disconnect_subscriber(session.subscriber);
         }
+        self.close_thin_session(session);
     }
 
     fn inbound_pending(&self) -> bool {
@@ -2100,6 +2209,7 @@ impl Owner {
         for id in gone {
             self.close_session(id);
         }
+        self.pump_thin();
     }
 
     /// An activation at a revision older than the current one is stale: the
