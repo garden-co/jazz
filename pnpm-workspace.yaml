@@ -39,9 +39,6 @@ catalogs:
     vitest: 4.1.0
     vue-tsc: "^2.1.10"
 
-ignoredBuiltDependencies:
-  - blake3
-
 allowBuilds:
   "@swc/core": true
   esbuild: true

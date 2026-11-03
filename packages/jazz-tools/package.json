@@ -192,6 +192,7 @@
     "pack:dry-run": "npm pack --dry-run"
   },
   "dependencies": {
+    "@noble/curves": "2.0.1",
     "@noble/hashes": "2.0.1",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-logs-otlp-http": "^0.216.0",
@@ -199,7 +200,7 @@
     "@opentelemetry/resources": "^2.7.1",
     "@opentelemetry/sdk-logs": "^0.216.0",
     "@opentelemetry/sdk-trace-base": "^2.7.1",
-    "@scure/bip39": "^2.0.1",
+    "@scure/bip39": "2.0.1",
     "@standard-schema/spec": "^1.1.0",
     "esbuild": "^0.27.0",
     "fs-native-extensions": "1.5.0",
@@ -245,6 +246,7 @@
   },
   "peerDependencies": {
     "@vercel/functions": ">=3.10.0",
+    "@vercel/sandbox": ">=3.9.0",
     "better-auth": "1.7.1",
     "effect": "^4.0.0-rc.118",
     "expo": ">=54",
@@ -296,6 +298,9 @@
       "optional": true
     },
     "@vercel/functions": {
+      "optional": true
+    },
+    "@vercel/sandbox": {
       "optional": true
     }
   },

@@ -30,7 +30,6 @@ function envBlockFor(bundler: Bundler, app: GeneratedApp): string {
     `${prefix}JAZZ_APP_ID="${app.appId}"`,
     `JAZZ_SERVER_URL="${JAZZ_CLOUD_SYNC_URL}"`,
     `JAZZ_ADMIN_SECRET="${app.adminSecret}"`,
-    `BACKEND_SECRET="${app.backendSecret}"`,
   ].join("\n");
 }
 
@@ -53,8 +52,7 @@ function ConfigBlock({ app }: { app: GeneratedApp }) {
     `  // app, permissions, authenticate ...`,
     `  store: remote({`,
     `    url: process.env.JAZZ_SERVER_URL!,`,
-    `    adminSecret: process.env.JAZZ_ADMIN_SECRET!,`,
-    `    backendSecret: process.env.BACKEND_SECRET!,`,
+    `    secret: process.env.JAZZ_ADMIN_SECRET!,`,
     `  }),`,
     `});`,
   ].join("\n");

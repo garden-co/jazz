@@ -79,16 +79,14 @@ export function serverSecret(name: SecretName): string {
 
 /**
  * Where the Jazz data lives: on the sync server JAZZ_SERVER_URL names (such as
- * Jazz Cloud), with the app's two secrets, or else in a local SQLite directory.
+ * Jazz Cloud), with the app's admin secret, or else in a local SQLite directory.
  */
 export function jazzStore(env: Record<string, string | undefined> = process.env) {
   const url = env.JAZZ_SERVER_URL;
   if (!url) return { kind: "sqlite" as const, path: env.JAZZ_DATA_PATH || ".jazz" };
-  const adminSecret = env.JAZZ_ADMIN_SECRET;
-  const backendSecret = env.BACKEND_SECRET;
-  if (!adminSecret || !backendSecret)
-    throw new Error("JAZZ_SERVER_URL needs JAZZ_ADMIN_SECRET and BACKEND_SECRET");
-  return { kind: "remote" as const, url, adminSecret, backendSecret };
+  const secret = env.JAZZ_ADMIN_SECRET;
+  if (!secret) throw new Error("JAZZ_SERVER_URL needs JAZZ_ADMIN_SECRET");
+  return { kind: "remote" as const, url, secret };
 }
 
 /** Check the server configuration at startup, so a misconfigured deployment fails before serving. */

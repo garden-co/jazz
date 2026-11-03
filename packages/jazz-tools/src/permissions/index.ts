@@ -18,7 +18,7 @@ import type {
   RelProjectColumn,
   RelValueRef,
 } from "../ir.js";
-import { blake3 } from "@noble/hashes/blake3.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { assertSchemaNameAllowed } from "../schema-name.js";
 
@@ -1255,7 +1255,7 @@ function createUnionRelation(
           inputs: states.map((state) => {
             const input = relationStateToRelExpr(state);
             return {
-              label: `permission:${bytesToHex(blake3(new TextEncoder().encode(JSON.stringify(input))))}`,
+              label: `permission:${bytesToHex(sha256(new TextEncoder().encode(JSON.stringify(input))))}`,
               input,
             };
           }),

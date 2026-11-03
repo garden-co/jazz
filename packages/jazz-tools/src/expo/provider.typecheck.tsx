@@ -20,3 +20,9 @@ export const expoApplication = (
     <Data />
   </JazzProvider>
 );
+declare const signedInUser: string | null | undefined;
+export const nativeApplicationFollowingUser = (
+  <JazzProvider serverUrl="https://app.example.test/jazz" user={signedInUser} signedOut={null}>
+    <Data />
+  </JazzProvider>
+);

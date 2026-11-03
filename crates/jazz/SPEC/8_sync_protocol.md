@@ -11,14 +11,22 @@ The model is small:
 - The **authority** (the server, or a node with no upstream) is a database
   holding complete history. Every accepted commit gets the next server seq.
 - A **replica** is a database whose store is a partial copy of server versions
-  plus its own optimistic writes. Every stored version sits at a position
-  `(_n, _seq)`: `_n` is the code of the node that numbered it (0 for the
-  authority) and `_seq` that node's counter. Replica rows carry the server
-  seq they were shipped at, at `_n = 0`, so cuts and history on the replica
-  are over server versions. A replica numbers its own optimistic writes
-  from 1 at its own node's code (role bits over its `_jazz_nodes` code:
-  `RELAY` for a durable replica, `LEAF` for a non-durable one), which sorts
-  after every server position, so no cut at a server seq sees them.
+  plus its own optimistic writes. Every stored version sits at one scalar
+  position `_clock` (below 2^53), of one of two kinds: accepted (`_clock` is the
+  authority position the version was shipped at, below 2^52) or pending
+  (`_clock` is `1<<52 | ` its writer's commit HLC). The commit HLC is a
+  hybrid clock: milliseconds since `HLC_EPOCH_MS` (2025-01-01) above
+  `HLC_COUNTER_BITS` bits of counter, each commit's past its writer's last
+  and every one it has seen, carried as `Commit.clock`. The
+  same `_clock`, wherever the version is stored. Unsettled versions of a row
+  order last-writer-wins by `_clock`, then the writer's node and its tx: two
+  writers' versions at one `_clock` are told apart by their writer (`_writer` in
+  history, §4). Every store orders the same unsettled commits the same
+  way, and the authority's order replaces it once they settle, so a row
+  may change then. A write's explicit time (`updated_at_ms`) is provenance
+  only and does not order it. Cuts and history on the replica are over
+  server versions: `_clock < 1<<52` is every accepted version, so no cut at a
+  server seq sees a pending version.
 - **Writes travel up** as one `Commit` per transaction and come back as one
   `Fate`.
 - **Reads travel up** as one `Read` per query and come back as rows plus
@@ -111,14 +119,17 @@ not supported yet, so such a store keeps them and refuses every upstream,
 failing its remote reads (live and one-shot `Remote` ones) with why, across
 reopens (`INV-SYNC-51`).
 
-Positions travel as per-sequencer lists: a `through`, a `since`, a
-serializable snapshot, a one-shot read's `at` and an accepted fate's `at` are
-each a list of `(sequencer, seq)` pairs (as is `ConnectionSettled`'s `through`), the sequencer `None` for the global
-authority and a node id for a replica that numbers its own positions (a relay
-with no server, §8.13). Each list holds at most one pair today; a list with
-more is refused as not supported yet, and an empty `since` or `at` means none.
-The list form leaves room for several sequencers (SPEC 15) without a wire
-change.
+Positions travel as scalars: a `through`, a `since`, a serializable
+snapshot, a one-shot read's `at` and an accepted fate's `at` are each one
+authority seq (`since` and `at` optional), as is `ConnectionSettled`'s
+`through`. Only the authority numbers accepted positions; a relay with no
+server never does (§8.13). A row image's `at` is its `_clock`, which the
+receiver stores as is: accepted, or pending at its writer's commit HLC,
+when the image names that writer (`Image.written`). A receiver refuses as
+malformed a pending image with no writer, a `_clock` of neither kind, a
+`Commit.clock` of 2^52 or more, and an authority seq of 2^52 or more where
+it names an accepted version: a `since`, a serializable snapshot, a
+delta's or an access proof's version, and a `BuiltOn::Seq`.
 
 Messages, with their postcard variant tags:
 
@@ -480,7 +491,7 @@ passes on (§8.13). Known limit: a branch view's read reads the current state.
 `known` is the connection's position, not any one result's: a live result may
 read further (its own read's settle), never less far. It is persisted, and a
 reopened replica rebuilds what reading by positions needs from its store
-alone: the newest accepted version each table holds (an indexed `MAX(_seq)`),
+alone: the newest accepted version each table holds (an indexed `MAX(_clock)` in the accepted band),
 and its own commits accepted past `known`, from its settled-transaction
 records. Until its upstream settles again, every read of a reopened replica is
 as of `known`, its own writes included. A replica's history pruning must keep,
@@ -743,14 +754,12 @@ type are never read as another's.
 ### 8.11 Resuming reads from `since`
 
 A replica persists, per read identity, the positions its result last settled
-through, in `_jazz_watermarks` (one row per sequencer, by its node code as in
-`_n`) keyed by a digest of the query, binding,
+through, in `_jazz_watermarks` (one `through` seq) keyed by a digest of the query, binding,
 `include_deleted` flag, the view it asked for and reader identity (not the tier or wait, and not the
 schema version: the key is over stored names). On reconnect or reopen, it
-sends `Read { since, span }` with those positions. A `since` at
-another sequencer than the one the store serves at opens fresh.
+sends `Read { since, span }` with that position.
 Repeated current-state one-shot reads reuse the same checkpoint as live reads.
-Historical one-shot reads (`at` nonempty) and one-shot reads of non-current
+Historical one-shot reads (`at` set) and one-shot reads of non-current
 views always open fully.
 
 A store with an upstream connection ignores downstream `since`: its partial
@@ -825,15 +834,40 @@ for its sessions (tabs). It serves a session's reads from its store per the
 read's tier, asking its upstream with the same `Read` where the tier needs
 the authority's answer, and tells its sessions the authority's seq it knows
 (`served_through`), so a session's snapshot is one the authority validates as
-it is. It numbers its unsettled versions at its own node and ships them to
-its sessions with `Image.by` naming that node; a non-durable session numbers
-its own writes at its own node, so the two never collide in the session's
-store (`INV-SYNC-50`). A relay stores a session's commit as its own pending
+it is. It ships its unsettled versions at their pending `_clock`, each with its
+writer (`Image.written`), and a session stores them there: a relay keeps
+a session's commit clock, so a version is at the same `_clock` in every store,
+and versions at one `_clock` are told apart by writer (`INV-SYNC-50`). The relay replays its pending commits (its own and the
+sessions' it carries) in that order, so a commit written earlier but
+delivered later goes under the later one. A session replays its own pending
+commits over the relay's version of a row only when they order after it,
+each branch of the row on its own, and holds its ordering clock past every
+order it is shipped, so a write it makes afterwards orders last. A relay
+holds its own commit HLC past every session commit it relays, so a write it
+makes afterwards orders after those too. A store counts a received HLC no
+further ahead than its own wall clock plus 500 ms (`HLC_SKEW_MS`, the
+shard offset bound), so a far-ahead peer cannot carry its next writes past
+every later write. The commit HLC is not the provenance clock: a clock seen
+from another writer moves no `$createdAt` or `$updatedAt` this store
+stamps. A relay uploads its
+pending commits in the order it got them, which the authority's order then
+follows; where that differs from the commits' clock order, a row's settled
+version can differ from the one it showed unsettled (it flips to the
+authority's), which is expected. On a new link a session drops the relay
+versions it shows (pending versions other writers wrote) back to the newest
+accepted version it holds: the link may be to another relay, or to its
+relay wiped, and the one it reaches ships its unsettled versions again as
+it answers the session's reads. A baseline under the session's own pending
+writes stays until they settle. A session names a
+relay's unsettled version it built on by the commit that wrote it
+(`BuiltOn::Commit { node, tx }`). A relay stores a session's commit as its own pending
 commit, answers `Stored`, and relays the authority's `Fate` (§8.3). A relay
-whose host says it has no server is its sessions' last word: its `Fate`,
-`Settled` and `ConnectionSettled` positions name its own node as their
-sequencer, since they count its positions rather than the authority's. A
-relay's `ConnectionSettled` to its sessions names the position it knows its
+whose host says it has no server never numbers accepted positions: its
+sessions' commits stay pending (it answers `Stored`, and the `Fate` comes
+once a server is added and decides them), a serializable commit waits for
+that server rather than being validated by the relay, and it settles its
+sessions' reads at the last authority position it holds. Its sessions still
+converge on concurrent edits of a row, by the commits' order. A relay's `ConnectionSettled` to its sessions names the position it knows its
 upstream through (`served_through`). A relayed result's `Settled` names its
 upstream read's own settle, when that is past `served_through`, so the session
 reads each result as of its own upstream read (§8.4). The relay passes each

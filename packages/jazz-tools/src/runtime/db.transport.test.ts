@@ -37,7 +37,7 @@ class TestRuntimeSource extends RuntimeSource<DbConfig> {
     return JazzClient.connectWithRuntime(
       makeRuntimeStub(),
       {
-        appId: config.appId,
+        appId: config.appId!,
         schema,
         driver: config.driver,
         serverUrl: config.serverUrl,
