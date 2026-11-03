@@ -27,6 +27,7 @@ import { ThinRuntime, type ThinRuntimeOptions } from "./thin-runtime.js";
 export { ThinRuntimeSource } from "./thin-runtime-source.js";
 export {
   ThinConnectionLostError,
+  ThinTransactionLostError,
   ThinRemoteError,
   type ThinRuntimeOptions,
 } from "./thin-runtime.js";

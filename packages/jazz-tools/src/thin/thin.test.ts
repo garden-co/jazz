@@ -7,6 +7,7 @@ import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { createAccountManager, createClient, upgradeToLocalFirst } from "./index.js";
+import { ThinRuntime } from "./thin-runtime.js";
 import { LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
 import { parseSnapshotRef, serializeSnapshotRef } from "../runtime/snapshot-ref.js";
 
@@ -253,6 +254,82 @@ describe("thin client", () => {
     expect(await db.one(app.documents, { branch: "main" })).toMatchObject({ title: "Changed" });
   }, 60_000);
 
+  it("keeps each user's live queries to that user's rows", async () => {
+    const server = await startServer();
+    const alice = await thinDb(server);
+    const bob = await thinDb(server);
+    const seen = { alice: [] as string[][], bob: [] as string[][] };
+    const stopAlice = alice.subscribe(app.notes, (rows) =>
+      seen.alice.push(rows.map((row) => row.text).sort()),
+    );
+    const stopBob = bob.subscribe(app.notes, (rows) =>
+      seen.bob.push(rows.map((row) => row.text).sort()),
+    );
+    await bob.insert(app.notes, { text: "bob's", done: false }).wait({ tier: "global" });
+    await alice.insert(app.notes, { text: "alice's", done: false }).wait({ tier: "global" });
+    await expect.poll(() => seen.alice.at(-1), { timeout: 10_000 }).toEqual(["alice's"]);
+    await expect.poll(() => seen.bob.at(-1), { timeout: 10_000 }).toEqual(["bob's"]);
+    expect(seen.alice.flat()).not.toContain("bob's");
+    expect(seen.bob.flat()).not.toContain("alice's");
+    stopAlice();
+    stopBob();
+  }, 60_000);
+
+  it("reopens live queries after a reconnect, replacing what they delivered", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    const deliveries: string[][] = [];
+    const stop = db.subscribe(app.notes, (rows) => deliveries.push(rows.map((row) => row.text)));
+    await db.insert(app.notes, { text: "before", done: false }).wait({ tier: "global" });
+    await expect.poll(() => deliveries.at(-1), { timeout: 10_000 }).toEqual(["before"]);
+
+    reconnect(db);
+    await db.insert(app.notes, { text: "after", done: false }).wait({ tier: "global" });
+    // The reopened query's first answer replaces the rows, not adds to them.
+    await expect
+      .poll(() => deliveries.at(-1)?.slice().sort(), { timeout: 10_000 })
+      .toEqual(["after", "before"]);
+    expect(deliveries.every((rows) => new Set(rows).size === rows.length)).toBe(true);
+    stop();
+  }, 60_000);
+
+  it("fails a transaction its connection took with it, and nothing else", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    const tx = db.beginTransaction();
+    tx.insert(app.notes, { text: "staged", done: false });
+    // The server has the transaction open.
+    expect((await tx.all(app.notes)).map((row) => row.text)).toEqual(["staged"]);
+
+    // A credential renewal takes a new connection, which ends the old one's
+    // transactions on the server.
+    reconnect(db);
+    expect(() => tx.insert(app.notes, { text: "more", done: false })).toThrow(
+      /lost with the connection/,
+    );
+    await expect(tx.commit().wait({ tier: "global" })).rejects.toThrow(/lost with the connection/);
+
+    const next = await db.transaction((again) => {
+      again.insert(app.notes, { text: "again", done: false });
+    });
+    await next.wait({ tier: "global" });
+    expect((await db.all(app.notes)).map((row) => row.text)).toEqual(["again"]);
+  }, 60_000);
+
+  it("refuses reads and transactions as another session", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.all(app.notes);
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const session = JSON.stringify({ issuer: "urn:test", user_id: "someone-else" });
+    const query = JSON.stringify({ table: "notes" });
+    await expect(runtime.query(query, session)).rejects.toThrow(/not supported in thin mode/);
+    expect(() => runtime.createSubscription(query, session)).toThrow(/not supported in thin mode/);
+    expect(() => runtime.beginTransaction("mergeable", "tx-other" as never, session)).toThrow(
+      /not supported in thin mode/,
+    );
+  }, 60_000);
+
   it("streams a large value into a row", async () => {
     const server = await startServer();
     const db = await thinDb(server);
@@ -295,3 +372,10 @@ describe("thin client", () => {
     expect((await db.all(app.files)).map((row) => row.name)).toEqual(["in a transaction"]);
   }, 60_000);
 });
+
+/** Renew the credential with itself: a thin client reconnects for a new one. */
+function reconnect(db: Db): void {
+  const runtime = db.currentRuntime();
+  if (!(runtime instanceof ThinRuntime)) throw new Error("not a thin Db");
+  runtime.updateAuth((runtime as unknown as { authJson: string }).authJson);
+}
