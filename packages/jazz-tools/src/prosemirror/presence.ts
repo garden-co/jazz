@@ -22,8 +22,8 @@ export interface Collaborator extends SelectionPresence {
   id: string;
   name: string;
   /** A CSS colour for their caret and selection: a hex colour, a colour
-   * name, or an `rgb()`/`hsl()`/`oklch()` function. Anything else is drawn
-   * grey, since it comes from another user. */
+   * name, an `rgb()`/`hsl()`/`oklch()` function or a `var(--custom-property)`.
+   * Anything else is drawn grey, as it may come from another user. */
   color: string;
 }
 
@@ -35,9 +35,21 @@ export function capturePresence(state: EditorState, anchors: TextAnchors): Selec
   return empty ? { cursor } : { cursor, selection: captureRange(state, anchors, from, to) };
 }
 
-/** Whether two presences point at the same place, to skip needless writes. */
+/** Whether two presences point at the same place, to skip needless writes.
+ * Only the text around them counts: when someone else's edit moves the
+ * text, the stored presence still finds it. */
 export function samePresence(a: SelectionPresence | undefined, b: SelectionPresence): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+  if (!a) return false;
+  const text = (presence: SelectionPresence) =>
+    JSON.stringify([
+      presence.cursor.side,
+      presence.cursor.before,
+      presence.cursor.after,
+      presence.selection?.before,
+      presence.selection?.matched,
+      presence.selection?.after,
+    ]);
+  return text(a) === text(b);
 }
 
 /** Overlays for collaborators' carets (with their name) and selections. */
@@ -68,7 +80,7 @@ export function presenceOverlays(collaborators: readonly Collaborator[]): Overla
 }
 
 const COLOR =
-  /^(#[0-9a-f]{3,8}|[a-z]{3,20}|(rgb|rgba|hsl|hsla|oklch|oklab)\([0-9a-z.%\s,/+-]{1,64}\))$/i;
+  /^(#[0-9a-f]{3,8}|[a-z]{3,20}|(rgb|rgba|hsl|hsla|oklch|oklab)\([0-9a-z.%\s,/+-]{1,64}\)|var\(--[a-z0-9_-]{1,64}\))$/i;
 
 /** `color` if it is only a colour, so it cannot add other style
  * declarations where it is written into a style attribute. */
