@@ -12293,6 +12293,9 @@ impl Db {
             own,
         } = &kind
         {
+            // Reads are validated by the policies the session read by: its
+            // bundle's when it is pinned to one, not the store's current ones.
+            let policies = self.view_policies();
             let inner = self.inner();
             // The sender's own commits its snapshot included, by local seq
             // and where each settled here (earlier on this connection, so
@@ -12326,9 +12329,10 @@ impl Db {
             }
             for read in reads {
                 // A read is evaluated in the version it was made in.
-                let Some(schema) =
-                    inner.governed(crate::ids::SchemaVersionId::from_bytes(read.version))
-                else {
+                let Some(schema) = inner.governed_by(
+                    crate::ids::SchemaVersionId::from_bytes(read.version),
+                    policies.clone(),
+                ) else {
                     return Err((schema_version_not_deployed(), mentioned(&inner)));
                 };
                 let prepared = PreparedQuery {
