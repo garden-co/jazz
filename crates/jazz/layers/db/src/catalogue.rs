@@ -402,6 +402,18 @@ fn has_bundles(conn: &Connection) -> Result<bool, Error> {
     .map_err(storage)
 }
 
+/// Whether this store has published any permissions bundle: its app is
+/// served through createJazz, which pins every session it opens.
+pub(crate) fn serves_bundles(conn: &Connection) -> Result<bool, Error> {
+    if !has_bundles(conn)? {
+        return Ok(false);
+    }
+    conn.cached_row("SELECT EXISTS (SELECT 1 FROM _jazz_bundles)", [], |r| {
+        r.get(0)
+    })
+    .map_err(storage)
+}
+
 /// The published bundle `id`: its write schema and permissions.
 pub(crate) fn bundle(
     conn: &Connection,

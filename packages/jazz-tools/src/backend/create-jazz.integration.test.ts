@@ -846,6 +846,35 @@ describe("createJazz", () => {
       await serve(newer, { sockets: true }),
     ];
 
+    // Local-first guests too: each backend pins its guests' sessions.
+    const guestOf = async (origin: string) => {
+      const session = await createJazzSession({
+        app,
+        permissions,
+        serverUrl: `${origin}/jazz`,
+        driver: { type: "memory" },
+        initial: "local-first",
+      });
+      cleanups.push(() => session.close());
+      return session.getSnapshot().client!;
+    };
+    const guestOnCurrent = await guestOf(onCurrent);
+    const guestRow = await guestOnCurrent.db
+      .insert(app.todos, {
+        title: "a guest's, by the current deployment",
+        owner: guestOnCurrent.session!.user!.account,
+      })
+      .wait({ tier: "global" });
+    const guestOnNewer = await guestOf(onNewer);
+    await expect(
+      guestOnNewer.db
+        .insert(app.todos, {
+          title: "a guest's, by the newer deployment",
+          owner: guestOnNewer.session!.user!.account,
+        })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
+
     const alice = await userSession(appId, onCurrent, "alice");
     const row = await alice.db
       .insert(app.todos, {
@@ -877,9 +906,56 @@ describe("createJazz", () => {
       .insert(app.todos, { title: "after the rollback", owner: alice.session!.user!.account })
       .wait({ tier: "global" });
     expect((await rolledBack.db.all(app.todos)).map((todo) => todo.id).sort()).toEqual(
-      [row.id, again.id].sort(),
+      [guestRow.id, row.id, again.id].sort(),
     );
   }, 60_000);
+
+  it.each([
+    ["has no route for bundles", 404, /predates per-deployment permissions bundles/],
+    ["publishes no bundle", 200, /did not publish a permissions bundle/],
+  ] as const)(
+    "refuses a core that %s instead of activating its deployment",
+    async (_label, status, error) => {
+      const appId = randomUUID();
+      const core = await startLocalJazzServer({ appId, inMemory: true });
+      cleanups.push(() => core.stop());
+      // An older core: everything but the `/bundles` route it never had.
+      const older = createServer((request, response) => {
+        if (request.url?.endsWith("/admin/bundles")) {
+          response.statusCode = status;
+          response.setHeader("content-type", "application/json");
+          response.end(
+            status === 200
+              ? JSON.stringify({ changed: true, published: { schemas: [], migrations: [] } })
+              : "",
+          );
+          return;
+        }
+        const target = new URL(request.url ?? "/", core.url);
+        const upstream = httpRequest(
+          target,
+          { method: request.method, headers: { ...request.headers, host: target.host } },
+          (answer) => {
+            response.writeHead(answer.statusCode ?? 502, answer.headers);
+            answer.pipe(response);
+          },
+        );
+        request.pipe(upstream);
+      });
+      await new Promise<void>((resolve) => older.listen(0, "127.0.0.1", resolve));
+      cleanups.push(() => new Promise<void>((resolve) => older.close(() => resolve())));
+      const url = `http://127.0.0.1:${(older.address() as AddressInfo).port}`;
+
+      await expect(
+        createJazz({ appId, app, permissions, store: remote({ url, secret: core.adminSecret }) }),
+      ).rejects.toThrow(error);
+      // Nothing was activated as the app's current permissions.
+      const head = await fetch(`${core.url}/apps/${appId}/admin/permissions`, {
+        headers: { "X-Jazz-Admin-Secret": core.adminSecret },
+      });
+      expect(((await head.json()) as { head: unknown }).head).toBeNull();
+    },
+  );
 
   it("presents the backend credential on every request and socket to a remote core", async () => {
     const appId = randomUUID();

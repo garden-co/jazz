@@ -160,6 +160,67 @@ fn a_bundle_this_store_never_published_is_refused() {
 }
 
 #[test]
+fn a_bundle_whose_write_schema_was_never_admitted_is_refused() {
+    let server = block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap();
+    server.set_authority();
+    // Its schema has a column the store never admitted.
+    let unadmitted = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("users")
+                .column("name", ColumnType::Text)
+                .column("nickname", ColumnType::Text)
+                .policies(read_and_allow_all_writes(PolicyExpr::True)),
+        )
+        .build();
+    let bundle = block_on(server.publish_bundle(&unadmitted)).unwrap();
+    let (_client_side, server_side) = duplex();
+    let error = server
+        .accept_pinned_subscriber(
+            server_side,
+            AuthorSubject::for_test_bytes([0x55; 16]),
+            None,
+            Some(bundle),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("never admitted its write schema"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_store_that_serves_bundles_refuses_unpinned_policy_sessions() {
+    let (server, _row) = server_with_row(
+        block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap(),
+    );
+    let alice = AuthorSubject::for_test_bytes([0x55; 16]);
+    // Before any bundle, an unpinned session still opens under the
+    // current permissions.
+    let (_client_side, server_side) = duplex();
+    server
+        .accept_pinned_subscriber(server_side, alice, None, None)
+        .unwrap();
+
+    block_on(server.publish_bundle(&users(PolicyExpr::True))).unwrap();
+    let (_client_side, server_side) = duplex();
+    let error = server
+        .accept_pinned_subscriber(server_side, alice, None, None)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("served through createJazz"),
+        "{error}"
+    );
+
+    // The trusted backend's own sessions need no pin.
+    let (_client_side, server_side) = duplex();
+    server
+        .accept_pinned_subscriber(server_side, AuthorSubject::SYSTEM, None, None)
+        .unwrap();
+}
+
+#[test]
 fn bundles_govern_sessions_after_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");

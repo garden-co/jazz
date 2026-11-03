@@ -237,7 +237,8 @@ impl Inner {
     }
 
     /// `delta(a, b)` (SPEC 19.6) between the values `column` of `row` holds
-    /// in its versions `from` and `to`, for a reader allowed to read both.
+    /// in its versions `from` and `to`, for a reader allowed to read both by
+    /// `policies` (a pinned session's bundle, or the current schema).
     /// Only the chunks in changed regions are read.
     pub(crate) fn value_delta(
         &self,
@@ -246,8 +247,10 @@ impl Inner {
         column: &str,
         (from, to): (sync::Rank, sync::Rank),
         reader: Option<AuthorSubject>,
+        policies: &Schema,
     ) -> Result<Vec<LargeValueDeltaSplice>, Error> {
         let t = self.schema.table(table)?;
+        let governed = policies.table(table)?;
         if !t.branch_by.is_empty() {
             return Err(unsupported("large-value deltas on branched tables"));
         }
@@ -258,7 +261,7 @@ impl Inner {
         let text = crate::large::kind(col) != lv::LargeValueKind::Bytes;
         // Losing read access takes effect at once, for earlier versions too.
         if let Some(author) = reader
-            && !self.check(t, row, &[], author, Operation::Select)?
+            && !self.check_in(policies, governed, row, &[], author, Operation::Select)?
         {
             return Err(Error::new(
                 ErrorCode::NotObserved,
@@ -268,7 +271,15 @@ impl Inner {
         let mut cells = Vec::with_capacity(2);
         for at in [from, to] {
             if let Some(author) = reader
-                && !self.check_version(&self.schema, t, row, &[], at, author, Operation::Select)?
+                && !self.check_version(
+                    policies,
+                    governed,
+                    row,
+                    &[],
+                    at,
+                    author,
+                    Operation::Select,
+                )?
             {
                 return Err(Error::new(
                     ErrorCode::NotObserved,
@@ -636,6 +647,7 @@ impl Db {
                 column,
                 ((from, None), (to, None)),
                 inner.reader(),
+                &inner.schema,
             )
         })
         .await

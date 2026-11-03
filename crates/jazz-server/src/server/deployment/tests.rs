@@ -72,6 +72,12 @@ async fn deploy_ok(router: &Router, request: Value) -> Value {
     assert_eq!(status, StatusCode::OK, "{body}");
     body
 }
+/// Publish a deployment as a bundle, activating nothing (createJazz).
+async fn publish_ok(router: &Router, request: Value) -> Value {
+    let (status, body) = http(router, "POST", "/bundles", request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body
+}
 async fn graph(router: &Router) -> Value {
     let (status, body) = http(router, "GET", "/migrations/graph", Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -699,7 +705,27 @@ async fn deploy_revert_then_new_branch_reopens_and_rejects_stored_sibling() {
     reopened.shutdown().await;
 }
 
-/// A deployment that activates nothing publishes its permissions as a
+/// Only the route chooses whether a deployment activates: an `activate`
+/// field in a `/deploy` body is ignored, as an older server ignores it.
+#[tokio::test]
+async fn deploy_bodies_cannot_opt_out_of_activation() {
+    let server = builder(None).build().await.unwrap();
+    let router = create_router(server.state.clone());
+    let base = schema(&[]);
+    let mut body = request(&base, &[&base], vec![]);
+    body["activate"] = json!(false);
+    let deployed = deploy_ok(&router, body).await;
+    assert_eq!(deployed["bundle"], Value::Null, "{deployed}");
+    let head = http(&router, "GET", "/permissions", Value::Null).await.1;
+    assert_ne!(
+        head["head"],
+        Value::Null,
+        "the deployment activated: {head}"
+    );
+    server.shutdown().await;
+}
+
+/// A deployment published to `/bundles` publishes its permissions as a
 /// bundle, by content: the same bundle again (a rollback) changes nothing,
 /// and the current permissions stay as they were.
 #[tokio::test]
@@ -709,7 +735,6 @@ async fn publish_only_deployments_publish_content_addressed_bundles() {
     let base = schema(&[]);
     let next = schema(&["body"]);
     let with = |mut request: Value, read: PolicyExpr| {
-        request["activate"] = json!(false);
         request["permissions"] = serde_json::to_value(HashMap::from([(
             TableName::new("notes"),
             TablePolicies::new().with_select(read),
@@ -720,19 +745,19 @@ async fn publish_only_deployments_publish_content_addressed_bundles() {
     let (open, closed) = {
         let server = builder(Some(&path)).build().await.unwrap();
         let router = create_router(server.state.clone());
-        let first = deploy_ok(
+        let first = publish_ok(
             &router,
             with(request(&base, &[&base], vec![]), PolicyExpr::True),
         )
         .await;
         assert_eq!(first["changed"], true);
         let open = first["bundle"].as_str().unwrap().to_owned();
-        let again = deploy_ok(&router, with(request(&base, &[], vec![]), PolicyExpr::True)).await;
+        let again = publish_ok(&router, with(request(&base, &[], vec![]), PolicyExpr::True)).await;
         assert_eq!(again["changed"], false);
         assert_eq!(again["bundle"], json!(open));
 
         // A newer deployment with another schema and policies.
-        let upgraded = deploy_ok(
+        let upgraded = publish_ok(
             &router,
             with(
                 request(&next, &[&next], vec![migration(&base, &next, &["body"])]),
@@ -746,7 +771,7 @@ async fn publish_only_deployments_publish_content_addressed_bundles() {
 
         // Rolling back to the first deployment publishes its bundle again.
         let rollback =
-            deploy_ok(&router, with(request(&base, &[], vec![]), PolicyExpr::True)).await;
+            publish_ok(&router, with(request(&base, &[], vec![]), PolicyExpr::True)).await;
         assert_eq!(rollback["changed"], false, "{rollback}");
         assert_eq!(rollback["bundle"], json!(open));
 

@@ -1947,6 +1947,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ws_a_workload_vouched_upgrade_may_pin_its_session() {
+        use crate::middleware::workload::{BackendAccess, VOUCHED_HEADER, vouched_value};
+        let state = make_ws_test_state().await;
+        let secrets = state.workload_secrets.as_ref().expect("internal secrets");
+        let identity = AuthorSubject::for_test_bytes([0x64; 16]);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            VOUCHED_HEADER,
+            vouched_value(secrets, BackendAccess::Backend)
+                .parse()
+                .unwrap(),
+        );
+        // The vouched upgrade stands in for the backend secret.
+        let admission = ws_admission(pinned_prelude(identity, None), &headers, &state)
+            .await
+            .expect("a vouched upgrade pins its session");
+        assert_eq!(
+            admission.bundle,
+            Some(jazz::catalogue::BundleId([0xab; 32]))
+        );
+
+        // A vouch the gate did not issue counts for nothing.
+        let mut forged = HeaderMap::new();
+        forged.insert(VOUCHED_HEADER, "not-the-backend session".parse().unwrap());
+        let Err(error) = ws_admission(pinned_prelude(identity, None), &forged, &state).await else {
+            panic!("a forged vouch may not pin a session");
+        };
+        assert!(
+            format!("{error:?}").contains("bundle pin needs"),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn ws_bundle_pin_without_the_backend_credential_is_refused() {
         let state = make_ws_test_state().await;
         let identity = AuthorSubject::for_test_bytes([0x63; 16]);

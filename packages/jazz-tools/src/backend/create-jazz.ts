@@ -29,7 +29,7 @@ import { computeSchemaHash } from "../schema-hash.js";
 import { validateSchemaAndPermissions } from "../dev/schema-validation.js";
 import { deployArtifacts } from "../dev/catalogue.js";
 import { fetchMigrationGraph } from "../dev/migration-graph.js";
-import type { PublishedTableLens } from "../dev/catalogue-api.js";
+import { DeploymentError, type PublishedTableLens } from "../dev/catalogue-api.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
@@ -304,7 +304,7 @@ interface CoreReply {
 }
 
 /** One sync session on the core. */
-interface CoreSocket {
+export interface CoreSocket {
   /** False once the session ended. */
   send(data: Uint8Array): boolean;
   close(): void;
@@ -481,6 +481,16 @@ async function applyBundle(
     })),
     permissions: options.permissions,
     activate: false,
+  }).catch((error: unknown) => {
+    // A core without `/bundles` predates per-deployment permissions; it
+    // must not be handed a deployment it would activate for every backend.
+    if (error instanceof DeploymentError && (error.status === 404 || error.status === 405)) {
+      throw new Error(
+        "createJazz: the sync server predates per-deployment permissions bundles; upgrade it before this backend",
+        { cause: error },
+      );
+    }
+    throw error;
   });
   if (!deployed.bundle) {
     throw new Error("createJazz: the core did not publish a permissions bundle; upgrade it");
@@ -493,13 +503,19 @@ async function applyBundle(
  * this backend serves with. The core honours the pin only on this backend's
  * word, so whatever bundle a browser stated is replaced.
  */
-function pinnedSocket(socket: CoreSocket, bundle: () => string | undefined): CoreSocket {
+export function pinnedSocket(socket: CoreSocket, bundle: () => string | undefined): CoreSocket {
   let first = true;
   return {
     send(data) {
       if (first) {
         first = false;
-        data = withBundle(data, bundle());
+        const pinned = withBundle(data, bundle());
+        // A prelude the pin cannot be stamped into would open unpinned.
+        if (pinned === null) {
+          socket.close();
+          return false;
+        }
+        data = pinned;
       }
       return socket.send(data);
     },
@@ -507,16 +523,23 @@ function pinnedSocket(socket: CoreSocket, bundle: () => string | undefined): Cor
   };
 }
 
-function withBundle(prelude: Uint8Array, bundle: string | undefined): Uint8Array {
-  if (bundle === undefined) return prelude;
+/**
+ * `prelude` pinned to `bundle`, or with no pin while none is published yet
+ * (the backend's own sockets while it boots): a bundle a browser stated
+ * never reaches the core. `null` when the prelude is not a JSON object.
+ */
+function withBundle(prelude: Uint8Array, bundle: string | undefined): Uint8Array | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(new TextDecoder().decode(prelude));
   } catch {
-    return prelude;
+    return null;
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return prelude;
-  return new TextEncoder().encode(JSON.stringify({ ...parsed, bundle }));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const { bundle: _stated, ...rest } = parsed as Record<string, unknown>;
+  return new TextEncoder().encode(
+    JSON.stringify(bundle === undefined ? rest : { ...rest, bundle }),
+  );
 }
 
 /** `bundle` is the published bundle every socket the core opens is pinned to. */

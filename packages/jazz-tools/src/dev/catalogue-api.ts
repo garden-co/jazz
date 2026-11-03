@@ -243,13 +243,15 @@ export interface DeploymentArtifacts {
   migrations: Array<{ fromHash: string; toHash: string; forward: PublishedTableLens[] }>;
   permissions: CompiledPermissionsMap;
   /**
-   * Make the target and its permissions current (the default), or only
-   * publish them as a bundle that sessions are pinned to (createJazz).
+   * Make the target and its permissions current (the default, `/deploy`), or
+   * only publish them as a bundle that sessions are pinned to (createJazz,
+   * `/bundles`). A core that predates bundles has no `/bundles` route, so it
+   * refuses such a publish instead of activating it.
    */
   activate?: boolean;
 }
 
-export interface DeploymentRequest extends Omit<DeploymentArtifacts, "schemas"> {
+export interface DeploymentRequest extends Omit<DeploymentArtifacts, "schemas" | "activate"> {
   schemas: Array<{ hash: string; schema: { tables: WasmSchema } }>;
 }
 
@@ -279,7 +281,11 @@ export async function publishDeployment(
   serverUrl: string,
   options: { appId: string; adminSecret: string } & DeploymentArtifacts,
 ): Promise<DeploymentResponse> {
-  const deployUrl = appScopedUrl(serverUrl, options.appId, "admin/deploy");
+  const deployUrl = appScopedUrl(
+    serverUrl,
+    options.appId,
+    options.activate === false ? "admin/bundles" : "admin/deploy",
+  );
   const response = await fetchFor(deployUrl)(deployUrl, {
     method: "POST",
     headers: {
@@ -292,7 +298,6 @@ export async function publishDeployment(
         schemas: options.schemas.map(({ hash, schema }) => ({ hash, schema: { tables: schema } })),
         migrations: options.migrations,
         permissions: normalizePermissionsForWasm(options.permissions),
-        ...(options.activate === false ? { activate: false } : {}),
       },
       runtimeSchemaJsonReplacer,
     ),

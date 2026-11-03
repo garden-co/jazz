@@ -9514,9 +9514,30 @@ impl Db {
         if let Some(bundle) = &bundle
             && inner.bundle(bundle)?.is_none()
         {
+            let published = crate::catalogue::bundle(&inner.conn, bundle)?.is_some();
             return Err(Error::new(
                 ErrorCode::Schema,
-                format!("permissions bundle {bundle} is not published on this store"),
+                if published {
+                    format!(
+                        "permissions bundle {bundle} is published, but this store never admitted its write schema"
+                    )
+                } else {
+                    format!("permissions bundle {bundle} is not published on this store")
+                },
+            ));
+        }
+        // Once createJazz publishes bundles here, its backend pins every
+        // session it opens. An unpinned policy session would be governed by
+        // the current permissions, which createJazz no longer advances, so
+        // a later tightening or rollback would never reach it.
+        if bundle.is_none()
+            && identity != AuthorSubject::SYSTEM
+            && crate::catalogue::serves_bundles(&inner.conn)?
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "this app is served through createJazz: connect through its backend, \
+                 which pins each session to the permissions it deployed",
             ));
         }
         // One relay tier only (SPEC 9 §9.5).

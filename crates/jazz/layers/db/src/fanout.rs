@@ -1378,12 +1378,20 @@ impl Inner {
                     }
                     continue;
                 }
+                // Read access is by the group's own policies: a pinned
+                // session's bundle, not the current schema.
+                let policies = group
+                    .prepared
+                    .schema
+                    .as_ref()
+                    .map_or(&*self.owner, |schema| schema.policy_schema());
                 if let Ok(splices) = self.value_delta(
                     &group.prepared.query.table,
                     out.row.id,
                     column,
                     (from, to),
                     group.identity,
+                    policies,
                 ) {
                     out.splices.push((column.clone(), splices));
                 }

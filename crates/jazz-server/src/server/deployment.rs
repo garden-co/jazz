@@ -18,9 +18,11 @@ pub(crate) struct DeployRequest {
     pub schemas: Vec<DeploySchema>,
     pub migrations: Vec<PublishMigrationRequest>,
     pub permissions: HashMap<TableName, TablePolicies>,
-    /// Make the target and its permissions current (the default), or only
-    /// publish them as a bundle sessions are pinned to.
-    #[serde(default = "activates")]
+    /// Make the target and its permissions current (`/deploy`), or only
+    /// publish them as a bundle sessions are pinned to (`/bundles`). Set by
+    /// the route, never by the body: an older server that ignored such a
+    /// field would activate a bundle meant only to be published.
+    #[serde(skip, default = "activates")]
     pub activate: bool,
 }
 
