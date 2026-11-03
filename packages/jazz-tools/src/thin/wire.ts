@@ -67,6 +67,7 @@ export type ThinOp =
       column: string;
       mutation: string;
       options: object;
+      transaction?: string;
     }
   | { type: "streamChunk"; stream: number; chunk: Uint8Array }
   | { type: "finishStream"; stream: number }
@@ -204,6 +205,7 @@ export function encodeThinRequest(id: number, op: ThinOp): Uint8Array {
       writer.string(op.column);
       writer.string(op.mutation);
       writer.bytes(json(op.options));
+      transaction(writer, op.transaction);
       break;
     case "streamChunk":
       writer.u64(op.stream);

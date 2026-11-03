@@ -66,6 +66,7 @@ const REQUESTS: Record<string, ThinOp> = {
     column: "body",
     mutation: "insert",
     options: {},
+    transaction: "tx-1",
   },
   streamChunk: { type: "streamChunk", stream: 7, chunk: text("chunk") },
   finishStream: { type: "finishStream", stream: 7 },
