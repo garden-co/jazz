@@ -5,6 +5,10 @@ import { JazzProvider as Jazz, betterAuth, useJazzAuth, useSession } from "jazz-
 import { authClient } from "@/lib/auth-client";
 import { ErrorScreen, LoadingScreen } from "@/components/status-screen";
 
+// Start on the thin client; load the local-first one (WASM, local storage,
+// offline writes) in its own chunk once the page has loaded.
+const loadLocalFirst = () => import("jazz-tools/local-first");
+
 const APP_ID = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
 // Better Auth's session drives sign-in; Wequencer's backend (`createJazz` in
 // lib/jazz.server.ts) reads it in `authenticate`. Signing up creates the
@@ -70,6 +74,7 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
     <Jazz
       appId={APP_ID}
       serverUrl="/jazz"
+      client={loadLocalFirst}
       auth={auth}
       // Signed-out pages (the sign-in form) need no Jazz.
       signedOut={children}

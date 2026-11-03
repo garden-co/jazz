@@ -11,6 +11,10 @@ import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { authClient } from "../src/lib/auth-client";
 
+// Start on the thin client; load the local-first one (WASM, local storage,
+// offline writes) in its own chunk once the page has loaded.
+const loadLocalFirst = () => import("jazz-tools/local-first");
+
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
 // Better Auth's session drives sign-in; RecordPlayer's backend (`createJazz`
 // in src/lib/jazz.server.ts) reads it in `authenticate`. Signing up creates
@@ -32,6 +36,7 @@ export function RecordPlayerProvider({
     <JazzProvider
       appId={appId}
       serverUrl="/jazz"
+      client={loadLocalFirst}
       auth={auth}
       signedOut={frame(<SignIn />, false)}
       loading={frame(<Status>Connecting RecordPlayer…</Status>, false)}
