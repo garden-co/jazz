@@ -503,10 +503,14 @@ impl Inner {
             }
         }
         if let Some(author) = identity {
+            let policies = prepared
+                .schema
+                .as_ref()
+                .map_or(&*self.owner, |schema| schema.policy_schema());
             for table in tables.clone() {
                 // Internal tables (history, branches) carry no policy.
-                if self.owner.by_stored(&table).is_some() {
-                    tables.extend(self.read_policy_tables(&table, author)?);
+                if policies.by_stored(&table).is_some() {
+                    tables.extend(self.read_policy_tables(policies, &table, author)?);
                 }
             }
         }
@@ -1374,12 +1378,20 @@ impl Inner {
                     }
                     continue;
                 }
+                // Read access is by the group's own policies: a pinned
+                // session's bundle, not the current schema.
+                let policies = group
+                    .prepared
+                    .schema
+                    .as_ref()
+                    .map_or(&*self.owner, |schema| schema.policy_schema());
                 if let Ok(splices) = self.value_delta(
                     &group.prepared.query.table,
                     out.row.id,
                     column,
                     (from, to),
                     group.identity,
+                    policies,
                 ) {
                     out.splices.push((column.clone(), splices));
                 }

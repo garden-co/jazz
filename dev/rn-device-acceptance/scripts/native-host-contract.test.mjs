@@ -809,7 +809,7 @@ test("RN packaging and public docs describe the proven alpha boundary semantical
     fs.readFileSync(path.resolve(root, "../../crates/jazz-rn/README.md"), "utf8"),
   );
   const installGuide = prose(
-    fs.readFileSync(path.resolve(root, "../../docs/content/docs/install/client.mdx"), "utf8"),
+    fs.readFileSync(path.resolve(root, "../../docs/content/docs/setup/react-native.mdx"), "utf8"),
   );
   const spec = prose(
     fs.readFileSync(path.resolve(root, "../../crates/jazz/SPEC/19_native_relays.md"), "utf8"),

@@ -1,6 +1,5 @@
 /**
- * The app's public origin: Better Auth's base URL and the JWT issuer and
- * audience. One constant, so issuer and audience cannot drift apart.
+ * The app's public origin: Better Auth's base URL and trusted origin.
  * Development defaults to the local dev origin; production must set it.
  */
 function appOrigin() {
