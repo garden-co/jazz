@@ -7,7 +7,7 @@
 //! holds and the write's value: each side's changes are diffed against the
 //! base and both applied. For a write its merge changed, the authority
 //! also keeps the write as sent, a history version flagged
-//! [`crate::values::STATE_AS_SENT`] that no read lists, so a later write
+//! as-sent that no read lists, so a later write
 //! its writer chained on it merges over what its writer saw.
 //!
 //! Values are cut into tokens first (words, single whitespace and
@@ -22,8 +22,15 @@
 //!   or only deletes, the deletes are unioned and the inserts kept;
 //! - otherwise (two replacements of overlapping spans) the incoming write,
 //!   which the authority sequences later, wins that span.
+//!
+//! Each side's diff keeps the most text in place first: word tokens found
+//! exactly once on both sides anchor it, heaviest run first (patience
+//! diff), so a moved or renumbered block does not pair unrelated words. A
+//! block one side deleted and reinserted elsewhere is a move: the other
+//! side's changes inside it apply to the moved copy. Whitespace added at
+//! the very end stays last, and an HTML merge drops tags it left unmatched.
 
-use crate::schema::TextFormat;
+use crate::TextFormat;
 use std::collections::HashMap;
 
 /// Past this many edit steps, one search of a diff stops looking for the
@@ -34,13 +41,13 @@ const MAX_EDIT_DISTANCE: usize = 256;
 
 /// The merge of `held` and `incoming`, both made from `base`, within
 /// [`MERGE_WORK_BUDGET`].
-pub(crate) fn merge3(format: TextFormat, base: &str, held: &str, incoming: &str) -> String {
+pub fn merge3(format: TextFormat, base: &str, held: &str, incoming: &str) -> String {
     merge3_within(format, base, held, incoming, MERGE_WORK_BUDGET)
 }
 
 /// [`merge3`] within `budget` diff steps: past them the merge stops and
 /// `incoming` stands as sent, as for overlapping replacements.
-pub(crate) fn merge3_within(
+pub fn merge3_within(
     format: TextFormat,
     base: &str,
     held: &str,
@@ -72,22 +79,75 @@ pub(crate) fn merge3_within(
             held_tokens[start..end] != incoming_tokens[hunk.new.0..hunk.new.1]
         })
     });
-    let side = |hunk: &Hunk, held: bool| Change {
-        old: hunk.old,
-        insert: if held {
-            held_tokens[hunk.new.0..hunk.new.1].concat()
-        } else {
-            incoming_tokens[hunk.new.0..hunk.new.1].concat()
-        },
-        held,
+    // A block one side moved carries the other side's edits inside it to
+    // where it went, instead of leaving them where it was.
+    let mut changes = Vec::with_capacity(ours.len() + theirs.len());
+    let (Ok(held_moves), Ok(incoming_moves)) = (
+        moves(&base_tokens, &held_tokens, &ours, &mut work),
+        moves(&base_tokens, &incoming_tokens, &theirs, &mut work),
+    ) else {
+        return incoming.to_owned();
     };
-    let mut changes: Vec<Change> = ours
-        .iter()
-        .map(|hunk| side(hunk, true))
-        .chain(theirs.iter().map(|hunk| side(hunk, false)))
-        .collect();
-    // Base order; at one point the held value's change first.
-    changes.sort_by_key(|change| (change.old.0, change.old.1, !change.held));
+    for (held, hunks, tokens, own_moves, other_moves, other_hunks, other_tokens) in [
+        (
+            true,
+            &ours,
+            &held_tokens,
+            &held_moves,
+            &incoming_moves,
+            &theirs,
+            &incoming_tokens,
+        ),
+        (
+            false,
+            &theirs,
+            &incoming_tokens,
+            &incoming_moves,
+            &held_moves,
+            &ours,
+            &held_tokens,
+        ),
+    ] {
+        for (index, hunk) in hunks.iter().enumerate() {
+            if other_moves.iter().any(|moved| moved.carries(hunk, tokens)) {
+                continue; // applied inside the moved copy instead
+            }
+            let mut insert = String::new();
+            let mut at = hunk.new.0;
+            let mut moves_block = false;
+            for moved in own_moves.iter().filter(|moved| moved.hunk == index) {
+                moves_block = true;
+                insert.extend(tokens[at..moved.at].iter().copied());
+                moved.write(&base_tokens, other_hunks, other_tokens, &mut insert);
+                at = moved.at + (moved.old.1 - moved.old.0);
+            }
+            insert.extend(tokens[at..hunk.new.1].iter().copied());
+            changes.push(Change {
+                old: hunk.old,
+                insert,
+                held,
+                moves_block,
+            });
+        }
+    }
+    // Base order; at one point the held value's change first, except that
+    // a block moved there goes after text the other side typed there (which
+    // belongs to the text it was typed against), and whitespace added at
+    // the very end (a trailing newline an editor adds) stays last.
+    let end_whitespace = |change: &Change| {
+        change.old.0 == base_tokens.len()
+            && change.inserts_only()
+            && change.insert.chars().all(char::is_whitespace)
+    };
+    changes.sort_by_key(|change| {
+        (
+            change.old.0,
+            change.old.1,
+            end_whitespace(change),
+            change.moves_block,
+            !change.held,
+        )
+    });
     let mut out = String::with_capacity(held.len().max(incoming.len()));
     let mut at = 0; // base tokens consumed
     let mut index = 0;
@@ -107,7 +167,247 @@ pub(crate) fn merge3_within(
         index = end;
     }
     out.extend(base_tokens[at..].iter().copied());
+    if format == TextFormat::Html {
+        out = balance_tags(&out, &[&base_tokens, &held_tokens, &incoming_tokens]);
+    }
     out
+}
+
+/// A block of base tokens `old` that one side deleted there and inserted,
+/// unchanged, at new token `at`, inside the insert of its hunk `hunk`.
+struct Move {
+    old: (usize, usize),
+    hunk: usize,
+    at: usize,
+}
+
+/// The fewest word tokens a block needs to count as moved rather than
+/// coincidentally repeated.
+const MOVE_MIN_WORDS: usize = 3;
+
+impl Move {
+    /// Whether the other side's `hunk` (into `tokens`) lies inside this
+    /// block, so it goes with the block. An insert right at one of its
+    /// edges goes with it too unless a line break parts them: text typed
+    /// onto the end of a moved sentence ends up after it, while a new
+    /// paragraph beside a moved one stays where it was written.
+    fn carries(&self, hunk: &Hunk, tokens: &[&str]) -> bool {
+        let (start, end) = self.old;
+        if !(start <= hunk.old.0 && hunk.old.1 <= end) {
+            return false;
+        }
+        if hunk.old.0 != hunk.old.1 || (hunk.old.0 != start && hunk.old.0 != end) {
+            return true;
+        }
+        let inserted = &tokens[hunk.new.0..hunk.new.1];
+        let breaks = |token: Option<&&str>| token.is_some_and(|token| token.contains('\n'));
+        if hunk.old.0 == end {
+            start < end && !breaks(inserted.first())
+        } else {
+            start < end && !breaks(inserted.last())
+        }
+    }
+
+    /// The block as the other side left it: base tokens with that side's
+    /// hunks inside it applied.
+    fn write(&self, base: &[&str], hunks: &[Hunk], tokens: &[&str], out: &mut String) {
+        let mut at = self.old.0;
+        for hunk in hunks.iter().filter(|hunk| self.carries(hunk, tokens)) {
+            out.extend(base[at..hunk.old.0].iter().copied());
+            out.extend(tokens[hunk.new.0..hunk.new.1].iter().copied());
+            at = hunk.old.1;
+        }
+        out.extend(base[at..self.old.1].iter().copied());
+    }
+}
+
+/// The blocks a side's `hunks` (from `base` to `new`) moved: the longest
+/// run of a hunk's deleted base tokens that reappears token for token
+/// inside another hunk's insert, if it holds [`MOVE_MIN_WORDS`] words.
+/// Each comparison of a deleted run with an insert is charged to `work`.
+fn moves(
+    base: &[&str],
+    new: &[&str],
+    hunks: &[Hunk],
+    work: &mut Work,
+) -> Result<Vec<Move>, OverBudget> {
+    let mut found = Vec::new();
+    // Only inserts holding enough words can hold a moved block.
+    let targets: Vec<usize> = hunks
+        .iter()
+        .enumerate()
+        .filter(|(_, other)| {
+            new[other.new.0..other.new.1]
+                .iter()
+                .filter(|token| anchors(token))
+                .count()
+                >= MOVE_MIN_WORDS
+        })
+        .map(|(to, _)| to)
+        .collect();
+    for (from, hunk) in hunks.iter().enumerate() {
+        let deleted = &base[hunk.old.0..hunk.old.1];
+        if deleted.iter().filter(|token| anchors(token)).count() < MOVE_MIN_WORDS {
+            continue;
+        }
+        let mut best = None;
+        for &to in targets.iter().filter(|&&to| to != from) {
+            let other = &hunks[to];
+            let inserted = &new[other.new.0..other.new.1];
+            work.spend((deleted.len() as u64).saturating_mul(inserted.len() as u64))?;
+            let Some((start, at, len)) = longest_common_run(deleted, inserted) else {
+                continue;
+            };
+            let candidate = (
+                len,
+                std::cmp::Reverse(to),
+                hunk.old.0 + start,
+                other.new.0 + at,
+            );
+            if best.is_none_or(|best: (usize, std::cmp::Reverse<usize>, usize, usize)| {
+                (candidate.0, candidate.1) > (best.0, best.1)
+            }) {
+                best = Some(candidate);
+            }
+        }
+        let best = best.map(|(len, to, start, at)| (len, to.0, start, at));
+        let Some((len, to, start, at)) = best else {
+            continue;
+        };
+        let block = &base[start..start + len];
+        if block.iter().filter(|token| anchors(token)).count() < MOVE_MIN_WORDS {
+            continue;
+        }
+        found.push(Move {
+            old: (start, start + len),
+            hunk: to,
+            at,
+        });
+    }
+    found.sort_by_key(|moved| (moved.hunk, moved.at));
+    // Two blocks moved into one insert must not overlap there.
+    found.dedup_by(|later, earlier| {
+        later.hunk == earlier.hunk && later.at < earlier.at + (earlier.old.1 - earlier.old.0)
+    });
+    Ok(found)
+}
+
+/// The most tokens [`longest_common_run`] compares, as the product of the
+/// two lengths; past it a move is only found when the whole deleted run
+/// reappears.
+const MOVE_SEARCH_CELLS: usize = 4_000_000;
+
+/// The longest run of tokens in both `a` and `b`, as (start in a, start in
+/// b, length).
+fn longest_common_run(a: &[&str], b: &[&str]) -> Option<(usize, usize, usize)> {
+    if a.len().saturating_mul(b.len()) > MOVE_SEARCH_CELLS {
+        return b
+            .windows(a.len())
+            .position(|window| window == a)
+            .map(|at| (0, at, a.len()));
+    }
+    let mut row = vec![0u32; b.len() + 1];
+    let mut best = (0, 0, 0);
+    for (i, token) in a.iter().enumerate() {
+        for j in (0..b.len()).rev() {
+            row[j + 1] = if b[j] == *token { row[j] + 1 } else { 0 };
+            if row[j + 1] as usize > best.2 {
+                best = (
+                    i + 1 - row[j + 1] as usize,
+                    j + 1 - row[j + 1] as usize,
+                    row[j + 1] as usize,
+                );
+            }
+        }
+    }
+    (best.2 > 0).then_some(best)
+}
+
+/// HTML elements that never have a closing tag.
+const VOID_ELEMENTS: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track",
+    "wbr",
+];
+
+/// `html` with tags the merge left unmatched removed: a closing tag with no
+/// open element of its name, and an opening tag still open when an outer
+/// element closes or the value ends. Their content stays. Tags left open on
+/// purpose (`<p>` or `<li>` without an end tag, as HTML allows) are kept:
+/// of each kind, as many stay unmatched as in the most of `inputs` (the
+/// base and both sides). Merges of sides that keep tags paired come through
+/// unchanged.
+fn balance_tags(html: &str, inputs: &[&[&str]]) -> String {
+    let tokens = tokenize(TextFormat::Html, html);
+    let unmatched = unmatched_tags(&tokens);
+    if unmatched.is_empty() {
+        return html.to_owned();
+    }
+    // Per (name, closing): how many unmatched tags the inputs already had.
+    let mut allowed: HashMap<(String, bool), usize> = HashMap::new();
+    for input in inputs {
+        let mut counts: HashMap<(String, bool), usize> = HashMap::new();
+        for (_, kind) in unmatched_tags(input) {
+            *counts.entry(kind).or_default() += 1;
+        }
+        for (kind, count) in counts {
+            let entry = allowed.entry(kind).or_default();
+            *entry = (*entry).max(count);
+        }
+    }
+    let mut drop = vec![false; tokens.len()];
+    for (index, kind) in unmatched {
+        match allowed.get_mut(&kind) {
+            Some(left) if *left > 0 => *left -= 1,
+            _ => drop[index] = true,
+        }
+    }
+    if !drop.contains(&true) {
+        return html.to_owned();
+    }
+    tokens
+        .iter()
+        .zip(drop)
+        .filter(|(_, dropped)| !dropped)
+        .map(|(token, _)| *token)
+        .collect()
+}
+
+/// The tags in `tokens` with no partner, in order: each one's index and
+/// its (lowercase name, whether it closes).
+fn unmatched_tags(tokens: &[&str]) -> Vec<(usize, (String, bool))> {
+    let mut unmatched = Vec::new();
+    let mut open: Vec<(String, usize)> = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        let Some(inner) = token.strip_prefix('<').and_then(|t| t.strip_suffix('>')) else {
+            continue;
+        };
+        if inner.starts_with('!') || inner.starts_with('?') || inner.ends_with('/') {
+            continue;
+        }
+        let closing = inner.starts_with('/');
+        let name: String = inner
+            .trim_start_matches('/')
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if name.is_empty() || VOID_ELEMENTS.contains(&name.as_str()) {
+            continue;
+        }
+        if !closing {
+            open.push((name, index));
+        } else if let Some(depth) = open.iter().rposition(|(open_name, _)| *open_name == name) {
+            for (name, at) in open.drain(depth + 1..) {
+                unmatched.push((at, (name, false)));
+            }
+            open.pop();
+        } else {
+            unmatched.push((index, (name, true)));
+        }
+    }
+    unmatched.extend(open.into_iter().map(|(name, at)| (at, (name, false))));
+    unmatched.sort_by_key(|(at, _)| *at);
+    unmatched
 }
 
 /// One side's replacement of base tokens `old` by `insert`.
@@ -115,6 +415,8 @@ struct Change {
     old: (usize, usize),
     insert: String,
     held: bool,
+    /// The insert holds a block moved from elsewhere.
+    moves_block: bool,
 }
 
 impl Change {
@@ -191,7 +493,7 @@ struct Hunk {
 /// on a current server: a 1 MB value with 10,000 scattered edits a side
 /// takes about a fifth of it. Past it the merge stops and the write's value
 /// stands as sent (SPEC 4 §4.3). Fixed, so every authority decides alike.
-pub(crate) const MERGE_WORK_BUDGET: u64 = 100_000_000;
+pub const MERGE_WORK_BUDGET: u64 = 100_000_000;
 
 /// The diff work left to a merge, counted in search steps: each diagonal
 /// a Myers search visits and each token a snake slides over.
@@ -226,8 +528,24 @@ fn diff(old: &[&str], new: &[&str], work: &mut Work) -> Result<Vec<Hunk>, OverBu
             out.push(*ids.entry(token).or_insert(next));
         }
     }
+    // An anchoring token weighs its length; others cannot anchor.
+    let mut weights = vec![0u64; ids.len()];
+    for (token, &id) in &ids {
+        if anchors(token) {
+            weights[id as usize] = token.chars().count() as u64;
+        }
+    }
     let mut hunks = Vec::new();
-    diff_range(&a, &b, 0, a.len(), 0, b.len(), &mut hunks, work)?;
+    diff_anchored(
+        &a,
+        &b,
+        (0, a.len()),
+        (0, b.len()),
+        &weights,
+        &mut hunks,
+        work,
+        0,
+    )?;
     // Coalesce touching hunks.
     let mut out: Vec<Hunk> = Vec::with_capacity(hunks.len());
     for hunk in hunks {
@@ -240,6 +558,148 @@ fn diff(old: &[&str], new: &[&str], work: &mut Work) -> Result<Vec<Hunk>, OverBu
         }
     }
     Ok(out)
+}
+
+/// Whether a token can anchor a diff: it holds a letter, so it is a word
+/// rather than a number, marker or piece of punctuation that repeats by
+/// nature (list numbers, `**`, `</li>`).
+fn anchors(token: &str) -> bool {
+    token.chars().any(|c| word(c) && !c.is_ascii_digit())
+}
+
+/// The diff of `a[a0..a1]` into `b[b0..b1]`, anchored first on the word
+/// tokens that occur exactly once on each side (patience diff): the longest
+/// run of them in the same order on both sides is kept, and the gaps
+/// between are diffed the same way, down to [`diff_range`] where no anchor
+/// is left. A moved or renumbered block then keeps its words matched
+/// instead of a minimal edit pairing unrelated text. Past
+/// [`MAX_ANCHOR_DEPTH`] nested gaps, a gap is diffed by [`diff_range`]
+/// alone, so the recursion stays shallow.
+#[allow(clippy::too_many_arguments)]
+fn diff_anchored(
+    a: &[u32],
+    b: &[u32],
+    (mut a0, mut a1): (usize, usize),
+    (mut b0, mut b1): (usize, usize),
+    weights: &[u64],
+    out: &mut Vec<Hunk>,
+    work: &mut Work,
+    depth: usize,
+) -> Result<(), OverBudget> {
+    while a0 < a1 && b0 < b1 && a[a0] == b[b0] {
+        a0 += 1;
+        b0 += 1;
+    }
+    while a0 < a1 && b0 < b1 && a[a1 - 1] == b[b1 - 1] {
+        a1 -= 1;
+        b1 -= 1;
+    }
+    if a0 == a1 || b0 == b1 || depth >= MAX_ANCHOR_DEPTH {
+        return diff_range(a, b, a0, a1, b0, b1, out, work);
+    }
+    work.spend((a1 - a0 + b1 - b0) as u64)?;
+    // Per anchoring token: (count in a, position in a, count in b, position in b).
+    let mut seen: HashMap<u32, (u32, usize, u32, usize)> = HashMap::new();
+    for (at, &id) in a.iter().enumerate().take(a1).skip(a0) {
+        if weights[id as usize] > 0 {
+            let entry = seen.entry(id).or_insert((0, 0, 0, 0));
+            entry.0 += 1;
+            entry.1 = at;
+        }
+    }
+    for (at, &id) in b.iter().enumerate().take(b1).skip(b0) {
+        if let Some(entry) = seen.get_mut(&id) {
+            entry.2 += 1;
+            entry.3 = at;
+        }
+    }
+    let mut pairs: Vec<(usize, usize)> = seen
+        .values()
+        .filter(|&&(in_a, _, in_b, _)| in_a == 1 && in_b == 1)
+        .map(|&(_, at_a, _, at_b)| (at_b, at_a))
+        .collect();
+    if pairs.is_empty() {
+        return diff_range(a, b, a0, a1, b0, b1, out, work);
+    }
+    pairs.sort_unstable();
+    let kept = heaviest_increasing(&pairs, |(_, at_a)| weights[a[at_a] as usize]);
+    let (mut from_a, mut from_b) = (a0, b0);
+    for (at_b, at_a) in kept {
+        diff_anchored(
+            a,
+            b,
+            (from_a, at_a),
+            (from_b, at_b),
+            weights,
+            out,
+            work,
+            depth + 1,
+        )?;
+        from_a = at_a + 1;
+        from_b = at_b + 1;
+    }
+    diff_anchored(
+        a,
+        b,
+        (from_a, a1),
+        (from_b, b1),
+        weights,
+        out,
+        work,
+        depth + 1,
+    )
+}
+
+/// How many gaps deep [`diff_anchored`] looks for anchors again.
+const MAX_ANCHOR_DEPTH: usize = 32;
+
+/// The heaviest run of `pairs` (sorted by their first element, the
+/// position in the new tokens) whose second elements (positions in the old
+/// tokens) also increase, each pair weighing `weight(pair)`: the most text
+/// that can stay where it is, so what moves is the smaller part.
+fn heaviest_increasing(
+    pairs: &[(usize, usize)],
+    weight: impl Fn((usize, usize)) -> u64,
+) -> Vec<(usize, usize)> {
+    // Ranks of the old positions, for a Fenwick tree of the best run
+    // ending below each rank.
+    let mut ranks: Vec<usize> = pairs.iter().map(|pair| pair.1).collect();
+    ranks.sort_unstable();
+    let mut tree: Vec<(u64, Option<usize>)> = vec![(0, None); ranks.len() + 1];
+    let mut previous: Vec<Option<usize>> = vec![None; pairs.len()];
+    let mut best = (0u64, None);
+    for (index, &pair) in pairs.iter().enumerate() {
+        let rank = ranks.partition_point(|&old| old < pair.1);
+        // The heaviest run ending at a rank below this one.
+        let mut below = (0u64, None);
+        let mut at = rank;
+        while at > 0 {
+            if tree[at].0 > below.0 {
+                below = tree[at];
+            }
+            at &= at - 1;
+        }
+        previous[index] = below.1;
+        let total = (below.0 + weight(pair), Some(index));
+        if total.0 > best.0 {
+            best = total;
+        }
+        let mut at = rank + 1;
+        while at < tree.len() {
+            if total.0 > tree[at].0 {
+                tree[at] = total;
+            }
+            at += at & at.wrapping_neg();
+        }
+    }
+    let mut run = Vec::new();
+    let mut at = best.1;
+    while let Some(index) = at {
+        run.push(pairs[index]);
+        at = previous[index];
+    }
+    run.reverse();
+    run
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -757,13 +1217,58 @@ mod tests {
     }
 
     /// The diff steps [`merge3`] spends on these values.
+    /// The work a plain merge spends: both diffs, and the search for
+    /// blocks each side moved.
     fn work_of(base: &str, held: &str, incoming: &str) -> u64 {
         let tokens = |text| tokenize(TextFormat::Plain, text);
         let (base, held, incoming) = (tokens(base), tokens(held), tokens(incoming));
         let mut work = Work::new(u64::MAX);
-        diff(&base, &held, &mut work).unwrap();
-        diff(&base, &incoming, &mut work).unwrap();
+        let ours = diff(&base, &held, &mut work).unwrap();
+        let theirs = diff(&base, &incoming, &mut work).unwrap();
+        moves(&base, &held, &ours, &mut work).unwrap();
+        moves(&base, &incoming, &theirs, &mut work).unwrap();
         u64::MAX - work.left
+    }
+
+    #[test]
+    fn the_search_for_moved_blocks_counts_against_the_budget() {
+        let base = "Load the van early. Soundcheck at five. Doors at eight.";
+        let held = "Soundcheck at five. Doors at eight. Load the van early.";
+        let incoming = "Load the van very early. Soundcheck at five. Doors at eight.";
+        let tokens = |text| tokenize(TextFormat::Plain, text);
+        let mut diffs_only = Work::new(u64::MAX);
+        diff(&tokens(base), &tokens(held), &mut diffs_only).unwrap();
+        diff(&tokens(base), &tokens(incoming), &mut diffs_only).unwrap();
+        let needed = work_of(base, held, incoming);
+        assert!(
+            needed > u64::MAX - diffs_only.left,
+            "moves were not charged"
+        );
+        let within = |budget| merge3_within(TextFormat::Plain, base, held, incoming, budget);
+        assert_eq!(
+            within(needed),
+            "Soundcheck at five. Doors at eight. Load the van very early."
+        );
+        assert_eq!(within(needed - 1), incoming);
+    }
+
+    #[test]
+    fn end_tags_html_leaves_out_stay_left_out() {
+        // `<p>` needs no end tag: a merge keeps the sides' paragraphs as
+        // they wrote them, and still drops a tag the merge itself orphaned.
+        assert_eq!(
+            merge3(TextFormat::Html, "<p>a<p>b", "<p>a<p>bc", "<p>xa<p>b"),
+            "<p>xa<p>bc"
+        );
+        assert_eq!(
+            merge3(
+                TextFormat::Html,
+                "<ul><li>one<li>two</ul>",
+                "<ul><li>one<li>two<li>three</ul>",
+                "<ul><li>uno<li>two</ul>"
+            ),
+            "<ul><li>uno<li>two<li>three</ul>"
+        );
     }
 
     #[test]
