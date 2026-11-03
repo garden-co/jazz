@@ -11,9 +11,9 @@ but proves who it is with its own machine-to-machine credential, not a user's se
 
 A backend client is one of two kinds:
 
-- **Trusted.** It acts with your main backend's own authority: your permissions are not checked,
-  and it may act on behalf of any user. Use it for system work such as imports, migrations and
-  scheduled jobs.
+- **Trusted.** It acts as the system, with your main backend's own authority: your permissions are
+  not checked, and its writes carry the [system identity](/docs/setup/auth/backend#system-authored-rows).
+  It never acts for a user. Use it for system work such as imports, migrations and scheduled jobs.
 - **Scoped.** It acts as one user, with that user's permissions, exactly as if `authenticate` had
   named the user. Use it for an agent or service that should only touch one account's data.
 
@@ -92,7 +92,8 @@ async function githubOidcToken() {
 ```
 
 The session opens as whatever your main backend trusts the token as: with backend authority for a
-trusted machine, or signed in as its user for a scoped one. Your main backend's API routes see the
+trusted machine (a request from it to act for a user is refused), or signed in as its user for a
+scoped one. Your main backend's API routes see the
 same identity, so `jazz.forRequest(request)` and `jazz.accountFor(request)` work for requests that
 carry the token as `Authorization: Bearer …`.
 
