@@ -1,21 +1,14 @@
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { verifyChallenge } from "../local-first-auth/server.js";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
-import { registerInProcessTransport } from "../runtime/in-process-transport.js";
+import type { JazzCoreSocketEvent } from "jazz-napi";
 import { accountAppId, localFirstAccountId } from "../accounts/local-first.js";
 import { LOCAL_FIRST_JWT_ISSUER, parseJwtPayload } from "../runtime/client-session.js";
 import { verifyLocalFirstToken } from "../runtime/local-first-token.js";
 import { endpointScope } from "../runtime/client-scope.js";
 import { PostcardWriter } from "../runtime/native-runtime/native-codec.js";
 import { encodeWebSocketFrameBatch } from "../runtime/native-runtime/websocket.js";
-import type {
-  BrowserWebSocket,
-  WebSocketConstructor,
-} from "../runtime/native-runtime/websocket.js";
 import {
   STREAM_RECORD_MESSAGE,
   STREAM_RECORD_SESSION,
@@ -50,201 +43,33 @@ import {
   backendClientVerifier,
   type BackendClientTrust,
 } from "./backend-clients.js";
+import { onVercelHost } from "./core-providers/vercel-store.js";
+import { registerInProcessTransport } from "../runtime/in-process-transport.js";
+import type { JazzCore, JazzCoreProvider } from "./core-providers/core-provider.js";
+import {
+  coreResponse,
+  inProcessWebSocket,
+  toBytes,
+  type CoreSocket,
+  type BackendAccess,
+} from "./core-transport.js";
+export { pinnedSocket } from "./core-transport.js";
+export type { CoreSocket } from "./core-transport.js";
+export { sqlite, memory, remote, vercel, files, s3, vercelBlob } from "./core-providers/index.js";
+export type {
+  BlobStore,
+  S3BlobStore,
+  VercelBlobStore,
+  BackendCredential,
+  VercelStoreOptions,
+} from "./core-providers/index.js";
+/** A provider of a compatible Jazz core. */
+export type JazzStore = JazzCoreProvider;
 import { BACKEND_USER_ISSUER } from "./backend-issuer.js";
 import { earlyDb, type EarlyDb } from "./early-db.js";
-import {
-  defaultCoreName,
-  onVercelDeployment,
-  onVercelHost,
-  openVercelCore,
-  refuseVercelAppId,
-  type VercelStoreOptions,
-} from "./vercel-store.js";
-
-export type { VercelStoreOptions } from "./vercel-store.js";
-
-import { files, type BlobStore } from "./blobs.js";
-export {
-  files,
-  s3,
-  vercelBlob,
-  type BlobStore,
-  type S3BlobStore,
-  type VercelBlobStore,
-} from "./blobs.js";
 import { isSameAdmission, recheckEvery } from "./session-recheck.js";
 import { NoJazzAccountError } from "./no-account-error.js";
 import { RequestAuthenticationError } from "./request-auth.js";
-
-/** Where the core keeps its data. */
-export type JazzStore =
-  | {
-      readonly kind: "sqlite";
-      readonly path: string;
-      readonly blobs: BlobStore;
-    }
-  | { readonly kind: "memory" }
-  | {
-      readonly kind: "remote";
-      readonly url: string;
-      /** The app this core serves. */
-      readonly appId: string;
-      /** This backend's credential for the core, asked for each request and socket. */
-      readonly backendCredential: BackendCredential;
-    }
-  | {
-      readonly kind: "vercel";
-      readonly options: VercelStoreOptions;
-      /**
-       * What runs outside a Vercel deployment, e.g. under `next dev`
-       * (default: `sqlite({ path: ".jazz/local" })`).
-       */
-      readonly local: Extract<JazzStore, { kind: "sqlite" | "memory" }>;
-    };
-
-/**
- * A SQLite core in this process, kept in the directory `path`. It generates
- * its app id on first start and keeps it beside its data, in `<path>/app-id`
- * (`jazz-alpha59-alpha60-import` writes an alpha.59 app's id there). Large
- * values' bytes go to `blobs`, by default `files()` in `<path>/blobs`.
- *
- * Only one process can open `path` at a time (it holds `<path>/jazz.lock`
- * while the core is open); a second one fails with "already open". It
- * refuses to start on serverless hosts with no lasting disk (Vercel, AWS
- * Lambda, Netlify): use `vercel()` or `remote()` there.
- */
-export function sqlite(options: {
-  path: string;
-  blobs?: BlobStore;
-}): Extract<JazzStore, { kind: "sqlite" }> {
-  refuseStoreAppId("sqlite", options);
-  const blobs = options.blobs ?? files();
-  if (
-    blobs !== "sqlite" &&
-    (typeof blobs !== "object" || (blobs.kind !== "files" && blobs.kind !== "s3"))
-  ) {
-    throw new Error('sqlite(): blobs must be files(), s3() or "sqlite"');
-  }
-  return { kind: "sqlite", path: options.path, blobs };
-}
-
-/**
- * An in-memory core in this process: for tests and throwaway previews. Each
- * one is its own store, with a new app id.
- */
-export function memory(options?: { appId?: never }): Extract<JazzStore, { kind: "memory" }> {
-  refuseStoreAppId("memory", options);
-  return { kind: "memory" };
-}
-
-/** Stores keep their own app id; one passed from JavaScript is refused, not ignored. */
-function refuseStoreAppId(store: string, options: unknown): void {
-  if (typeof options === "object" && options !== null && "appId" in options) {
-    throw new Error(
-      `${store}(): appId is not an option: the store keeps its own app id. To keep an alpha.59 app's id, import its data with \`jazz-alpha59-alpha60-import import --app-id\`.`,
-    );
-  }
-}
-
-/**
- * The credential this backend presents to its core, fresh for each request
- * and socket: the app's secret, or a token that proves which workload this
- * is (a sync server started with `--trusted-workload-*` accepts its
- * platform's OIDC token, such as a Vercel function's).
- */
-export type BackendCredential = () => string | Promise<string>;
-
-/**
- * A core running elsewhere (Jazz Cloud, or a sync server you run), serving
- * the app `appId`, reached from this backend with the app's one secret (its
- * admin secret), or with a `backendCredential` of your own. Browsers still
- * talk only to your backend: it decides who each user is, and the core
- * trusts it to say so. The secret never leaves your server.
- */
-export function remote(
-  options:
-    | { url: string; appId: string; secret: string }
-    | { url: string; appId: string; backendCredential: BackendCredential },
-): Extract<JazzStore, { kind: "remote" }> {
-  const appId = options.appId;
-  if (typeof appId !== "string" || !appId.trim()) {
-    throw new Error("remote(): appId must name the app the core serves (it is empty)");
-  }
-  let backendCredential: BackendCredential;
-  if ("backendCredential" in options) {
-    backendCredential = options.backendCredential;
-  } else {
-    const secret = options.secret;
-    if (secret === undefined && "adminSecret" in options) {
-      throw new Error(
-        "remote(): `adminSecret` and `backendSecret` were replaced by one `secret`, the app's admin secret",
-      );
-    }
-    if (typeof secret !== "string" || !secret.trim()) {
-      throw new Error("remote(): secret must be the app's admin secret (it is empty)");
-    }
-    backendCredential = () => secret;
-  }
-  return { kind: "remote", url: options.url.replace(/\/+$/, ""), appId, backendCredential };
-}
-
-/**
- * The store for apps deployed on Vercel. Use it in dev too: outside a
- * production or preview deployment (`next dev`, `vercel dev`, tests) it runs
- * `local`, by default `sqlite({ path: ".jazz/local" })`.
- *
- * Deployed, it runs a core in a persistent Vercel Sandbox in your own Vercel
- * project, with its data on a Drive: one for production and one per Git
- * branch for previews.
- * It is created on first use, wakes when a request needs it (about a second)
- * and stops after `idleMs` without requests or sockets. The function's Vercel
- * OIDC token is its only credential, so there are no secrets and no env vars:
- * the core admits only tokens naming the workload its first start pinned
- * (team, project and environment by name), and a deployment of another
- * environment refuses to start or retarget it. All previews share one
- * workload, so preview branches' cores are kept apart, not secured from each
- * other. Anyone with Sandbox access to the project controls its cores. The
- * token comes with each request (it can't be read at module scope), so the
- * core opens on the first request, not when `createJazz` is called; work
- * between requests uses the freshest one seen, and open sockets outlive its
- * expiry. A team or project rename (or
- * a change of OIDC issuer mode) changes the workload: delete `/data/trust` in
- * the Sandbox to re-pin the core. Install `@vercel/sandbox` and
- * `@vercel/functions` next to `jazz-tools`. A deployment of a newer jazz-tools
- * restarts the core on its version, and an older deployment never moves it
- * back. Branch cores are not deleted when a branch merges yet: each keeps its
- * Sandbox and a Drive of up to `maxDriveBytes` until you remove them.
- */
-export function vercel(
-  options: VercelStoreOptions & { local?: Extract<JazzStore, { kind: "sqlite" | "memory" }> } = {},
-): JazzStore {
-  // Refused here, not on the first deployed request: in dev the local
-  // store runs and would never read it.
-  refuseVercelAppId(options);
-  const { local, ...rest } = options;
-  return { kind: "vercel", options: rest, local: local ?? sqlite({ path: ".jazz/local" }) };
-}
-
-function blobOptions(blobs: BlobStore): {
-  blobs: "files" | "s3" | "sqlite";
-  blobsDir?: string;
-  s3Bucket?: string;
-  s3Region?: string;
-  s3Endpoint?: string;
-  s3Prefix?: string;
-} {
-  if (blobs === "sqlite") return { blobs: "sqlite" };
-  if (blobs.kind === "s3") {
-    return {
-      blobs: "s3",
-      ...(blobs.bucket === undefined ? {} : { s3Bucket: blobs.bucket }),
-      ...(blobs.region === undefined ? {} : { s3Region: blobs.region }),
-      ...(blobs.endpoint === undefined ? {} : { s3Endpoint: blobs.endpoint }),
-      ...(blobs.prefix === undefined ? {} : { s3Prefix: blobs.prefix }),
-    };
-  }
-  return { blobs: "files", ...(blobs.dir === undefined ? {} : { blobsDir: blobs.dir }) };
-}
 
 declare const localFirstGuestBrand: unique symbol;
 
@@ -527,67 +352,10 @@ const STRIPPED_HEADERS = [
   "x-jazz-backend-access",
   "x-jazz-internal-workload-vouched",
 ];
-const CREDENTIAL_HEADER = "x-jazz-backend-credential";
-const ACCESS_HEADER = "x-jazz-backend-access";
-// What the secret slots carry to a remote core: the access stated next to
-// the backend credential decides what a request gets, not these.
-const STAND_IN_SECRET = "stated-by-backend-credential";
 // What a browser's request to a public route carries on to a remote core:
 // never its cookies or its app session.
 const REMOTE_FORWARDED_HEADERS = ["accept", "content-type", "if-none-match"];
 const MAX_STREAM_MESSAGE_BYTES = 2 * 1024 * 1024;
-
-interface CoreReply {
-  status: number;
-  headers: string[][];
-  body: Uint8Array;
-}
-
-/** One sync session on the core. */
-export interface CoreSocket {
-  /** False once the session ended. */
-  send(data: Uint8Array): boolean;
-  close(): void;
-}
-
-/**
- * The access this backend states for a request or socket: `admin` (schema,
- * permissions and account admin calls), `backend` (its own client, and
- * sessions it vouches for) or `session` (a guest's session, or a public
- * route, relayed as is).
- */
-type BackendAccess = "admin" | "backend" | "session";
-
-/** The core this backend fronts: in this process, or reached over the network. */
-interface Core {
-  /**
-   * The app the core serves: the one `remote()` names, or the id an
-   * in-process or Vercel core keeps with its data.
-   */
-  readonly appId: string;
-  /** Where this process's own clients reach it. */
-  readonly serverUrl: string;
-  /**
-   * What requests and preludes carry in their secret slots: the core's own
-   * secrets in this process. A remote core replaces them by the `access`
-   * stated next to the backend credential.
-   */
-  readonly adminSecret: string;
-  readonly backendSecret: string;
-  handle(
-    method: string,
-    path: string,
-    headers: string[][],
-    body: Uint8Array,
-    access?: BackendAccess,
-  ): Promise<CoreReply>;
-  openSocket(
-    headers: string[][],
-    onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
-    access?: BackendAccess,
-  ): CoreSocket;
-  close(): Promise<void>;
-}
 
 function headerPairs(headers: Headers): string[][] {
   const pairs: string[][] = [];
@@ -595,100 +363,6 @@ function headerPairs(headers: Headers): string[][] {
     if (!STRIPPED_HEADERS.includes(name.toLowerCase())) pairs.push([name, value]);
   });
   return pairs;
-}
-
-function coreResponse(response: {
-  status: number;
-  headers: string[][];
-  body: Uint8Array;
-}): Response {
-  const headers = new Headers();
-  for (const [name, value] of response.headers) headers.append(name!, value!);
-  const nullBody = response.status === 204 || response.status === 304;
-  return new Response(nullBody ? null : (response.body as BodyInit), {
-    status: response.status,
-    headers,
-  });
-}
-
-function toBytes(data: unknown): Uint8Array {
-  if (data instanceof Uint8Array) return data;
-  if (data instanceof ArrayBuffer) return new Uint8Array(data);
-  if (Array.isArray(data)) return Buffer.concat(data as Uint8Array[]);
-  if (typeof data === "string") return new TextEncoder().encode(data);
-  throw new Error("unsupported socket message");
-}
-
-function arrayBufferOf(bytes: Uint8Array): ArrayBuffer {
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-}
-
-/** A WebSocket-shaped session on the core, for clients in this process. */
-function inProcessWebSocket(
-  open: (
-    url: string,
-    onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
-  ) => CoreSocket,
-): WebSocketConstructor {
-  return class InProcessSocket implements BrowserWebSocket {
-    binaryType: "arraybuffer" | "blob" = "arraybuffer";
-    readyState = 0;
-    private readonly listeners = new Map<string, Array<(event?: any) => void>>();
-    private session: CoreSocket | undefined;
-
-    constructor(url: string) {
-      queueMicrotask(() => {
-        if (this.readyState !== 0) return;
-        try {
-          this.session = open(url, (error, event) => this.onCoreEvent(error, event));
-        } catch (error) {
-          this.emit("error", error);
-          this.finish(1011, error instanceof Error ? error.message : String(error));
-          return;
-        }
-        this.readyState = 1;
-        this.emit("open");
-      });
-    }
-
-    addEventListener(type: string, listener: (event?: any) => void): void {
-      const list = this.listeners.get(type) ?? [];
-      list.push(listener);
-      this.listeners.set(type, list);
-    }
-
-    send(data: Uint8Array | string): void {
-      if (this.readyState !== 1 || !this.session) throw new Error("socket is not open");
-      this.session.send(toBytes(data));
-    }
-
-    close(): void {
-      if (this.readyState >= 2) return;
-      this.session?.close();
-      this.finish(1000, "client closed");
-    }
-
-    private onCoreEvent(error: Error | null, event: JazzCoreSocketEvent): void {
-      if (error) {
-        this.emit("error", error);
-        this.finish(1011, error.message);
-      } else if (event.kind === "message" && event.data) {
-        this.emit("message", { data: arrayBufferOf(event.data) });
-      } else if (event.kind === "close") {
-        this.finish(event.code ?? 1000, event.reason ?? "");
-      }
-    }
-
-    private emit(type: string, event?: unknown): void {
-      for (const listener of this.listeners.get(type) ?? []) listener(event);
-    }
-
-    private finish(code: number, reason: string): void {
-      if (this.readyState >= 2) return;
-      this.readyState = 3;
-      this.emit("close", { code, reason });
-    }
-  };
 }
 
 /** The app's schema versions, migrations and permissions, as its code declares them. */
@@ -746,322 +420,7 @@ async function applyBundle(
 }
 
 /**
- * `socket`, its first frame (the prelude) pinned to the published bundle
- * this backend serves with. The core honours the pin only on this backend's
- * word, so whatever bundle a browser stated is replaced.
  */
-export function pinnedSocket(socket: CoreSocket, bundle: () => string | undefined): CoreSocket {
-  let first = true;
-  return {
-    send(data) {
-      if (first) {
-        first = false;
-        const pinned = withBundle(data, bundle());
-        // A prelude the pin cannot be stamped into would open unpinned.
-        if (pinned === null) {
-          socket.close();
-          return false;
-        }
-        data = pinned;
-      }
-      return socket.send(data);
-    },
-    close: () => socket.close(),
-  };
-}
-
-/**
- * `prelude` pinned to `bundle`, or with no pin while none is published yet
- * (the backend's own sockets while it boots): a bundle a browser stated
- * never reaches the core. `null` when the prelude is not a JSON object.
- */
-function withBundle(prelude: Uint8Array, bundle: string | undefined): Uint8Array | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(new TextDecoder().decode(prelude));
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  const { bundle: _stated, ...rest } = parsed as Record<string, unknown>;
-  return new TextEncoder().encode(
-    JSON.stringify(bundle === undefined ? rest : { ...rest, bundle }),
-  );
-}
-
-/** `bundle` is the published bundle every socket the core opens is pinned to. */
-async function openInProcessCore(
-  store: Extract<JazzStore, { kind: "sqlite" | "memory" }>,
-  bundle: () => string | undefined,
-): Promise<Core> {
-  const backendSecret = randomBytes(32).toString("base64url");
-  const adminSecret = randomBytes(32).toString("base64url");
-  // The core holds `<path>/jazz.lock` with an OS lock while it's open.
-  if (store.kind === "sqlite") refuseServerlessDisk(store.path);
-  const appId = store.kind === "sqlite" ? await keptAppId(store.path) : randomUUID();
-  const core = await JazzCore.open({
-    appId,
-    backendSecret,
-    adminSecret,
-    ...(store.kind === "sqlite"
-      ? { dataDir: store.path, ...blobOptions(store.blobs) }
-      : { inMemory: true }),
-  });
-  const handle = async (method: string, path: string, headers: string[][], body: Uint8Array) =>
-    core.handle(method, path, headers, Buffer.from(body));
-  const serverUrl = `http://jazz-${randomUUID()}.invalid`;
-  const unregister = registerInProcessTransport(serverUrl, {
-    fetch: async (input, init) => {
-      const request = new Request(input, init);
-      const url = new URL(request.url);
-      return coreResponse(
-        await handle(
-          request.method,
-          url.pathname + url.search,
-          [...request.headers].map(([name, value]) => [name, value]),
-          new Uint8Array(await request.arrayBuffer()),
-        ),
-      );
-    },
-    WebSocket: inProcessWebSocket((_url, onEvent) =>
-      pinnedSocket(core.openSocket([], onEvent), bundle),
-    ),
-  });
-  const opened: Core = {
-    appId,
-    serverUrl,
-    adminSecret,
-    backendSecret,
-    handle,
-    openSocket: (headers, onEvent) => pinnedSocket(core.openSocket(headers, onEvent), bundle),
-    async close() {
-      unregister();
-      await core.close();
-    },
-  };
-  return opened;
-}
-
-/**
- * The app id an in-process SQLite core keeps beside its data, in
- * `<path>/app-id`: a new one on first start, so the app's identities stay
- * the same across restarts without the app naming an id.
- */
-async function keptAppId(dir: string): Promise<string> {
-  const file = join(dir, "app-id");
-  const kept = async (): Promise<string | undefined> => {
-    try {
-      return (await readFile(file, "utf8")).trim() || undefined;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      return undefined;
-    }
-  };
-  let appId = await kept();
-  if (appId === undefined) {
-    await mkdir(dir, { recursive: true });
-    // `wx`: two processes starting the same store at once agree on one id.
-    try {
-      appId = randomUUID();
-      await writeFile(file, `${appId}\n`, { flag: "wx" });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      appId = (await kept())!;
-    }
-  }
-  return appId;
-}
-
-/**
- * Serverless functions have no disk that outlives an instance (or none
- * writable at all), so a sqlite store there loses data silently.
- */
-function refuseServerlessDisk(dir: string): void {
-  const host = onVercelHost()
-    ? "Vercel"
-    : process.env.AWS_LAMBDA_FUNCTION_NAME
-      ? "AWS Lambda"
-      : process.env.NETLIFY
-        ? "Netlify"
-        : undefined;
-  if (!host) return;
-  throw new Error(
-    `sqlite({ path: ${JSON.stringify(dir)} }) can't keep data on ${host}: its functions have no lasting disk. ` +
-      (host === "Vercel" ? "Use vercel(), whose local store runs sqlite() in dev, or " : "Use ") +
-      "remote({ url, appId, secret }) to a sync server or Jazz Cloud.",
-  );
-}
-
-/** The access a request from this process's own clients asks for, by the secret slot it fills. */
-function accessOffered(headers: Headers): BackendAccess {
-  if (headers.has("x-jazz-admin-secret")) return "admin";
-  if (headers.has("x-jazz-backend-secret")) return "backend";
-  return "session";
-}
-
-/**
- * A core reached over the network. Every request and socket carries the
- * backend credential and the access it states; a core that trusts a workload
- * admits nothing else, and either way the secrets a request offers itself
- * never count next to it. `secrets` fill the secret slots (stand-ins unless
- * the caller holds the real ones).
- */
-function openRemoteCore(
-  appId: string,
-  target: {
-    url: string;
-    backendCredential: BackendCredential;
-    secrets?: { adminSecret: string; backendSecret: string };
-  },
-  bundle: () => string | undefined,
-): Core {
-  const socketUrl = `${target.url.replace(/^http/, "ws")}/apps/${encodeURIComponent(appId)}/ws`;
-  if (!globalThis.WebSocket) {
-    throw new Error("remote() needs a global WebSocket (Node 22 or newer)");
-  }
-  // Node's WebSocket (undici) takes upgrade headers as a second argument.
-  const NativeWebSocket = globalThis.WebSocket as unknown as new (
-    url: string,
-    options?: { headers?: Record<string, string> },
-  ) => WebSocket;
-  const credentialHeaders = async (access: BackendAccess): Promise<string[][]> => {
-    const credential = await target.backendCredential();
-    if (typeof credential !== "string" || !credential) {
-      throw new Error("backendCredential() returned no credential");
-    }
-    return access === "session"
-      ? [[CREDENTIAL_HEADER, credential]]
-      : [
-          [CREDENTIAL_HEADER, credential],
-          [ACCESS_HEADER, access],
-        ];
-  };
-  const withoutStated = (headers: string[][]) =>
-    headers.filter(([name]) => {
-      const lower = name!.toLowerCase();
-      return lower !== CREDENTIAL_HEADER && lower !== ACCESS_HEADER;
-    });
-
-  const core: Core = {
-    appId,
-    serverUrl: `http://jazz-remote-${randomUUID()}.invalid`,
-    adminSecret: target.secrets?.adminSecret ?? STAND_IN_SECRET,
-    backendSecret: target.secrets?.backendSecret ?? STAND_IN_SECRET,
-    async handle(method, path, headers, body, access = "session") {
-      const response = await fetch(`${target.url}${path}`, {
-        method,
-        headers: [...withoutStated(headers), ...(await credentialHeaders(access))].map(
-          ([name, value]) => [name!, value!] as [string, string],
-        ),
-        ...(method === "GET" || method === "HEAD" ? {} : { body: body as BodyInit }),
-      });
-      const replyHeaders: string[][] = [];
-      response.headers.forEach((value, name) => {
-        // fetch already decoded the body.
-        if (name !== "content-encoding" && name !== "content-length") {
-          replyHeaders.push([name, value]);
-        }
-      });
-      return {
-        status: response.status,
-        headers: replyHeaders,
-        body: new Uint8Array(await response.arrayBuffer()),
-      };
-    },
-    openSocket: (_headers, onEvent, access = "session") =>
-      pinnedSocket(connect(socketUrl, onEvent, access), bundle),
-    async close() {
-      unregister();
-    },
-  };
-  // Browsers' own headers stay here: the core sees only this backend.
-  function connect(
-    url: string,
-    onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
-    access: BackendAccess,
-  ): CoreSocket {
-    let ws: WebSocket | undefined;
-    const queued: Uint8Array[] = [];
-    let ended = false;
-    const finish = (code: number, reason: string) => {
-      if (ended) return;
-      ended = true;
-      onEvent(null, { kind: "close", code, reason });
-    };
-    credentialHeaders(access)
-      .then((headers) => {
-        if (ended) return;
-        ws = new NativeWebSocket(url, { headers: Object.fromEntries(headers) });
-        ws.binaryType = "arraybuffer";
-        ws.addEventListener("open", () => {
-          for (const data of queued.splice(0)) ws!.send(data as Uint8Array<ArrayBuffer>);
-        });
-        ws.addEventListener("message", (event) => {
-          const data =
-            typeof event.data === "string"
-              ? new TextEncoder().encode(event.data)
-              : new Uint8Array(event.data as ArrayBuffer);
-          onEvent(null, { kind: "message", data });
-        });
-        ws.addEventListener("close", (event) => finish(event.code, event.reason));
-        // A socket that never connects (the core is down or restarting) can
-        // report only the error, and stay CONNECTING: without this, the link
-        // waits on it forever instead of retrying.
-        ws.addEventListener("error", () => {
-          finish(1006, "connection to the core failed");
-          try {
-            ws?.close();
-          } catch {
-            // Already closing.
-          }
-        });
-      })
-      // A failing credential hook, or a socket that can't even be created.
-      .catch((error: unknown) =>
-        finish(1011, error instanceof Error ? error.message : "no backend credential"),
-      );
-    return {
-      send(data) {
-        if (ended) return false;
-        if (ws?.readyState === 1) ws.send(data as Uint8Array<ArrayBuffer>);
-        else queued.push(data);
-        return true;
-      },
-      close() {
-        ended = true;
-        ws?.close();
-      },
-    };
-  }
-  // This process's own clients (the backend's session) reach the core
-  // through an in-process origin, so they present the credential too.
-  const unregister = registerInProcessTransport(core.serverUrl, {
-    fetch: async (input, init) => {
-      const request = new Request(input, init);
-      const url = new URL(request.url);
-      const headers: string[][] = [];
-      request.headers.forEach((value, name) => headers.push([name, value]));
-      return coreResponse(
-        await core.handle(
-          request.method,
-          url.pathname + url.search,
-          headers,
-          new Uint8Array(await request.arrayBuffer()),
-          accessOffered(request.headers),
-        ),
-      );
-    },
-    WebSocket: inProcessWebSocket((url, onEvent) => {
-      const { pathname, search } = new URL(url);
-      return pinnedSocket(
-        connect(`${target.url.replace(/^http/, "ws")}${pathname}${search}`, onEvent, "backend"),
-        bundle,
-      );
-    }),
-  });
-  return core;
-}
-
 /**
  * A request `authenticate` names no user for: what an app answers with 401.
  * (A throwing `authenticate` passes its own error through instead.)
@@ -1071,7 +430,6 @@ function signedOut(operation: string): RequestAuthenticationError {
     code: "signed_out",
   });
 }
-
 /** How long `close()` waits for pending writes to reach the core. */
 const CLOSE_SYNC_TIMEOUT_MS = 10_000;
 
@@ -1121,11 +479,6 @@ function jazzSettings(options: CreateJazzOptions): JazzSettings {
   return { basePath, publicUrls, allowedOrigins };
 }
 
-/** The store this process runs: `vercel()` outside a Vercel deployment runs its `local` store. */
-function runningStore(store: JazzStore): JazzStore {
-  return store.kind === "vercel" && !onVercelDeployment() ? store.local : store;
-}
-
 /** A Jazz with its store open: what a `createJazz` facade hands each call to. */
 interface OpenedJazz extends Omit<Jazz, "ready" | "db"> {
   readonly db: Db;
@@ -1143,24 +496,13 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   // The bundle this backend published: every socket to the core carries it,
   // and the core governs this backend's sessions by its permissions alone.
   let pin: string | undefined;
-  const bundle = () => pin;
-  const core =
-    store.kind === "remote"
-      ? openRemoteCore(store.appId, store, bundle)
-      : store.kind === "vercel"
-        ? await openVercelCore({
-            options: store.options,
-            // The function's OIDC token is the core's only credential.
-            openRemote: ({ appId, url, backendCredential }) =>
-              openRemoteCore(appId, { url, backendCredential }, bundle),
-          })
-        : await openInProcessCore(store, bundle);
+  const { core, serverUrl, adminSecret, backendSecret } = await openProvider(store, () => pin);
   const appId = core.appId;
   const issuer = BACKEND_USER_ISSUER;
 
   /** Publish `next`'s bundle: what it is pinned by. Publishing one already published changes nothing. */
   const publish = (next: CreateJazzOptions) =>
-    applyBundle(core.serverUrl, { ...next, appId, adminSecret: core.adminSecret });
+    applyBundle(serverUrl, { ...next, appId, adminSecret: adminSecret });
 
   /** Publish `next`'s bundle and open the backend's own session on it. */
   async function backendSession(
@@ -1172,9 +514,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       appId,
       app: next.app,
       permissions: next.permissions,
-      serverUrl: core.serverUrl,
+      serverUrl: serverUrl,
       driver: { type: "memory" },
-      initial: { backendSecret: core.backendSecret },
+      initial: { backendSecret },
     });
     const opened = session.getSnapshot();
     if (opened.status !== "ready" || !opened.client) {
@@ -1291,7 +633,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       "POST",
       `/apps/${encodeURIComponent(accountAppId(appId))}/admin/accounts/${operation}`,
       [
-        ["x-jazz-admin-secret", core.adminSecret],
+        ["x-jazz-admin-secret", adminSecret],
         ["content-type", "application/json"],
       ],
       new TextEncoder().encode(JSON.stringify(body)),
@@ -1430,31 +772,29 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    * Link challenges: a guest links only on a proof made for one challenge,
    * never on its sync token, so a leaked token can't link it to someone
    * else. A challenge names the user it links to and expires quickly; it is
-   * signed with a key only this app's backend instances share (derived from
-   * the core's admin secret), and its nonce becomes the link's single-use
+   * signed with a key only this app's backend instances share (provided by
+   * the core provider), and its nonce becomes the link's single-use
    * intent id at the core, so a proof works once.
    */
-  const challengeKey = createHmac("sha256", core.adminSecret)
-    .update(`jazz-link-challenge-v1\0${accountAppId(appId)}`)
-    .digest();
   const LINK_CHALLENGE_TTL_SECONDS = 120;
-  const challengeMac = (payload: string) =>
-    createHmac("sha256", challengeKey).update(payload).digest("base64url");
+  const challengeMac = (payload: string) => core.signLinkChallenge(payload);
 
-  function issueLinkChallenge(userId: string): { challenge: string; expiresAt: number } {
+  async function issueLinkChallenge(
+    userId: string,
+  ): Promise<{ challenge: string; expiresAt: number }> {
     const expiresAt = Math.floor(Date.now() / 1000) + LINK_CHALLENGE_TTL_SECONDS;
     const payload = Buffer.from(
       JSON.stringify({ v: 1, sub: userId, nonce: randomUUID(), exp: expiresAt }),
     ).toString("base64url");
-    return { challenge: `${payload}.${challengeMac(payload)}`, expiresAt };
+    return { challenge: `${payload}.${await challengeMac(payload)}`, expiresAt };
   }
 
   /** The nonce of a challenge this backend issued for `userId`, still fresh; else null. */
-  function readLinkChallenge(challenge: unknown, userId: string): string | null {
+  async function readLinkChallenge(challenge: unknown, userId: string): Promise<string | null> {
     if (typeof challenge !== "string" || challenge.length > 1024) return null;
     const [payload, mac, extra] = challenge.split(".");
     if (!payload || !mac || extra !== undefined) return null;
-    const expected = Buffer.from(challengeMac(payload));
+    const expected = Buffer.from(await challengeMac(payload));
     const given = Buffer.from(mac);
     if (expected.length !== given.length || !timingSafeEqual(expected, given)) return null;
     let claims: { v?: unknown; sub?: unknown; nonce?: unknown; exp?: unknown };
@@ -1480,7 +820,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     if (request.method !== "POST") return new Response(null, { status: 405 });
     const user = await authenticate(request);
     if (!user) return new Response("signed_out", { status: 401 });
-    return Response.json(issueLinkChallenge(user.userId), {
+    return Response.json(await issueLinkChallenge(user.userId), {
       headers: { "Cache-Control": "no-store" },
     });
   }
@@ -1501,7 +841,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     } catch {
       return new Response("local_first_proof_required", { status: 400 });
     }
-    const nonce = readLinkChallenge(body?.challenge, user.userId);
+    const nonce = await readLinkChallenge(body?.challenge, user.userId);
     if (!nonce) return new Response("invalid_link_challenge", { status: 400 });
     let guest: { issuer: string; subject: string };
     try {
@@ -1569,7 +909,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         "POST",
         `/apps/${encodeURIComponent(accountAppId(appId))}/admin/accounts/revoke`,
         [
-          ["x-jazz-admin-secret", core.adminSecret],
+          ["x-jazz-admin-secret", adminSecret],
           ["content-type", "application/json"],
         ],
         new TextEncoder().encode(
@@ -1765,7 +1105,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         if (parsed[key] != null || auth[key] != null) return null;
       }
       if (parsed.backend_secret == null && auth.backend_secret == null) return null;
-      const vouched = { backend_secret: core.backendSecret };
+      const vouched = { backend_secret: backendSecret };
       const rewritten = { ...parsed, ...vouched, auth: { ...auth, ...vouched } };
       return {
         prelude: new TextEncoder().encode(JSON.stringify(rewritten)),
@@ -1793,7 +1133,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       if (audience.endpoint === undefined) {
         // Its own token decides who it is; the backend's secret only vouches
         // for the bundle this socket is pinned to (see `pinnedSocket`).
-        const pinned = { ...parsed, auth: { ...auth, backend_secret: core.backendSecret } };
+        const pinned = { ...parsed, auth: { ...auth, backend_secret: backendSecret } };
         return {
           prelude: new TextEncoder().encode(JSON.stringify(pinned)),
           userId: undefined,
@@ -1806,7 +1146,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       const vouched = {
         ...parsed,
         local_first_audience: audience.endpoint,
-        auth: { ...auth, backend_secret: core.backendSecret },
+        auth: { ...auth, backend_secret: backendSecret },
       };
       // The backend's word on the endpoint needs backend access; the
       // guest's own token still decides who it is.
@@ -1834,7 +1174,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       if (error instanceof NoJazzAccountError) return null;
       throw error;
     }
-    const vouched = { backend_secret: core.backendSecret, backend_session: session };
+    const vouched = { backend_secret: backendSecret, backend_session: session };
     const rewritten = { ...parsed, ...vouched, auth: { ...auth, ...vouched } };
     return {
       prelude: new TextEncoder().encode(JSON.stringify(rewritten)),
@@ -2052,7 +1392,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     const response = await core.handle(
       "POST",
       `/apps/${encodeURIComponent(accountAppId(appId))}/backend/admit`,
-      [["x-jazz-backend-secret", core.backendSecret]],
+      [["x-jazz-backend-secret", backendSecret]],
       new Uint8Array(0),
       "backend",
     );
@@ -2286,9 +1626,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       await core.handle(
         request.method,
         corePath + url.search,
-        store.kind === "remote" || store.kind === "vercel"
-          ? headers.filter(([name]) => REMOTE_FORWARDED_HEADERS.includes(name!.toLowerCase()))
-          : headers,
+        headers.filter(([name]) => REMOTE_FORWARDED_HEADERS.includes(name!.toLowerCase())),
         body,
       ),
     );
@@ -2519,7 +1857,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
  */
 export function createJazz(options: CreateJazzOptions): Jazz {
   jazzSettings(options);
-  const store = runningStore(options.store);
+  const store = options.store;
   const key = storeKey(store);
   const entries = registry();
   const shared = key === undefined ? undefined : entries.get(key);
@@ -2587,19 +1925,7 @@ function registry(): Map<string, Entry> {
  * across reloads itself (on `globalThis`), or closes it.
  */
 function storeKey(store: JazzStore): string | undefined {
-  if (store.kind === "sqlite") return `sqlite:${resolve(store.path)}`;
-  if (store.kind === "vercel") {
-    const project = store.options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID;
-    let name = store.options.name;
-    try {
-      name ??= project ? defaultCoreName(project, process.env) : undefined;
-    } catch {
-      // A preview without a branch: its open reports that, not createJazz.
-    }
-    // Without a name the core is unknown: its open reports that.
-    return name ? `vercel:${name}` : undefined;
-  }
-  return undefined;
+  return store.reuse?.key;
 }
 
 /**
@@ -2608,7 +1934,7 @@ function storeKey(store: JazzStore): string | undefined {
  * is: another one is another setting.
  */
 function storeSettings(store: JazzStore): string {
-  return JSON.stringify(store, (name, value: unknown) => {
+  return JSON.stringify(store.reuse?.settings ?? {}, (name, value: unknown) => {
     if (name === "sdk" && value !== undefined) return `sdk#${identity(value as object)}`;
     return typeof value === "function" ? "function" : value;
   });
@@ -2641,15 +1967,17 @@ function liveStore(entry: Entry): JazzStore {
     return out as T;
   };
   const store = entry.store;
-  if (store.kind === "vercel") {
-    return {
-      ...store,
-      options: through(store.options, () =>
-        entry.store.kind === "vercel" ? entry.store.options : undefined,
-      ),
-    };
-  }
-  return through(store, () => entry.store);
+  return {
+    ...store,
+    ...(store.reuse
+      ? {
+          reuse: {
+            key: store.reuse.key,
+            settings: through(store.reuse.settings, () => entry.store.reuse?.settings),
+          },
+        }
+      : {}),
+  };
 }
 
 /**
@@ -3005,4 +2333,118 @@ function isLocalEndpoint(endpoint: string): boolean {
   } catch {
     return false;
   }
+}
+
+// Adapt the internal clients' URL/secret-shaped API to the public provider contract.
+// These random markers are local routing tokens, never provider credentials.
+const credentialHeaders = new Set([
+  "x-jazz-admin-secret",
+  "x-jazz-backend-secret",
+  "x-jazz-backend-credential",
+  "x-jazz-backend-access",
+  "x-jazz-internal-workload-vouched",
+]);
+
+async function openProvider(
+  provider: JazzCoreProvider,
+  bundle: () => string | undefined,
+): Promise<{
+  core: JazzCore;
+  serverUrl: string;
+  adminSecret: string;
+  backendSecret: string;
+}> {
+  const opened = await provider.open();
+  const serverUrl = `http://jazz-provider-${randomUUID()}.invalid`;
+  const cleanHeaders = (entries: string[][]) => {
+    const headers = new Headers();
+    for (const [name, value] of entries) {
+      if (!credentialHeaders.has(name!.toLowerCase())) headers.append(name!, value!);
+    }
+    return [...headers];
+  };
+  let closed = false;
+  const sockets = new Set<ReturnType<JazzCore["openSocket"]>>();
+  const adminSecret = randomBytes(32).toString("base64url");
+  const backendSecret = randomBytes(32).toString("base64url");
+  const core: JazzCore = {
+    appId: opened.appId,
+    signLinkChallenge: (payload) => opened.signLinkChallenge(payload),
+    async handle(method, path, headers, body, access = "session") {
+      return opened.handle(method, path, cleanHeaders(headers), body, access);
+    },
+    openSocket(headers, onEvent, access = "session") {
+      if (closed) throw new Error("Jazz core connection is closed");
+      const pin = bundle();
+      const socket = opened.openSocket(
+        cleanHeaders(headers),
+        (error, event) => {
+          onEvent(error, event);
+          if (error || event.kind === "close") sockets.delete(wrapped);
+        },
+        access,
+      );
+      let first = true;
+      const wrapped = {
+        send(data: Uint8Array) {
+          if (first) {
+            first = false;
+            try {
+              const parsed = JSON.parse(new TextDecoder().decode(data));
+              if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+                throw new Error("invalid prelude");
+              delete parsed.admin_secret;
+              delete parsed.backend_secret;
+              if (parsed.auth && typeof parsed.auth === "object") {
+                delete parsed.auth.admin_secret;
+                delete parsed.auth.backend_secret;
+              }
+              delete parsed.bundle;
+              if (pin !== undefined) parsed.bundle = pin;
+              data = new TextEncoder().encode(JSON.stringify(parsed));
+            } catch {
+              wrapped.close();
+              return false;
+            }
+          }
+          return socket.send(data);
+        },
+        close() {
+          sockets.delete(wrapped);
+          socket.close();
+        },
+      };
+      sockets.add(wrapped);
+      return wrapped;
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      unregister();
+      for (const socket of sockets) socket.close();
+      await opened.close();
+    },
+  };
+  const unregister = registerInProcessTransport(serverUrl, {
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      const access: BackendAccess = request.headers.has("x-jazz-admin-secret")
+        ? "admin"
+        : request.headers.has("x-jazz-backend-secret")
+          ? "backend"
+          : "session";
+      return coreResponse(
+        await core.handle(
+          request.method,
+          url.pathname + url.search,
+          [...request.headers],
+          new Uint8Array(await request.arrayBuffer()),
+          access,
+        ),
+      );
+    },
+    WebSocket: inProcessWebSocket((_url, onEvent) => core.openSocket([], onEvent, "backend")),
+  });
+  return { core, serverUrl, adminSecret, backendSecret };
 }

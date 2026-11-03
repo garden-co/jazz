@@ -46,3 +46,12 @@ export {
   type VercelStoreOptions,
   type WsLikeSocket,
 } from "./create-jazz.js";
+
+export type {
+  JazzCoreProvider,
+  JazzCore,
+  JazzCoreReply,
+  JazzCoreAccess,
+  JazzCoreEvent,
+  JazzCoreSocket,
+} from "./core-providers/core-provider.js";

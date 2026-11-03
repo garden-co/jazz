@@ -2,9 +2,9 @@ import { createHmac, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
-import { startLocalJazzServer } from "../dev/dev-server.js";
-import { createJazz, vercel } from "./index.js";
+import { schema as s } from "../../index.js";
+import { startLocalJazzServer } from "../../dev/dev-server.js";
+import { createJazz, vercel } from "../index.js";
 import {
   defaultCoreName,
   newerVersion,
@@ -456,7 +456,7 @@ describe("vercel() store", () => {
     cleanups.push(async () => {
       if (before !== undefined) process.env.VERCEL = before;
     });
-    const { memory } = await import("./index.js");
+    const { memory } = await import("../index.js");
     const jazz = await createJazz({
       app,
       permissions,

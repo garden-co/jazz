@@ -9,7 +9,6 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import type { JazzCoreSocketEvent } from "jazz-napi";
 import {
   connectedBlobStore,
   resolveVercelBlob,
@@ -19,16 +18,9 @@ import {
   type VercelBlob,
   type VercelBlobStore,
   type VercelS3,
-} from "./blobs.js";
-import {
-  fetchFor,
-  inProcessWebSocketFor,
-  registerInProcessTransport,
-} from "../runtime/in-process-transport.js";
-import type {
-  BrowserWebSocket,
-  WebSocketConstructor,
-} from "../runtime/native-runtime/websocket.js";
+} from "../blobs.js";
+import type { JazzCore as VercelCore } from "./core-provider.js";
+export type { JazzCore as VercelCore } from "./core-provider.js";
 
 export const VERCEL_CORE_PORT = 1625;
 
@@ -112,29 +104,6 @@ export interface SandboxHandle {
   writeFiles(files: { path: string; content: Buffer }[]): Promise<void>;
   readFileToBuffer(file: { path: string }): Promise<Buffer | null>;
   stop(): Promise<void>;
-}
-
-/** The shape `createJazz` drives a core through (see `Core` in create-jazz.ts). */
-export interface VercelCore {
-  /** The app id the core runs as, kept on its Drive. */
-  readonly appId: string;
-  readonly serverUrl: string;
-  readonly adminSecret: string;
-  readonly backendSecret: string;
-  /** `access` is what the backend states next to its credential (see `Core`). */
-  handle(
-    method: string,
-    path: string,
-    headers: string[][],
-    body: Uint8Array,
-    access?: "admin" | "backend" | "session",
-  ): Promise<{ status: number; headers: string[][]; body: Uint8Array }>;
-  openSocket(
-    headers: string[][],
-    onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
-    access?: "admin" | "backend" | "session",
-  ): { send(data: Uint8Array): boolean; close(): void };
-  close(): Promise<void>;
 }
 
 /** A core reached at `url` with this backend credential: `remote()`'s core. */
@@ -931,26 +900,9 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   (keepalive as { unref?: () => void }).unref?.();
 
   const first = await ensure();
-  // Clients in this process (the backend's own session) reach the core through
-  // an in-process origin, so each of their requests and reconnects wakes it;
-  // they go on through the current remote core's own in-process origin, which
-  // presents the backend credential.
-  const serverUrl = `http://jazz-vercel-${randomUUID()}.invalid`;
-  const unregister = registerInProcessTransport(serverUrl, {
-    fetch: async (input, init) => {
-      const request = new Request(input, init);
-      const url = new URL(request.url);
-      const inner = (await ensure()).core.serverUrl;
-      return fetchFor(inner)(new Request(`${inner}${url.pathname}${url.search}`, request));
-    },
-    WebSocket: wakingWebSocket(async () => (await ensure()).core.serverUrl),
-  });
-
   return {
     appId: first.appId,
-    serverUrl,
-    adminSecret: first.core.adminSecret,
-    backendSecret: first.core.backendSecret,
+    signLinkChallenge: (payload) => first.core.signLinkChallenge(payload),
     async handle(method, path, headers, body, access) {
       return (await ensure()).core.handle(method, path, headers, body, access);
     },
@@ -981,7 +933,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
               kind: "close",
               code: 1011,
               reason: "core unavailable",
-            } as JazzCoreSocketEvent);
+            });
             return;
           }
           for (const data of queued.splice(0)) inner.send(data);
@@ -992,7 +944,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
             kind: "close",
             code: 1011,
             reason: "core unavailable",
-          } as JazzCoreSocketEvent);
+          });
         },
       );
       return {
@@ -1011,78 +963,15 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     },
     async close() {
       clearInterval(keepalive);
-      unregister();
       await live?.core.close();
     },
   };
 }
 
-/** A WebSocket that wakes the core, then connects to wherever it now runs. */
-function wakingWebSocket(resolveOrigin: () => Promise<string>): WebSocketConstructor {
-  return class WakingSocket implements BrowserWebSocket {
-    binaryType: "arraybuffer" | "blob" = "arraybuffer";
-    readyState = 0;
-    private socket: WebSocket | undefined;
-    private readonly listeners = new Map<string, Array<(event?: any) => void>>();
-
-    constructor(url: string) {
-      const path = new URL(url).pathname + new URL(url).search;
-      resolveOrigin().then(
-        (origin) => {
-          if (this.readyState >= 2) return;
-          const Socket = inProcessWebSocketFor(origin) ?? globalThis.WebSocket;
-          const socket = new Socket(`${origin.replace(/^http/, "ws")}${path}`) as WebSocket;
-          socket.binaryType = "arraybuffer";
-          this.socket = socket;
-          socket.addEventListener("open", () => {
-            this.readyState = 1;
-            this.emit("open");
-          });
-          socket.addEventListener("message", (event) => this.emit("message", { data: event.data }));
-          socket.addEventListener("error", (event) => this.emit("error", event));
-          socket.addEventListener("close", (event) => this.finish(event.code, event.reason));
-        },
-        (error: unknown) => {
-          this.emit("error", error);
-          this.finish(1011, "core unavailable");
-        },
-      );
-    }
-
-    addEventListener(type: string, listener: (event?: any) => void): void {
-      const list = this.listeners.get(type) ?? [];
-      list.push(listener);
-      this.listeners.set(type, list);
-    }
-
-    send(data: Uint8Array | string): void {
-      if (this.readyState !== 1 || !this.socket) throw new Error("socket is not open");
-      this.socket.send(data as Uint8Array<ArrayBuffer>);
-    }
-
-    close(): void {
-      if (this.readyState >= 2) return;
-      this.socket?.close();
-      this.finish(1000, "client closed");
-    }
-
-    private emit(type: string, event?: unknown): void {
-      for (const listener of this.listeners.get(type) ?? []) listener(event);
-    }
-
-    private finish(code: number, reason: string): void {
-      if (this.readyState >= 3) return;
-      this.readyState = 3;
-      this.emit("close", { code, reason });
-    }
-  };
-}
-
-/** The core keeps its own app id; one passed from JavaScript is refused, not ignored. */
+/** Refuse an app id: the core owns its identity on its Drive. */
 export function refuseVercelAppId(options: object): void {
-  if ("appId" in options) {
+  if ("appId" in options)
     throw new Error(
       "vercel(): appId is not an option: the core keeps its own app id on its Drive.",
     );
-  }
 }

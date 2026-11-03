@@ -5,7 +5,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { CORE_LAUNCHER } from "./vercel-store.js";
+import { CORE_LAUNCHER } from "./core-providers/vercel-store.js";
 
 const addon = createRequire(import.meta.url).resolve("jazz-napi");
 
