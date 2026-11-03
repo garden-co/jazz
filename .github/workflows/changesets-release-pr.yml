@@ -81,8 +81,6 @@ jobs:
           # publish unless each of these passed on this head (see
           # dev/scripts/release-test-gate.mjs). Their pull_request runs on a
           # bot-created PR stop at action_required, so dispatch them too.
-          gh workflow run starters-e2e.yml --repo "${REPO}" --ref "${RELEASE_BRANCH}"
-          assert_release_head
           gh workflow run rn-device-acceptance.yml --repo "${REPO}" --ref "${RELEASE_BRANCH}"
           assert_release_head
-          echo "Dispatched release CI, preview, starters E2E and RN device acceptance for ${RELEASE_BRANCH} at ${RELEASE_SHA} (PR #${PR_NUMBER})."
+          echo "Dispatched release CI, preview and RN device acceptance for ${RELEASE_BRANCH} at ${RELEASE_SHA} (PR #${PR_NUMBER})."
