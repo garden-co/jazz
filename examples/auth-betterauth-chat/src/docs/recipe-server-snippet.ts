@@ -9,10 +9,9 @@ export const auth = betterAuth({
 });
 
 export const jazz = await createJazz({
-  appId: "my-app",
   app,
   permissions,
-  store: sqlite({ path: "./data/jazz" }),
+  store: sqlite({ path: "./data/jazz", appId: "my-app" }),
   // The Better Auth session cookie decides who the user is.
   authenticate: async (request) => {
     const session = await auth.api.getSession({ headers: request.headers });

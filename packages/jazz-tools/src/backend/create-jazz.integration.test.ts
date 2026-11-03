@@ -124,8 +124,8 @@ async function userSession(appId: string, origin: string, userId: string) {
 
 describe("createJazz", () => {
   it("serves sync and sign-in from the app's backend with permissions from code", async () => {
-    const appId = randomUUID();
-    const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate });
+    const appId = jazz.appId;
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: true });
 
@@ -226,8 +226,8 @@ describe("createJazz", () => {
   }, 60_000);
 
   it("links only a guest whose proof is for this app or this endpoint", async () => {
-    const appId = randomUUID();
-    const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate });
+    const appId = jazz.appId;
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: true });
     const secret = generateSecret();
@@ -265,15 +265,14 @@ describe("createJazz", () => {
   });
 
   it("accepts guests of the public URL a proxy serves this endpoint at", async () => {
-    const appId = randomUUID();
     const jazz = await createJazz({
-      appId,
       app,
       permissions,
       store: memory(),
       authenticate,
       publicUrl: "https://app.example.com/api/jazz/",
     });
+    const appId = jazz.appId;
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: true });
     const secret = generateSecret();
@@ -294,14 +293,12 @@ describe("createJazz", () => {
     expect(await link(`${origin}/jazz`)).toBe(401);
     expect(await link("https://app.example.com/api/jazz")).toBe(200);
     await expect(
-      createJazz({ appId, app, permissions, store: memory(), authenticate, publicUrl: "/jazz" }),
+      createJazz({ app, permissions, store: memory(), authenticate, publicUrl: "/jazz" }),
     ).rejects.toThrow("not an absolute URL");
   });
 
   it("refuses sign-in and sync started by a page on another origin", async () => {
-    const appId = randomUUID();
     const jazz = await createJazz({
-      appId,
       app,
       permissions,
       store: memory(),
@@ -309,6 +306,7 @@ describe("createJazz", () => {
       // Written as a URL, compared as an origin.
       allowedOrigins: ["https://app.example.com/"],
     });
+    const appId = jazz.appId;
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: true });
     const signIn = (headers: Record<string, string>) =>
@@ -361,10 +359,8 @@ describe("createJazz", () => {
   }, 60_000);
 
   it("ends a user's open sync session once authenticate no longer names them", async () => {
-    const appId = randomUUID();
     const signedOut = new Set<string>();
     const jazz = await createJazz({
-      appId,
       app,
       permissions,
       store: memory(),
@@ -374,6 +370,7 @@ describe("createJazz", () => {
       },
       recheckSeconds: 0.05,
     });
+    const appId = jazz.appId;
     cleanups.push(() => jazz.close());
     let upgrades = 0;
     const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
@@ -402,12 +399,10 @@ describe("createJazz", () => {
   }, 30_000);
 
   it("reconnects a user whose socket's cookies expired but who is still signed in", async () => {
-    const appId = randomUUID();
     // Requests seen before `expiredBefore` carry cookies that have since expired.
     const firstSeen = new WeakMap<Request, number>();
     let expiredBefore = 0;
     const jazz = await createJazz({
-      appId,
       app,
       permissions,
       store: memory(),
@@ -417,6 +412,7 @@ describe("createJazz", () => {
       },
       recheckSeconds: 0.05,
     });
+    const appId = jazz.appId;
     cleanups.push(() => jazz.close());
     let upgrades = 0;
     const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
@@ -436,8 +432,8 @@ describe("createJazz", () => {
   }, 30_000);
 
   it("links a second identity to the same account", async () => {
-    const appId = randomUUID();
-    const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate });
+    const appId = jazz.appId;
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: true });
 
@@ -466,11 +462,11 @@ describe("createJazz", () => {
   ] as const)(
     "keeps a local-first guest's account when it signs up (%s store, %s, the client %s)",
     async (kind, transport, scoping) => {
-      const appId = randomUUID();
       const dir = await mkdtemp(join(tmpdir(), "jazz-link-"));
       cleanups.push(() => rm(dir, { recursive: true, force: true }));
       const store = kind === "memory" ? memory() : sqlite({ path: dir });
-      const jazz = await createJazz({ appId, app, permissions, store, authenticate });
+      const jazz = await createJazz({ app, permissions, store, authenticate });
+      const appId = jazz.appId;
       cleanups.push(() => jazz.close());
       const origin = await serve(jazz, { sockets: transport === "sockets" });
       if (transport !== "sockets") {
@@ -530,8 +526,8 @@ describe("createJazz", () => {
   );
 
   it("links a guest only on a fresh proof for one challenge, never on its token", async () => {
-    const appId = randomUUID();
-    const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate });
+    const appId = jazz.appId;
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: true });
     const accounts = `${origin}/jazz/apps/${appId}/accounts`;
@@ -617,15 +613,14 @@ describe("createJazz", () => {
   it.each(["keep", "revoke"] as const)(
     "keeps or retires the guest key after a link (guestKeyAfterLink: %s)",
     async (guestKeyAfterLink) => {
-      const appId = randomUUID();
       const jazz = await createJazz({
-        appId,
         app,
         permissions,
         store: memory(),
         authenticate,
         guestKeyAfterLink,
       });
+      const appId = jazz.appId;
       cleanups.push(() => jazz.close());
       const origin = await serve(jazz, { sockets: true });
       const accounts = `${origin}/jazz/apps/${appId}/accounts`;
@@ -669,15 +664,8 @@ describe("createJazz", () => {
     // Two backends on one core: the first links without revoking, as a
     // link whose revoke failed would leave it; the second revokes.
     const backend = async (guestKeyAfterLink: "keep" | "revoke") => {
-      const store = remote({ url: core.url, secret: core.adminSecret });
-      const jazz = await createJazz({
-        appId,
-        app,
-        permissions,
-        store,
-        authenticate,
-        guestKeyAfterLink,
-      });
+      const store = remote({ url: core.url, appId, secret: core.adminSecret });
+      const jazz = await createJazz({ app, permissions, store, authenticate, guestKeyAfterLink });
       cleanups.push(() => jazz.close());
       const origin = await serve(jazz, { sockets: true });
       const accounts = `${origin}/jazz/apps/${appId}/accounts`;
@@ -712,8 +700,8 @@ describe("createJazz", () => {
   }, 60_000);
 
   it("syncs over the HTTP stream when the host can't upgrade sockets", async () => {
-    const appId = randomUUID();
-    const jazz = await createJazz({ appId, app, permissions, store: memory(), authenticate });
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate });
+    const appId = jazz.appId;
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: false });
 
@@ -770,7 +758,7 @@ describe("createJazz", () => {
       (await response).headers.get("x-jazz-stream");
     const probe = () => new Request(`http://app.test/jazz/apps/${appId}/ws`);
 
-    const plain = await createJazz({ appId, app, permissions, store: memory(), authenticate });
+    const plain = await createJazz({ app, permissions, store: memory(), authenticate });
     cleanups.push(() => plain.close());
     const previous = process.env.VERCEL;
     process.env.VERCEL = "1";
@@ -787,7 +775,6 @@ describe("createJazz", () => {
 
     // A host that upgrades on its own and hands sockets to acceptSocket.
     const own = await createJazz({
-      appId: randomUUID(),
       app,
       permissions,
       store: memory(),
@@ -802,33 +789,32 @@ describe("createJazz", () => {
     // An entry that isn't an origin (it would parse as the opaque "null").
     for (const entry of ["localhost:3000", "app.example.com:443", "not a url"]) {
       await expect(
-        createJazz({ appId, app, permissions, store: memory(), allowedOrigins: [entry] }),
+        createJazz({ app, permissions, store: memory(), allowedOrigins: [entry] }),
       ).rejects.toThrow(/is not an origin/);
     }
   }, 60_000);
 
   it("opens a sqlite directory in one core at a time, and not on serverless hosts", async () => {
-    const appId = randomUUID();
     const dir = await mkdtemp(join(tmpdir(), "jazz-lock-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     // A lock file left by a process that died (under Docker often our own
     // pid, back after a restart) holds nothing: only the OS lock counts.
     await writeFile(join(dir, "jazz.lock"), `process ${process.pid}`);
-    const first = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
-    await expect(
-      createJazz({ appId, app, permissions, store: sqlite({ path: dir }) }),
-    ).rejects.toThrow(/is already open/);
+    const first = await createJazz({ app, permissions, store: sqlite({ path: dir }) });
+    await expect(createJazz({ app, permissions, store: sqlite({ path: dir }) })).rejects.toThrow(
+      /is already open/,
+    );
     await first.close();
     // Closed, the directory is free again.
-    const second = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
+    const second = await createJazz({ app, permissions, store: sqlite({ path: dir }) });
     await second.close();
 
     const previous = process.env.VERCEL;
     process.env.VERCEL = "1";
     try {
-      await expect(
-        createJazz({ appId, app, permissions, store: sqlite({ path: dir }) }),
-      ).rejects.toThrow(/Use remote\(/);
+      await expect(createJazz({ app, permissions, store: sqlite({ path: dir }) })).rejects.toThrow(
+        /Use remote\(/,
+      );
     } finally {
       if (previous === undefined) delete process.env.VERCEL;
       else process.env.VERCEL = previous;
@@ -836,18 +822,25 @@ describe("createJazz", () => {
   }, 60_000);
 
   it("keeps data in the sqlite directory across restarts", async () => {
-    const appId = randomUUID();
     const dir = await mkdtemp(join(tmpdir(), "jazz-embedded-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
 
-    const first = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
+    // The core names its own app and keeps that id with its data.
+    const first = await createJazz({ app, permissions, store: sqlite({ path: dir }) });
+    const appId = first.appId;
+    expect(appId).toMatch(/^[0-9a-f-]{36}$/);
     const inserted = await first.db
       .insert(app.todos, { title: "kept", owner: randomUUID() })
       .wait({ tier: "global" });
     await first.close();
 
-    const second = await createJazz({ appId, app, permissions, store: sqlite({ path: dir }) });
+    const second = await createJazz({ app, permissions, store: sqlite({ path: dir }) });
     cleanups.push(() => second.close());
+    expect(second.appId).toBe(appId);
+    // Naming another app for this store is refused; naming its own is fine.
+    await expect(
+      createJazz({ app, permissions, store: sqlite({ path: dir, appId: randomUUID() }) }),
+    ).rejects.toThrow(/belongs to app/);
     const rows = await second.db.all(app.todos.where({ id: inserted.id }));
     expect(rows.map((todo) => todo.title)).toEqual(["kept"]);
   }, 60_000);
@@ -857,8 +850,8 @@ describe("createJazz", () => {
     const core = await startLocalJazzServer({ appId, inMemory: true });
     cleanups.push(() => core.stop());
     // The app's one secret: the core's admin secret.
-    const store = remote({ url: core.url, secret: core.adminSecret });
-    const jazz = await createJazz({ appId, app, permissions, store, authenticate });
+    const store = remote({ url: core.url, appId, secret: core.adminSecret });
+    const jazz = await createJazz({ app, permissions, store, authenticate });
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: true });
 
@@ -869,7 +862,7 @@ describe("createJazz", () => {
 
     // A second backend on the same core (another instance, after a restart)
     // sees the same data and the same accounts.
-    const other = await createJazz({ appId, app, permissions, store, authenticate });
+    const other = await createJazz({ app, permissions, store, authenticate });
     cleanups.push(() => other.close());
     const seen = await other.db.all(app.todos.where({ id: row.id }));
     expect(seen.map((todo) => todo.title)).toEqual(["through the backend"]);
@@ -907,7 +900,7 @@ describe("createJazz", () => {
     const appId = randomUUID();
     const core = await startLocalJazzServer({ appId, inMemory: true });
     cleanups.push(() => core.stop());
-    const store = remote({ url: core.url, secret: core.adminSecret });
+    const store = remote({ url: core.url, appId, secret: core.adminSecret });
     const noInserts = s.definePermissions(app, ({ policy, session }) => {
       policy.todos.allowRead.where({ owner: session.user.account });
       policy.todos.allowInsert.never();
@@ -916,9 +909,9 @@ describe("createJazz", () => {
     });
     // The current deployment, then a newer one that boots last: neither
     // takes over the other's sessions.
-    const current = await createJazz({ appId, app, permissions, store, authenticate });
+    const current = await createJazz({ app, permissions, store, authenticate });
     cleanups.push(() => current.close());
-    const newer = await createJazz({ appId, app, permissions: noInserts, store, authenticate });
+    const newer = await createJazz({ app, permissions: noInserts, store, authenticate });
     cleanups.push(() => newer.close());
     const [onCurrent, onNewer] = [
       await serve(current, { sockets: true }),
@@ -976,7 +969,7 @@ describe("createJazz", () => {
     expect(await asBob.all(app.todos)).toEqual([]);
 
     // Rolling back: the current deployment boots again, and serves as before.
-    const rolledBack = await createJazz({ appId, app, permissions, store, authenticate });
+    const rolledBack = await createJazz({ app, permissions, store, authenticate });
     cleanups.push(() => rolledBack.close());
     const asAlice = await rolledBack.forRequest(
       new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
@@ -1026,7 +1019,7 @@ describe("createJazz", () => {
       const url = `http://127.0.0.1:${(older.address() as AddressInfo).port}`;
 
       await expect(
-        createJazz({ appId, app, permissions, store: remote({ url, secret: core.adminSecret }) }),
+        createJazz({ app, permissions, store: remote({ url, appId, secret: core.adminSecret }) }),
       ).rejects.toThrow(error);
       // Nothing was activated as the app's current permissions.
       const head = await fetch(`${core.url}/apps/${appId}/admin/permissions`, {
@@ -1044,28 +1037,42 @@ describe("createJazz", () => {
     // Not the admin secret (the backend secret included): nothing opens.
     for (const secret of ["not-the-secret", core.backendSecret]) {
       await expect(
-        createJazz({ appId, app, permissions, store: remote({ url: core.url, secret }) }),
+        createJazz({ app, permissions, store: remote({ url: core.url, appId, secret }) }),
       ).rejects.toThrow();
     }
-    expect(() => remote({ url: core.url, secret: "" })).toThrow(/admin secret/);
+    expect(() => remote({ url: core.url, appId, secret: "" })).toThrow(/admin secret/);
     // Untyped callers of the old shape hear about the rename.
     expect(() =>
-      remote({ url: core.url, adminSecret: core.adminSecret } as unknown as {
+      remote({ url: core.url, appId, adminSecret: core.adminSecret } as unknown as {
         url: string;
+        appId: string;
         secret: string;
       }),
     ).toThrow(/replaced by one `secret`/);
+    expect(() => remote({ url: core.url, appId: "", secret: core.adminSecret })).toThrow(
+      /appId must name the app/,
+    );
+    // createJazz names no app of its own any more: remote() does.
+    await expect(
+      createJazz({
+        appId,
+        app,
+        permissions,
+        store: memory(),
+      } as unknown as Parameters<typeof createJazz>[0]),
+    ).rejects.toThrow(/appId moved to the store/);
 
     // A credential hook is asked fresh for each request and socket.
     let asked = 0;
     const store = remote({
       url: core.url,
+      appId,
       backendCredential: async () => {
         asked++;
         return core.adminSecret;
       },
     });
-    const jazz = await createJazz({ appId, app, permissions, store, authenticate });
+    const jazz = await createJazz({ app, permissions, store, authenticate });
     cleanups.push(() => jazz.close());
     const opened = asked;
     expect(opened).toBeGreaterThan(1);

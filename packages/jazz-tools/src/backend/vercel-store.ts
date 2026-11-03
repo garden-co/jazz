@@ -90,7 +90,7 @@ export interface SandboxHandle {
 /** The shape `createJazz` drives a core through (see `Core` in create-jazz.ts). */
 export interface VercelCore {
   /** The app id the core runs as (see `VercelStoreOptions.appId`). */
-  readonly appId?: string;
+  readonly appId: string;
   readonly serverUrl: string;
   readonly adminSecret: string;
   readonly backendSecret: string;
@@ -397,8 +397,6 @@ async function installedVersion(): Promise<string> {
 }
 
 export interface OpenVercelCoreOptions {
-  /** Used when the store has no `appId` of its own. */
-  appId?: string;
   options: VercelStoreOptions;
   openRemote: OpenRemote;
   sdk?: SandboxSdk;
@@ -408,7 +406,7 @@ export interface OpenVercelCoreOptions {
 
 export async function openVercelCore(params: OpenVercelCoreOptions): Promise<VercelCore> {
   const { options, openRemote } = params;
-  const appId = options.appId ?? params.appId;
+  const appId = options.appId;
   const env = params.env ?? process.env;
   const sdk =
     params.sdk ??
