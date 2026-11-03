@@ -1211,10 +1211,13 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     const client = await backendClients.resolve(request);
     if (client === "refused") return null;
     if (client?.kind === "backend") {
-      // A trusted backend client syncs with this backend's authority: it
-      // states a backend secret (any stand-in) and, to act for a user, that
-      // user's session, as the main backend's own client does.
-      if (parsed.admin_secret != null || auth.admin_secret != null) return null;
+      // A trusted backend client syncs with this backend's authority, as the
+      // system and never for a user: it states a backend secret (any
+      // stand-in) and nothing else. A prelude naming a session or user is
+      // refused, so its writes carry the system identity.
+      for (const key of ["admin_secret", "backend_session", "user_id", "jwt_token"]) {
+        if (parsed[key] != null || auth[key] != null) return null;
+      }
       if (parsed.backend_secret == null && auth.backend_secret == null) return null;
       const vouched = { backend_secret: core.backendSecret };
       const rewritten = { ...parsed, ...vouched, auth: { ...auth, ...vouched } };

@@ -272,9 +272,15 @@ describe("trusted backend clients", () => {
     const row = await client!.db
       .insert(app.todos, { title: "from ops", owner })
       .wait({ tier: "global" });
-    expect((await jazz.db.all(app.todos.where({ id: row.id }))).map((t) => t.owner)).toEqual([
-      owner,
-    ]);
+    const [written] = await jazz.db.all(
+      app.todos.where({ id: row.id }).select("owner", "$createdBy"),
+    );
+    expect(written?.owner).toBe(owner);
+    // Its writes are the system's, never a user's.
+    expect(written?.$createdBy).toMatchObject({
+      account: "00000000-0000-0000-0000-000000000000",
+      identity: { issuer: "urn:jazz:system" },
+    });
     // A trusted machine has no user of its own.
     expect(
       (
@@ -322,6 +328,28 @@ describe("trusted backend clients", () => {
       socket.addEventListener("close", (event) => resolve(event.code)),
     );
     expect(code).toBe(1008);
+  });
+
+  it("can't act for a user", async () => {
+    const { appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+    ]);
+    const token = await sign({ sub: "ops" });
+    for (const stated of [
+      { backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" } },
+      { auth: { backend_secret: "stand-in", user_id: "alice" } },
+    ]) {
+      const socket = new WebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
+        headers: { authorization: `Bearer ${token}` },
+      } as never);
+      socket.addEventListener("open", () =>
+        socket.send(JSON.stringify({ peer_identity: "x", backend_secret: "stand-in", ...stated })),
+      );
+      const code = await new Promise<number>((resolve) =>
+        socket.addEventListener("close", (event) => resolve(event.code)),
+      );
+      expect(code).toBe(1008);
+    }
   });
 
   it("a key outage is a 503, never read as a refusal", async () => {
