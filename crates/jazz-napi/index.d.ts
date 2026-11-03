@@ -17,7 +17,7 @@ export type E2eeSodiumStream = E2EeSodiumStream
 
 export declare class JazzCore {
   /** Open the core's storage and serve it in this process. */
-  static open(options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; jwtPublicKey?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  static open(options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "sqlite"; blobsDir?: string; jwtPublicKey?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }): Promise<JazzCore>
   /**
    * Route one HTTP request. `url` is the path and query, as the core's
    * router sees them (`/apps/<appId>/...` or `/health`).
@@ -41,7 +41,7 @@ export declare class JazzCoreSocket {
 }
 
 export declare class JazzServer {
-  static start(options: { appId: string; backendSecret: string; adminSecret: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[] }): Promise<JazzServer>
+  static start(options: { appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }): Promise<JazzServer>
   get appId(): string
   get url(): string
   get port(): number

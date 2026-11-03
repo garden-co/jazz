@@ -1,3 +1,4 @@
+import { clientScope } from "./client-scope.js";
 import type { ClientMigrations } from "./client-migrations.js";
 import { JazzClient, type ConnectRuntimeOptions } from "./client.js";
 import { loadWasmModule, type WasmModule } from "./wasm-loader.js";
@@ -123,7 +124,7 @@ export function selfSignedClientProofFromConfig(
   }
   return {
     token: config.jwtToken,
-    appId: config.appId,
+    appId: clientScope(config),
     claimedAuthor: canonicalAuthorSubject(session.issuer, session.user_id, session.account_id),
   };
 }
@@ -202,7 +203,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       !browserMode,
       selfSignedClientProof,
       backendMode,
-      { appId: config.appId, thresholdMs: config.slowQueryThresholdMs },
+      { appId: clientScope(config), thresholdMs: config.slowQueryThresholdMs },
       migrations,
     );
     if (foregroundNodeLease) {
@@ -216,7 +217,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     }
 
     const context: AppContext = {
-      appId: config.appId,
+      appId: clientScope(config),
       accountId: config.accountId,
       schema,
       driver: config.driver,
@@ -265,7 +266,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const { acquireNodeForegroundNodeLease } =
       await import("./native-runtime/node-foreground-node-lease.js");
     return await acquireNodeForegroundNodeLease({
-      appId: config.appId,
+      appId: clientScope(config),
       env: config.env ?? "dev",
       authScope: createBrowserAuthSessionKey(config),
     });
@@ -325,11 +326,13 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         selfSignedClientProof,
         initialSyncFlushEvery: initialSyncFlushEvery(config),
         migrations: runtime.migrations,
-        appId: config.appId,
+        appId: clientScope(config),
         slowQueryThresholdMs: config.slowQueryThresholdMs,
         storageOwner: createBrowserStorageOwner(config),
         authSessionKey: createBrowserAuthSessionKey(config),
-        serverUrl: config.serverUrl ? httpUrlToWs(config.serverUrl, config.appId) : undefined,
+        serverUrl: config.serverUrl
+          ? httpUrlToWs(config.serverUrl, clientScope(config))
+          : undefined,
         authJson: JSON.stringify(browserWorkerTransportAuth(config)),
         sessionClaims: sessionFromConfig(config)?.claims ?? {},
         logLevel: config.logLevel,
@@ -424,15 +427,6 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       collectorUrl,
       runtimeThread,
     });
-  }
-
-  override mintLocalFirstToken(options: RuntimeTokenOptions): string {
-    return this.wasmModule.mintLocalFirstToken(
-      options.secret,
-      options.audience,
-      options.ttlSeconds,
-      options.nowSeconds,
-    );
   }
 
   override mintAnonymousToken(options: RuntimeTokenOptions): string {

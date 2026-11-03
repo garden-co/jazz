@@ -164,7 +164,7 @@ it("signs in the user authenticate names", async () => {
       return userId ? { userId, claims: { role: "admin" } } : null;
     },
   });
-  const response = await jazz.fetch(
+  const response = await jazz.handle(
     new Request(`http://app/jazz/apps/${appId}/accounts/backend-sign-in`, {
       method: "POST",
       headers: { "x-test-user": "alice" },

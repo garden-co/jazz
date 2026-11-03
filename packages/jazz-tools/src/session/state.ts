@@ -10,6 +10,13 @@ import { createListeners, toError } from "../runtime/util.js";
 export interface SessionClient {
   shutdown(options?: { waitForSync?: boolean }): Promise<void>;
 }
+/** A client whose database can wipe its local storage (`clearOnSignOut`). */
+type WipeableClient = {
+  db?: {
+    waitForSync?(options?: { timeoutMs?: number }): Promise<void>;
+    deleteClientStorage?(): Promise<void>;
+  };
+};
 export type JazzSessionOperation =
   | "createLocalFirst"
   | "restoreLocalFirst"
@@ -66,11 +73,21 @@ export function attachJazzSessionConsumer<Client>(
 }
 
 /** @internal Hosts prepare accounts and supply their client adapter once. */
-export async function createJazzSessionOwner<Client extends SessionClient>(options: {
+export async function createJazzSessionOwner<
+  Client extends SessionClient,
+  Extra extends object = {},
+>(options: {
   accounts: AccountManager<JWTAuth>;
   openClient(account: AccountHandle): Promise<Client>;
   initial?: "local-first" | BackendAuth;
-}): Promise<JazzSession<Client>> {
+  /**
+   * Wipe the signed-out account's local storage, unsynced writes included,
+   * instead of keeping it for that user's next sign-in (shared devices).
+   */
+  clearOnSignOut?: boolean;
+  /** Add host methods (e.g. `setUser`) to the session before it is sealed. */
+  decorate?(session: JazzSession<Client>): Extra;
+}): Promise<JazzSession<Client> & Extra> {
   const { accounts, openClient } = options;
   let selected = accounts.getLoggedIn();
   if (!selected && options.initial === "local-first")
@@ -125,7 +142,15 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
     if (token !== generation) throw superseded();
     try {
       if (client) {
-        await client.shutdown({ waitForSync: true });
+        if (operation === "logout" && options.clearOnSignOut) {
+          const db = (client as WipeableClient).db;
+          // Upload what the server still accepts before wiping the rest.
+          await db?.waitForSync?.({ timeoutMs: 5_000 }).catch(() => {});
+          await db?.deleteClientStorage?.();
+          await client.shutdown();
+        } else {
+          await client.shutdown({ waitForSync: true });
+        }
         client = undefined;
       }
     } catch (cause) {
@@ -276,5 +301,6 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
       },
     };
   });
-  return Object.freeze(session);
+  if (options.decorate) Object.assign(session, options.decorate(session));
+  return Object.freeze(session) as JazzSession<Client> & Extra;
 }

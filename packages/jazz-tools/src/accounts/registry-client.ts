@@ -42,33 +42,59 @@ export async function requestAccountRegistry(
 }
 
 /**
- * Ask the app's own backend (`createJazz`) who is signed in. Same-origin with
- * the app's cookies: the backend's `authenticate` decides, and the answer
- * carries the account, identity and claims but no credential.
- */
-/**
- * Sign in through the app's backend (`createJazz`). With `link`, a local-first
- * guest's token: the backend links that guest to the user it names.
+ * Sign in through the app's backend (`createJazz`), same-origin with the app's
+ * cookies: the backend's `authenticate` decides, and the answer carries the
+ * account, identity and claims but no credential. With `link`, a local-first
+ * guest's proof for a challenge the backend issued (see
+ * {@link requestBackendLinkChallenge}): the backend links that guest to the
+ * user it names.
  */
 export async function requestBackendSignIn(
   registry: string,
   fetcher: typeof fetch = fetchFor(registry),
-  options: { link?: string } = {},
+  options: { link?: { challenge: string; proof: string; audience?: string } } = {},
+): Promise<unknown> {
+  return backendRequest(
+    registry,
+    options.link ? "backend-link" : "backend-sign-in",
+    fetcher,
+    options.link,
+  );
+}
+
+/**
+ * A challenge from the app's backend for a local-first guest to sign before
+ * it links to the user the backend names. It names that user, expires
+ * quickly and links once.
+ */
+export async function requestBackendLinkChallenge(
+  registry: string,
+  fetcher: typeof fetch = fetchFor(registry),
+): Promise<string> {
+  const value = (await backendRequest(registry, "backend-link/challenge", fetcher)) as {
+    challenge?: unknown;
+  } | null;
+  if (typeof value?.challenge !== "string" || !value.challenge) {
+    throw new AccountAuthError("invalid_link_challenge");
+  }
+  return value.challenge;
+}
+
+async function backendRequest(
+  registry: string,
+  path: string,
+  fetcher: typeof fetch,
+  body?: unknown,
 ): Promise<unknown> {
   return withAuthRequestDeadline(async (signal) => {
-    const response = await fetcher(
-      `${registry}/${options.link ? "backend-link" : "backend-sign-in"}`,
-      {
-        signal,
-        method: "POST",
-        credentials: "same-origin",
-        redirect: "error",
-        headers: {
-          "Content-Type": "application/json",
-          ...(options.link ? { Authorization: `Bearer ${options.link}` } : {}),
-        },
-      },
-    );
+    const response = await fetcher(`${registry}/${path}`, {
+      signal,
+      method: "POST",
+      credentials: "same-origin",
+      redirect: "error",
+      headers: { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
     if (!response.ok) {
       const code = await response.text();
       throw new AccountAuthError(

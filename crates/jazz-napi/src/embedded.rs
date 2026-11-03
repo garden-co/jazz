@@ -7,7 +7,9 @@
 use std::sync::{Arc, Mutex};
 
 use jazz::tools::AppId;
-use jazz_server::{AuthConfig, EmbeddedOutgoing, EmbeddedServer, ServerBuilder, StorageBackend};
+use jazz_server::{
+    AuthConfig, BlobStore, EmbeddedOutgoing, EmbeddedServer, ServerBuilder, StorageBackend,
+};
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
@@ -21,6 +23,11 @@ struct JazzCoreOpenOptions {
     admin_secret: String,
     data_dir: Option<String>,
     in_memory: Option<bool>,
+    /// `"files"` or `"sqlite"` (the default): where settled large-value
+    /// bytes of a persistent core live.
+    blobs: Option<String>,
+    /// The directory for `blobs: "files"`; defaults to `<dataDir>/blobs`.
+    blobs_dir: Option<String>,
     jwt_public_key: Option<String>,
     jwt_issuer: Option<String>,
     jwt_audience: Option<String>,
@@ -47,6 +54,9 @@ pub struct JazzCoreSocketEvent {
 #[napi]
 pub struct JazzCore {
     server: Arc<EmbeddedServer>,
+    /// The OS lock on `<dataDir>/jazz.lock`, held while the core is open.
+    /// The kernel drops it when the process exits, however it exits.
+    dir_lock: Mutex<Option<std::fs::File>>,
 }
 
 #[napi]
@@ -54,7 +64,7 @@ impl JazzCore {
     /// Open the core's storage and serve it in this process.
     #[napi(
         factory,
-        ts_args_type = "options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; jwtPublicKey?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }",
+        ts_args_type = "options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: \"files\" | \"sqlite\"; blobsDir?: string; jwtPublicKey?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }",
         ts_return_type = "Promise<JazzCore>"
     )]
     pub async fn open(options: serde_json::Value) -> napi::Result<Self> {
@@ -73,24 +83,44 @@ impl JazzCore {
             admin_secret: Some(opts.admin_secret),
             ..Default::default()
         };
+        let mut dir_lock = None;
         let storage = if opts.in_memory.unwrap_or(false) {
             StorageBackend::InMemory
         } else {
             let data_dir = opts.data_dir.ok_or_else(|| {
                 napi::Error::from_reason("JazzCore needs dataDir unless inMemory is set")
             })?;
+            dir_lock = Some(lock_data_dir(std::path::Path::new(&data_dir))?);
             StorageBackend::Persistent {
                 path: data_dir.into(),
+            }
+        };
+        let blobs = match (opts.blobs.as_deref(), opts.blobs_dir) {
+            (None | Some("sqlite"), None) => BlobStore::Sqlite,
+            (Some("files"), dir) => BlobStore::Files {
+                dir: dir.map(Into::into),
+            },
+            (Some("sqlite") | None, Some(_)) => {
+                return Err(napi::Error::from_reason(
+                    "JazzCore: blobsDir needs blobs: \"files\"",
+                ));
+            }
+            (Some(other), _) => {
+                return Err(napi::Error::from_reason(format!(
+                    "JazzCore: blobs must be \"files\" or \"sqlite\", not {other:?}"
+                )));
             }
         };
         let built = ServerBuilder::new(app_id)
             .with_auth_config(auth_config)
             .with_storage(storage)
+            .with_blob_store(blobs)
             .build()
             .await
             .map_err(napi::Error::from_reason)?;
         Ok(Self {
             server: Arc::new(EmbeddedServer::new(built)),
+            dir_lock: Mutex::new(dir_lock),
         })
     }
 
@@ -186,6 +216,7 @@ impl JazzCore {
     pub async fn close(&self) -> napi::Result<()> {
         let phase = self.server.shutdown().await;
         if phase == jazz_server::ShutdownPhase::StorageClosed {
+            self.dir_lock.lock().expect("dir lock").take();
             Ok(())
         } else {
             Err(napi::Error::from_reason(format!(
@@ -217,6 +248,30 @@ impl JazzCoreSocket {
             peer.close();
         }
     }
+}
+
+/// Hold `dir` for this core with an OS file lock: two cores on one sqlite
+/// directory (a hot reload without a cached instance, cluster mode, a
+/// rolling deploy on one volume) would each believe they own its data. The
+/// lock is per open file, so a second core in the same process is refused
+/// too, and it goes away with the process, so a crash or `docker stop`
+/// never leaves the directory locked.
+fn lock_data_dir(dir: &std::path::Path) -> napi::Result<std::fs::File> {
+    jazz_server::lock_data_dir(dir).map_err(|error| match error {
+        jazz_server::DataDirLockError::Held(holder) => napi::Error::from_reason(format!(
+            "sqlite(): {} is already open{}. One core per directory: create Jazz once and reuse it \
+             (cache it on globalThis across hot reloads), and give each process its own directory or use remote().",
+            dir.display(),
+            if holder.is_empty() {
+                String::new()
+            } else {
+                format!(" ({holder})")
+            },
+        )),
+        jazz_server::DataDirLockError::Io(error) => {
+            napi::Error::from_reason(format!("sqlite(): {error}"))
+        }
+    })
 }
 
 fn pairs(headers: &[Vec<String>]) -> Vec<(String, String)> {

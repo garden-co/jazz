@@ -25,7 +25,7 @@ mod shutdown;
 #[cfg(feature = "embedded-server")]
 mod testing;
 
-pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
+pub use builder::{BlobStore, BuiltServer, ServerBuilder, StorageBackend};
 pub(crate) use catalogue::{ActiveSchemaSummary, ServerCatalogue, StoredCatalogue};
 pub(crate) use catalogue_storage::CatalogueStorage;
 #[cfg(feature = "embedded-server")]
@@ -96,6 +96,10 @@ pub struct ServerState {
     /// Authentication configuration.
     pub auth_config: AuthConfig,
     pub jwt_verifier: Option<Arc<JwtVerifier>>,
+    /// How backend credentials are checked (see `middleware::workload`): a
+    /// trusted workload's token, or the admin secret.
+    pub(crate) backend_credential: Option<Arc<crate::middleware::workload::BackendCredential>>,
+    pub(crate) workload_secrets: Option<crate::middleware::workload::InternalSecrets>,
     /// Sendable handle to the local-owner server shell for the websocket route.
     pub(crate) core_server_shell: StdRwLock<Option<ServerRuntimeHandle>>,
     /// Per-state admission owner for policy-scoped WebSocket connections.

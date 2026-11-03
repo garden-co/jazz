@@ -71,8 +71,7 @@ That includes `next dev` on a non-loopback host (for example a LAN address or a 
 needs the full deployment configuration too.
 
 By default the backend stores data in SQLite next to the app. To sync through Jazz Cloud or your
-own sync server instead, set `JAZZ_SERVER_URL`, `JAZZ_ADMIN_SECRET` and `BACKEND_SECRET`; the
-backend then uses `remote()`, and browsers still talk only to `/jazz`.
+own sync server instead, set `JAZZ_SERVER_URL` and `JAZZ_ADMIN_SECRET`; the backend then uses `remote()`, and browsers still talk only to `/jazz`.
 
 To try Stripe test mode, set `PAYMENT_PROVIDER=stripe`, `STRIPE_SECRET_KEY=sk_test_…` and
 `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_…`. Live keys are refused.

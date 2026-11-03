@@ -12,9 +12,7 @@ export function jazzConfig(env: Record<string, string | undefined> = process.env
   if (!appId) throw new Error("NEXT_PUBLIC_JAZZ_APP_ID must be configured in production");
   const url = env.JAZZ_SERVER_URL;
   if (!url) return { appId, remote: undefined, dataPath: env.JAZZ_DATA_PATH || ".jazz" };
-  const adminSecret = env.JAZZ_ADMIN_SECRET;
-  const backendSecret = env.BACKEND_SECRET;
-  if (!adminSecret || !backendSecret)
-    throw new Error("JAZZ_SERVER_URL needs JAZZ_ADMIN_SECRET and BACKEND_SECRET");
-  return { appId, remote: { url, adminSecret, backendSecret }, dataPath: undefined };
+  const secret = env.JAZZ_ADMIN_SECRET;
+  if (!secret) throw new Error("JAZZ_SERVER_URL needs JAZZ_ADMIN_SECRET");
+  return { appId, remote: { url, secret }, dataPath: undefined };
 }

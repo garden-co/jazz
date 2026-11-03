@@ -13,6 +13,8 @@ import type { BrowserWebSocket, WebSocketConstructor } from "./websocket.js";
  * A record is `[kind u8][length u32 BE][payload]`.
  */
 export const STREAM_RECORD_SESSION = 0;
+/** Header carrying the stream session's key, which the session record hands over. */
+const STREAM_KEY_HEADER = "x-jazz-stream-key";
 export const STREAM_RECORD_MESSAGE = 1;
 export const STREAM_RECORD_CLOSE = 2;
 
@@ -105,7 +107,7 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
   readyState = 0;
   private readonly streamUrl: string;
   private readonly abort = new AbortController();
-  private session: string | undefined;
+  private session: { id: string; key: string } | undefined;
   private queued: Uint8Array[] = [];
   private sending = false;
 
@@ -127,9 +129,10 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
     const session = this.session;
     this.finish(1000, "client closed");
     if (session) {
-      void fetch(`${this.streamUrl}/${encodeURIComponent(session)}`, {
+      void fetch(`${this.streamUrl}/${encodeURIComponent(session.id)}`, {
         method: "DELETE",
         credentials: "same-origin",
+        headers: { [STREAM_KEY_HEADER]: session.key },
       }).catch(() => undefined);
     }
   }
@@ -164,7 +167,7 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
 
   private receive(kind: number, payload: Uint8Array): void {
     if (kind === STREAM_RECORD_SESSION) {
-      this.session = textDecoder.decode(payload);
+      this.session = JSON.parse(textDecoder.decode(payload)) as { id: string; key: string };
       this.readyState = 1;
       this.emit("open");
     } else if (kind === STREAM_RECORD_MESSAGE) {
@@ -189,10 +192,13 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
       while (this.queued.length > 0 && this.readyState === 1) {
         const body = concatBytes(this.queued);
         this.queued = [];
-        const response = await fetch(`${this.streamUrl}/${encodeURIComponent(this.session)}`, {
+        const response = await fetch(`${this.streamUrl}/${encodeURIComponent(this.session.id)}`, {
           method: "POST",
           credentials: "same-origin",
-          headers: { "Content-Type": "application/octet-stream" },
+          headers: {
+            "Content-Type": "application/octet-stream",
+            [STREAM_KEY_HEADER]: this.session.key,
+          },
           body: body as BodyInit,
         });
         if (!response.ok) throw new Error(`HTTP stream send refused (${response.status})`);
@@ -217,29 +223,55 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
   }
 }
 
-// Once a native socket failed to open on this page, later sessions go
-// straight to the HTTP stream: the host can't upgrade.
-let nativeUnavailable = false;
+/**
+ * Endpoints on this page known to serve the HTTP stream and not upgrade
+ * sockets: a createJazz backend answered a plain request for the socket
+ * path with 426 and the stream marker. Only that answer switches an
+ * endpoint; a socket that fails for any other reason (a restart, a proxy to
+ * a sync server that has no stream) fails as a socket would.
+ */
+const streamEndpoints = new Set<string>();
+
+/** Header on createJazz's 426 for a socket path (see `createJazz`). */
+const STREAM_AVAILABLE_HEADER = "x-jazz-stream";
+
+async function servesStreamInstead(url: string): Promise<boolean> {
+  try {
+    const response = await fetch(url.replace(/^ws/, "http"), {
+      method: "GET",
+      credentials: "same-origin",
+    });
+    void response.body?.cancel().catch(() => undefined);
+    return response.status === 426 && response.headers.get(STREAM_AVAILABLE_HEADER) === "1";
+  } catch {
+    return false;
+  }
+}
 
 /**
  * A WebSocket constructor for a same-origin Jazz endpoint: a native socket
- * when the host upgrades it, else the HTTP stream transport. The switch
- * happens before the session opens, so the carrier never sees it.
+ * when the host upgrades it, else, on a createJazz backend that can't, the
+ * HTTP stream transport. The switch happens before the session opens, so the
+ * carrier never sees it.
  */
 export function sameOriginWebSocketConstructor(native: WebSocketConstructor): WebSocketConstructor {
   return class SameOriginSocket extends SocketEvents implements BrowserWebSocket {
     binaryType: "arraybuffer" | "blob" = "arraybuffer";
     private inner: BrowserWebSocket;
-    private switched = false;
+    private settled = false;
+    /** The native socket failed and we're asking whether to use the stream. */
+    private probing = false;
 
     constructor(private readonly url: string) {
       super();
-      this.inner = nativeUnavailable ? new HttpStreamSocket(url) : this.openNative();
-      if (nativeUnavailable) this.forward(this.inner);
+      const stream = streamEndpoints.has(url);
+      this.inner = stream ? new HttpStreamSocket(url) : this.openNative();
+      if (stream) this.forward(this.inner);
     }
 
     get readyState(): number {
-      return this.inner.readyState;
+      // Still connecting while the probe runs: the session hasn't failed yet.
+      return this.probing ? 0 : this.inner.readyState;
     }
 
     send(data: Uint8Array | string): void {
@@ -247,6 +279,8 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
     }
 
     close(): void {
+      this.settled = true;
+      this.probing = false;
       this.inner.close();
     }
 
@@ -254,25 +288,42 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
       const socket = new native(this.url);
       socket.binaryType = "arraybuffer";
       let opened = false;
-      const fallBack = () => {
-        if (opened || this.switched) return;
-        this.switched = true;
-        nativeUnavailable = true;
-        this.inner = new HttpStreamSocket(this.url);
-        this.forward(this.inner);
+      let failure: { error?: unknown; close?: unknown } | undefined;
+      const failedBeforeOpen = (kind: "error" | "close", event: unknown) => {
+        if (this.settled) return;
+        if (failure) {
+          failure[kind] ??= event;
+          return;
+        }
+        failure = { [kind]: event };
+        this.probing = true;
+        void servesStreamInstead(this.url).then((stream) => {
+          this.probing = false;
+          if (this.settled) return;
+          this.settled = true;
+          if (stream) {
+            streamEndpoints.add(this.url);
+            this.inner = new HttpStreamSocket(this.url);
+            this.forward(this.inner);
+            return;
+          }
+          if (failure?.error !== undefined) this.emit("error", failure.error);
+          this.emit("close", failure?.close ?? { code: 1006, reason: "" });
+        });
       };
       socket.addEventListener("open", () => {
         opened = true;
+        this.settled = true;
         this.emit("open");
       });
       socket.addEventListener("message", (event) => this.emit("message", event));
       socket.addEventListener("error", (event) => {
         if (opened) this.emit("error", event);
-        else fallBack();
+        else failedBeforeOpen("error", event);
       });
       socket.addEventListener("close", (event) => {
         if (opened) this.emit("close", event);
-        else fallBack();
+        else failedBeforeOpen("close", event);
       });
       return socket;
     }
