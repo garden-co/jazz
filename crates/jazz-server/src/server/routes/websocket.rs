@@ -2641,31 +2641,17 @@ mod tests {
             features,
         )
         .await;
-        let chunk_len = jazz::wire::channels::CHANNEL_CHUNK_BYTES;
+        // Leading parts of one split sync message (part marker 0xFF): the
+        // owner buffers them and waits for the rest, so the link stays open
+        // whenever the owner gets to the batch. Each part is well under the
+        // frame limit and all of them under the untrusted message ceiling;
+        // only the batch as a whole is above the legacy 1 MiB cap.
+        let part_len = 64 * 1024;
         let encoded = (0..24)
-            .map(|index| {
-                let envelope = jazz::wire::WireChannelEnvelope {
-                    protocol_version: WIRE_PROTOCOL_VERSION,
-                    features,
-                    session: None,
-                    extent: jazz::wire::channels::ChannelFrame {
-                        channel: 1,
-                        generation: 0,
-                        sequence: index,
-                        class: jazz::wire::channels::ChannelClass::Writes,
-                        first: index == 0,
-                        last: false,
-                        message_len: if index == 0 {
-                            (chunk_len * 32) as u32
-                        } else {
-                            0
-                        },
-                        decoded_len: chunk_len as u32,
-                        payload: vec![0x42; chunk_len],
-                    },
-                };
-                encode_frame(&WireFrame::Channel(envelope))
-                    .expect("encode large websocket channel batch")
+            .map(|_| {
+                let mut frame = vec![0xFF_u8];
+                frame.resize(part_len + 1, 0x42);
+                frame
             })
             .collect::<Vec<_>>();
         let batch = postcard::to_allocvec(&encoded).expect("encode large websocket batch");
