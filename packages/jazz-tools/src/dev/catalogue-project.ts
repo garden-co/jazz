@@ -1672,7 +1672,7 @@ async function retireLegacyMigrations(
   return legacy;
 }
 
-/** Refuse to deploy while legacy migrations are in place, pointing at `validate`. */
+/** Refuse to publish while legacy migrations are in place, pointing at `validate`. */
 async function assertNoLegacyMigrations(
   migrationsDir: string,
   currentSchema: WasmSchema,
@@ -1682,7 +1682,7 @@ async function assertNoLegacyMigrations(
   });
   if (legacy.length === 0) return;
   throw new Error(
-    `${legacy.join(", ")} ${legacy.length === 1 ? "names" : "name"} schema versions by the hashes Jazz used before alpha.60 switched schema hashes to SHA-256. Run \`jazz-tools validate\` to move ${legacy.length === 1 ? "it" : "them"} to ${LEGACY_MIGRATIONS_DIR}/ and deploy schema.ts as it is.`,
+    `${legacy.join(", ")} ${legacy.length === 1 ? "names" : "name"} schema versions by the hashes Jazz used before alpha.60 switched schema hashes to SHA-256. Run \`jazz-tools validate\` to move ${legacy.length === 1 ? "it" : "them"} to ${LEGACY_MIGRATIONS_DIR}/; the app then runs on schema.ts as it is.`,
   );
 }
 

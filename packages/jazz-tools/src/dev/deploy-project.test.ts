@@ -233,7 +233,7 @@ it("moves migrations written with pre-SHA-256 schema hashes to legacy/", async (
   );
 });
 
-it("refuses to deploy legacy migrations and points at validate", async () => {
+it("refuses to publish legacy migrations and points at validate", async () => {
   const { root, legacyName, fetchMock } = await legacyFixture();
   await expect(deploy({ ...options, schemaDir: root })).rejects.toThrow(
     new RegExp(`${legacyName}.*jazz-tools validate`),
