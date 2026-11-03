@@ -424,3 +424,140 @@ fn a_server_serves_chunk_requests_from_an_asynchronous_chunk_store() {
     assert_eq!(body(&alice, 1), value);
     assert!(remote.objects().gets > 0);
 }
+
+fn open_host_io(path: &Path, store: Arc<dyn ChunkStore>) -> Db {
+    let config = config(0, AuthorSubject::SYSTEM)
+        .with_chunk_store(store)
+        .with_host_chunk_io();
+    block_on(Db::open_at(config, path, FileOptions::default())).unwrap()
+}
+
+/// Run a batch on another thread, as a server runs it beside its store
+/// thread.
+fn run_elsewhere(
+    io: jazz::chunk_store::ChunkIo,
+    store: Arc<dyn ChunkStore>,
+) -> jazz::chunk_store::ChunkIoDone {
+    std::thread::spawn(move || block_on(io.run(&*store)))
+        .join()
+        .unwrap()
+}
+
+/// A store whose host runs the chunk I/O: the tick never waits on the
+/// bucket, the host takes one batch at a time, runs it elsewhere and hands
+/// the outcome back.
+///
+/// ```
+/// tick ──► (no I/O)        take_chunk_io ──► puts ──thread──► bucket
+///                          finish_chunk_io ◄──── outcome ◄────┘
+/// ```
+#[test]
+fn a_host_runs_the_chunk_io_one_batch_at_a_time() {
+    let (_dir, path) = scratch();
+    let remote = Remote::default();
+    let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
+    let value = text(55, LARGE);
+    let db = open_host_io(&path, store.clone());
+    insert(&db, 1, &value);
+    block_on(db.tick()).unwrap();
+    assert_eq!(remote.objects().puts, 0, "the tick ran no I/O");
+    let io = db.take_chunk_io().unwrap().expect("a batch");
+    let (_, puts, _) = io.counts();
+    assert!(puts > 2, "{puts}");
+    assert!(db.take_chunk_io().unwrap().is_none(), "one batch is out");
+    // Writes and reads go on while the batch is out.
+    insert(&db, 2, &text(56, LARGE));
+    assert_eq!(body(&db, 1), value);
+    let done = run_elsewhere(io, store.clone());
+    assert_eq!(file_node_bytes(&path).1, 0, "nothing moves before finish");
+    db.finish_chunk_io(done).unwrap();
+    assert_eq!(file_node_bytes(&path).1 as usize, puts);
+    // The next batch moves the second value.
+    let done = run_elsewhere(db.take_chunk_io().unwrap().unwrap(), store.clone());
+    db.finish_chunk_io(done).unwrap();
+    assert_eq!(
+        file_node_bytes(&path).1 as usize,
+        remote.objects().map.len()
+    );
+    drop(db);
+    // Reopened, a direct read fetches the leaves it needs itself.
+    let db = open_host_io(&path, store.clone());
+    assert_eq!(body(&db, 1), value);
+    assert!(remote.objects().gets > 0);
+}
+
+/// A host's failed put leaves the bytes in SQLite; finishing reports it
+/// and a later batch puts the leaf again.
+#[test]
+fn a_host_batch_that_fails_is_retried_by_the_next() {
+    let (_dir, path) = scratch();
+    let remote = Remote::default();
+    let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
+    let value = text(57, LARGE);
+    let db = open_host_io(&path, store.clone());
+    insert(&db, 1, &value);
+    remote.objects().failing = true;
+    let done = run_elsewhere(db.take_chunk_io().unwrap().unwrap(), store.clone());
+    let error = db.finish_chunk_io(done).err().expect("reported");
+    assert_eq!(error.code, ErrorCode::Storage);
+    assert_eq!(file_node_bytes(&path).1, 0);
+    remote.objects().failing = false;
+    let done = run_elsewhere(db.take_chunk_io().unwrap().unwrap(), store.clone());
+    db.finish_chunk_io(done).unwrap();
+    assert!(file_node_bytes(&path).1 > 2);
+    drop(db);
+    let db = open_host_io(&path, store);
+    assert_eq!(body(&db, 1), value);
+}
+
+/// A server whose host runs the chunk I/O holds a replica's chunk
+/// requests until a batch has fetched the leaves, then serves them when
+/// the batch is finished, without another tick.
+#[test]
+fn a_server_with_host_io_serves_chunk_requests_once_a_batch_fetched_them() {
+    let (_dir, path) = scratch();
+    let remote = Remote::default();
+    let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
+    let value = text(58, LARGE);
+    {
+        let server = open(&path, Some(store.clone())).unwrap();
+        insert(&server, 1, &value);
+        block_on(server.tick()).unwrap();
+    }
+    let server = open_host_io(&path, store.clone());
+    let alice = block_on(Db::open(config(1, user(1)))).unwrap();
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let _ = block_on(alice.connect_upstream(Box::new(Pipe {
+        out: up.clone(),
+        inbound: down.clone(),
+    })));
+    server
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down,
+                inbound: up,
+            }),
+            user(1),
+        )
+        .unwrap();
+    let _stream = block_on(alice.subscribe(
+        &alice.prepare_query(&Query::from("docs")).unwrap(),
+        ReadOpts::default(),
+    ))
+    .unwrap();
+    let mut fetched = 0;
+    for _ in 0..16 {
+        block_on(alice.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+        if let Some(io) = server.take_chunk_io().unwrap() {
+            fetched += io.counts().0;
+            server
+                .finish_chunk_io(run_elsewhere(io, store.clone()))
+                .unwrap();
+        }
+    }
+    block_on(alice.tick()).unwrap();
+    assert!(fetched > 0, "the host fetched the leaves");
+    assert_eq!(body(&alice, 1), value);
+}

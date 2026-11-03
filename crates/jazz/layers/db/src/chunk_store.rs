@@ -213,6 +213,76 @@ impl ChunkStore for FileChunkStore {
     }
 }
 
+/// Operations on a chunk store at once.
+const CONCURRENCY: usize = 16;
+
+/// One batch of chunk-store work: nodes reads wait on, settled leaves to
+/// move out of SQLite and reclaimed ones to delete. [`crate::db::Db::tick`]
+/// runs each batch itself, unless the store was opened
+/// [`crate::options::DbConfig::with_host_chunk_io`]: then the host takes it
+/// with [`crate::db::Db::take_chunk_io`], runs it with [`ChunkIo::run`]
+/// wherever it likes and hands the result to
+/// [`crate::db::Db::finish_chunk_io`]. One batch is out at a time, so a
+/// delete never overtakes the put it undoes; until its result is back, no
+/// further batch is handed out.
+///
+/// It is plain data (`Send`): the puts' marks are committed before it is
+/// handed out, so the host may run it on another thread, and a host that
+/// loses it (a crash) loses nothing the store does not redo on reopen.
+#[derive(Debug, Default)]
+pub struct ChunkIo {
+    pub(crate) fetch: Vec<ChunkRequest>,
+    pub(crate) puts: Vec<(NodeKey, Vec<u8>)>,
+    pub(crate) deletes: Vec<NodeKey>,
+}
+
+/// What running a [`ChunkIo`] came to, for
+/// [`crate::db::Db::finish_chunk_io`].
+#[derive(Debug)]
+pub struct ChunkIoDone {
+    pub(crate) io: ChunkIo,
+    pub(crate) fetched: Vec<Result<Option<Bytes>, Error>>,
+    pub(crate) put: Vec<Result<(), Error>>,
+    pub(crate) deleted: Vec<Result<(), Error>>,
+}
+
+impl ChunkIo {
+    /// Whether the batch has nothing to do.
+    pub fn is_empty(&self) -> bool {
+        self.fetch.is_empty() && self.puts.is_empty() && self.deletes.is_empty()
+    }
+
+    /// Nodes to fetch, leaves to put and leaves to delete, in that order.
+    pub fn counts(&self) -> (usize, usize, usize) {
+        (self.fetch.len(), self.puts.len(), self.deletes.len())
+    }
+
+    /// Run the batch against `store`, up to 16 operations of each kind at
+    /// once. A
+    /// batch never holds a node in two lists, so the order among them does
+    /// not matter.
+    pub async fn run(self, store: &dyn ChunkStore) -> ChunkIoDone {
+        use futures::StreamExt;
+        let keys: Vec<NodeKey> = self.fetch.iter().map(NodeKey::from).collect();
+        let fetched = futures::stream::iter(keys.iter().map(|key| store.get(key)))
+            .buffered(CONCURRENCY)
+            .collect::<Vec<_>>();
+        let put = futures::stream::iter(self.puts.iter().map(|(key, bytes)| store.put(key, bytes)))
+            .buffered(CONCURRENCY)
+            .collect::<Vec<_>>();
+        let deleted = futures::stream::iter(self.deletes.iter().map(|key| store.delete(key)))
+            .buffered(CONCURRENCY)
+            .collect::<Vec<_>>();
+        let (fetched, put, deleted) = futures::join!(fetched, put, deleted);
+        ChunkIoDone {
+            io: self,
+            fetched,
+            put,
+            deleted,
+        }
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;

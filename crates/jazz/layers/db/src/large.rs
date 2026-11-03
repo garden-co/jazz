@@ -515,6 +515,9 @@ pub(crate) struct Chunks {
     /// Where settled leaf bytes live when not in the file
     /// ([`crate::chunk_store`]).
     store: Option<Arc<dyn ChunkStore>>,
+    /// The host runs chunk-store I/O ([`crate::db::Db::take_chunk_io`]),
+    /// not the tick.
+    host_io: std::sync::atomic::AtomicBool,
 }
 
 struct State {
@@ -612,6 +615,7 @@ impl Chunks {
                 pumping: false,
             }),
             store,
+            host_io: std::sync::atomic::AtomicBool::new(false),
         });
         Ok(chunks)
     }
@@ -641,6 +645,17 @@ impl Chunks {
     /// The chunk store, if this store has one.
     pub(crate) fn store(&self) -> Option<&Arc<dyn ChunkStore>> {
         self.store.as_ref()
+    }
+
+    /// Have the host run chunk-store I/O instead of the tick.
+    pub(crate) fn set_host_io(&self, host: bool) {
+        self.host_io
+            .store(host, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the host runs chunk-store I/O.
+    pub(crate) fn host_io(&self) -> bool {
+        self.host_io.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The chunk store settled leaves move to, if they move: a store in
@@ -677,6 +692,14 @@ impl Chunks {
             state.evict();
         }
         Some(std::mem::take(&mut state.fetch).into_iter().collect())
+    }
+
+    /// The nodes reads wait on, for a read that fetches them itself. Unlike
+    /// [`Self::begin_fetch`] this runs beside a host's batch: a fetch never
+    /// reorders a put and the delete that undoes it.
+    pub(crate) fn take_fetch(&self) -> Vec<ChunkRequest> {
+        let mut state = self.state.lock().expect("chunk cache");
+        std::mem::take(&mut state.fetch).into_iter().collect()
     }
 
     /// End a fetch [`Self::begin_fetch`] started.
