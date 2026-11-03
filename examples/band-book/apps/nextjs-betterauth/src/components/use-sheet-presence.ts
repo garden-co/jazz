@@ -34,7 +34,8 @@ function colorFor(account: string): string {
  * every 150 ms), refreshed every 10 s while it stays open and deleted when it
  * closes. A row this client has not seen refreshed for 30 s belongs to an
  * editor that went away; timing it by this client's clock, not the writer's,
- * keeps a wrong clock elsewhere from hiding or keeping anyone. Names and
+ * keeps a wrong clock elsewhere from hiding or keeping anyone, or from
+ * deleting this account's live rows on its other devices. Names and
  * colours come from the row's account, never from what the row says.
  */
 export function useSheetPresence(pageId: string) {
@@ -98,16 +99,6 @@ export function useSheetPresence(pageId: string) {
 
   const { data: rows } = useAll(app.sheetPresence.where({ pageId }));
 
-  // Rows this editor left behind (a closed laptop, a crashed tab) were
-  // timed by this clock, so they can be told apart from a live tab's.
-  useEffect(() => {
-    for (const row of rows ?? []) {
-      if (row.account === me && row.id !== rowId.current && Date.now() - row.seenAt > STALE_MS) {
-        db.delete(app.sheetPresence, row.id);
-      }
-    }
-  }, [rows, me, db]);
-
   // When this client last saw each row change.
   const seen = useRef(new Map<string, { seenAt: number; at: number }>());
   const collaborators = useMemo<Collaborator[]>(() => {
@@ -128,6 +119,18 @@ export function useSheetPresence(pageId: string) {
     }
     return live;
   }, [rows, now, members]);
+
+  // This account's rows left behind by a closed laptop or a crashed tab:
+  // timed, like everyone's, by when this client last saw them change, so
+  // another device of the same account with a slow clock keeps its row.
+  useEffect(() => {
+    for (const row of rows ?? []) {
+      const at = seen.current.get(row.id)?.at;
+      if (row.account === me && row.id !== rowId.current && at && now - at > STALE_MS) {
+        db.delete(app.sheetPresence, row.id);
+      }
+    }
+  }, [rows, now, me, db]);
   return { collaborators, report };
 }
 // #endregion rich-text-presence

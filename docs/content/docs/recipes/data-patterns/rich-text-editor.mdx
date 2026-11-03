@@ -31,7 +31,8 @@ text after) instead of character offsets, so they survive edits that move the te
 The editor's document model must round-trip through Markdown: loading a value and saving it again
 without edits has to give back the same string. `jazz-tools/prosemirror` writes canonical Markdown
 that `prosemirror-markdown`'s CommonMark parser reads back into the same document, including empty
-paragraphs and lines that start with spaces (their first space is written as `&#32;`). It has
+paragraphs (written as an empty link, `[]()`) and lines that start with spaces (their first space
+is written as `&#32;`). It has
 writers for the CommonMark schema's nodes and marks; give it writers for any others your schema
 adds. A stored value written differently (by another tool, or by hand) is read into the same
 document and written back in canonical form only where someone edits it.
