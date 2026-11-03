@@ -1,0 +1,16 @@
+[package]
+name = "jazz-text"
+version = "0.1.0"
+edition = "2024"
+description = "Jazz's text primitives: the authority's text merge and stateless anchors into text."
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+
+[features]
+# Serialize anchors, ranges and their resolves for host bindings.
+serde = ["dep:serde"]
+
+[dev-dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"

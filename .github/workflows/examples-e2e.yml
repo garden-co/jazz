@@ -124,7 +124,7 @@ jobs:
 
       - name: Verify package artifact hand-off
         if: env.REUSE_PREVIEW != 'true'
-        run: node dev/artifacts/verify-starter-e2e-artifacts.mjs
+        run: node dev/artifacts/verify-package-artifacts.mjs
 
       - name: Wait for the release preview of this commit
         id: preview

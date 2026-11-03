@@ -34,6 +34,7 @@ mod browser;
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
 pub mod browser_bench;
 mod identity;
+mod text;
 
 #[cfg(feature = "bench-probes")]
 pub mod bench_probes;
