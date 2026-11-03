@@ -29,7 +29,7 @@ question; GitHub is the inbox rather than a repository-local queue.
 
 **Non-goals**
 
-- Replacing framework starters or making one app per framework/auth provider.
+- Making one app per framework/auth provider. Framework and auth coverage comes from a few variants of the hero apps (`examples/<app>/apps/<framework>-<auth>`), which replace the removed starters as the tested environment matrix.
 - Treating benchmark scores as a product-compatibility promise or a substitute for focused core tests.
 - Importing customer schemas, production traces, identifiers, or PII. Those remain in `jazz-private`; public scenarios preserve load _shape_, not customer data.
 - Generalizing app-specific UI models into a new public API before an actual API proposal is reviewed.
@@ -83,7 +83,7 @@ keep independent microbenchmarks and core canaries.
 | `examples/chat-react` and `examples/auth-*-chat`         | BandChat                               | Preserve auth-specific teaching value as small shells; migrate product workflow, room policy, attachments, and fan-out scenarios. |
 | `examples/world-tour`                                    | WorldTour                              | Evolve it into the canonical WorldTour app rather than rebuild it elsewhere.                                                      |
 | `examples/branching-project-planner-ts`                  | BandBook and PosterShop                | Split branch/history lessons by product flow; keep any minimal branch API example needed for reference.                           |
-| Todo local-first families                                | StagePlan plus framework shells        | Retain framework-baseline starters/examples; adopt offline persistence and CRUD load shape only where it belongs.                 |
+| Todo local-first families                                | StagePlan plus framework shells        | Retain framework-baseline examples; adopt offline persistence and CRUD load shape only where it belongs.                          |
 | Realistic `W1`, `W3`, `W4`                               | StagePlan, WorldTour, Jamazon          | Recast interactive, offline-reconnect, and cold-start behavior as app scenarios; retain shared runner plumbing.                   |
 | Realistic `B1`/`R1`, `B2`/`R2`, `B3`/`R3`                | BigLabel and Jamazon Warehouse         | Use for sustained CRUD, indexed reads, and cold-load scale profiles.                                                              |
 | Realistic `B4`/`R4`, `R9`                                | BandChat, PosterShop, Wequencer        | Adopt subscription fan-out and subscribed-write semantics.                                                                        |
@@ -96,7 +96,7 @@ keep independent microbenchmarks and core canaries.
 | `jazz-sim` `s4_order_processing`, `s9_durable_execution` | Jamazon Warehouse, Jamazon, MusicAgent | Keep order-processing/reference comparison and durable-workflow semantics, surfaced through their respective UIs.                 |
 | `jazz-sim` `s5_durable_stream`                           | RecordPlayer, EpicDrop, MusicAgent     | Adopt stream lifecycle, persistence, resume, and bounded-memory transfer behavior.                                                |
 
-Server/runtime examples and framework/auth starters remain
+Server/runtime examples remain
 valuable focused references. They are out of catalogue scope unless a later
 scenario needs their specific runtime surface.
 

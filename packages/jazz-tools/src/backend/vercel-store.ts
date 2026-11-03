@@ -11,6 +11,16 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { JazzCoreSocketEvent } from "jazz-napi";
 import {
+  connectedBlobStore,
+  resolveVercelBlob,
+  resolveVercelS3,
+  vercelBlob,
+  type S3BlobStore,
+  type VercelBlob,
+  type VercelBlobStore,
+  type VercelS3,
+} from "./blobs.js";
+import {
   fetchFor,
   inProcessWebSocketFor,
   registerInProcessTransport,
@@ -37,6 +47,19 @@ export interface VercelStoreOptions {
   appId?: string;
   /** Sandbox region. Defaults to `iad1`. Fixed when the Sandbox is created. */
   region?: string;
+  /**
+   * Where large values' bytes go:
+   * - `vercelBlob()`: the project's Blob store, written by the core
+   *   through `/jazz`. The default whenever a Blob store is connected to
+   *   the project (`BLOB_STORE_ID` is set).
+   * - `s3()`: a bucket connected through the Vercel Marketplace.
+   * - `"sqlite"`: the core's database file on its Drive, which grows with
+   *   every large value. The default without a Blob store.
+   *
+   * A core may move from `"sqlite"` to either of the others, never back or
+   * between them.
+   */
+  blobs?: VercelBlobStore | S3BlobStore | "sqlite";
   /** vCPUs for the core (2 GB of memory each). Defaults to 1. Fixed at creation. */
   vcpus?: number;
   /** Drive size in bytes. Defaults to 10 GiB. Fixed at creation. */
@@ -201,6 +224,7 @@ export function startScript(
   version: string,
   tarballUrl: string,
   trust: TrustedWorkload,
+  blobs?: VercelS3 | VercelBlob,
   /** @internal Prefix for /data and /tmp, for tests. */
   root = "",
 ): string {
@@ -269,14 +293,67 @@ find "$data/bin" -name 'jazz-tools-*' ! -name "jazz-tools-$version" -delete
 printf '%s\\n' "$version" > "$run/jazz.version"
 echo $$ > "$run/jazz.pid"
 exec 9>&-
-# The core admits only the deploying function's own workload. Large values
-# stay in its SQLite file until blob stores reach the Sandbox (they can move
-# out from there later).
-exec "$bin" server "$app_id" --port ${VERCEL_CORE_PORT} --data-dir "$data/store" --blobs sqlite \\
+# The core admits only the deploying function's own workload.${blobsSetup(blobs, q)}
+exec "$bin" server "$app_id" --port ${VERCEL_CORE_PORT} --data-dir "$data/store" ${blobsFlags(blobs, q)} \\
   --trusted-workload-issuer ${q(trust.issuer)} \\
   --trusted-workload-audience ${q(trust.audience)} \\
   --trusted-workload-subject ${q(trust.subject)}
 `;
+}
+
+/**
+ * The environment a core with `s3()` starts with: it assumes the
+ * Marketplace's role with the function's OIDC token, which every request
+ * carries. With `vercelBlob()` that token is the Blob credential itself.
+ */
+function blobsSetup(blobs: VercelS3 | VercelBlob | undefined, q: (s: string) => string): string {
+  if (!blobs) {
+    return "\n# Large values stay in its SQLite file (they can move to Vercel Blob or S3 later).";
+  }
+  if ("storeId" in blobs) {
+    return "\n# Large values go to the project's Blob store, with the function's own OIDC token.";
+  }
+  return `
+# Large values go to S3, under the role this project's functions assume.
+export S3_BUCKET_NAME=${q(blobs.bucket)} AWS_REGION=${q(blobs.region)} AWS_ROLE_ARN=${q(blobs.roleArn)}`;
+}
+
+function blobsFlags(blobs: VercelS3 | VercelBlob | undefined, q: (s: string) => string): string {
+  if (!blobs) return "--blobs sqlite";
+  if ("storeId" in blobs) {
+    return [
+      `--blobs vercel-blob --vercel-blob-token-from-workload --vercel-blob-store-id ${q(blobs.storeId)}`,
+      ...(blobs.prefix === undefined ? [] : [`--vercel-blob-prefix ${q(blobs.prefix)}`]),
+    ].join(" ");
+  }
+  return [
+    "--blobs s3 --s3-role-from-workload",
+    ...(blobs.endpoint === undefined ? [] : [`--s3-endpoint ${q(blobs.endpoint)}`]),
+    ...(blobs.prefix === undefined ? [] : [`--s3-prefix ${q(blobs.prefix)}`]),
+  ].join(" ");
+}
+
+let warnedNoBlobStore = false;
+
+/**
+ * Where a `vercel()` core keeps large values: as asked, or by default the
+ * project's Blob store when one is connected, and its SQLite file when not.
+ */
+export function resolveCoreBlobs(
+  options: Pick<VercelStoreOptions, "blobs" | "region">,
+  env: Record<string, string | undefined>,
+  warn: (message: string) => void = console.warn,
+): VercelS3 | VercelBlob | undefined {
+  const blobs = options.blobs ?? (connectedBlobStore(env) ? vercelBlob() : undefined);
+  if (blobs === undefined && !warnedNoBlobStore) {
+    warnedNoBlobStore = true;
+    warn(
+      "vercel(): no Blob store is connected to this project, so large values stay in the core's SQLite file. Connect one (Storage tab in the Vercel dashboard) and they go there from then on.",
+    );
+  }
+  if (blobs === undefined || blobs === "sqlite") return undefined;
+  if (blobs.kind === "vercel-blob") return resolveVercelBlob(blobs, env);
+  return resolveVercelS3(blobs, options.region ?? "iad1", env);
 }
 
 /** The workload an OIDC token names: whoever holds such a token is trusted. */
@@ -436,7 +513,8 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   // workload you chose.
   if (!options.backendCredential) refuseOtherEnvironment(trust, env);
   const trustLine = `${trust.issuer} ${trust.audience} ${trust.subject}`;
-  const script = Buffer.from(startScript(appId, version, tarballUrl, trust));
+  const blobs = resolveCoreBlobs(options, env);
+  const script = Buffer.from(startScript(appId, version, tarballUrl, trust, blobs));
 
   const startServer = async (sbx: SandboxHandle) => {
     // A fresh path each time: bash reads a script as it runs, so one that is

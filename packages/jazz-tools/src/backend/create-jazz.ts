@@ -59,23 +59,15 @@ import {
 
 export type { VercelStoreOptions } from "./vercel-store.js";
 
-/**
- * Where a store keeps the bytes of large values once they settle. Rows and
- * the chunk index stay in the database either way.
- * - `files()`: one file per chunk in a directory (the default).
- * - `"sqlite"`: inside the database file. Works, but the file grows with
- *   every large value, so it is not recommended.
- */
-export type BlobStore = { readonly kind: "files"; readonly dir?: string } | "sqlite";
-
-/**
- * Large-value bytes as files in `dir`, by default `blobs/` in the store's
- * directory. A store keeps the blob store it was first opened with; one that
- * started on `"sqlite"` may move to `files()` later.
- */
-export function files(options: { dir?: string } = {}): Extract<BlobStore, { kind: "files" }> {
-  return { kind: "files", ...(options.dir === undefined ? {} : { dir: options.dir }) };
-}
+import { files, type BlobStore } from "./blobs.js";
+export {
+  files,
+  s3,
+  vercelBlob,
+  type BlobStore,
+  type S3BlobStore,
+  type VercelBlobStore,
+} from "./blobs.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
@@ -113,8 +105,11 @@ export function sqlite(options: {
   blobs?: BlobStore;
 }): Extract<JazzStore, { kind: "sqlite" }> {
   const blobs = options.blobs ?? files();
-  if (blobs !== "sqlite" && (typeof blobs !== "object" || blobs.kind !== "files")) {
-    throw new Error('sqlite(): blobs must be files() or "sqlite"');
+  if (
+    blobs !== "sqlite" &&
+    (typeof blobs !== "object" || (blobs.kind !== "files" && blobs.kind !== "s3"))
+  ) {
+    throw new Error('sqlite(): blobs must be files(), s3() or "sqlite"');
   }
   return {
     kind: "sqlite",
@@ -201,8 +196,24 @@ export function vercel(
   return { kind: "vercel", options: rest, local: local ?? sqlite({ path: ".jazz/local" }) };
 }
 
-function blobOptions(blobs: BlobStore): { blobs: "files" | "sqlite"; blobsDir?: string } {
+function blobOptions(blobs: BlobStore): {
+  blobs: "files" | "s3" | "sqlite";
+  blobsDir?: string;
+  s3Bucket?: string;
+  s3Region?: string;
+  s3Endpoint?: string;
+  s3Prefix?: string;
+} {
   if (blobs === "sqlite") return { blobs: "sqlite" };
+  if (blobs.kind === "s3") {
+    return {
+      blobs: "s3",
+      ...(blobs.bucket === undefined ? {} : { s3Bucket: blobs.bucket }),
+      ...(blobs.region === undefined ? {} : { s3Region: blobs.region }),
+      ...(blobs.endpoint === undefined ? {} : { s3Endpoint: blobs.endpoint }),
+      ...(blobs.prefix === undefined ? {} : { s3Prefix: blobs.prefix }),
+    };
+  }
   return { blobs: "files", ...(blobs.dir === undefined ? {} : { blobsDir: blobs.dir }) };
 }
 

@@ -16,7 +16,6 @@
  */
 export const RELEASE_TEST_WORKFLOWS = Object.freeze([
   Object.freeze({ file: "ci.yml", label: "CI", events: null }),
-  Object.freeze({ file: "starters-e2e.yml", label: "Starters E2E", events: null }),
   Object.freeze({
     file: "rn-device-acceptance.yml",
     label: "React Native device acceptance",
