@@ -7,7 +7,7 @@ MusicAgent demonstrates; this app only differs in how it is wired.
 
 - `server/index.ts` mounts the app's Jazz (`createJazz` in
   `src/lib/backend-jazz-client.ts`) under `/jazz` (plain requests through
-  `jazz.fetch`, sync sockets through `jazz.attach(server)`), Better Auth under
+  `jazz.handle`, sync sockets through `jazz.attach(server)`), Better Auth under
   `/api/auth`, and the agent routes (`src/server/routes.ts`). Replies run in
   the background after the response; the browser watches the turn's row.
 - `src/client/main.ts` follows Better Auth's session with

@@ -28,8 +28,8 @@ app.post("/api/turns/:id/regenerate", (c) => routes.regenerate(c.req.raw, c.req.
 app.post("/api/turns/:id/resume", (c) => routes.resume(c.req.raw, c.req.param("id")));
 app.get("/api/attachments/:id", (c) => routes.attachment(c.req.raw, c.req.param("id")));
 // Sync and sign-in for the browser, on this app's own origin.
-app.all("/jazz", async (c) => (await backendJazzClient()).fetch(c.req.raw));
-app.all("/jazz/*", async (c) => (await backendJazzClient()).fetch(c.req.raw));
+app.all("/jazz", async (c) => (await backendJazzClient()).handle(c.req.raw));
+app.all("/jazz/*", async (c) => (await backendJazzClient()).handle(c.req.raw));
 if (production) {
   app.use("/*", serveStatic({ root: "./dist" }));
   // A single-page app: every other path renders index.html.
