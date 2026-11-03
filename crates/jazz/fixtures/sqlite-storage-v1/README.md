@@ -132,7 +132,7 @@ way: `_b` is `_branch`, `_t` is `_clock` (index `__by_clock`), `_w` is
 `_writer`, `_st` is `_state` and `_cols` is `_touched`; `_base` keeps its
 name. History is keyed by `(id, _branch, _clock, _writer)`.
 
-Replacing BLAKE3 with SHA-256 for every hash Jazz computes (large-value
+Replacing BLAKE3 with SHA-256 everywhere Jazz used it (large-value
 object hashes are now plain SHA-256 over the node's encoding, so an object
 store can verify a presigned upload against the node hash itself; schema
 hashes, schema version ids, stored column and table names, and derived ids

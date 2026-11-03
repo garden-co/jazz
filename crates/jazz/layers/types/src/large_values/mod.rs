@@ -3742,8 +3742,9 @@ fn validate_untyped_node_structure(node: &ChunkNode) -> Result<(), Error> {
 /// also exactly the object a chunk store holds. No domain prefix, so an
 /// object store that checks a SHA-256 checksum on upload (S3 and R2 with a
 /// presigned PUT that signs `x-amz-checksum-sha256`) verifies the node hash
-/// itself. The encoding starts with the format and kind, which separates
-/// nodes of different formats and kinds.
+/// itself. The encoding opens with the node tag (leaf or branch), the format
+/// version and the column kind, which separates nodes of different formats
+/// and kinds.
 pub fn object_hash(encoded: &[u8]) -> ContentHash {
     use sha2::Digest;
     ContentHash(sha2::Sha256::digest(encoded).into())

@@ -81,8 +81,8 @@ same bytes build the same nodes, and an edit changes only the leaves around
 it and the path above them.
 
 A node is identified by its hash: plain SHA-256 over its canonical encoding,
-which starts with the format version and the column kind (bytes, string,
-JSON). A JSON tree therefore never reads as a string tree. The encoding is
+which opens with the node tag, the format version and the column kind (bytes,
+string, JSON). A JSON tree therefore never reads as a string tree. The encoding is
 also exactly the object a chunk store holds, so an object store that checks
 a SHA-256 checksum on upload (a presigned PUT that signs
 `x-amz-checksum-sha256`) verifies the node hash itself. A leaf encodes its bytes;

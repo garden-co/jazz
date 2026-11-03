@@ -1,8 +1,10 @@
-//! The one hash Jazz uses: SHA-256.
+//! SHA-256, the hash Jazz uses for content identities, derived ids and
+//! fingerprints.
 //!
-//! Every content identity, derived id and fingerprint in Jazz is SHA-256, so
 //! JavaScript can compute any of them with WebCrypto, and object stores that
-//! check SHA-256 checksums verify large-value nodes directly.
+//! check SHA-256 checksums verify large-value nodes directly. Two things are
+//! not this module: RFC 9562 UUIDv5 ids (account, app and object ids keep
+//! their identities) and E2EE, which uses libsodium's keyed BLAKE2b.
 //!
 //! [`derive_key`] separates contexts by hashing the context's length and
 //! bytes before the input. Its outputs are public identifiers, never MACs
@@ -93,6 +95,31 @@ mod tests {
         let mut hasher = Hasher::new();
         hasher.update(b"a").update(b"bc");
         assert_eq!(hasher.finalize(), hash(b"abc"));
+    }
+
+    /// JavaScript recomputes these ids with WebCrypto, so each context Jazz
+    /// derives under is pinned against an independent computation
+    /// (Python's hashlib over the same length-prefixed preimage).
+    #[test]
+    fn derive_key_contexts_have_known_answers() {
+        for (context, expected) in [
+            (
+                "jazz committed batch id v1",
+                "b7951e6ea8869e3814c5301bc5934a0027d05c78186db48dd7f2cb5b35763a4f",
+            ),
+            (
+                "jazz typed schema view id v1",
+                "16d3bb47178c6da87b2f3f5152a55a97b41401e21784eaac6703eb183747783c",
+            ),
+            (
+                "jazz.authority-policy-binding-directory.v1",
+                "0e08a77a6b5fc18ae365ede839b4f1319e1f951b72e2b2b734913ecfe467092a",
+            ),
+        ] {
+            let derived = derive_key(context, b"abc");
+            let hex: String = derived.iter().map(|byte| format!("{byte:02x}")).collect();
+            assert_eq!(hex, expected, "{context}");
+        }
     }
 
     #[test]
