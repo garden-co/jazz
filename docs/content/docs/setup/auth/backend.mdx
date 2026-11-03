@@ -195,9 +195,13 @@ A copied account id or claim is not authorization: Jazz checks the request or ha
 
 A [local-first](/docs/setup/auth/local-first) guest who signs up keeps its account and data: after
 your sign-up sets its session, the client calls `linkWithBackend()`. It proves it owns the guest
-account with its own local-first key; your backend runs `authenticate` and links the new user to
-that account. Call it in your sign-up handler, right after your auth sets the session; the `user`
-change that follows is then a no-op.
+account by signing a one-time challenge with its local-first key; your backend runs `authenticate`
+and links the new user to that account. Call it in your sign-up handler, right after your auth sets
+the session; the `user` change that follows is then a no-op.
+
+By default the guest's key stays an identity of the account, so the device can still sign in as the
+guest, for example offline. Pass `guestKeyAfterLink: "revoke"` to `createJazz` to retire it once it
+links: from then on only the signed-in user opens the account, and a leaked guest key opens nothing.
 
 To link from your own backend code instead, for example a second identity your auth issued, call:
 

@@ -7,7 +7,7 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 
 it("keeps local reads available while another transaction waits for remote coverage", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  const app = s.defineApp({ entries: s.table({ title: s.string() }, {}) });
+  const app = s.defineApp({ entries: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   const permissions = definePermissions(app, ({ policy }) => {
     policy.entries.allowRead.always();
     policy.entries.allowInsert.always();

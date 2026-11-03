@@ -7,7 +7,7 @@ import {
 } from "./testing/napi-runtime-test-utils.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "./testing/wasm-runtime-test-utils.js";
 
-const app = s.defineApp({ files: s.table({ data: s.bytes() }, {}) });
+const app = s.defineApp({ files: s.table({ data: s.bytes() }, {}) }, { migrations: "none" });
 
 function deferred() {
   let resolve!: () => void;

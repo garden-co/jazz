@@ -528,7 +528,14 @@ fn run(config: &Config, emit: bool) {
             if personas[0].resources.ids().contains(resource) {
                 break;
             }
-            assert!(sim.step(), "the grant must reach the persona");
+            // The last tick can deliver it with nothing left in flight.
+            if !sim.step() {
+                personas[0].resources.poll();
+                assert!(
+                    personas[0].resources.ids().contains(resource),
+                    "the grant must reach the persona"
+                );
+            }
         }
         grant_latency.record(sim.now_ms() - at);
     }

@@ -1723,7 +1723,6 @@ impl Owner {
                                 },
                             },
                             global: true,
-                            by: None,
                         });
                 }
                 Ok(Some(

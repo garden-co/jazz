@@ -67,6 +67,8 @@ use jazz_server::{
     AuthConfig, JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
     TEST_JWT_AUDIENCE, TEST_JWT_ISSUER, TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
+mod embedded;
+
 use napi::bindgen_prelude::*;
 use napi::sys;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -1129,7 +1131,11 @@ impl NapiDb {
         let (schema, mut config) = binding_host::decode_open(schema, config).map_err(host_error)?;
         let (identity, trusted) =
             binding_host::open_identity(&mut config, how).map_err(host_error)?;
-        let db_config = binding_host::db_config(schema, &config, identity);
+        let db_config = jazz::tools::deployment::published::with_client_migrations(
+            binding_host::db_config(schema, &config, identity),
+            config.migrations.as_deref(),
+        )
+        .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
         let db = match data_path {
             None => block_on(binding_host::open_memory(db_config)),
             Some(data_path) => block_on(binding_host::open_file(
@@ -1644,11 +1650,22 @@ impl NapiDb {
         Ok(Self::open_as(&schema, &config, Some(&data_path), how)?)
     }
 
-    /// Register and return a typed view backed by this same runtime owner.
+    /// Register and return a typed view backed by this same runtime owner,
+    /// of an app shipping `migrations` (its bundle as JSON).
     #[napi(js_name = "registerSchema")]
-    pub fn register_schema(&self, schema: Uint8Array) -> js::Result<Self> {
+    pub fn register_schema(
+        &self,
+        schema: Uint8Array,
+        migrations: Option<Uint8Array>,
+    ) -> js::Result<Self> {
         let inner = self.open_inner()?;
-        let binding = inner.binding.register_schema(&schema).map_err(host_error)?;
+        let migrations =
+            jazz::tools::deployment::published::lowered_client_migrations(migrations.as_deref())
+                .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
+        let binding = inner
+            .binding
+            .register_schema_shipping(&schema, migrations)
+            .map_err(host_error)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(Inner { binding, ..inner }))),
             owns_runtime: false,
@@ -2030,12 +2047,22 @@ struct JazzServerStartOptions {
     jwks_url: Option<String>,
     jwt_issuer: Option<String>,
     jwt_audience: Option<String>,
-    backend_secret: String,
-    admin_secret: String,
+    /// Required unless the server trusts a workload, which replaces them.
+    backend_secret: Option<String>,
+    admin_secret: Option<String>,
     upstream_url: Option<String>,
     allow_local_first_auth: Option<bool>,
     telemetry_collector_url: Option<String>,
     schema: Option<Vec<u8>>,
+    /// Trust this OIDC workload instead of the shared secrets.
+    trusted_workload: Option<TrustedWorkloadOptions>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrustedWorkloadOptions {
+    issuer: String,
+    audience: String,
+    subject: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2050,7 +2077,7 @@ fn parse_jazz_server_start_options(options: JsonValue) -> napi::Result<JazzServe
         .map_err(|error| napi::Error::from_reason(format!("Invalid JazzServer options: {error}")))
 }
 
-fn init_jazz_server_telemetry(collector_url: Option<&str>) {
+pub(crate) fn init_jazz_server_telemetry(collector_url: Option<&str>) {
     let Some(collector_url) = collector_url else {
         return;
     };
@@ -2161,7 +2188,7 @@ impl JazzServer {
     #[napi(factory, ts_return_type = "Promise<JazzServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; backendSecret: string; adminSecret: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[] }"
+            ts_arg_type = "{ appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -2178,13 +2205,41 @@ impl JazzServer {
         let app_id =
             AppId::from_string(&opts.app_id).unwrap_or_else(|_| AppId::from_name(&opts.app_id));
 
+        // A trusted workload replaces the shared secrets.
+        let trusted_workload = opts.trusted_workload.take().map(|workload| {
+            jazz_server::middleware::workload::TrustedWorkload {
+                issuer: workload.issuer,
+                audience: workload.audience,
+                subject: workload.subject,
+            }
+        });
+        let (admin_secret, backend_secret) = match (
+            &trusted_workload,
+            opts.admin_secret.take(),
+            opts.backend_secret.take(),
+        ) {
+            (None, Some(admin), Some(backend)) => (Some(admin), Some(backend)),
+            (Some(_), None, None) => (None, None),
+            (None, _, _) => {
+                return Err(napi::Error::from_reason(
+                    "JazzServer needs adminSecret and backendSecret (or a trustedWorkload)",
+                ));
+            }
+            (Some(_), _, _) => {
+                return Err(napi::Error::from_reason(
+                    "a trustedWorkload replaces adminSecret and backendSecret; pass neither",
+                ));
+            }
+        };
+
         let auth_config = AuthConfig {
             jwks_url: opts.jwks_url,
             jwt_issuer: opts.jwt_issuer,
             jwt_audience: opts.jwt_audience,
             allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
-            backend_secret: Some(opts.backend_secret.clone()),
-            admin_secret: Some(opts.admin_secret.clone()),
+            backend_secret: backend_secret.clone(),
+            admin_secret: admin_secret.clone(),
+            trusted_workload,
             ..Default::default()
         };
 
@@ -2223,8 +2278,8 @@ impl JazzServer {
             opts.host,
             app_id,
             ServerDataDir::from_path(std::path::PathBuf::from(&data_dir)),
-            opts.admin_secret.clone(),
-            opts.backend_secret.clone(),
+            admin_secret.unwrap_or_default(),
+            backend_secret.unwrap_or_default(),
         )
         .await
         .map_err(napi::Error::from_reason)?;

@@ -106,13 +106,20 @@ fn open_writer(
     schema: JazzSchema,
     table: &str,
 ) -> (Db, jazz::db::Upstream, jazz::db::SubscriptionStream) {
-    let writer = block_on(Db::open(DbConfig::new(
-        schema,
-        DbIdentity {
-            node: node(byte),
-            author,
-        },
-    )))
+    // The app ships v1, v2 and the rename between them (SPEC 10.7).
+    let v1 = SchemaVersion::new(v1_schema());
+    let v2 = SchemaVersion::new(v2_schema());
+    let lens = rename_lens(&v1, &v2);
+    let writer = block_on(Db::open(
+        DbConfig::new(
+            schema,
+            DbIdentity {
+                node: node(byte),
+                author,
+            },
+        )
+        .with_migrations(vec![v1.schema, v2.schema], vec![lens]),
+    ))
     .expect("open writer");
     let (client_side, authority_side) = duplex();
     let upstream = block_on(writer.connect_upstream(client_side));

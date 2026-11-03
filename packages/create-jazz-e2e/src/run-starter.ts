@@ -422,7 +422,7 @@ function replaceExactly(
  * generated-app mutation exercises the user-visible case where a public
  * subscription is cancelled immediately before its replacement begins.
  */
-function injectTsBetterAuthCancelReopenSubscriptionProbe(appDir: string): void {
+function injectTsHybridCancelReopenSubscriptionProbe(appDir: string): void {
   const widgetFile = path.join(appDir, "src", "todo-widget.ts");
   let source = fs.readFileSync(widgetFile, "utf-8");
   source = replaceExactly(
@@ -567,11 +567,11 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
     });
 
     if (opts.cancelReopenSubscriptionProbe) {
-      if (opts.starter !== "ts-betterauth") {
-        throw new Error("The cancel/reopen subscription probe is only defined for ts-betterauth");
+      if (opts.starter !== "ts-hybrid") {
+        throw new Error("The cancel/reopen subscription probe is only defined for ts-hybrid");
       }
       await recordPhase("inject cancel/reopen subscription probe", async () => {
-        injectTsBetterAuthCancelReopenSubscriptionProbe(appDir);
+        injectTsHybridCancelReopenSubscriptionProbe(appDir);
       });
     }
 

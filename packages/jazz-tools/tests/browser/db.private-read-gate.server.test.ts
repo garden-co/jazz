@@ -23,93 +23,99 @@ import {
 } from "./support.js";
 import { getJazzServerInfo, getJazzServerJwtForUser } from "./testing-server.js";
 
-const app = schema.defineApp({
-  chats: schema.table(
-    {
-      title: schema.string(),
-      visibility: schema.string(),
-      owner_id: schema.uuid(),
-    },
-    {
-      chat_membersViaChat: schema.reverse("chat_members", "chat"),
-      messagesViaChat: schema.reverse("messages", "chat"),
-    },
-  ),
-  chat_members: schema.table(
-    {
-      chat_id: schema.uuid(),
-      user_id: schema.uuid(),
-    },
-    { chat: schema.rel("chats", "chat_id") },
-  ),
-  messages: schema.table(
-    {
-      chat_id: schema.uuid(),
-      body: schema.string(),
-      author_id: schema.uuid(),
-      owner_id: schema.uuid(),
-    },
-    { chat: schema.rel("chats", "chat_id") },
-  ),
-  announcements: schema.table(
-    {
-      title: schema.string(),
-    },
-    {},
-  ),
-});
+const app = schema.defineApp(
+  {
+    chats: schema.table(
+      {
+        title: schema.string(),
+        visibility: schema.string(),
+        owner_id: schema.uuid(),
+      },
+      {
+        chat_membersViaChat: schema.reverse("chat_members", "chat"),
+        messagesViaChat: schema.reverse("messages", "chat"),
+      },
+    ),
+    chat_members: schema.table(
+      {
+        chat_id: schema.uuid(),
+        user_id: schema.uuid(),
+      },
+      { chat: schema.rel("chats", "chat_id") },
+    ),
+    messages: schema.table(
+      {
+        chat_id: schema.uuid(),
+        body: schema.string(),
+        author_id: schema.uuid(),
+        owner_id: schema.uuid(),
+      },
+      { chat: schema.rel("chats", "chat_id") },
+    ),
+    announcements: schema.table(
+      {
+        title: schema.string(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
-const camelChatApp = schema.defineApp({
-  chats: schema.table(
-    {
-      name: schema.string().optional(),
-      isPublic: schema.boolean(),
-      createdBy: schema.string(),
-      joinCode: schema.string().optional(),
-    },
-    {
-      chatMembersViaChat: schema.reverse("chatMembers", "chat"),
-      messagesViaChat: schema.reverse("messages", "chat"),
-    },
-  ),
-  profiles: schema.table(
-    {
-      userId: schema.string(),
-      name: schema.string(),
-      avatar: schema.string().optional(),
-    },
-    { messagesViaSender: schema.reverse("messages", "sender") },
-  ),
-  chatMembers: schema.table(
-    {
-      chatId: schema.uuid(),
-      userId: schema.string(),
-      joinCode: schema.string().optional(),
-    },
-    { chat: schema.rel("chats", "chatId") },
-  ),
-  messages: schema.table(
-    {
-      chatId: schema.uuid(),
-      senderId: schema.uuid(),
-      text: schema.string(),
-      createdAt: schema.timestamp(),
-    },
-    {
-      chat: schema.rel("chats", "chatId"),
-      sender: schema.rel("profiles", "senderId"),
-      reactionsViaMessage: schema.reverse("reactions", "message"),
-    },
-  ),
-  reactions: schema.table(
-    {
-      messageId: schema.uuid(),
-      userId: schema.string(),
-      emoji: schema.string(),
-    },
-    { message: schema.rel("messages", "messageId") },
-  ),
-});
+const camelChatApp = schema.defineApp(
+  {
+    chats: schema.table(
+      {
+        name: schema.string().optional(),
+        isPublic: schema.boolean(),
+        createdBy: schema.string(),
+        joinCode: schema.string().optional(),
+      },
+      {
+        chatMembersViaChat: schema.reverse("chatMembers", "chat"),
+        messagesViaChat: schema.reverse("messages", "chat"),
+      },
+    ),
+    profiles: schema.table(
+      {
+        userId: schema.string(),
+        name: schema.string(),
+        avatar: schema.string().optional(),
+      },
+      { messagesViaSender: schema.reverse("messages", "sender") },
+    ),
+    chatMembers: schema.table(
+      {
+        chatId: schema.uuid(),
+        userId: schema.string(),
+        joinCode: schema.string().optional(),
+      },
+      { chat: schema.rel("chats", "chatId") },
+    ),
+    messages: schema.table(
+      {
+        chatId: schema.uuid(),
+        senderId: schema.uuid(),
+        text: schema.string(),
+        createdAt: schema.timestamp(),
+      },
+      {
+        chat: schema.rel("chats", "chatId"),
+        sender: schema.rel("profiles", "senderId"),
+        reactionsViaMessage: schema.reverse("reactions", "message"),
+      },
+    ),
+    reactions: schema.table(
+      {
+        messageId: schema.uuid(),
+        userId: schema.string(),
+        emoji: schema.string(),
+      },
+      { message: schema.rel("messages", "messageId") },
+    ),
+  },
+  { migrations: "none" },
+);
 
 const permissions = schema.definePermissions(app, ({ policy, anyOf, session }) => [
   policy.chats.allowRead.where(
@@ -243,15 +249,18 @@ const camelChatStyleMessagePermissions = schema.definePermissions(
   ],
 );
 
-const createdByApp = schema.defineApp({
-  todos: schema.table(
-    {
-      title: schema.string(),
-      done: schema.boolean(),
-    },
-    {},
-  ),
-});
+const createdByApp = schema.defineApp(
+  {
+    todos: schema.table(
+      {
+        title: schema.string(),
+        done: schema.boolean(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 const createdByPermissions = schema.definePermissions(createdByApp, ({ policy, session }) => {
   policy.todos.allowRead.where({ "$createdBy.account": session.user.account });

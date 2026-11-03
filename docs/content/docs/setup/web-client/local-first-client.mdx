@@ -113,8 +113,8 @@ There is no Jazz plugin to add. In development, run your app as usual: `createJa
 [main backend](/docs/setup/deployment) is the dev server, and it publishes your schema, permissions
 and migrations every time it starts.
 
-The local-first client loads Jazz's Wasm in the browser, and your backend loads Jazz's native
-module (`jazz-napi`) on the server. Tell your bundler to leave both alone:
+The local-first client loads Jazz's Wasm in the browser, and a Next.js backend loads Jazz's native
+module (`jazz-napi`) on the server. Tell your bundler to leave them alone:
 
 <Tabs groupId="jazz-bundler" items={["Vite", "Next.js"]} persist updateAnchor>
   <Tab value="Vite">
@@ -125,8 +125,6 @@ module (`jazz-napi`) on the server. Tell your bundler to leave both alone:
       // plugins: your framework's plugin (React, Vue, Svelte, Solid, SvelteKit) ...
       // Load the Wasm as a real module instead of pre-bundling it.
       optimizeDeps: { exclude: ["jazz-wasm"] },
-      // Keep the native module out of the server bundle.
-      ssr: { external: ["jazz-napi"] },
     });
     ```
 
@@ -139,7 +137,7 @@ module (`jazz-napi`) on the server. Tell your bundler to leave both alone:
 
     const nextConfig: NextConfig = {
       // Your backend loads Jazz's native module; Next must not bundle it.
-      serverExternalPackages: ["jazz-napi", "jazz-tools/backend"],
+      serverExternalPackages: ["jazz-napi"],
     };
 
     export default nextConfig;
@@ -148,8 +146,8 @@ module (`jazz-napi`) on the server. Tell your bundler to leave both alone:
   </Tab>
 </Tabs>
 
-The [thin client](/docs/setup/web-client/thin-client) has no Wasm, so it needs none of the
-browser-side config. Your backend still needs the server-side lines.
+The [thin client](/docs/setup/web-client/thin-client) has no Wasm, so it needs no Vite line. A
+Next.js app that imports `jazz-tools/backend` still needs `serverExternalPackages`.
 
 ### Wasm loading
 

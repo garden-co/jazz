@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { createJazzSessionOwner } from "./state.js";
 import { connectAuthProvider } from "./auth-provider.js";
-import type { JWTAuth } from "../accounts/enrollment.js";
 import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 const tick = async () => {
   for (let i = 0; i < 60; i++) await Promise.resolve();
@@ -27,9 +26,12 @@ async function setup() {
     }
     return result;
   };
-  const token = async (auth: JWTAuth) => (typeof auth === "string" ? auth : auth.getToken());
-  const enroll = async (auth: JWTAuth) => {
-    const id = await token(auth);
+  // Who the app's backend says is signed in; a test can hold the answer back.
+  const backend: { user: string; next?: Promise<string> } = { user: "one" };
+  const signIn = async () => {
+    const pending = backend.next;
+    backend.next = undefined;
+    const id = await (pending ?? backend.user);
     events.push(`admit:${id}`);
     if (admissionFailure) throw new Error("registry offline");
     return account(id);
@@ -40,12 +42,9 @@ async function setup() {
     logout() {
       events.push("logout");
     },
-    registerJWT: enroll,
-    loginJWT: enroll,
-    loginOrRegisterJWT: enroll,
-    async linkJWT(_account: AccountHandle, auth: JWTAuth) {
+    loginWithBackend: signIn,
+    async linkWithBackend() {
       events.push("link");
-      await token(auth);
       return account("local");
     },
   });
@@ -64,6 +63,7 @@ async function setup() {
   return {
     session,
     events,
+    backend,
     failShutdown(value: boolean) {
       shutdownFailure = value;
     },
@@ -76,7 +76,7 @@ async function setup() {
 describe("provider connection with real Jazz session lifecycle", () => {
   it("waits for hydration and coalesces repeated identity and refresh events", async () => {
     const { session, events } = await setup();
-    const auth = connectAuthProvider(session, { getToken: async () => "one" });
+    const auth = connectAuthProvider(session);
     auth.update({ key: null, isPending: true });
     await tick();
     expect(events).toEqual([]);
@@ -90,41 +90,43 @@ describe("provider connection with real Jazz session lifecycle", () => {
     auth.dispose();
     await session.close();
   });
-  it("does not admit a JWT fetched for a superseded provider identity", async () => {
-    const { session, events } = await setup();
-    const jwt = deferred<string>();
-    const auth = connectAuthProvider(session, { getToken: () => jwt.promise });
+  it("ends signed out when the provider signs out during a backend sign-in", async () => {
+    const { session, backend } = await setup();
+    const answer = deferred<string>();
+    backend.next = answer.promise;
+    const auth = connectAuthProvider(session);
     auth.update({ key: "one" });
     await tick();
     auth.update({ key: null });
-    jwt.resolve("one");
+    answer.resolve("one");
     await tick();
-    expect(events).not.toContain("admit:one");
     expect(session.getSnapshot().status).toBe("signed-out");
     expect(auth.getSnapshot().ready).toBe(true);
     auth.dispose();
     await session.close();
   });
-  it("cancels pending admission when explicit signout supersedes credential acquisition", async () => {
-    const { session, events } = await setup();
-    const jwt = deferred<string>();
-    const auth = connectAuthProvider(session, { getToken: () => jwt.promise });
+  it("explicit signout supersedes a pending backend sign-in", async () => {
+    const { session, events, backend } = await setup();
+    const answer = deferred<string>();
+    backend.next = answer.promise;
+    const auth = connectAuthProvider(session);
     auth.update({ key: "one" });
     await tick();
     const leaving = auth.logout(async () => {
       events.push("revoke");
       auth.update({ key: null });
     });
-    jwt.resolve("one");
+    answer.resolve("one");
     await leaving;
-    expect(events).toEqual(["logout", "revoke"]);
+    expect(events.slice(-2)).toEqual(["logout", "revoke"]);
+    expect(session.getSnapshot().status).toBe("signed-out");
     expect(auth.getSnapshot().ready).toBe(true);
     auth.dispose();
     await session.close();
   });
   it("failed flush retains provider credentials and retries logout without reenrollment", async () => {
     const { session, events, failShutdown } = await setup();
-    const auth = connectAuthProvider(session, { getToken: async () => "one" });
+    const auth = connectAuthProvider(session);
     auth.update({ key: "one" });
     await tick();
     failShutdown(true);
@@ -147,7 +149,7 @@ describe("provider connection with real Jazz session lifecycle", () => {
   });
   it("exposes enrollment failures and retries the same identity", async () => {
     const { session, failAdmission } = await setup();
-    const auth = connectAuthProvider(session, { getToken: async () => "one" });
+    const auth = connectAuthProvider(session);
     failAdmission(true);
     auth.update({ key: "one" });
     await tick();
@@ -164,7 +166,7 @@ describe("provider connection with real Jazz session lifecycle", () => {
   });
   it("does not reenroll stale provider state after successful signout", async () => {
     const { session, events } = await setup();
-    const auth = connectAuthProvider(session, { getToken: async () => "one" });
+    const auth = connectAuthProvider(session);
     auth.update({ key: "one" });
     await tick();
     await auth.logout(async () => {});
@@ -179,14 +181,15 @@ describe("provider connection with real Jazz session lifecycle", () => {
     await session.close();
   });
   it("disposal releases connection ownership, not the session, and ignores queued work", async () => {
-    const { session, events } = await setup();
-    const auth = connectAuthProvider(session, { getToken: async () => "one" });
-    expect(() => connectAuthProvider(session, { getToken: async () => "two" })).toThrow("already");
+    const { session, events, backend } = await setup();
+    const auth = connectAuthProvider(session);
+    expect(() => connectAuthProvider(session)).toThrow("already");
     auth.update({ key: "one" });
     auth.dispose();
     await tick();
     expect(events).toEqual([]);
-    const next = connectAuthProvider(session, { getToken: async () => "two" });
+    backend.user = "two";
+    const next = connectAuthProvider(session);
     next.update({ key: "two" });
     await tick();
     expect(session.getSnapshot().account?.id).toBe("two");
@@ -197,7 +200,7 @@ describe("provider connection with real Jazz session lifecycle", () => {
   it("manual hybrid linking can precede any automatic enrollment", async () => {
     const { session, events } = await setup();
     await session.createLocalFirst();
-    await session.linkJWT("new-provider");
+    await session.linkWithBackend();
     expect(events).toContain("link");
     expect(events.some((event) => event.startsWith("admit:"))).toBe(false);
     expect(session.getSnapshot().account?.id).toBe("local");
@@ -206,15 +209,14 @@ describe("provider connection with real Jazz session lifecycle", () => {
 });
 
 it("admits a newer provider session observed while explicit signout finishes", async () => {
-  const { session, events } = await setup();
-  let current = "one";
-  const auth = connectAuthProvider(session, { getToken: async () => current });
+  const { session, events, backend } = await setup();
+  const auth = connectAuthProvider(session);
   auth.update({ key: "one" });
   await tick();
   const done = deferred<void>();
   const leaving = auth.logout(() => done.promise);
   await tick();
-  current = "two";
+  backend.user = "two";
   auth.update({ key: "two" });
   done.resolve();
   await leaving;
@@ -254,9 +256,6 @@ it("Better Auth retries a failed initial provider fetch before admitting Jazz", 
         },
       },
     },
-    async $fetch() {
-      return { data: { token: "one" } };
-    },
     async signOut() {
       return {};
     },
@@ -270,20 +269,22 @@ it("Better Auth retries a failed initial provider fetch before admitting Jazz", 
   await session.close();
 });
 
-it("rejects a stale initial JWT across an A to B to A provider transition", async () => {
-  const { session, events } = await setup();
+it("signs in again after an A to B to A provider transition during a sign-in", async () => {
+  const { session, events, backend } = await setup();
   const stale = deferred<string>();
-  let calls = 0;
-  const auth = connectAuthProvider(session, {
-    getToken: () => (++calls === 1 ? stale.promise : Promise.resolve("fresh-A")),
-  });
+  backend.next = stale.promise;
+  backend.user = "fresh-A";
+  const auth = connectAuthProvider(session);
   auth.update({ key: "A" });
   await tick();
   auth.update({ key: "B" });
   auth.update({ key: "A" });
   stale.resolve("stale-A");
   await tick();
-  expect(events.filter((event) => event.startsWith("admit:"))).toEqual(["admit:fresh-A"]);
+  // The sign-in that started before the transition doesn't count: the
+  // backend is asked again, and its answer now is the one that sticks.
+  expect(events.filter((event) => event.startsWith("admit:")).at(-1)).toBe("admit:fresh-A");
+  expect(session.getSnapshot().account?.id).toBe("fresh-A");
   expect(auth.getSnapshot()).toMatchObject({ ready: true, key: "A" });
   auth.dispose();
   await session.close();
@@ -291,7 +292,7 @@ it("rejects a stale initial JWT across an A to B to A provider transition", asyn
 
 it("concurrent retries retain the active attempt across unchanged provider notifications", async () => {
   const { session, events, failAdmission } = await setup();
-  const auth = connectAuthProvider(session, { getToken: async () => "one" });
+  const auth = connectAuthProvider(session);
   failAdmission(true);
   auth.update({ key: "one" });
   await tick();

@@ -543,11 +543,13 @@ fn remote_read_rejection(client: &Db, server: &Db) -> Option<String> {
 }
 
 /// A replica and its authority each add `rank` again while apart, as text
-/// and as a boolean: both store it under the same fresh name. The replica
-/// refuses the authority's catalogue rather than read text as booleans: it
-/// stays as it was, its remote reads say why, and its local reads go on.
+/// and as a boolean. Each version's new column is stored under a name
+/// derived from that version (SPEC 10.7), so the two never share a stored
+/// column: the replica mirrors the authority's catalogue beside its own,
+/// its remote reads go on, and its text write under a version the
+/// authority never deployed is refused (#4450), never read as a boolean.
 #[test]
-fn a_replica_refuses_a_catalogue_storing_its_column_with_another_type() {
+fn a_column_re_added_with_another_type_while_apart_gets_its_own_stored_column() {
     let server = authority(notes("notes", "text"), 0);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("client.sqlite");
@@ -570,11 +572,6 @@ fn a_replica_refuses_a_catalogue_storing_its_column_with_another_type() {
             ),
         ],
     );
-    block_on(server.activate_schema(bool_rank())).unwrap();
-
-    let _link = link(&client, &server);
-    let reason = remote_read_rejection(&client, &server).expect("the remote read says why");
-    assert!(reason.contains("changing the type"), "{reason}");
     assert_eq!(
         ranks(&client),
         [Some(Value::Nullable(Some(Box::new(Value::String(
@@ -582,15 +579,11 @@ fn a_replica_refuses_a_catalogue_storing_its_column_with_another_type() {
         )))))],
         "local reads go on"
     );
-    drop(client);
-    let reopened = open_at(text_rank(), 1, &path);
-    assert_eq!(
-        ranks(&reopened),
-        [Some(Value::Nullable(Some(Box::new(Value::String(
-            "high".into()
-        )))))],
-        "nothing of the authority's catalogue was stored"
-    );
+    block_on(server.activate_schema(bool_rank())).unwrap();
+
+    let _link = link(&client, &server);
+    assert_eq!(remote_read_rejection(&client, &server), None);
+    assert_eq!(ranks(&server), [], "text is never read as a boolean");
 }
 
 /// `table(text)`, with `rank` of `ty` defaulting to `default` when given.
@@ -849,11 +842,11 @@ fn task_rows(db: &Db) -> Vec<(String, Option<Value>)> {
 }
 
 /// A replica writes before its first sync under a version whose column the
-/// authority stores elsewhere (its type changed there, so `status~2`):
-/// mirroring the catalogue renames the replica's column, and its pending
-/// write still uploads, settles and reads back on both sides.
+/// authority stores in a new stored column (its type changed there). With
+/// the app's lenses it stores it there too, so its pending write uploads,
+/// settles and reads back on both sides with nothing renamed.
 #[test]
-fn a_pending_write_survives_the_catalogue_renaming_its_column() {
+fn a_pending_write_under_a_retyped_column_lands_where_the_authority_stores_it() {
     let server = authority(tasks(ColumnType::Boolean), 0);
     block_on(server.insert(
         "tasks",
@@ -867,12 +860,17 @@ fn a_pending_write_survives_the_catalogue_renaming_its_column() {
         Default::default(),
     ))
     .unwrap();
-    block_on(server.activate_schema(tasks(ColumnType::Text))).unwrap();
-    let client = block_on(Db::open(config(
-        tasks(ColumnType::Text),
-        1,
-        AuthorSubject::SYSTEM,
-    )))
+    let retype = rename(
+        &tasks(ColumnType::Boolean),
+        &tasks(ColumnType::Text),
+        vec![],
+    );
+    block_on(server.activate_schema_with_lenses(tasks(ColumnType::Text), &[retype.clone()]))
+        .unwrap();
+    let client = block_on(Db::open(
+        config(tasks(ColumnType::Text), 1, AuthorSubject::SYSTEM)
+            .with_migrations(vec![tasks(ColumnType::Boolean)], vec![retype]),
+    ))
     .unwrap();
     client.become_replica();
     let doing = Value::Nullable(Some(Box::new(text("doing"))));
@@ -900,4 +898,514 @@ fn a_pending_write_survives_the_catalogue_renaming_its_column() {
         client.column_identity("tasks", "status").unwrap(),
         server.column_identity("tasks", "status").unwrap()
     );
+}
+
+/// `notes(text, rank: bigint = 0, <extra>: text?)`: a v2 that adds `rank`
+/// beside another new column, so two of them are different versions.
+fn rank_beside(extra: &str) -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("text", ColumnType::Text)
+                    .column_with_default("rank", ColumnType::BigInt, jazz::tools::Value::BigInt(0))
+                    .nullable_column(extra, ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+/// The columns `path`'s `notes` keeps, physically.
+fn notes_columns(path: &Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let mut statement = conn
+        .prepare("SELECT name FROM pragma_table_info('notes') ORDER BY name")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// An offline replica ships v2 and writes `rank` under it while its
+/// authority admits another v2 (a draft adding `rank` too) first. Stored
+/// columns are derived from the version that introduces them, not minted in
+/// admission order, so the replica stored `rank` where the authority does
+/// before it ever heard of either: mirroring the catalogue renames nothing
+/// and the pending write lands in the authority's v2 column, not the
+/// draft's.
+#[test]
+fn an_offline_replica_stores_its_v2_columns_where_the_authority_does() {
+    let v1 = without_rank();
+    let draft = rank_beside("tag");
+    let v2 = rank_beside("label");
+    let adds = |target: &JazzSchema, extra: &str| {
+        rename(
+            &v1,
+            target,
+            vec![
+                LensOp::AddColumn {
+                    column: "rank".into(),
+                    default: Value::I64(0),
+                },
+                LensOp::AddColumn {
+                    column: extra.into(),
+                    default: Value::Nullable(None),
+                },
+            ],
+        )
+    };
+    let server = authority(v1.clone(), 0);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("client.sqlite");
+    {
+        let client = open_at(v1.clone(), 1, &path);
+        let _link = link(&client, &server);
+        pump(&server, &[&client]);
+    }
+    block_on(server.admit_schema_with_lenses(draft.clone(), &[adds(&draft, "tag")])).unwrap();
+    block_on(server.admit_schema_with_lenses(v2.clone(), &[adds(&v2, "label")])).unwrap();
+
+    let client = open_at(v2.clone(), 1, &path);
+    insert(
+        &client,
+        1,
+        &[("text", Value::String("a".into())), ("rank", Value::I64(7))],
+    );
+    let offline = notes_columns(&path);
+    assert_eq!(
+        offline
+            .iter()
+            .filter(|c| common::unhashed(c) == "rank")
+            .count(),
+        1,
+        "{offline:?}"
+    );
+
+    let _link = link(&client, &server);
+    pump(&server, &[&client]);
+    let mirrored = notes_columns(&path);
+    let ours = |columns: &[String]| -> Vec<String> {
+        columns
+            .iter()
+            .filter(|c| common::unhashed(c) == "rank")
+            .cloned()
+            .collect()
+    };
+    let [column] = ours(&offline).try_into().unwrap();
+    assert!(mirrored.contains(&column), "{offline:?} -> {mirrored:?}");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let kept: i64 = conn
+        .query_row(&format!("SELECT \"{column}\" FROM notes"), [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        kept, 7,
+        "mirroring moved nothing: {offline:?} -> {mirrored:?}"
+    );
+    assert_eq!(ranks(&client), [Some(Value::I64(7))]);
+    let view = block_on(server.register_schema_view(v2)).unwrap();
+    assert_eq!(ranks(&view), [Some(Value::I64(7))]);
+    let draft = block_on(server.register_schema_view(draft)).unwrap();
+    assert_eq!(
+        ranks(&draft),
+        [Some(Value::I64(0))],
+        "the draft's `rank` is a column of its own"
+    );
+}
+
+/// A replica that never synced opens straight into v2, whose lens renames
+/// `text` to `body`, with the app's bundled v1 and lens. It stores `body`
+/// in v1's `text` column, as the authority does, before it ever connects:
+/// its offline write lands there, and the authority reads it under both
+/// versions without anything being renamed or moved.
+#[test]
+fn a_replica_with_bundled_lenses_stores_a_renamed_column_where_the_authority_does() {
+    let v1 = without_rank();
+    let v2 = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let lens = rename(
+        &v1,
+        &v2,
+        vec![LensOp::RenameColumn {
+            from: "text".into(),
+            to: "body".into(),
+        }],
+    );
+    let server = authority(v1.clone(), 0);
+    block_on(server.activate_schema_with_lenses(v2.clone(), &[lens.clone()])).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("client.sqlite");
+    let open = || {
+        block_on(Db::open_at(
+            config(v2.clone(), 1, AuthorSubject::SYSTEM)
+                .with_migrations(vec![v1.clone()], vec![lens.clone()]),
+            &path,
+            FileOptions::default(),
+        ))
+        .unwrap()
+    };
+    let unsynced = {
+        let client = open();
+        let unsynced = notes_columns(&path);
+        assert!(
+            unsynced.iter().all(|c| common::unhashed(c) != "body"),
+            "`body` is stored in v1's `text`: {unsynced:?}"
+        );
+        // A store becomes a replica before it writes (INV-SYNC-51).
+        let _link = link(&client, &server);
+        pump(&server, &[&client]);
+        unsynced
+    };
+    assert_eq!(notes_columns(&path), unsynced, "mirroring changed nothing");
+
+    let client = open();
+    insert(&client, 1, &[("body", Value::String("offline".into()))]);
+    let _link = link(&client, &server);
+    pump(&server, &[&client]);
+    assert_eq!(notes_columns(&path), unsynced);
+    let read = |db: &Db, column: &str| -> Vec<Option<Value>> {
+        let prepared = db.prepare_query(&Query::from("notes")).unwrap();
+        block_on(db.all(&prepared, ReadOpts::default()))
+            .unwrap()
+            .iter()
+            .map(|row| {
+                row.cells()
+                    .find(|(name, _)| *name == column)
+                    .and_then(|(_, value)| value.cloned())
+            })
+            .collect()
+    };
+    let offline = Some(Value::String("offline".into()));
+    assert_eq!(read(&client, "body"), [offline.clone()]);
+    assert_eq!(read(&server, "body"), [offline.clone()]);
+    let old = block_on(server.register_schema_view(v1)).unwrap();
+    assert_eq!(read(&old, "text"), [offline]);
+}
+
+/// A schema view of a version the store lacks is admitted along the app's
+/// lenses too (a TS client reads every app version through a view): its
+/// renamed column is the authority's.
+#[test]
+fn a_schema_view_is_admitted_along_the_bundled_lenses() {
+    let v1 = without_rank();
+    let v2 = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let lens = rename(
+        &v1,
+        &v2,
+        vec![LensOp::RenameColumn {
+            from: "text".into(),
+            to: "body".into(),
+        }],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("client.sqlite");
+    let client = block_on(Db::open_at(
+        config(v1.clone(), 1, AuthorSubject::SYSTEM).with_migrations(vec![v1], vec![lens]),
+        &path,
+        FileOptions::default(),
+    ))
+    .unwrap();
+    let view = block_on(client.register_schema_view(v2)).unwrap();
+    block_on(view.insert(
+        "notes",
+        BTreeMap::from([("body".to_owned(), Value::String("via view".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let columns = notes_columns(&path);
+    assert!(
+        columns.iter().all(|c| common::unhashed(c) != "body"),
+        "{columns:?}"
+    );
+}
+
+/// A client shipping the app's migrations refuses a schema they lack, on
+/// open and as a view, rather than naming it otherwise than its server.
+#[test]
+fn a_schema_outside_the_shipped_migrations_is_refused() {
+    let v1 = without_rank();
+    let stray = text_rank();
+    let shipped = |schema: JazzSchema| {
+        config(schema, 1, AuthorSubject::SYSTEM).with_migrations(vec![without_rank()], vec![])
+    };
+    let error = block_on(Db::open(shipped(stray.clone())))
+        .err()
+        .expect("refused on open");
+    assert_eq!(error.code, jazz::db::ErrorCode::Schema, "{error:?}");
+    assert!(
+        error.message.contains("not among the app's migrations"),
+        "{error:?}"
+    );
+
+    let client = block_on(Db::open(shipped(v1))).unwrap();
+    let error = block_on(client.register_schema_view(stray))
+        .err()
+        .expect("refused as a view");
+    assert!(
+        error.message.contains("not among the app's migrations"),
+        "{error:?}"
+    );
+}
+
+/// `notes(text: text, <extras>: text?)`, its columns in the order given
+/// (`text` first unless `text_last`).
+fn notes_with(extras: &[&str], text_last: bool) -> JazzSchema {
+    let mut table = TableSchemaBuilder::new("notes");
+    if !text_last {
+        table = table.column("text", ColumnType::Text);
+    }
+    for extra in extras {
+        table = table.nullable_column(extra, ColumnType::Text);
+    }
+    if text_last {
+        table = table.column("text", ColumnType::Text);
+    }
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(table.policies(allow_all_policies()))
+            .build(),
+    )
+}
+
+fn adds(source: &JazzSchema, target: &JazzSchema, columns: &[&str]) -> MigrationLens {
+    rename(
+        source,
+        target,
+        columns
+            .iter()
+            .map(|column| LensOp::AddColumn {
+                column: (*column).into(),
+                default: Value::Nullable(None),
+            })
+            .collect(),
+    )
+}
+
+/// The empty lens deployment adds between compatible versions.
+fn compatible(source: &JazzSchema, target: &JazzSchema) -> MigrationLens {
+    MigrationLens::new(source.version_id(), target.version_id(), Vec::new()).unwrap()
+}
+
+fn tag_of(db: &Db, n: u8) -> Option<Value> {
+    let prepared = db.prepare_query(&Query::from("notes")).unwrap();
+    block_on(db.all(&prepared, ReadOpts::default()))
+        .unwrap()
+        .iter()
+        .find(|row| row.row_uuid() == RowUuid::from_bytes([n; 16]))
+        .and_then(|row| {
+            row.cells()
+                .find(|(name, _)| *name == "tag")
+                .and_then(|(_, value)| value.cloned())
+        })
+}
+
+/// A compatible revision (columns reordered) is connected by an empty lens
+/// that only the authority holds: the app's migrations, as `jazz-tools`
+/// writes them from its migration files, carry both versions and no lens.
+/// A fresh client opened at the revision stores its columns where the
+/// authority does, so it syncs both ways.
+#[test]
+fn a_fresh_client_at_a_compatible_revision_stores_where_the_authority_does() {
+    let v1 = notes_with(&["tag"], false);
+    let v2 = notes_with(&["tag"], true);
+    assert_eq!(v1.compatibility_id(), v2.compatibility_id());
+    assert_ne!(v1.version_id(), v2.version_id());
+    let server = authority(v1.clone(), 0);
+    insert(
+        &server,
+        1,
+        &[
+            ("text", Value::String("a".into())),
+            (
+                "tag",
+                Value::Nullable(Some(Box::new(Value::String("x".into())))),
+            ),
+        ],
+    );
+    block_on(server.activate_schema_with_lenses(v2.clone(), &[compatible(&v1, &v2)])).unwrap();
+
+    let client = block_on(Db::open(
+        config(v2.clone(), 1, AuthorSubject::SYSTEM).with_migrations(vec![v1, v2], vec![]),
+    ))
+    .unwrap();
+    let _link = link(&client, &server);
+    assert_eq!(remote_read_rejection(&client, &server), None);
+    assert_eq!(
+        tag_of(&client, 1),
+        Some(Value::Nullable(Some(Box::new(Value::String("x".into())))))
+    );
+    insert(
+        &client,
+        2,
+        &[
+            ("text", Value::String("b".into())),
+            (
+                "tag",
+                Value::Nullable(Some(Box::new(Value::String("y".into())))),
+            ),
+        ],
+    );
+    pump(&server, &[&client]);
+    assert_eq!(
+        tag_of(&server, 2),
+        Some(Value::Nullable(Some(Box::new(Value::String("y".into())))))
+    );
+}
+
+/// The compatible revision follows a version a lens added `tag` in: a fresh
+/// client reaches the revision from that version, as the authority's empty
+/// lens does, so `tag` keeps the stored column the lens started.
+#[test]
+fn a_compatible_revision_after_a_lens_keeps_the_lenss_columns() {
+    let v0 = notes_with(&[], false);
+    let v1 = notes_with(&["tag"], false);
+    let v2 = notes_with(&["tag"], true);
+    let server = authority(v0.clone(), 0);
+    block_on(server.admit_schema_with_lenses(v1.clone(), &[adds(&v0, &v1, &["tag"])])).unwrap();
+    block_on(server.activate_schema_with_lenses(v2.clone(), &[compatible(&v1, &v2)])).unwrap();
+    insert(
+        &server,
+        1,
+        &[
+            ("text", Value::String("a".into())),
+            (
+                "tag",
+                Value::Nullable(Some(Box::new(Value::String("x".into())))),
+            ),
+        ],
+    );
+
+    let client = block_on(Db::open(
+        config(v2.clone(), 1, AuthorSubject::SYSTEM).with_migrations(
+            vec![v2, v0.clone(), v1.clone()],
+            vec![adds(&v0, &v1, &["tag"])],
+        ),
+    ))
+    .unwrap();
+    let _link = link(&client, &server);
+    assert_eq!(remote_read_rejection(&client, &server), None);
+    assert_eq!(
+        tag_of(&client, 1),
+        Some(Value::Nullable(Some(Box::new(Value::String("x".into())))))
+    );
+}
+
+/// Two branches add `a` and `x` and merge, with a lens from each into the
+/// merge (as the deploy error for diverged branches recommends). Each lens
+/// adds the column the other branch added, so the merge would read one
+/// branch's values as new: the authority refuses it, and so does a fresh
+/// client, which admits both branches first as the authority did.
+#[test]
+fn a_merge_whose_lenses_disagree_on_a_columns_lineage_is_refused() {
+    let v0 = notes_with(&[], false);
+    let a = notes_with(&["a"], false);
+    let x = notes_with(&["x"], false);
+    let merged = notes_with(&["a", "x"], false);
+    let lenses = vec![
+        adds(&v0, &a, &["a"]),
+        adds(&v0, &x, &["x"]),
+        adds(&a, &merged, &["x"]),
+        adds(&x, &merged, &["a"]),
+    ];
+    let server = authority(v0.clone(), 0);
+    block_on(server.admit_schema_with_lenses(a.clone(), &lenses[0..1])).unwrap();
+    block_on(server.admit_schema_with_lenses(x.clone(), &lenses[1..2])).unwrap();
+    let refused = block_on(server.activate_schema_with_lenses(merged.clone(), &lenses[2..4]))
+        .expect_err("a merge losing a branch's values");
+    assert_eq!(refused.code, ErrorCode::Schema);
+    assert!(
+        refused.to_string().contains("not supported yet"),
+        "{refused}"
+    );
+
+    let client = block_on(Db::open(
+        config(merged.clone(), 1, AuthorSubject::SYSTEM)
+            .with_migrations(vec![v0, a, x, merged], lenses),
+    ));
+    let refused = client.err().expect("the client refuses it too");
+    assert!(
+        refused.to_string().contains("not supported yet"),
+        "{refused}"
+    );
+}
+
+/// A version with lenses from two sources that agree on every column (the
+/// second source extends the first with a column the merge drops): every
+/// store names it by the lens from the smallest source, whatever order the
+/// app's migrations list them in, so fresh clients store it where the
+/// authority does.
+#[test]
+fn several_lenses_into_one_version_name_its_columns_alike_everywhere() {
+    let v0 = notes_with(&[], false);
+    let a = notes_with(&["a"], false);
+    let wide = notes_with(&["a", "tmp"], false);
+    let merged = notes_with(&["a", "x"], false);
+    let lenses = vec![
+        adds(&v0, &a, &["a"]),
+        adds(&a, &wide, &["tmp"]),
+        adds(&a, &merged, &["x"]),
+        rename(
+            &wide,
+            &merged,
+            vec![
+                LensOp::DropColumn {
+                    column: "tmp".into(),
+                    backwards_default: Value::Nullable(None),
+                },
+                LensOp::AddColumn {
+                    column: "x".into(),
+                    default: Value::Nullable(None),
+                },
+            ],
+        ),
+    ];
+    let server = authority(v0.clone(), 0);
+    block_on(server.admit_schema_with_lenses(a.clone(), &lenses[0..1])).unwrap();
+    block_on(server.admit_schema_with_lenses(wide.clone(), &lenses[1..2])).unwrap();
+    block_on(server.activate_schema_with_lenses(merged.clone(), &lenses[2..4])).unwrap();
+    let schemas = vec![v0, a, wide, merged.clone()];
+    let dir = tempfile::tempdir().unwrap();
+    let mut stored = Vec::new();
+    for (node, reversed) in [(1u8, false), (2, true)] {
+        let mut order = lenses.clone();
+        if reversed {
+            order.reverse();
+        }
+        let path = dir.path().join(format!("client-{node}.sqlite"));
+        let client = block_on(Db::open_at(
+            config(merged.clone(), node, AuthorSubject::SYSTEM)
+                .with_migrations(schemas.clone(), order),
+            &path,
+            FileOptions::default(),
+        ))
+        .unwrap();
+        let _link = link(&client, &server);
+        assert_eq!(
+            remote_read_rejection(&client, &server),
+            None,
+            "client {node}"
+        );
+        stored.push(notes_columns(&path));
+    }
+    assert_eq!(stored[0], stored[1]);
 }

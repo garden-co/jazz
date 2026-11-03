@@ -1,3 +1,5 @@
+import { mintLocalFirstTokenFromSeed } from "./local-first-token.js";
+import type { ClientMigrations } from "./client-migrations.js";
 import type { RemoteLinkState } from "./remote-link-state.js";
 import type { LinkStatus } from "./sync-status.js";
 import type { WasmSchema } from "../drivers/types.js";
@@ -15,6 +17,8 @@ export interface RuntimeTokenOptions {
 export interface RuntimeClientContext<RuntimeConfig extends DbConfig = DbConfig> {
   config: RuntimeConfig;
   schema: WasmSchema;
+  /** The migrations the app defining `schema` ships (see {@link ClientMigrations}). */
+  migrations?: ClientMigrations;
   onAuthFailure: (reason: AuthFailureReason) => void;
   /**
    * Browser-only identity leased by the durable SharedWorker before the
@@ -200,8 +204,14 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
     return null;
   }
 
-  mintLocalFirstToken(_options: RuntimeTokenOptions): string {
-    throw new Error("Db runtime source does not support local-first auth");
+  /** Same on every host: minted in TypeScript by `src/local-first-auth`. */
+  mintLocalFirstToken(options: RuntimeTokenOptions): string {
+    return mintLocalFirstTokenFromSeed(
+      options.secret,
+      options.audience,
+      options.ttlSeconds,
+      Number(options.nowSeconds),
+    );
   }
 
   mintAnonymousToken(_options: RuntimeTokenOptions): string {

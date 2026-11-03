@@ -158,11 +158,39 @@ async fn deploy_complete_diamond_reopens_and_rejects_incomplete_history() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
     assert_eq!(error["code"], "unreachable_deployment_target");
     assert_eq!(graph(&router).await, before);
-    let mut complete = incomplete;
-    complete["migrations"]
+    // Completing it with B -> D introducing `b` leaves the two lenses into D
+    // disagreeing on `a` (C's introduces it, B's keeps B's): not supported yet.
+    let mut lossy = incomplete;
+    lossy["migrations"]
         .as_array_mut()
         .unwrap()
         .push(migration(&b, &d, &["b"]));
+    let (status, error) = http(&router, "POST", "/deploy", lossy).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("not supported yet"),
+        "{error}"
+    );
+    assert_eq!(graph(&router).await, before);
+    // A diamond whose branches both keep B's `a` merges.
+    let wide = schema(&["a", "tmp"]);
+    let mut narrow = migration(&wide, &d, &["b"]);
+    narrow["forward"][0]["operations"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type":"drop","column":"tmp","column_type":ColumnType::Text,"value":jazz::tools::public_schema::Value::Text("default".into())}));
+    let complete = request(
+        &d,
+        &[&wide, &d],
+        vec![
+            migration(&b, &wide, &["tmp"]),
+            narrow,
+            migration(&b, &d, &["b"]),
+        ],
+    );
     let result = deploy_ok(&router, complete).await;
     assert_eq!(result["published"]["schemas"].as_array().unwrap().len(), 2);
     assert_eq!(
