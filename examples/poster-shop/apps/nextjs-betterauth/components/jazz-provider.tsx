@@ -6,6 +6,10 @@ import { JazzProvider as Jazz, betterAuth } from "jazz-tools/react";
 import { authClient } from "@/src/lib/auth-client";
 import { LOCAL_DEFAULTS } from "@/src/lib/build-config.mjs";
 
+// Start on the thin client; load the local-first one (WASM, local storage,
+// offline writes) in its own chunk once the page has loaded.
+const loadLocalFirst = () => import("jazz-tools/local-first");
+
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID || LOCAL_DEFAULTS.appId;
 // Better Auth's session drives sign-in; PosterShop's backend (`createJazz` in
 // src/lib/jazz.server.ts) reads it in `authenticate`.
@@ -20,6 +24,7 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
     <Jazz
       appId={appId}
       serverUrl="/jazz"
+      client={loadLocalFirst}
       auth={auth}
       signedOut={children}
       loading={

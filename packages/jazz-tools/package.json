@@ -55,6 +55,10 @@
       "types": "./dist/thin/index.d.ts",
       "default": "./dist/thin/index.js"
     },
+    "./local-first": {
+      "types": "./dist/local-first/index.d.ts",
+      "default": "./dist/local-first/index.js"
+    },
     "./react": {
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
