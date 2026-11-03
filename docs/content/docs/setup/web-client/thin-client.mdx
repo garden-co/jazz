@@ -11,15 +11,6 @@ description: "Learn how to set up the thin browser client, which talks to your b
 
 The default web client: about 86 KB gzipped, no Wasm, no local storage. The server runs every query under the signed-in session's policies and sends finished rows; writes commit on the server.
 
-## Bundler config
-
-- No Jazz plugin: in development, run your app as usual. `createJazz` in your main backend is the dev server and publishes your schema and permissions on start
-- The browser needs no config. Your backend keeps the server-side lines from the [local-first client](/docs/setup/web-client/local-first-client#bundler-config) (`serverExternalPackages` or `ssr.external` for `jazz-napi`)
-
-## Wasm loading
-
-- Nothing to set up: the thin client has no Wasm and no workers
-
 ## Configure one session
 
 - Import from `jazz-tools/thin`
