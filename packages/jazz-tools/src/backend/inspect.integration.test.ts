@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -111,6 +111,28 @@ async function serveNode(jazz: Jazz): Promise<string> {
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
+/** POST `whoami` to `origin` over its real socket, naming `host` in the Host header. */
+function statusWithHost(origin: string, host: string): Promise<number> {
+  const { hostname, port } = new URL(origin);
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        hostname,
+        port,
+        path: "/jazz/inspect/api",
+        method: "POST",
+        headers: { host, "content-type": "application/json" },
+      },
+      (res) => {
+        res.resume();
+        res.on("end", () => resolve(res.statusCode ?? 0));
+      },
+    );
+    req.on("error", reject);
+    req.end(JSON.stringify({ op: "whoami" }));
+  });
+}
+
 async function ok<T = any>(response: Promise<Response>): Promise<T> {
   const answered = await response;
   const body = await answered.json();
@@ -177,11 +199,8 @@ describe("Inspector admission", () => {
 
     // A proxy in front makes every request look local.
     expect((await refused(local({ "x-forwarded-for": "203.0.113.9" }))).status).toBe(401);
-    // Another host name is not this machine.
-    expect(
-      (await refused(api(jazz, { op: "whoami" }, {}, "http://app.example.com/jazz/inspect/api")))
-        .status,
-    ).toBe(401);
+    // Another host name is not this machine, even over a loopback socket.
+    expect(await statusWithHost(origin, "app.example.com")).toBe(401);
     // Production never gets the default.
     process.env.NODE_ENV = "production";
     expect((await refused(local())).status).toBe(401);
