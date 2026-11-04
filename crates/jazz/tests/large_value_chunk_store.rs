@@ -804,20 +804,37 @@ fn a_host_deletes_reclaimed_leaves_even_while_their_put_is_out() {
     assert!(db.take_chunk_io().unwrap().unwrap().is_empty());
 }
 
-/// A fetch that fails is reported by the finish; the request waiting on it
-/// asks again, and a later batch serves it.
+/// A fetch that fails is reported by the finish, and what waited on it is
+/// refused with the store's error rather than held: a pull is answered
+/// missing, and a message the server cannot serve without the leaves ends
+/// the session with why, so the client is told and reconnects. Each batch
+/// (paced by the host's backoff) asks again, so once the store answers, a
+/// replica subscribing again is served.
 #[test]
-fn a_host_fetch_that_fails_is_asked_again() {
+fn a_host_fetch_that_fails_refuses_what_waits_on_it() {
     let (_dir, path) = scratch();
     let remote = Remote::default();
     let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
     let value = text(65, LARGE);
     moved_to(&path, &store, &value);
     let server = open_host_io(&path, store.clone());
+    server.track_closed_subscribers();
     let sub = subscribe_to(&server);
     remote.objects().failing_gets = true;
     let mut failed = 0;
-    for _ in 0..32 {
+    let mut refused = false;
+    for _ in 0..16 {
+        refused |= sub.down.borrow().iter().any(|message| match message {
+            SyncMessage::Chunks { missing, .. } => !missing.is_empty(),
+            SyncMessage::Refused { code, message, .. } => {
+                *code == ErrorCode::Storage && message.contains("bucket unreachable")
+            }
+            _ => false,
+        });
+        refused |= server
+            .take_closed_subscribers()
+            .into_iter()
+            .any(|(_, error)| error.message.contains("bucket unreachable"));
         block_on(sub.alice.tick()).unwrap();
         block_on(server.tick()).unwrap();
         let Some(io) = server.take_chunk_io().unwrap() else {
@@ -826,14 +843,45 @@ fn a_host_fetch_that_fails_is_asked_again() {
         if let Err(error) = server.finish_chunk_io(run_elsewhere(io, store.clone())) {
             assert_eq!(error.code, ErrorCode::Storage);
             failed += 1;
-            if failed == 2 {
-                remote.objects().failing_gets = false;
-            }
+        }
+    }
+    assert!(failed >= 1, "{failed}");
+    assert!(refused, "the replica is told, not left waiting");
+    drop(sub);
+
+    remote.objects().failing_gets = false;
+    let sub = subscribe_to(&server);
+    for _ in 0..16 {
+        block_on(sub.alice.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+        if let Some(io) = server.take_chunk_io().unwrap() {
+            server
+                .finish_chunk_io(run_elsewhere(io, store.clone()))
+                .unwrap();
         }
     }
     block_on(sub.alice.tick()).unwrap();
-    assert!(failed >= 2, "{failed}");
     assert_eq!(body(&sub.alice, 1), value);
+}
+
+/// A leaf the store answers it does not hold is data loss, reported as
+/// such; it is not remembered as lost, so once it is back (a restored
+/// bucket, a fixed permission) a later read is served without a restart.
+#[test]
+fn a_leaf_the_store_lost_is_read_again_once_it_is_back() {
+    let (_dir, path) = scratch();
+    let remote = Remote::default();
+    let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
+    let value = text(68, LARGE);
+    moved_to(&path, &store, &value);
+    let saved = remote.objects().map.clone();
+    remote.objects().map.clear();
+    let db = open(&path, Some(store.clone())).unwrap();
+    let error = cell(&db, 1, "body").unwrap_err();
+    assert_eq!(error.code, ErrorCode::Storage);
+    assert!(error.message.contains("missing"), "{}", error.message);
+    remote.objects().map = saved;
+    assert_eq!(body(&db, 1), value);
 }
 
 /// Fetches that succeed are served at once even when the batch's puts

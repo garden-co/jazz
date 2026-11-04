@@ -255,7 +255,10 @@ pub enum SubscriptionEvent {
         settled: bool,
         tier: DurabilityTier,
     },
+    /// The subscription ended with an error: `code` says what kind,
+    /// `reason` is the error as text.
     Rejected {
+        code: ErrorCode,
         reason: String,
     },
     Closed,
@@ -381,14 +384,16 @@ impl Drop for SubscriptionStream {
 
 impl SubscriptionStream {
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
-        let reason = self
-            .refused
-            .as_ref()
-            .and_then(|refused| refused.borrow().as_ref().map(Error::to_string));
-        if let Some(reason) = reason {
+        let refused = self.refused.as_ref().and_then(|refused| {
+            refused
+                .borrow()
+                .as_ref()
+                .map(|error| (error.code, error.to_string()))
+        });
+        if let Some((code, reason)) = refused {
             self.refused = None;
             self.gate = None;
-            return Some(SubscriptionEvent::Rejected { reason });
+            return Some(SubscriptionEvent::Rejected { code, reason });
         }
         if let Some(gate) = &self.gate {
             if !gate.open() {
@@ -1753,6 +1758,12 @@ impl Db {
         &self,
         chunks: &std::sync::Arc<crate::large::Chunks>,
     ) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
+        // The last batch's failed fetches are asked again: results that
+        // were refused for them run again, and want what they still lack
+        // in this batch.
+        if chunks.outstanding().is_none() && chunks.clear_failed() {
+            self.inner().retry_awaiting();
+        }
         let Some((batch, fetch)) = chunks.begin_fetch() else {
             return Ok(None);
         };
@@ -1804,7 +1815,7 @@ impl Db {
         let mut fetch_failed = None;
         let any = !io.fetch.is_empty();
         if any {
-            self.install_fetched(chunks, &io.fetch, fetched, &mut fetch_failed);
+            self.install_fetched(chunks, &io.fetch, fetched, true, &mut fetch_failed);
         }
         {
             let inner = self.inner();
@@ -1835,25 +1846,32 @@ impl Db {
                 })?;
             }
         }
-        if any && fetch_failed.is_none() {
-            // Messages held for those nodes are served now, not a tick later.
+        if any {
+            // Messages held for those nodes are served now, not a tick
+            // later: with them, or refused with why they could not be.
             self.sync_tick()?;
         }
         fetch_failed.or(first).map_or(Ok(()), Err)
     }
 
     /// Install what the chunk store answered for `wanted`; reads waiting
-    /// on those nodes run again.
+    /// on those nodes run again. For the host's batch (`refuse`), reads of
+    /// a node it failed to fetch are refused with why until the next batch,
+    /// rather than waiting on it; a read that fetched itself gets the error
+    /// back directly.
     fn install_fetched(
         &self,
         chunks: &crate::large::Chunks,
         wanted: &[jazz_types::large_values::chunks::ChunkRequest],
         answers: Vec<Result<Option<bytes::Bytes>, Error>>,
+        refuse: bool,
         first: &mut Option<Error>,
     ) {
         for (request, answer) in wanted.iter().zip(answers) {
             if let Err(error) = answer.and_then(|bytes| chunks.install_from_store(request, bytes)) {
-                // Asked again by the next read that needs it.
+                if refuse {
+                    chunks.fetch_failed(request, error.clone());
+                }
                 first.get_or_insert(error);
             }
         }
@@ -1874,7 +1892,7 @@ impl Db {
             .run(store)
             .await;
         let mut first = None;
-        self.install_fetched(chunks, &done.io.fetch, done.fetched, &mut first);
+        self.install_fetched(chunks, &done.io.fetch, done.fetched, false, &mut first);
         first.map_or(Ok(()), Err)
     }
 

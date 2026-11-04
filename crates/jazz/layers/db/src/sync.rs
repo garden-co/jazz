@@ -10251,6 +10251,20 @@ impl Db {
                 if events.is_empty() {
                     continue;
                 }
+                // A subscription the server can no longer serve (its rows
+                // failed to run, say on a chunk store that failed) ends at
+                // the client with why, rather than waiting on rows that
+                // never come.
+                for event in &events {
+                    if let SubscriptionEvent::Rejected { code, reason } = event {
+                        let prefix = format!("{code:?}: ");
+                        inner.sessions[index].outbox.push(SyncMessage::Refused {
+                            id,
+                            code: *code,
+                            message: reason.strip_prefix(&prefix).unwrap_or(reason).to_owned(),
+                        });
+                    }
+                }
                 if events
                     .iter()
                     .any(|event| matches!(event, SubscriptionEvent::Delta { reset: true, .. }))
@@ -12194,6 +12208,14 @@ impl Db {
             let (found, foreign, absent, rest) = match found {
                 Err(error) if crate::large::is_missing(&error) => {
                     fetching = true;
+                    continue;
+                }
+                // The chunk store failed to answer for them (a token, a
+                // permission, the network): missing to the reader, which
+                // stops waiting rather than hold its session's backlog. It
+                // asks again once a version or a reconnect may answer.
+                Err(error) if error.code == ErrorCode::Storage => {
+                    missing.extend(pull.nodes.into_iter().map(|hash| WireChunkRef { hash }));
                     continue;
                 }
                 found => found?,
