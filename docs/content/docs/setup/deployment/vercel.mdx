@@ -108,7 +108,7 @@ All options are optional.
 | `region`           | `iad1`                                                               | Where the Sandbox runs; put it near your functions               |
 | `vcpus`            | `1`                                                                  | Sandbox size, 2 GB of memory per vCPU                            |
 | `maxDriveBytes`    | 10 GiB                                                               | The most data the environment's Drive holds                      |
-| `idleMs`           | 5 minutes                                                            | How long the Sandbox stays up without traffic                    |
+| `idleMs`           | 5 minutes                                                            | How long the Sandbox stays up with no requests or clients        |
 | `serverTarballUrl` | the npm package of your installed `jazz-tools` version               | Which Jazz server build the Sandbox runs                         |
 | `blobs`            | `vercelBlob()` if a Blob store is connected, otherwise `"sqlite"`    | Where large values go; see [Large values](#large-values)         |
 | `local`            | `sqlite({ path: ".jazz/local" })`                                    | The store used outside Vercel                                    |
