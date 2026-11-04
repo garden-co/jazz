@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateSecret, identityOf, signChallenge, signToken } from "../local-first-auth/index.js";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
@@ -13,6 +14,7 @@ import {
   createJazz,
   createJazzSession,
   files,
+  fromJWT,
   memory,
   remote,
   sqlite,
@@ -232,6 +234,36 @@ describe("createJazz", () => {
     const probe = await fetch(`${origin}/jazz/apps/${appId}/ws`);
     expect(probe.status).toBe(426);
     expect(probe.headers.get("x-jazz-stream")).toBeNull();
+  }, 60_000);
+
+  it("signs users in with fromJWT and keeps their account and claims", async () => {
+    const { privateKey, publicKey } = await generateKeyPair("ES256", { extractable: true });
+    const issuer = "https://idp.example";
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: fromJWT({ publicKey: await exportJWK(publicKey), issuer, audience: "my-app" }),
+    });
+    cleanups.push(() => jazz.close());
+    const bearer = async (subject: string) =>
+      new Request("http://app/x", {
+        headers: {
+          authorization: `Bearer ${await new SignJWT({ role: "editor" })
+            .setProtectedHeader({ alg: "ES256" })
+            .setIssuer(issuer)
+            .setAudience("my-app")
+            .setSubject(subject)
+            .setExpirationTime("5m")
+            .sign(privateKey)}`,
+        },
+      });
+    const account = await jazz.accountFor(await bearer("user_01"));
+    expect(account).toEqual(expect.any(String));
+    // A fresh token for the same user opens the same account.
+    await expect(jazz.accountFor(await bearer("user_01"))).resolves.toBe(account);
+    await expect(jazz.accountFor(await bearer("user_02"))).resolves.not.toBe(account);
+    await expect(jazz.accountFor(new Request("http://app/x"))).resolves.toBeNull();
   }, 60_000);
 
   it("links only a guest whose proof is for this app or this endpoint", async () => {
@@ -730,6 +762,233 @@ describe("createJazz", () => {
     },
     60_000,
   );
+
+  it("says who is signed in without giving them an account, so a guest can still link", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate });
+    const appId = jazz.appId;
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const accounts = `${origin}/jazz/apps/${appId}/accounts`;
+    const post = (path: string, user?: string, body?: unknown) =>
+      fetch(`${accounts}/${path}`, {
+        method: "POST",
+        headers: {
+          ...(user ? { "x-test-user": user } : {}),
+          "content-type": "application/json",
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    expect((await post("backend-user")).status).toBe(401);
+    // Asked as often as a page focuses, it never assigns an account.
+    for (let i = 0; i < 2; i++) {
+      const answer = (await (await post("backend-user", "alice")).json()) as {
+        account: string | null;
+        identity: { issuer: string; subject: string };
+      };
+      expect(answer.account).toBeNull();
+      expect(answer.identity).toEqual({ issuer: `jazz:app:${appId}`, subject: "alice" });
+    }
+    // So the guest's link to alice still goes through, and the answer names
+    // the guest's account from then on.
+    const secret = generateSecret();
+    const { challenge } = (await (await post("backend-link/challenge", "alice")).json()) as {
+      challenge: string;
+    };
+    const linked = await post("backend-link", "alice", {
+      challenge,
+      proof: signChallenge(secret, challenge),
+    });
+    expect(linked.status).toBe(200);
+    const { account } = (await linked.json()) as { account: string };
+    const after = (await (await post("backend-user", "alice")).json()) as { account: string };
+    expect(after.account).toBe(account);
+    // A user who signed in has an account; a GET is refused.
+    await post("backend-sign-in", "bob");
+    expect(
+      ((await (await post("backend-user", "bob")).json()) as { account: string | null }).account,
+    ).not.toBeNull();
+    expect((await fetch(`${accounts}/backend-user`)).status).toBe(405);
+  });
+
+  it("links one guest to one user from two tabs at once, both to the guest's account", async () => {
+    for (const guestKeyAfterLink of ["keep", "revoke"] as const) {
+      const jazz = await createJazz({
+        app,
+        permissions,
+        store: memory(),
+        authenticate,
+        guestKeyAfterLink,
+      });
+      const appId = jazz.appId;
+      cleanups.push(() => jazz.close());
+      const origin = await serve(jazz, { sockets: true });
+      const accounts = `${origin}/jazz/apps/${appId}/accounts`;
+      const post = (path: string, body?: unknown) =>
+        fetch(`${accounts}/${path}`, {
+          method: "POST",
+          headers: { "x-test-user": "alice", "content-type": "application/json" },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+      const secret = generateSecret();
+      // Each tab asks for its own challenge, then both links race.
+      const challenges = await Promise.all(
+        [0, 1].map(
+          async () =>
+            ((await (await post("backend-link/challenge")).json()) as { challenge: string })
+              .challenge,
+        ),
+      );
+      const links = await Promise.all(
+        challenges.map((challenge) =>
+          post("backend-link", { challenge, proof: signChallenge(secret, challenge) }),
+        ),
+      );
+      expect(
+        links.map((link) => link.status),
+        guestKeyAfterLink,
+      ).toEqual([200, 200]);
+      const [first, second] = (await Promise.all(links.map((link) => link.json()))) as {
+        account: string;
+      }[];
+      expect(second!.account, guestKeyAfterLink).toBe(first!.account);
+      const after = (await (await post("backend-user")).json()) as { account: string };
+      expect(after.account, guestKeyAfterLink).toBe(first!.account);
+    }
+  });
+
+  /**
+   * A core behind a proxy that lets a test hold, or fail, the core's `link`
+   * calls. It proxies plain requests only, not sockets: the tests that use
+   * it make account calls, never sync.
+   */
+  async function heldCore(appId: string) {
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const control: { hold?: () => Promise<void>; fail?: number } = {};
+    // A held request that a failed test never released.
+    let unheld: (() => void) | undefined;
+    const proxy = createServer(async (request, response) => {
+      if (request.url?.endsWith("/admin/accounts/link")) {
+        if (control.fail) {
+          response.statusCode = control.fail;
+          response.end("busy");
+          return;
+        }
+        const hold = control.hold;
+        control.hold = undefined;
+        if (hold) {
+          await Promise.race([hold(), new Promise<void>((resolve) => (unheld = resolve))]);
+        }
+      }
+      const target = new URL(request.url ?? "/", core.url);
+      const upstream = httpRequest(
+        target,
+        { method: request.method, headers: { ...request.headers, host: target.host } },
+        (answer) => {
+          response.writeHead(answer.statusCode ?? 502, answer.headers);
+          answer.pipe(response);
+        },
+      );
+      request.pipe(upstream);
+    });
+    await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+    cleanups.push(
+      () =>
+        new Promise<void>((resolve) => {
+          unheld?.();
+          proxy.closeAllConnections();
+          proxy.close(() => resolve());
+        }),
+    );
+    const url = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`;
+    return { core, url, control };
+  }
+
+  it("links a tab whose guest another tab's link revoked between founding and linking", async () => {
+    const appId = randomUUID();
+    const { core, url, control } = await heldCore(appId);
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: remote({ url, appId, secret: core.adminSecret }),
+      authenticate,
+      guestKeyAfterLink: "revoke",
+    });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const post = (path: string, body?: unknown) =>
+      fetch(`${origin}/jazz/apps/${appId}/accounts/${path}`, {
+        method: "POST",
+        headers: { "x-test-user": "alice", "content-type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    const link = async () => {
+      const { challenge } = (await (await post("backend-link/challenge")).json()) as {
+        challenge: string;
+      };
+      return post("backend-link", { challenge, proof: signChallenge(secret, challenge) });
+    };
+    const secret = generateSecret();
+    // Tab B's guest is founded, then its link waits at the core...
+    let reached!: () => void;
+    let release!: () => void;
+    const atLink = new Promise<void>((resolve) => (reached = resolve));
+    control.hold = () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+        reached();
+      });
+    const tabB = link();
+    await atLink;
+    // ...while tab A links the same guest and revokes its key.
+    const tabA = await link();
+    expect(tabA.status).toBe(200);
+    release();
+    // B's link reaches the core with a revoked guest: alice already belongs
+    // to the guest's account, so it is done, not refused (and B doesn't
+    // revoke the key a second time when the core refused it as retired).
+    const b = await tabB;
+    expect(b.status).toBe(200);
+    expect(((await b.json()) as { account: string }).account).toBe(
+      ((await tabA.json()) as { account: string }).account,
+    );
+  });
+
+  it("answers a core that fails a link for a passing reason as unavailable, and a retry links", async () => {
+    const appId = randomUUID();
+    const { core, url, control } = await heldCore(appId);
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: remote({ url, appId, secret: core.adminSecret }),
+      authenticate,
+    });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const post = (path: string, body?: unknown) =>
+      fetch(`${origin}/jazz/apps/${appId}/accounts/${path}`, {
+        method: "POST",
+        headers: { "x-test-user": "alice", "content-type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    const secret = generateSecret();
+    const link = async () => {
+      const { challenge } = (await (await post("backend-link/challenge")).json()) as {
+        challenge: string;
+      };
+      return post("backend-link", { challenge, proof: signChallenge(secret, challenge) });
+    };
+    // The core down, its credential check refusing this backend mid-rotation,
+    // a proxy in front of it timing out or rate-limiting: none refuses the link.
+    for (const status of [503, 401, 408, 429]) {
+      control.fail = status;
+      const failed = await link();
+      expect(failed.status, String(status)).toBe(503);
+      expect(await failed.text(), String(status)).toBe("account_registry_unavailable");
+    }
+    control.fail = undefined;
+    expect((await link()).status).toBe(200);
+  });
 
   it("revokes the guest key on a retry when the first link's revoke didn't happen", async () => {
     const appId = randomUUID();

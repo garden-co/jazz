@@ -28,6 +28,7 @@ export {
   UnsupportedSnapshotError,
 } from "../runtime/snapshot-ref.js";
 export { trustWorkload, type BackendClientTrust } from "./backend-clients.js";
+export { fromJWT, type FromJWTOptions } from "./from-jwt.js";
 export {
   createJazz,
   files,
