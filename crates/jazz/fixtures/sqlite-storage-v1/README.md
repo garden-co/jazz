@@ -60,9 +60,7 @@ way.
 Keeping the deploy catalogue as typed rows (`_jazz_versions` numbering the
 admitted versions, `_jazz_names` keyed by that number, `_jazz_stored_columns`,
 and `_jazz_schemas`, `_jazz_lenses` and `_jazz_permissions`) regenerated it
-the same way. A development store with the earlier layout (`_jazz_names`
-keyed by version id) is refused at open with "delete the local store and
-resync".
+the same way.
 
 Moving a commit's bases, access proofs (formerly sources) and deltas onto its
 ops, so each pending op is stored with them and `_jazz_pending_items` keeps
