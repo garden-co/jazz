@@ -737,6 +737,15 @@ impl JazzClient {
                 ));
             }
         };
+        // A core governs a stated session only by the bundle it is pinned
+        // to, and refuses one without: say so here, not as a refusal later.
+        if has_server && context.backend_session.is_some() && context.bundle.is_none() {
+            return Err(JazzError::Connection(
+                "a backend_session needs `bundle`: the published permissions bundle \
+                 (as deploying the app returns it) its user is checked by"
+                    .to_owned(),
+            ));
+        }
         let default_session = default_session_from_context(&context);
         let core_schema = crate::schema::JazzSchema::new(&context.schema)
             .map_err(|error| JazzError::Schema(error.to_string()))?;

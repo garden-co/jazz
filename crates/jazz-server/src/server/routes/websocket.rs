@@ -843,16 +843,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     let session = match opened {
         Ok(session) => session,
         Err(error) => {
-            // A session this core does not serve (unpinned, or pinned to a
-            // bundle it never published) stays refused: the client must not
-            // retry it. Anything else may pass.
-            let refused = error.starts_with("Protocol:") || error.starts_with("Schema:");
-            let wire = if refused {
-                WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, error)
-            } else {
-                WireError::new(WireErrorCode::Internal, WireRetry::Later, error)
-            };
-            send_ws_error(&mut socket, wire).await;
+            send_ws_error(&mut socket, session_open_wire_error(&error)).await;
             let _ = socket.close().await;
             return;
         }
@@ -1221,6 +1212,34 @@ async fn close_ws_for_shutdown<S: SyncSocket>(socket: &mut S) {
             reason: "server shutting down".into(),
         })))
         .await;
+}
+
+/// What a client is told when its session was not opened. A session this
+/// core refuses for who it is or how it connects (unpinned, another
+/// identity: [`jazz::db::ErrorCode::Protocol`]) stays refused, so the
+/// client must not retry it. One refused for the catalogue's state (a
+/// bundle not published or admitted here yet:
+/// [`jazz::db::ErrorCode::Schema`]) may open after a publish, and so may
+/// anything else.
+fn session_open_wire_error(error: &crate::runtime::SessionOpenError) -> WireError {
+    use crate::runtime::SessionOpenError;
+    match error {
+        SessionOpenError::Refused(refusal) if refusal.code == jazz::db::ErrorCode::Protocol => {
+            WireError::new(
+                WireErrorCode::AuthFailed,
+                WireRetry::Never,
+                refusal.to_string(),
+            )
+        }
+        SessionOpenError::Refused(refusal) => WireError::new(
+            WireErrorCode::NotReady,
+            WireRetry::Later,
+            refusal.to_string(),
+        ),
+        SessionOpenError::Runtime(message) => {
+            WireError::new(WireErrorCode::Internal, WireRetry::Later, message.clone())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5354,13 +5373,26 @@ mod tests {
 
         // Once bundles are published, an unpinned user session is refused,
         // as a sync session is, and so is a pin to a bundle never published.
+        // The first is refused for good; the second may open once the
+        // bundle is published, so the client retries it later.
         let refused = thin_refusal(addr, &state, pinned_thin_prelude(bob, None)).await;
-        assert!(refused.contains("served through createJazz"), "{refused}");
+        assert!(
+            refused.message.contains("served through createJazz"),
+            "{refused:?}"
+        );
+        assert_eq!(
+            (refused.code, refused.retry),
+            (WireErrorCode::AuthFailed, WireRetry::Never)
+        );
         let unknown = "cd".repeat(32);
         let refused = thin_refusal(addr, &state, pinned_thin_prelude(bob, Some(&unknown))).await;
         assert!(
-            refused.contains("is not published on this store"),
-            "{refused}"
+            refused.message.contains("is not published on this store"),
+            "{refused:?}"
+        );
+        assert_eq!(
+            (refused.code, refused.retry),
+            (WireErrorCode::NotReady, WireRetry::Later)
         );
     }
 
@@ -5369,7 +5401,7 @@ mod tests {
         addr: std::net::SocketAddr,
         state: &Arc<ServerState>,
         prelude: Vec<u8>,
-    ) -> String {
+    ) -> WireError {
         let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
             .await
             .expect("connect websocket");
@@ -5385,7 +5417,7 @@ mod tests {
             .expect("a frame")
             .expect("a message");
         match decode_ws_message(&message).as_slice() {
-            [WireFrame::Error(error)] => error.message.clone(),
+            [WireFrame::Error(error)] => error.clone(),
             frames => panic!("expected a refusal, got {frames:?}"),
         }
     }
@@ -5438,6 +5470,12 @@ mod tests {
             .await
             .expect_err("an unpinned user session is refused");
         assert!(refused.contains("served through createJazz"), "{refused}");
+        let wire = session_open_wire_error(&refused);
+        assert_eq!(
+            (wire.code, wire.retry),
+            (WireErrorCode::AuthFailed, WireRetry::Never),
+            "an unpinned user session is refused for good"
+        );
         assert_eq!(answer(CommitUnitTrust::TrustedBackend).await, ThinBody::Ok);
     }
 

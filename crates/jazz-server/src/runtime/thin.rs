@@ -269,12 +269,10 @@ impl Owner {
         bundle: Option<jazz::catalogue::BundleId>,
         output: tokio_mpsc::UnboundedSender<Outbound>,
         egress: Arc<AtomicUsize>,
-    ) -> Result<(), String> {
+    ) -> Result<(), jazz::db::Error> {
         // Admitted on the same terms as a sync session: a pinned bundle must
         // resolve here, and a createJazz app serves only pinned sessions.
-        self.db
-            .check_session_pin(identity, bundle.as_ref())
-            .map_err(|error| error.to_string())?;
+        self.db.check_session_pin(identity, bundle.as_ref())?;
         let claims = (identity != AuthorSubject::SYSTEM).then(|| {
             self.db.set_identity_claims(identity, claims.clone());
             claims
