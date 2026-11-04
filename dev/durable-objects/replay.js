@@ -8,11 +8,18 @@ export class Replay {
     const ops = await req.json();
     const sql = this.ctx.storage.sql;
     const res = [];
-    for (const [kind, text, params] of ops) {
+    for (const [index, [kind, text, params]] of ops.entries()) {
+      if (req.headers.has("x-replay-debug"))
+        console.log("replay", new URL(req.url).pathname, index, kind, text);
       try {
         const binds = Array(params).fill(null);
         if (kind === "ddl") sql.exec(text, ...binds);
-        else sql.exec("EXPLAIN " + text, ...binds).toArray();
+        // QUERY PLAN prepares without executing the statement. Drain its
+        // cursor before commit, but do not enumerate full bytecode: workerd
+        // 1.20260730.1 can hang in sqlite3_step/strlen while rendering EXPLAIN
+        // cells after schema changes. Bytecode rendering is not SQL execution
+        // coverage, and is unnecessary for this prepare/authorizer check.
+        else sql.exec("EXPLAIN QUERY PLAN " + text, ...binds).toArray();
         res.push(null);
       } catch (e) {
         res.push(String(e.message || e));

@@ -1,142 +1,135 @@
-# jazz-db on Durable Object SQLite
+# Jazz on Durable Object SQLite
 
-A de-risk spike: can jazz-db run on Cloudflare Durable Object SQLite
-(`ctx.storage.sql`)? Measured in a
-local workerd (`workerd 2026-07-30`, via Miniflare 4), which enforces the
-same authorizer and limits as production.
+Jazz's authority can use a Durable Object's own `ctx.storage.sql`, without a
+page VFS. The refresh found a query-compilation limit the earlier spike missed;
+not every current query shape fits yet. This directory contains compatibility probes
+rather than a production DO provider. Implementation
+work is described in [PLAN.md](PLAN.md).
 
-**Verdict: yes, with no design change to the data model.** Every statement
-jazz-db issues across the whole workspace test suite (2.4M statements,
-17k distinct texts, 1,624 connections) prepares on Durable Object SQLite
-with the fixes now in jazz-db (the `durable-object-limits` feature), except
-the transaction statements, which need a scoped transaction API (below). The work left is a storage
-seam, not a redesign.
+## Compatibility baseline (2026-11-04)
 
-## How it was checked
+The refreshed probes run on **Miniflare 4.20260730.0 / workerd 1.20260730.1**,
+with compatibility date `2026-07-01`. This is the version currently available
+from the npm registry used here; it is not a verification of November production
+workerd. Versions are pinned in `package-lock.json` and printed by the runner.
 
-1. `probe.js`: what DO SQLite accepts (transactions, PRAGMAs, schema
-   features, functions, limits, value types, exec cost).
-2. `JAZZ_SQL_TRACE=<file>` with jazz's `sql-trace` feature logs every
-   top-level statement jazz-db runs (connection, text, bound-parameter
-   count, largest value, integers beyond 2^53).
-3. `replay-prep.py` + `replay.js` replay each connection's trace in its own
-   Durable Object: DDL runs, every other distinct statement is prepared with
-   `EXPLAIN`. This catches the authorizer (functions, PRAGMAs, TEMP) and
-   every prepare-time limit.
-4. jazz's `durable-object-limits` feature applies DO's limits to native
-   SQLite (`sqlite3_limit`), so the whole Rust suite runs as if on DO,
-   including runtime limits (value size) that a prepare cannot show.
+| Area                         | Observed behavior / current Jazz implications                                                                                                                                                                                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Transactions                 | SQL BEGIN, SAVEPOINT, RELEASE, COMMIT and ROLLBACK are refused. Nested `transactionSync` rolls back an inner throw independently. Async `transaction` rolls back across await; SQL issued by an awaited helper participates, on both success and failure.                      |
+| Columns                      | 100 per table. Current rows have 8 structural columns (`rid`, `id`, `_branch`, `_clock`, `_writer`, `_state`, `_base`, `_touched`) plus 4 provenance columns: **88 physical app columns**. Retained migration columns count. History tables omit `rid`.                        |
+| Bound parameters             | 100 accepted, 101 refused. Long eligible IN lists still use one JSON parameter; mixed-type shapes may retain placeholders.                                                                                                                                                     |
+| SQL length                   | Exactly 100,000 ASCII bytes accepted; 100,001 refused. The limit applies to the whole `exec` input. The schema DDL helper splits at complete-statement boundaries, including trigger bodies.                                                                                   |
+| Expression / compound limits | Flat AND chain of 101 refused (depth limit 100); 5 compound SELECT terms accepted, 6 refused. Jazz balances long AND/OR chains, but nested policy/query shapes can still exceed limits.                                                                                        |
+| Function arguments           | This workerd accepts 127 and refuses 128. Cloudflare documents **32**; native `durable-object-limits` now uses the conservative documented value.                                                                                                                              |
+| Values                       | Large values remain chunked. The probe accepts a BLOB just below 2 MiB and rejects one just below 3 MiB; the SQLite length limit also covers a whole row.                                                                                                                      |
+| Integers                     | Reading `9007199254740993` as a JS number loses precision; BigInt bindings are refused. Decimal text bound to a current affinity-free app column stays TEXT and changes equality. `CAST(? AS INTEGER)` plus `CAST(value AS TEXT)` round-trips signed 64-bit endpoints exactly. |
+| Storage classes              | Current app columns have no type affinity. Inline text/JSON is TEXT, bytes are BLOB, and chunked cells are INTEGER epoch markers. Integral REAL values retain REAL in SQL even though JS cannot distinguish them from integers.                                                |
+| Internal tables              | KV use creates `_cf_KV` in this workerd, which current fresh-store checks ignore. Creating `_cf_x` is refused.                                                                                                                                                                 |
+| PRAGMAs                      | journal mode, synchronous, cache size, user version, temp store and page count are refused. Foreign keys, recursive triggers, table info, optimize, data version and quick check work.                                                                                         |
+| SQL features                 | Triggers, WITHOUT ROWID, STRICT, partial/expression indexes, FTS5, ANALYZE, JSON functions and unhex work. TEMP, ATTACH, rtree and sqlite_version are refused. LIKE patterns accept 50 bytes and reject 51.                                                                    |
+
+The column diagnostics are enabled by the native
+`durable-object-limits` feature. Schema admission checks the physical union
+before DDL, including retained columns, and names the table and limit in a
+`Schema` error. Other SQLite failures retain their existing error classification.
+This feature is a compatibility test profile, not the production storage interface.
+
+References: [Cloudflare SQL limits](https://developers.cloudflare.com/durable-objects/platform/limits/),
+[SQL storage and transaction APIs](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/).
+The documented function-argument limit and measured runtime limit differ; do
+not silently treat the more permissive local result as the production contract.
+
+The pinned [workerd security profile](https://github.com/cloudflare/workerd/blob/v1.20260730.1/src/workerd/util/sqlite.c%2B%2B#L1353)
+also limits compiled VM instruction allocation to 25,000, trigger depth to 10,
+attached databases to zero, and worker threads to zero. These are now included
+in the native profile. Its length limit is 2,200,000 bytes; the native profile
+retains the more conservative 2 MiB limit. Instruction allocation grows in
+chunks, so fewer than 25,000 emitted instructions can still exhaust its budget.
+The probe accepts 5,000 literal IN members and rejects 8,000 with SQLITE_NOMEM.
+
+## Run the probes and replay
+
+From the repository root:
 
 ```sh
-# 1. probe (needs miniflare from npm)
-node run-probe.mjs
-# 2. trace
-JAZZ_SQL_TRACE=/tmp/trace.jsonl cargo test --workspace --features jazz/sql-trace
-# 3. replay
-python3 replay-prep.py /tmp/trace.jsonl /tmp/jobs.json
-node run-replay.mjs /tmp/jobs.json /tmp/failures.json
-# 4. the suite under DO limits
-cargo test --workspace --features jazz/durable-object-limits
+npm ci --prefix dev/durable-objects
+node dev/durable-objects/run-probe.mjs
+
+# Use a new trace path for each run: the tracer appends.
+JAZZ_SQL_TRACE=/tmp/jazz-do-trace.jsonl cargo test --workspace \
+  --features jazz/durable-object-limits,jazz/sql-trace --no-fail-fast
+python3 dev/durable-objects/replay-prep.py /tmp/jazz-do-trace.jsonl /tmp/jazz-do-jobs.json
+node dev/durable-objects/run-replay.mjs /tmp/jazz-do-jobs.json /tmp/jazz-do-failures.json
+
+# Native boundary regression tests.
+cargo test -p jazz --features durable-object-limits --test integration durable_object_limits
 ```
 
-Before the fixes: 225 distinct statements failed on DO (all over the
-bound-parameter cap), schema DDL over 100 KB failed to open
-(permissioned-resources), and 10 tests failed under the limits. After: none
-(the replay's remaining "no such table" errors are reopened file stores
-whose DDL ran on an earlier connection; the two suite failures,
-`ordered_page_preserves_id_ties_and_refills_after_deletions` and
-`predicate_json_and_postcard_encodings_are_pinned`, fail on the base branch
-too).
+The probe runner asserts transaction outcomes, exact casts, and key limit
+boundaries, and exits nonzero on a mismatch. `--bench` separately enables the
+old exec timing probe; ordinary compatibility runs do not measure performance.
 
-## What DO SQLite gives and refuses
+Replay executes DDL and prepares other statements with EXPLAIN QUERY PLAN and NULL
+bindings. It skips transaction statements and PRAGMAs; probes cover those
+separately. It does not execute the traced writes, prove result correctness,
+or reconstruct a reopened file's earlier connections. Full EXPLAIN cursor
+enumeration hung after schema changes in the pinned runtime; QUERY PLAN avoids
+bytecode rendering while still preparing SQL and draining each cursor. The
+runner saves progress, bounds each job to 30 seconds, records incomplete jobs,
+and exits nonzero for any failure. `START`/`END` select a job range and
+`DEBUG_JOB` prints its operations. Missing-table failures
+must be inspected rather than counted as platform incompatibility. Failed
+native prepares do not enter the SQL trace. Native limits do not emulate the
+DO authorizer, JS value bridge, or callback transaction lifetime.
 
-| Area                                                                                                                                  | DO SQLite                                                                                                                                                                                          | jazz-db today                                                                                                                                                                                     |
-| ------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Transactions                                                                                                                          | `BEGIN`/`SAVEPOINT`/`RELEASE`/`ROLLBACK` refused. `transactionSync(fn)` nests (inner throw rolls back only the inner scope). Async `transaction(fn)` holds across `await` and rolls back on throw. | 11 savepoint sites, 39% of all statements run. All lexical except `SAVEPOINT tx`, held across the async Jazz transaction callback.                                                                |
-| PRAGMAs                                                                                                                               | `journal_mode`, `synchronous`, `cache_size`, `user_version`, `temp_store`, `page_count` refused. `foreign_keys`, `recursive_triggers`, `table_info`, `optimize`, `quick_check` allowed.            | Only the file store sets PRAGMAs.                                                                                                                                                                 |
-| TEMP, ATTACH, rtree                                                                                                                   | Refused                                                                                                                                                                                            | Not used                                                                                                                                                                                          |
-| Triggers, WITHOUT ROWID, STRICT, partial and expression indexes, FTS5, window functions, recursive CTEs, `RETURNING`, upsert, ANALYZE | Allowed                                                                                                                                                                                            | Triggers, WITHOUT ROWID, expression indexes, recursive CTEs used                                                                                                                                  |
-| Functions                                                                                                                             | Allowlist. `sqlite_version`, `subtype`, `load_extension` refused; no `generate_series`, `carray`. `json_each`, `unhex`, `instr`, `substr` allowed.                                                 | Uses only `cast`, `coalesce`, `count`, `max`, `instr`, `substr` (+ `json_each`, `unhex` now). No custom functions or collations since the vanilla large-value format.                             |
-| Bound parameters                                                                                                                      | **100** per statement, `?NNN` up to `?100`                                                                                                                                                         | Up to 10,002 (IN lists, policy batches of 500 ids). **Fixed.**                                                                                                                                    |
-| Statement length                                                                                                                      | 100,000 bytes, for the whole text of one `exec` (multi-statement too)                                                                                                                              | Schema DDL batches past 100 KB. **Fixed.**                                                                                                                                                        |
-| Expression depth                                                                                                                      | 100 (a chain of n AND/OR terms is n deep)                                                                                                                                                          | Flat AND/OR chains. **Fixed** (balanced past 32 terms).                                                                                                                                           |
-| Columns per table                                                                                                                     | 100                                                                                                                                                                                                | 11 engine columns (`rid`, `id`, `_branch`, `_seq`, `_state`, `_base`, `_touched` and 4 provenance stamps), so 89 for the app. Not fixed: an explicit error for wider tables is the honest answer. |
-| Compound SELECT                                                                                                                       | 5 terms                                                                                                                                                                                            | 2 at most                                                                                                                                                                                         |
-| LIKE pattern                                                                                                                          | 50 bytes                                                                                                                                                                                           | Not used (`contains` is `instr`)                                                                                                                                                                  |
-| Value / row size                                                                                                                      | 2 MiB                                                                                                                                                                                              | Large values are chunked; largest traced value well under.                                                                                                                                        |
-| Integers                                                                                                                              | Read back as JS numbers (exact to 2^53); BigInt cannot be bound. Text bound against an INTEGER column compares exactly.                                                                            | Local seqs from 2^62 and scratch slots from 64 hash bits. **Fixed** (2^52 base, 52-bit slots). User `I64`/`U64` columns still need the bridge below.                                              |
-| Internal tables                                                                                                                       | `_cf_*` names reserved; `_cf_KV` appears in the file                                                                                                                                               | The "fresh store" check counted non-`_jazz_` tables. **Fixed.**                                                                                                                                   |
-| Exec cost                                                                                                                             | ~2.3 us per `exec` with a repeated text (workerd caches statements), ~7.4 us for a new text                                                                                                        | rusqlite statement cache, 512 entries                                                                                                                                                             |
+## Validation of this refresh
 
-## Fixes in jazz-db
+- Probe assertions pass on the pinned runtime, including async helper commit
+  and rollback, exact integer casts, storage classes, and limit boundaries.
+- The final workspace suite with all 12 native limits reports 2,644 passed,
+  2 failed, and 11 ignored.
+  Both failures are `durable_file` memory tests that read `/proc/self/status`,
+  which is unavailable on the macOS host. Their expectations were not changed.
+- A subsequent Jazz integration run, including the new fresh-schema,
+  schema-evolution, and retained-column boundary tests, reports 908 passed,
+  0 failed, and 4 ignored.
+- The new trace contains 5,376,911 statements, 14,360 distinct SQL texts, and
+  5,717 connections. This capture preceded adding the VM/trigger limits.
+  Replay preparation produces 2,142 jobs / 223,444 operations.
+  No traced binding exceeds 100 parameters or the scanned 2 MiB value bound.
+  Wide integer literals/bindings remain present and require the typed bridge.
+- All 2,142 replay jobs complete with 978 errors: 977 missing-table errors
+  (coverage gaps in per-connection schema reconstruction) and one reproducible
+  `SQLITE_NOMEM` on the S1 SaaS policy query. Missing-table errors are not passes.
+  There are no other error categories or timed-out jobs in the QUERY PLAN run.
 
-- **Long IN lists bind one JSON array.** Past 16 values, `x IN (?1, …, ?n)`
-  becomes `x IN (SELECT value FROM json_each(?k))` (`unhex(value)` for
-  blobs) in the query compiler, the policy batch check (`versions_in`) and
-  the fan-out order-key read. One placeholder, one cached statement for
-  every length. Cost natively (Python sqlite3, 100k-row table, encoding
-  included): +40% at 20 ids, +15% at 500, +70% at 10,000 on that one
-  statement. Reals and blobs mixed with other types keep placeholders.
-- **DDL runs one statement at a time** (`execute_script`), split at
-  `sqlite3_complete` boundaries so trigger bodies stay whole.
-- **AND/OR chains nest in halves past 32 terms**, so depth grows with
-  log n. SQLite splits nested AND/OR terms the same as a flat chain.
-- **Engine integers stay below 2^53**: `LOCAL_BASE` is 2^52,
-  `NON_DURABLE_BASE` (a worker's tabs) is 1.5 · 2^52, scratch slots are 52
-  bits.
-- **The fresh-store check ignores `_cf_*` tables** and escapes `_` in its
-  LIKE pattern.
+The S1 failure combines history-cut unions with nested membership/inheritance
+policy joins. Its full EXPLAIN contains 32,106 instructions on SQLite 3.51.3
+and 31,459 on Jazz's bundled SQLite 3.53.2. Setting the 25,000 VM allocation
+limit reproduces the failure on both versions. The native S1 scenario tests
+still pass, so they do not establish that this exact emitted shape fits. This
+is a query-shape restriction, not evidence of exhausted isolate heap. The
+fixture contains only the existing simulator's synthetic DDL and the failing
+query; it fails in a fresh workerd with no application rows:
 
-## What still needs a seam (the next step)
+```sh
+node dev/durable-objects/run-replay.mjs \
+  dev/durable-objects/fixtures/s1-policy-prepare.json /tmp/s1-policy-failures.json
+# Expected today: one SQLITE_NOMEM failure and a nonzero exit.
+```
 
-None of these change the data model; they decide the shape of a storage
-trait jazz-db could adopt (rusqlite natively and in the browser,
-`ctx.storage.sql` through a JS bridge on DO).
+The existing S1 expectations remain unchanged. This baseline does not resolve
+policy-query expansion or establish support for the failing shape. Do not turn
+an arbitrary SQLITE_NOMEM into an unsupported-query error: real allocation
+failures share that code and need to remain distinguishable.
 
-1. **Transactions as scopes, not statements.** Replace the 11
-   `execute_batch("SAVEPOINT …")` sites with `storage.scope(|| …)`:
-   `SAVEPOINT`/`RELEASE`/`ROLLBACK TO` on rusqlite, nested
-   `transactionSync` on DO (an `Err` becomes a throw, which rolls back that
-   scope only). Ten sites are already lexical.
-2. **The async Jazz transaction holds `SAVEPOINT tx` across `await`.** On DO
-   the callback-shaped `transaction()` can't be opened from Rust and closed
-   later without its release slipping to a microtask. Principled fix: stage
-   a mergeable transaction's writes the way open transaction batches
-   already are, and apply them in one scope at commit (reads-your-writes
-   through the existing overlay scope). Fallback: run the callback inside
-   `transactionSync` and refuse with "awaiting I/O inside a transaction is
-   not supported on Durable Objects yet" if it does not complete in one
-   poll.
-3. **Commit and rollback hooks** (the large-value chunk cache pins nodes
-   until commit) become "outermost scope ended" callbacks from (1).
-4. **No reader connection.** The file store's second, read-only connection
-   reads chunks while the writer is mid-statement. On DO there is one
-   connection; read chunks through it, and give the chunk cache a byte
-   budget (a DO isolate has 128 MB, shared by its objects), as file stores
-   have.
-5. **No PRAGMAs**: a DO store is a durable store without the file store's
-   PRAGMAs (durability and caching are DO's).
-6. **Exact 64-bit integers.** The bridge binds integers beyond 2^53 as
-   decimal text (exact against INTEGER columns), and the compiler projects
-   `I64`/`U64` columns as `CAST(… AS TEXT)` on DO so the decoder, which
-   already decodes by declared type, parses them exactly.
-7. **The statement surface is small.** jazz-db uses `prepare_cached`
-   (25 sites), `query_row` (25), `query_map` (13), `execute` (33),
-   `execute_batch` (41, mostly savepoints and DDL) and reads `ValueRef`
-   cells. A trait with `exec(sql, params) -> rows`, `scope(f)` and
-   `on_commit` covers it; DO's per-text statement cache stands in for
-   rusqlite's.
+## Historical evidence
 
-Risks to keep an eye on:
-
-- **Expression depth 100** also bounds nested `EXISTS` (multi-hop
-  policies), `CASE` nesting from large-value comparisons and unrolled
-  `Inherits`. Every current test passes under the limit; a compile-time
-  depth check that answers "not supported yet" would make it explicit.
-- **95 app columns per table.**
-- **Per-statement overhead**: ~2.3 us per `exec` plus the wasm-to-JS
-  crossing, against ~1 us natively. Savepoints are 39% of statements today;
-  as `transactionSync` scopes they cost a JS call each, not an `exec`.
-
-A CI job running `cargo test --workspace --features jazz/durable-object-limits`
-keeps all of this from regressing.
+The October spike captured 2.4 million statements, 17,000 distinct SQL texts,
+and 1,624 connections. It found and fixed long IN bindings, oversized DDL
+batches, deep AND/OR chains, engine integer ranges, and fresh-store detection.
+Those counts and its reported suite results describe that snapshot, not the
+current tree. Its 89/95 app-column figures and large-value TEXT-marker advice
+are obsolete. The subsequent #4579 experiment ran sync over WebSockets with
+10–500 sessions, but its timing and memory estimates are not measurements of
+this refreshed build.

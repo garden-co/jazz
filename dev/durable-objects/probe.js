@@ -7,7 +7,7 @@ export class Probe {
     this.ctx = ctx;
   }
 
-  async fetch() {
+  async fetch(request) {
     const storage = this.ctx.storage;
     const sql = storage.sql;
     const out = {};
@@ -21,6 +21,12 @@ export class Probe {
     };
     const rows = (q, ...b) => sql.exec(q, ...b).toArray();
     const all = () => sql.exec("select group_concat(x) g from a").one().g;
+    await t("internal tables", async () => {
+      await storage.put("probe", true);
+      return rows("select name from sqlite_master where type = 'table' order by name").map(
+        (row) => row.name,
+      );
+    });
     sql.exec("create table a(x)");
 
     // Transactions: SQL transaction statements are refused.
@@ -46,6 +52,28 @@ export class Probe {
           throw new Error("boom");
         });
       } catch {}
+      return all();
+    });
+    await t("async helper SQL rolls back with caller", async () => {
+      const helper = async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        sql.exec("insert into a values (4)");
+      };
+      try {
+        await storage.transaction(async () => {
+          await helper();
+          throw new Error("rollback helper");
+        });
+      } catch (error) {
+        if (error.message !== "rollback helper") throw error;
+      }
+      return all();
+    });
+    await t("async helper SQL commits with caller", async () => {
+      await storage.transaction(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        sql.exec("insert into a values (5)");
+      });
       return all();
     });
 
@@ -110,6 +138,16 @@ export class Probe {
       await t("fn " + f, () => JSON.stringify(rows("select " + f + " v")[0].v));
 
     // Limits.
+    for (const n of [5000, 8000])
+      await t(`VM budget IN literals ${n}`, () => {
+        const values = Array.from({ length: n }, (_, i) => i).join(",");
+        return rows(`select 1 v where 1 in (${values})`)[0].v;
+      });
+    for (const n of [32, 33, 127, 128])
+      await t(
+        `function arguments ${n}`,
+        () => rows(`select coalesce(${Array(n).fill("1").join(",")}) v`)[0].v,
+      );
     for (const n of [100, 101])
       await t(
         `bound params ${n}`,
@@ -119,8 +157,11 @@ export class Probe {
             ...Array(n).fill(1),
           )[0].c,
       );
-    for (const n of [99_000, 100_000])
-      await t(`statement ${n} bytes`, () => rows("select 1 v /*" + "x".repeat(n - 15) + "*/")[0].v);
+    for (const n of [99_999, 100_000, 100_001])
+      await t(`statement ${n} bytes`, () => {
+        const prefix = "select 1 v /*";
+        return rows(prefix + "x".repeat(n - prefix.length - 2) + "*/")[0].v;
+      });
     await t(
       "150 KB across 30 statements in one exec",
       () =>
@@ -174,17 +215,34 @@ export class Probe {
     await t("blob comes back as", () =>
       Object.prototype.toString.call(rows("select x'00ff' v")[0].v),
     );
+    await t("wide integer in affinity-free column", () => {
+      sql.exec("create table untyped(v)");
+      sql.exec("insert into untyped values (?)", "9007199254740993");
+      return rows("select typeof(v) type, v = 9007199254740993 equal from untyped")[0];
+    });
+    await t("exact cast integer round trips", () => {
+      sql.exec("create table exact(v)");
+      const values = ["-9223372036854775808", "9007199254740993", "9223372036854775807"];
+      for (const value of values) sql.exec("insert into exact values (cast(? as integer))", value);
+      return rows("select typeof(v) type, cast(v as text) value from exact order by v");
+    });
+    await t("integer epoch and real storage classes", () => {
+      sql.exec("create table cells(v)");
+      sql.exec("insert into cells values (42), (1.0), ('inline'), (x'00ff')");
+      return rows("select typeof(v) type from cells").map((row) => row.type);
+    });
 
     // Cost of one exec (same text is cached by workerd).
-    await t("exec cost", () => {
-      let s = performance.now();
-      for (let i = 0; i < 20000; i++) sql.exec("select x from a where x = ?", i).toArray();
-      const same = ((performance.now() - s) * 1000) / 20000;
-      s = performance.now();
-      for (let i = 0; i < 20000; i++) sql.exec("select x from a where x = " + i).toArray();
-      const unique = ((performance.now() - s) * 1000) / 20000;
-      return `same text ${same.toFixed(2)} us, unique text ${unique.toFixed(2)} us`;
-    });
+    if (new URL(request.url).searchParams.has("bench"))
+      await t("exec cost", () => {
+        let s = performance.now();
+        for (let i = 0; i < 20000; i++) sql.exec("select x from a where x = ?", i).toArray();
+        const same = ((performance.now() - s) * 1000) / 20000;
+        s = performance.now();
+        for (let i = 0; i < 20000; i++) sql.exec("select x from a where x = " + i).toArray();
+        const unique = ((performance.now() - s) * 1000) / 20000;
+        return `same text ${same.toFixed(2)} us, unique text ${unique.toFixed(2)} us`;
+      });
     return Response.json(out);
   }
 }

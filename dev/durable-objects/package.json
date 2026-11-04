@@ -1,0 +1,12 @@
+{
+  "name": "jazz-durable-objects-spike",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "probe": "node run-probe.mjs",
+    "replay": "node run-replay.mjs"
+  },
+  "devDependencies": {
+    "miniflare": "4.20260730.0"
+  }
+}

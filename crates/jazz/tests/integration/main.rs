@@ -39,6 +39,8 @@ mod composite_indexes;
 mod deleted_rows;
 #[path = "../deployment_preparation.rs"]
 mod deployment_preparation;
+#[path = "../durable_object_limits.rs"]
+mod durable_object_limits;
 #[path = "../dynamic_schema_views.rs"]
 mod dynamic_schema_views;
 #[path = "../enum_tags.rs"]

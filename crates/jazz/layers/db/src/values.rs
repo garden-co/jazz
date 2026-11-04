@@ -1472,6 +1472,8 @@ impl Schema {
     /// `ADD COLUMN ... DEFAULT` for new columns (an O(1) schema change; old
     /// rows read the default without being rewritten) and new indexes.
     pub fn union(&mut self, other: &Schema) -> Result<String, Error> {
+        #[cfg(feature = "durable-object-limits")]
+        crate::durable_object_limits::validate_schema(other, Some(self))?;
         let mut ddl = String::new();
         for table in other.tables.values() {
             let name = &table.stored;

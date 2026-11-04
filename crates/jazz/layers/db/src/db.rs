@@ -1365,6 +1365,8 @@ impl Db {
         // the names it was stored under.
         let mut admitted = crate::catalogue::admitted(&conn)?;
         let schema = names.resolve(&config.schema, &[], names.latest())?;
+        #[cfg(feature = "durable-object-limits")]
+        crate::durable_object_limits::validate_schema(&schema, None)?;
         names.check_branches(&schema)?;
         names.check_types(&schema)?;
         // Variants are tagged before any DDL: an enum default is its tag.
