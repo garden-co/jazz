@@ -104,7 +104,7 @@ it("backend initialization retains roots but never persists backend selection or
   const session = await createJazzSessionOwner({
     accounts,
     openClient,
-    initial: { backendSecret: "ephemeral-secret" },
+    backend: { backendSecret: "ephemeral-secret" },
   });
   expect(session.getSnapshot().account?.identity).toEqual({
     issuer: "urn:jazz:system",
