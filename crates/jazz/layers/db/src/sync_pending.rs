@@ -101,24 +101,6 @@ pub(crate) const REJECTED_OPS_DDL: [&str; 3] = [
 /// The op tables, by suffix after `_jazz_pending_` or `_jazz_rejected_`.
 pub(crate) const OP_TABLES: [&str; 3] = ["ops", "cells", "deltas"];
 
-fn has_table(conn: &rusqlite::Connection, name: &str) -> Result<bool, Error> {
-    conn.query_row(
-        "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-        [name],
-        |r| r.get(0),
-    )
-    .map_err(storage)
-}
-
-fn has_rows(conn: &rusqlite::Connection, table: &str) -> Result<bool, Error> {
-    Ok(has_table(conn, table)?
-        && conn
-            .query_row(&format!("SELECT count(*) > 0 FROM {table}"), [], |r| {
-                r.get(0)
-            })
-            .map_err(storage)?)
-}
-
 /// A stored part that does not read back is another layout's: refused as
 /// an unsupported storage format, never misread.
 fn bad(detail: impl std::fmt::Display) -> Error {
