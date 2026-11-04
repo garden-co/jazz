@@ -48,7 +48,7 @@ export const jazz = await createJazz({
   authenticate: fromJWT({
     jwksUrl: "https://idp.example.com/.well-known/jwks.json",
     issuer: "https://idp.example.com",
-    audience: "my-app", // when your provider sets `aud`
+    audience: "my-app",
   }),
 });
 ```
@@ -58,6 +58,11 @@ export const jazz = await createJazz({
 - **Which claims your policies see:** by default every claim except the registered ones (`iss`,
   `sub`, `aud`, `exp`, `nbf`, `iat`, `jti`). Pass `claims: (payload) => ({ role: payload.role })`
   to choose.
+- **Audience:** required. Name the audience your provider puts in `aud` for this app, so a token
+  issued to another app on the same tenant is refused. Pass `audience: false` only when your
+  issuer is already specific to this app and its tokens carry no `aud` (WorkOS, for example).
+- **Expiry:** tokens must carry `exp`. `exp` and `nbf` are checked with 60 seconds of leeway for
+  clock skew; change it with `clockToleranceSeconds`.
 - **Keys:** pass `publicKey` (PEM, X.509 or a JWK) instead of `jwksUrl` if your provider gives you
   a key rather than a JWKS endpoint.
 

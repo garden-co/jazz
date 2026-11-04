@@ -10,8 +10,15 @@ export interface FromJWTOptions {
   publicKey?: BackendJwtPublicKey;
   /** The `iss` every accepted token carries. Tokens from any other issuer are refused. */
   issuer: string;
-  /** Accepted `aud` values, when the issuer sets one. */
-  audience?: string | readonly string[];
+  /**
+   * The `aud` values that name this app. Required: an issuer shared by
+   * several apps (an Auth0 or Clerk tenant) signs tokens for all of them.
+   * Pass `false` only when the issuer itself is this app's alone (WorkOS's
+   * issuer names your client id) and its tokens carry no audience.
+   */
+  audience: string | readonly string[] | false;
+  /** Seconds of clock skew allowed on `exp` and `nbf`. Defaults to 60. */
+  clockToleranceSeconds?: number;
   /**
    * Where the token comes from. Defaults to the `Authorization: Bearer`
    * header. Return null when the request carries none.
@@ -41,8 +48,9 @@ function isReservedIssuer(issuer: string): boolean {
  * An `authenticate` for {@link createJazz} that signs users in with JWTs
  * from your identity provider (WorkOS, Auth0, Clerk, any OIDC issuer).
  *
- * It verifies the token's signature, expiry, issuer and audience, and names
- * the user by its `sub`. A request without a token, or with one that does
+ * It verifies the token's signature, expiry (`exp` is required; 60 seconds
+ * of clock skew are allowed), `nbf`, issuer and audience, and names the
+ * user by its `sub`. A request without a token, or with one that does
  * not verify, is signed out (null). A JWKS that cannot be fetched is the
  * server's problem and throws, so clients retry instead of signing out.
  *
@@ -50,8 +58,9 @@ function isReservedIssuer(issuer: string): boolean {
  * createJazz({
  *   app, permissions, store,
  *   authenticate: fromJWT({
- *     jwksUrl: `https://api.workos.com/sso/jwks/${clientId}`,
- *     issuer: `https://api.workos.com/user_management/${clientId}`,
+ *     jwksUrl: "https://my-tenant.auth0.com/.well-known/jwks.json",
+ *     issuer: "https://my-tenant.auth0.com/",
+ *     audience: "https://api.my-app.com",
  *   }),
  * });
  * ```
@@ -64,12 +73,29 @@ export function fromJWT(options: FromJWTOptions): (request: Request) => Promise<
   if ((options.jwksUrl === undefined) === (options.publicKey === undefined)) {
     throw new Error("fromJWT: pass exactly one of jwksUrl and publicKey");
   }
+  const audience = options.audience as unknown;
+  if (
+    audience !== false &&
+    !(typeof audience === "string" && audience !== "") &&
+    !(
+      Array.isArray(audience) &&
+      audience.length > 0 &&
+      audience.every((a) => typeof a === "string" && a !== "")
+    )
+  ) {
+    throw new Error("fromJWT: audience is required (or false when the issuer is this app's alone)");
+  }
+  const lifetime = {
+    requireExp: true,
+    checkNotBefore: true,
+    clockToleranceSeconds: options.clockToleranceSeconds ?? 60,
+  };
   const config = {
     appId: "",
     jwtIssuer: options.issuer,
     ...(options.jwksUrl === undefined ? {} : { jwksUrl: options.jwksUrl }),
     ...(options.publicKey === undefined ? {} : { jwtPublicKey: options.publicKey }),
-    ...(options.audience === undefined ? {} : { jwtAudience: options.audience }),
+    ...(options.audience === false ? {} : { jwtAudience: options.audience }),
   };
   const readToken = options.token ?? bearerToken;
   const readClaims =
@@ -83,17 +109,12 @@ export function fromJWT(options: FromJWTOptions): (request: Request) => Promise<
     const payload = parseJwtPayload(token);
     if (!payload || typeof payload.sub !== "string" || payload.sub === "") return null;
     try {
-      await verifyExternalJwt(token, payload, config);
+      await verifyExternalJwt(token, payload, config, lifetime);
     } catch (error) {
       // A token that does not verify signs nobody in; an unreachable
       // JWKS or an unusable key is the server's problem.
       if (isRequestAuthenticationError(error)) return null;
       throw error;
-    }
-    if (payload.nbf !== undefined) {
-      if (typeof payload.nbf !== "number" || payload.nbf > Math.floor(Date.now() / 1000)) {
-        return null;
-      }
     }
     return { userId: payload.sub, claims: readClaims(payload) };
   };

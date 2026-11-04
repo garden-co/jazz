@@ -242,7 +242,7 @@ describe("createJazz", () => {
       app,
       permissions,
       store: memory(),
-      authenticate: fromJWT({ publicKey: await exportJWK(publicKey), issuer }),
+      authenticate: fromJWT({ publicKey: await exportJWK(publicKey), issuer, audience: "my-app" }),
     });
     cleanups.push(() => jazz.close());
     const bearer = async (subject: string) =>
@@ -251,6 +251,7 @@ describe("createJazz", () => {
           authorization: `Bearer ${await new SignJWT({ role: "editor" })
             .setProtectedHeader({ alg: "ES256" })
             .setIssuer(issuer)
+            .setAudience("my-app")
             .setSubject(subject)
             .setExpirationTime("5m")
             .sign(privateKey)}`,

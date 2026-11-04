@@ -50,6 +50,8 @@ policies as `session.claims`:
 authenticate: fromJWT({
   jwksUrl: `https://api.workos.com/sso/jwks/${WORKOS_CLIENT_ID}`,
   issuer: `https://api.workos.com/user_management/${WORKOS_CLIENT_ID}`,
+  // WorkOS access tokens carry no `aud`; the issuer already names your client id.
+  audience: false,
 }),
 ```
 
