@@ -4993,6 +4993,28 @@ pub(crate) const WITHHELD_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_withheld
 const WATERMARKS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_watermarks \
     (key BLOB PRIMARY KEY, through INTEGER NOT NULL, under BLOB) WITHOUT ROWID";
 
+/// Forget watermarks a development store kept before they recorded the
+/// bundle they were settled under (`under`): which bundle each was
+/// settled under is unknown, so none may resume a read. Watermarks only
+/// spare a reconnect the rows it already holds, so a read without one
+/// opens fresh and loses nothing. One statement, so a crash leaves either
+/// the old table or none.
+pub(crate) fn forget_unbundled_watermarks(conn: &rusqlite::Connection) -> Result<(), Error> {
+    let stale: bool = conn
+        .query_row(
+            "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' \
+             AND name = '_jazz_watermarks' AND sql NOT LIKE '%under BLOB%'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(storage)?;
+    if stale {
+        conn.execute_batch("DROP TABLE _jazz_watermarks")
+            .map_err(storage)?;
+    }
+    Ok(())
+}
+
 /// A remote query's `_jazz_watermarks` key: what it reads, and as whom.
 /// How far it reaches (tier and wait) is not part of it: every tier's
 /// result settles from the same server state.
@@ -13114,6 +13136,41 @@ impl Db {
 mod tests {
     use super::*;
     use crate::ids::NodeUuid;
+
+    #[test]
+    fn watermarks_from_before_bundles_are_forgotten_and_current_ones_kept() {
+        let tables = |conn: &rusqlite::Connection| -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = '_jazz_watermarks'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let old = rusqlite::Connection::open_in_memory().unwrap();
+        old.execute_batch(
+            "CREATE TABLE _jazz_watermarks (key BLOB PRIMARY KEY, through INTEGER NOT NULL) \
+             WITHOUT ROWID; INSERT INTO _jazz_watermarks VALUES (x'01', 5);",
+        )
+        .unwrap();
+        forget_unbundled_watermarks(&old).unwrap();
+        assert_eq!(tables(&old), 0, "a watermark of unknown bundle cannot resume");
+
+        let current = rusqlite::Connection::open_in_memory().unwrap();
+        current.execute_batch(WATERMARKS_DDL).unwrap();
+        current
+            .execute("INSERT INTO _jazz_watermarks VALUES (x'01', 5, NULL)", [])
+            .unwrap();
+        forget_unbundled_watermarks(&current).unwrap();
+        let kept: i64 = current
+            .query_row("SELECT count(*) FROM _jazz_watermarks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1);
+
+        let none = rusqlite::Connection::open_in_memory().unwrap();
+        forget_unbundled_watermarks(&none).unwrap();
+        assert_eq!(tables(&none), 0, "nothing is created");
+    }
 
     #[test]
     fn replace_name_rewrites_only_whole_names() {
