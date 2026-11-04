@@ -57,6 +57,7 @@ export function appConfig(id) {
           NODE_ENV: "production",
           NEXT_TELEMETRY_DISABLED: "1",
           NEXT_PUBLIC_APP_ORIGIN: origin,
+          NEXT_PUBLIC_JAZZ_APP_ID: appId,
           JAZZ_APP_ID: appId,
           // The app's backend keeps its data on the local sync server.
           JAZZ_SERVER_URL: serverUrl,
@@ -64,7 +65,7 @@ export function appConfig(id) {
           BETTER_AUTH_SECRET: betterAuthSecret,
           ...a.env,
         }
-      : { JAZZ_APP_ID: appId, JAZZ_IN_MEMORY: "1" };
+      : { VITE_JAZZ_APP_ID: appId, JAZZ_IN_MEMORY: "1" };
   const sync = { appId, backendSecret, adminSecret };
   const dir = join(repo, a.dir);
   const [assetPrefix, staticDir, buildDir] =

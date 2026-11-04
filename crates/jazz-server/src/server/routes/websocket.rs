@@ -5239,14 +5239,14 @@ mod tests {
         );
     }
 
-    /// Publish the docs schema with `select` as its read policy, as a
-    /// backend publishes its bundle on boot: the answer's status and body.
-    async fn post_docs_bundle(
+    /// Publish the docs schema as a bundle whose docs read by `select`
+    /// (createJazz's `/bundles`); its hex id.
+    async fn publish_docs_bundle(
         addr: std::net::SocketAddr,
         state: &Arc<ServerState>,
         schema: &Schema,
         select: PolicyExpr,
-    ) -> (reqwest::StatusCode, serde_json::Value) {
+    ) -> String {
         let hash = jazz::tools::public_schema::SchemaHash::compute(schema).to_string();
         let response = reqwest::Client::new()
             .post(format!("http://{addr}/apps/{}/admin/bundles", state.app_id))
@@ -5266,18 +5266,6 @@ mod tests {
             .expect("publish bundle");
         let status = response.status();
         let body: serde_json::Value = response.json().await.expect("bundle response");
-        (status, body)
-    }
-
-    /// Publish the docs schema as a bundle whose docs read by `select`
-    /// (createJazz's `/bundles`); its hex id.
-    async fn publish_docs_bundle(
-        addr: std::net::SocketAddr,
-        state: &Arc<ServerState>,
-        schema: &Schema,
-        select: PolicyExpr,
-    ) -> String {
-        let (status, body) = post_docs_bundle(addr, state, schema, select).await;
         assert_eq!(status, reqwest::StatusCode::OK, "{body}");
         body["bundle"].as_str().expect("bundle id").to_owned()
     }
@@ -5453,20 +5441,13 @@ mod tests {
         bind_thin_schema(&mut thin_ws, &schema).await;
         // An unpinned SYSTEM link (an admin's, the system's own) is pinned
         // to no bundle, so no permissions change ends it.
-        let system_ws = open_negotiated_ws_with_prelude_and_features(
+        let mut system_ws = open_negotiated_ws_with_prelude_and_features(
             addr,
             &state,
             ws_prelude(AuthorSubject::SYSTEM),
             0,
         )
         .await;
-
-        // A publish ends sessions in the job that commits it, before it
-        // answers, so the runtime's session count right after a publish is
-        // exact: no close can still be on its way.
-        let runtime = state.runtime().expect("runtime");
-        let open = runtime.open_sessions_for_test().await;
-        assert_eq!(open, 3, "the sync, thin and system sessions");
 
         // Publishing it again (a cold start, a deployment running beside
         // one that published the same permissions) ends no one.
@@ -5475,8 +5456,8 @@ mod tests {
             first
         );
         assert_eq!(
-            runtime.open_sessions_for_test().await,
-            open,
+            next_wire_error(&mut sync_ws, Duration::from_millis(300)).await,
+            None,
             "republishing the same bundle leaves its sessions alone"
         );
 
@@ -5484,13 +5465,6 @@ mod tests {
         // backend pins them again.
         let second = publish_docs_bundle(addr, &state, &schema, PolicyExpr::False).await;
         assert_ne!(second, first);
-        assert_eq!(
-            runtime.open_sessions_for_test().await,
-            open - 2,
-            "exactly the two pinned sessions end; the unpinned SYSTEM link stays"
-        );
-        // The first error each one receives names the new bundle, so the
-        // republish above sent none.
         for (ws, kind) in [(&mut sync_ws, "sync"), (&mut thin_ws, "thin")] {
             let error = next_wire_error(ws, Duration::from_secs(5))
                 .await
@@ -5498,6 +5472,11 @@ mod tests {
             assert!(error.asks_reconnect_later(), "{kind}: {error:?}");
             assert!(error.message.contains(&second), "{kind}: {error:?}");
         }
+        assert_eq!(
+            next_wire_error(&mut system_ws, Duration::from_millis(300)).await,
+            None,
+            "an unpinned SYSTEM link survives new permissions"
+        );
 
         // A session pinned to the old bundle may open again: a deployment
         // still serving it pins its own sessions as before.
@@ -5522,96 +5501,21 @@ mod tests {
         )
         .await;
         bind_thin_schema(&mut on_second, &schema).await;
-        let open = runtime.open_sessions_for_test().await;
-        assert_eq!(open, 3, "the system link and two thin sessions");
         assert_eq!(
             publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await,
             first
         );
-        assert_eq!(
-            runtime.open_sessions_for_test().await,
-            open,
-            "a rollback ends no session on either bundle, nor the system link"
-        );
-        // Both thin sessions still answer.
-        assert!(thin_titles(&mut again, 2, None).await.is_empty());
-        assert!(thin_titles(&mut on_second, 1, None).await.is_empty());
-        drop(system_ws);
-    }
-
-    /// A publish whose commit succeeds but whose next step fails (here the
-    /// catalogue reload) still ended the sessions on other bundles, and a
-    /// retry, which finds nothing to change, leaves them ended.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_new_bundle_that_fails_after_its_commit_still_ends_other_sessions() {
-        let schema = private_docs_public_schema();
-        let state = bundle_test_state().await;
-        let addr = start_ws_test_server(state.clone()).await;
-        let first = publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await;
-        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
-        let mut ws = open_negotiated_ws_with_prelude_and_features(
-            addr,
-            &state,
-            pinned_thin_prelude(alice, Some(&first)),
-            jazz::wire::FEATURE_THIN_RESULTS,
-        )
-        .await;
-        bind_thin_schema(&mut ws, &schema).await;
-        let runtime = state.runtime().expect("runtime");
-        assert_eq!(runtime.open_sessions_for_test().await, 1);
-
-        runtime.fail_next_catalogue_reload_for_test().await;
-        let (status, body) = post_docs_bundle(addr, &state, &schema, PolicyExpr::False).await;
-        assert_eq!(
-            status,
-            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-            "the injected failure fails the deploy: {body}"
-        );
-        assert_eq!(
-            runtime.open_sessions_for_test().await,
-            0,
-            "the commit ended the session on the other bundle anyway"
-        );
-        let error = next_wire_error(&mut ws, Duration::from_secs(5))
-            .await
-            .expect("the session was told to reconnect");
-        assert!(error.asks_reconnect_later(), "{error:?}");
-
-        // The retry finds the bundle published and changes nothing.
-        let version = jazz::schema::JazzSchema::new(&schema)
-            .expect("docs schema")
-            .version_id();
-        assert!(
-            !runtime
-                .runtime_catalogue_contains_schema(version)
-                .await
-                .unwrap(),
-            "the failed reload left the runtime's catalogue behind"
-        );
-        let (status, body) = post_docs_bundle(addr, &state, &schema, PolicyExpr::False).await;
-        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-        assert_eq!(body["changed"], false, "{body}");
-        let second = body["bundle"].as_str().expect("bundle id").to_owned();
-        assert_ne!(second, first);
-        assert_eq!(runtime.open_sessions_for_test().await, 0);
-        // The retry brought the runtime's catalogue up to date, and the new
-        // bundle serves.
-        assert!(
-            runtime
-                .runtime_catalogue_contains_schema(version)
-                .await
-                .unwrap(),
-            "the retry reloads the runtime's catalogue"
-        );
-        let mut on_second = open_negotiated_ws_with_prelude_and_features(
-            addr,
-            &state,
-            pinned_thin_prelude(alice, Some(&second)),
-            jazz::wire::FEATURE_THIN_RESULTS,
-        )
-        .await;
-        bind_thin_schema(&mut on_second, &schema).await;
-        assert!(thin_titles(&mut on_second, 1, None).await.is_empty());
+        for (ws, kind) in [
+            (&mut again, "old bundle"),
+            (&mut on_second, "newer bundle"),
+            (&mut system_ws, "system link"),
+        ] {
+            assert_eq!(
+                next_wire_error(ws, Duration::from_millis(300)).await,
+                None,
+                "a rollback leaves the {kind}'s session alone"
+            );
+        }
     }
 
     /// The error a connection opening with `prelude` and negotiating

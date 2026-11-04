@@ -11,7 +11,7 @@ function Data() {
 }
 export const nativeApplication = (
   <JazzProvider
-    scope="native-app"
+    appId="native-app"
     serverUrl="https://sync.example.test"
     store={store}
     signedOut={null}

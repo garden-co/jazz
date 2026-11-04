@@ -8,7 +8,7 @@ export const LOCAL_DEFAULTS = Object.freeze({
 export function readBuildConfig(env = process.env) {
   return {
     origin: env.NEXT_PUBLIC_APP_ORIGIN ?? LOCAL_DEFAULTS.origin,
-    appId: env.JAZZ_APP_ID ?? LOCAL_DEFAULTS.appId,
+    appId: env.NEXT_PUBLIC_JAZZ_APP_ID ?? LOCAL_DEFAULTS.appId,
     /**
      * Where the data lives. With JAZZ_SERVER_URL set, the backend connects to
      * that sync server (such as Jazz Cloud) with the app's admin secret; otherwise
@@ -26,7 +26,7 @@ export function readBuildConfig(env = process.env) {
     /** Which deployment settings were set explicitly rather than defaulted. */
     explicit: {
       origin: Boolean(env.NEXT_PUBLIC_APP_ORIGIN),
-      appId: Boolean(env.JAZZ_APP_ID),
+      appId: Boolean(env.NEXT_PUBLIC_JAZZ_APP_ID),
     },
   };
 }
@@ -55,7 +55,7 @@ export function assertBuildConfiguration(config = readBuildConfig()) {
   const production = config.nodeEnv === "production";
   const missing = [
     production && !config.explicit.origin && "NEXT_PUBLIC_APP_ORIGIN",
-    production && !config.explicit.appId && "JAZZ_APP_ID",
+    production && !config.explicit.appId && "NEXT_PUBLIC_JAZZ_APP_ID",
     !config.betterAuthSecret && "BETTER_AUTH_SECRET",
     config.remote && !config.remote.adminSecret && "JAZZ_ADMIN_SECRET",
   ].filter(Boolean);

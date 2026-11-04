@@ -2,7 +2,7 @@
 //! prints cell values, string prefixes and authors: customer data. Only run
 //! it on synthetic dumps.
 
-use jazz_alpha59_dump::{Reader, Record, Value};
+use migrate_alpha59_dump::{Reader, Record, Value};
 
 fn short(value: &Value) -> String {
     match value {

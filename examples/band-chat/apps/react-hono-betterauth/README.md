@@ -24,5 +24,5 @@ pnpm start        # production server on APP_ORIGIN's port (or PORT)
 pnpm test:e2e     # Playwright smoke against `pnpm dev`
 ```
 
-Deployments set `APP_ORIGIN`, `JAZZ_APP_ID` and `BETTER_AUTH_SECRET`, and
+Deployments set `APP_ORIGIN`, `VITE_JAZZ_APP_ID` and `BETTER_AUTH_SECRET`, and
 optionally `JAZZ_SERVER_URL` with the app's secrets (see `.env.example`).

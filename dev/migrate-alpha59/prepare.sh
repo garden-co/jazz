@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
-# Set up the alpha.59 checkout the exporter builds in: jazz at
-# v2.0.0-alpha.59, plus the read-only export hooks, the dump crate, and the
-# exporter and test-fixture crates as workspace members.
+# Set up the two throwaway checkouts the migration tool builds in:
 #
-# The exporter has to link alpha.59 itself: it reads the store with
-# alpha.59's own decoders. It can't share a build with `jazz-tools` either:
-# the two pull different libsqlite3-sys versions, which both declare
-# `links = "sqlite3"`. The import side is `jazz-tools migrate-alpha59`.
+#   .a59/  jazz at v2.0.0-alpha.59, plus the read-only export hook and the
+#          a59-export binary as a workspace member.
+#   .a60/  jazz at the SQLite engine commit, plus the import hook and the
+#          sqlite-import binary as a workspace member.
 #
-#   dev/migrate-alpha59/prepare.sh
-#   A59_DIR=...  use an existing checkout instead of cloning into .a59/.
+# Each binary is built by its own checkout's workspace (its lockfile,
+# patches and profiles), so it links exactly that version of Jazz. The two
+# can't share one build: they pull different libsqlite3-sys versions, which
+# both declare `links = "sqlite3"`.
+#
+#   dev/migrate-alpha59/prepare.sh [a59|a60|both]
+#   A59_DIR=... A60_DIR=...  use existing checkouts instead of cloning.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-crates="$(cd "$here/../../crates" && pwd)"
 repo="${JAZZ_REPO:-https://github.com/garden-co/jazz.git}"
 a59_ref="v2.0.0-alpha.59"
+# Main with every deployment published as a bundle (#4674). Repin to the
+# alpha.60 release commit before any production run.
+a60_ref="${A60_REF:-d87b3caad}"
 
 checkout() { # dir ref
   local dir="$1" ref="$2"
@@ -29,8 +34,10 @@ checkout() { # dir ref
 install_tool() { # dir crate
   local dir="$1" crate="$2"
   mkdir -p "$dir/dev/migrate-alpha59"
-  rm -rf "$dir/dev/migrate-alpha59/$crate"
+  rm -rf "$dir/dev/migrate-alpha59/dump" "$dir/dev/migrate-alpha59/$crate"
+  cp -R "$here/dump" "$dir/dev/migrate-alpha59/dump"
   cp -R "$here/$crate" "$dir/dev/migrate-alpha59/$crate"
+  rm -rf "$dir/dev/migrate-alpha59/dump/target" "$dir/dev/migrate-alpha59/dump/Cargo.lock"
   # Join that checkout's workspace.
   if ! grep -q "\"dev/migrate-alpha59/$crate\"" "$dir/Cargo.toml"; then
     sed -i.bak "0,/^members = \[/s||members = [\n  \"dev/migrate-alpha59/$crate\",|" "$dir/Cargo.toml"
@@ -49,17 +56,34 @@ hook() { # src dest mod-file anchor-line
   fi
 }
 
-dir="${A59_DIR:-$here/.a59}"
-[[ -n "${A59_DIR:-}" ]] || checkout "$dir" "$a59_ref"
-hook "$here/export/hooks/migrate_export.rs" "$dir/crates/jazz/layers/node/src/node/migrate_export.rs" \
-  "$dir/crates/jazz/layers/node/src/node/mod.rs" "pub mod api_error;"
-hook "$here/export/hooks/server_migrate_export.rs" "$dir/crates/jazz-server/src/server/migrate_export.rs" \
-  "$dir/crates/jazz-server/src/server/mod.rs" "pub mod routes;"
-hook "$here/export/hooks/account_migrate_export.rs" "$dir/crates/jazz/layers/types/src/account_registry/migrate_export.rs" \
-  "$dir/crates/jazz/layers/types/src/account_registry.rs" "pub mod storage;"
-# The dump format, shared with `jazz-tools migrate-alpha59`.
-rm -rf "$dir/crates/jazz-alpha59-dump"
-cp -R "$crates/jazz-alpha59-dump" "$dir/crates/jazz-alpha59-dump"
-install_tool "$dir" export
-install_tool "$dir" produce
-echo "alpha.59 exporter ready in $dir: cargo build --release -p jazz-alpha59-export"
+prepare_a59() {
+  local dir="${A59_DIR:-$here/.a59}"
+  [[ -n "${A59_DIR:-}" ]] || checkout "$dir" "$a59_ref"
+  hook "$here/export/hooks/migrate_export.rs" "$dir/crates/jazz/layers/node/src/node/migrate_export.rs" \
+    "$dir/crates/jazz/layers/node/src/node/mod.rs" "pub mod api_error;"
+  hook "$here/export/hooks/server_migrate_export.rs" "$dir/crates/jazz-server/src/server/migrate_export.rs" \
+    "$dir/crates/jazz-server/src/server/mod.rs" "pub mod routes;"
+  hook "$here/export/hooks/account_migrate_export.rs" "$dir/crates/jazz/layers/types/src/account_registry/migrate_export.rs" \
+    "$dir/crates/jazz/layers/types/src/account_registry.rs" "pub mod storage;"
+  install_tool "$dir" export
+  install_tool "$dir" produce
+  echo "alpha.59 exporter ready in $dir: cargo build --release -p migrate-alpha59-export"
+}
+
+prepare_a60() {
+  local dir="${A60_DIR:-$here/.a60}"
+  [[ -n "${A60_DIR:-}" ]] || checkout "$dir" "$a60_ref"
+  hook "$here/import/hooks/runtime_migrate_import.rs" "$dir/crates/jazz-server/src/runtime/migrate_import.rs" \
+    "$dir/crates/jazz-server/src/runtime/mod.rs" "pub mod auth_admission;"
+  hook "$here/import/hooks/server_migrate_import.rs" "$dir/crates/jazz-server/src/server/migrate_import.rs" \
+    "$dir/crates/jazz-server/src/server/mod.rs" "pub mod routes;"
+  install_tool "$dir" import
+  echo "SQLite importer ready in $dir: cargo build --release -p migrate-alpha59-import"
+}
+
+case "${1:-both}" in
+  a59) prepare_a59 ;;
+  a60) prepare_a60 ;;
+  both) prepare_a59; prepare_a60 ;;
+  *) echo "usage: $0 [a59|a60|both]" >&2; exit 2 ;;
+esac

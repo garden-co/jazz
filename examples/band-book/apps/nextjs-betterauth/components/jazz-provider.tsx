@@ -4,6 +4,7 @@ import { Button } from "@astryxdesign/core";
 import { JazzProvider as CoreJazzProvider } from "jazz-tools/react";
 import { SignInForm } from "@/components/sign-in-form";
 import { StatusScreen } from "@/components/status-screen";
+import { jazzAppId } from "@/src/lib/config";
 
 // Start on the thin client; load the local-first one (WASM, local storage,
 // offline writes) in its own chunk once the page has loaded.
@@ -19,6 +20,7 @@ const loadLocalFirst = () => import("jazz-tools/local-first");
 export function JazzProvider({ children }: { children: React.ReactNode }) {
   return (
     <CoreJazzProvider
+      appId={jazzAppId}
       serverUrl="/jazz"
       client={loadLocalFirst}
       signedOut={<SignInForm />}

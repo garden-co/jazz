@@ -257,7 +257,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
           false,
           {
             slowQueryLog: {
-              appId: clientScope(context.config),
+              appId: context.config.appId,
               thresholdMs: context.config.slowQueryThresholdMs,
             },
           },

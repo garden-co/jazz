@@ -1,6 +1,6 @@
 import * as React from "react";
 import { JazzProvider, useJazzAuth, useAuthState } from "jazz-tools/react";
-import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "../constants.js";
+import { ANNOUNCEMENTS_CHAT_ID, APP_ID, CHAT_ID } from "../constants.js";
 import { type WorkOSUser, useWorkOSSession } from "./session.js";
 import { ChatPanel } from "./ChatPanel.js";
 import { AuthCard } from "./AuthCard.js";
@@ -55,6 +55,7 @@ export function App() {
     // Jazz runs in the backend (server/server.ts) under /jazz; its
     // `authenticate` reads the AuthKit session cookie.
     <JazzProvider
+      appId={APP_ID}
       serverUrl="/jazz"
       signedOut={<button onClick={() => void signIn()}>Sign in with WorkOS</button>}
     >

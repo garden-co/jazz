@@ -34,8 +34,6 @@ export {
   type JazzStore,
   type BackendCredential,
   type JazzUser,
-  type LocalFirstGuest,
-  acceptLocalFirstAuth,
   type VercelStoreOptions,
   type WsLikeSocket,
 } from "./create-jazz.js";

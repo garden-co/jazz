@@ -55,7 +55,7 @@ describe("JazzSessionProvider dev auto-attach", () => {
 
   it("enables devMode before creating a configured session", () => {
     render(
-      <JazzSessionProvider config={{ scope: "app" } as never}>
+      <JazzSessionProvider config={{ appId: "app" } as never}>
         <div />
       </JazzSessionProvider>,
     );

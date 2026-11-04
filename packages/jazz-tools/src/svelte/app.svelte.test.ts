@@ -74,7 +74,7 @@ it("owns startup retry and keeps the hook context across fallback and ready chil
   component = mount(JazzProvider, {
     target,
     props: {
-      scope: "test",
+      appId: "test",
       autoAttachDevTools: false,
       children: status,
       signedOut: createRawSnippet(() => ({ render: () => "<p>SIGN IN</p>" })),
@@ -119,7 +119,7 @@ it("renders custom startup loading and error snippets with the provider retry", 
   component = mount(JazzProvider, {
     target,
     props: {
-      scope: "test",
+      appId: "test",
       children: createRawSnippet(() => ({ render: () => "<p>PRIVATE</p>" })),
       loading: createRawSnippet(() => ({ render: () => "<p>CUSTOM LOADING</p>" })),
       error: createRawSnippet((error, action) => {

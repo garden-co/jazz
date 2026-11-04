@@ -13,9 +13,9 @@ export function readBuildConfig(env = process.env) {
   return {
     nodeEnv: env.NODE_ENV,
     /** Public settings set explicitly rather than defaulted (deployments must set all). */
-    unsetPublic: ["NEXT_PUBLIC_APP_ORIGIN", "JAZZ_APP_ID"].filter((name) => !env[name]),
+    unsetPublic: ["NEXT_PUBLIC_APP_ORIGIN", "NEXT_PUBLIC_JAZZ_APP_ID"].filter((name) => !env[name]),
     origin: env.NEXT_PUBLIC_APP_ORIGIN || LOCAL_DEFAULTS.origin,
-    appId: env.JAZZ_APP_ID || LOCAL_DEFAULTS.appId,
+    appId: env.NEXT_PUBLIC_JAZZ_APP_ID || LOCAL_DEFAULTS.appId,
     /**
      * Where the data lives. With JAZZ_SERVER_URL set, the backend connects to
      * that sync server (such as Jazz Cloud) with the app's admin secret; otherwise

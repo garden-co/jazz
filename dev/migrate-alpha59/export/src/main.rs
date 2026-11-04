@@ -1,4 +1,4 @@
-//! `jazz-alpha59-export`: read one alpha.59 server data dir and write a dump.
+//! `a59-export`: read one alpha.59 server data dir and write a dump.
 //!
 //! It opens a private copy of the data dir (never the original: opening a
 //! RocksDB root can run recovery, which writes) and reads it with alpha.59's
@@ -15,7 +15,7 @@ use jazz::node::NodeState;
 use jazz::node::migrate_export::ExportedVersion;
 use jazz::schema::JazzSchema;
 use jazz::tx::{DeletionEvent, Fate};
-use jazz_alpha59_dump as dump;
+use migrate_alpha59_dump as dump;
 
 /// The node id every alpha.59 server shell runs as.
 const SERVER_NODE: [u8; 16] = [0x5e; 16];
@@ -63,9 +63,9 @@ fn main() -> ExitCode {
     let args = match parse_args() {
         Ok(args) => args,
         Err(error) => {
-            eprintln!("jazz-alpha59-export: {error}");
+            eprintln!("a59-export: {error}");
             eprintln!(
-                "usage: jazz-alpha59-export --data-dir <alpha.59 data dir> --work <empty dir> --out <dump> [--catalogue-only]"
+                "usage: a59-export --data-dir <alpha.59 data dir> --work <empty dir> --out <dump> [--catalogue-only]"
             );
             return ExitCode::from(2);
         }
@@ -85,7 +85,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("jazz-alpha59-export: {error}");
+            eprintln!("a59-export: {error}");
             ExitCode::FAILURE
         }
     }

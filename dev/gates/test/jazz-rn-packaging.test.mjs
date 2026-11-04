@@ -867,7 +867,7 @@ test("React Native docs advertise the supported alpha session and account-handle
   assert.match(expoSetup, /import \{ JazzSessionProvider \} from "jazz-tools\/expo"/);
   assert.match(
     expoSetup,
-    /<JazzSessionProvider config=\{\{ serverUrl, initial: "local-first" \}\}>[\s\S]*<TodoApp \/>[\s\S]*<\/JazzSessionProvider>/,
+    /<JazzSessionProvider config=\{\{ appId, serverUrl, initial: "local-first" \}\}>[\s\S]*<TodoApp \/>[\s\S]*<\/JazzSessionProvider>/,
     "Expo setup must give the session provider one local-first configuration and mount its child",
   );
   assert.doesNotMatch(

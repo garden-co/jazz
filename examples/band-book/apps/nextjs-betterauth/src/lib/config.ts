@@ -8,3 +8,4 @@ import { LOCAL_DEFAULTS } from "./build-config.mjs";
 
 /** The app's own origin, which Better Auth trusts. */
 export const appOrigin = process.env.NEXT_PUBLIC_APP_ORIGIN ?? LOCAL_DEFAULTS.origin;
+export const jazzAppId = process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? LOCAL_DEFAULTS.appId;

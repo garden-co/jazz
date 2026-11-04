@@ -15,7 +15,6 @@ mod data_dir_corpus;
 mod embedded;
 pub use crate::runtime::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
 pub(crate) mod deployment;
-pub mod migrate_alpha59;
 mod permissions_validation;
 pub mod routes;
 #[cfg(any(test, feature = "embedded-server"))]

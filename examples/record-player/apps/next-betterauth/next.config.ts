@@ -1,7 +1,7 @@
 import { readConfig } from "./src/lib/config.mjs";
 
 // Fails closed: a production build needs its own app id and secrets.
-readConfig();
+const config = readConfig();
 
 // Jazz runs inside this app (src/lib/jazz.server.ts): no separate sync server.
 export default {
@@ -10,4 +10,6 @@ export default {
   allowedDevOrigins: ["127.0.0.1"],
   // jazz-napi is a native addon: Node loads it at runtime, the bundler leaves it alone.
   serverExternalPackages: ["jazz-napi", "jazz-tools/backend"],
+  // The browser and the backend name the same Jazz app.
+  env: { NEXT_PUBLIC_JAZZ_APP_ID: config.appId },
 };

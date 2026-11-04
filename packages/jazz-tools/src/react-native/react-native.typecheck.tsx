@@ -68,6 +68,7 @@ function Hooks({ children }: { children: ReactNode }) {
   const session = useSession();
   const auth = useLocalFirstAuth({
     key: "rn-auth-key",
+    appId: "rn-typecheck",
     store: authSecretStore,
   });
   const todos = useAll(app.todos);

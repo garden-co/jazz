@@ -20,6 +20,7 @@ export function App() {
   const { signIn, signOut } = useWorkOSSession();
   return (
     <JazzProvider
+      appId="my-app"
       serverUrl="/jazz"
       signedOut={<button onClick={() => void signIn()}>Sign in</button>}
     >

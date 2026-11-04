@@ -9,7 +9,7 @@ afterEach(cleanup);
 it("uses the Expo host factory and native loading/recovery controls", async () => {
   host.create.mockRejectedValue(new Error("secure store unavailable"));
   const view = render(
-    <JazzProvider scope="expo-app" serverUrl="https://sync.example.test">
+    <JazzProvider appId="expo-app" serverUrl="https://sync.example.test">
       <span>data</span>
     </JazzProvider>,
   );

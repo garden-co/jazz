@@ -19,6 +19,7 @@ const status = (message: string, error = false) =>
 // Better Auth's session drives sign-in; the server's Jazz (`createJazz` in
 // server/jazz.ts) reads it in `authenticate`.
 const jazz = createJazzApp({
+  appId: import.meta.env.VITE_JAZZ_APP_ID,
   serverUrl: "/jazz",
 });
 

@@ -2,10 +2,7 @@ import { JazzProvider as Jazz, useJazzAuth } from "jazz-tools/react";
 import { Banner, Button, Center, Spinner } from "@astryxdesign/core";
 import { authClient } from "@/src/lib/auth-client";
 
-// Start on the thin client; load the local-first one (WASM, local storage,
-// offline writes) in its own chunk once the page has loaded.
-const loadLocalFirst = () => import("jazz-tools/local-first");
-
+const APP_ID: string | undefined = import.meta.env.VITE_JAZZ_APP_ID;
 // Better Auth signs users in; BandChat's backend (`createJazz` in
 // server/jazz.ts) reads its session in `authenticate`.
 type AuthActions = { signOut(): Promise<void> };
@@ -22,10 +19,22 @@ export function useBandChatLifecycle(): AuthActions {
 }
 
 export function JazzProvider({ children }: React.PropsWithChildren) {
+  // Fail closed: vite.config.ts sets it from the checked configuration.
+  if (!APP_ID)
+    return (
+      <StatusScreen>
+        <Banner
+          status="error"
+          collapsible={false}
+          title="BandChat is not configured"
+          description="Set VITE_JAZZ_APP_ID."
+        />
+      </StatusScreen>
+    );
   return (
     <Jazz
+      appId={APP_ID}
       serverUrl="/jazz"
-      client={loadLocalFirst}
       loading={<LoadingScreen label="Connecting BandChat…" />}
       signedOut={<LoadingScreen label="Signing in…" />}
       error={(state) => (

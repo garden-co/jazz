@@ -34,7 +34,7 @@ export interface UseLocalFirstAuth {
  *
  * const config = computed(() =>
  *   !isLoading.value && secret.value
- *     ? { secret: secret.value }
+ *     ? { appId: '<your-app-id>', secret: secret.value }
  *     : null,
  * );
  * </script>

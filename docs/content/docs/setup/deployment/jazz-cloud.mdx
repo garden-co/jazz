@@ -16,7 +16,7 @@ Your app ID namespaces your data for storage and sync. Click below to generate o
 Put the generated values in your backend's environment. Only the app ID is public. The sync URL and the admin secret stay server-side, like a database password:
 
 ```bash title=".env"
-JAZZ_APP_ID="<your app ID>"
+NEXT_PUBLIC_JAZZ_APP_ID="<your app ID>"
 JAZZ_SERVER_URL="https://v2.sync.jazz.tools/"
 JAZZ_ADMIN_SECRET="<admin secret>"
 ```
@@ -28,7 +28,7 @@ import { createJazz, remote } from "jazz-tools/backend";
 import { app, permissions } from "./schema";
 
 export const jazz = await createJazz({
-  appId: process.env.JAZZ_APP_ID!,
+  appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
   app,
   permissions,
   store: remote({

@@ -24,10 +24,10 @@ jazz.forRequest(request))`), so permissions.ts decides, exactly as for the
 
 ```sh
 pnpm dev          # http://127.0.0.1:3000, data in .jazz/
-pnpm build        # builds dist/ (needs JAZZ_APP_ID)
+pnpm build        # builds dist/ (needs VITE_JAZZ_APP_ID)
 pnpm start        # production server on APP_ORIGIN's port (or PORT)
 pnpm test:e2e     # Playwright smoke against `pnpm dev`
 ```
 
-Production sets `APP_ORIGIN`, `JAZZ_APP_ID` and `BETTER_AUTH_SECRET`, and
+Production sets `APP_ORIGIN`, `VITE_JAZZ_APP_ID` and `BETTER_AUTH_SECRET`, and
 optionally `JAZZ_SERVER_URL` with `JAZZ_ADMIN_SECRET`.

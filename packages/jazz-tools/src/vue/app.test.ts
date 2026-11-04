@@ -57,7 +57,7 @@ async function fixture(fail: false | "unknown" | "graceful" = false) {
 describe("Vue ergonomic app", () => {
   it("is inert in SSR and supplies default loading", async () => {
     mocks.factory.mockReset();
-    const app = createSSRApp({ render: () => h(JazzProvider, { scope: "test" }) });
+    const app = createSSRApp({ render: () => h(JazzProvider, { appId: "test" }) });
     expect(await renderToString(app)).toContain("Loading Jazz");
     expect(mocks.factory).not.toHaveBeenCalled();
   });
@@ -72,7 +72,7 @@ describe("Vue ergonomic app", () => {
       render: () =>
         h(
           JazzProvider,
-          { scope: "test", autoAttachDevTools: false },
+          { appId: "test", autoAttachDevTools: false },
           { default: () => h("p", "active") },
         ),
     });
@@ -94,7 +94,7 @@ describe("Vue ergonomic app", () => {
     const app = createApp({
       render: () =>
         h(JazzProvider, {
-          scope: `test-${version.value}`,
+          appId: `test-${version.value}`,
           initial: "signed-out",
           autoAttachDevTools: false,
         }),
@@ -104,7 +104,7 @@ describe("Vue ergonomic app", () => {
     version.value++;
     await flush();
     expect(mocks.factory).toHaveBeenCalledTimes(1);
-    expect(mocks.factory.mock.calls[0][0].scope).toBe("test-0");
+    expect(mocks.factory.mock.calls[0][0].appId).toBe("test-0");
     expect(mocks.factory.mock.calls[0][0].initial).toBe("signed-out");
     app.unmount();
     await flush();
@@ -128,7 +128,7 @@ describe("Vue ergonomic app", () => {
         render: () =>
           h(
             JazzProvider,
-            { scope: "test", autoAttachDevTools: false },
+            { appId: "test", autoAttachDevTools: false },
             { default: () => h(Child), signedOut: () => h("p", "signed out") },
           ),
       });

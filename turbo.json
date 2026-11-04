@@ -171,7 +171,6 @@
         "package.json",
         "$TURBO_ROOT$/crates/jazz/**",
         "$TURBO_ROOT$/crates/jazz-text/**",
-        "$TURBO_ROOT$/crates/jazz-alpha59-dump/**",
         "$TURBO_ROOT$/crates/jazz-cli/**",
         "$TURBO_ROOT$/crates/jazz-compression/**",
         "$TURBO_ROOT$/vendor/ruzstd/**",

@@ -1,5 +1,6 @@
 import { dev } from "$app/environment";
 import { env } from "$env/dynamic/private";
+import { env as publicEnv } from "$env/dynamic/public";
 import { LOCAL_APP_ID, LOCAL_ORIGIN } from "$lib/config";
 
 /**
@@ -17,7 +18,7 @@ export function serverConfig() {
   };
   const config = {
     origin: required("APP_ORIGIN", env.APP_ORIGIN, LOCAL_ORIGIN),
-    appId: required("JAZZ_APP_ID", env.JAZZ_APP_ID, LOCAL_APP_ID),
+    appId: required("PUBLIC_JAZZ_APP_ID", publicEnv.PUBLIC_JAZZ_APP_ID, LOCAL_APP_ID),
     betterAuthSecret: required(
       "BETTER_AUTH_SECRET",
       env.BETTER_AUTH_SECRET,

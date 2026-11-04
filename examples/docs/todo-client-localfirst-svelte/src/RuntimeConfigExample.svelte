@@ -6,7 +6,7 @@
   // Prepare the handle with these same runtimeSources.
   let { account, children }: { account: AccountHandle; children: Snippet } = $props();
   const config = $derived({
-    serverUrl: "https://my-jazz-server.example.com", account,
+    appId: "my-app", serverUrl: "https://my-jazz-server.example.com", account,
     runtimeSources: { baseUrl: "/assets/jazz/", wasmVersion: "2026-08-25" },
   });
 </script>

@@ -111,7 +111,7 @@ call `reauthenticate()` from `useJazzAuth()`:
 ```tsx
 import { JazzProvider, useJazzAuth } from "jazz-tools/react";
 
-<JazzProvider serverUrl="/jazz" signedOut={<SignIn />}>
+<JazzProvider appId="my-app" serverUrl="/jazz" signedOut={<SignIn />}>
   <App />
 </JazzProvider>;
 
@@ -129,7 +129,7 @@ Without React, own the session yourself:
 ```ts
 import { createJazzClient } from "jazz-tools/client";
 
-const jazz = await createJazzClient({ serverUrl: "/jazz" });
+const jazz = await createJazzClient({ appId: "my-app", serverUrl: "/jazz" });
 await jazz.reauthenticate(); // after your own sign-in or sign-out
 ```
 
@@ -138,17 +138,7 @@ Svelte, Solid, Vue and React Native expose the same actions through their bindin
 ## Guests who sign up
 
 An app can start every visitor as a [local-first](/docs/setup/auth/local-first) guest
-(`initial: "local-first"`). Its backend lets guests sync by returning `acceptLocalFirstAuth(request)`
-from `authenticate` for signed-out requests; guests are refused otherwise:
-
-```ts
-authenticate: async (request) => {
-  const user = await yourAuth.userFor(request);
-  return user ? { userId: user.id } : acceptLocalFirstAuth(request);
-},
-```
-
-When the guest signs up, call `linkWithBackend()` instead of
+(`initial: "local-first"`). When the guest signs up, call `linkWithBackend()` instead of
 `loginWithBackend()`:
 
 ```ts
@@ -208,7 +198,7 @@ share account ownership while keeping distinct authorship.
 Apps on alpha.59 signed users in with JWTs, so their accounts belong to identities like
 `{ issuer: "https://idp.example.com", subject: "user_01" }`. `createJazz` names users
 `{ issuer: "jazz:app:<appId>", subject: userId }` instead. The alpha.59 import
-(`jazz-tools migrate-alpha59 import`) links each user's `jazz:app:<appId>` identity to their existing account. Its
+(`sqlite-import`) links each user's `jazz:app:<appId>` identity to their existing account. Its
 `--app-id` must be exactly the `appId` you pass to `remote()`. If your
 `authenticate` returns the old token's `sub` as `userId` (which `fromJWT` does), returning users
 open their old accounts and keep all their data. Pass `--no-backend-identity-links` to skip this.

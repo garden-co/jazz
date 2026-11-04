@@ -1,80 +1,86 @@
 # migrate-alpha59
 
-Moves an alpha.59 server data dir (RocksDB) to the current server format.
-Self-hosters running alpha.59 use it to upgrade. It stays released: the
-exporter binaries stay attached to the release they shipped with, and the
-import side ships in `jazz-tools` until a release removes it.
+One-time tool that moves an alpha.59 server data dir (RocksDB) to the
+SQLite engine's layout. **Delete this folder once the fleet runs alpha.60.**
+Nothing here is part of the workspace or of any release build.
 
-## For self-hosters
+## How it works
 
-1. Stop the alpha.59 server. Keep its data dir; nothing below writes to it.
-2. Download `jazz-alpha59-export-<platform>` (Linux x64/arm64, macOS arm64)
-   from the GitHub release you upgrade to, and check it against
-   `jazz-alpha59-export.sha256`.
-3. Export. `--work` is an empty scratch dir: the exporter reads a private
-   copy of the data dir, never the original.
+Two binaries, because alpha.59 and the SQLite engine link different
+`libsqlite3-sys` versions that both declare `links = "sqlite3"`:
 
-   ```sh
-   jazz-alpha59-export --data-dir ./data --work ./export-work --out app.dump
-   ```
+| binary          | built in                 | does                                                                                        |
+| --------------- | ------------------------ | ------------------------------------------------------------------------------------------- |
+| `a59-export`    | jazz `v2.0.0-alpha.59`   | copies the data dir, reads the copy with alpha.59's own decoders, writes a dump             |
+| `sqlite-import` | the SQLite engine commit | builds a new data dir from a dump through the new server's own code paths, and `verify`s it |
 
-4. Import into a new, empty dir with the new `jazz-tools`, then verify:
+`prepare.sh` checks out each version (or uses `A59_DIR` / `A60_DIR`), copies
+small hook modules into it to reach private internals, and adds the crate to
+that checkout's workspace. The hooks only read (export) or call existing
+server functions (import).
 
-   ```sh
-   npx jazz-tools@<version> migrate-alpha59 import --dump app.dump --data-dir ./data-new --app-id <app id>
-   npx jazz-tools@<version> migrate-alpha59 verify --dump app.dump --data-dir ./data-new --app-id <app id>
-   ```
+The dump (`dump/`) is version-neutral: runtime schemas and lenses, every
+admin catalogue entry decoded to JSON, the account journal, what alpha.59
+answers for each principal's login, what alpha.59 reads as each row's
+current state (its settled content and deletion winners), then every stored
+row version in commit order with its authors and timestamps. It ends with a
+BLAKE3 digest, which the import checks before it builds anything. The
+import also refuses to finish when its replay leaves any row in another
+state than alpha.59 reads for it; `verify` then checks the result through
+the new server's own read paths. A failed import removes what it built
+(a dir that existed beforehand is kept, emptied).
 
-   `--app-id` must be the app id your app passes to `remote()`, exactly,
-   case included: it names the `createJazz` identity of every returning
-   user (see below).
-
-5. Start the new server on `./data-new`. Keep `./data` until you are happy.
-
-The dump holds all of the app's data: keep it where the data dir is, and
-delete it when done.
-
-## What the import does
-
-The dump carries the runtime schemas and lenses, every admin catalogue
-entry, the account journal, what alpha.59 answers for each principal's
-login, what alpha.59 reads as each row's current state (its settled content
-and deletion winners), then every stored row version in commit order with
-its authors and timestamps. It ends with a BLAKE3 digest, which the import
-checks before it builds anything.
+Import:
 
 - **Admin catalogue:** only the active schema and its permissions, as one
-  fresh deployment, which publishes it as a bundle. Old schemas, migrations
-  and permission revisions stay behind, so the store matches a client that
-  ships only the current schema. Schema hashes are recomputed with the
-  current engine's own hash function.
+  fresh deployment, which publishes it as a bundle. Old schemas,
+  migrations and permission revisions stay behind, so the store matches a
+  client that ships only the current schema. Schema hashes are recomputed
+  with the SQLite engine's own hash function.
 - **Accounts:** the journal replayed command by command.
 - **Backend identity links:** apps moving to `createJazz` name users
   `(jazz:app:<appId>, userId)`. So that `authenticate` answering
   `{ userId: sub }` opens a returning user's old account, each admitted
   external identity `(iss, sub)` gets `(jazz:app:<appId>, sub)` linked to the
-  same account, through the registry's own link commands. Built-in issuers
-  (`urn:jazz:*`) are left alone, and revoked identities get no link. The
-  registry grants every linked identity the right to manage the account's
-  identities, so the import refuses an identity that lacks it (alpha.59
-  never creates one). It also refuses, naming only issuers, when two issuers
-  hold a subject on different accounts, revoked or not. Pass
-  `--no-backend-identity-links` to skip this.
+  same account, through the registry's own link commands. `<appId>` is
+  `--app-id` exactly as given, which must match the app id the app passes
+  to `remote()` character for character, case included. Built-in issuers (`urn:jazz:*`) are left alone, and revoked
+  identities get no link. The registry grants every linked identity the
+  right to manage the account's identities, so the import refuses an
+  identity that lacks it (alpha.59 never creates one). It also refuses,
+  naming only issuers, when two issuers hold a subject on different
+  accounts, revoked or not. Pass `--no-backend-identity-links` to skip this.
 - **Rows:** every version, brought forward to the active schema along
   alpha.59's own runtime lenses (columns those lenses dropped stay dropped),
   then written through the public Db API as `WriteIdentity::Attribution` of
   its original author with its original timestamp. Each insert and update
   writes every column, absent cells as explicit nulls.
 
-The import refuses to finish when its replay leaves any row in another state
-than alpha.59 reads for it. A failed import removes what it built (a dir
-that existed beforehand is kept, emptied).
+`sqlite-import verify` checks the published bundle's schema and
+permissions, every login answer, every backend identity link, and every
+row's deleted flag, cells and created/updated provenance against what
+alpha.59 itself reads as the row's current state (not against the import's
+own replay), and that no table holds rows alpha.59 lacks. It prints row ids,
+table and column names only, never values or authors.
 
-`verify` checks the published bundle's schema and permissions, every login
-answer, every backend identity link, and every row's deleted flag, cells
-and created/updated provenance against what alpha.59 itself reads as the
-row's current state, through the new server's own read paths. It prints row
-ids, table and column names only, never values or authors.
+## Use
+
+```sh
+dev/migrate-alpha59/test.sh      # end to end on a synthetic tenant
+
+# per tenant
+a59-export --data-dir /app/data --work <empty dir> --out tenant.dump
+sqlite-import --dump tenant.dump --data-dir <new dir> --app-id <app uuid>
+sqlite-import verify --dump tenant.dump --data-dir <new dir> --app-id <app uuid>
+
+# census: counts and lens-op kinds only, safe to leave the cluster
+a59-export --data-dir /app/data --work <empty dir> --out c.dump --catalogue-only
+dump-census c.dump
+```
+
+Dumps hold customer data: keep them inside the cluster and never commit
+them. `dump-show` prints string prefixes, cell values and authors, so only
+run it on synthetic dumps.
 
 ## Not supported yet (fails loudly)
 
@@ -82,36 +88,9 @@ Branched rows, schemas published but never activated, rows with no lens
 path to the active schema, TransformColumn lens ops (no shipped alpha.59
 tool creates them; `dump-census` reports them under `unsupported_by_sqlite`),
 versions not yet settled by the authority (`pending`), content written while
-a row was deleted (alpha.59 keeps it under the deletion; the current engine
-cannot), and transaction metadata, which the current engine does not have:
+a row was deleted (alpha.59 keeps it under the deletion; the SQLite engine
+cannot), and transaction metadata, which the SQLite engine does not have:
 `--drop-transaction-metadata` imports those versions without it and counts
-them. Verify does not yet compare history depth per row or permissions as
-seen by each account.
-
-## Layout
-
-| piece                             | built                                 | does                                                                   |
-| --------------------------------- | ------------------------------------- | ---------------------------------------------------------------------- |
-| `jazz-alpha59-export` (`export/`) | in a `v2.0.0-alpha.59` checkout       | copies the data dir, reads the copy with alpha.59's decoders, dumps it |
-| `crates/jazz-alpha59-dump`        | in both                               | the dump format, plus `dump-show` and `dump-census`                    |
-| `jazz-tools migrate-alpha59`      | with `jazz-tools` (`crates/jazz-cli`) | `import` builds a new data dir from a dump, `verify` checks it         |
-| `produce/`                        | in the alpha.59 checkout              | the synthetic tenant `test.sh` migrates                                |
-
-The exporter must link alpha.59 itself, and can't share a build with
-`jazz-tools`: the two pull different libsqlite3-sys versions, which both
-declare `links = "sqlite3"`. `prepare.sh` checks out alpha.59 (or uses
-`A59_DIR`), copies small read-only hook modules and the dump crate into it,
-and adds the exporter and fixture to that checkout's workspace. The
-`alpha.59 exporter` workflow does the same in CI and attaches the binaries to
-a release.
-
-```sh
-dev/migrate-alpha59/test.sh      # end to end on a synthetic tenant
-
-# census: counts and lens-op kinds only, safe to share
-jazz-alpha59-export --data-dir ./data --work <empty dir> --out c.dump --catalogue-only
-dump-census c.dump
-```
-
-`dump-show` prints string prefixes, cell values and authors, so only run it
-on synthetic dumps.
+them.
+Verify does not yet compare history depth per row or permissions as seen by
+each account.

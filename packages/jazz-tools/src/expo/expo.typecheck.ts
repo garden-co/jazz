@@ -25,7 +25,7 @@ const options: ExpoAuthSecretStoreOptions = {
 
 const hookOptions: UseLocalFirstAuthOptions = {
   key: "expo-hook-auth-key",
-  scope: "expo-hook-app",
+  appId: "expo-hook-app",
 };
 
 const store = new ExpoAuthSecretStore(options);

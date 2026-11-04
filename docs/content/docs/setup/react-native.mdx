@@ -14,7 +14,7 @@ import { JazzSessionProvider } from "jazz-tools/expo";
 
 function App() {
   return (
-    <JazzSessionProvider config={{ serverUrl, initial: "local-first" }}>
+    <JazzSessionProvider config={{ appId, serverUrl, initial: "local-first" }}>
       <TodoApp />
     </JazzSessionProvider>
   );
@@ -30,9 +30,7 @@ shows the complete lifecycle and platform configuration. The alpha has not yet
 proven two physical JSI runtimes attached to one relay.
 
 <Callout type="info">
-  `serverUrl` is your backend's Jazz endpoint (where `createJazz` is mounted); the app names no app
-  id. For Jazz on the device only, pass `serverUrl: null`: no backend, one local-first account on
-  this device.
+  For a local-only context, pass `{ ...config, serverUrl: undefined }`. The handle keeps its registry authority; writes stay locally durable. A later context using the matching server URL can synchronize them.
 </Callout>
 
 <Callout type="warn">

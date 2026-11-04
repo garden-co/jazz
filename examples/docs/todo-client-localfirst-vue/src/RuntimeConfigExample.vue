@@ -8,6 +8,7 @@ const props = defineProps<{ account: AccountHandle }>();
 // Prepare the handle with these same runtimeSources.
 const config = computed(() => ({
   account: props.account,
+  appId: "my-app",
   serverUrl: "https://my-jazz-server.example.com",
   runtimeSources: {
     baseUrl: "/assets/jazz/",

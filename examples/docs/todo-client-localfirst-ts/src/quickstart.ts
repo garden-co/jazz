@@ -3,8 +3,8 @@ import { createAccountManager, createDb } from "jazz-tools";
 import { app } from "../schema.js";
 import { renderTodoItem } from "./TodoItem.js";
 
-// Your backend serves Jazz at /jazz (createJazz); the browser names no app.
-const config = { serverUrl: "/jazz" };
+const appId = "<your-app-id>";
+const config = { appId, serverUrl: "https://core.example" };
 const accounts = await createAccountManager(config);
 const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
 const db = await createDb({ ...config, account });

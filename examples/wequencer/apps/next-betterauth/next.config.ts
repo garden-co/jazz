@@ -1,7 +1,7 @@
 import { jazzConfig } from "./lib/jazz-config";
 
 // Fails closed: a production build must name its Jazz app.
-jazzConfig();
+const config = jazzConfig();
 
 // Jazz runs inside this app (lib/jazz.server.ts): no separate sync server.
 export default {
@@ -9,4 +9,6 @@ export default {
   allowedDevOrigins: ["127.0.0.1"],
   // jazz-napi is a native addon: Node loads it at runtime, the bundler leaves it alone.
   serverExternalPackages: ["jazz-napi", "jazz-tools/backend"],
+  // The browser and the backend name the same Jazz app.
+  env: { NEXT_PUBLIC_JAZZ_APP_ID: config.appId },
 };

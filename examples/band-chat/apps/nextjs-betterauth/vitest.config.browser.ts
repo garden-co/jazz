@@ -34,9 +34,7 @@ export default defineConfig({
     },
   },
   define: {
-    // The topology tests replay a seed from the shell: JAZZ_EXAMPLE_TOPOLOGY_SEED=29 pnpm test:browser.
-    "process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED":
-      JSON.stringify(process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED) ?? "undefined",
+    "process.env.NEXT_PUBLIC_JAZZ_APP_ID": JSON.stringify("band-chat-browser-tests"),
   },
   plugins: [wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },

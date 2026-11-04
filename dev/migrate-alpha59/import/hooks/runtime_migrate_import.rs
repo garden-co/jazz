@@ -1,8 +1,9 @@
-//! Runtime access for `jazz-tools migrate-alpha59`, which imports an
-//! alpha.59 server data dir: it writes rows through the runtime owner's own
-//! `Db` (the public Db API) on the thread that owns it.
+//! Import hook for the one-time alpha.59 -> SQLite migration.
 //!
-//! Only for the alpha.59 importer; it goes when the importer does.
+//! `dev/migrate-alpha59/prepare.sh` copies this file into a SQLite-engine
+//! checkout as `jazz_server::runtime::migrate_import`, so the importer can
+//! write rows through the runtime owner's own `Db` (the public Db API) on
+//! the thread that owns it. Nothing in released Jazz contains it.
 #![allow(missing_docs)]
 
 use jazz::db::Db;

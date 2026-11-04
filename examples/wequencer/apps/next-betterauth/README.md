@@ -81,6 +81,6 @@ at `/jazz`). In development it uses a local app id and keeps its data in
 `.jazz/`; no separate server runs. Its `authenticate` reads the Better Auth
 session cookie, so the browser signs in through the backend with no token of
 its own. `NEXT_PUBLIC_APP_ORIGIN` is the Better Auth origin. Before deploying,
-set a stable `BETTER_AUTH_SECRET` and your `JAZZ_APP_ID`; to keep
+set a stable `BETTER_AUTH_SECRET` and your `NEXT_PUBLIC_JAZZ_APP_ID`; to keep
 the data on a sync server such as Jazz Cloud, also set `JAZZ_SERVER_URL`
 and `JAZZ_ADMIN_SECRET`.

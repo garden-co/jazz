@@ -17,6 +17,7 @@ import {
 import { Operations } from "../src/App";
 import { authClient } from "../src/lib/auth-client";
 
+const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
 // Better Auth's session drives sign-in; BigLabel's backend (`createJazz` in
 // src/lib/jazz.server.ts) reads it in `authenticate`. Signing up creates the
 // user's Jazz account, signing in opens it again.
@@ -136,6 +137,7 @@ function Failure({ error, onRetry }: { error: Error; onRetry: () => void }) {
 export default function Page() {
   return (
     <JazzProvider
+      appId={appId}
       serverUrl="/jazz"
       signedOut={<SignIn />}
       loading={<Waiting message="Preparing your personal label…" />}

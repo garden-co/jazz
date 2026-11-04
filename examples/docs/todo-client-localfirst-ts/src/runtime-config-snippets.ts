@@ -2,6 +2,7 @@ import { createAccountManager, createDb } from "jazz-tools";
 
 // #region context-setup-ts-runtime-sources
 const config = {
+  appId: "my-app",
   serverUrl: "https://my-jazz-server.example.com",
   runtimeSources: {
     wasmUrl: "/static/jazz/jazz_wasm_bg.wasm",

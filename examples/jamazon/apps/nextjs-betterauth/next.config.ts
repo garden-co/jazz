@@ -17,6 +17,9 @@ export default {
   // jazz-napi is a native addon: Node loads it at runtime, the bundler leaves it alone.
   serverExternalPackages: ["jazz-napi", "jazz-tools/backend"],
   env: {
+    // The browser and the backend name the same Jazz app (a local default
+    // in development).
+    NEXT_PUBLIC_JAZZ_APP_ID: config.appId,
     // The browser needs to know which payment UI to show; the server enforces it.
     NEXT_PUBLIC_PAYMENT_PROVIDER: paymentProvider(config),
   },

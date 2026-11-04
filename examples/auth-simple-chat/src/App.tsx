@@ -1,6 +1,6 @@
 import * as React from "react";
 import { JazzProvider, useJazzAuth, useAuthState } from "jazz-tools/react";
-import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "../constants.js";
+import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, DEFAULT_APP_ID } from "../constants.js";
 import { ChatPanel } from "./ChatPanel.js";
 import { AuthCard } from "./AuthCard.js";
 import { fetchSignedInUser, requestSignIn, requestSignOut, requestSignUp } from "./api.js";
@@ -52,6 +52,7 @@ function ChatShell({
 
 // Jazz runs inside the auth server, reached on this origin under /jazz.
 const config = {
+  appId: DEFAULT_APP_ID,
   serverUrl: "/jazz",
   driver: { type: "memory" as const },
 };

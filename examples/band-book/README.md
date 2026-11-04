@@ -38,7 +38,7 @@ song and the pages inside it, under **Shared with you**.
 `apps/nextjs-betterauth/.env.example` lists the settings. The checked-in
 defaults are for local development only. A production build or server
 (`NODE_ENV=production`) never uses them: it refuses to start unless
-`NEXT_PUBLIC_APP_ORIGIN`, `JAZZ_APP_ID` and `BETTER_AUTH_SECRET`
+`NEXT_PUBLIC_APP_ORIGIN`, `NEXT_PUBLIC_JAZZ_APP_ID` and `BETTER_AUTH_SECRET`
 are all set. Jazz runs inside the Next app and keeps its data in `.jazz/`; to
 keep it on a sync server such as Jazz Cloud instead, set `JAZZ_SERVER_URL`
 and `JAZZ_ADMIN_SECRET`.

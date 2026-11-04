@@ -10,7 +10,7 @@ const build = assertBuildConfiguration(
   readBuildConfig({
     ...process.env,
     NEXT_PUBLIC_APP_ORIGIN: process.env.NEXT_PUBLIC_APP_ORIGIN,
-    JAZZ_APP_ID: process.env.JAZZ_APP_ID,
+    NEXT_PUBLIC_JAZZ_APP_ID: process.env.NEXT_PUBLIC_JAZZ_APP_ID,
     NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY,
   }),
 );

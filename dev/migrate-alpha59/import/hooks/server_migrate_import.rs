@@ -1,8 +1,9 @@
-//! Server access for `jazz-tools migrate-alpha59`, which imports an alpha.59
-//! server data dir. It drives the same code `deploy()` and the account
-//! routes run, without HTTP.
+//! Import hook for the one-time alpha.59 -> SQLite migration.
 //!
-//! Only for the alpha.59 importer; it goes when the importer does.
+//! `dev/migrate-alpha59/prepare.sh` copies this file into a SQLite-engine
+//! checkout as `jazz_server::server::migrate_import`. It drives the same
+//! code `deploy()` and the account routes run, without
+//! HTTP. Nothing in released Jazz contains it.
 #![allow(missing_docs)]
 
 use std::sync::Arc;

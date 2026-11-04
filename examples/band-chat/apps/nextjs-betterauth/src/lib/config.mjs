@@ -10,11 +10,10 @@ export const LOCAL_APP_ID = "00000000-0000-0000-0000-0000000b0c4a";
 export function readConfig(env = process.env) {
   return {
     nodeEnv: env.NODE_ENV,
-    /** Settings a deployment must set that were not set explicitly. */
-    unsetRequired: ["NEXT_PUBLIC_APP_ORIGIN", "JAZZ_APP_ID"].filter((name) => !env[name]),
+    /** Public settings that were not set explicitly. */
+    unsetPublic: ["NEXT_PUBLIC_APP_ORIGIN", "NEXT_PUBLIC_JAZZ_APP_ID"].filter((name) => !env[name]),
     origin: env.NEXT_PUBLIC_APP_ORIGIN || LOCAL_ORIGIN,
-    /** The Jazz app, for the backend's store only: the browser names none. */
-    appId: env.JAZZ_APP_ID || LOCAL_APP_ID,
+    appId: env.NEXT_PUBLIC_JAZZ_APP_ID || LOCAL_APP_ID,
     betterAuthSecret: env.BETTER_AUTH_SECRET || undefined,
     /**
      * Where the data lives. With JAZZ_SERVER_URL set, the backend connects to
@@ -53,7 +52,7 @@ export function usesLocalDefaults(config = readConfig()) {
 export function assertConfiguration(config = readConfig()) {
   const local = usesLocalDefaults(config);
   const missing = [
-    ...(local ? [] : config.unsetRequired),
+    ...(local ? [] : config.unsetPublic),
     ...(config.betterAuthSecret ? [] : ["BETTER_AUTH_SECRET"]),
     ...(config.remote && !config.remote.adminSecret ? ["JAZZ_ADMIN_SECRET"] : []),
   ];

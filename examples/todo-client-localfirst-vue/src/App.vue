@@ -15,17 +15,10 @@ const config = computed(() => ({
 // Explicit account overrides retain the caller-owned account path used by tests;
 // otherwise the app starts with a local-first guest account.
 const providerProps = computed(() =>
-  config.value.account ? { config: config.value as DbConfig } : sessionProps(config.value),
+  config.value.account
+    ? { config: config.value as DbConfig }
+    : { ...config.value, initial: "local-first" as const },
 );
-// Tests point the app at a sync server by its app id; a browser client takes
-// that as its `scope` (it names no app of its own).
-function sessionProps({ appId, ...rest }: Partial<DbConfig>) {
-  return {
-    ...rest,
-    ...(appId === undefined ? {} : { scope: appId }),
-    initial: "local-first" as const,
-  };
-}
 // #endregion context-setup-vue
 </script>
 

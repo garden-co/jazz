@@ -1,6 +1,6 @@
 export interface BandChatConfig {
   nodeEnv: string | undefined;
-  unsetRequired: string[];
+  unsetPublic: string[];
   origin: string;
   appId: string;
   betterAuthSecret: string | undefined;

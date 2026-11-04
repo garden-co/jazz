@@ -13,7 +13,7 @@ function requiredInProduction(name: string, value: string | undefined, devDefaul
 
 // vite.config.ts hands the same value to the browser bundle.
 export const jazzAppId = requiredInProduction(
-  "JAZZ_APP_ID",
-  process.env.JAZZ_APP_ID,
+  "VITE_JAZZ_APP_ID",
+  process.env.VITE_JAZZ_APP_ID,
   "00000000-0000-0000-0000-00000000a6e7",
 );

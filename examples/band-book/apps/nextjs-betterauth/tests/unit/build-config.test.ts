@@ -7,7 +7,7 @@ import {
 
 const deployment = {
   NEXT_PUBLIC_APP_ORIGIN: "https://band.example",
-  JAZZ_APP_ID: "4f8f6e0a-2c1b-4d7e-9f3a-5b6c7d8e9f01",
+  NEXT_PUBLIC_JAZZ_APP_ID: "4f8f6e0a-2c1b-4d7e-9f3a-5b6c7d8e9f01",
 };
 const remote = {
   JAZZ_SERVER_URL: "https://jazz.example",
@@ -37,7 +37,7 @@ describe("build config", () => {
       assertBuildConfiguration(
         readBuildConfig({ NODE_ENV: "production", BETTER_AUTH_SECRET: "a" }),
       ),
-    ).toThrow(/missing: NEXT_PUBLIC_APP_ORIGIN, JAZZ_APP_ID$/);
+    ).toThrow(/missing: NEXT_PUBLIC_APP_ORIGIN, NEXT_PUBLIC_JAZZ_APP_ID$/);
   });
 
   it("requires the app's admin secret for a sync server", () => {

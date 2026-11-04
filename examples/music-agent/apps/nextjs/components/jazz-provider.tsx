@@ -1,6 +1,7 @@
 "use client";
 
 import { JazzProvider as Jazz } from "jazz-tools/react";
+import { jazzAppId } from "@/src/lib/jazz-env";
 import { StatusScreen } from "./status-screen";
 
 // Start on the thin client; load the local-first one (WASM, local storage,
@@ -12,6 +13,7 @@ const loadLocalFirst = () => import("jazz-tools/local-first");
 export function JazzProvider({ children }: { children: React.ReactNode }) {
   return (
     <Jazz
+      appId={jazzAppId}
       serverUrl="/jazz"
       client={loadLocalFirst}
       // Signed out, the app renders its own sign-in screen without Jazz.

@@ -105,8 +105,7 @@ const DEFAULT_PUBLIC_PREFIX = "NEXT_PUBLIC_";
 
 /**
  * The environment a variant is built, started and tested with: its origin as
- * APP_ORIGIN and `<prefix>APP_ORIGIN`, a fresh app id as JAZZ_APP_ID (the backend's;
- * the browser names no app),
+ * APP_ORIGIN and `<prefix>APP_ORIGIN`, a fresh app id as `<prefix>JAZZ_APP_ID`,
  * a fresh Better Auth secret and data directory.
  */
 export function variantEnv(variant, { dataPath, baseEnv = process.env } = {}) {
@@ -123,7 +122,7 @@ export function variantEnv(variant, { dataPath, baseEnv = process.env } = {}) {
     ...env,
     APP_ORIGIN: ORIGIN,
     [`${prefix}APP_ORIGIN`]: ORIGIN,
-    JAZZ_APP_ID: randomUUID(),
+    [`${prefix}JAZZ_APP_ID`]: randomUUID(),
     BETTER_AUTH_SECRET: randomBytes(32).toString("hex"),
     JAZZ_DATA_PATH: dataPath,
     NEXT_TELEMETRY_DISABLED: "1",

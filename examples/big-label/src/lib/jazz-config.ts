@@ -8,8 +8,8 @@ export const LOCAL_APP_ID = "00000000-0000-0000-0000-000000000301";
  */
 export function jazzConfig(env: Record<string, string | undefined> = process.env) {
   const production = env.NODE_ENV === "production";
-  const appId = env.JAZZ_APP_ID || (production ? undefined : LOCAL_APP_ID);
-  if (!appId) throw new Error("JAZZ_APP_ID must be configured in production");
+  const appId = env.NEXT_PUBLIC_JAZZ_APP_ID || (production ? undefined : LOCAL_APP_ID);
+  if (!appId) throw new Error("NEXT_PUBLIC_JAZZ_APP_ID must be configured in production");
   const url = env.JAZZ_SERVER_URL;
   if (!url) return { appId, remote: undefined, dataPath: env.JAZZ_DATA_PATH || ".jazz" };
   const secret = env.JAZZ_ADMIN_SECRET;

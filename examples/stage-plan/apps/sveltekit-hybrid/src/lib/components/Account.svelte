@@ -1,13 +1,13 @@
 <script lang="ts">
+  import { env } from "$env/dynamic/public";
   import { useJazzAuth } from "jazz-tools/svelte";
   import { authClient } from "$lib/auth-client";
+  import { backendIssuer, LOCAL_APP_ID } from "$lib/config";
 
   const jazzAuth = useJazzAuth();
   const betterAuthSession = authClient.useSession();
-  // Signed in: an account the backend names, not this device's guest.
-  const signedIn = $derived(
-    !!$jazzAuth.account && $jazzAuth.account.identity.issuer !== "urn:jazz:local-first",
-  );
+  const issuer = backendIssuer(env.PUBLIC_JAZZ_APP_ID || LOCAL_APP_ID);
+  const signedIn = $derived($jazzAuth.account?.identity.issuer === issuer);
 
   let mode = $state<"closed" | "sign-up" | "sign-in">("closed");
   let name = $state("");

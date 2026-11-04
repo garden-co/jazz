@@ -174,16 +174,6 @@ pub(crate) async fn deploy(
         .stage_deployment(&prepared)
         .map_err(DeployError::invalid)?;
     if !staged.response.changed {
-        // Nothing to commit, but the runtime's view of the catalogue may be
-        // behind the store's: a deployment that committed and then failed
-        // before reloading it is retried here. Reloading is cheap, and a
-        // backend publishes its bundle once per boot.
-        if let Some(runtime) = state.runtime() {
-            runtime
-                .reload_catalogue()
-                .await
-                .map_err(DeployError::internal)?;
-        }
         return Ok(staged.response);
     }
     let new_bundle = (!staged.put.bundles.is_empty())

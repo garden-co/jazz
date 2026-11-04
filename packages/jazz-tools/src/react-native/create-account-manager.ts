@@ -1,5 +1,5 @@
 import { installNativeRuntimeEntropy } from "../runtime/runtime-entropy.js";
-import { clientRegistryUrl, deviceOnlyFetch } from "../accounts/account-manager-core.js";
+import { accountRegistryUrl } from "../accounts/context.js";
 import { clientScope } from "../runtime/client-scope.js";
 import { prepareAccountManager, type AccountStore } from "../accounts/persistence.js";
 import type { AppBearer } from "../accounts/enrollment.js";
@@ -13,11 +13,7 @@ export interface AccountManagerConfig {
   appId?: string;
   /** The app id an existing local-first app's users were created under. */
   scope?: string;
-  /**
-   * The app's Jazz endpoint, its backend's `createJazz` mount. `null` keeps
-   * Jazz on this device only: no server, no sign-in, one local-first account.
-   */
-  serverUrl: string | null;
+  serverUrl: string;
   /** Atomic OS-protected storage scoped to this application, registry, and profile. */
   store: AccountStore;
   /**
@@ -31,7 +27,7 @@ export interface AccountManagerConfig {
 
 /** Prepare native crypto and retained selection without opening a Jazz context. */
 export async function createAccountManager(config: AccountManagerConfig) {
-  const registry = clientRegistryUrl(config);
+  const registry = accountRegistryUrl(config.serverUrl, clientScope(config));
   const native = await import("jazz-rn/relay");
   const crypto = native.installNativeForegroundRuntime();
   const generateSecret = crypto.accountSecret;
@@ -49,7 +45,6 @@ export async function createAccountManager(config: AccountManagerConfig) {
     registry,
     store: config.store,
     bearer: config.bearer,
-    ...(config.serverUrl === null ? { fetch: deviceOnlyFetch } : {}),
     generateSecret: () => formatAuthSecret(generateSecret()),
     mintToken: (secret, audience) =>
       mintToken(parseAuthSecret(secret), audience, 3600, Math.floor(Date.now() / 1000)),

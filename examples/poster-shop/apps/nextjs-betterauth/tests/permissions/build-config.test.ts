@@ -7,7 +7,7 @@ import {
 
 const deployment = {
   NEXT_PUBLIC_APP_ORIGIN: "https://poster-shop.example",
-  JAZZ_APP_ID: "8f0b7a52-5d0e-4b4c-9a51-3c1f2b9d7e10",
+  NEXT_PUBLIC_JAZZ_APP_ID: "8f0b7a52-5d0e-4b4c-9a51-3c1f2b9d7e10",
   BETTER_AUTH_SECRET: "better-auth-secret",
 };
 const remote = {
@@ -27,7 +27,7 @@ describe("PosterShop build configuration", () => {
 
   it.each([
     ["origin", { NEXT_PUBLIC_APP_ORIGIN: "https://poster-shop.example" }],
-    ["app id", { JAZZ_APP_ID: deployment.JAZZ_APP_ID }],
+    ["app id", { NEXT_PUBLIC_JAZZ_APP_ID: deployment.NEXT_PUBLIC_JAZZ_APP_ID }],
     ["sync server", remote],
   ])("requires a Better Auth secret once the %s is not local", (_dimension, override) => {
     expect(() => assertBuildConfiguration(readBuildConfig(override))).toThrow(
@@ -44,7 +44,7 @@ describe("PosterShop build configuration", () => {
   it("accepts a configured deployment, with or without a sync server", () => {
     expect(assertBuildConfiguration(readBuildConfig(deployment))).toMatchObject({
       origin: "https://poster-shop.example",
-      appId: deployment.JAZZ_APP_ID,
+      appId: deployment.NEXT_PUBLIC_JAZZ_APP_ID,
       remote: undefined,
     });
     expect(assertBuildConfiguration(readBuildConfig({ ...deployment, ...remote }))).toMatchObject({

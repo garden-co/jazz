@@ -3,8 +3,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { schema } from "../../src/schema-namespace.js";
-import { createAccountManager, openJazzClient } from "../../src/react-native/index.js";
-import { createNativeAccountTestSession } from "../../src/_dev/native-account-session.js";
+import { createAccountManager } from "../../src/react-native/index.js";
+import {
+  createNativeAccountTestSession,
+  openJazzClient,
+} from "../../src/_dev/native-account-session.js";
 import { serializeSchemaSource } from "../../src/drivers/schema-wire.js";
 import { createPlatformHost, installPlatformHost } from "./native-platform.js";
 

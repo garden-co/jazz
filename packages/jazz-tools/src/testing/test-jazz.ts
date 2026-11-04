@@ -1,13 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
-import {
-  acceptLocalFirstAuth,
-  createJazz,
-  remote,
-  type CreateJazzOptions,
-  type Jazz,
-} from "../backend/create-jazz.js";
+import { createJazz, remote, type CreateJazzOptions, type Jazz } from "../backend/create-jazz.js";
 import type { Session } from "../runtime/context.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import type { SchemaSourceInput } from "../schema-source.js";
@@ -88,11 +82,6 @@ export interface StartTestJazzOptions {
    * so clients keep their origin, as across a real redeploy.
    */
   port?: number;
-  /**
-   * Whether the app lets local-first guests sync, as an app's `authenticate`
-   * does by returning `acceptLocalFirstAuth(request)` (default true).
-   */
-  guests?: boolean;
   /** More `createJazz` options (not `app`, `permissions`, `store` or `authenticate`). */
   jazz?: Omit<CreateJazzOptions, "app" | "permissions" | "store" | "authenticate">;
 }
@@ -113,10 +102,8 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
   const bearers = new Map<string, { userId: string; claims?: Record<string, unknown> }>();
   const userFor = (request: Request) => {
     const authorization = request.headers.get("authorization");
-    const user = authorization?.startsWith("Bearer ")
-      ? bearers.get(authorization.slice(7))
-      : users.get(new URL(request.url).host);
-    return user ?? (options.guests === false ? null : acceptLocalFirstAuth(request));
+    if (authorization?.startsWith("Bearer ")) return bearers.get(authorization.slice(7)) ?? null;
+    return users.get(new URL(request.url).host) ?? null;
   };
   const servers: Server[] = [];
   // Every connection, including upgraded sync sockets, which `server.close`
