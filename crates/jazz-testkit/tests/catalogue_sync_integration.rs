@@ -2452,3 +2452,106 @@ async fn keeps_authorization_through_v1_head_impl() {
     bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
 }
+
+/// A permission change reaches a user's client when its backend redeploys:
+/// publishing a tighter bundle changes nothing for the session pinned to the
+/// old one, and the client reconnecting pinned to the new one loses the row
+/// it held, remotely and in its own store.
+#[tokio::test]
+async fn retightened_bundle_reaches_a_client_reconnecting_pinned_to_it() {
+    tokio::task::LocalSet::new()
+        .run_until(retightened_bundle_reaches_a_client_reconnecting_pinned_to_it_impl())
+        .await
+}
+
+async fn retightened_bundle_reaches_a_client_reconnecting_pinned_to_it_impl() {
+    let schema = schema_v1();
+    let server = JazzServer::start().await.expect("start test server");
+    let open = publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &schema,
+    )
+    .await;
+    // The app's backend writes the row on its own link.
+    let backend =
+        support::connect(server.make_client_context_for_user(schema.clone(), "retighten-backend"))
+            .await
+            .expect("connect the backend");
+    let (row_id, _, tx) = backend
+        .insert("users", user_values_v1("visible until retightened"))
+        .expect("backend inserts");
+    support::wait_for_global_txs(&backend, &[tx.expect("insert transaction")]).await;
+
+    let mut alice_context =
+        server.make_user_context(schema.clone(), test_user_id("alice-retighten"));
+    alice_context.client_id = Some(jazz::tools::ClientId::new());
+    alice_context.storage = jazz::tools::ClientStorage::Persistent;
+    alice_context.bundle = Some(open.bundle.clone());
+    support::enroll_test_context(&mut alice_context)
+        .await
+        .expect("enroll alice");
+    let alice = support::connect(alice_context.clone())
+        .await
+        .expect("connect alice pinned to the open bundle");
+    let query = Query::from("users");
+    let mut stream = alice
+        .subscribe(query.clone())
+        .await
+        .expect("alice subscribes");
+    let mut log = Vec::new();
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        Duration::from_secs(30),
+        "alice reads the row by the open bundle",
+        |log| has_added_id(log, row_id),
+    )
+    .await;
+
+    let closed = publish_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &schema,
+        support::deny_all_select_permissions(&schema),
+    )
+    .await;
+    assert_ne!(closed, open);
+    let rows = alice
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
+        .await
+        .map(jazz::tools::test_support::ordinary_rows)
+        .expect("alice reads remotely");
+    assert_eq!(
+        rows.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![row_id],
+        "publishing a bundle changes nothing for a session pinned to another"
+    );
+    drop(stream);
+    alice.shutdown().await.expect("shutdown alice");
+
+    // The backend redeployed: alice's client reconnects pinned to its bundle.
+    alice_context.bundle = Some(closed.bundle);
+    let alice = support::connect(alice_context)
+        .await
+        .expect("reconnect alice pinned to the closed bundle");
+    support::wait_for_rows(
+        &alice,
+        query.clone(),
+        "alice reads nothing by the closed bundle",
+        |rows| rows.is_empty().then_some(()),
+    )
+    .await;
+    let local = alice
+        .query(query, jazz::tools::ReadTier::LocalOnly)
+        .await
+        .map(jazz::tools::test_support::ordinary_rows)
+        .expect("alice reads her store");
+    assert!(local.is_empty(), "alice's store dropped the row: {local:?}");
+
+    alice.shutdown().await.expect("shutdown alice");
+    backend.shutdown().await.expect("shutdown backend");
+    server.shutdown().await;
+}

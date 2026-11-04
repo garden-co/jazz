@@ -1218,7 +1218,7 @@ impl ServerRuntimeHandle {
         _negotiated_features: WireFeatures,
         _session_context: Option<ConnectionSessionContext>,
         link_admission: ServerLinkAdmission,
-    ) -> Result<ServerSession, String> {
+    ) -> Result<ServerSession, SessionOpenError> {
         // The SQLite sync protocol has no per-query delegated scope yet, so
         // an authority link is served as the trusted SYSTEM link it is. A
         // client relay (a browser worker relaying for its tabs) is served as
@@ -1241,23 +1241,47 @@ impl ServerRuntimeHandle {
         let session = ServerSession(self.inner.next_session.fetch_add(1, Ordering::Relaxed));
         let (output, receiver) = tokio_mpsc::unbounded_channel();
         let egress = Arc::new(AtomicUsize::new(0));
-        self.edges()?.insert(
+        self.insert_edge(session, receiver, Arc::clone(&egress))?;
+        let opened = self
+            .run(move |owner| {
+                Ok(owner.open_session(session, served_as, claims, bundle, output, egress))
+            })
+            .await;
+        self.settle_open(session, opened)
+    }
+
+    fn insert_edge(
+        &self,
+        session: ServerSession,
+        receiver: tokio_mpsc::UnboundedReceiver<Outbound>,
+        egress: Arc<AtomicUsize>,
+    ) -> Result<(), SessionOpenError> {
+        self.edges().map_err(SessionOpenError::Runtime)?.insert(
             session,
             Edge {
                 output: Some(receiver),
                 ingress: Arc::new(AtomicUsize::new(0)),
-                egress: Arc::clone(&egress),
+                egress,
             },
         );
-        let opened = self
-            .run(move |owner| {
-                owner.open_session(session, served_as, claims, bundle, output, egress)
-            })
-            .await;
-        if opened.is_err() {
-            self.edges()?.remove(&session);
-        }
-        opened.map(|()| session)
+        Ok(())
+    }
+
+    /// The opened `session`, or why not (its edge then goes).
+    fn settle_open(
+        &self,
+        session: ServerSession,
+        opened: Result<Result<(), jazz::db::Error>, String>,
+    ) -> Result<ServerSession, SessionOpenError> {
+        let opened = match opened {
+            Ok(Ok(())) => return Ok(session),
+            Ok(Err(error)) => SessionOpenError::Refused(error),
+            Err(message) => SessionOpenError::Runtime(message),
+        };
+        self.edges()
+            .map_err(SessionOpenError::Runtime)?
+            .remove(&session);
+        Err(opened)
     }
 
     /// Take the session's ordered output stream. Output produced before
@@ -1317,7 +1341,7 @@ impl ServerRuntimeHandle {
         claims: BTreeMap<String, Value>,
         bundle: Option<jazz::catalogue::BundleId>,
         trust: CommitUnitTrust,
-    ) -> Result<ServerSession, String> {
+    ) -> Result<ServerSession, SessionOpenError> {
         let served_as = match trust {
             CommitUnitTrust::Session => identity,
             CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => {
@@ -1327,23 +1351,13 @@ impl ServerRuntimeHandle {
         let session = ServerSession(self.inner.next_session.fetch_add(1, Ordering::Relaxed));
         let (output, receiver) = tokio_mpsc::unbounded_channel();
         let egress = Arc::new(AtomicUsize::new(0));
-        self.edges()?.insert(
-            session,
-            Edge {
-                output: Some(receiver),
-                ingress: Arc::new(AtomicUsize::new(0)),
-                egress: Arc::clone(&egress),
-            },
-        );
+        self.insert_edge(session, receiver, Arc::clone(&egress))?;
         let opened = self
             .run(move |owner| {
-                owner.open_thin_session(session, served_as, claims, bundle, output, egress)
+                Ok(owner.open_thin_session(session, served_as, claims, bundle, output, egress))
             })
             .await;
-        if opened.is_err() {
-            self.edges()?.remove(&session);
-        }
-        opened.map(|()| session)
+        self.settle_open(session, opened)
     }
 
     /// Queue a thin client's request, `bytes` long on the wire, for the
@@ -1608,6 +1622,33 @@ impl ServerRuntimeHandle {
         response
             .await
             .map_err(|_| "server runtime thread dropped the response".to_owned())?
+    }
+}
+
+/// Why a session was not opened.
+#[derive(Debug, Clone)]
+pub enum SessionOpenError {
+    /// The store refused to serve the session (see
+    /// [`jazz::db::Db::check_session_pin`]), with its typed error.
+    Refused(jazz::db::Error),
+    /// The runtime could not open it (its thread is gone, its state is
+    /// poisoned).
+    Runtime(String),
+}
+
+impl std::fmt::Display for SessionOpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(error) => write!(f, "{error}"),
+            Self::Runtime(message) => f.write_str(message),
+        }
+    }
+}
+
+impl SessionOpenError {
+    /// Whether `self` contains `needle` (as its message shows it).
+    pub fn contains(&self, needle: &str) -> bool {
+        self.to_string().contains(needle)
     }
 }
 
@@ -1990,7 +2031,7 @@ impl Owner {
         bundle: Option<jazz::catalogue::BundleId>,
         output: tokio_mpsc::UnboundedSender<Outbound>,
         egress: Arc<AtomicUsize>,
-    ) -> Result<(), String> {
+    ) -> Result<(), jazz::db::Error> {
         let claims = (identity != AuthorSubject::SYSTEM).then(|| {
             self.db.set_identity_claims(identity, claims.clone());
             claims
@@ -2003,15 +2044,12 @@ impl Owner {
             done: std::cell::Cell::new(false),
             slice: Rc::clone(&self.slice),
         });
-        let subscriber = self
-            .db
-            .accept_pinned_subscriber(
-                Box::new(SessionTransport(Rc::clone(&queues))),
-                identity,
-                claims,
-                bundle,
-            )
-            .map_err(|error| error.to_string())?;
+        let subscriber = self.db.accept_pinned_subscriber(
+            Box::new(SessionTransport(Rc::clone(&queues))),
+            identity,
+            claims,
+            bundle,
+        )?;
         self.sessions.insert(
             session,
             OwnerSession {
@@ -2365,14 +2403,16 @@ mod tests {
         // A session with more inbound messages than the window's ticks take.
         block_on(runtime.run(|owner| {
             let (output, _) = tokio_mpsc::unbounded_channel();
-            owner.open_session(
-                ServerSession(1),
-                AuthorSubject::SYSTEM,
-                BTreeMap::new(),
-                None,
-                output,
-                Arc::default(),
-            )?;
+            owner
+                .open_session(
+                    ServerSession(1),
+                    AuthorSubject::SYSTEM,
+                    BTreeMap::new(),
+                    None,
+                    output,
+                    Arc::default(),
+                )
+                .map_err(|error| error.to_string())?;
             let mut inbound = owner.sessions[&ServerSession(1)]
                 .queues
                 .inbound

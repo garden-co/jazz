@@ -31,17 +31,18 @@ fn allow_all() -> TablePolicies {
         .with_delete(PolicyExpr::True)
 }
 
+fn public_schema() -> jazz::tools::public_schema::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("messages")
+                .column("body", ColumnType::Text)
+                .policies(allow_all()),
+        )
+        .build()
+}
+
 fn schema() -> JazzSchema {
-    JazzSchema::new(
-        &SchemaBuilder::new()
-            .table(
-                TableSchemaBuilder::new("messages")
-                    .column("body", ColumnType::Text)
-                    .policies(allow_all()),
-            )
-            .build(),
-    )
-    .unwrap()
+    JazzSchema::new(&public_schema()).unwrap()
 }
 
 fn user(n: u8) -> AuthorSubject {
@@ -952,4 +953,63 @@ fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
     assert_eq!(fates(&m_down), vec![(1, false), (2, true)]);
     let (_, link) = user(2).principal_parts();
     assert_eq!(creators(&server), vec![("as a session".to_owned(), link)]);
+}
+
+/// A trusted link that acts for a user must be pinned once the store serves
+/// bundles: its user would otherwise be checked by the store's own
+/// permissions, which no deployment chose. Its own writes need no pin.
+#[test]
+fn an_unpinned_trusted_link_may_not_act_for_a_user_once_bundles_are_served() {
+    let server = server();
+    let bundle = block_on(server.publish_bundle(&public_schema())).unwrap();
+    let commit = |tx: u64, row: u8, acting: Acting| SyncMessage::Commit {
+        clock: 0,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([4; 16])),
+        kind: WireKind::Mergeable,
+        ops: vec![
+            WireWrite::Insert {
+                table: "messages".to_owned(),
+                row: [row; 16],
+                cells: [(
+                    stored(&server, "messages", "body"),
+                    Value::String(format!("row {row}")),
+                )]
+                .into(),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into(),
+        ],
+        acting,
+    };
+    let as_alice = || Acting::Session {
+        author: user(5).canonical().to_owned(),
+        claims: BTreeMap::new(),
+    };
+
+    let (_unpinned_client, unpinned_server, unpinned_up, unpinned_down) = pipe();
+    server
+        .accept_pinned_subscriber(unpinned_server, AuthorSubject::SYSTEM, None, None)
+        .unwrap();
+    unpinned_up
+        .borrow_mut()
+        .extend([commit(1, 1, as_alice()), commit(2, 2, Acting::Own)]);
+    block_on(server.tick()).unwrap();
+    assert_eq!(
+        fates(&unpinned_down),
+        vec![(1, false), (2, true)],
+        "unpinned, the link writes as itself but not for alice"
+    );
+
+    let (_pinned_client, pinned_server, pinned_up, pinned_down) = pipe();
+    server
+        .accept_pinned_subscriber(pinned_server, AuthorSubject::SYSTEM, None, Some(bundle))
+        .unwrap();
+    pinned_up.borrow_mut().push_back(commit(3, 3, as_alice()));
+    block_on(server.tick()).unwrap();
+    assert_eq!(
+        fates(&pinned_down),
+        vec![(3, true)],
+        "pinned, it acts for alice"
+    );
 }
