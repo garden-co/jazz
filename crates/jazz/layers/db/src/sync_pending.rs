@@ -130,19 +130,29 @@ pub(crate) fn holds_encoded_pending(conn: &rusqlite::Connection) -> Result<bool,
 
 /// Lay out a development store's empty pending tables anew if they are in
 /// the encoded-op layout: `format::admit` refused one holding uploads, so
-/// nothing is lost.
+/// nothing is lost. The drops are one savepoint, and `_jazz_pending_items`
+/// (what marks the old layout) goes last, so a crash part way leaves the
+/// old layout whole, to be replaced again at the next open.
 pub(crate) fn replace_encoded_pending(conn: &rusqlite::Connection) -> Result<(), Error> {
     if !has_table(conn, "_jazz_pending_items")? {
         return Ok(());
     }
-    conn.execute_batch(
+    conn.execute_batch("SAVEPOINT jazz_replace_pending")
+        .map_err(storage)?;
+    let dropped = conn.execute_batch(
         "DROP TRIGGER IF EXISTS _jazz_pending_forget; \
-         DROP TABLE _jazz_pending_items; \
          DROP TABLE IF EXISTS _jazz_pending; \
          DROP TABLE IF EXISTS _jazz_rejected_ops; \
-         DROP TABLE IF EXISTS _jazz_rejected;",
-    )
-    .map_err(storage)
+         DROP TABLE IF EXISTS _jazz_rejected; \
+         DROP TABLE _jazz_pending_items;",
+    );
+    let end = match dropped {
+        Ok(()) => "RELEASE jazz_replace_pending",
+        Err(_) => "ROLLBACK TO jazz_replace_pending; RELEASE jazz_replace_pending",
+    };
+    let ended = conn.execute_batch(end).map_err(storage);
+    dropped.map_err(storage)?;
+    ended
 }
 
 /// A stored part that does not read back is another layout's: refused as
