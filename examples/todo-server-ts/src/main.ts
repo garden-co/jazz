@@ -268,7 +268,7 @@ export async function createServer(
         description: body.description?.trim(),
         owner_id: res.locals.userId as string,
       });
-      await inserted.wait({ tier: "local" });
+      await inserted.wait({ tier: "global" });
       await broadcastTodos();
 
       res.status(201).json(inserted.value);
@@ -346,7 +346,7 @@ export async function createServer(
       };
 
       if (Object.values(updates).some((value) => value !== undefined)) {
-        await db.update(schemaApp.todos, id, updates).wait({ tier: "local" });
+        await db.update(schemaApp.todos, id, updates).wait({ tier: "global" });
         await broadcastTodos();
       }
 
@@ -372,7 +372,7 @@ export async function createServer(
         return;
       }
 
-      await db.delete(schemaApp.todos, id).wait({ tier: "local" });
+      await db.delete(schemaApp.todos, id).wait({ tier: "global" });
       await broadcastTodos();
       res.status(204).send();
     } catch (e) {

@@ -1161,6 +1161,27 @@ describe("createJazz", () => {
     expect(rows.map((todo) => todo.title)).toEqual(["kept"]);
   }, 60_000);
 
+  it("hands writes to the sqlite core before close, even ones it hasn't confirmed", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-embedded-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+
+    const first = await createJazz({ app, permissions, store: sqlite({ path: dir }) });
+    // Resolved at "local": the backend's own client has it, the core may not yet.
+    const written = await Promise.all(
+      Array.from({ length: 5 }, (_, i) =>
+        first.db.insert(app.todos, { title: `pending ${i}`, owner: randomUUID() }).wait({
+          tier: "local",
+        }),
+      ),
+    );
+    await first.close();
+
+    const second = await createJazz({ app, permissions, store: sqlite({ path: dir }) });
+    cleanups.push(() => second.close());
+    const rows = await second.db.all(app.todos, { tier: "remote" });
+    expect(rows.map((todo) => todo.id).sort()).toEqual(written.map((todo) => todo.id).sort());
+  }, 60_000);
+
   it("keeps a sqlite store's large values as files, and keeps that choice", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-blobs-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
