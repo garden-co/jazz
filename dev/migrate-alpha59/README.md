@@ -39,12 +39,10 @@ Import:
   with the SQLite engine's own hash function.
 - **Accounts:** the journal replayed command by command.
 - **Backend identity links:** apps moving to `createJazz` name users
-  `(jazz:app:<appId>, userId)`. So that `authenticate` answering
+  `(jazz:backend, userId)`. So that `authenticate` answering
   `{ userId: sub }` opens a returning user's old account, each admitted
-  external identity `(iss, sub)` gets `(jazz:app:<appId>, sub)` linked to the
-  same account, through the registry's own link commands. `<appId>` is
-  `--app-id` exactly as given, which must match the app id the app passes
-  to `remote()` character for character, case included. Built-in issuers (`urn:jazz:*`) are left alone, and revoked
+  external identity `(iss, sub)` gets `(jazz:backend, sub)` linked to the
+  same account, through the registry's own link commands. Built-in issuers (`urn:jazz:*`, `jazz:*`) are left alone, and revoked
   identities get no link. The registry grants every linked identity the
   right to manage the account's identities, so the import refuses an
   identity that lacks it (alpha.59 never creates one). It also refuses,
@@ -77,6 +75,11 @@ sqlite-import verify --dump tenant.dump --data-dir <new dir> --app-id <app uuid>
 a59-export --data-dir /app/data --work <empty dir> --out c.dump --catalogue-only
 dump-census c.dump
 ```
+
+`--app-id` is the alpha.59 app's id: its guests' accounts are derived from
+it. The import keeps it in `<new dir>/app-id`, so `createJazz` with
+`sqlite({ path: "<new dir>" })` runs as that app without the app naming
+the id.
 
 Dumps hold customer data: keep them inside the cluster and never commit
 them. `dump-show` prints string prefixes, cell values and authors, so only

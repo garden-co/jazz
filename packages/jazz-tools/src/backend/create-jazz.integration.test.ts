@@ -159,7 +159,7 @@ describe("createJazz", () => {
     const alice = await userSession(appId, origin, "alice");
     // The client holds no Jazz credential: its identity comes from the backend.
     expect(alice.session?.user?.identity).toEqual({
-      issuer: `jazz:app:${appId}`,
+      issuer: "jazz:backend",
       subject: "alice",
     });
 
@@ -171,7 +171,7 @@ describe("createJazz", () => {
       forged.send(
         JSON.stringify({
           peer_identity: "forged",
-          backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
+          backend_session: { issuer: "jazz:backend", user_id: "alice" },
         }),
       ),
     );
@@ -189,7 +189,7 @@ describe("createJazz", () => {
         JSON.stringify({
           peer_identity: "worker",
           jwt_token: null,
-          backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
+          backend_session: { issuer: "jazz:backend", user_id: "alice" },
           auth: { jwt_token: null, backend_session: { user_id: "alice" } },
         }),
       ),
@@ -385,7 +385,7 @@ describe("createJazz", () => {
           socket.send(
             JSON.stringify({
               peer_identity: "page",
-              backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
+              backend_session: { issuer: "jazz:backend", user_id: "alice" },
             }),
           );
         });
@@ -552,7 +552,7 @@ describe("createJazz", () => {
       const alice = session.getSnapshot().client!;
       expect(alice.session!.user!.account).toBe(account);
       expect(alice.session!.user!.identity).toEqual({
-        issuer: `jazz:app:${appId}`,
+        issuer: "jazz:backend",
         subject: "alice",
       });
       const seen = await alice.db.all(app.todos.where({ id: row.id }));
@@ -722,7 +722,7 @@ describe("createJazz", () => {
         identity: { issuer: string; subject: string };
       };
       expect(answer.account).toBeNull();
-      expect(answer.identity).toEqual({ issuer: `jazz:app:${appId}`, subject: "alice" });
+      expect(answer.identity).toEqual({ issuer: "jazz:backend", subject: "alice" });
     }
     // So the guest's link to alice still goes through, and the answer names
     // the guest's account from then on.
@@ -985,7 +985,7 @@ describe("createJazz", () => {
 
     // The app's own session still names alice, but her identity is revoked
     // at the core.
-    const alice = { issuer: `jazz:app:${appId}`, subject: "alice" };
+    const alice = { issuer: "jazz:backend", subject: "alice" };
     const admin = (operation: string, body: unknown) =>
       fetch(`${core.url}/apps/${appId}/admin/accounts/${operation}`, {
         method: "POST",

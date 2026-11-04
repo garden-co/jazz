@@ -339,12 +339,12 @@ impl ServerBuilder {
                     // A bucket's default prefix is this store's own.
                     BlobStore::S3(options) if options.prefix.is_empty() => {
                         let mut options = options.clone();
-                        options.prefix = format!("jazz/{}/{}/", self.app_id, store_id(path)?);
+                        options.prefix = format!("jazz/{}/", store_id(path)?);
                         BlobStore::S3(options)
                     }
                     BlobStore::VercelBlob(options) if options.prefix.is_empty() => {
                         let mut options = options.clone();
-                        options.prefix = format!("jazz/{}/{}/", self.app_id, store_id(path)?);
+                        options.prefix = format!("jazz/{}/", store_id(path)?);
                         BlobStore::VercelBlob(options)
                     }
                     blobs => blobs.clone(),
@@ -973,7 +973,7 @@ mod tests {
             let marker = std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap();
             assert_eq!(
                 marker,
-                format!("s3 http://127.0.0.1:9 jazz/jazz/{app}/{}/\n", id.trim())
+                format!("s3 http://127.0.0.1:9 jazz/jazz/{}/\n", id.trim())
             );
             recorded.push(marker);
         }
@@ -1005,10 +1005,7 @@ mod tests {
             .await;
         let id = std::fs::read_to_string(data_dir.path().join(STORE_ID_FILE)).unwrap();
         let marker = std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap();
-        assert_eq!(
-            marker,
-            format!("vercel-blob abc/jazz/{app}/{}/\n", id.trim())
-        );
+        assert_eq!(marker, format!("vercel-blob abc/jazz/{}/\n", id.trim()));
     }
 
     #[tokio::test]

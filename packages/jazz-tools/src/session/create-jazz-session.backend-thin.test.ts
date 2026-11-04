@@ -116,7 +116,7 @@ describe("browser session against the app's backend", () => {
     await session.loginWithBackend();
     const thin = session.getSnapshot().client!;
     expect(isThinDb(thin.db)).toBe(true);
-    expect(thin.session?.user?.identity).toEqual({ issuer: `jazz:app:${appId}`, subject: "alice" });
+    expect(thin.session?.user?.identity).toEqual({ issuer: "jazz:backend", subject: "alice" });
     const owner = thin.session!.user!.account;
 
     await thin.db.insert(app.todos, { title: "thin", owner }).wait({ tier: "global" });

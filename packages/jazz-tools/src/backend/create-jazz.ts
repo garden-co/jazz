@@ -50,6 +50,7 @@ import {
   backendClientVerifier,
   type BackendClientTrust,
 } from "./backend-clients.js";
+import { BACKEND_USER_ISSUER } from "./backend-issuer.js";
 import { earlyDb } from "./early-db.js";
 import {
   defaultCoreName,
@@ -1009,7 +1010,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
           })
         : await openInProcessCore(store, bundle);
   const appId = core.appId;
-  const issuer = `jazz:app:${appId}`;
+  const issuer = BACKEND_USER_ISSUER;
 
   /** Publish `next`'s bundle and open the backend's own session on it. */
   async function backendSession(

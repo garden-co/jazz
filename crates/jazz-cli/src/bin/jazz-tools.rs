@@ -138,7 +138,7 @@ enum Commands {
         #[arg(long)]
         s3_endpoint: Option<String>,
 
-        /// Prefix for every object name; defaults to jazz/<app id>/<store id>/,
+        /// Prefix for every object name; defaults to jazz/<store id>/,
         /// one per data dir. A prefix is claimed by the first store to use it.
         #[arg(long)]
         s3_prefix: Option<String>,
@@ -155,7 +155,7 @@ enum Commands {
         vercel_blob_store_id: Option<String>,
 
         /// Prefix for every blob's pathname; defaults to
-        /// jazz/<app id>/<store id>/, one per data dir.
+        /// jazz/<store id>/, one per data dir.
         #[arg(long)]
         vercel_blob_prefix: Option<String>,
 

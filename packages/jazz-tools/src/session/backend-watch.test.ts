@@ -8,7 +8,7 @@ import { createJazzSessionOwner } from "./state.js";
 const handle = (issuer: string, subject: string) =>
   Object.freeze({ id: `${issuer}:${subject}`, identity: { issuer, subject } }) as AccountHandle;
 const guest = handle("urn:jazz:local-first", "guest");
-const user = (subject: string) => handle("jazz:app:test", subject);
+const user = (subject: string) => handle("jazz:backend", subject);
 const settle = async (ms = 0) => {
   await new Promise((resolve) => setTimeout(resolve, ms));
   for (let i = 0; i < 20; i++) await Promise.resolve();

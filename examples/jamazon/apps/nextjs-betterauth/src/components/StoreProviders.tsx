@@ -20,7 +20,7 @@ const loadLocalFirst = () => import("jazz-tools/local-first");
 
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID || LOCAL_DEFAULTS.appId;
 // Accounts the store's backend signs in are issued by this app.
-const backendIssuer = `jazz:app:${appId}`;
+const backendIssuer = "jazz:backend";
 const GUEST_CART_KEY = "jamazon:guest-cart-to-claim";
 
 // Set while a sign-in, sign-up or sign-out runs, so the restore effect below

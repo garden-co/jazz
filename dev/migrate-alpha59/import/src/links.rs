@@ -1,9 +1,9 @@
 //! Account continuity for apps moving to `createJazz`.
 //!
-//! `createJazz` names every user `(jazz:app:<appId>, userId)`. An alpha.59
+//! `createJazz` names every user `(jazz:backend, userId)`. An alpha.59
 //! app authenticated users by their own JWTs, as `(iss, sub)`. So that a
 //! returning user's `authenticate` answering `{ userId: sub }` opens their
-//! old account, the import links `(jazz:app:<appId>, sub)` to the account of
+//! old account, the import links `(jazz:backend, sub)` to the account of
 //! each admitted external identity `(iss, sub)`, through the account
 //! registry's own link commands.
 //!
@@ -16,7 +16,7 @@
 //! Local-first, anonymous, system and other built-in issuers are left
 //! alone. A revoked identity gets no link, but still counts as holding its
 //! subject: two issuers that share a subject on different accounts, revoked
-//! or not, would both claim one `jazz:app` identity, and the import refuses
+//! or not, would both claim one `jazz:backend` identity, and the import refuses
 //! that rather than pick one.
 
 use std::collections::BTreeMap;
@@ -30,14 +30,12 @@ use serde_json::json;
 
 use crate::err;
 
-/// The `createJazz` issuer of an app: its app id exactly as the app passes
-/// it to `remote()`, not canonicalized.
-pub fn app_issuer(app: &str) -> String {
-    format!("jazz:app:{app}")
-}
+/// The issuer `createJazz` names every user by. A core admits only its own
+/// app's backend, so it names no app.
+pub const BACKEND_ISSUER: &str = "jazz:backend";
 
 fn eligible(issuer: &str) -> bool {
-    !issuer.starts_with("urn:jazz:") && !issuer.starts_with("jazz:app:")
+    !issuer.starts_with("urn:jazz:") && !issuer.starts_with("jazz:")
 }
 
 /// One identity with an account, as the account journal leaves it.
@@ -84,7 +82,7 @@ pub fn identities(
     Ok(out)
 }
 
-/// A planned link: `subject` joins `account` as `(jazz:app:<app>, subject)`,
+/// A planned link: `subject` joins `account` as `(jazz:backend, subject)`,
 /// approved by `approver` (issuer, subject), which manages that account.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Link {
@@ -161,8 +159,8 @@ pub fn plan(identities: &[Identity]) -> Result<Vec<Link>, String> {
 
 /// Link every planned identity. One already on its account is left as is;
 /// one on another account is an error.
-pub async fn apply(state: &Arc<ServerState>, app: &str, links: &[Link]) -> Result<u64, String> {
-    let issuer = app_issuer(app);
+pub async fn apply(state: &Arc<ServerState>, links: &[Link]) -> Result<u64, String> {
+    let issuer = BACKEND_ISSUER;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(err)?
@@ -223,7 +221,8 @@ mod tests {
             identity("https://a", "u1", "A", true, true),
             identity("https://a", "u2", "B", true, true),
             identity("urn:jazz:local-first", "x", "B", true, true),
-            identity("jazz:app:1", "u3", "C", true, true),
+            identity("jazz:backend", "u3", "C", true, true),
+            identity("jazz:app:1", "u4", "C", true, true),
         ])
         .unwrap();
         assert_eq!(links.len(), 2);

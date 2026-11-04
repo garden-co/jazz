@@ -61,10 +61,7 @@ async fn run() {
         jwt_token: None,
         // A user the app's backend opens a session for, as createJazz does.
         backend_secret: Some(core.backend_secret().to_owned()),
-        backend_session: Some(Session::new(
-            "jazz:app:rn-device",
-            "rn-device-core-observer",
-        )),
+        backend_session: Some(Session::new("jazz:backend", "rn-device-core-observer")),
         bundle: core.latest_bundle(),
         admin_secret: None,
         migrations: Default::default(),
@@ -154,7 +151,7 @@ async fn run() {
         // A user the app's backend opens a session for, as createJazz does.
         backend_secret: Some(core.backend_secret().to_owned()),
         backend_session: Some(Session::new(
-            "jazz:app:rn-device",
+            "jazz:backend",
             "rn-device-core-recovery-writer",
         )),
         bundle: core.latest_bundle(),

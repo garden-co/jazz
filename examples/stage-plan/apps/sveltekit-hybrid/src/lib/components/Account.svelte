@@ -1,12 +1,11 @@
 <script lang="ts">
-  import { env } from "$env/dynamic/public";
   import { useJazzAuth } from "jazz-tools/svelte";
   import { authClient } from "$lib/auth-client";
-  import { backendIssuer, LOCAL_APP_ID } from "$lib/config";
+  import { backendIssuer } from "$lib/config";
 
   const jazzAuth = useJazzAuth();
   const betterAuthSession = authClient.useSession();
-  const issuer = backendIssuer(env.PUBLIC_JAZZ_APP_ID || LOCAL_APP_ID);
+  const issuer = backendIssuer;
   const signedIn = $derived($jazzAuth.account?.identity.issuer === issuer);
 
   let mode = $state<"closed" | "sign-up" | "sign-in">("closed");

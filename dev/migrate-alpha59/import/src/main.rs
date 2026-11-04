@@ -37,8 +37,8 @@ struct Args {
     dump: PathBuf,
     data_dir: PathBuf,
     app_id: AppId,
-    /// `--app-id` exactly as given: the app id the app passes to `remote()`,
-    /// which `createJazz` puts in its issuer verbatim.
+    /// `--app-id` exactly as given, kept in `<data-dir>/app-id` so that
+    /// `sqlite({ path })` runs the imported app without naming its id.
     app_id_text: String,
     /// Link each external identity's subject as a `createJazz` user id.
     link_backend_identities: bool,
@@ -229,7 +229,7 @@ async fn run(args: &Args) -> Result<Json, String> {
     let mut linked = 0;
     if args.link_backend_identities {
         let planned = links::plan(&links::identities(&head.accounts, &head.principals)?)?;
-        linked = links::apply(&state, &args.app_id_text, &planned).await?;
+        linked = links::apply(&state, &planned).await?;
     }
 
     let mut rows = RowImport::default();
@@ -277,6 +277,14 @@ async fn run(args: &Args) -> Result<Json, String> {
     let footer = reader.footer().clone();
 
     let phase = built.shutdown().await;
+    // `sqlite({ path })` keeps its app id here: the store runs as the
+    // alpha.59 app, so its guests' and users' accounts stay theirs, without
+    // the app naming the id.
+    std::fs::write(
+        args.data_dir.join("app-id"),
+        format!("{}\n", args.app_id_text),
+    )
+    .map_err(err)?;
     Ok(json!({
         "data_dir": args.data_dir,
         "deployments": deployments,
