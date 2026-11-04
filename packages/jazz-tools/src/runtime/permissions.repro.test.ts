@@ -293,7 +293,7 @@ async function createServerBackedReproContext(
     adminSecret,
   });
   const permissions = definePermissions(reproApp, defineCasePermissions);
-  await deploy({
+  const { bundle } = await deploy({
     appId,
     serverUrl: server.url,
     adminSecret,
@@ -303,6 +303,7 @@ async function createServerBackedReproContext(
 
   const { createJazzContext } = await import("../backend/create-jazz-context.js");
   const context = createJazzContext({
+    bundle,
     appId: server.appId,
     app: reproApp,
     permissions,
@@ -330,7 +331,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
     let context: JazzContext | null = null;
 
     try {
-      await deploy({
+      const { bundle } = await deploy({
         appId,
         serverUrl: server.url,
         adminSecret,
@@ -339,6 +340,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
       });
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
       context = createJazzContext({
+        bundle,
         appId: server.appId,
         app: relatedWriteApp,
         permissions: relatedWritePermissions,

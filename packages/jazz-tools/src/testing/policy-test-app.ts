@@ -263,7 +263,8 @@ export async function createPolicyTestApp(
     adminSecret,
   });
 
-  await deploy({
+  // Published as createJazz publishes it; the backend link is pinned to it.
+  const { bundle } = await deploy({
     appId: server.appId,
     serverUrl: server.url,
     adminSecret,
@@ -281,6 +282,7 @@ export async function createPolicyTestApp(
       options.clientBackendSecret === undefined
         ? backendSecret
         : (options.clientBackendSecret ?? undefined),
+    bundle,
     env: "test",
   });
 

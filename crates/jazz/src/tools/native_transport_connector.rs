@@ -41,6 +41,9 @@ pub struct NativeTransportRequest {
     /// app's own backend authenticates its native clients by (its bearer),
     /// as a browser's request carries the app's cookie. Never sent to a core.
     pub authorization: Option<String>,
+    /// The published permissions bundle a stated session is pinned to
+    /// (see [`crate::tools::AppContext::bundle`]).
+    pub bundle: Option<String>,
     pub wake: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -181,6 +184,7 @@ mod tests {
             peer_identity,
             auth: AuthConfig::default(),
             authorization: None,
+            bundle: None,
             wake: Arc::new(|| {}),
         }))
         .expect("connector result");
@@ -216,6 +220,7 @@ mod tests {
                 backend_session: Some(serde_json::json!({ "credential": marker })),
             },
             authorization: Some(format!("Bearer {marker}")),
+            bundle: None,
             wake: Arc::new(|| {}),
         };
 
