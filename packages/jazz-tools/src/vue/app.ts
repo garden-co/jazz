@@ -48,7 +48,6 @@ export const JazzProvider = defineComponent({
   inheritAttrs: false,
   props: {
     config: Object as PropType<AccountDbConfig>,
-    appId: String,
     scope: String,
     serverUrl: { type: String as PropType<string | null>, default: undefined },
     initial: [String, Object] as PropType<JazzSessionConfig["initial"]>,
@@ -68,7 +67,6 @@ export const JazzProvider = defineComponent({
         );
     const config = {
       ...attrs,
-      appId: props.appId,
       scope: props.scope,
       serverUrl: props.serverUrl,
       initial: props.initial,

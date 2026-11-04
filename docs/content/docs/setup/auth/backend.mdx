@@ -45,7 +45,6 @@ function Root() {
   const { data, isPending } = authClient.useSession();
   return (
     <JazzProvider
-      appId="my-app"
       serverUrl="/jazz"
       auth={backendAuth({
         key: data?.user.id ?? null,

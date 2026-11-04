@@ -22,14 +22,21 @@ import {
   type LocalFirstModule,
 } from "../runtime/local-first-upgrade.js";
 import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
-import { DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
+import { DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
 import { followUser, type UserFollowingSession } from "./follow-user.js";
 
 export type { LocalFirstLoader };
 
-export type JazzSessionConfig = Omit<JazzClientConfig, "account" | "serverUrl"> &
-  AccountManagerConfig & {
+export type JazzSessionConfig = Omit<JazzClientConfig, "account" | "serverUrl" | "appId"> &
+  Omit<AccountManagerConfig, "appId"> & {
+    /**
+     * Not for a client: the app id belongs to your backend's store
+     * (`remote({ appId })`, `sqlite({ appId })`). A client is scoped by its
+     * `serverUrl`; use `scope` to keep local-first users created under an
+     * app id.
+     */
+    appId?: never;
     /**
      * Your app's Jazz endpoint: by default `"/jazz"`, where `createJazz` is
      * mounted in your own backend. `null` keeps Jazz on this device only: no
@@ -40,8 +47,10 @@ export type JazzSessionConfig = Omit<JazzClientConfig, "account" | "serverUrl"> 
     /**
      * Who the app starts as before your backend names a user: signed out
      * (the default, also `"signed-out"`), or a `"local-first"` guest, an
-     * account on this device that works offline and can later link to your
-     * backend's user (`linkWithBackend`).
+     * account on this device that can later link to your backend's user
+     * (`linkWithBackend`). Your backend must accept guests
+     * (`acceptLocalFirstAuth`). A guest works offline once its client is the
+     * local-first one (`client`).
      */
     initial?: "local-first" | "signed-out" | BackendAuth;
     /**
@@ -68,6 +77,7 @@ export type BrowserJazzSession = UserFollowingSession<JazzClient>;
 
 /** Own one configured client and serialize its account lifecycle. */
 export async function createJazzSession(config: JazzSessionConfig): Promise<BrowserJazzSession> {
+  refuseClientAppId(config);
   if (config.serverUrl === null) return createDeviceOnlySession(config);
   const serverUrl = config.serverUrl ?? DEFAULT_SERVER_URL;
   const {

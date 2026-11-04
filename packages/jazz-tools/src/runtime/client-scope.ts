@@ -30,6 +30,21 @@ export function clientScope(config: {
   return endpointScope(config.serverUrl);
 }
 
+/**
+ * A browser (or app) session names no app: the app id is the backend's, on
+ * its store. Refuse one passed anyway (plain JavaScript, a cast, an old
+ * config), so it can't quietly rescope the device's data and accounts.
+ */
+export function refuseClientAppId(config: { appId?: unknown }): void {
+  if (config.appId === undefined) return;
+  throw new Error(
+    "A Jazz client session takes no appId: the app id belongs to your backend's store " +
+      "(remote({ appId }) or sqlite({ appId })), and a client is scoped by its serverUrl. " +
+      "Remove appId. An app whose local-first users were created under an app id keeps them " +
+      'with scope: "<that app id>".',
+  );
+}
+
 /** Where a browser client syncs when it names no `serverUrl`: its own backend. */
 export const DEFAULT_SERVER_URL = "/jazz";
 

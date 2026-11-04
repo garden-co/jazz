@@ -9,14 +9,23 @@ import {
   type JazzClient,
   type JazzClientConfig,
 } from "../react-native/create-jazz-client.js";
+import { refuseClientAppId } from "../runtime/client-scope.js";
 
-export type JazzSessionConfig = Omit<JazzClientConfig, "account" | "serverUrl"> &
-  AccountManagerConfig & {
+export type JazzSessionConfig = Omit<JazzClientConfig, "account" | "serverUrl" | "appId"> &
+  Omit<AccountManagerConfig, "appId"> & {
+    /**
+     * Not for a client: the app id belongs to your backend's store
+     * (`remote({ appId })`, `sqlite({ appId })`). A client is scoped by its
+     * `serverUrl`; use `scope` to keep local-first users created under an
+     * app id.
+     */
+    appId?: never;
     /**
      * Who the app starts as before your backend names a user: signed out
      * (the default, also `"signed-out"`), or a `"local-first"` guest, an
-     * account on this device that works offline and can later link to your
-     * backend's user (`linkWithBackend`).
+     * account on this device that can later link to your backend's user
+     * (`linkWithBackend`). Your backend must accept guests
+     * (`acceptLocalFirstAuth`).
      */
     initial?: "local-first" | "signed-out" | BackendAuth;
   };
@@ -25,6 +34,7 @@ export type JazzSessionConfig = Omit<JazzClientConfig, "account" | "serverUrl"> 
 export async function createJazzSession(
   config: JazzSessionConfig,
 ): Promise<UserFollowingSession<JazzClient>> {
+  refuseClientAppId(config);
   const accounts = await createAccountManager(config);
   const { serverUrl } = config;
   if (serverUrl === null) {

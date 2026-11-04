@@ -85,4 +85,13 @@ describe("device-only browser session (serverUrl: null)", () => {
       /no backend to sign in through/,
     );
   });
+
+  it("refuses an appId: the app id is the backend's", async () => {
+    await expect(
+      createJazzSession({ appId: "my-app", serverUrl: null, store: memoryStore() } as never),
+    ).rejects.toThrow(/takes no appId/);
+    await expect(
+      createJazzSession({ appId: "my-app", serverUrl: "/jazz", store: memoryStore() } as never),
+    ).rejects.toThrow(/remote\(\{ appId \}\)/);
+  });
 });

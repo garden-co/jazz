@@ -37,7 +37,7 @@ for (const [host, create, prepare] of [
       const shutdown = vi.fn(async () => {});
       mocks.client.mockResolvedValue({ shutdown });
       const config = {
-        appId: "app-1",
+        scope: "app-1",
         serverUrl: "https://jazz.example.com",
         initial: "local-first" as const,
         profile: "personal",
@@ -67,7 +67,7 @@ for (const [host, create, prepare] of [
       });
       prepare.mockResolvedValue(accounts);
       const session = await create({
-        appId: "app-1",
+        scope: "app-1",
         serverUrl: "https://jazz.example.com",
         store: { read: async () => null, update: async () => {} },
       });
