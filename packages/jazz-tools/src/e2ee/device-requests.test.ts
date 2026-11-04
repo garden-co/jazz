@@ -168,14 +168,18 @@ it("keeps enrolment requests private to their verified author account and immuta
           );
         }
       }
-      await expect(
+      const update = async () =>
         client
           .update(requests, request.id, {
             publicKey: new Uint8Array(32).fill(3),
           })
-          .wait({ tier: "global" }),
+          .wait({ tier: "global" });
+      if (client === bob)
+        await expect(update).rejects.toThrow("NotObserved: UPDATE on table __e2ee_device_requests");
+      else await expect(update).rejects.toThrow();
+      await expect(async () =>
+        client.delete(requests, request.id).wait({ tier: "global" }),
       ).rejects.toThrow();
-      await expect(client.delete(requests, request.id).wait({ tier: "global" })).rejects.toThrow();
     }
     await expect(
       alice.one(requests.where({ id: request.id }), { tier: "remote" }),
