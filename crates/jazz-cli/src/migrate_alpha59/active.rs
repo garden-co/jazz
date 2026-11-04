@@ -9,10 +9,10 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use migrate_alpha59_dump as dump;
+use jazz_alpha59_dump as dump;
 use serde_json::Value as Json;
 
-use crate::{err, uuid_string};
+use super::{err, uuid_string};
 
 pub struct ToHead {
     pub head: [u8; 16],
@@ -23,6 +23,7 @@ pub struct ToHead {
 }
 
 /// What became of one version.
+#[allow(clippy::large_enum_variant)]
 pub enum Translated {
     Kept(dump::Version),
     /// Its table is not in the active schema.

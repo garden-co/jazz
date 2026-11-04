@@ -13,6 +13,7 @@
 //! runtime's [`Db`] opens on the same connection once a schema is known.
 
 pub mod auth_admission;
+pub mod migrate_alpha59;
 mod thin;
 
 use std::cell::RefCell;
@@ -1508,9 +1509,10 @@ impl ServerRuntimeHandle {
         change: CatalogueChange,
         supersedes: Option<jazz::catalogue::BundleId>,
     ) -> Result<(), CatalogueApplyError> {
-        let result = self
+        let (ended, result) = self
             .run(move |owner| {
-                Ok((|| {
+                let mut ended = 0;
+                let result = (|| {
                     if change.activate.is_some() {
                         return Err(CatalogueApplyError::Rejected(
                             "a server never makes a schema current: sessions pin bundles"
@@ -1525,7 +1527,7 @@ impl ServerRuntimeHandle {
                         }
                     })?;
                     if let Some(published) = supersedes {
-                        let ended = owner.end_pinned_sessions(
+                        ended = owner.end_pinned_sessions(
                             &|bundle| *bundle != published,
                             &superseded_error(&published),
                         );
@@ -1537,18 +1539,56 @@ impl ServerRuntimeHandle {
                             );
                         }
                     }
+                    #[cfg(test)]
+                    if std::mem::take(&mut owner.fail_next_reload) {
+                        // As a reload that failed partway: the runtime's
+                        // view of the catalogue is no longer the store's.
+                        owner.catalogue = Catalogue::default();
+                        return Err(CatalogueApplyError::Failed(
+                            "injected catalogue reload failure".to_owned(),
+                        ));
+                    }
                     owner
                         .reload_catalogue()
                         .map_err(CatalogueApplyError::Failed)?;
                     Ok(())
-                })())
+                })();
+                Ok((ended, result))
             })
             .await
-            .unwrap_or_else(|error| Err(CatalogueApplyError::Failed(error)));
-        if result.is_ok() {
+            .unwrap_or_else(|error| (0, Err(CatalogueApplyError::Failed(error))));
+        // Sessions that ended are gone even when a later step failed: the
+        // runtime loop still has to see that.
+        if result.is_ok() || ended > 0 {
             self.notify_activity();
         }
         result
+    }
+
+    /// Read the store's catalogue again into the runtime's view of it,
+    /// which a change that committed and then failed may have left behind.
+    pub async fn reload_catalogue(&self) -> Result<(), String> {
+        self.run(|owner| owner.reload_catalogue()).await
+    }
+
+    /// Tests: how many sessions (sync and thin) the runtime serves now.
+    #[cfg(test)]
+    pub(crate) async fn open_sessions_for_test(&self) -> usize {
+        self.run(|owner| Ok(owner.sessions.len() + owner.thin.len()))
+            .await
+            .unwrap()
+    }
+
+    /// Tests: the next [`Self::apply_catalogue`] fails after its commit
+    /// (and after ending superseded sessions), as a failed catalogue reload.
+    #[cfg(test)]
+    pub(crate) async fn fail_next_catalogue_reload_for_test(&self) {
+        self.run(|owner| {
+            owner.fail_next_reload = true;
+            Ok(())
+        })
+        .await
+        .unwrap();
     }
 
     /// Tests: run `f` on the runtime's database.
@@ -1650,6 +1690,9 @@ struct Owner {
     app: Option<String>,
     /// Runs a network chunk store's I/O beside this thread.
     chunk_io: Option<ChunkIoRunner>,
+    /// Tests: the next catalogue reload after a commit fails.
+    #[cfg(test)]
+    fail_next_reload: bool,
 }
 
 struct OwnerSession {
@@ -2030,6 +2073,8 @@ impl Owner {
             catalogue,
             app,
             chunk_io,
+            #[cfg(test)]
+            fail_next_reload: false,
         })
     }
 

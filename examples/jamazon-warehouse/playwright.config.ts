@@ -29,7 +29,7 @@ export default defineConfig({
         command: `node node_modules/next/dist/bin/next dev -p ${PORT}`,
         env: {
           NEXT_PUBLIC_APP_ORIGIN: BASE_URL,
-          NEXT_PUBLIC_JAZZ_APP_ID: process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? randomUUID(),
+          JAZZ_APP_ID: process.env.JAZZ_APP_ID ?? randomUUID(),
           // Jazz runs inside the app; a fresh data directory per run as well.
           JAZZ_DATA_PATH: `.jazz/e2e-${randomUUID()}`,
         },
