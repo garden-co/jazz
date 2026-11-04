@@ -186,8 +186,6 @@ export type {
   JazzSessionOperation,
 } from "./session/state.js";
 
-export * from "./session/auth-provider-exports.js";
-
 export type {
   ForwardRelationship,
   ReverseRelationship,

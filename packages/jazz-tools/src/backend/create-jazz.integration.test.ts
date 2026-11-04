@@ -707,6 +707,55 @@ describe("createJazz", () => {
     expect((await revokes("bob", secret)).status).toBe(409);
   }, 60_000);
 
+  it("refuses a socket for a revoked identity as an auth failure, not an outage", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const store = remote({ url: core.url, appId, secret: core.adminSecret });
+    const jazz = await createJazz({ app, permissions, store, authenticate });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+
+    // The app's own session still names alice, but her identity is revoked
+    // at the core.
+    const alice = { issuer: `jazz:app:${appId}`, subject: "alice" };
+    const admin = (operation: string, body: unknown) =>
+      fetch(`${core.url}/apps/${appId}/admin/accounts/${operation}`, {
+        method: "POST",
+        headers: { "X-Jazz-Admin-Secret": core.adminSecret, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    expect((await admin("login-or-register", { identity: alice })).status).toBe(200);
+    expect((await admin("revoke", { approver: alice, target: alice })).status).toBe(204);
+
+    const socket = new NodeWebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
+      headers: { "x-test-user": "alice" },
+    } as never);
+    socket.binaryType = "arraybuffer";
+    socket.addEventListener("open", () =>
+      socket.send(
+        JSON.stringify({
+          peer_identity: "revoked",
+          backend_session: { issuer: alice.issuer, user_id: "alice" },
+        }),
+      ),
+    );
+    const messages: string[] = [];
+    socket.addEventListener("message", (event) =>
+      messages.push(new TextDecoder().decode(new Uint8Array(event.data as ArrayBuffer))),
+    );
+    const closed = await new Promise<{ code: number; reason: string }>((resolve) =>
+      socket.addEventListener("close", (event) =>
+        resolve({ code: event.code, reason: event.reason }),
+      ),
+    );
+    // A refusal the client must not retry: an auth-failed frame, then 1008.
+    // An outage (core unreachable, 5xx) closes 1011 and the client retries.
+    expect(closed).toEqual({ code: 1008, reason: "sign-in refused" });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("session refused: identity_not_authorized");
+  }, 60_000);
+
   it("syncs over the HTTP stream when the host can't upgrade sockets", async () => {
     const jazz = await createJazz({ app, permissions, store: memory(), authenticate });
     const appId = jazz.appId;

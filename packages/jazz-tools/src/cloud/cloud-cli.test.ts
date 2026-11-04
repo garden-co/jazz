@@ -625,53 +625,37 @@ describe("jazz-tools apps", () => {
     expect(cloud.requests.some((request) => request.method === "POST")).toBe(false);
   });
 
-  it("sends only the auth fields that were given, with a key read from a file", async () => {
-    const keyFile = join(configDir, "key.pem");
-    await writeFile(keyFile, "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----\n");
+  it("changes the local-first auth setting", async () => {
     cloud.apiResponses.set("PATCH /api/v1/apps/app-1/auth", {
       status: 202,
-      body: {
-        appId: "app-1",
-        desiredVersion: 5,
-        auth: {
-          jwksUrl: "",
-          jwtIssuer: "iss",
-          jwtAudience: "aud",
-          jwtPublicKey: "k",
-          allowLocalFirstAuth: false,
-        },
-      },
+      body: { appId: "app-1", desiredVersion: 5, auth: { allowLocalFirstAuth: false } },
     });
     const run = io();
     const code = await runCloudCommand(
-      [
-        "apps",
-        "auth",
-        "set",
-        "app-1",
-        "--jwt-public-key-file",
-        keyFile,
-        "--jwt-issuer",
-        "iss",
-        "--jwt-audience",
-        "aud",
-        "--jwks-url",
-        "",
-        "--allow-local-first-auth",
-        "false",
-        "--json",
-      ],
+      ["apps", "auth", "set", "app-1", "--allow-local-first-auth", "false", "--json"],
       run.io,
     );
     expect(code).toBe(0);
     const patch = cloud.requests.find((request) => request.method === "PATCH");
-    expect(JSON.parse(patch!.body)).toEqual({
-      jwksUrl: "",
-      jwtIssuer: "iss",
-      jwtAudience: "aud",
-      jwtPublicKey: "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----",
-      allowLocalFirstAuth: false,
-    });
+    expect(JSON.parse(patch!.body)).toEqual({ allowLocalFirstAuth: false });
+  });
+
+  it.each([
+    "--jwks-url",
+    "--jwt-issuer",
+    "--jwt-audience",
+    "--jwt-public-key",
+    "--jwt-public-key-file",
+  ])("refuses the removed %s setting instead of sending it", async (removed) => {
+    const run = io();
+    const code = await runCloudCommand(
+      ["apps", "auth", "set", "app-1", removed, "value", "--json"],
+      run.io,
+    );
+    expect(code).toBe(2);
+    expect(run.json()).toMatchObject({ error: "usage" });
+    expect(run.json().message).toContain(`${removed} is not supported`);
+    expect(cloud.requests.some((request) => request.method === "PATCH")).toBe(false);
   });
 
   it("will not delete without the app name", async () => {

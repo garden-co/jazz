@@ -14,7 +14,7 @@ import {
   waitForCondition,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
 
 const app = schema.defineApp(
   {
@@ -107,10 +107,12 @@ describe("websocket include subscriptions", () => {
    * observer ──three Global attachments──► server ──current receipts──► observer
    */
   it("covers concurrent global queries attached after a serializable commit", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("serializable-then-global-coverage"),
-    );
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+    const {
+      appId,
+      serverUrl: coreUrl,
+      adminSecret,
+    } = await getJazzServerInfo(uniqueDbName("serializable-then-global-coverage"));
+    const serverUrl = await publishSchemaAndPermissions(appId, coreUrl, adminSecret, permissions);
 
     const sharedSecret = generateAuthSecret();
     const owner = await openDb(
@@ -195,10 +197,12 @@ describe("websocket include subscriptions", () => {
   }, 45_000);
 
   it("delivers depth-3 reverse include material from client A to client B subscribe", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("include-subscriptions"),
-    );
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+    const {
+      appId,
+      serverUrl: coreUrl,
+      adminSecret,
+    } = await getJazzServerInfo(uniqueDbName("include-subscriptions"));
+    const serverUrl = await publishSchemaAndPermissions(appId, coreUrl, adminSecret, permissions);
 
     const sharedSecret = generateAuthSecret();
     const dbA = await openDb(
@@ -318,10 +322,12 @@ describe("websocket include subscriptions", () => {
   }, 60_000);
 
   it("keeps overlapping forward-include carriers canonical after a live global insert", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("overlapping-forward-include-carriers"),
-    );
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+    const {
+      appId,
+      serverUrl: coreUrl,
+      adminSecret,
+    } = await getJazzServerInfo(uniqueDbName("overlapping-forward-include-carriers"));
+    const serverUrl = await publishSchemaAndPermissions(appId, coreUrl, adminSecret, permissions);
 
     const sharedSecret = generateAuthSecret();
     const authority = await openDb(
@@ -438,14 +444,11 @@ async function publishSchemaAndPermissions(
   serverUrl: string,
   adminSecret: string,
   permissions: CompiledPermissions,
-): Promise<void> {
-  await deploy({
-    appId,
-    serverUrl,
-    adminSecret,
-    schema: app.wasmSchema,
-    permissions,
-  });
+): Promise<string> {
+  const core = { appId, serverUrl, adminSecret };
+  await deploy({ ...core, schema: app.wasmSchema, permissions });
+  // Clients sync through the app's backend; return its URL.
+  return (await startJazzApp(core, { schema: app.wasmSchema, permissions })).serverUrl;
 }
 
 function includesNote(

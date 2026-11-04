@@ -6,6 +6,8 @@ import {
   SharedClientShutdownError,
 } from "../runtime/graceful-shutdown-error.js";
 import { createListeners, toError } from "../runtime/util.js";
+import type { Db } from "../runtime/db.js";
+import { isThinDb } from "../runtime/local-first-upgrade.js";
 
 export interface SessionClient {
   shutdown(options?: { waitForSync?: boolean }): Promise<void>;
@@ -63,6 +65,27 @@ export interface JazzSessionConsumer<Client> {
   release(): void;
 }
 const consumers = new WeakMap<object, () => JazzSessionConsumer<unknown>>();
+type ClientReplacer = (
+  open: (current: unknown, account: AccountHandle) => Promise<unknown>,
+) => Promise<void>;
+const replacers = new WeakMap<object, ClientReplacer>();
+
+/**
+ * @internal Swap the signed-in account's client for another one for the same
+ * account, as the thin-to-local-first upgrade does. `open` gets the current
+ * client; once it resolves the session publishes the new client, then shuts
+ * the old one down after its writes have synced. If the session changes
+ * account, logs out or closes meanwhile, the new client is shut down and this
+ * rejects.
+ */
+export function replaceJazzSessionClient<Client>(
+  session: JazzSession<Client>,
+  open: (current: Client, account: AccountHandle) => Promise<Client>,
+): Promise<void> {
+  const replace = replacers.get(session);
+  if (!replace) return Promise.reject(new Error("Unknown Jazz session"));
+  return replace(open as (current: unknown, account: AccountHandle) => Promise<unknown>);
+}
 /** @internal Framework commit acknowledgement; never required by imperative callers. */
 export function attachJazzSessionConsumer<Client>(
   session: JazzSession<Client>,
@@ -79,13 +102,13 @@ export async function createJazzSessionOwner<
 >(options: {
   accounts: AccountManager<JWTAuth>;
   openClient(account: AccountHandle): Promise<Client>;
-  initial?: "local-first" | BackendAuth;
+  initial?: "local-first" | "signed-out" | BackendAuth;
   /**
    * Wipe the signed-out account's local storage, unsynced writes included,
    * instead of keeping it for that user's next sign-in (shared devices).
    */
   clearOnSignOut?: boolean;
-  /** Add host methods (e.g. `setUser`) to the session before it is sealed. */
+  /** Add host methods (e.g. `reauthenticate`) to the session before it is sealed. */
   decorate?(session: JazzSession<Client>): Extra;
 }): Promise<JazzSession<Client> & Extra> {
   const { accounts, openClient } = options;
@@ -142,7 +165,9 @@ export async function createJazzSessionOwner<
     if (token !== generation) throw superseded();
     try {
       if (client) {
-        if (operation === "logout" && options.clearOnSignOut) {
+        // A thin client keeps nothing in the browser, so there is nothing to wipe.
+        const thin = isThinDb((client as WipeableClient).db as Db);
+        if (operation === "logout" && options.clearOnSignOut && !thin) {
           const db = (client as WipeableClient).db;
           // Upload what the server still accepts before wiping the rest.
           await db?.waitForSync?.({ timeoutMs: 5_000 }).catch(() => {});
@@ -284,6 +309,29 @@ export async function createJazzSessionOwner<
       return closing;
     },
   };
+  replacers.set(session, async (open) => {
+    if (closed) throw new Error("Jazz session is closed");
+    await busy?.catch(() => {});
+    await loggingOut?.catch(() => {});
+    const token = generation;
+    const current = client;
+    const account = selected;
+    if (closed || !current || !account || snapshot.status !== "ready")
+      throw new Error("The Jazz session has no signed-in client to replace");
+    const next = (await open(current, account)) as Client;
+    if (token !== generation || client !== current || closed) {
+      await next.shutdown().catch(() => {});
+      throw superseded();
+    }
+    client = next;
+    publish({ status: "ready", account: selected, client: next });
+    // Children re-render onto the new client first; the old one finishes
+    // uploading its writes before it stops. The swap is done either way: a
+    // slow or failing shutdown of the old client neither holds nor fails it.
+    void current.shutdown({ waitForSync: true }).catch((error: unknown) => {
+      console.warn("Jazz could not shut the replaced client down cleanly.", error);
+    });
+  });
   consumers.set(session, () => {
     const lease: { waiting?: () => void } = {};
     leases.add(lease);

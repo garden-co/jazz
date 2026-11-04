@@ -3,9 +3,11 @@ import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 import react from "@vitejs/plugin-react";
 import { playwright } from "@vitest/browser-playwright";
+import { jazzBackend } from "./jazz.server.js";
+import { APP_ID } from "./tests/browser/test-constants.js";
 
 export default defineConfig({
-  plugins: [wasm(), topLevelAwait(), react()],
+  plugins: [wasm(), topLevelAwait(), react(), jazzBackend({ appId: APP_ID })],
   worker: {
     plugins: () => [wasm(), topLevelAwait()],
   },
@@ -16,7 +18,6 @@ export default defineConfig({
       instances: [{ browser: "chromium", headless: true }],
     },
     include: ["tests/browser/**/*.test.tsx"],
-    globalSetup: ["tests/browser/global-setup.ts"],
     testTimeout: 30000,
   },
 });

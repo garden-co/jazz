@@ -56,8 +56,7 @@ fn user_client_context(
     schema: jazz::tools::Schema,
     user_id: &str,
 ) -> jazz::tools::AppContext {
-    let mut context = server.make_client_context_for_user(schema, user_id);
-    context.backend_secret = None;
+    let mut context = server.make_user_context(schema, user_id);
     context.admin_secret = None;
     context
 }

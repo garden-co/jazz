@@ -7,8 +7,8 @@ Local-first todo app in vanilla TypeScript + Vite — no UI framework. Anonymous
 - Anonymous identity from a locally generated secret — no login UI, no auth server.
 - The low-level Jazz client API: `createDb`, `db.subscribe`, `db.insert` / `db.update` / `db.delete`, `db.onAuthChanged` — consumed without React, Svelte, or Vue bindings.
 - Row-level permissions — `owner_id` enforced by `definePermissions`; mutations on rows you don't own are rejected by the runtime.
-- IndexedDB-backed persistence across reload, plus optional server sync when `VITE_JAZZ_SERVER_URL` is set.
-- The Jazz Vite plugin (`jazzPlugin` in `vite.config.ts`) hosts the dev sync server alongside Vite.
+- IndexedDB-backed persistence across reload, synced through the app's own backend.
+- Jazz inside the app's backend: `jazz.server.ts` runs `createJazz` in the Vite server, so pages sync on their own origin under `/jazz`. In production, run the same `createJazz` in your server.
 
 ## Schema
 
@@ -21,7 +21,7 @@ Local-first todo app in vanilla TypeScript + Vite — no UI framework. Anonymous
 pnpm dev
 ```
 
-`pnpm dev` starts the Jazz dev server and the Vite dev server together via the Jazz Vite plugin. The plugin writes `VITE_JAZZ_APP_ID` / `VITE_JAZZ_SERVER_URL` into the dev environment automatically.
+`pnpm dev` starts Vite with Jazz inside it (`jazz.server.ts`); data stays in `.jazz/`.
 
 ## Tests
 
@@ -29,4 +29,4 @@ pnpm dev
 pnpm test
 ```
 
-Vitest browser-mode integration tests (chromium) covering IndexedDB persistence across remount and core ↔ edge sync between two app instances.
+Vitest browser-mode integration tests (chromium) covering IndexedDB persistence across remount and sync between two app instances through the backend.

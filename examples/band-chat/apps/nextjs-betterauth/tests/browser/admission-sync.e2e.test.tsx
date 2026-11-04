@@ -8,7 +8,8 @@ import {
 } from "../../../../../../packages/jazz-tools/tests/browser/support";
 import {
   getJazzServerInfo,
-  getJazzServerJwtForUser,
+  signInWithJazzApp,
+  startJazzApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server";
 import permissions from "../../permissions";
 import { app } from "../../schema";
@@ -36,14 +37,15 @@ interface Live<T> {
  */
 describe("BandChat admission with open subscriptions", () => {
   it("keeps room history and the room list live for an admitted guest", async () => {
-    const server = await getJazzServerInfo(uniqueDbName("band-chat-admission"));
+    const core = await getJazzServerInfo(uniqueDbName("band-chat-admission"));
     await deploy({
-      appId: server.appId,
-      serverUrl: server.serverUrl,
-      adminSecret: server.adminSecret,
+      appId: core.appId,
+      serverUrl: core.serverUrl,
+      adminSecret: core.adminSecret,
       schema: app,
       permissions,
     });
+    const server = await startJazzApp(core, { schema: app, permissions });
     const owner = await openMember(server, "owner");
     const guest = await openMember(server, "guest");
 
@@ -198,16 +200,14 @@ function live<T extends { id: string }>(db: Db, query: Parameters<Db["subscribe"
 }
 
 async function openMember(
-  server: { appId: string; serverUrl: string },
+  server: Awaited<ReturnType<typeof startJazzApp>>,
   userId: string,
 ): Promise<Member> {
-  const token = await getJazzServerJwtForUser(userId, undefined, server.appId);
-  const accounts = await createAccountManager({ appId: server.appId, serverUrl: server.serverUrl });
-  const account = await accounts.registerJWT({ getToken: async () => token });
+  const { serverUrl, account } = await signInWithJazzApp(createAccountManager, server, userId);
   const db = cleanup.track(
     await createDb({
       appId: server.appId,
-      serverUrl: server.serverUrl,
+      serverUrl,
       account,
       driver: { type: "persistent", dbName: uniqueDbName(`band-chat-${userId}`) },
     }),

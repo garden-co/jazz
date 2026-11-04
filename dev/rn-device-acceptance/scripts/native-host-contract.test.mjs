@@ -640,7 +640,7 @@ test("both platform session wrappers delegate one authenticated socket owner to 
   // worker, then activates the same Rust-owned worker after publication.
   assert.match(relay, /NativeRelaySocketWorker::prepare_with_connector\(/);
   assert.match(relay, /worker\._worker\.activate\(\)/);
-  assert.match(relay, /native relay sockets require an ordinary non-SYSTEM bearer session/);
+  assert.match(relay, /native relay sockets require an ordinary non-SYSTEM user session/);
   assert.match(relay, /private_socket_sessions\.remove/);
 });
 

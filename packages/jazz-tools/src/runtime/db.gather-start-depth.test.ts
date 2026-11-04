@@ -5,7 +5,7 @@ import { createJazzSession } from "../backend/index.js";
 import { createDb } from "./default-create-db.js";
 import type { Db } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startTestJazz } from "../testing/index.js";
 
 // garden-co/jazz#3778: `gather` honours `start` and `maxDepth` for a backend
 // client and for a user client whose rows are behind a read policy.
@@ -28,20 +28,17 @@ const permissions = definePermissions(app, ({ policy, session }) => {
   policy.todos.allowInsert.where({ owner: session.user.account });
 });
 
-let server: Awaited<ReturnType<typeof startLocalJazzServer>>;
+let server: Awaited<ReturnType<typeof startTestJazz>>;
 let backendSession: Awaited<ReturnType<typeof createJazzSession>>;
 let backend: Db;
 let user: Db;
 const ids: Record<string, string> = {};
 
 beforeAll(async () => {
-  server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  await deploy({
-    serverUrl: server.url,
-    appId: server.appId,
-    adminSecret: server.adminSecret,
-    schema: app,
-    permissions,
+  server = await startTestJazz({
+    app: app,
+    permissions: permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
   });
   const account = await localAccountConfig(server.appId, server.url);
   user = await createDb(account);
@@ -68,7 +65,7 @@ beforeAll(async () => {
     appId: server.appId,
     app,
     permissions,
-    serverUrl: server.url,
+    serverUrl: server.core.url,
     driver: { type: "memory" },
     initial: { backendSecret: server.backendSecret },
   });
