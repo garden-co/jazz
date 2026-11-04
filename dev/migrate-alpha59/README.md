@@ -21,8 +21,11 @@ server functions (import).
 
 The dump (`dump/`) is version-neutral: runtime schemas and lenses, every
 admin catalogue entry decoded to JSON, the account journal, what alpha.59
-answers for each principal's login, then every stored row version in commit
-order with its authors and timestamps. It ends with a BLAKE3 digest.
+answers for each principal's login, what alpha.59 reads as each row's
+current state (its settled content and deletion winners), then every stored
+row version in commit order with its authors and timestamps. It ends with a
+BLAKE3 digest, which the import checks before it builds anything. A failed
+import removes the dir it was building.
 
 Import:
 
@@ -36,19 +39,26 @@ Import:
   `(jazz:app:<appId>, userId)`. So that `authenticate` answering
   `{ userId: sub }` opens a returning user's old account, each admitted
   external identity `(iss, sub)` gets `(jazz:app:<appId>, sub)` linked to the
-  same account, through the registry's own link commands. Built-in issuers
-  (`urn:jazz:*`) are left alone. The import refuses, naming only issuers,
-  when two issuers share a subject on different accounts. Pass
-  `--no-backend-identity-links` to skip this.
+  same account, through the registry's own link commands. `<appId>` is
+  `--app-id` exactly as given, which must be the app id the app passes to
+  `remote()`. Built-in issuers (`urn:jazz:*`) are left alone, and revoked
+  identities get no link. The registry grants every linked identity the
+  right to manage the account's identities, so the import refuses an
+  identity that lacks it (alpha.59 never creates one). It also refuses,
+  naming only issuers, when two issuers hold a subject on different
+  accounts, revoked or not. Pass `--no-backend-identity-links` to skip this.
 - **Rows:** every version, brought forward to the active schema along
   alpha.59's own runtime lenses (columns those lenses dropped stay dropped),
   then written through the public Db API as `WriteIdentity::Attribution` of
-  its original author with its original timestamp.
+  its original author with its original timestamp. Each insert and update
+  writes every column, absent cells as explicit nulls.
 
-`sqlite-import verify` checks the published bundle's schema and permissions, every login answer,
-every backend identity link,
-and every row's deleted flag, cells and created/updated provenance. It
-prints row ids and column names only, never values or authors.
+`sqlite-import verify` checks the published bundle's schema and
+permissions, every login answer, every backend identity link, and every
+row's deleted flag, cells and created/updated provenance against what
+alpha.59 itself reads as the row's current state (not against the import's
+own replay), and that no table holds rows alpha.59 lacks. It prints row ids,
+table and column names only, never values or authors.
 
 ## Use
 
@@ -66,12 +76,18 @@ dump-census c.dump
 ```
 
 Dumps hold customer data: keep them inside the cluster and never commit
-them.
+them. `dump-show` prints string prefixes, cell values and authors, so only
+run it on synthetic dumps.
 
 ## Not supported yet (fails loudly)
 
 Branched rows, schemas published but never activated, rows with no lens
-path to the active schema, and TransformColumn lens ops (no shipped alpha.59
-tool creates them; `dump-census` reports them under `unsupported_by_sqlite`).
+path to the active schema, TransformColumn lens ops (no shipped alpha.59
+tool creates them; `dump-census` reports them under `unsupported_by_sqlite`),
+versions not yet settled by the authority (`pending`), content written while
+a row was deleted (alpha.59 keeps it under the deletion; the SQLite engine
+cannot), and transaction metadata, which the SQLite engine does not have:
+`--drop-transaction-metadata` imports those versions without it and counts
+them.
 Verify does not yet compare history depth per row or permissions as seen by
 each account.

@@ -227,6 +227,25 @@ async fn export_versions<W: std::io::Write>(
             version.deletion.is_some(),
         )
     });
+    // What alpha.59 reads as each row's current state, so verify can check
+    // the import against alpha.59 itself rather than against its own replay.
+    let rows: Vec<_> = versions
+        .iter()
+        .map(|version| (version.schema, version.table.clone(), version.row))
+        .collect();
+    let tx_ref = |tx: jazz::tx::TxId| dump::TxRef {
+        node: *tx.node.as_bytes(),
+        time: tx.time.0,
+    };
+    for (row, content, deletion) in node.migrate_export_current(&rows).await.map_err(err)? {
+        writer
+            .write(&dump::Record::Current(dump::Current {
+                row: *row.0.as_bytes(),
+                content: content.map(tx_ref),
+                deletion: deletion.map(tx_ref),
+            }))
+            .map_err(err)?;
+    }
     for version in versions {
         writer
             .write(&dump::Record::Version(convert_version(version)?))
@@ -296,7 +315,9 @@ async fn export_accounts<W: std::io::Write>(
 fn convert_version(version: ExportedVersion) -> Result<dump::Version, String> {
     let mut cells = BTreeMap::new();
     for (name, value) in version.cells {
-        cells.insert(name, convert_value(&value)?);
+        let converted = convert_value(&value)
+            .map_err(|error| format!("{} column {name}: {error}", version.table))?;
+        cells.insert(name, converted);
     }
     Ok(dump::Version {
         table: version.table,
@@ -376,9 +397,7 @@ fn convert_value(value: &Value) -> Result<dump::Value, String> {
         Value::I32(v) => dump::Value::I32(*v),
         Value::Large(_) => return Err("a large value was not read back inline".to_owned()),
         Value::Record(_) | Value::Enum(_) => {
-            return Err(format!(
-                "nested record cells are not supported yet: {value:?}"
-            ));
+            return Err("nested record cells are not supported yet".to_owned());
         }
     })
 }

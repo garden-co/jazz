@@ -296,8 +296,15 @@ fn settle(db: &Db) {
     }
 }
 
+/// Settle a write as the server, the global authority, does its own:
+/// Accepted, with the next global time.
+fn accept(db: &Db, tx: jazz::tx::TxId) {
+    db.finalize_local_mergeable_commit_for_test(tx)
+        .expect("accept as the authority");
+}
+
 fn insert(db: &Db, table: &str, id: RowUuid, by: AuthorSubject, n: u64, values: &[(&str, Value)]) {
-    block_on(db.insert(
+    let write = block_on(db.insert(
         table,
         cells(values),
         InsertOptions {
@@ -308,10 +315,11 @@ fn insert(db: &Db, table: &str, id: RowUuid, by: AuthorSubject, n: u64, values: 
         },
     ))
     .expect("insert");
+    accept(db, write.mergeable_tx_id());
 }
 
 fn update(db: &Db, table: &str, id: RowUuid, by: AuthorSubject, n: u64, values: &[(&str, Value)]) {
-    block_on(db.update(
+    let write = block_on(db.update(
         table,
         id,
         cells(values),
@@ -322,10 +330,11 @@ fn update(db: &Db, table: &str, id: RowUuid, by: AuthorSubject, n: u64, values: 
         },
     ))
     .expect("update");
+    accept(db, write.mergeable_tx_id());
 }
 
 fn delete(db: &Db, table: &str, id: RowUuid, by: AuthorSubject, n: u64) {
-    block_on(db.delete(
+    let write = block_on(db.delete(
         table,
         id,
         DeleteOptions {
@@ -335,6 +344,7 @@ fn delete(db: &Db, table: &str, id: RowUuid, by: AuthorSubject, n: u64) {
         },
     ))
     .expect("delete");
+    accept(db, write.mergeable_tx_id());
 }
 
 fn v1_rows(db: &Db) {
@@ -423,7 +433,7 @@ fn v1_rows(db: &Db) {
         ],
     );
     delete(db, "projects", row(1, 3), user(1), 9);
-    block_on(db.restore(
+    let write = block_on(db.restore(
         "projects",
         row(1, 3),
         None,
@@ -434,6 +444,7 @@ fn v1_rows(db: &Db) {
         },
     ))
     .expect("restore");
+    accept(db, write.mergeable_tx_id());
 }
 
 fn v2_rows(db: &Db) {
@@ -459,6 +470,15 @@ fn v2_rows(db: &Db) {
             ("rank", Value::Nullable(Some(Box::new(Value::I32(-1))))),
             ("pinned", Value::Bool(false)),
         ],
+    );
+    // Clear a nullable cell: the import must write the null, not keep 5.
+    update(
+        db,
+        "documents",
+        row(2, 2),
+        user(2),
+        13,
+        &[("rank", Value::Nullable(None))],
     );
 }
 

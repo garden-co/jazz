@@ -37,30 +37,42 @@ struct Args {
     dump: PathBuf,
     data_dir: PathBuf,
     app_id: AppId,
+    /// `--app-id` exactly as given: the app id the app passes to `remote()`,
+    /// which `createJazz` puts in its issuer verbatim.
+    app_id_text: String,
     /// Link each external identity's subject as a `createJazz` user id.
     link_backend_identities: bool,
+    /// Import versions whose transaction carried user metadata, without it:
+    /// the SQLite engine has no transaction metadata.
+    drop_transaction_metadata: bool,
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
-    let (mut dump, mut data_dir, mut app_id) = (None, None, None);
+    let (mut dump, mut data_dir, mut app_id) = (None, None, None::<(AppId, String)>);
     let mut link_backend_identities = true;
+    let mut drop_transaction_metadata = false;
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
             "--dump" => dump = Some(PathBuf::from(value()?)),
             "--data-dir" => data_dir = Some(PathBuf::from(value()?)),
             "--app-id" => {
-                app_id = Some(AppId::from_string(&value()?).map_err(|error| error.to_string())?)
+                let text = value()?;
+                let id = AppId::from_string(&text).map_err(|error| error.to_string())?;
+                app_id = Some((id, text));
             }
             "--no-backend-identity-links" => link_backend_identities = false,
+            "--drop-transaction-metadata" => drop_transaction_metadata = true,
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
     Ok(Args {
         dump: dump.ok_or("--dump is required")?,
         data_dir: data_dir.ok_or("--data-dir (a new, empty dir) is required")?,
-        app_id: app_id.ok_or("--app-id is required")?,
+        app_id: app_id.as_ref().ok_or("--app-id is required")?.0,
+        app_id_text: app_id.ok_or("--app-id is required")?.1,
         link_backend_identities,
+        drop_transaction_metadata,
     })
 }
 
@@ -77,7 +89,7 @@ async fn main() -> ExitCode {
             eprintln!("sqlite-import: {error}");
             eprintln!(
                 "usage: sqlite-import [verify] --dump <dump> --data-dir <dir> --app-id <uuid> \
-                 [--no-backend-identity-links]"
+                 [--no-backend-identity-links] [--drop-transaction-metadata]"
             );
             return ExitCode::from(2);
         }
@@ -85,7 +97,7 @@ async fn main() -> ExitCode {
     let result = if verifying {
         verify::verify(&args).await
     } else {
-        run(&args).await
+        import(&args).await
     };
     match result {
         Ok(summary) => {
@@ -114,7 +126,9 @@ struct Head {
     principals: Vec<String>,
 }
 
-async fn run(args: &Args) -> Result<Json, String> {
+/// Import into a new, empty data dir; a failed import removes what it built,
+/// so a half-built dir is never left to boot.
+async fn import(args: &Args) -> Result<Json, String> {
     if args.data_dir.exists()
         && std::fs::read_dir(&args.data_dir)
             .map_err(err)?
@@ -123,6 +137,29 @@ async fn run(args: &Args) -> Result<Json, String> {
     {
         return Err(format!("{} is not empty", args.data_dir.display()));
     }
+    check_dump(args)?;
+    let result = run(args).await;
+    if result.is_err() && args.data_dir.exists() {
+        if let Err(error) = std::fs::remove_dir_all(&args.data_dir) {
+            eprintln!(
+                "sqlite-import: could not remove the half-built {}: {error}",
+                args.data_dir.display()
+            );
+        }
+    }
+    result
+}
+
+/// Read the whole dump once, so its digest and counts are checked before
+/// anything is built from it.
+fn check_dump(args: &Args) -> Result<(), String> {
+    let file = std::fs::File::open(&args.dump).map_err(err)?;
+    let (mut reader, _) = dump::Reader::open(std::io::BufReader::new(file)).map_err(err)?;
+    while reader.next_record().map_err(err)?.is_some() {}
+    Ok(())
+}
+
+async fn run(args: &Args) -> Result<Json, String> {
     let file = std::fs::File::open(&args.dump).map_err(err)?;
     let (mut reader, header) = dump::Reader::open(std::io::BufReader::new(file)).map_err(err)?;
     if header.format != dump::DUMP_FORMAT {
@@ -145,11 +182,13 @@ async fn run(args: &Args) -> Result<Json, String> {
             dump::Record::AccountLogin { principal_json, .. } => {
                 head.principals.push(principal_json)
             }
+            // For verify.
+            dump::Record::Current(_) => {}
             dump::Record::Version(version) => {
                 first_version = Some(version);
                 break;
             }
-            other => return Err(format!("unexpected record {other:?}")),
+            other => return Err(format!("unexpected {} record", other.kind())),
         }
     }
 
@@ -168,9 +207,8 @@ async fn run(args: &Args) -> Result<Json, String> {
     }
     let mut linked = 0;
     if args.link_backend_identities {
-        let admitted = links::admitted(&state, &head.principals).await?;
-        let planned = links::plan(&admitted)?;
-        linked = links::apply(&state, &args.app_id.to_string(), &planned).await?;
+        let planned = links::plan(&links::identities(&head.accounts, &head.principals)?)?;
+        linked = links::apply(&state, &args.app_id_text, &planned).await?;
     }
 
     let mut rows = RowImport::default();
@@ -192,11 +230,12 @@ async fn run(args: &Args) -> Result<Json, String> {
             .collect();
         let views = match_schemas(&active, runtime.migrate_import_schemas().await?)?;
         rows.to_head = Some(to_head);
+        rows.drop_transaction_metadata = args.drop_transaction_metadata;
         let mut batch = vec![first];
         while let Some(record) = reader.next_record().map_err(err)? {
             match record {
                 dump::Record::Version(version) => batch.push(version),
-                other => return Err(format!("unexpected record after rows: {other:?}")),
+                other => return Err(format!("unexpected {} record after rows", other.kind())),
             }
             if batch.len() == BATCH {
                 rows.write(&runtime, &views, std::mem::take(&mut batch))
@@ -225,6 +264,7 @@ async fn run(args: &Args) -> Result<Json, String> {
         "versions_written": rows.written,
         "versions_skipped_rejected": rows.rejected,
         "versions_dropped_with_their_table": rows.table_gone,
+        "transaction_metadata_dropped": rows.metadata_dropped,
         "shutdown": format!("{phase:?}"),
     }))
 }
@@ -382,10 +422,14 @@ struct Write {
 #[derive(Default)]
 struct RowImport {
     to_head: Option<active::ToHead>,
+    drop_transaction_metadata: bool,
     seen: HashSet<[u8; 16]>,
+    /// Rows the replay has deleted so far.
+    deleted: HashSet<[u8; 16]>,
     written: u64,
     rejected: u64,
     table_gone: u64,
+    metadata_dropped: u64,
 }
 
 impl RowImport {
@@ -400,6 +444,25 @@ impl RowImport {
             if version.fate.starts_with("rejected") {
                 self.rejected += 1;
                 continue;
+            }
+            if version.fate != "accepted" {
+                return Err(format!(
+                    "row {} of {} has a {} version: only settled versions are supported",
+                    uuid_string(version.row),
+                    version.table,
+                    version.fate
+                ));
+            }
+            if version.user_metadata_json.is_some() {
+                if !self.drop_transaction_metadata {
+                    return Err(format!(
+                        "row {} of {} was written with transaction metadata, which the SQLite \
+                         engine cannot store; pass --drop-transaction-metadata to import without it",
+                        uuid_string(version.row),
+                        version.table
+                    ));
+                }
+                self.metadata_dropped += 1;
             }
             if !version.branch.is_empty() {
                 return Err(format!(
@@ -416,25 +479,42 @@ impl RowImport {
                     continue;
                 }
             };
+            // alpha.59 keeps content and deletion apart: content written
+            // while a row is deleted stays under the deletion. The SQLite
+            // engine keeps a deleted row's content fixed until a restore.
             let op = match version.deletion {
-                Some(dump::Deletion::Deleted) => Op::Delete,
-                Some(dump::Deletion::Restored) => Op::Restore,
+                Some(dump::Deletion::Deleted) => {
+                    self.deleted.insert(version.row);
+                    Op::Delete
+                }
+                Some(dump::Deletion::Restored) => {
+                    self.deleted.remove(&version.row);
+                    Op::Restore
+                }
+                None if self.deleted.contains(&version.row) => {
+                    return Err(format!(
+                        "row {} of {} has content written while it was deleted: not supported yet",
+                        uuid_string(version.row),
+                        version.table
+                    ));
+                }
                 None if self.seen.insert(version.row) => Op::Insert,
                 None => Op::Update,
             };
-            let mut cells = BTreeMap::new();
-            for (name, value) in version.cells {
-                cells.insert(name, convert_value(value));
-            }
+            let schema = views
+                .get(&version.schema)
+                .ok_or(format!(
+                    "version under unknown schema {}",
+                    uuid_string(version.schema)
+                ))?
+                .clone();
+            let cells = match op {
+                Op::Insert | Op::Update => full_cells(&schema, &version.table, version.cells)?,
+                Op::Delete | Op::Restore => BTreeMap::new(),
+            };
             writes.push(Write {
                 op,
-                schema: views
-                    .get(&version.schema)
-                    .ok_or(format!(
-                        "version under unknown schema {}",
-                        uuid_string(version.schema)
-                    ))?
-                    .clone(),
+                schema,
                 table: version.table,
                 row: RowUuid::from_bytes(version.row),
                 author: convert_author(&version.updated_by)?,
@@ -504,6 +584,42 @@ impl RowImport {
             })
             .await
     }
+}
+
+/// Every column of `table`, as alpha.59 stored them: an absent cell is a
+/// null, written as one so an update clears it rather than keeping the old
+/// value.
+fn full_cells(
+    schema: &JazzSchema,
+    table: &str,
+    cells: BTreeMap<String, dump::Value>,
+) -> Result<BTreeMap<String, Value>, String> {
+    let columns = &schema
+        .tables()
+        .iter()
+        .find(|candidate| candidate.name == table)
+        .ok_or(format!("table {table} is not in the active schema"))?
+        .columns;
+    let mut out = BTreeMap::new();
+    for (name, value) in cells {
+        out.insert(name, convert_value(value));
+    }
+    for column in columns {
+        if out.contains_key(&column.name) {
+            continue;
+        }
+        if !matches!(
+            column.column_type,
+            jazz::column_schema::ColumnType::Nullable(_)
+        ) {
+            return Err(format!(
+                "{table} column {} has no value and is not nullable",
+                column.name
+            ));
+        }
+        out.insert(column.name.clone(), Value::Nullable(None));
+    }
+    Ok(out)
 }
 
 fn convert_author(author: &dump::Author) -> Result<AuthorSubject, String> {

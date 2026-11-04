@@ -7,35 +7,79 @@
 //! each admitted external identity `(iss, sub)`, through the account
 //! registry's own link commands.
 //!
+//! The registry grants every linked identity the right to manage the
+//! account's identities, so only an identity that holds that right itself is
+//! linked; anything else is refused rather than escalated. (alpha.59 grants
+//! it to every identity it registers or links, so this never refuses a
+//! store alpha.59 built.)
+//!
 //! Local-first, anonymous, system and other built-in issuers are left
-//! alone, as are revoked identities. Two issuers that share a subject on
-//! different accounts would both claim one `jazz:app` identity: the import
-//! refuses that and reports it, rather than pick one.
+//! alone. A revoked identity gets no link, but still counts as holding its
+//! subject: two issuers that share a subject on different accounts, revoked
+//! or not, would both claim one `jazz:app` identity, and the import refuses
+//! that rather than pick one.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use jazz::account_registry::{AccountCommand, AccountRegistry, AccountState, Principal};
 use jazz_server::ServerState;
 use jazz_server::server::migrate_import::{migrate_import_account, migrate_import_login};
-use serde_json::{Value as Json, json};
+use migrate_alpha59_dump as dump;
+use serde_json::json;
 
 use crate::err;
 
+/// The `createJazz` issuer of an app: its app id exactly as the app passes
+/// it to `remote()`, not canonicalized.
 pub fn app_issuer(app: &str) -> String {
-    format!("jazz:app:{}", app.to_lowercase())
+    format!("jazz:app:{app}")
 }
 
 fn eligible(issuer: &str) -> bool {
     !issuer.starts_with("urn:jazz:") && !issuer.starts_with("jazz:app:")
 }
 
-/// One admitted identity, as the new server answers its login.
+/// One identity with an account, as the account journal leaves it.
 #[derive(Clone, Debug)]
-pub struct Admitted {
+pub struct Identity {
     pub issuer: String,
     pub subject: String,
+    /// The account id, as JSON.
     pub account: String,
+    pub active: bool,
     pub manage_identities: bool,
+}
+
+/// Every identity among `principals` (JSON) that the journal assigned an
+/// account, admitted or revoked. The journal is replayed through the
+/// registry's own decisions, in memory.
+pub fn identities(
+    accounts: &[dump::Account],
+    principals: &[String],
+) -> Result<Vec<Identity>, String> {
+    let mut registry = AccountRegistry::default();
+    for account in accounts {
+        let command: AccountCommand = serde_json::from_str(&account.command_json).map_err(err)?;
+        registry
+            .apply(&command)
+            .map_err(|error| format!("account command {}: {error}", account.revision))?;
+    }
+    let mut out = Vec::new();
+    for principal_json in principals {
+        let principal: Principal = serde_json::from_str(principal_json).map_err(err)?;
+        let Some(assignment) = registry.assignment(&principal).map_err(err)? else {
+            continue;
+        };
+        out.push(Identity {
+            issuer: principal.issuer,
+            subject: principal.subject,
+            account: serde_json::to_string(&assignment.account).map_err(err)?,
+            active: assignment.active,
+            manage_identities: assignment.manage_identities,
+        });
+    }
+    Ok(out)
 }
 
 /// A planned link: `subject` joins `account` as `(jazz:app:<app>, subject)`,
@@ -47,12 +91,13 @@ pub struct Link {
     pub approver: (String, String),
 }
 
-/// Plan the links for every eligible admitted identity. Fails, naming only
-/// issuers, when one subject belongs to different accounts or an account has
-/// no identity that may approve links.
-pub fn plan(admitted: &[Admitted]) -> Result<Vec<Link>, String> {
-    let mut by_subject: BTreeMap<&str, Vec<&Admitted>> = BTreeMap::new();
-    for identity in admitted
+/// Plan a link for every subject an admitted eligible identity holds.
+/// Fails, naming only issuers and counts, when a subject is held on
+/// different accounts, when an admitted identity may not manage identities,
+/// or when an account has no admitted identity that may approve links.
+pub fn plan(identities: &[Identity]) -> Result<Vec<Link>, String> {
+    let mut by_subject: BTreeMap<&str, Vec<&Identity>> = BTreeMap::new();
+    for identity in identities
         .iter()
         .filter(|identity| eligible(&identity.issuer))
     {
@@ -62,22 +107,30 @@ pub fn plan(admitted: &[Admitted]) -> Result<Vec<Link>, String> {
             .push(identity);
     }
     let mut conflicts = Vec::new();
+    let mut unprivileged = 0;
     let mut unmanaged = 0;
     let mut links = Vec::new();
-    for (subject, identities) in by_subject {
-        let account = &identities[0].account;
-        if identities
-            .iter()
-            .any(|identity| &identity.account != account)
-        {
-            let mut issuers: Vec<&str> = identities.iter().map(|i| i.issuer.as_str()).collect();
+    for (subject, holders) in by_subject {
+        let account = &holders[0].account;
+        if holders.iter().any(|identity| &identity.account != account) {
+            let mut issuers: Vec<&str> = holders.iter().map(|i| i.issuer.as_str()).collect();
             issuers.sort();
             conflicts.push(issuers.join(" + "));
             continue;
         }
-        let approver = admitted
+        let admitted: Vec<&&Identity> = holders.iter().filter(|identity| identity.active).collect();
+        if admitted.is_empty() {
+            continue;
+        }
+        if admitted.iter().any(|identity| !identity.manage_identities) {
+            unprivileged += 1;
+            continue;
+        }
+        let approver = identities
             .iter()
-            .filter(|identity| &identity.account == account && identity.manage_identities)
+            .filter(|identity| {
+                &identity.account == account && identity.active && identity.manage_identities
+            })
             .min_by_key(|identity| (!eligible(&identity.issuer), &identity.issuer));
         let Some(approver) = approver else {
             unmanaged += 1;
@@ -89,37 +142,19 @@ pub fn plan(admitted: &[Admitted]) -> Result<Vec<Link>, String> {
             approver: (approver.issuer.clone(), approver.subject.clone()),
         });
     }
-    if !conflicts.is_empty() || unmanaged > 0 {
+    if !conflicts.is_empty() || unprivileged > 0 || unmanaged > 0 {
         conflicts.sort();
         conflicts.dedup();
         return Err(format!(
-            "cannot link backend identities: {} subjects are shared by issuers on different \
-             accounts ({}), {unmanaged} accounts have no identity that may approve links; \
-             pass --no-backend-identity-links to import without them",
+            "cannot link backend identities: {} subjects are held by issuers on different \
+             accounts ({}), {unprivileged} subjects belong to identities that may not manage \
+             identities (a link would grant that), {unmanaged} accounts have no identity that \
+             may approve links; pass --no-backend-identity-links to import without them",
             conflicts.len(),
             conflicts.join(", ")
         ));
     }
     Ok(links)
-}
-
-/// Every admitted identity among `principals` (JSON), as the server answers.
-pub async fn admitted(state: &ServerState, principals: &[String]) -> Result<Vec<Admitted>, String> {
-    let mut out = Vec::new();
-    for principal_json in principals {
-        let principal: Json = serde_json::from_str(principal_json).map_err(err)?;
-        let login = migrate_import_login(state, principal_json).await?;
-        let Some(assignment) = login.get("Ok") else {
-            continue;
-        };
-        out.push(Admitted {
-            issuer: principal["issuer"].as_str().unwrap_or_default().to_owned(),
-            subject: principal["subject"].as_str().unwrap_or_default().to_owned(),
-            account: assignment["account"].to_string(),
-            manage_identities: assignment["manage_identities"].as_bool() == Some(true),
-        });
-    }
-    Ok(out)
 }
 
 /// Link every planned identity. One already on its account is left as is;
@@ -164,11 +199,18 @@ pub async fn apply(state: &Arc<ServerState>, app: &str, links: &[Link]) -> Resul
 mod tests {
     use super::*;
 
-    fn admitted(issuer: &str, subject: &str, account: &str, manage: bool) -> Admitted {
-        Admitted {
+    fn identity(
+        issuer: &str,
+        subject: &str,
+        account: &str,
+        active: bool,
+        manage: bool,
+    ) -> Identity {
+        Identity {
             issuer: issuer.into(),
             subject: subject.into(),
             account: account.into(),
+            active,
             manage_identities: manage,
         }
     }
@@ -176,26 +218,23 @@ mod tests {
     #[test]
     fn links_external_identities_and_skips_built_in_issuers() {
         let links = plan(&[
-            admitted("https://a", "u1", "A", true),
-            admitted("https://a", "u2", "B", false),
-            admitted("urn:jazz:local-first", "x", "B", true),
-            admitted("jazz:app:1", "u3", "C", true),
+            identity("https://a", "u1", "A", true, true),
+            identity("https://a", "u2", "B", true, true),
+            identity("urn:jazz:local-first", "x", "B", true, true),
+            identity("jazz:app:1", "u3", "C", true, true),
         ])
         .unwrap();
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].approver, ("https://a".into(), "u1".into()));
-        // u2 cannot approve; the local-first manager on its account does.
-        assert_eq!(
-            links[1].approver,
-            ("urn:jazz:local-first".into(), "x".into())
-        );
+        // An external manager approves before a built-in one.
+        assert_eq!(links[1].approver, ("https://a".into(), "u2".into()));
     }
 
     #[test]
     fn same_subject_on_one_account_links_once() {
         let links = plan(&[
-            admitted("https://a", "u1", "A", true),
-            admitted("https://b", "u1", "A", false),
+            identity("https://a", "u1", "A", true, true),
+            identity("https://b", "u1", "A", true, true),
         ])
         .unwrap();
         assert_eq!(links.len(), 1);
@@ -204,8 +243,8 @@ mod tests {
     #[test]
     fn refuses_a_subject_shared_across_accounts() {
         let error = plan(&[
-            admitted("https://a", "u1", "A", true),
-            admitted("https://b", "u1", "B", true),
+            identity("https://a", "u1", "A", true, true),
+            identity("https://b", "u1", "B", true, true),
         ])
         .unwrap_err();
         assert!(error.contains("https://a + https://b"), "{error}");
@@ -216,8 +255,36 @@ mod tests {
     }
 
     #[test]
-    fn refuses_an_account_nobody_may_manage() {
-        let error = plan(&[admitted("https://a", "u1", "A", false)]).unwrap_err();
-        assert!(error.contains("1 accounts have no identity"), "{error}");
+    fn a_revoked_identity_still_holds_its_subject() {
+        let error = plan(&[
+            identity("https://a", "u1", "B", true, true),
+            identity("https://b", "u1", "A", false, true),
+        ])
+        .unwrap_err();
+        assert!(error.contains("https://a + https://b"), "{error}");
+    }
+
+    #[test]
+    fn a_revoked_identity_alone_gets_no_link() {
+        let links = plan(&[
+            identity("https://a", "u1", "A", true, true),
+            identity("https://a", "u2", "A", false, true),
+        ])
+        .unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].subject, "u1");
+    }
+
+    #[test]
+    fn refuses_to_grant_management_a_source_lacks() {
+        let error = plan(&[
+            identity("https://a", "u1", "A", true, true),
+            identity("https://a", "u2", "A", true, false),
+        ])
+        .unwrap_err();
+        assert!(
+            error.contains("1 subjects belong to identities that may not manage"),
+            "{error}"
+        );
     }
 }

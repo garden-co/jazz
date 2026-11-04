@@ -110,6 +110,45 @@ where
         Ok(versions)
     }
 
+    /// What this node itself reads as each row's current state: the
+    /// transactions of its settled content and deletion winners. `rows` names
+    /// each row by a schema and table it was written under.
+    pub async fn migrate_export_current(
+        &mut self,
+        rows: &[(SchemaVersionId, String, RowUuid)],
+    ) -> Result<Vec<(RowUuid, Option<TxId>, Option<TxId>)>, Error> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for (schema, table, row) in rows {
+            let table_id = self
+                .catalogue
+                .physical_mappings
+                .get(schema)
+                .and_then(|mapping| mapping.tables.get(table))
+                .map(|mapping| mapping.table_id)
+                .ok_or(Error::InvalidStoredValue("physical table mapping missing"))?;
+            if !seen.insert((table_id.0, row.0)) {
+                continue;
+            }
+            let content = self
+                .visible_global_layer_tx_id_for_physical_table_now(
+                    table_id,
+                    *row,
+                    VersionLayer::Content,
+                )
+                .await;
+            let deletion = self
+                .visible_global_layer_tx_id_for_physical_table_now(
+                    table_id,
+                    *row,
+                    VersionLayer::Deletion,
+                )
+                .await;
+            out.push((*row, content, deletion));
+        }
+        Ok(out)
+    }
+
     async fn migrate_export_version(
         &mut self,
         version: &VersionRow,

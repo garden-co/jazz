@@ -13,7 +13,7 @@ use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 
 /// Bumped when a record changes shape.
-pub const DUMP_FORMAT: u32 = 1;
+pub const DUMP_FORMAT: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Record {
@@ -36,9 +36,47 @@ pub enum Record {
         principal_json: String,
         login_json: String,
     },
+    /// What alpha.59 itself reads as one row's current state. Every one
+    /// comes before the first [`Record::Version`]. For verification.
+    Current(Current),
     /// One stored row version.
     Version(Version),
     Footer(Footer),
+}
+
+impl Record {
+    /// The record's kind, for messages: never its contents, which may be
+    /// customer data.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Record::Header(_) => "header",
+            Record::Schema(_) => "schema",
+            Record::Lens(_) => "lens",
+            Record::ActiveSchema { .. } => "active schema",
+            Record::AdminEntry(_) => "admin catalogue entry",
+            Record::Account(_) => "account command",
+            Record::AccountLogin { .. } => "account login",
+            Record::Current(_) => "current row state",
+            Record::Version(_) => "row version",
+            Record::Footer(_) => "footer",
+        }
+    }
+}
+
+/// One transaction, by its node and packed HLC time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct TxRef {
+    pub node: [u8; 16],
+    pub time: u64,
+}
+
+/// A row's settled winners as alpha.59 reads them: the transaction of its
+/// current content version, and of its current delete or restore.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Current {
+    pub row: [u8; 16],
+    pub content: Option<TxRef>,
+    pub deletion: Option<TxRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -3,9 +3,11 @@
 //!
 //! - the bundle the one deployment published: schema and policies;
 //! - every principal's login answer, against what alpha.59 itself answered;
-//! - every row: deleted or not, every cell (read through the schema version
-//!   its last version was written under), and its created/updated author
-//!   and timestamp.
+//! - every backend identity link;
+//! - every row, against what alpha.59 itself reads as its current state
+//!   (the dump's settled content and deletion winners, not this tool's own
+//!   replay): deleted or not, every cell in the active schema, and its
+//!   created/updated author and timestamp; and no row alpha.59 lacks.
 //!
 //! It prints counts and at most 20 mismatches, naming rows and columns but
 //! never cell values or authors.
@@ -33,7 +35,7 @@ use crate::{
 
 const MAX_REPORTED: usize = 20;
 
-/// A row as its last stored version left it.
+/// A row as alpha.59 reads it.
 struct Expected {
     table: String,
     schema: [u8; 16],
@@ -73,18 +75,45 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
     let mut to_head: Option<ToHead> = None;
     let mut admin = Vec::new();
     let mut logins = Vec::new();
-    let mut rows: HashMap<[u8; 16], Expected> = HashMap::new();
+    let mut accounts = Vec::new();
+    let mut currents: HashMap<[u8; 16], dump::Current> = HashMap::new();
+    // Per row: its content winner and its deletion winner, each with its
+    // position in commit order.
+    let mut content: HashMap<[u8; 16], (u64, dump::Version)> = HashMap::new();
+    let mut deletion: HashMap<[u8; 16], (u64, dump::Version)> = HashMap::new();
+    let mut gone: std::collections::HashSet<[u8; 16]> = Default::default();
+    let mut position = 0u64;
     while let Some(record) = reader.next_record().map_err(err)? {
         match record {
             dump::Record::Schema(schema) => runtime_schemas.push(schema),
             dump::Record::Lens(lens) => runtime_lenses.push(lens),
             dump::Record::ActiveSchema { schema } => active_schema = Some(schema),
             dump::Record::AdminEntry(entry) => admin.push(entry),
+            dump::Record::Account(account) => accounts.push(account),
             dump::Record::AccountLogin {
                 principal_json,
                 login_json,
             } => logins.push((principal_json, login_json)),
-            dump::Record::Version(version) if !version.fate.starts_with("rejected") => {
+            dump::Record::Current(current) => {
+                currents.insert(current.row, current);
+            }
+            dump::Record::Version(version) => {
+                position += 1;
+                let tx = dump::TxRef {
+                    node: version.tx_node,
+                    time: version.tx_time,
+                };
+                let Some(current) = currents.get(&version.row) else {
+                    continue;
+                };
+                let winner = if version.deletion.is_none() {
+                    current.content
+                } else {
+                    current.deletion
+                };
+                if winner != Some(tx) {
+                    continue;
+                }
                 if to_head.is_none() {
                     to_head = Some(ToHead::new(
                         active_schema.ok_or("the dump has rows but no active schema")?,
@@ -95,32 +124,60 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
                 let to_head = to_head.as_ref().expect("set above");
                 let version = match to_head.translate(version)? {
                     Translated::Kept(version) => version,
-                    Translated::TableGone => continue,
+                    Translated::TableGone => {
+                        gone.insert(current.row);
+                        continue;
+                    }
                 };
-                let previous = rows.remove(&version.row);
-                let deleted = version.deletion == Some(dump::Deletion::Deleted);
-                let cells = match (version.deletion, previous) {
-                    (None, _) => version.cells,
-                    // A delete or restore keeps the content it covers.
-                    (Some(_), Some(previous)) => previous.cells,
-                    (Some(_), None) => version.cells,
+                let winners = if version.deletion.is_none() {
+                    &mut content
+                } else {
+                    &mut deletion
                 };
-                rows.insert(
-                    version.row,
-                    Expected {
-                        table: version.table,
-                        schema: version.schema,
-                        deleted,
-                        cells,
-                        created_by: version.created_by,
-                        created_at: version.created_at,
-                        updated_by: version.updated_by,
-                        updated_at: version.updated_at,
-                    },
-                );
+                winners.insert(version.row, (position, version));
             }
             _ => {}
         }
+    }
+    let mut report = Report::default();
+    let mut rows: HashMap<[u8; 16], Expected> = HashMap::new();
+    for (row, current) in &currents {
+        if gone.contains(row) {
+            continue;
+        }
+        let label = || format!("row {}", uuid_string(*row));
+        let Some((content_at, content)) = content.remove(row) else {
+            report.check("alpha.59 current state", false, || {
+                format!("{}: alpha.59 reads no content version for it", label())
+            });
+            continue;
+        };
+        let deletion = deletion.remove(row);
+        if current.deletion.is_some() && deletion.is_none() {
+            report.check("alpha.59 current state", false, || {
+                format!("{}: its current deletion event is missing", label())
+            });
+            continue;
+        }
+        report.check("alpha.59 current state", true, label);
+        let (updated_by, updated_at) = match &deletion {
+            Some((at, event)) if *at > content_at => (event.updated_by.clone(), event.updated_at),
+            _ => (content.updated_by.clone(), content.updated_at),
+        };
+        rows.insert(
+            *row,
+            Expected {
+                table: content.table,
+                schema: content.schema,
+                deleted: deletion
+                    .is_some_and(|(_, event)| event.deletion == Some(dump::Deletion::Deleted)),
+                cells: content.cells,
+                created_by: content.created_by,
+                created_at: content.created_at,
+                updated_by,
+                updated_at,
+            },
+        );
     }
 
     let built = ServerBuilder::new(args.app_id)
@@ -130,7 +187,6 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
         .build()
         .await?;
     let state = built.state.clone();
-    let mut report = Report::default();
     verify_permissions(&state, &admin, &mut report)?;
     for (index, (principal, expected)) in logins.iter().enumerate() {
         let actual = migrate_import_login(&state, principal).await?;
@@ -152,8 +208,8 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
     }
     if args.link_backend_identities {
         let principals: Vec<String> = logins.iter().map(|(p, _)| p.clone()).collect();
-        let planned = crate::links::plan(&crate::links::admitted(&state, &principals).await?)?;
-        let issuer = crate::links::app_issuer(&args.app_id.to_string());
+        let planned = crate::links::plan(&crate::links::identities(&accounts, &principals)?)?;
+        let issuer = crate::links::app_issuer(&args.app_id_text);
         for (index, link) in planned.iter().enumerate() {
             let candidate = json!({ "issuer": issuer, "subject": link.subject }).to_string();
             let login = migrate_import_login(&state, &candidate).await?;
@@ -277,6 +333,11 @@ async fn verify_rows(
                 Ok(found)
             })
             .await?;
+        let wanted: std::collections::HashSet<_> = ids.iter().copied().collect();
+        let extra = actual.keys().filter(|id| !wanted.contains(*id)).count();
+        report.check("no extra rows", extra == 0, || {
+            format!("{table}: {extra} rows alpha.59 does not have")
+        });
         for id in ids {
             let expected = &rows[&id];
             let label = || format!("{table} row {}", uuid_string(id));
