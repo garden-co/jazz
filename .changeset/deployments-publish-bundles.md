@@ -1,7 +1,6 @@
 ---
 "jazz-tools": patch
 "jazz-napi": patch
-"@jazz/rust": patch
 ---
 
 Deployments no longer activate permissions on the core. The `/admin/deploy` route is removed: `/admin/bundles` publishes a deployment's schemas, migrations and permissions as a bundle that sessions are pinned to, and makes nothing current. `deploy()` from `jazz-tools/dev` and `jazz-tools/testing` publishes the same way and returns the bundle's id as `bundle`. A new deployment's target no longer has to be reachable from an active schema; its history must still have a single root, so backends on sibling branches serve side by side.
