@@ -137,3 +137,10 @@ object hashes are now plain SHA-256 over the node's encoding, so an object
 store can verify a presigned upload against the node hash itself; schema
 hashes, schema version ids, stored column and table names, and derived ids
 are SHA-256 too) regenerated it the same way.
+
+Resuming reads from where they settled regenerated it the same way:
+`_jazz_watermarks` is `(key, through, context)`, where `context` is the
+digest of the permissions bundle and claims the result was read under
+(`NULL` for a session with neither, as every session here is). A
+development store whose `_jazz_watermarks` lacks `context` has the table
+dropped at open, so its reads open fresh once.

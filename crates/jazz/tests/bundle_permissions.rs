@@ -405,11 +405,24 @@ fn reconnect_pinned(
     bundle: BundleId,
     upstream: &jazz::db::Upstream,
 ) -> (usize, jazz::db::Upstream) {
+    reconnect_with(server, db, author, None, bundle, upstream)
+}
+
+/// Reconnect `db`'s upstream to `server` with `claims`, pinned to
+/// `bundle`: the rows the server shipped while `pump` ran.
+fn reconnect_with(
+    server: &Db,
+    db: &Db,
+    author: AuthorSubject,
+    claims: Option<BTreeMap<String, Value>>,
+    bundle: BundleId,
+    upstream: &jazz::db::Upstream,
+) -> (usize, jazz::db::Upstream) {
     assert!(db.detach_connection(upstream));
     let (client_side, server_side, shipped) = counting_pipe();
     let upstream = block_on(db.connect_upstream(client_side));
     server
-        .accept_pinned_subscriber(server_side, author, None, Some(bundle))
+        .accept_pinned_subscriber(server_side, author, claims, Some(bundle))
         .unwrap();
     pump(server, &[db]);
     (shipped.get(), upstream)
@@ -468,6 +481,40 @@ fn a_pinned_session_under_another_bundle_opens_fresh() {
     // And back: the rows the closed bundle hides leave the replica.
     let (_, _upstream) = reconnect_pinned(&server, &db, alice, closed, &upstream);
     assert_eq!(local(&db), []);
+}
+
+/// Claims are part of what a session's reads are evaluated under: a
+/// session that reconnects with the same claims resumes, one whose claims
+/// changed opens fresh (its policies may read them differently).
+#[test]
+fn a_session_with_claims_resumes_only_with_the_same_claims() {
+    let (server, open, _) = server_with_users(4);
+    let alice = AuthorSubject::for_test_bytes([0x55; 16]);
+    let claims = |role: &str| {
+        Some(BTreeMap::from([(
+            "role".to_owned(),
+            Value::String(role.to_owned()),
+        )]))
+    };
+    let db = client(1, alice);
+    let (client_side, server_side, shipped) = counting_pipe();
+    let upstream = block_on(db.connect_upstream(client_side));
+    server
+        .accept_pinned_subscriber(server_side, alice, claims("editor"), Some(open))
+        .unwrap();
+    let prepared = db.prepare_query(&Query::from("users")).unwrap();
+    let _stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &[&db]);
+    assert_eq!(shipped.get(), 4);
+
+    let (shipped, upstream) =
+        reconnect_with(&server, &db, alice, claims("editor"), open, &upstream);
+    assert_eq!(shipped, 0, "the same claims resume");
+
+    let (shipped, _upstream) =
+        reconnect_with(&server, &db, alice, claims("viewer"), open, &upstream);
+    assert_eq!(shipped, 4, "other claims open fresh");
+    assert_eq!(local(&db).len(), 4);
 }
 
 #[test]
