@@ -84,7 +84,7 @@ const USAGE: &str = "usage: jazz-tools migrate-alpha59 (import | verify) --dump 
 
 /// Run `jazz-tools migrate-alpha59 <args>`; the process exit code.
 pub async fn main(args: Vec<String>) -> i32 {
-    let mut args = args.into_iter().peekable();
+    let mut args = args.into_iter();
     let verifying = match args.next().as_deref() {
         Some("import") => false,
         Some("verify") => true,

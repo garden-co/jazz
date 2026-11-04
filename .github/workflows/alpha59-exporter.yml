@@ -7,12 +7,16 @@ name: alpha.59 exporter
 # The exporter has to link alpha.59 itself, so it is built inside a
 # v2.0.0-alpha.59 checkout with `dev/migrate-alpha59/prepare.sh`, from the
 # hooks and dump crate at `ref`. Dispatched by hand (or by an agent) for the
-# release that self-hosters upgrade to; the assets stay on that release.
+# release that self-hosters upgrade to, while it is still a draft: after the
+# npm publish pushes the tag and before "GitHub release" publishes the draft,
+# which refuses to publish a release whose tag has dev/migrate-alpha59 but no
+# exporter assets. The assets stay on that release, and are never replaced
+# once it is published.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release to attach the exporter to, e.g. 2.0.0-alpha.60 (tag v<version>). The release, draft or published, must exist."
+        description: "Release to attach the exporter to, e.g. 2.0.0-alpha.60 (tag v<version>). It must still be a draft."
         required: true
         type: string
       ref:
@@ -30,6 +34,7 @@ concurrency:
 
 env:
   CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}
+  VERSION: ${{ inputs.version }}
 
 jobs:
   build:
@@ -51,8 +56,8 @@ jobs:
     steps:
       - name: Validate inputs
         run: |
-          if ! [[ "${{ inputs.version }}" =~ ^2\.0\.0-alpha\.[0-9]+$ ]]; then
-            echo "::error::version must look like 2.0.0-alpha.N"
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+$ ]]; then
+            echo "::error::version must look like 2.0.0-alpha.N, got '${VERSION}'"
             exit 1
           fi
 
@@ -88,14 +93,21 @@ jobs:
           grep -q "usage: jazz-alpha59-export" usage.txt
 
       - name: Stage
+        env:
+          PLATFORM: ${{ matrix.platform }}
         run: |
           mkdir -p dist
-          cp .a59/target/release/jazz-alpha59-export "dist/jazz-alpha59-export-${{ matrix.platform }}"
+          cp .a59/target/release/jazz-alpha59-export "dist/jazz-alpha59-export-${PLATFORM}"
+          # The commits it was built from, checked equal across platforms.
+          printf 'jazz %s\nalpha.59 %s\n' "$(git rev-parse HEAD)" "$(git -C .a59 rev-parse HEAD)" \
+            > "dist/source-${PLATFORM}.txt"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-alpha59-export-${{ matrix.platform }}
-          path: dist/jazz-alpha59-export-${{ matrix.platform }}
+          path: |
+            dist/jazz-alpha59-export-${{ matrix.platform }}
+            dist/source-${{ matrix.platform }}.txt
           if-no-files-found: error
 
   attach:
@@ -115,9 +127,28 @@ jobs:
           merge-multiple: true
           path: dist
 
-      - name: Checksums
-        working-directory: dist
-        run: sha256sum jazz-alpha59-export-* > jazz-alpha59-export.sha256 && cat jazz-alpha59-export.sha256
+      - name: Refuse a published release
+        run: |
+          if ! is_draft=$(gh release view "v${VERSION}" --json isDraft --jq .isDraft); then
+            echo "::error::No release v${VERSION}; create its draft with the GitHub release workflow first."
+            exit 1
+          fi
+          if [ "${is_draft}" != true ]; then
+            echo "::error::v${VERSION} is published; its exporter assets are never replaced."
+            exit 1
+          fi
 
+      - name: Checksums and source
+        working-directory: dist
+        run: |
+          for source in source-*.txt; do
+            cmp "${source}" source-linux-x64.txt
+          done
+          mv source-linux-x64.txt jazz-alpha59-export.source.txt
+          rm source-*.txt
+          sha256sum jazz-alpha59-export-* > jazz-alpha59-export.sha256
+          cat jazz-alpha59-export.sha256 jazz-alpha59-export.source.txt
+
+      # Replacing assets is safe only on a draft, which the step above checked.
       - name: Upload
-        run: gh release upload "v${{ inputs.version }}" dist/* --clobber
+        run: gh release upload "v${VERSION}" dist/* --clobber

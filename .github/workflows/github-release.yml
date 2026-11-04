@@ -120,5 +120,13 @@ jobs:
             echo "::error::Tag ${TAG} does not exist yet; publish to npm first."
             exit 1
           fi
+          # Self-hosters upgrading from alpha.59 need the exporter, which the
+          # "alpha.59 exporter" workflow attaches. It goes with the importer
+          # in dev/migrate-alpha59; this check goes with them.
+          if gh api "repos/${GH_REPO}/contents/dev/migrate-alpha59/README.md?ref=${TAG}" --silent 2>/dev/null &&
+            ! gh release view "${TAG}" --json assets --jq '.assets[].name' | grep -qx jazz-alpha59-export.sha256; then
+            echo "::error::${TAG} has no alpha.59 exporter assets; dispatch the \"alpha.59 exporter\" workflow with version ${VERSION} first."
+            exit 1
+          fi
           gh release edit "${TAG}" --draft=false --prerelease=false --latest
           gh release view "${TAG}" --json url --jq '"Published: " + .url'
