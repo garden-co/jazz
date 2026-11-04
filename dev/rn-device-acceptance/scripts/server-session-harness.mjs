@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { createConnection } from "node:net";
 import { resolve } from "node:path";
 import { isDeviceRunNonce, persistedTitleForRun } from "../src/run-marker.ts";
@@ -19,12 +20,14 @@ export function assertCoreObservation(observation, runNonce) {
 
 const harnessRoot = resolve(import.meta.dirname, "../../..");
 const harnessCargoArgs = ["-p", "jazz-native-relay", "--example", "rn_server_session_harness"];
+const deviceBackendScript = resolve(import.meta.dirname, "device-backend.mjs");
 
 export function boundedHarnessOutput(output) {
   // Keep readiness/control lines bounded and private to the driver. Retain
   // token redaction defensively for any authentication diagnostics upstream.
   return output
     .replace(/^JAZZ_RN_SERVER_SESSION .+$/gm, "JAZZ_RN_SERVER_SESSION [redacted]")
+    .replace(/\b[0-9a-f]{64}\b/g, "[redacted-secret]")
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[redacted-token]")
     .slice(-4_096);
 }
@@ -51,7 +54,12 @@ function harnessDiagnostic({ child, stdout, stderr, device }) {
  * it before offline verification. The fixture emits fresh JWTs at runtime; this
  * driver passes them directly to the native fixture and never writes
  * them to source, Gradle config, logs, or a receipt. */
-export async function startLocalServerSessionHarness({ device, runNonce, host }) {
+export async function startLocalServerSessionHarness({
+  device,
+  runNonce,
+  host,
+  backendScript = deviceBackendScript,
+}) {
   if (!isDeviceRunNonce(runNonce)) throw new Error("invalid device run nonce");
   // `cargo run` includes compilation. On a cold hosted runner that can take
   // longer than the service-readiness allowance and, with --quiet, produces no
@@ -61,11 +69,14 @@ export async function startLocalServerSessionHarness({ device, runNonce, host })
     cwd: harnessRoot,
     stdio: "inherit",
   });
+  // Core and the app's backend share this run's admin secret; neither the
+  // device nor any receipt ever sees it.
+  const adminSecret = randomBytes(32).toString("hex");
   const child = spawn("cargo", ["run", "--quiet", ...harnessCargoArgs], {
     cwd: harnessRoot,
     stdio: ["pipe", "pipe", "pipe"],
     detached: process.platform !== "win32",
-    env: { ...process.env, JAZZ_DEVICE_RUN_NONCE: runNonce },
+    env: { ...process.env, JAZZ_DEVICE_RUN_NONCE: runNonce, JAZZ_DEVICE_ADMIN_SECRET: adminSecret },
   });
   let observation;
   let stdout = "";
@@ -152,16 +163,34 @@ export async function startLocalServerSessionHarness({ device, runNonce, host })
     });
   });
   if (
-    Object.keys(session).some((key) => key !== "server_port") ||
-    !Number.isInteger(session.server_port) ||
-    session.server_port < 1 ||
-    session.server_port > 65_535
+    Object.keys(session).some((key) => key !== "server_port" && key !== "app_id") ||
+    !isPort(session.server_port) ||
+    typeof session.app_id !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(session.app_id)
   ) {
     await terminateHarness(child);
     throw new Error("local Core harness emitted malformed session material");
   }
+  let backend;
+  try {
+    backend = await startDeviceBackend({
+      coreUrl: `http://127.0.0.1:${session.server_port}`,
+      appId: session.app_id,
+      adminSecret,
+      device,
+      script: backendScript,
+    });
+  } catch (error) {
+    await terminateHarness(child);
+    throw error;
+  }
+  const terminateAll = async () => {
+    await terminateHarness(backend.child);
+    await terminateHarness(child);
+  };
   return {
     child,
+    backend: backend.child,
     async waitForCoreObservation(timeoutMs = 60_000) {
       const deadline = Date.now() + timeoutMs;
       while (!observation) {
@@ -174,8 +203,12 @@ export async function startLocalServerSessionHarness({ device, runNonce, host })
       }
       return assertCoreObservation(observation, runNonce);
     },
-    stopForOfflineRestart: () => stopForOfflineRestart(child, session.server_port),
-    terminate: () => terminateHarness(child),
+    // Offline means no upstream at all: the backend stops with Core.
+    async stopForOfflineRestart() {
+      await stopForOfflineRestart(backend.child, backend.port);
+      await stopForOfflineRestart(child, session.server_port);
+    },
+    terminate: terminateAll,
     async interruptAndRecover() {
       child.stdin.write("interrupt-server\n");
       await waitForLine("JAZZ_RN_SERVER_INTERRUPTED ");
@@ -183,8 +216,82 @@ export async function startLocalServerSessionHarness({ device, runNonce, host })
       child.stdin.write("recover-server\n");
       await waitForLine("JAZZ_RN_SERVER_RECOVERED ");
     },
-    endpoint: `http://${host}:${session.server_port}`,
+    // The device reaches Jazz through the app's backend, never Core.
+    endpoint: `http://${host}:${backend.port}${backend.basePath}`,
   };
+}
+
+function isPort(value) {
+  return Number.isInteger(value) && value >= 1 && value <= 65_535;
+}
+
+/** Start the app's backend in front of Core and wait for its listening port. */
+export async function startDeviceBackend({
+  coreUrl,
+  appId,
+  adminSecret,
+  device,
+  script = deviceBackendScript,
+}) {
+  const child = spawn(process.execPath, ["--experimental-strip-types", script], {
+    cwd: resolve(import.meta.dirname, ".."),
+    stdio: ["pipe", "pipe", "pipe"],
+    detached: process.platform !== "win32",
+    env: {
+      ...process.env,
+      JAZZ_DEVICE_CORE_URL: coreUrl,
+      JAZZ_DEVICE_APP_ID: appId,
+      JAZZ_DEVICE_ADMIN_SECRET: adminSecret,
+    },
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr = retainHarnessOutput(stderr, chunk);
+  });
+  const ready = await new Promise((resolveReady, rejectReady) => {
+    let settled = false;
+    const fail = (reason) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      void terminateHarness(child).catch(() => {});
+      rejectReady(new Error(`${reason}; ${harnessDiagnostic({ child, stdout, stderr, device })}`));
+    };
+    const timeout = setTimeout(
+      () => fail("device backend timed out waiting for readiness"),
+      60_000,
+    );
+    child.stdout.on("data", (chunk) => {
+      stdout = retainHarnessOutput(stdout, chunk);
+      const line = stdout
+        .split(/\r?\n/)
+        .slice(0, -1)
+        .find((item) => item.startsWith("JAZZ_RN_DEVICE_BACKEND "));
+      if (!line || settled) return;
+      try {
+        const value = JSON.parse(line.slice("JAZZ_RN_DEVICE_BACKEND ".length));
+        if (
+          !isPort(value.port) ||
+          typeof value.basePath !== "string" ||
+          !value.basePath.startsWith("/")
+        )
+          return fail("device backend emitted malformed readiness");
+        settled = true;
+        clearTimeout(timeout);
+        resolveReady(value);
+      } catch {
+        fail("device backend emitted invalid readiness JSON");
+      }
+    });
+    child.once("error", (error) => fail(`could not spawn device backend (${error.message})`));
+    child.once("exit", (code, signal) =>
+      fail(
+        `device backend exited before readiness (code=${code ?? "none"}, signal=${signal ?? "none"})`,
+      ),
+    );
+  });
+  return { child, port: ready.port, basePath: ready.basePath };
 }
 
 /** Cargo can be a parent of the actual fixture. Close its control reader and

@@ -683,7 +683,9 @@ test("Android acceptance reads only bounded receipt and allowlisted diagnostic t
   );
   assert.match(harness, /rn_server_session_harness/);
   assert.match(driver, /host: "10\.0\.2\.2"/);
-  assert.match(harness, /http:\/\/\$\{host\}:\$\{session\.server_port\}/);
+  // Devices reach Jazz through the app's backend, never Core directly.
+  assert.match(harness, /http:\/\/\$\{host\}:\$\{backend\.port\}\$\{backend\.basePath\}/);
+  assert.match(harness, /device-backend\.mjs/);
   for (const input of ["jazzDeviceEdgeEndpoint"]) {
     assert.match(driver, new RegExp(`"${input}"`));
     assert.match(fixture, new RegExp(`"${input}"`));

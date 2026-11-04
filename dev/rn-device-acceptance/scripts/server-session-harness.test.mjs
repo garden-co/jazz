@@ -47,7 +47,7 @@ test("shared harness requires a child-produced run-bound observation and handles
         join(directory, "cargo"),
         `#!${process.execPath}
 if (process.argv[2] === "build") process.exit(0);
-const line = 'JAZZ_RN_SERVER_SESSION ' + JSON.stringify(${JSON.stringify(planted === "legacy-readiness" ? { server_port: 12345, bearer_a: "synthetic-retired-input" } : { server_port: 12345 })}) + '\\n';
+const line = 'JAZZ_RN_SERVER_SESSION ' + JSON.stringify(${JSON.stringify(planted === "legacy-readiness" ? { server_port: 12345, bearer_a: "synthetic-retired-input" } : { server_port: 12345, app_id: "00000000-0000-4000-8000-000000000001" })}) + '\\n';
 process.stdout.write(line.slice(0, 25));
 setTimeout(() => {
   process.stdout.write(line.slice(25));
@@ -58,12 +58,21 @@ setInterval(() => {}, 1000);
 `,
         { mode: 0o755 },
       );
+      // The app's backend in front of Core, reporting where devices reach it.
+      writeFileSync(
+        join(directory, "backend.mjs"),
+        `if (!process.env.JAZZ_DEVICE_CORE_URL?.endsWith(":12345") || !/^[0-9a-f]{64}$/.test(process.env.JAZZ_DEVICE_ADMIN_SECRET ?? "")) process.exit(3);
+process.stdout.write('JAZZ_RN_DEVICE_BACKEND {"port":23456,"basePath":"/jazz"}\\n');
+setInterval(() => {}, 1000);
+`,
+      );
       process.env.PATH = `${directory}:${oldPath}`;
       const start = () =>
         startLocalServerSessionHarness({
           device: "contract-device",
           runNonce: nonce,
           host: "127.0.0.1",
+          backendScript: join(directory, "backend.mjs"),
         });
       if (planted === "legacy-readiness") {
         await assert.rejects(start(), /malformed session material/);
@@ -71,7 +80,7 @@ setInterval(() => {}, 1000);
       }
       const harness = await start();
       try {
-        assert.equal(harness.endpoint, "http://127.0.0.1:12345");
+        assert.equal(harness.endpoint, "http://127.0.0.1:23456/jazz");
         if (planted === valid) assert.deepEqual(await harness.waitForCoreObservation(150), valid);
         else
           await assert.rejects(
