@@ -20,6 +20,7 @@ jazz-native-relay = { path = "../jazz-native-relay", optional = true }
 jazz = { path = "../jazz", default-features = false, features = ["runtime"] }
 jazz-server = { path = "../jazz-server", features = ["embedded-server"] }
 jazz-otel.workspace = true
+jazz-text = { path = "../jazz-text", features = ["serde"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync"] }
 futures = "0.3"
 base64 = "0.22"
