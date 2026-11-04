@@ -13,6 +13,7 @@
 //! runtime's [`Db`] opens on the same connection once a schema is known.
 
 pub mod auth_admission;
+pub mod migrate_alpha59;
 mod thin;
 
 use std::cell::RefCell;
