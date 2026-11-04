@@ -297,7 +297,7 @@ function assertPublicClientSeedStages(source) {
   for (const pattern of [
     /markFailure\("public-client-open-failed"\);\s*const client = await createJazzClient/,
     /markFailure\("public-client-subscribe-failed"\);\s*unsubscribe = client\.db\.subscribe/,
-    /markFailure\("public-client-write-failed"\);\s*const write = client\.db\.insert/,
+    /markFailure\("public-client-write-failed"\);\s*try \{\s*const write = client\.db\.insert/,
     /markFailure\("public-client-read-failed"\);\s*const rows = await client\.db\.all/,
     /markFailure\("public-client-publish-failed"\);\s*if \(!\(await waitForPublication\(\(\) => observed\)\)\)/,
     /markFailure\("public-client-core-observation-failed"\);\s*boundary\?\.\("js-before-core-await"\);\s*await waitForCoreObservation\(\);/,
@@ -1005,7 +1005,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   assert.match(app, /await proveHighLevelForegroundRestart\(reopened, receipt\.runNonce\)/);
   assert.match(
     app,
-    /seedHighLevelForegroundRuntime\(\s*scopeA,\s*receipt\.runNonce,\s*markFailure,\s*waitForNativeCoreObservation,\s*recordNativeSeedBoundary,?\s*\)/,
+    /seedHighLevelForegroundRuntime\(\s*scopeA,\s*receipt\.runNonce,\s*markFailure,\s*waitForNativeCoreObservation,\s*recordNativeSeedBoundary,\s*reportPublicClientWriteFailure,?\s*\)/,
   );
   // Before the driver ends the seed process, a separately opened public
   // foreground must read the run-bound row. This prevents the restart claim

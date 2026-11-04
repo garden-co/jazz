@@ -327,6 +327,14 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_DIAGNOSTIC", error) }
   }
 
+  @ReactMethod fun recordPublicClientWriteDiagnostic(detail: String, promise: Promise) {
+    try {
+      require(Regex("^public-client-write-detail:[A-Za-z][A-Za-z0-9]{0,47}-(none|[a-z0-9_]{1,40})$").matches(detail)) { "invalid public client write diagnostic" }
+      Log.e("JazzPublicClientWrite", detail)
+      promise.resolve(null)
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_DIAGNOSTIC", error) }
+  }
+
   @ReactMethod fun clearDiagnostic(promise: Promise) {
     try {
       val target = reactApplicationContext.cacheDir.resolve("jazz-device-diagnostic.txt")

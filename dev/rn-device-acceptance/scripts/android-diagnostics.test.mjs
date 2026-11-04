@@ -6,6 +6,7 @@ import {
   androidDeviceDiagnostic,
   androidCoreObservationDiagnostic,
   androidScopeWriterReadDiagnostic,
+  androidPublicClientWriteDiagnostic,
   androidForegroundWakeDiagnostic,
 } from "./android-diagnostics.mjs";
 
@@ -80,6 +81,20 @@ test("Android timeout reports only the bounded scope writer-read counters", () =
   assert.equal(androidDeviceDiagnostic(output), "scope-isolation-writer-read-failed");
   assert.equal(androidScopeWriterReadDiagnostic(output), detail);
   assert.match(androidAcceptanceFailure("timeout", "seed", output), new RegExp(detail));
+});
+
+test("Android timeout names the failed public write's error class and code only", () => {
+  const detail = "public-client-write-detail:PersistedWriteRejectedError-permission_denied";
+  const output = [
+    `08-29 22:52:21.495  4268  4288 E JazzPublicClientWrite: ${detail}`,
+    "08-29 22:52:21.496  4268  4288 E JazzDeviceAcceptance: public-client-write-failed",
+    "08-29 22:52:21.497  4268  4288 E JazzPublicClientWrite: public-client-write-detail:Error-none secret",
+    "08-29 22:52:21.498  4268  4288 I ReactNativeJS: public-client-write-detail:Forged-none",
+  ].join("\n");
+  assert.equal(androidPublicClientWriteDiagnostic(output), detail);
+  const failure = androidAcceptanceFailure("timeout", "seed", output);
+  assert.match(failure, new RegExp(`public client write: ${detail}`));
+  assert.doesNotMatch(failure, /secret|Forged/);
 });
 
 test("invalid Android receipt keeps its safe stage without echoing receipt contents", () => {

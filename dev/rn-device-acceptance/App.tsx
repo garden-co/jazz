@@ -26,6 +26,7 @@ import {
   nativeAcceptancePhase,
   recordDeviceDiagnostic,
   recordScopeWriterReadDiagnostic,
+  recordPublicClientWriteDiagnostic,
   recordDeviceReceipt,
   recordNativeSeedBoundary,
   recordSameRuntimeWakeBoundary,
@@ -48,6 +49,11 @@ import { rowIdForRun } from "./src/run-marker";
 async function observeTrustedAdmissionLifecycleInner(
   markFailure: (code: DeviceDiagnosticCode) => void,
 ) {
+  const reportPublicClientWriteFailure = (detail: string) => {
+    try {
+      void recordPublicClientWriteDiagnostic(detail).catch(() => {});
+    } catch {}
+  };
   const reportWriterReadDiagnostic = (detail: string) => {
     try {
       return recordScopeWriterReadDiagnostic(detail).catch(() => {});
@@ -144,6 +150,7 @@ async function observeTrustedAdmissionLifecycleInner(
       markFailure,
       waitForNativeCoreObservation,
       recordNativeSeedBoundary,
+      reportPublicClientWriteFailure,
     );
     const tick = foregroundCodec.decode(rawSibling.execute(foregroundCodec.encode("tick")));
     if (tick.type !== "ticked") throw new Error("public shutdown invalidated its raw sibling");

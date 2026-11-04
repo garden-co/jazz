@@ -36,6 +36,7 @@ const acceptanceLogcat = () =>
     "ReactNativeJS:I",
     "JazzDeviceAcceptance:E",
     "JazzScopeWriterRead:E",
+    "JazzPublicClientWrite:E",
     "JazzForegroundWake:E",
     "JazzCoreObservation:E",
     "JazzFixtureMetadata:E",

@@ -17,6 +17,21 @@ const app = s.defineApp(
   { migrations: "none" },
 );
 
+/**
+ * The failed write's error class and code only: identifiers, never its
+ * message, so nothing the app or Core wrote crosses into CI output.
+ */
+export function publicClientWriteDetail(error: unknown): string {
+  const record = (error ?? {}) as { name?: unknown; code?: unknown };
+  const name =
+    typeof record.name === "string" && /^[A-Za-z][A-Za-z0-9]{0,47}$/.test(record.name)
+      ? record.name
+      : "unknown";
+  const code =
+    typeof record.code === "string" && /^[a-z0-9_]{1,40}$/.test(record.code) ? record.code : "none";
+  return `public-client-write-detail:${name}-${code}`;
+}
+
 /** Public foregrounds borrow the fixture lease using the genuine account. */
 function clientConfig(admitted: {
   capability: Uint8Array;
@@ -40,6 +55,7 @@ export async function seedHighLevelForegroundRuntime(
   markFailure: (code: DeviceDiagnosticCode) => void,
   waitForCoreObservation: () => Promise<void>,
   boundary?: (code: SeedBoundary) => void,
+  reportWriteFailure?: (detail: string) => void,
 ): Promise<void> {
   markFailure("public-client-open-failed");
   const client = await createJazzClient(clientConfig(admitted));
@@ -56,8 +72,13 @@ export async function seedHighLevelForegroundRuntime(
       recoveredObserved ||= todos.some((todo) => todo.title === `${title}:recovered-by-core`);
     });
     markFailure("public-client-write-failed");
-    const write = client.db.insert(app.todos, { title });
-    await write.wait({ tier: "local" });
+    try {
+      const write = client.db.insert(app.todos, { title });
+      await write.wait({ tier: "local" });
+    } catch (error) {
+      reportWriteFailure?.(publicClientWriteDetail(error));
+      throw error;
+    }
     markFailure("public-client-read-failed");
     const rows = await client.db.all(app.todos);
     if (!rows.some((row) => row.title === title)) {
