@@ -41,7 +41,7 @@ import type { JazzSession } from "../session/state.js";
 import {
   backendDbAttributedTo,
   backendDbForSession,
-  createJazzSession,
+  openJazzSession,
   type JazzClient,
 } from "./create-jazz-session.js";
 import type { BackendSchemaInput } from "./create-jazz-context.js";
@@ -1061,7 +1061,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   let session: JazzSession<JazzClient>;
   try {
     pin = await applyBundle(core.serverUrl, { ...options, appId, adminSecret: core.adminSecret });
-    session = await createJazzSession({
+    session = await openJazzSession({
       appId,
       app: options.app,
       permissions: options.permissions,

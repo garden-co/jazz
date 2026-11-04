@@ -92,8 +92,9 @@ conflict, so it composes with `Effect.retry`.
 
 ## On the server
 
-`jazz-tools/effect/backend` wraps `createJazzSession`. `JazzBackend` does not provide `Jazz` on its own:
-each handler chooses whose permissions it acts with, usually the requesting user's.
+`jazz-tools/effect/backend` wraps your app's Jazz (`createJazz`). `JazzBackend` does not provide `Jazz` on its own:
+each handler chooses whose permissions it acts with, usually the requesting user's, as your
+`authenticate` names them.
 
 ```ts
 import { Effect } from "effect";
@@ -104,7 +105,7 @@ const listTodos = Effect.gen(function* () {
   return yield* jazz.all(app.todos);
 });
 
-// With a request object that carries the user's Authorization header:
+// With a fetch Request from the signed-in user:
 listTodos.pipe(JazzBackend.forRequest(request));
 
 // Inside an `effect/http` handler, from the current HttpServerRequest:
@@ -114,6 +115,7 @@ listTodos.pipe(JazzBackend.forCurrentRequest());
 listTodos.pipe(JazzBackend.asAuthority);
 ```
 
-Provide `JazzBackend.layer(sessionConfig)` once for the whole server. Because handlers only depend on
+Provide `JazzBackend.layer(createJazzOptions)` once for the whole server (or
+`JazzBackend.layerJazz(jazz)` for a Jazz you already created). Because handlers only depend on
 `Jazz`, the same code runs in the browser against `Jazz.layer`, and in tests against an in-memory
 database.
