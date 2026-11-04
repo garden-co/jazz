@@ -158,8 +158,8 @@
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
     "build:solid": "vite build --config vite.config.solid.ts --mode solid-dom && vite build --config vite.config.solid.ts --mode solid-ssr && tsc --project tsconfig.solid.json --emitDeclarationOnly",
     "check": "tsc --noEmit",
-    "test": "pnpm test:classic-api || status=1; pnpm test:stage-binary || status=1; pnpm test:browser:contract || status=1; pnpm test:node || status=1; pnpm test:react || status=1; pnpm test:svelte || status=1; pnpm test:solid || status=1; pnpm typecheck:react-native || status=1; exit ${status:-0}",
-    "test:stage-binary": "node --test scripts/stage-binary.test.mjs scripts/stage-inspector-overlay.test.mjs",
+    "test": "pnpm test:classic-api || status=1; pnpm test:stage-inspector-overlay || status=1; pnpm test:browser:contract || status=1; pnpm test:node || status=1; pnpm test:react || status=1; pnpm test:svelte || status=1; pnpm test:solid || status=1; pnpm typecheck:react-native || status=1; exit ${status:-0}",
+    "test:stage-inspector-overlay": "node --test scripts/stage-inspector-overlay.test.mjs",
     "test:classic-api": "node --test scripts/classic-api.test.mjs",
     "test:crypto-package": "node --test scripts/bundle-e2ee-crypto.test.mjs && node ../../dev/gates/run-correctness-consumer.mjs -- node scripts/verify-e2ee-package.mjs",
     "test:node": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.ts",
@@ -179,7 +179,6 @@
     "bench:abstract:node": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.ts src/runtime/schema-marshalling.abstract-bench.test.ts",
     "bench:abstract:browser": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.browser.ts tests/browser/schema-marshalling.abstract-bench.test.ts",
     "bench:realistic:browser": "vitest run --config vitest.config.browser.ts tests/browser/realistic-bench.test.ts",
-    "stage:local": "node scripts/stage-local-binary.mjs",
     "stage:inspector-overlay": "node scripts/stage-inspector-overlay.mjs",
     "pack:dry-run": "npm pack --dry-run"
   },

@@ -525,14 +525,6 @@ jobs:
           name: pkg-create-jazz
           path: packages/create-jazz
 
-      - name: Restore executable permissions on CLI binaries
-        run: |
-          chmod 755 \
-            packages/jazz-tools/bin/native/jazz-tools-darwin-arm64 \
-            packages/jazz-tools/bin/native/jazz-tools-darwin-x64 \
-            packages/jazz-tools/bin/native/jazz-tools-linux-arm64 \
-            packages/jazz-tools/bin/native/jazz-tools-linux-x64
-
       - name: Show release mode
         run: |
           case "${RELEASE_MODE}" in
@@ -693,33 +685,6 @@ jobs:
           tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);for(const field of ["dependencies","optionalDependencies","peerDependencies"]){for(const [name,version] of Object.entries(p[field]||{})){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`${field}.${name} uses workspace protocol (${version}) in packed manifest`);}}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
           tar -tf "${TARBALL}" | grep -q "package/bin/create-jazz.js"
           tar -tf "${TARBALL}" | grep -q "package/dist/index.js"
-
-      - name: Verify packed jazz-tools native binaries and runtime bootstrap
-        run: |
-          TMP_DIR=$(mktemp -d)
-          EXTRACT_DIR=$(mktemp -d)
-          pnpm --filter jazz-tools pack --pack-destination "${TMP_DIR}"
-          TARBALL=$(ls "${TMP_DIR}"/jazz-tools-*.tgz | head -n 1)
-          tar -xzf "${TARBALL}" -C "${EXTRACT_DIR}"
-          for bin in \
-            jazz-tools-darwin-arm64 \
-            jazz-tools-darwin-x64 \
-            jazz-tools-linux-arm64 \
-            jazz-tools-linux-x64; do
-            FILE="${EXTRACT_DIR}/package/bin/native/${bin}"
-            test -f "${FILE}" || { echo "Missing packed native binary ${bin}"; exit 1; }
-          done
-
-          case "$(uname -m)" in
-            x86_64) HOST_LINUX_BIN="jazz-tools-linux-x64" ;;
-            aarch64|arm64) HOST_LINUX_BIN="jazz-tools-linux-arm64" ;;
-            *)
-              echo "Unsupported linux runner architecture: $(uname -m)"
-              exit 1
-              ;;
-          esac
-
-          node packages/jazz-tools/scripts/verify-packed-runtime-bootstrap.mjs "${EXTRACT_DIR}/package"
 
       - name: Publish jazz-wasm (alpha tag)
         if: env.RELEASE_MODE == 'publish'

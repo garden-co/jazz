@@ -38,6 +38,13 @@ const DEPLOY_REMOVED =
   "createJazz publishes your schema, its permissions and its migrations when your backend starts, " +
   "so deploying the backend is the deployment.";
 
+const SERVER_REMOVED =
+  "`jazz-tools server` was removed. Jazz runs inside your backend: " +
+  "`createJazz({ store: sqlite({ path }) })` serves sync from your own server, and " +
+  "`createJazz({ store: remote({ url, appId, secret }) })` uses Jazz Cloud.";
+
+const CREATE_REMOVED = "`jazz-tools create` was removed. Start a project with `npm create jazz`.";
+
 const PERMISSIONS_LIFECYCLE_NOTE =
   "Permission-only changes do not create schema hashes or require migrations.";
 
@@ -470,6 +477,12 @@ if (isMainModule()) {
     exitOnError(task);
   } else if (command === "deploy") {
     console.error(DEPLOY_REMOVED);
+    process.exit(1);
+  } else if (command === "server") {
+    console.error(SERVER_REMOVED);
+    process.exit(1);
+  } else if (command === "create") {
+    console.error(CREATE_REMOVED);
     process.exit(1);
   } else {
     printHelp();

@@ -8,7 +8,6 @@ import { pathToFileURL } from "node:url";
 import { parse } from "yaml";
 import { cleanDist } from "../../../packages/jazz-tools/scripts/clean-dist.mjs";
 import { missingJazzToolsTestSurface } from "../verify-jazz-tools-exports.mjs";
-import { TARGETS as jazzToolsTargets } from "../../../packages/jazz-tools/scripts/targets.mjs";
 
 const root = path.resolve(import.meta.dirname, "../../..");
 const workflow = fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8");
@@ -1461,36 +1460,13 @@ test("CodSpeed measures BandChat and WorldTour through the native wall-time matr
   assert.match(codspeedWorkflow, /node dev\/benchmarks\/codspeed-artifact\.mjs groups/);
 });
 
-test("jazz-tools advertises exactly the CLI artifacts its build matrix produces", () => {
-  const producedCliArtifacts = [...packageBuild.matchAll(/^\s+output: (jazz-tools-\S+)$/gm)].map(
-    (match) => match[1],
-  );
-
-  assert.deepEqual(Object.values(jazzToolsTargets).sort(), producedCliArtifacts.sort());
-  assert.equal(jazzToolsTargets["win32-x64"], undefined);
-  assert.match(packageBuild, /default: .*"platform":"win32-x64-msvc"/);
-});
-
-test("the jazz-tools launcher reports Windows as unsupported instead of a missing artifact", () => {
-  const launcherPath = path.join(root, "packages/jazz-tools/bin/jazz-tools.js");
-  const probe = spawnSync(
-    process.execPath,
-    [
-      "--input-type=module",
-      "--eval",
-      `
-        Object.defineProperty(process, "platform", { value: "win32" });
-        Object.defineProperty(process, "arch", { value: "x64" });
-        process.argv = ["node", "jazz-tools", "server"];
-        await import(${JSON.stringify(launcherPath)});
-      `,
-    ],
-    { encoding: "utf8" },
-  );
-
-  assert.equal(probe.status, 1);
-  assert.match(probe.stderr, /jazz-tools CLI is not supported on win32\/x64\./);
-  assert.doesNotMatch(probe.stderr, /Bundled binary missing/);
+test("the jazz-tools npm package ships no native CLI binary", () => {
+  // The server CLI was removed: jazz-tools is TypeScript only, and the core
+  // ships as the jazz-napi addon (serveCore) that vercel() Sandboxes run.
+  assert.doesNotMatch(packageBuild, /jazz-tools-(linux|darwin)-/);
+  assert.doesNotMatch(packageBuild, /bin\/native/);
+  const launcher = fs.readFileSync(path.join(root, "packages/jazz-tools/bin/jazz-tools.js"), "utf8");
+  assert.doesNotMatch(launcher, /bin.*native|spawnSync\(binaryPath/);
 });
 
 test("native release builds need no libclang because no Rust dependency uses bindgen", () => {
