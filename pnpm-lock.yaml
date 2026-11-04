@@ -1178,6 +1178,9 @@ importers:
       jazz-tools:
         specifier: workspace:*
         version: link:../../../packages/jazz-tools
+      jose:
+        specifier: ^6.2.1
+        version: 6.2.10
     devDependencies:
       '@hono/node-server':
         specifier: ^1.19.11
@@ -2058,6 +2061,9 @@ importers:
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
+      jose:
+        specifier: ^6.2.1
+        version: 6.2.10
     devDependencies:
       '@types/express':
         specifier: ^4.17.21
