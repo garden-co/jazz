@@ -758,21 +758,29 @@ describe("createJazz", () => {
     }
   });
 
-  /** A core behind a proxy that lets a test hold, or fail, the core's `link` calls. */
+  /**
+   * A core behind a proxy that lets a test hold, or fail, the core's `link`
+   * calls. It proxies plain requests only, not sockets: the tests that use
+   * it make account calls, never sync.
+   */
   async function heldCore(appId: string) {
     const core = await startLocalJazzServer({ appId, inMemory: true });
     cleanups.push(() => core.stop());
     const control: { hold?: () => Promise<void>; fail?: number } = {};
+    // A held request that a failed test never released.
+    let unheld: (() => void) | undefined;
     const proxy = createServer(async (request, response) => {
       if (request.url?.endsWith("/admin/accounts/link")) {
         if (control.fail) {
           response.statusCode = control.fail;
-          response.end("account_registry_unavailable");
+          response.end("busy");
           return;
         }
         const hold = control.hold;
         control.hold = undefined;
-        await hold?.();
+        if (hold) {
+          await Promise.race([hold(), new Promise<void>((resolve) => (unheld = resolve))]);
+        }
       }
       const target = new URL(request.url ?? "/", core.url);
       const upstream = httpRequest(
@@ -786,7 +794,14 @@ describe("createJazz", () => {
       request.pipe(upstream);
     });
     await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
-    cleanups.push(() => new Promise<void>((resolve) => proxy.close(() => resolve())));
+    cleanups.push(
+      () =>
+        new Promise<void>((resolve) => {
+          unheld?.();
+          proxy.closeAllConnections();
+          proxy.close(() => resolve());
+        }),
+    );
     const url = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`;
     return { core, url, control };
   }
@@ -832,7 +847,8 @@ describe("createJazz", () => {
     expect(tabA.status).toBe(200);
     release();
     // B's link reaches the core with a revoked guest: alice already belongs
-    // to the guest's account, so it is done, not refused.
+    // to the guest's account, so it is done, not refused (and B doesn't
+    // revoke the key a second time when the core refused it as retired).
     const b = await tabB;
     expect(b.status).toBe(200);
     expect(((await b.json()) as { account: string }).account).toBe(
@@ -840,7 +856,7 @@ describe("createJazz", () => {
     );
   });
 
-  it("answers a core outage during a link as unavailable, and a retry links", async () => {
+  it("answers a core that fails a link for a passing reason as unavailable, and a retry links", async () => {
     const appId = randomUUID();
     const { core, url, control } = await heldCore(appId);
     const jazz = await createJazz({
@@ -864,10 +880,14 @@ describe("createJazz", () => {
       };
       return post("backend-link", { challenge, proof: signChallenge(secret, challenge) });
     };
-    control.fail = 503;
-    const failed = await link();
-    expect(failed.status).toBe(503);
-    expect(await failed.text()).toBe("account_registry_unavailable");
+    // The core down, its credential check refusing this backend mid-rotation,
+    // a proxy in front of it timing out or rate-limiting: none refuses the link.
+    for (const status of [503, 401, 408, 429]) {
+      control.fail = status;
+      const failed = await link();
+      expect(failed.status, String(status)).toBe(503);
+      expect(await failed.text(), String(status)).toBe("account_registry_unavailable");
+    }
     control.fail = undefined;
     expect((await link()).status).toBe(200);
   });

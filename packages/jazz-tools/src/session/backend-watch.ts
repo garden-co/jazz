@@ -126,9 +126,10 @@ export function watchBackendUser<Client>(
   // A guest whose link to a user was refused for good, so later checks sign
   // that user in instead of reopening the guest for the same refusal.
   let refusedLink: { account: unknown; issuer: string; subject: string } | undefined;
-  // Links the backend ended as signed out although its probe named a user:
-  // one re-check follows the newer answer, more would loop if they disagree.
-  let signedOutLinks = 0;
+  // A link the backend ended as signed out although its probe named this
+  // user: one re-check follows the newer answer, more would loop if they
+  // disagree. Kept per user, so another user gets their own re-check.
+  let signedOutLink: string | undefined;
   let checking: Promise<void> | undefined;
   // Checks asked for while one runs: a plain one (may sign out), a refused
   // one (only reconnects) and an asked one (the app's auth changed: no
@@ -222,12 +223,14 @@ export function watchBackendUser<Client>(
         try {
           await link.done;
           link.result = session.getSnapshot().account;
-          signedOutLinks = 0;
+          signedOutLink = undefined;
           return;
         } catch (cause) {
           if (linking === link) linking = undefined;
           if (stopped) return;
-          if (signedOutMeanwhile(cause) && signedOutLinks++ === 0) {
+          const who = `${signedIn.issuer}\0${signedIn.subject}`;
+          if (signedOutMeanwhile(cause) && signedOutLink !== who) {
+            signedOutLink = who;
             // Signed out while linking: follow the backend's new answer.
             if (asked) return "again";
             check();
@@ -239,7 +242,7 @@ export function watchBackendUser<Client>(
             if (asked) throw cause;
             return;
           }
-          signedOutLinks = 0;
+          signedOutLink = undefined;
           refusedLink = { account, issuer: signedIn.issuer, subject: signedIn.subject };
           console.warn(
             "Jazz could not link this device's guest to the user who signed in, so it signs them in to their own account. The guest stays on this device.",
@@ -250,7 +253,7 @@ export function watchBackendUser<Client>(
       }
       return attempt(session.loginWithBackend());
     }
-    signedOutLinks = 0;
+    signedOutLink = undefined;
     if (!backendUser) return;
     if (refused) {
       // Never sign out on a refusal alone (the cookie may be stale), but a

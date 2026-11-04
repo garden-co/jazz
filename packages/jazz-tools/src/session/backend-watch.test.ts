@@ -844,3 +844,19 @@ it("an app's linkWithBackend a moment before the watch's own doesn't fail the wa
   expect(t.linkWithBackend).toHaveBeenCalledOnce();
   await t.close();
 });
+
+it("gives each user their own re-check when links keep answering signed out", async () => {
+  const t = await guestSetup({
+    linkWithBackend: async () => {
+      throw new AccountAuthError("signed_out", 401);
+    },
+  });
+  t.backendNames(user("alice"));
+  await expect(t.watch.reauthenticate()).rejects.toThrow("signed_out");
+  expect(t.linkWithBackend).toHaveBeenCalledTimes(2);
+  // Bob signs in next, with no signed-out answer between: he gets his own re-check.
+  t.backendNames(user("bob"));
+  await expect(t.watch.reauthenticate()).rejects.toThrow("signed_out");
+  expect(t.linkWithBackend).toHaveBeenCalledTimes(4);
+  await t.close();
+});

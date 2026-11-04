@@ -1241,19 +1241,23 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
           // another account are still refused.
           const status = (error as { status?: number }).status;
           if ((status !== 409 && status !== 403) || !(await userIs(account))) throw error;
+          // Refused for a retired key: the link that won already retired it.
+          if (status === 403) guestRevoked = true;
         }
       }
     } catch (error) {
       const status = (error as { status?: number }).status;
-      // The core is down, slow or failing: the link may still go through on
-      // a retry, so say so rather than refuse it for good.
-      if (status === undefined || status >= 500) {
-        console.error("Jazz: linking a guest failed on the core", error);
-        return new Response("account_registry_unavailable", { status: 503 });
-      }
-      // The core refused it: its reason (e.g. the identity already belongs
-      // to another account, or the challenge was used) stays on the backend.
-      return new Response("link_refused", { status: 409 });
+      // Only the core's own refusals refuse the link for good: an invalid
+      // link intent (400), a retired or foreign identity (403), a user with
+      // no account to check (404), an identity of another account (409).
+      // Its reason stays on the backend.
+      if (status === 400 || status === 403 || status === 404 || status === 409)
+        return new Response("link_refused", { status: 409 });
+      // Anything else (the core down or failing, its credential check
+      // refusing this backend mid-rotation, a proxy's 408 or 429) may pass on
+      // a retry, so say so rather than strand the guest.
+      console.error("Jazz: linking a guest failed on the core", error);
+      return new Response("account_registry_unavailable", { status: 503 });
     }
     if (options.guestKeyAfterLink === "revoke" && !guestRevoked) {
       // The link already stands. If the revoke fails, the guest key stays
