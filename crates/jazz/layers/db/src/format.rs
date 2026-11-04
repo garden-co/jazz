@@ -100,8 +100,9 @@ pub(crate) fn admit(conn: &Connection) -> Result<(), Error> {
 }
 
 /// Refuse a development store of format 1 from before it kept pending
-/// uploads a row per op (SPEC 8.3): its `_jazz_pending` holds each one as
-/// an encoded message (`commit_msg`), which this build does not read.
+/// uploads as rows of their cells (SPEC 8.3): its `_jazz_pending` holds
+/// each one as an encoded message (`commit_msg`), or its
+/// `_jazz_pending_items` each op as one, which this build does not read.
 /// Format 1 had not shipped then, so no released store has that layout.
 fn refuse_message_outbox(conn: &Connection) -> Result<(), Error> {
     let old: bool = conn
@@ -115,6 +116,17 @@ fn refuse_message_outbox(conn: &Connection) -> Result<(), Error> {
     if old {
         return Err(unsupported(
             "this development store keeps pending uploads as encoded messages, \
+             a layout from before format 1 shipped",
+        ));
+    }
+    // Later development stores kept each op as an encoded message in
+    // `_jazz_pending_items`, before ops were stored as rows of their cells.
+    // One holding no upload has nothing to misread, and is laid out anew
+    // when it opens (`sync::replace_encoded_pending`); one holding uploads
+    // would strand them, so it is refused.
+    if crate::db::sync::holds_encoded_pending(conn)? {
+        return Err(unsupported(
+            "this development store keeps pending uploads as encoded ops, \
              a layout from before format 1 shipped",
         ));
     }

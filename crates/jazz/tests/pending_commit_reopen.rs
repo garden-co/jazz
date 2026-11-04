@@ -16,7 +16,7 @@ use std::task::{Context, Poll, Waker};
 use duplex_transport::duplex;
 use jazz::db::{
     Db, DbConfig, DbIdentity, ErrorCode, FileOptions, InsertOptions, LargeValueUpdate,
-    LargeValueUpdatePage, LargeValueUpdateSplice, ReadOpts, RemoteLinkHint, WireOp, block_on,
+    LargeValueUpdatePage, LargeValueUpdateSplice, ReadOpts, RemoteLinkHint, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
@@ -114,29 +114,37 @@ fn docs(db: &Db) -> BTreeMap<[u8; 16], (String, String)> {
         .collect()
 }
 
-/// The stored ops of the pending commits, in order.
-fn stored_ops(path: &Path) -> Vec<WireOp> {
+/// Each stored op of the pending commits, in order: how many bases and
+/// deltas it keeps, and whether it keeps an access proof.
+fn stored_ops(path: &Path) -> Vec<(i64, i64, bool)> {
     let conn = rusqlite::Connection::open(path).unwrap();
     let mut statement = conn
-        .prepare("SELECT item FROM _jazz_pending_items WHERE part = 0 ORDER BY tx, n")
+        .prepare(
+            "SELECT json_array_length(o.bases), \
+             (SELECT count(*) FROM _jazz_pending_deltas AS d WHERE d.tx = o.tx AND d.n = o.n), \
+             o.proof_key IS NOT NULL \
+             FROM _jazz_pending_ops AS o ORDER BY o.tx, o.n",
+        )
         .unwrap();
     statement
-        .query_map([], |r| r.get::<_, Vec<u8>>(0))
-        .unwrap()
-        .map(|item| postcard::from_bytes(&item.unwrap()).unwrap())
-        .collect()
-}
-
-fn stored_parts(path: &Path) -> BTreeSet<i64> {
-    let conn = rusqlite::Connection::open(path).unwrap();
-    let mut statement = conn
-        .prepare("SELECT DISTINCT part FROM _jazz_pending_items")
-        .unwrap();
-    statement
-        .query_map([], |r| r.get(0))
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap()
+}
+
+/// Which of a commit's lists (its ops, its serializable reads) are stored.
+fn stored_parts(path: &Path) -> BTreeSet<&'static str> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    ["_jazz_pending_ops", "_jazz_pending_reads"]
+        .into_iter()
+        .filter(|table| {
+            conn.query_row(&format!("SELECT count(*) > 0 FROM {table}"), [], |r| {
+                r.get::<_, bool>(0)
+            })
+            .unwrap()
+        })
+        .collect()
 }
 
 #[test]
@@ -215,24 +223,14 @@ fn a_pending_serializable_commit_reloads_every_stored_part_after_a_restart() {
         .unwrap();
         block_on(client.commit_serializable_handle(open)).unwrap().0
     };
-    // Ops and reads (see `PendingPart`); each op keeps its base, and its
-    // delta or access proof.
+    // Ops and reads; each op keeps its base, and its delta or access proof.
     assert_eq!(
         stored_parts(&path),
-        BTreeSet::from([0, 1]),
+        BTreeSet::from(["_jazz_pending_ops", "_jazz_pending_reads"]),
         "every list of the commit is stored"
     );
     let ops = stored_ops(&path);
-    assert_eq!(ops.len(), 2, "{ops:?}");
-    assert!(ops.iter().all(|op| op.bases.len() == 1), "{ops:?}");
-    assert!(
-        ops[0].deltas.len() == 1 && ops[0].access_proof.is_none(),
-        "{ops:?}"
-    );
-    assert!(
-        ops[1].deltas.is_empty() && ops[1].access_proof.is_some(),
-        "{ops:?}"
-    );
+    assert_eq!(ops, [(1, 1, false), (1, 0, true)], "{ops:?}");
 
     let client = open_file(&path);
     connect(&client, &server);
@@ -282,6 +280,96 @@ fn a_store_with_the_old_message_outbox_is_refused_unchanged() {
         std::fs::read(&path).unwrap(),
         before,
         "the file is unchanged"
+    );
+}
+
+/// Turn a store into one in the development layout that kept each pending
+/// op as an encoded message, holding `uploads` pending commits.
+fn encoded_pending_layout(path: &Path, uploads: usize) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER _jazz_pending_forget; DROP TABLE _jazz_pending; \
+         CREATE TABLE _jazz_pending (tx INTEGER PRIMARY KEY, header BLOB NOT NULL); \
+         CREATE TABLE _jazz_pending_items (tx INTEGER NOT NULL, part INTEGER NOT NULL, \
+         n INTEGER NOT NULL, item BLOB NOT NULL, PRIMARY KEY (tx, part, n)); \
+         CREATE TRIGGER _jazz_pending_forget AFTER DELETE ON _jazz_pending BEGIN \
+         DELETE FROM _jazz_pending_items WHERE tx = OLD.tx; \
+         DELETE FROM _jazz_pending_rows WHERE tx = OLD.tx; END;",
+    )
+    .unwrap();
+    for tx in 0..uploads {
+        conn.execute(
+            "INSERT INTO _jazz_pending (tx, header) VALUES (?1, x'04')",
+            [tx as i64 + 1],
+        )
+        .unwrap();
+    }
+}
+
+/// A development store that kept each pending op as an encoded message
+/// (`_jazz_pending_items`) and still holds an upload is refused as another
+/// format, and left as it was: its upload would otherwise be lost.
+#[test]
+fn a_store_with_encoded_pending_ops_is_refused_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.sqlite");
+    drop(open_file(&path));
+    encoded_pending_layout(&path, 1);
+    let before = std::fs::read(&path).unwrap();
+    let Err(error) = block_on(Db::open_at(config(0x61), &path, FileOptions::default())) else {
+        panic!("the old store opened");
+    };
+    assert_eq!(error.code, ErrorCode::UnsupportedStorageCodecs, "{error}");
+    assert!(error.message.contains("encoded ops"), "{error}");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "the file is unchanged"
+    );
+}
+
+/// One in that layout holding no upload opens, its pending tables laid out
+/// anew, and keeps a write made offline across a reopen.
+#[test]
+fn a_store_with_empty_encoded_pending_tables_opens_in_the_current_layout() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.sqlite");
+    drop(open_file(&path));
+    encoded_pending_layout(&path, 0);
+    {
+        let server = block_on(Db::open_history_complete(config(0xee))).unwrap();
+        let client = open_file(&path);
+        connect(&client, &server);
+        // Offline: the write stays pending.
+        drop(server);
+        block_on(client.insert(
+            "docs",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("offline".to_owned())),
+                ("body".to_owned(), Value::String("short".to_owned())),
+            ]),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    assert_eq!(stored_ops(&path).len(), 1, "stored in the current layout");
+    let server = block_on(Db::open_history_complete(config(0xee))).unwrap();
+    let client = open_file(&path);
+    connect(&client, &server);
+    drive(
+        &[&client, &server, &client],
+        client.wait_for_pending_writes(DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(
+        docs(&server)
+            .into_values()
+            .map(|(title, _)| title)
+            .collect::<Vec<_>>(),
+        ["offline"]
     );
 }
 
@@ -358,20 +446,25 @@ fn an_update_that_changes_nothing_records_no_upload() {
 fn pending_rows_in_another_layout_are_refused_as_another_format() {
     for (case, edit) in [
         (
-            "an unknown item part",
-            "UPDATE _jazz_pending_items SET part = 7",
+            "an unknown op",
+            "UPDATE _jazz_pending_ops SET op = 'truncate'",
+        ),
+        (
+            "a cell of an unknown kind",
+            "UPDATE _jazz_pending_cells SET ty = 'decimal'",
         ),
         (
             "a mergeable commit with reads",
-            "UPDATE _jazz_pending_items SET part = 1",
+            "INSERT INTO _jazz_pending_reads (tx, n, version, query, binding, include_deleted) \
+             SELECT tx, 0, x'00', '{}', '{}', 0 FROM _jazz_pending",
         ),
         (
             "a row id that is not 16 bytes",
             "UPDATE _jazz_pending_rows SET id = x'0102'",
         ),
         (
-            "a header that is not a commit",
-            "UPDATE _jazz_pending SET header = x'00'",
+            "a writer node that is not 16 bytes",
+            "UPDATE _jazz_pending SET node = x'00'",
         ),
     ] {
         let dir = tempfile::tempdir().unwrap();

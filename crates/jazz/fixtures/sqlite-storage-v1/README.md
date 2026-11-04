@@ -12,9 +12,9 @@ pending uploads moved from one encoded message to a row per op, and
 watermarks became per-sequencer rows).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `4ed6e440fe4f74dbc745011475e0892f5d3543a73ffdde8bcc68f86336ed4bbf`.
+  the SQLite file `ec0f311bcd560f207436e247f19ece5b2ae022bc2eb1f280bcc017dcb3a6d1c2`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `9c819e575adcf9cd04d31f49ac6c9f68aebadc23d6d451488cd794c602259273`.
+  `920fd39ddef476eaa7cd9d240a7b0a256bc29d4c3b1e50a62c5ae9db75f8fc94`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -137,3 +137,13 @@ object hashes are now plain SHA-256 over the node's encoding, so an object
 store can verify a presigned upload against the node hash itself; schema
 hashes, schema version ids, stored column and table names, and derived ids
 are SHA-256 too) regenerated it the same way.
+
+Storing pending uploads as rows shaped like the rows they write, instead of
+encoded sync messages (`_jazz_pending` with named columns, one
+`_jazz_pending_ops` row per op, one `_jazz_pending_cells` row per written
+cell with its kind and a native SQLite value, `_jazz_pending_deltas`,
+`_jazz_pending_reads` and `_jazz_pending_read_rows`; the retry store's
+`_jazz_rejected_ops`, `_jazz_rejected_cells` and `_jazz_rejected_deltas`
+in the same layout), regenerated it the same way. A development store in
+the encoded-op layout (`_jazz_pending_items`) opens with its pending tables
+laid out anew when it holds no upload, and is refused when it holds one.
