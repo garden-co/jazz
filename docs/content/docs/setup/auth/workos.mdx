@@ -42,6 +42,19 @@ WorkOS access tokens inside the session are short-lived. Refresh an expired sess
 (`session.refresh()`) and write the new cookie on your next HTTP response; the example shows one
 way to share the refreshed session with sync sockets, which can't set cookies.
 
+If your backend receives WorkOS access tokens instead (for example, from a native app sending
+`Authorization: Bearer`), use `fromJWT`. Their `role`, `permissions` and `org_id` claims reach your
+policies as `session.claims`:
+
+```ts
+authenticate: fromJWT({
+  jwksUrl: `https://api.workos.com/sso/jwks/${WORKOS_CLIENT_ID}`,
+  issuer: `https://api.workos.com/user_management/${WORKOS_CLIENT_ID}`,
+  // WorkOS access tokens carry no `aud`; the issuer already names your client id.
+  audience: false,
+}),
+```
+
 ## Client
 
 Ask your backend who is signed in, and pass that to Jazz:

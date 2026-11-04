@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateSecret, identityOf, signChallenge, signToken } from "../local-first-auth/index.js";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
@@ -12,6 +13,7 @@ import {
   createJazz,
   createJazzSession,
   files,
+  fromJWT,
   memory,
   remote,
   sqlite,
@@ -231,6 +233,36 @@ describe("createJazz", () => {
     const probe = await fetch(`${origin}/jazz/apps/${appId}/ws`);
     expect(probe.status).toBe(426);
     expect(probe.headers.get("x-jazz-stream")).toBeNull();
+  }, 60_000);
+
+  it("signs users in with fromJWT and keeps their account and claims", async () => {
+    const { privateKey, publicKey } = await generateKeyPair("ES256", { extractable: true });
+    const issuer = "https://idp.example";
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: fromJWT({ publicKey: await exportJWK(publicKey), issuer, audience: "my-app" }),
+    });
+    cleanups.push(() => jazz.close());
+    const bearer = async (subject: string) =>
+      new Request("http://app/x", {
+        headers: {
+          authorization: `Bearer ${await new SignJWT({ role: "editor" })
+            .setProtectedHeader({ alg: "ES256" })
+            .setIssuer(issuer)
+            .setAudience("my-app")
+            .setSubject(subject)
+            .setExpirationTime("5m")
+            .sign(privateKey)}`,
+        },
+      });
+    const account = await jazz.accountFor(await bearer("user_01"));
+    expect(account).toEqual(expect.any(String));
+    // A fresh token for the same user opens the same account.
+    await expect(jazz.accountFor(await bearer("user_01"))).resolves.toBe(account);
+    await expect(jazz.accountFor(await bearer("user_02"))).resolves.not.toBe(account);
+    await expect(jazz.accountFor(new Request("http://app/x"))).resolves.toBeNull();
   }, 60_000);
 
   it("links only a guest whose proof is for this app or this endpoint", async () => {
