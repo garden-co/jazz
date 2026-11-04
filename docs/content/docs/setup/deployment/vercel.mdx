@@ -80,8 +80,11 @@ vercel({ blobs: "sqlite" }); // always the core's SQLite file
 ```
 
 `s3()` reads `S3_BUCKET_NAME`, `AWS_REGION` and `AWS_ROLE_ARN`, which the Marketplace's AWS
-integration sets, and the core assumes that role with your function's OIDC token. Put the bucket in
-the AWS region your Sandbox runs in; the backend warns when they differ. Its options are the same
+integration sets, and the core assumes that role with your function's OIDC token. The bucket can be in
+any region: on Vercel, `AWS_REGION` is the function's region, so if it doesn't match the bucket, the
+backend learns the bucket's region from S3's first reply, signs for it from then on, and logs a
+warning suggesting you set `AWS_REGION` to it. Putting the bucket in your Sandbox's region still
+keeps latency and transfer costs down. Its options are the same
 as for [your own server](/docs/setup/deployment/own-server#large-values).
 
 Each Blob store or bucket serves one Vercel environment. Give production and previews their own,
