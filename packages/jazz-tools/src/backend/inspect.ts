@@ -202,15 +202,23 @@ export function createInspector(deps: InspectorDeps) {
 
   // ---------------------------------------------------------------- admission
 
-  /** The local development default: no hook, NODE_ENV=development, and a request from this machine. */
-  function devAllowed(request: Request): boolean {
+  /**
+   * The local development default: no hook, NODE_ENV=development, and a
+   * request from this machine. "This machine" is the socket's peer address,
+   * which only a host that hands Jazz its Node request knows (`attach()`,
+   * `nodeHandler`). The Host header can't stand in for it: anyone who reaches
+   * a dev server listening on every interface (as `next dev` does) can send
+   * `Host: localhost`. So on other hosts the default is off, and says so.
+   */
+  function devAllowed(request: Request): boolean | "no_peer" {
     if (env.NODE_ENV !== "development") return false;
     // A proxy in front of the backend makes every request look local.
     for (const header of ["x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded"]) {
       if (request.headers.has(header)) return false;
     }
     const remote = deps.remoteAddress(request);
-    if (remote !== undefined && !isLoopbackAddress(remote)) return false;
+    if (remote === undefined) return "no_peer";
+    if (!isLoopbackAddress(remote)) return false;
     const host = request.headers.get("host") ?? new URL(request.url).host;
     let hostname: string;
     try {
@@ -235,7 +243,14 @@ export function createInspector(deps: InspectorDeps) {
       }
       return { by: grant.by, via: "hook", write: grant.write === true };
     }
-    if (devAllowed(request)) return { by: "local development", via: "dev", write: true };
+    const dev = devAllowed(request);
+    if (dev === true) return { by: "local development", via: "dev", write: true };
+    if (dev === "no_peer") {
+      throw new InspectError(
+        "unauthorized",
+        "Local inspection without an `inspect` hook is not supported on this host yet: it doesn't tell Jazz the request's peer address, and the Host header proves nothing (anyone who reaches a dev server listening on every interface can send `Host: localhost`). Serve Jazz through `attach()` or `nodeHandler`, or pass an `inspect` hook that names who may inspect from your own sign-in",
+      );
+    }
     throw new InspectError(
       "unauthorized",
       "Inspecting this app needs an `inspect` hook in createJazz (or, in local development, NODE_ENV=development and a request from this machine)",

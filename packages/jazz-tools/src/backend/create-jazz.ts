@@ -331,8 +331,11 @@ export interface CreateJazzOptions {
    * Access, a VPN or SSO proxy) rather than a flag on a user account, which
    * one compromised account or one bug in your auth would hand out.
    *
-   * Without it, only local development is let in: a request from this
-   * machine while NODE_ENV is "development". Pass `() => null` to turn even
+   * Without it, only local development is let in: a request whose socket
+   * comes from this machine while NODE_ENV is "development". Only hosts that
+   * hand Jazz their Node request (`attach()`, `nodeHandler`) know the socket's
+   * address; on others (Next.js route handlers, Hono, Bun, Deno) the default
+   * is off, since a Host header proves nothing. Pass `() => null` to turn even
    * that off.
    */
   inspect?: InspectHook;

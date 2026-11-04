@@ -1,4 +1,6 @@
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -86,6 +88,29 @@ function api(
   );
 }
 
+/**
+ * Serve `jazz` on a real loopback socket through `nodeHandler`, the way a
+ * Node host hands Jazz its requests, so the Inspector knows each request's
+ * peer address. Returns the origin.
+ */
+async function serveNode(jazz: Jazz): Promise<string> {
+  const server = createServer((req, res) =>
+    jazz.nodeHandler(req, res, () => {
+      res.statusCode = 404;
+      res.end();
+    }),
+  );
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  cleanups.push(
+    () =>
+      new Promise((resolve) => {
+        server.closeAllConnections();
+        server.close(resolve);
+      }),
+  );
+  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
 async function ok<T = any>(response: Promise<Response>): Promise<T> {
   const answered = await response;
   const body = await answered.json();
@@ -138,15 +163,20 @@ describe("Inspector admission", () => {
 
   it("lets this machine in during local development, and nobody through a proxy or another host", async () => {
     const { jazz } = await start({ inspect: undefined });
+    const origin = await serveNode(jazz);
+    const local = (headers: Record<string, string> = {}) =>
+      fetch(`${origin}/jazz/inspect/api`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify({ op: "whoami" }),
+      });
     process.env.NODE_ENV = "development";
-    const me = await ok(api(jazz, { op: "whoami" }));
+    const me = await ok(local());
     expect(me).toMatchObject({ via: "dev", write: true, appId: jazz.appId });
-    expect(me.inspectorUrl).toBe("http://localhost:3000/jazz/inspect/");
+    expect(me.inspectorUrl).toBe(`${origin}/jazz/inspect/`);
 
     // A proxy in front makes every request look local.
-    expect(
-      (await refused(api(jazz, { op: "whoami" }, { "x-forwarded-for": "203.0.113.9" }))).status,
-    ).toBe(401);
+    expect((await refused(local({ "x-forwarded-for": "203.0.113.9" }))).status).toBe(401);
     // Another host name is not this machine.
     expect(
       (await refused(api(jazz, { op: "whoami" }, {}, "http://app.example.com/jazz/inspect/api")))
@@ -154,7 +184,20 @@ describe("Inspector admission", () => {
     ).toBe(401);
     // Production never gets the default.
     process.env.NODE_ENV = "production";
-    expect((await refused(api(jazz, { op: "whoami" }))).status).toBe(401);
+    expect((await refused(local())).status).toBe(401);
+  });
+
+  it("refuses the dev default where the host can't say who the peer is, whatever Host claims", async () => {
+    // `handle(request)` is how Next.js route handlers, Hono, Bun and Deno
+    // reach Jazz: no socket, so no peer address. A caller on the network
+    // that names `Host: localhost` must not get in (`next dev` listens on
+    // every interface).
+    const { jazz } = await start({ inspect: undefined });
+    process.env.NODE_ENV = "development";
+    const answer = await refused(api(jazz, { op: "whoami" }));
+    expect(answer.status).toBe(401);
+    expect(answer.message).toMatch(/not supported on this host yet/);
+    expect(answer.message).toMatch(/Host header proves nothing/);
   });
 
   it("asks the hook, and `() => null` turns even local development off", async () => {
@@ -828,6 +871,13 @@ describe("jazz-tools inspect and mcp", () => {
       return jazz.handle(request);
     }) as typeof fetch;
   }
+  /** Routes the CLI's requests to `origin` over a real loopback socket. */
+  function fetchAt(origin: string): typeof fetch {
+    return (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(new Request(input, init).url);
+      return fetch(`${origin}${url.pathname}${url.search}`, init);
+    }) as typeof fetch;
+  }
 
   it("runs queries and writes with a stored token, printing JSON", async () => {
     const { jazz } = await start();
@@ -917,6 +967,7 @@ describe("jazz-tools inspect and mcp", () => {
     process.env.NODE_ENV = "development";
     const { jazz: devJazz } = await start({ inspect: undefined });
     await seed(devJazz);
+    const devOrigin = await serveNode(devJazz);
     const config = await withConfigDir();
     const input = new PassThrough();
     const lines: any[] = [];
@@ -925,7 +976,7 @@ describe("jazz-tools inspect and mcp", () => {
       env: { JAZZ_CONFIG_DIR: config },
       input,
       output: (line) => lines.push(JSON.parse(line)),
-      fetch: fetchVia(devJazz),
+      fetch: fetchAt(devOrigin),
     });
     const send = (message: unknown) => input.write(`${JSON.stringify(message)}\n`);
     const answer = async (id: number) => {
@@ -959,7 +1010,7 @@ describe("jazz-tools inspect and mcp", () => {
     });
     const queried = JSON.parse((await answer(3)).result.content[0].text);
     expect(queried.rows).toHaveLength(2);
-    expect(queried.inspectorUrl).toMatch(/^http:\/\/localhost:3000\/jazz\/inspect\/#q=/);
+    expect(queried.inspectorUrl.startsWith(`${devOrigin}/jazz/inspect/#q=`)).toBe(true);
     send({
       jsonrpc: "2.0",
       id: 4,
