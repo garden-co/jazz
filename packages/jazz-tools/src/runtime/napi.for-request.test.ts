@@ -246,7 +246,7 @@ describe("forRequest auth and policy", () => {
       driver: { type: "memory" },
       serverUrl: server.url,
       backendSecret,
-        env: "test",
+      env: "test",
     });
     onTestFinished(() => context.shutdown());
     const alice = await createExternalIdentity("alice", server, appId);
@@ -445,7 +445,7 @@ describe("forRequest auth and policy", () => {
       serverUrl: server.url,
       backendSecret,
       adminSecret,
-        env: "test",
+      env: "test",
     });
 
     onTestFinished(async () => {

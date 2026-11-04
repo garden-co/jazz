@@ -755,15 +755,12 @@ export class JazzContext {
     if (!this.config.serverUrl) {
       throw new Error("forRequest requires a configured core serverUrl for account admission");
     }
-    return await resolveRequestSession(
-      request,
-      {
-        appId: this.config.appId,
-        accountRegistry: accountRegistryUrl(this.config.serverUrl, this.config.appId),
-        backendSecret: this.config.backendSecret,
-        allowLocalFirstAuth: this.config.allowLocalFirstAuth,
-      },
-    );
+    return await resolveRequestSession(request, {
+      appId: this.config.appId,
+      accountRegistry: accountRegistryUrl(this.config.serverUrl, this.config.appId),
+      backendSecret: this.config.backendSecret,
+      allowLocalFirstAuth: this.config.allowLocalFirstAuth,
+    });
   }
 
   /**

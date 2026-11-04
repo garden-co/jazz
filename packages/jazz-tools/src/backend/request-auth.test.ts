@@ -66,9 +66,12 @@ describe("backend request auth", () => {
   it("reads the bearer from a mixed-case plain-record Authorization key", async () => {
     mocks.verifyLocalFirstIdentityProof.mockReturnValue({ ok: true, id: GUEST });
     await expect(
-      resolveRequestSession({ headers: { Authorization: `Bearer ${guestToken()}` } }, {
-        appId: "app",
-      }),
+      resolveRequestSession(
+        { headers: { Authorization: `Bearer ${guestToken()}` } },
+        {
+          appId: "app",
+        },
+      ),
     ).resolves.toMatchObject({ user_id: GUEST, authMode: "local-first" });
   });
 

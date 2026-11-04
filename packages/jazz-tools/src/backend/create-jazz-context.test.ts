@@ -353,26 +353,18 @@ describe("backend/create-jazz-context", () => {
       },
     });
     expect(mocks.resolveRequestSession).toHaveBeenCalledTimes(2);
-    expect(mocks.resolveRequestSession).toHaveBeenNthCalledWith(
-      1,
-      req,
-      {
-        appId: "server-app",
-        accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
-        backendSecret: "secret",
-        allowLocalFirstAuth: true,
-      },
-    );
-    expect(mocks.resolveRequestSession).toHaveBeenNthCalledWith(
-      2,
-      req,
-      {
-        appId: "server-app",
-        accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
-        backendSecret: "secret",
-        allowLocalFirstAuth: true,
-      },
-    );
+    expect(mocks.resolveRequestSession).toHaveBeenNthCalledWith(1, req, {
+      appId: "server-app",
+      accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
+      backendSecret: "secret",
+      allowLocalFirstAuth: true,
+    });
+    expect(mocks.resolveRequestSession).toHaveBeenNthCalledWith(2, req, {
+      appId: "server-app",
+      accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
+      backendSecret: "secret",
+      allowLocalFirstAuth: true,
+    });
     expect(mocks.clients).toHaveLength(1);
     expect(mocks.clients[0]!.asBackend).toHaveBeenCalledTimes(6);
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(1);
