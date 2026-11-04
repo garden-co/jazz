@@ -337,12 +337,25 @@ function blobsSetup(blobs: VercelS3 | VercelBlob | undefined, q: (s: string) => 
 export S3_BUCKET_NAME=${q(blobs.bucket)} AWS_REGION=${q(blobs.region)} AWS_ROLE_ARN=${q(blobs.roleArn)}`;
 }
 
+/**
+ * The Vercel environment (`production`, `preview` or a custom one's slug)
+ * whose functions this core trusts, from the token's subject.
+ */
+export function environmentOf(trust: TrustedWorkload): string | undefined {
+  return /:environment:([^:]+)$/.exec(trust.subject)?.[1];
+}
+
 /** The core's options, but its app id, which the Drive keeps. */
 function coreOptions(
   dataDir: string,
   trust: TrustedWorkload,
   blobs: VercelS3 | VercelBlob | undefined,
 ): Record<string, unknown> {
+  // A bucket or Blob store is claimed for the core's environment: one
+  // environment's OIDC token reaches the whole store, so preview and
+  // production never share one.
+  const environment = environmentOf(trust);
+  const claim = environment === undefined ? {} : { environment };
   return {
     port: VERCEL_CORE_PORT,
     dataDir,
@@ -353,11 +366,13 @@ function coreOptions(
             kind: "vercel-blob",
             tokenFromWorkload: true,
             storeId: blobs.storeId,
+            ...claim,
             ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
           }
         : {
             kind: "s3",
             roleFromWorkload: true,
+            ...claim,
             ...(blobs.endpoint === undefined ? {} : { endpoint: blobs.endpoint }),
             ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
           },
@@ -547,6 +562,11 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   if (!options.backendCredential) refuseOtherEnvironment(trust, env);
   const trustLine = `${trust.issuer} ${trust.audience} ${trust.subject}`;
   const blobs = resolveCoreBlobs(options, env);
+  if (blobs && environmentOf(trust) === undefined) {
+    console.warn(
+      `vercel(): the core's workload ${trust.subject} names no Vercel environment, so its blob store is not claimed for one; make sure no other environment uses that store`,
+    );
+  }
   const script = Buffer.from(startScript(appId, version, tarballUrl, trust, blobs));
 
   const startServer = async (sbx: SandboxHandle) => {

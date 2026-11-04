@@ -428,7 +428,7 @@ export interface RestoreOptions {
  * memory limits, graceful drain) until [`ServedCore::stop`]. One per
  * process.
  */
-export declare function serveCore(options: { appId: string; port: number; dataDir: string; blobs: { kind: "sqlite" } | { kind: "files"; dir?: string } | { kind: "s3"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean } | { kind: "vercel-blob"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; allowLocalFirstAuth?: boolean; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }): ServedCore
+export declare function serveCore(options: { appId: string; port: number; dataDir: string; blobs: { kind: "sqlite" } | { kind: "files"; dir?: string } | { kind: "s3"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: "vercel-blob"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; allowLocalFirstAuth?: boolean; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }): ServedCore
 
 /** Owned libsodium device encryption keys. */
 export interface SodiumDeviceKeyPair {

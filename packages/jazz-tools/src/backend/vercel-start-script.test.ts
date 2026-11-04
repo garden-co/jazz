@@ -108,7 +108,12 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(await start("1.0.0", undefined, trust, blobs)).toBe("running");
     const [server] = servers();
     expect(server!.bucket).toBe("app-blobs");
-    expect(server!.options.blobs).toEqual({ kind: "s3", roleFromWorkload: true, prefix: "it's/" });
+    expect(server!.options.blobs).toEqual({
+      kind: "s3",
+      roleFromWorkload: true,
+      environment: "production",
+      prefix: "it's/",
+    });
   });
 
   it("starts a core whose large values go to the project's Blob store", async () => {
@@ -120,6 +125,7 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
       kind: "vercel-blob",
       tokenFromWorkload: true,
       storeId: "abc",
+      environment: "production",
       prefix: "it's/",
     });
   });

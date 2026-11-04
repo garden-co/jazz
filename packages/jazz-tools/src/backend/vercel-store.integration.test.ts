@@ -408,7 +408,7 @@ describe("vercel() store", () => {
     const trust = { issuer: "https://oidc.vercel.com/t", audience: AUDIENCE, subject: SUBJECT };
     const script = startScript(undefined, "2.0.0-alpha.60", "https://example.invalid/t.tgz", trust);
     expect(script).toContain("app_id=$(cat /proc/sys/kernel/random/uuid)");
-    expect(script).toContain('exec node -e \'const [addon, appId, options]');
+    expect(script).toContain("exec node -e 'const [addon, appId, options]");
     expect(script).toContain('"$addon" "$app_id"');
     expect(script).toContain('"port":1625');
     expect(script).not.toContain("SECRET");

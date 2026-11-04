@@ -108,6 +108,9 @@ pub struct BlobOptions {
     pub vercel_blob_prefix: Option<String>,
     /// Authenticate to Vercel Blob with the trusted workload's OIDC token.
     pub vercel_blob_token_from_workload: bool,
+    /// The environment an S3 bucket or Blob store is claimed for: one
+    /// environment's credential reaches the whole store, so two never share one.
+    pub environment: Option<String>,
 }
 
 impl BlobOptions {
@@ -132,6 +135,7 @@ impl BlobOptions {
                     };
                     *token = s3::WebIdentityToken::Workload;
                 }
+                options.environment = self.environment;
                 Ok(BlobStore::S3(options))
             }
             "vercel-blob" => vercel_blob::VercelBlobOptions::from_env(
@@ -141,7 +145,10 @@ impl BlobOptions {
                     vercel_blob::VercelBlobCredentials::Oidc(s3::WebIdentityToken::Workload),
                 ),
             )
-            .map(BlobStore::VercelBlob),
+            .map(|mut options| {
+                options.environment = self.environment;
+                BlobStore::VercelBlob(options)
+            }),
             other => Err(format!(
                 "blobs must be files, s3, vercel-blob or sqlite, not {other:?}"
             )),

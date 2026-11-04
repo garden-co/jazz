@@ -164,6 +164,13 @@ enum Commands {
         #[arg(long)]
         vercel_blob_token_from_workload: bool,
 
+        /// The deployment environment (production, preview, …) this server
+        /// runs in. With `--blobs s3` or `--blobs vercel-blob`, the bucket or
+        /// Blob store is claimed for it, and a server of another environment
+        /// is refused there (a `vercel()` core passes it).
+        #[arg(long)]
+        blobs_environment: Option<String>,
+
         /// Enable local-first auth (Authorization: Bearer <self-signed Jazz JWT>).
         ///
         /// Required in NODE_ENV=production.
@@ -326,6 +333,7 @@ async fn run() {
             vercel_blob_store_id,
             vercel_blob_prefix,
             vercel_blob_token_from_workload,
+            blobs_environment,
             allow_local_first_auth,
             backend_secret,
             admin_secret,
@@ -378,6 +386,7 @@ async fn run() {
                 vercel_blob_store_id,
                 vercel_blob_prefix,
                 vercel_blob_token_from_workload,
+                environment: blobs_environment,
             })
             .resolve()
             {

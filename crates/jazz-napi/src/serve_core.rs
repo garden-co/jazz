@@ -49,6 +49,7 @@ enum ServeCoreBlobs {
         prefix: Option<String>,
         #[serde(default)]
         role_from_workload: bool,
+        environment: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     VercelBlob {
@@ -56,6 +57,7 @@ enum ServeCoreBlobs {
         prefix: Option<String>,
         #[serde(default)]
         token_from_workload: bool,
+        environment: Option<String>,
     },
 }
 
@@ -77,6 +79,7 @@ impl ServeCoreBlobs {
                 endpoint,
                 prefix,
                 role_from_workload,
+                environment,
             } => jazz_server::BlobOptions {
                 kind: "s3".into(),
                 s3_bucket: bucket,
@@ -84,17 +87,20 @@ impl ServeCoreBlobs {
                 s3_endpoint: endpoint,
                 s3_prefix: prefix,
                 s3_role_from_workload: role_from_workload,
+                environment,
                 ..Default::default()
             },
             Self::VercelBlob {
                 store_id,
                 prefix,
                 token_from_workload,
+                environment,
             } => jazz_server::BlobOptions {
                 kind: "vercel-blob".into(),
                 vercel_blob_store_id: store_id,
                 vercel_blob_prefix: prefix,
                 vercel_blob_token_from_workload: token_from_workload,
+                environment,
                 ..Default::default()
             },
         }
@@ -141,7 +147,7 @@ impl ServedCore {
 /// process.
 #[napi(
     js_name = "serveCore",
-    ts_args_type = "options: { appId: string; port: number; dataDir: string; blobs: { kind: \"sqlite\" } | { kind: \"files\"; dir?: string } | { kind: \"s3\"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean } | { kind: \"vercel-blob\"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; allowLocalFirstAuth?: boolean; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }"
+    ts_args_type = "options: { appId: string; port: number; dataDir: string; blobs: { kind: \"sqlite\" } | { kind: \"files\"; dir?: string } | { kind: \"s3\"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: \"vercel-blob\"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; allowLocalFirstAuth?: boolean; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }"
 )]
 pub fn serve_core(options: JsonValue) -> Result<ServedCore> {
     let options: ServeCoreOptions = serde_json::from_value(options)
@@ -216,4 +222,26 @@ pub fn serve_core(options: JsonValue) -> Result<ServedCore> {
         stop,
         closed: std::sync::Mutex::new(Some(closed_rx)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ServeCoreBlobs;
+
+    #[test]
+    fn claims_a_blob_store_for_its_environment() {
+        let blobs: ServeCoreBlobs = serde_json::from_str(
+            r#"{"kind":"vercel-blob","storeId":"abc","tokenFromWorkload":true,"environment":"production"}"#,
+        )
+        .unwrap();
+        let options = blobs.into_options();
+        assert_eq!(options.kind, "vercel-blob");
+        assert_eq!(options.environment.as_deref(), Some("production"));
+
+        let blobs: ServeCoreBlobs = serde_json::from_str(
+            r#"{"kind":"s3","roleFromWorkload":true,"environment":"preview"}"#,
+        )
+        .unwrap();
+        assert_eq!(blobs.into_options().environment.as_deref(), Some("preview"));
+    }
 }
