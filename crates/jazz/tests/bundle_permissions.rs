@@ -401,3 +401,43 @@ fn a_revoked_bundle_pins_no_session_and_is_not_published_again() {
     let error = server.revoke_bundle(&BundleId([9; 32])).unwrap_err();
     assert!(error.to_string().contains("not published"), "{error}");
 }
+
+#[test]
+fn a_revocation_survives_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+    let open = || {
+        block_on(Db::open_at(
+            config(0, AuthorSubject::SYSTEM, PolicyExpr::True),
+            &path,
+            FileOptions::default(),
+        ))
+        .unwrap()
+    };
+    let leaky = {
+        let (server, _) = server_with_row(open());
+        let leaky = block_on(server.publish_bundle(&users(PolicyExpr::True))).unwrap();
+        assert!(server.revoke_bundle(&leaky).unwrap());
+        leaky
+    };
+    let server = open();
+    server.set_authority();
+    let alice = AuthorSubject::for_test_bytes([0x55; 16]);
+    let error = server.check_session_pin(alice, Some(&leaky)).unwrap_err();
+    assert!(error.to_string().contains("was revoked"), "{error}");
+    let error = block_on(server.publish_bundle(&users(PolicyExpr::True))).unwrap_err();
+    assert!(error.to_string().contains("was revoked"), "{error}");
+    assert!(
+        server
+            .catalogue()
+            .unwrap()
+            .bundles
+            .iter()
+            .any(|bundle| bundle.id == leaky && bundle.revoked_at.is_some()),
+        "still listed as revoked"
+    );
+    assert!(
+        !server.revoke_bundle(&leaky).unwrap(),
+        "it was revoked before the restart"
+    );
+}

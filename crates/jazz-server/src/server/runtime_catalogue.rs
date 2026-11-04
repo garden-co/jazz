@@ -131,19 +131,22 @@ pub(crate) async fn publish_permissions_and_runtime(
     };
     // The revision's row and its activation commit together.
     let applied = runtime
-        .apply_catalogue(jazz::catalogue::CatalogueChange {
-            put: jazz::catalogue::CataloguePut {
-                permissions: vec![(
-                    revision,
-                    schema_hash,
-                    permissions.into_iter().collect(),
-                    super::catalogue::unix_timestamp_millis(),
-                )],
+        .apply_catalogue(
+            jazz::catalogue::CatalogueChange {
+                put: jazz::catalogue::CataloguePut {
+                    permissions: vec![(
+                        revision,
+                        schema_hash,
+                        permissions.into_iter().collect(),
+                        super::catalogue::unix_timestamp_millis(),
+                    )],
+                    ..Default::default()
+                },
+                activate: Some((revision, compiled, Vec::new())),
                 ..Default::default()
             },
-            activate: Some((revision, compiled, Vec::new())),
-            ..Default::default()
-        })
+            None,
+        )
         .await;
     state
         .catalogue_store

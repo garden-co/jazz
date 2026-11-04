@@ -291,6 +291,30 @@ rather than checked by permissions no deployment chose. Schema and bundle
 publication, account registry operations, and query authorization all
 terminate at Core.
 
+Permissions changes reach every session at once (`INV-EDGE-27`). When a
+backend publishes a bundle new to the Core, the job that commits it also ends
+every session pinned to another bundle with a close asking it to reconnect
+later (`NotReady`, `Later`); each reconnects through whichever backend serves
+it now and is pinned again by that backend. Because the end runs in the commit's
+own job, a publish that commits has always ended them, even when the deployment
+request then fails and a retry finds nothing to change. Publishing a bundle the
+Core already has ends no one: a cold start, a rollback to an earlier bundle,
+or a deployment publishing the same permissions as another. A preview or canary
+deployment that publishes new permissions therefore reconnects the sessions of
+every other deployment of the app, which pin themselves to their own bundle
+again. Unpinned links (`SYSTEM`, an admin's) are pinned to no bundle and are
+never ended by a publish. Schema-only changes need no reconnect: lenses carry
+sessions across schema versions.
+
+An admin can revoke a published bundle (`INV-EDGE-28`). Every session pinned to
+it ends with a terminal close (`AuthFailed`, `Never`), no backend can pin a
+session to it again, and publishing it again is refused with `bundle_revoked`,
+across restarts. A rollback to a known bundle ends no session on a newer one,
+so revocation is how a newer bundle that leaks is cut off. Revocation cannot be
+undone and a revoked bundle's backend cannot boot until it is redeployed with
+other permissions, so revoking the newest bundle still serving requires an
+explicit confirmation.
+
 The historical `INV-EDGE` identifiers retained above describe client-relay and
 session boundaries; their names do not imply a remaining semantic edge role.
 The former edge-final acceptance, stale permission-scope authorization and

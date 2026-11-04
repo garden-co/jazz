@@ -5494,9 +5494,18 @@ mod tests {
         )
         .await;
         bind_thin_schema(&mut thin_ws, &schema).await;
+        // An unpinned SYSTEM link (an admin's, the system's own) is pinned
+        // to no bundle, so no permissions change ends it.
+        let mut system_ws = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            ws_prelude(AuthorSubject::SYSTEM),
+            0,
+        )
+        .await;
 
         // Publishing it again (a cold start, a deployment running beside
-        // another) ends no one.
+        // one that published the same permissions) ends no one.
         assert_eq!(
             publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await,
             first
@@ -5518,6 +5527,11 @@ mod tests {
             assert!(error.asks_reconnect_later(), "{kind}: {error:?}");
             assert!(error.message.contains(&second), "{kind}: {error:?}");
         }
+        assert_eq!(
+            next_wire_error(&mut system_ws, Duration::from_millis(300)).await,
+            None,
+            "an unpinned SYSTEM link survives new permissions"
+        );
 
         // A session pinned to the old bundle may open again: a deployment
         // still serving it pins its own sessions as before.
@@ -5530,6 +5544,51 @@ mod tests {
         .await;
         bind_thin_schema(&mut again, &schema).await;
         assert!(thin_titles(&mut again, 1, None).await.is_empty());
+
+        // Rolling back to a bundle this store already has ends no one, on
+        // either bundle: to cut off sessions on the newer bundle, revoke it.
+        let mut on_second = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(alice, Some(&second)),
+            jazz::wire::FEATURE_THIN_RESULTS,
+        )
+        .await;
+        bind_thin_schema(&mut on_second, &schema).await;
+        assert_eq!(
+            publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await,
+            first
+        );
+        for (ws, kind) in [
+            (&mut again, "old bundle"),
+            (&mut on_second, "newer bundle"),
+            (&mut system_ws, "system link"),
+        ] {
+            assert_eq!(
+                next_wire_error(ws, Duration::from_millis(300)).await,
+                None,
+                "a rollback leaves the {kind}'s session alone"
+            );
+        }
+
+        // An older bundle revokes without confirmation, ending its sessions
+        // and none on the newest.
+        let (status, body) =
+            admin_post(addr, &state, &format!("/bundles/{first}/revoke"), None).await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        let error = next_wire_error(&mut again, Duration::from_secs(5))
+            .await
+            .expect("the revoked bundle's session ends");
+        assert_eq!(
+            (error.code, error.retry),
+            (WireErrorCode::AuthFailed, WireRetry::Never),
+            "{error:?}"
+        );
+        assert_eq!(
+            next_wire_error(&mut on_second, Duration::from_millis(300)).await,
+            None,
+            "the newest bundle's session stays"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5548,8 +5607,24 @@ mod tests {
         .await;
         bind_thin_schema(&mut ws, &schema).await;
 
+        // The only (newest) bundle: revoking it stops the latest deployment
+        // and cannot be undone, so it takes an explicit confirmation.
         let (status, body) =
             admin_post(addr, &state, &format!("/bundles/{leaky}/revoke"), None).await;
+        assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], "bundle_is_latest");
+        assert_eq!(
+            next_wire_error(&mut ws, Duration::from_millis(300)).await,
+            None,
+            "a refused revocation ends no one"
+        );
+        let (status, body) = admin_post(
+            addr,
+            &state,
+            &format!("/bundles/{leaky}/revoke?confirmLatest=true"),
+            None,
+        )
+        .await;
         assert_eq!(status, reqwest::StatusCode::OK, "{body}");
         assert_eq!(body["revoked"], true);
         let error = next_wire_error(&mut ws, Duration::from_secs(5))

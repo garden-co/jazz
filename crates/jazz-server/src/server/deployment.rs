@@ -220,7 +220,7 @@ pub(crate) async fn deploy(
                     .map_err(DeployError::internal)?;
             let applied = match change(&probe, &prepared, staged.put.clone(), revision).await {
                 Ok(change) => probe
-                    .apply_catalogue(change)
+                    .apply_catalogue(change, None)
                     .await
                     .map_err(DeployError::from),
                 Err(error) => Err(error),
@@ -238,26 +238,18 @@ pub(crate) async fn deploy(
         .map_err(DeployError::invalid)?;
     let change = change(&runtime, &prepared, staged.put, revision).await?;
     // The deployment's rows, admissions and activation commit together on
-    // the store's thread, or not at all.
-    let applied = runtime.apply_catalogue(change).await;
+    // the store's thread, or not at all. New permissions reach every session
+    // at once: with a bundle new to this store, the same job ends the
+    // sessions pinned to other bundles, which reconnect and are pinned again
+    // by whichever backend serves them now. Publishing a known bundle again
+    // (a cold start, a rollback, a deployment running beside one that
+    // published the same permissions) ends no one.
+    let applied = runtime.apply_catalogue(change, new_bundle).await;
     state
         .catalogue_store
         .refresh()
         .map_err(DeployError::internal)?;
     applied?;
-    // New permissions reach every session at once: those pinned to other
-    // bundles reconnect and are pinned again by whichever backend serves
-    // them now. Publishing a bundle again changes nothing, so neither a
-    // cold start nor a deployment running beside this one ends anyone.
-    if let Some(published) = new_bundle {
-        let ended = runtime
-            .supersede_bundles(published)
-            .await
-            .map_err(DeployError::internal)?;
-        if ended > 0 {
-            tracing::info!(bundle = %published, ended, "new permissions bundle: sessions pinned to others reconnect");
-        }
-    }
     Ok(staged.response)
 }
 

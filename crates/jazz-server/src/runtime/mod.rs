@@ -1557,9 +1557,17 @@ impl ServerRuntimeHandle {
 
     /// Apply `change` to the store's catalogue in one transaction (see
     /// [`Db::apply_catalogue`]): a change that fails leaves nothing behind.
+    ///
+    /// With `supersedes`, the change publishes that bundle new to this
+    /// store, and every session pinned to another bundle ends, told to
+    /// reconnect later, in the same job as the commit:
+    /// a publish that commits always ends them, so a deployment retried
+    /// after a later failure (which then changes nothing) leaves no session
+    /// on the permissions it replaced.
     pub async fn apply_catalogue(
         &self,
         change: CatalogueChange,
+        supersedes: Option<jazz::catalogue::BundleId>,
     ) -> Result<(), CatalogueApplyError> {
         let result = self
             .run(move |owner| {
@@ -1576,6 +1584,19 @@ impl ServerRuntimeHandle {
                             CatalogueApplyError::Rejected(error.to_string())
                         }
                     })?;
+                    if let Some(published) = supersedes {
+                        let ended = owner.end_pinned_sessions(
+                            &|bundle| *bundle != published,
+                            &superseded_error(&published),
+                        );
+                        if ended > 0 {
+                            tracing::info!(
+                                bundle = %published,
+                                ended,
+                                "new permissions bundle: sessions pinned to others reconnect"
+                            );
+                        }
+                    }
                     owner
                         .reload_catalogue()
                         .map_err(CatalogueApplyError::Failed)?;
@@ -1589,33 +1610,6 @@ impl ServerRuntimeHandle {
             self.notify_activity();
         }
         result
-    }
-
-    /// Bundle `published` is new to this store: end every session pinned
-    /// to another bundle, asking it to reconnect. Each reconnects through
-    /// whichever backend serves it now and is pinned again by that
-    /// backend, so a permissions change reaches every session a newer
-    /// deployment serves, while a deployment still running beside it pins
-    /// its own sessions as before. How many ended.
-    pub async fn supersede_bundles(
-        &self,
-        published: jazz::catalogue::BundleId,
-    ) -> Result<usize, String> {
-        let error = jazz::wire::WireError::new(
-            WireErrorCode::NotReady,
-            WireRetry::Later,
-            format!(
-                "permissions changed: bundle {published} was published; reconnect through \
-                 the app's backend"
-            ),
-        );
-        let ended = self
-            .run(move |owner| Ok(owner.end_pinned_sessions(&|bundle| *bundle != published, &error)))
-            .await?;
-        if ended > 0 {
-            self.notify_activity();
-        }
-        Ok(ended)
     }
 
     /// Revoke published bundle `id` ([`Db::revoke_bundle`]) and end every
@@ -2370,6 +2364,21 @@ impl Owner {
         self.release_held_reads();
         Ok(id)
     }
+}
+
+/// What a session pinned to a bundle other than `published` is told when it
+/// ends: reconnect later. `NotReady` with `Later` is the close every client
+/// already answers by reconnecting with backoff, so new permissions need no
+/// new wire code; the message says why.
+fn superseded_error(published: &jazz::catalogue::BundleId) -> jazz::wire::WireError {
+    jazz::wire::WireError::new(
+        WireErrorCode::NotReady,
+        WireRetry::Later,
+        format!(
+            "permissions changed: bundle {published} was published; reconnect through the \
+             app's backend"
+        ),
+    )
 }
 
 #[cfg(test)]
