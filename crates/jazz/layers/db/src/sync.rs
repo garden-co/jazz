@@ -779,7 +779,7 @@ fn echo_digest(image: &Image) -> [u8; 16] {
         cells,
     ))
     .expect("postcard encodes images");
-    let hash = blake3::hash(&bytes);
+    let hash = jazz_types::sha256::hash(&bytes);
     hash.as_bytes()[..16].try_into().expect("16 bytes")
 }
 
@@ -2187,6 +2187,10 @@ pub(crate) struct Session {
     backlog_reads: (Option<Rc<Schema>>, HashMap<u64, Option<BTreeSet<String>>>),
     /// The schema version the client declared (`None`: the current one).
     version: Option<crate::ids::SchemaVersionId>,
+    /// The published bundle the backend that admitted this session pinned
+    /// it to: its policies govern the session, and its write schema is the
+    /// session's when it declares none.
+    bundle: Option<crate::catalogue::BundleId>,
     /// Fetches whose upstream answer arrived, or that this relay already
     /// asked its upstream to refresh: served from this store.
     fetched_upstream: BTreeSet<u64>,
@@ -2270,6 +2274,7 @@ impl Session {
             backlog: VecDeque::new(),
             backlog_reads: (None, HashMap::new()),
             version: None,
+            bundle: None,
             fetched_upstream: BTreeSet::new(),
             parked_pulls: Vec::new(),
             deferred_pulls: Vec::new(),
@@ -2489,6 +2494,8 @@ struct Floor {
 struct Follow<'w> {
     owner: u64,
     identity: Option<AuthorSubject>,
+    /// The policies `identity` reads by (its session's).
+    policies: Rc<Schema>,
     out: &'w mut Vec<Image>,
     watch: &'w mut Watches,
     held: &'w mut Kept,
@@ -3298,7 +3305,7 @@ impl Inner {
 
     /// Who committed each of `seqs`, as (seq, node, tx): `_jazz_transactions`
     /// for uploads, this authority's node for its own commits.
-    fn tx_ids(&self, seqs: &BTreeSet<u64>) -> Result<Vec<TxName>, Error> {
+    pub(super) fn tx_ids(&self, seqs: &BTreeSet<u64>) -> Result<Vec<TxName>, Error> {
         let mut statement = self
             .conn
             .prepare_cached(
@@ -3395,6 +3402,7 @@ impl Inner {
         unwatched: bool,
         floor: Option<Floor>,
         identity: Option<AuthorSubject>,
+        policies: &Schema,
     ) -> Result<bool, Error> {
         let Some(floor) = floor.filter(|floor| found.at <= Pos::at(floor.since)) else {
             return Ok(unwatched);
@@ -3405,6 +3413,7 @@ impl Inner {
         let row = RowUuid::from_bytes(found.id);
         Ok(!readable_version(
             self,
+            policies,
             table,
             row,
             &found.key,
@@ -3458,7 +3467,14 @@ impl Inner {
         };
         for found in self.images_where(table, false, &filter, &[&value])? {
             let row = RowUuid::from_bytes(found.id);
-            let can = readable(self, table, row, &found.key, follow.identity)?;
+            let can = readable(
+                self,
+                &follow.policies,
+                table,
+                row,
+                &found.key,
+                follow.identity,
+            )?;
             if follow.identity.is_some() {
                 follow.held.keep(follow.owner, table, row, &found.key, can);
             }
@@ -3479,7 +3495,14 @@ impl Inner {
             );
             // Not watched yet, so the replica does not hold it current; or
             // a new correlation's row.
-            let ship = self.ships(table, &found, unwatched || fresh, floor, follow.identity)?;
+            let ship = self.ships(
+                table,
+                &found,
+                unwatched || fresh,
+                floor,
+                follow.identity,
+                &follow.policies,
+            )?;
             // A row that ships may point at rows the client never had:
             // its own support is followed whole.
             let below = if ship { None } else { floor };
@@ -3525,7 +3548,14 @@ impl Inner {
             };
             for found in self.images_where(reach.edges, false, &filter, &[&value])? {
                 let row = RowUuid::from_bytes(found.id);
-                let can = readable(self, reach.edges, row, &found.key, follow.identity)?;
+                let can = readable(
+                    self,
+                    &follow.policies,
+                    reach.edges,
+                    row,
+                    &found.key,
+                    follow.identity,
+                )?;
                 if follow.identity.is_some() {
                     follow
                         .held
@@ -3550,7 +3580,14 @@ impl Inner {
                         watch_key(&Sql::Blob(found.id.to_vec())),
                     )),
                 );
-                if self.ships(reach.edges, &found, unwatched, floor, follow.identity)? {
+                if self.ships(
+                    reach.edges,
+                    &found,
+                    unwatched,
+                    floor,
+                    follow.identity,
+                    &follow.policies,
+                )? {
                     follow.out.push(found);
                 }
             }
@@ -3562,15 +3599,15 @@ impl Inner {
     /// (claims do not change which tables a policy names).
     pub(super) fn read_policy_tables(
         &self,
+        schema: &Schema,
         table: &str,
         author: AuthorSubject,
     ) -> Result<BTreeSet<String>, Error> {
-        let schema = self.owner.clone();
-        let table = owned_table(&schema, table)?;
+        let table = owned_table(schema, table)?;
         let session = self.session(author);
         let binding = BTreeMap::new();
         let claims = crate::compile::Session::default();
-        let mut ctx = crate::compile::Ctx::new(&schema, None, &claims, &binding);
+        let mut ctx = crate::compile::Ctx::new(schema, None, &claims, &binding);
         ctx.operation_policy(table, Operation::Select, "a", &session)?;
         let mut tables = ctx.tables;
         tables.remove(&table.stored);
@@ -3584,14 +3621,14 @@ impl Inner {
     /// always matters.
     fn policy_touched(
         &self,
+        schema: &Schema,
         table: &str,
         author: AuthorSubject,
         deps: &[&String],
         written: &[((String, RowUuid, Vec<u8>), Vec<u64>)],
         values: &mut HashMap<(String, String), BTreeSet<String>>,
     ) -> Result<bool, Error> {
-        let schema = self.owner.clone();
-        let Some(policy) = owned_table(&schema, table)?.policy(Operation::Select) else {
+        let Some(policy) = owned_table(schema, table)?.policy(Operation::Select) else {
             return Ok(true);
         };
         let session = self.session(author);
@@ -3599,7 +3636,7 @@ impl Inner {
         if !super::fanout::policy_pins(policy, &session, &mut pins) {
             return Ok(true);
         }
-        let pins = super::fanout::stored_pins(&schema, pins);
+        let pins = super::fanout::stored_pins(schema, pins);
         for dep in deps {
             let Some(Some((column, value))) = pins.get(dep.as_str()) else {
                 return Ok(true);
@@ -4015,6 +4052,7 @@ impl Inner {
     fn masked(
         &self,
         policy: Option<AuthorSubject>,
+        policies: &Schema,
         mask: &fanout::ViewMask,
         ids: &[RowUuid],
     ) -> Result<Vec<RowUuid>, Error> {
@@ -4039,7 +4077,7 @@ impl Inner {
                     let shown = self
                         .current_image(&mask.table, row, &mask.base)?
                         .is_some_and(|image| !image.deleted || mask.base_read.include_deleted);
-                    if shown && readable(self, &mask.table, row, &mask.base, policy)? {
+                    if shown && readable(self, policies, &mask.table, row, &mask.base, policy)? {
                         out.push(row);
                     }
                 }
@@ -4054,6 +4092,7 @@ impl Inner {
     fn masking_rows(
         &self,
         policy: Option<AuthorSubject>,
+        policies: &Schema,
         mask: &fanout::ViewMask,
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, Error> {
         let mut heads: Vec<RowUuid> = self
@@ -4069,7 +4108,7 @@ impl Inner {
                 .map(RowUuid::from_bytes),
         );
         Ok(self
-            .masked(policy, mask, &heads)?
+            .masked(policy, policies, mask, &heads)?
             .into_iter()
             .map(|row| (mask.table.clone(), row, mask.head.clone()))
             .collect())
@@ -4951,7 +4990,7 @@ fn watermark_key(
     view: &ReadViewSourceSpec,
     author: AuthorSubject,
 ) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = jazz_types::sha256::Hasher::new();
     // A current-state read keeps the key it had before views were part of
     // it, so its resume point survives the upgrade.
     match view {
@@ -5626,9 +5665,21 @@ impl Inner {
     }
 
     /// Whether `identity` may commit as `node`. A node belongs to the
-    /// identity that first commits as it: commits are deduplicated by
-    /// (node, tx), so another identity writing as that node could claim its
-    /// transactions before it sends them.
+    /// principal that first commits as it: commits are deduplicated by
+    /// (node, tx), so another principal committing as that node could claim
+    /// its transactions before it sends them, and builds on its commits
+    /// under its own claims.
+    ///
+    /// The node moves with its account's sign-in: a local-first guest that
+    /// signs up keeps its account and its store, and so its node, and goes on
+    /// writing under the principal the app's backend names; later the same
+    /// account may sign in another way (another issuer, or an identity the
+    /// backend linked). The first commit as the node by another signed-in
+    /// principal of the same account takes the node over, and from then on
+    /// only that principal writes as it, until another one takes it over.
+    /// A local-first principal never takes a node over, so a guest's key
+    /// (unexpired, or leaked) no longer writes as its node once the account
+    /// has signed in.
     fn claim_node(&self, node: [u8; 16], identity: &AuthorSubject) -> Result<bool, Error> {
         let author = self.author_code(&author_key(identity))?;
         let code = self.node_code(node)?;
@@ -5643,7 +5694,43 @@ impl Inner {
                 r.get(0)
             })
             .map_err(storage)?;
-        Ok(owner == author)
+        if owner == author {
+            return Ok(true);
+        }
+        if !self.takes_over_from(owner, identity)? {
+            return Ok(false);
+        }
+        // Only the owner we read is handed over: if the node changed hands in
+        // between, nothing is updated and the caller doesn't get it.
+        let handed_over = self
+            .exec(
+                "UPDATE _jazz_nodes SET author = ?2 WHERE n = ?1 AND author = ?3",
+                rusqlite::params![code, author, owner],
+            )
+            .map_err(storage)?;
+        Ok(handed_over == 1)
+    }
+
+    /// Whether `identity`, a signed-in principal, takes over a node of
+    /// another principal (author code `owner`) of its own account.
+    fn takes_over_from(&self, owner: i64, identity: &AuthorSubject) -> Result<bool, Error> {
+        let Some(account) = identity.account_id() else {
+            return Ok(false);
+        };
+        if account == jazz_types::account_registry::SYSTEM_ACCOUNT_ID
+            || identity.principal_parts().0 == jazz_types::identity::LOCAL_FIRST_ISSUER
+        {
+            return Ok(false);
+        }
+        match self.conn.cached_row(
+            "SELECT account FROM _jazz_authors WHERE n = ?1",
+            [owner],
+            |r| r.get::<_, Vec<u8>>(0),
+        ) {
+            Ok(stored) => Ok(stored.as_slice() == account.0.as_bytes().as_slice()),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(error) => Err(storage(error)),
+        }
     }
 
     /// Whether `node` is one `identity` writes as (see [`Inner::claim_node`]),
@@ -6085,14 +6172,15 @@ impl Inner {
         // Membership inputs: every table the read and its policies read
         // (its own included: a filter or policy may read other rows of
         // it), and the supporting tables with their policies' inputs.
-        let mut inputs = self.read_dependencies(prepared, identity)?;
+        let mut inputs = self.read_dependencies_in(prepared, identity, read)?;
         let mut tables = Vec::new();
         support_tables(support, &mut tables);
+        let policies = read.governance.policies(self);
         for table in tables {
             if let Some(author) = identity
-                && self.owner.by_stored(&table).is_some()
+                && policies.by_stored(&table).is_some()
             {
-                inputs.extend(self.read_policy_tables(&table, author)?);
+                inputs.extend(self.read_policy_tables(&policies, &table, author)?);
             }
             inputs.insert(table);
         }
@@ -6754,7 +6842,7 @@ impl Db {
             },
             ..ReadOpts::default()
         };
-        let mut read = ReadSpec::of(&opts, &self.inner.borrow())?;
+        let mut read = ReadSpec::of(&opts, &self.inner.borrow(), self.governance.clone())?;
         read.position = Position::Current;
         // A frozen view is this store's own state, not the server's to judge.
         if read.frozen() {
@@ -7789,6 +7877,7 @@ impl Db {
     fn advise(
         &self,
         identity: Option<AuthorSubject>,
+        index: usize,
         action: PermissionAdviceAction,
     ) -> PermissionAdvice {
         if self.is_client() {
@@ -7809,7 +7898,8 @@ impl Db {
                 let Some(image) = images.into_iter().find(|image| !image.deleted) else {
                     return PermissionAdvice::Denied;
                 };
-                return match readable(&inner, &table, row, &image.key, identity) {
+                let policies = inner.session_policies(index);
+                return match readable(&inner, &policies, &table, row, &image.key, identity) {
                     Ok(true) => PermissionAdvice::Allowed,
                     Ok(false) => PermissionAdvice::Denied,
                     Err(_) => PermissionAdvice::Unknown,
@@ -7839,7 +7929,11 @@ impl Db {
             return PermissionAdvice::Unknown;
         }
         let mark = inner.changed.borrow().len();
+        // Dry-run under the session's policies: a pinned session's bundle.
+        let governed = inner.governed_view(&inner.schema.clone(), index);
+        let active = std::mem::replace(&mut inner.schema, governed);
         let applied = inner.apply_as(&op, who, seq).map(drop);
+        inner.schema = active;
         inner.changed.borrow_mut().truncate(mark);
         let undone = end_savepoint(&inner.conn, "advise", false);
         match (applied, undone) {
@@ -8921,6 +9015,50 @@ impl Inner {
         (identity != AuthorSubject::SYSTEM && !own).then_some(identity)
     }
 
+    /// The schema whose policies govern session `index`: its bundle's,
+    /// else the current schema's.
+    pub(crate) fn session_policies(&self, index: usize) -> Rc<Schema> {
+        self.sessions[index]
+            .bundle
+            .and_then(|bundle| self.bundles.get(&bundle))
+            .map_or_else(|| self.owner.clone(), |(_, governing)| governing.clone())
+    }
+
+    /// Admission has resolved every pinned bundle before serving a session.
+    fn session_governance(&self, index: usize) -> Governance {
+        match self.sessions[index].bundle {
+            None => Governance::CurrentOwner,
+            Some(bundle) => Governance::Selected(
+                self.bundles
+                    .get(&bundle)
+                    .expect("admitted session bundle")
+                    .1
+                    .clone(),
+                bundle,
+            ),
+        }
+    }
+
+    /// `view` governed by session `index`'s policies: unchanged unless the
+    /// session is pinned to a bundle, whose policies then replace its own.
+    pub(crate) fn governed_view(&self, view: &Rc<Schema>, index: usize) -> Rc<Schema> {
+        let Some(bundle) = self.sessions[index].bundle else {
+            return view.clone();
+        };
+        let Some((_, governing)) = self.bundles.get(&bundle) else {
+            return view.clone();
+        };
+        let mut cache = self.bundle_views.borrow_mut();
+        if let Some((built, governed)) = cache.get(&bundle)
+            && Rc::ptr_eq(built, view)
+        {
+            return governed.clone();
+        }
+        let governed = Rc::new((**view).clone().with_policies_of(governing.clone()));
+        cache.insert(bundle, (view.clone(), governed.clone()));
+        governed
+    }
+
     /// Whether session `index` declared a schema version this store has
     /// not admitted.
     fn session_unadmitted(&self, index: usize) -> bool {
@@ -9029,11 +9167,25 @@ impl Inner {
         });
     }
 
-    /// The schema session `index` declared, governed by the current
-    /// schema's policies. A declared version pins its subscriptions even
-    /// while it is the current one, so they keep reading by its names after
-    /// a newer version becomes current.
+    /// The schema session `index` reads and writes by, governed by the
+    /// policies of the bundle it is pinned to, else by the current
+    /// schema's. A declared version pins its subscriptions even while it is
+    /// the current one, so they keep reading by its names after a newer
+    /// version becomes current; a pinned session that declares none reads
+    /// by its bundle's write schema.
     pub(crate) fn session_schema(&mut self, index: usize) -> Option<Rc<Schema>> {
+        if let Some(bundle) = self.sessions[index].bundle {
+            if let Some((_, schema)) = &self.sessions[index].schema {
+                return Some(schema.clone());
+            }
+            // Accepting the session resolved it; a bundle resolves alike
+            // for the store's life (its rows and versions are immutable).
+            let (written, governing) = self.bundle(&bundle).ok().flatten()?;
+            let version = self.sessions[index].version.unwrap_or(written);
+            let schema = self.governed_by(version, governing.clone())?;
+            self.sessions[index].schema = Some((governing, schema.clone()));
+            return Some(schema);
+        }
         let version = self.sessions[index].version?;
         if let Some((owner, schema)) = &self.sessions[index].schema
             && Rc::ptr_eq(owner, &self.owner)
@@ -9048,14 +9200,22 @@ impl Inner {
     /// Admitted `version` under its stored names, governed by the current
     /// schema's policies.
     pub(crate) fn governed(&self, version: crate::ids::SchemaVersionId) -> Option<Rc<Schema>> {
+        self.governed_by(version, self.owner.clone())
+    }
+
+    /// Admitted `version` under its stored names, governed by `policies`'
+    /// policies.
+    pub(crate) fn governed_by(
+        &self,
+        version: crate::ids::SchemaVersionId,
+        policies: Rc<Schema>,
+    ) -> Option<Rc<Schema>> {
         let jazz = if version == self.owner_version {
             &self.owner.jazz
         } else {
             &self.admitted.iter().find(|(id, _)| *id == version)?.1
         };
-        Some(Rc::new(
-            self.named(jazz).with_policies_of(self.owner.clone()),
-        ))
+        Some(Rc::new(self.named(jazz).with_policies_of(policies)))
     }
 
     /// `image`'s deltas made whole over the versions they name (SPEC
@@ -9350,6 +9510,50 @@ impl Db {
         Ok(())
     }
 
+    /// Whether this store may serve a session of `identity` pinned to
+    /// `bundle` ([`Self::check_serves`] first). A bundle this store has not
+    /// published, or whose write schema it has not admitted, is refused, and
+    /// so is an unpinned session of a user once createJazz publishes
+    /// bundles here.
+    pub fn check_session_pin(
+        &self,
+        identity: AuthorSubject,
+        bundle: Option<&crate::catalogue::BundleId>,
+    ) -> Result<(), Error> {
+        self.check_serves(identity)?;
+        let mut inner = self.inner.borrow_mut();
+        if let Some(bundle) = bundle
+            && inner.bundle(bundle)?.is_none()
+        {
+            let published = crate::catalogue::bundle(&inner.conn, bundle)?.is_some();
+            return Err(Error::new(
+                ErrorCode::Schema,
+                if published {
+                    format!(
+                        "permissions bundle {bundle} is published, but this store never admitted its write schema"
+                    )
+                } else {
+                    format!("permissions bundle {bundle} is not published on this store")
+                },
+            ));
+        }
+        // Once createJazz publishes bundles here, its backend pins every
+        // session it opens. An unpinned policy session would be governed by
+        // the current permissions, which createJazz no longer advances, so
+        // a later tightening or rollback would never reach it.
+        if bundle.is_none()
+            && identity != AuthorSubject::SYSTEM
+            && crate::catalogue::serves_bundles(&inner.conn)?
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "this app is served through createJazz: connect through its backend, \
+                 which pins each session to the permissions it deployed",
+            ));
+        }
+        Ok(())
+    }
+
     /// Serve a client over `transport` as `identity`, once
     /// [`Self::check_serves`] allows it.
     pub fn accept_subscriber(
@@ -9368,7 +9572,22 @@ impl Db {
         identity: AuthorSubject,
         claims: Option<BTreeMap<String, Value>>,
     ) -> Result<SubscriberId, Error> {
-        self.check_serves(identity)?;
+        self.accept_pinned_subscriber(transport, identity, claims, None)
+    }
+
+    /// [`Self::accept_subscriber_with_claims`], pinned to published bundle
+    /// `bundle` (see [`crate::catalogue`]): the session is governed by its
+    /// policies, whatever this store's own schema allows. A bundle this
+    /// store has not published, or whose write schema it has not admitted,
+    /// is refused.
+    pub fn accept_pinned_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: Option<BTreeMap<String, Value>>,
+        bundle: Option<crate::catalogue::BundleId>,
+    ) -> Result<SubscriberId, Error> {
+        self.check_session_pin(identity, bundle.as_ref())?;
         let mut inner = self.inner.borrow_mut();
         // One relay tier only (SPEC 9 §9.5).
         debug_assert!(
@@ -9379,6 +9598,7 @@ impl Db {
         let generation = inner.accepted;
         let mut session = Session::new(transport, identity);
         session.claims = claims;
+        session.bundle = bundle;
         session.generation = generation;
         let slot = match inner.sessions.iter().position(|session| !session.open) {
             Some(slot) => {
@@ -9771,13 +9991,11 @@ impl Db {
             .filter(|_| identity != AuthorSubject::SYSTEM)
             .map(|claims| (identity, claims));
         let tables = self.with_claims(vouched, || {
-            let prepared = self
-                .session_db(index)
-                .prepare_query_bound(query, binding.clone())
-                .ok()?;
+            let db = self.session_db(index);
+            let prepared = db.prepare_query_bound(query, binding.clone()).ok()?;
             self.inner
                 .borrow()
-                .read_dependencies(&prepared, policy)
+                .read_dependencies_in(&prepared, policy, &ReadSpec::new(db.governance.clone()))
                 .ok()
         });
         // An unadmitted version may be admitted without the owner schema
@@ -9844,7 +10062,10 @@ impl Db {
             .iter()
             .map(|((table, ..), _)| table.as_str())
             .collect();
-        let mut policy_tables: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let mut policy_tables: HashMap<
+            (Option<crate::catalogue::BundleId>, String),
+            BTreeSet<String>,
+        > = HashMap::new();
         let mut written_values: HashMap<(String, String), BTreeSet<String>> = HashMap::new();
         let dropped = inner.fan.dropped.clone();
         for index in 0..sessions {
@@ -9857,21 +10078,25 @@ impl Db {
             let mut recheck: Vec<(String, RowUuid, Vec<u8>)> = Vec::new();
             if !written_tables.is_empty() {
                 let identity = inner.sessions[index].identity;
+                let bundle = inner.sessions[index].bundle;
+                let policies = inner.session_policies(index);
                 let tables: Vec<String> = inner.sessions[index].held.tables().cloned().collect();
                 for table in tables {
-                    if !policy_tables.contains_key(&table) {
-                        let deps = inner.read_policy_tables(&table, identity)?;
-                        policy_tables.insert(table.clone(), deps);
+                    let cached = (bundle, table.clone());
+                    if !policy_tables.contains_key(&cached) {
+                        let deps = inner.read_policy_tables(&policies, &table, identity)?;
+                        policy_tables.insert(cached.clone(), deps);
                     }
                     let Some(held) = inner.sessions[index].held.of(&table) else {
                         continue;
                     };
-                    let deps: Vec<&String> = policy_tables[&table]
+                    let deps: Vec<&String> = policy_tables[&cached]
                         .iter()
                         .filter(|dep| written_tables.contains(dep.as_str()))
                         .collect();
                     if !deps.is_empty()
                         && inner.policy_touched(
+                            &policies,
                             &table,
                             identity,
                             &deps,
@@ -9919,7 +10144,12 @@ impl Db {
                     };
                     if has_head
                         && !inner
-                            .masked(inner.session_policy(index), mask, &[*row])?
+                            .masked(
+                                inner.session_policy(index),
+                                &inner.session_policies(index),
+                                mask,
+                                &[*row],
+                            )?
                             .is_empty()
                     {
                         masking.push((*owner, table.clone(), *row, mask.head.clone()));
@@ -9938,6 +10168,7 @@ impl Db {
                 continue;
             }
             let policy = inner.session_policy(index);
+            let policies = inner.session_policies(index);
             let names = inner
                 .session_schema(index)
                 .unwrap_or_else(|| inner.owner.clone());
@@ -9953,7 +10184,7 @@ impl Db {
             let mut unreadable = std::mem::take(&mut inner.sessions[index].unreadable);
             for (table, row, key) in recheck {
                 let can = inner.current_image(&table, row, &key)?.is_some()
-                    && readable(&inner, &table, row, &key, policy)?;
+                    && readable(&inner, &policies, &table, row, &key, policy)?;
                 if held_rows.recheck(&table, row, &key, can) {
                     touched.insert((table, row, key));
                 }
@@ -9970,7 +10201,7 @@ impl Db {
                         .is_some_and(|(can, _)| !can);
                     if hidden || unreadable.contains(&known) {
                         let can = inner.current_image(table, *row, key)?.is_some()
-                            && readable(&inner, table, *row, key, policy)?;
+                            && readable(&inner, &policies, table, *row, key, policy)?;
                         if can {
                             unreadable.remove(&known);
                             touched.insert(known);
@@ -10260,6 +10491,7 @@ impl Db {
                     let mut follow = Follow {
                         owner: id,
                         identity: policy,
+                        policies: inner.session_policies(index),
                         out: &mut extra,
                         watch: &mut watch,
                         held: &mut held_rows,
@@ -10339,7 +10571,7 @@ impl Db {
             // version it may not read would otherwise reach it (SPEC 8.4).
             for (owner, table, row, key) in masking {
                 let can = inner.current_image(&table, row, &key)?.is_some()
-                    && readable(&inner, &table, row, &key, policy)?;
+                    && readable(&inner, &policies, &table, row, &key, policy)?;
                 let hidden_before = held_rows
                     .of(&table)
                     .and_then(|rows| rows.get(&(row, key.clone())))
@@ -10352,9 +10584,11 @@ impl Db {
             // An opening ships every masking row as of now: the client's
             // copy may predate a change of access (a resume included).
             for (owner, mask) in &opening_masks {
-                for (table, row, key) in inner.masking_rows(policy, mask)? {
+                for (table, row, key) in
+                    inner.masking_rows(policy, &inner.session_policies(index), mask)?
+                {
                     let can = inner.current_image(&table, row, &key)?.is_some()
-                        && readable(&inner, &table, row, &key, policy)?;
+                        && readable(&inner, &policies, &table, row, &key, policy)?;
                     held_rows.keep(*owner, &table, row, &key, can);
                     touched.insert((table, row, key));
                 }
@@ -10367,7 +10601,7 @@ impl Db {
             let mut gone = Vec::new();
             for (table, row, key) in touched {
                 let hidden = match inner.current_image(&table, row, &key)? {
-                    Some(image) if readable(&inner, &table, row, &key, policy)? => {
+                    Some(image) if readable(&inner, &policies, &table, row, &key, policy)? => {
                         unreadable.remove(&(table.clone(), row, key.clone()));
                         images.push(image);
                         continue;
@@ -10412,7 +10646,7 @@ impl Db {
                 if superseded {
                     echoes.retain(|e| !(e.table == table && e.row == row && e.key == key));
                 }
-                if superseded && readable(&inner, &table, row, &key, policy)? {
+                if superseded && readable(&inner, &policies, &table, row, &key, policy)? {
                     let id = row.0.as_bytes().to_vec();
                     let w =
                         at.1.map_or_else(Vec::new, |(node, tx)| writer_bytes(node, tx));
@@ -10656,6 +10890,7 @@ impl Db {
                             let row = RowUuid::from_bytes(base.id);
                             if readable_version(
                                 &inner,
+                                &policies,
                                 &base.table,
                                 row,
                                 &base.key,
@@ -10803,7 +11038,10 @@ impl Db {
             let (queue, group) = inner.subscribe_member(
                 &wait.prepared,
                 policy,
-                wait.read,
+                ReadSpec {
+                    governance: db.governance.clone(),
+                    ..wait.read
+                },
                 SettledBy::Always(authority),
             )?;
             let session = &mut inner.sessions[index];
@@ -10817,20 +11055,34 @@ impl Db {
     }
 
     /// A handle on this store under its stored view, which replicated
-    /// writes apply under.
-    fn stored_db(&self) -> Db {
-        let view = self.inner.borrow().stored_view();
+    /// writes apply under, governed by session `index`'s policies: its
+    /// bundle's when it is pinned.
+    fn stored_db_for(&self, index: usize) -> Db {
+        let inner = self.inner.borrow();
+        let view = inner.governed_view(&inner.stored_view(), index);
+        let governance = inner.session_governance(index);
+        drop(inner);
         Db {
             inner: self.inner.clone(),
             view: Some(view),
+            governance,
         }
     }
 
+    /// Resolve the policy source chosen by trusted handle construction.
+    /// Named-view policy snapshots do not establish an authenticated pin.
+    pub(super) fn view_policies(&self) -> Rc<Schema> {
+        self.governance.policies(&self.inner.borrow())
+    }
+
     fn session_db(&self, index: usize) -> Db {
-        let view = self.inner.borrow_mut().session_schema(index);
+        let mut inner = self.inner.borrow_mut();
+        let view = inner.session_schema(index);
+        let governance = inner.session_governance(index);
         Db {
             inner: self.inner.clone(),
             view,
+            governance,
         }
     }
 
@@ -10890,6 +11142,7 @@ impl Db {
             None => prepared,
         };
         let policy = self.inner.borrow().session_policy(index);
+        let policies = self.inner.borrow().session_policies(index);
         // Queries and held rows name tables and columns as the client's
         // schema version does; commits by stored names (see below).
         let db = self.session_db(index);
@@ -10921,7 +11174,7 @@ impl Db {
                     // A session's read is served as this store holds it.
                     ReadSpec {
                         position: Position::Current,
-                        ..ReadSpec::of(&opts, &db.inner())?
+                        ..ReadSpec::of(&opts, &db.inner(), db.governance.clone())?
                     }
                 };
                 let resume_read = viewed.clone();
@@ -11020,7 +11273,10 @@ impl Db {
                     .subs
                     .insert(id, (queue, group, windowed, false));
                 if let Some(since) = since {
-                    let claims = inner.sessions[index].claims.is_some();
+                    // A pinned session reads by its bundle's policies, which
+                    // what it resumes from may not have been read under.
+                    let claims = inner.sessions[index].claims.is_some()
+                        || inner.sessions[index].bundle.is_some();
                     let resume = inner.resume_from(
                         &prepared,
                         policy,
@@ -11132,7 +11388,7 @@ impl Db {
                             _ => policy,
                         };
                         let vouched = vouched(policy, who, acting);
-                        self.with_claims(vouched, || self.advise(identity, action))
+                        self.with_claims(vouched, || self.advise(identity, index, action))
                     }
                     Err(_) => PermissionAdvice::Denied,
                 };
@@ -11284,7 +11540,7 @@ impl Db {
                     },
                     ..ReadOpts::default()
                 };
-                let viewed = match ReadSpec::of(&opts, &inner) {
+                let viewed = match ReadSpec::of(&opts, &inner, db.governance.clone()) {
                     // A session's read is served as this store holds it.
                     Ok(viewed) => ReadSpec {
                         position: Position::Current,
@@ -11300,6 +11556,7 @@ impl Db {
                     }
                 };
                 let read = ReadSpec {
+                    governance: viewed.governance,
                     position: Position::Current,
                     cut: viewed.cut.or(pinned.map(Cut::at)),
                     include_deleted,
@@ -11393,6 +11650,7 @@ impl Db {
                 let mut follow = Follow {
                     owner: id,
                     identity: policy,
+                    policies: inner.session_policies(index),
                     out: &mut extra,
                     watch: &mut watch,
                     held: &mut held,
@@ -11418,7 +11676,7 @@ impl Db {
                 let mut lost = Vec::new();
                 for (table, row, key) in gone {
                     match inner.current_image(&table, row, &key)? {
-                        Some(image) if readable(&inner, &table, row, &key, policy)? => {
+                        Some(image) if readable(&inner, &policies, &table, row, &key, policy)? => {
                             images.push(image)
                         }
                         _ => lost.push(SyncMessage::AccessLost {
@@ -11443,9 +11701,13 @@ impl Db {
                     Vec::new()
                 };
                 for mask in &masks {
-                    for (table, row, key) in inner.masking_rows(policy, mask)? {
+                    for (table, row, key) in
+                        inner.masking_rows(policy, &inner.session_policies(index), mask)?
+                    {
                         match inner.current_image(&table, row, &key)? {
-                            Some(image) if readable(&inner, &table, row, &key, policy)? => {
+                            Some(image)
+                                if readable(&inner, &policies, &table, row, &key, policy)? =>
+                            {
                                 images.push(image)
                             }
                             _ => hidden.push(SyncMessage::AccessLost {
@@ -11525,7 +11787,7 @@ impl Db {
                 // whichever version wrote them: they apply under the stored
                 // view, and one naming what this store does not hold was
                 // written under a version it has not deployed.
-                let db = self.stored_db();
+                let db = self.stored_db_for(index);
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
                 let resent = known.is_some();
@@ -11772,6 +12034,7 @@ impl Db {
         identity: Option<AuthorSubject>,
         mut ops: Vec<WireOp>,
     ) -> Result<(Vec<WireOp>, BTreeSet<[u8; 32]>), Error> {
+        let policies = self.view_policies();
         let mut roots = BTreeSet::new();
         let unresolved = || {
             Error::new(
@@ -11832,6 +12095,7 @@ impl Db {
                 let seq = delta.delta.seq;
                 if !still_readable_version(
                     &inner,
+                    &policies,
                     &table.stored,
                     row,
                     &delta.key,
@@ -11875,6 +12139,7 @@ impl Db {
         identity: Option<AuthorSubject>,
         pulls: Vec<WirePull>,
     ) -> Result<(Vec<SyncMessage>, Vec<WirePull>, Vec<WirePull>), Error> {
+        let policies = self.view_policies();
         let inner = self.inner();
         let mut replies = Vec::new();
         let mut parked = Vec::new();
@@ -11895,14 +12160,13 @@ impl Db {
             let at = Some(pull.at);
             // Pulls name the version's table as it is stored, as rows do.
             let image = match (
-                inner
-                    .owner
-                    .by_stored(&pull.table)
-                    .map(|t| t.stored.as_str()),
+                policies.by_stored(&pull.table).map(|t| t.stored.as_str()),
                 at,
             ) {
                 (Some(table), Some(at))
-                    if still_readable_version(&inner, table, row, &pull.key, at, identity)? =>
+                    if still_readable_version(
+                        &inner, &policies, table, row, &pull.key, at, identity,
+                    )? =>
                 {
                     inner
                         .version_image(table, row, &pull.key, at)?
@@ -11996,6 +12260,7 @@ impl Db {
         identity: Option<AuthorSubject>,
         ops: &[WireOp],
     ) -> Result<BTreeSet<[u8; 32]>, Error> {
+        let policies = self.view_policies();
         let inner = self.inner();
         let mut roots = BTreeSet::new();
         for op in ops {
@@ -12008,6 +12273,7 @@ impl Db {
             };
             if !still_readable_version(
                 &inner,
+                &policies,
                 table,
                 row,
                 &proof.key,
@@ -12093,6 +12359,9 @@ impl Db {
             own,
         } = &kind
         {
+            // Reads are validated by the policies the session read by: its
+            // bundle's when it is pinned to one, not the store's current ones.
+            let policies = self.view_policies();
             let inner = self.inner();
             // The sender's own commits its snapshot included, by local seq
             // and where each settled here (earlier on this connection, so
@@ -12126,9 +12395,10 @@ impl Db {
             }
             for read in reads {
                 // A read is evaluated in the version it was made in.
-                let Some(schema) =
-                    inner.governed(crate::ids::SchemaVersionId::from_bytes(read.version))
-                else {
+                let Some(schema) = inner.governed_by(
+                    crate::ids::SchemaVersionId::from_bytes(read.version),
+                    policies.clone(),
+                ) else {
                     return Err((schema_version_not_deployed(), mentioned(&inner)));
                 };
                 let prepared = PreparedQuery {
@@ -12141,7 +12411,7 @@ impl Db {
                 };
                 let spec = ReadSpec {
                     include_deleted: read.include_deleted,
-                    ..ReadSpec::default()
+                    ..ReadSpec::new(self.governance.clone())
                 };
                 let now: Vec<([u8; 16], Option<Pos>)> = inner
                     .read_versions(&prepared, identity, &spec)
@@ -12498,6 +12768,7 @@ fn fresh_advice_base() -> u64 {
 /// [`readable`] for the version of the row at `at`.
 fn readable_version(
     inner: &Inner,
+    policies: &Schema,
     table: &str,
     row: RowUuid,
     key: &[u8],
@@ -12507,9 +12778,16 @@ fn readable_version(
     let Some(author) = identity else {
         return Ok(true);
     };
-    let schema = inner.owner.clone();
-    let table = owned_table(&schema, table)?;
-    inner.check_version(table, row, key, (at, None), author, Operation::Select)
+    let table = owned_table(policies, table)?;
+    inner.check_version(
+        policies,
+        table,
+        row,
+        key,
+        (at, None),
+        author,
+        Operation::Select,
+    )
 }
 
 /// Whether `identity` may read the version of `row` at `seq` and, still,
@@ -12517,19 +12795,24 @@ fn readable_version(
 /// content of every earlier version too (SPEC 19.9, INV-RLS-13).
 fn still_readable_version(
     inner: &Inner,
+    policies: &Schema,
     table: &str,
     row: RowUuid,
     key: &[u8],
     at: Pos,
     identity: Option<AuthorSubject>,
 ) -> Result<bool, Error> {
-    Ok(readable_version(inner, table, row, key, at, identity)?
-        && readable(inner, table, row, key, identity)?)
+    Ok(
+        readable_version(inner, policies, table, row, key, at, identity)?
+            && readable(inner, policies, table, row, key, identity)?,
+    )
 }
 
-/// Whether `identity` may read a row of stored table `table`.
+/// Whether `identity` may read a row of stored table `table`, by
+/// `policies`' policies (the session's: see [`Inner::session_policies`]).
 fn readable(
     inner: &Inner,
+    policies: &Schema,
     table: &str,
     row: RowUuid,
     key: &[u8],
@@ -12538,9 +12821,8 @@ fn readable(
     let Some(author) = identity else {
         return Ok(true);
     };
-    let schema = inner.owner.clone();
-    let table = owned_table(&schema, table)?;
-    inner.check(table, row, key, author, Operation::Select)
+    let table = owned_table(policies, table)?;
+    inner.check_in(policies, table, row, key, author, Operation::Select)
 }
 
 /// The current schema's table stored as `stored`.
@@ -12707,7 +12989,7 @@ impl Db {
         poll_fn(|_| {
             let read = {
                 let inner = self.inner();
-                ReadSpec::of(&opts, &inner).and_then(|mut spec| {
+                ReadSpec::of(&opts, &inner, self.governance.clone()).and_then(|mut spec| {
                     // It reads as far as the answer it fetched settled.
                     if let Some(at) = fetched
                         && spec.position == Position::Known
@@ -13022,3 +13304,15 @@ mod tests {
         assert!(joiner.push(&parts[1]).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "nested_policy_dependencies_tests.rs"]
+mod nested_policy_dependencies_tests;
+
+#[cfg(test)]
+#[path = "executing_handle_policy_context_tests.rs"]
+mod executing_handle_policy_context_tests;
+
+#[cfg(test)]
+#[path = "governance_composition_tests.rs"]
+mod governance_composition_tests;

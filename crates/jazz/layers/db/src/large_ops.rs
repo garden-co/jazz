@@ -176,6 +176,7 @@ impl Inner {
         row: RowUuid,
         column: &str,
         identity: Option<AuthorSubject>,
+        governance: Governance,
     ) -> Result<(crate::values::Column, Sql), Error> {
         let t = self.schema.table(table)?;
         if !t.branch_by.is_empty() {
@@ -200,9 +201,9 @@ impl Inner {
             shape: Shape([0; 16]),
             binding_id: Binding([0; 16]),
             request_claims: None,
-            schema: None,
+            schema: Some(self.schema.clone()),
         };
-        let compiled = self.compile(&prepared, identity, &ReadSpec::default())?;
+        let compiled = self.compile(&prepared, identity, &ReadSpec::new(governance))?;
         let cell: Option<Sql> = self
             .conn
             .prepare_cached(&compiled.sql)
@@ -225,8 +226,9 @@ impl Inner {
         column: &str,
         range: std::ops::Range<u64>,
         utf16: bool,
+        governance: Governance,
     ) -> Result<Vec<u8>, Error> {
-        let (col, cell) = self.physical_cell(table, row, column, self.reader())?;
+        let (col, cell) = self.physical_cell(table, row, column, self.reader(), governance)?;
         if !large_cell(&cell) {
             return Err(not_large(table, column));
         }
@@ -237,7 +239,8 @@ impl Inner {
     }
 
     /// `delta(a, b)` (SPEC 19.6) between the values `column` of `row` holds
-    /// in its versions `from` and `to`, for a reader allowed to read both.
+    /// in its versions `from` and `to`, for a reader allowed to read both by
+    /// `policies` (a pinned session's bundle, or the current schema).
     /// Only the chunks in changed regions are read.
     pub(crate) fn value_delta(
         &self,
@@ -246,8 +249,10 @@ impl Inner {
         column: &str,
         (from, to): (sync::Rank, sync::Rank),
         reader: Option<AuthorSubject>,
+        policies: &Schema,
     ) -> Result<Vec<LargeValueDeltaSplice>, Error> {
         let t = self.schema.table(table)?;
+        let governed = policies.table(table)?;
         if !t.branch_by.is_empty() {
             return Err(unsupported("large-value deltas on branched tables"));
         }
@@ -258,7 +263,7 @@ impl Inner {
         let text = crate::large::kind(col) != lv::LargeValueKind::Bytes;
         // Losing read access takes effect at once, for earlier versions too.
         if let Some(author) = reader
-            && !self.check(t, row, &[], author, Operation::Select)?
+            && !self.check_in(policies, governed, row, &[], author, Operation::Select)?
         {
             return Err(Error::new(
                 ErrorCode::NotObserved,
@@ -268,7 +273,15 @@ impl Inner {
         let mut cells = Vec::with_capacity(2);
         for at in [from, to] {
             if let Some(author) = reader
-                && !self.check_version(t, row, &[], at, author, Operation::Select)?
+                && !self.check_version(
+                    policies,
+                    governed,
+                    row,
+                    &[],
+                    at,
+                    author,
+                    Operation::Select,
+                )?
             {
                 return Err(Error::new(
                     ErrorCode::NotObserved,
@@ -611,8 +624,14 @@ impl Db {
         range: std::ops::Range<u64>,
     ) -> Result<Vec<u8>, Error> {
         self.fetching(|| {
-            self.inner()
-                .read_range(table, row, column, range.clone(), false)
+            self.inner().read_range(
+                table,
+                row,
+                column,
+                range.clone(),
+                false,
+                self.governance.clone(),
+            )
         })
         .await
     }
@@ -636,6 +655,7 @@ impl Db {
                 column,
                 ((from, None), (to, None)),
                 inner.reader(),
+                &inner.schema,
             )
         })
         .await
@@ -652,8 +672,14 @@ impl Db {
     ) -> Result<String, Error> {
         let bytes = self
             .fetching(|| {
-                self.inner()
-                    .read_range(table, row, column, range.clone(), true)
+                self.inner().read_range(
+                    table,
+                    row,
+                    column,
+                    range.clone(),
+                    true,
+                    self.governance.clone(),
+                )
             })
             .await?;
         String::from_utf8(bytes).map_err(|_| query("UTF-16 range splits a surrogate pair"))
@@ -681,7 +707,8 @@ impl Db {
     ) -> Result<Option<serde_json::Value>, Error> {
         let inner = self.inner();
         let reader = inner.reader();
-        let (col, cell) = inner.physical_cell(table, row, column, reader)?;
+        let (col, cell) =
+            inner.physical_cell(table, row, column, reader, self.governance.clone())?;
         if crate::large::kind(&col) != lv::LargeValueKind::Json {
             return Err(Error::new(
                 ErrorCode::Schema,
@@ -754,7 +781,13 @@ impl Db {
             let mut inner = self.inner();
             inner.require_mutation_admission()?;
             let edited = inner
-                .physical_cell(table, row, column, identity_of(opts.identity))
+                .physical_cell(
+                    table,
+                    row,
+                    column,
+                    identity_of(opts.identity),
+                    self.governance.clone(),
+                )
                 .and_then(|(col, cell)| Ok(nullable(&col, inner.edited(table, &col, cell, edit)?)));
             match edited {
                 Ok(value) => value,
@@ -803,7 +836,14 @@ impl Db {
             let mut inner = self.inner();
             inner.require_mutation_admission()?;
             let identity = identity_of(opts.identity);
-            inner.lower_large_mutations(table, row, &mut patch, mutations, identity)
+            inner.lower_large_mutations(
+                table,
+                row,
+                &mut patch,
+                mutations,
+                identity,
+                self.governance.clone(),
+            )
         };
         if let Err(error) = lowered {
             self.inner().clear_derived();
@@ -1050,8 +1090,74 @@ impl Db {
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
     ) -> Result<WriteHandle, Error> {
+        if let Some(value) = self.seal_streaming_upload(&mut upload, table, &mut cells, column)? {
+            self.inner().derived.push(value);
+        }
+        let result = match mutation {
+            StreamingMutationKind::Insert if base.is_some() => Err(Error::new(
+                ErrorCode::WriteRejected,
+                "a streamed insert writes one exact branch, not a branch view",
+            )),
+            StreamingMutationKind::Insert => {
+                self.insert(
+                    table,
+                    cells,
+                    InsertOptions {
+                        row_id: Some(row),
+                        identity,
+                        target: head.map_or(ExactWriteTarget::Root, ExactWriteTarget::Branch),
+                        updated_at_ms: now_ms,
+                    },
+                )
+                .await
+            }
+            StreamingMutationKind::Update => {
+                let target = view_target(head, base);
+                self.update(
+                    table,
+                    row,
+                    cells,
+                    UpdateOptions {
+                        identity,
+                        target,
+                        updated_at_ms: now_ms,
+                    },
+                )
+                .await
+            }
+            StreamingMutationKind::Upsert => {
+                let target = view_target(head, base);
+                self.upsert(
+                    table,
+                    row,
+                    cells,
+                    UpsertOptions {
+                        identity,
+                        target,
+                        updated_at_ms: now_ms,
+                    },
+                )
+                .await
+            }
+        };
+        let mut inner = self.inner();
+        inner.clear_derived();
+        crate::large::end_upload(&inner.conn, &upload.id)?;
+        result
+    }
+
+    /// Finish `upload`'s value and set it as `column` of `cells`: inline when
+    /// it fits, else the chunked descriptor, returned for the write to trust.
+    /// A failed upload is ended here.
+    fn seal_streaming_upload(
+        &self,
+        upload: &mut StreamingValueUpload,
+        table: &str,
+        cells: &mut BTreeMap<String, Value>,
+        column: &str,
+    ) -> Result<Option<lv::LargeValueRef>, Error> {
         self.inner().require_mutation_admission()?;
-        self.check_streaming_upload(&mut upload)?;
+        self.check_streaming_upload(upload)?;
         if upload.table != table || upload.column != column {
             return Err(schema_error(
                 "streaming upload target differs from its original table or column",
@@ -1105,65 +1211,14 @@ impl Db {
         // A value that fits inline is written as an ordinary inline cell, as
         // the store keeps it: its commit carries the bytes, not a
         // descriptor of chunks the store then reclaims.
-        let logical = if value.byte_length <= lv::INLINE_VALUE_MAX_BYTES as u64 {
+        let (logical, large) = if value.byte_length <= lv::INLINE_VALUE_MAX_BYTES as u64 {
             let bytes = self.inner().chunks.value_bytes(&value)?;
-            logical_value(value.kind, bytes)?
+            (logical_value(value.kind, bytes)?, None)
         } else {
-            self.inner().derived.push(value.clone());
-            Value::Large(Box::new(value))
+            (Value::Large(Box::new(value.clone())), Some(value))
         };
         cells.insert(column.to_owned(), nullable(&col, logical));
-        let result = match mutation {
-            StreamingMutationKind::Insert if base.is_some() => Err(Error::new(
-                ErrorCode::WriteRejected,
-                "a streamed insert writes one exact branch, not a branch view",
-            )),
-            StreamingMutationKind::Insert => {
-                self.insert(
-                    table,
-                    cells,
-                    InsertOptions {
-                        row_id: Some(row),
-                        identity,
-                        target: head.map_or(ExactWriteTarget::Root, ExactWriteTarget::Branch),
-                        updated_at_ms: now_ms,
-                    },
-                )
-                .await
-            }
-            StreamingMutationKind::Update => {
-                let target = view_target(head, base);
-                self.update(
-                    table,
-                    row,
-                    cells,
-                    UpdateOptions {
-                        identity,
-                        target,
-                        updated_at_ms: now_ms,
-                    },
-                )
-                .await
-            }
-            StreamingMutationKind::Upsert => {
-                let target = view_target(head, base);
-                self.upsert(
-                    table,
-                    row,
-                    cells,
-                    UpsertOptions {
-                        identity,
-                        target,
-                        updated_at_ms: now_ms,
-                    },
-                )
-                .await
-            }
-        };
-        let mut inner = self.inner();
-        inner.clear_derived();
-        crate::large::end_upload(&inner.conn, &upload.id)?;
-        result
+        Ok(large)
     }
 
     /// Replace the limits on local streaming uploads.
@@ -1247,7 +1302,7 @@ pub struct StreamingValueUpload {
 
 /// Drop schedules cleanup on the next maintenance tick without borrowing the
 /// database recursively. The existing persisted lease handles crash recovery.
-struct UploadLease {
+pub(crate) struct UploadLease {
     id: [u8; 32],
     cleanup: Rc<RefCell<Vec<[u8; 32]>>>,
 }
@@ -1256,6 +1311,18 @@ impl Drop for UploadLease {
     fn drop(&mut self) {
         self.cleanup.borrow_mut().push(self.id);
     }
+}
+
+/// Renew the leases a batch holds before it commits; a lease that expired
+/// while the batch was open refuses the commit, as its chunks may be gone.
+pub(crate) fn renew_upload_leases(inner: &Inner, leases: &[UploadLease]) -> Result<(), Error> {
+    let now = streaming_now_ms();
+    for lease in leases {
+        if !crate::large::touch_upload(&inner.conn, &lease.id, now)? {
+            return Err(expired());
+        }
+    }
+    Ok(())
 }
 
 fn streaming_column(
@@ -1423,6 +1490,7 @@ impl Inner {
         patch: &mut BTreeMap<String, Value>,
         mutations: Vec<LargeValueUpdate>,
         identity: Option<AuthorSubject>,
+        governance: Governance,
     ) -> Result<(), Error> {
         for mutation in &mutations {
             let column = mutation.column();
@@ -1434,7 +1502,8 @@ impl Inner {
         }
         for mutation in mutations {
             let column = mutation.column().to_owned();
-            let (col, mut cell) = self.physical_cell(table, row, &column, identity)?;
+            let (col, mut cell) =
+                self.physical_cell(table, row, &column, identity, governance.clone())?;
             let value = match mutation {
                 LargeValueUpdate::Splice {
                     within, splices, ..
@@ -1485,6 +1554,83 @@ impl Inner {
 }
 
 impl TxRef<'_> {
+    /// [`Db::finish_streaming_value_upload`] staged in an open batch. The
+    /// batch holds the upload's lease, so the streamed chunks stay until it
+    /// commits or is abandoned; a commit after the lease expired (untouched
+    /// past the staging policy's maximum age) is refused.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finish_streaming_value_upload(
+        &self,
+        mut upload: StreamingValueUpload,
+        mutation: StreamingMutationKind,
+        table: &str,
+        row: RowUuid,
+        mut cells: BTreeMap<String, Value>,
+        column: &str,
+        identity: WriteIdentity,
+        now_ms: Option<u64>,
+        head: Option<BranchSelector>,
+        base: Option<BranchViewBase>,
+    ) -> Result<WriteHandle, Error> {
+        if mutation == StreamingMutationKind::Insert && base.is_some() {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "a streamed insert writes one exact branch, not a branch view",
+            ));
+        }
+        let large = self
+            .db
+            .seal_streaming_upload(&mut upload, table, &mut cells, column)?;
+        let op = match mutation {
+            StreamingMutationKind::Insert => StagedOp::Insert(
+                table.to_owned(),
+                cells,
+                InsertOptions {
+                    row_id: Some(row),
+                    identity,
+                    target: head.map_or(ExactWriteTarget::Root, ExactWriteTarget::Branch),
+                    updated_at_ms: now_ms,
+                },
+            ),
+            StreamingMutationKind::Update => StagedOp::Update(
+                table.to_owned(),
+                row,
+                cells,
+                UpdateOptions {
+                    identity,
+                    target: view_target(head, base),
+                    updated_at_ms: now_ms,
+                },
+            ),
+            StreamingMutationKind::Upsert => StagedOp::Upsert(
+                table.to_owned(),
+                row,
+                cells,
+                BTreeMap::new(),
+                UpsertOptions {
+                    identity,
+                    target: view_target(head, base),
+                    updated_at_ms: now_ms,
+                },
+            ),
+        };
+        let held = large.is_some();
+        let edits = crate::db::LargeEdits {
+            derived: large.into_iter().collect(),
+            pending_nodes: Vec::new(),
+        };
+        self.db.stage_with_edits(self.id, op, edits)?;
+        // An inline value is in its cell: its upload ends as the handle drops.
+        if held {
+            self.db.hold_upload(self.id, upload._lease)?;
+        }
+        Ok(WriteHandle {
+            row,
+            seq: Pos::default(),
+            tx: 0,
+        })
+    }
+
     /// [`Db::update_with_large_value_mutations`] staged in an open batch:
     /// the edits read the row with the batch's earlier writes applied.
     pub async fn update_with_large_value_mutations(
@@ -1498,7 +1644,14 @@ impl TxRef<'_> {
         self.db.inner().require_mutation_admission()?;
         let edits = self.db.in_overlay(self.id, None, |inner, _| {
             let identity = identity_of(opts.identity);
-            let lowered = inner.lower_large_mutations(table, row, &mut patch, mutations, identity);
+            let lowered = inner.lower_large_mutations(
+                table,
+                row,
+                &mut patch,
+                mutations,
+                identity,
+                self.db.governance.clone(),
+            );
             let edits = crate::db::LargeEdits {
                 derived: std::mem::take(&mut inner.derived),
                 pending_nodes: std::mem::take(&mut inner.pending_nodes),
