@@ -37,23 +37,25 @@ describe("Node shared backend session", () => {
       jwtAudience: issuer.audience,
     };
     const server = await startLocalJazzServer({ appId });
+    // Published as createJazz publishes it; the backend link is pinned to it.
+    const { bundle } = await deploy({
+      serverUrl: server.url,
+      appId,
+      adminSecret: server.adminSecret,
+      schema: resolveSchemaSource(app),
+      permissions,
+    });
     const owner = await createJazzSession({
       appId,
       serverUrl: server.url,
       app,
       permissions,
       ...auth,
+      bundle,
       driver: { type: "memory" },
       initial: { backendSecret: server.backendSecret },
     });
     try {
-      await deploy({
-        serverUrl: server.url,
-        appId,
-        adminSecret: server.adminSecret,
-        schema: resolveSchemaSource(app),
-        permissions,
-      });
       const original = owner.getSnapshot();
       const backend = original.client!;
       const tokens = await Promise.all([
@@ -191,11 +193,19 @@ describe("Node shared backend session", () => {
     const appId = randomUUID();
     const backendSecret = "pending-service-secret";
     const server = await startLocalJazzServer({ appId, backendSecret });
+    const { bundle } = await deploy({
+      serverUrl: server.url,
+      appId,
+      adminSecret: server.adminSecret,
+      schema: resolveSchemaSource(app),
+      permissions,
+    });
     const owner = await createJazzSession({
       appId,
       serverUrl: server.url,
       app,
       permissions,
+      bundle,
       driver: { type: "memory" },
       initial: { backendSecret },
     });
@@ -208,13 +218,6 @@ describe("Node shared backend session", () => {
       initial: "local-first",
     });
     try {
-      await deploy({
-        serverUrl: server.url,
-        appId,
-        adminSecret: server.adminSecret,
-        schema: resolveSchemaSource(app),
-        permissions,
-      });
       const backend = owner.getSnapshot().client!;
       const scoped = await backend.forAccount(user.getSnapshot().account!);
       await backend.db.disconnect();
@@ -248,21 +251,22 @@ describe("Node shared backend session", () => {
     const backendSecret = "session-service-secret";
     const adminSecret = "session-publication-secret";
     const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
+    const { bundle } = await deploy({
+      serverUrl: server.url,
+      appId,
+      adminSecret,
+      schema: resolveSchemaSource(app),
+      permissions,
+    });
     const session = await createJazzSession({
       appId,
       serverUrl: server.url,
       app,
       permissions,
+      bundle,
       driver: { type: "memory" },
     });
     try {
-      await deploy({
-        serverUrl: server.url,
-        appId,
-        adminSecret,
-        schema: resolveSchemaSource(app),
-        permissions,
-      });
       await session.becomeBackend({ backendSecret });
       const first = session.getSnapshot();
       expect(first.status).toBe("ready");

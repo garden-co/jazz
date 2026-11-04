@@ -141,7 +141,7 @@ async function createTestContext(
   backendSecret: string,
   adminSecret: string,
 ) {
-  await deploy({
+  const { bundle } = await deploy({
     appId,
     serverUrl: server.url,
     adminSecret,
@@ -153,6 +153,7 @@ async function createTestContext(
   const dataPath = join(dataRoot, "runtime.db");
   const { createJazzContext } = await import("../backend/create-jazz-context.js");
   const context = createJazzContext({
+    bundle,
     appId,
     app: todoApp,
     permissions: todoAppPermissions,
@@ -236,9 +237,16 @@ describe("forRequest auth and policy", () => {
     });
     const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
     onTestFinished(() => server.stop());
-    await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+    const { bundle } = await deploy({
+      appId,
+      serverUrl: server.url,
+      adminSecret,
+      schema: app,
+      permissions,
+    });
     const { createJazzContext } = await import("../backend/create-jazz-context.js");
     const context = createJazzContext({
+      bundle,
       appId,
       app,
       permissions,
@@ -959,9 +967,16 @@ it.each(["table", "relation"] as const)(
     });
     const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
     onTestFinished(() => server.stop());
-    await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+    const { bundle } = await deploy({
+      appId,
+      serverUrl: server.url,
+      adminSecret,
+      schema: app,
+      permissions,
+    });
     const { createJazzContext } = await import("../backend/create-jazz-context.js");
     const writer = createJazzContext({
+      bundle,
       appId,
       app,
       permissions,
@@ -971,6 +986,7 @@ it.each(["table", "relation"] as const)(
       driver: { type: "memory" },
     });
     const reader = createJazzContext({
+      bundle,
       appId,
       app,
       permissions,
@@ -1134,10 +1150,17 @@ it("shares explicit backend transport state across scoped Db wrappers", async ()
   });
   const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
   onTestFinished(() => server.stop());
-  await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+  const { bundle } = await deploy({
+    appId,
+    serverUrl: server.url,
+    adminSecret,
+    schema: app,
+    permissions,
+  });
 
   const { createJazzContext } = await import("../backend/create-jazz-context.js");
   const writer = createJazzContext({
+    bundle,
     appId,
     app,
     permissions,
@@ -1147,6 +1170,7 @@ it("shares explicit backend transport state across scoped Db wrappers", async ()
     driver: { type: "memory" },
   });
   const reader = createJazzContext({
+    bundle,
     appId,
     app,
     permissions,
@@ -1191,9 +1215,16 @@ it("rejects a scoped remote wait when its context shuts down offline", async () 
   });
   const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
   onTestFinished(() => server.stop());
-  await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+  const { bundle } = await deploy({
+    appId,
+    serverUrl: server.url,
+    adminSecret,
+    schema: app,
+    permissions,
+  });
   const { createJazzContext } = await import("../backend/create-jazz-context.js");
   const context = createJazzContext({
+    bundle,
     appId,
     app,
     permissions,

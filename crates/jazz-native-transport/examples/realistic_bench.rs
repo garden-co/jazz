@@ -362,6 +362,7 @@ async fn connect_client(
         jwt_token: None,
         backend_secret: None,
         backend_session: None,
+        bundle: None,
         admin_secret: None,
         migrations: Default::default(),
     };
