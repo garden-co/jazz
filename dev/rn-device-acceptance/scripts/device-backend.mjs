@@ -41,8 +41,9 @@ const server = createServer((req, res) =>
   }),
 );
 await jazz.attach(server);
-// Every interface: the Android emulator reaches the host through 10.0.2.2.
-server.listen(0, "0.0.0.0", () => {
+// Loopback only: the iOS simulator shares the host network, and the Android
+// emulator's 10.0.2.2 maps to the host's 127.0.0.1.
+server.listen(0, "127.0.0.1", () => {
   const { port } = server.address();
   console.log(`JAZZ_RN_DEVICE_BACKEND ${JSON.stringify({ port, basePath: jazz.basePath })}`);
 });

@@ -21,7 +21,7 @@ export function completeAbortSignal(scope: typeof globalThis = globalThis): void
       if (!this.signal.aborted) {
         reasons.set(this.signal, reason === undefined ? abortError() : reason);
       }
-      abort.call(this);
+      abort.call(this, reason);
     },
   });
   if (!("reason" in signal)) {

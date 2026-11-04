@@ -1234,7 +1234,7 @@ test("dispatch device workflow uses Blacksmith KVM while source jobs remain chea
     assert.match(
       section,
       new RegExp(
-        `pnpm install --frozen-lockfile[\\s\\S]*?pnpm --filter rn-device-acceptance build:workspace-prerequisites[\\s\\S]*?${followingStage}`,
+        `pnpm install --frozen-lockfile[\\s\\S]*?pnpm --filter rn-device-acceptance build:device-backend[\\s\\S]*?pnpm --filter jazz-rn build\\n[\\s\\S]*?${followingStage}`,
       ),
       `${job} must stage the source-built React Native public entrypoint immediately after install and before native bundling`,
     );

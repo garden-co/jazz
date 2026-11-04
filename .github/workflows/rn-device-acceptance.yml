@@ -12,6 +12,9 @@ on:
       - "crates/jazz/**"
       - "crates/jazz-compression/**"
       - "crates/jazz-native-transport/**"
+      - "crates/jazz-napi/**"
+      - "crates/jazz-wasm/**"
+      - "dev/artifacts/**"
       - "packages/jazz-tools/src/**"
       - "package.json"
       - "pnpm-lock.yaml"
@@ -98,7 +101,7 @@ jobs:
         with:
           cache-on-failure: true
           prefix-key: rn-device-ios-macos-15
-          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-transport/**') }}
+          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-transport/**', 'crates/jazz-napi/**', 'crates/jazz-wasm/**', 'dev/artifacts/**') }}
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
@@ -108,8 +111,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Verify synthetic scope authorization and generated native fixture
         run: cargo test -p jazz-native-relay --example rn_server_session_harness --no-fail-fast
-      - name: Build the React Native JavaScript workspace entrypoints
-        run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
       # Apple's clang and ar cannot build or archive the WASM build's SQLite
       # objects. The build finds Homebrew's llvm-ar on its own; point cc-rs at
       # Homebrew's clang for the wasm32 target.
@@ -125,6 +126,10 @@ jobs:
           tool: wasm-pack@0.13.1
       - name: Build the Node runtime of the device app's backend
         run: pnpm --filter rn-device-acceptance build:device-backend
+      # build:device-backend already builds jazz-tools' React Native entry after
+      # staging the fingerprints, so only jazz-rn is left to build here.
+      - name: Build the React Native JavaScript workspace entrypoints
+        run: pnpm --filter jazz-rn build
       - name: Build and stage the relay XCFramework
         run: |
           pnpm --filter jazz-rn build:relay:ios
@@ -201,7 +206,7 @@ jobs:
         with:
           cache-on-failure: true
           prefix-key: rn-device-android-ubuntu-2404
-          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-transport/**') }}
+          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-transport/**', 'crates/jazz-napi/**', 'crates/jazz-wasm/**', 'dev/artifacts/**') }}
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: .cache/android-device-acceptance
@@ -209,8 +214,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Verify synthetic scope authorization and generated native fixture
         run: cargo test -p jazz-native-relay --example rn_server_session_harness --no-fail-fast
-      - name: Build the React Native JavaScript workspace entrypoints
-        run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
       # The backend loads jazz-tools on Node, whose runtime checks the native
       # fingerprints staged from release NAPI and fast WASM builds.
       - uses: ./.github/actions/install-rust-tool
@@ -218,6 +221,10 @@ jobs:
           tool: wasm-pack@0.13.1
       - name: Build the Node runtime of the device app's backend
         run: pnpm --filter rn-device-acceptance build:device-backend
+      # build:device-backend already builds jazz-tools' React Native entry after
+      # staging the fingerprints, so only jazz-rn is left to build here.
+      - name: Build the React Native JavaScript workspace entrypoints
+        run: pnpm --filter jazz-rn build
       - name: Bootstrap pinned lane-local Android toolchain
         run: dev/rn-device-acceptance/scripts/bootstrap-android.sh --emulator
       - name: Stage and verify all relay ABI artifacts

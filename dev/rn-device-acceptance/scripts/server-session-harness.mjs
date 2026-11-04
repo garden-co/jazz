@@ -184,19 +184,36 @@ export async function startLocalServerSessionHarness({
     await terminateHarness(child);
     throw error;
   }
+  let stopping = false;
+  // Core always stops, even when stopping the backend throws.
   const terminateAll = async () => {
-    await terminateHarness(backend.child);
-    await terminateHarness(child);
+    stopping = true;
+    try {
+      await terminateHarness(backend.child);
+    } finally {
+      await terminateHarness(child);
+    }
   };
+  const backendExited = () => backend.child.exitCode !== null || Boolean(backend.child.signalCode);
+  // A backend that dies mid-run leaves the device with nothing to sync to;
+  // say so with its output instead of leaving only the device's view.
+  backend.child.once("exit", () => {
+    if (!stopping) console.error(`device backend exited after readiness; ${backend.diagnostic()}`);
+  });
   return {
     child,
     backend: backend.child,
     async waitForCoreObservation(timeoutMs = 60_000) {
       const deadline = Date.now() + timeoutMs;
       while (!observation) {
-        if (child.exitCode !== null || child.signalCode || Date.now() >= deadline) {
+        if (
+          child.exitCode !== null ||
+          child.signalCode ||
+          backendExited() ||
+          Date.now() >= deadline
+        ) {
           throw new Error(
-            `missing run-bound Core observation; ${harnessDiagnostic({ child, stdout, stderr, device })}`,
+            `missing run-bound Core observation; ${harnessDiagnostic({ child, stdout, stderr, device })}; backend ${backend.diagnostic()}`,
           );
         }
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -205,8 +222,12 @@ export async function startLocalServerSessionHarness({
     },
     // Offline means no upstream at all: the backend stops with Core.
     async stopForOfflineRestart() {
-      await stopForOfflineRestart(backend.child, backend.port);
-      await stopForOfflineRestart(child, session.server_port);
+      stopping = true;
+      try {
+        await stopForOfflineRestart(backend.child, backend.port);
+      } finally {
+        await stopForOfflineRestart(child, session.server_port);
+      }
     },
     terminate: terminateAll,
     async interruptAndRecover() {
@@ -291,7 +312,12 @@ export async function startDeviceBackend({
       ),
     );
   });
-  return { child, port: ready.port, basePath: ready.basePath };
+  return {
+    child,
+    port: ready.port,
+    basePath: ready.basePath,
+    diagnostic: () => harnessDiagnostic({ child, stdout, stderr, device }),
+  };
 }
 
 /** Cargo can be a parent of the actual fixture. Close its control reader and
