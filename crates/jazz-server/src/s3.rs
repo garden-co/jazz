@@ -634,6 +634,15 @@ impl Inner {
         let Some(environment) = &self.options.environment else {
             return Ok(());
         };
+        let unreachable_marker = || {
+            format!(
+                "s3 blobs: cannot claim bucket {bucket} for the {environment} environment: \
+                 the credentials may not read or write s3://{bucket}/{ENVIRONMENT_OBJECT}. \
+                 Allow s3:GetObject and s3:PutObject on arn:aws:s3:::{bucket}/{ENVIRONMENT_OBJECT} \
+                 as well as on the prefix",
+                bucket = self.options.bucket,
+            )
+        };
         let refused = |other: &str| {
             format!(
                 "s3 blobs: bucket {} serves the {other} environment, not {environment}; \
@@ -663,13 +672,7 @@ impl Inner {
             // reads as absent, and its put is refused.
             let body = response.text().await.unwrap_or_default();
             if xml_field(&body, "Code").as_deref() == Some("AccessDenied") {
-                return Err(format!(
-                    "s3 blobs: cannot claim bucket {bucket} for the {environment} environment: \
-                     the credentials may not read or write s3://{bucket}/{ENVIRONMENT_OBJECT}. \
-                     Allow s3:GetObject and s3:PutObject on arn:aws:s3:::{bucket}/{ENVIRONMENT_OBJECT} \
-                     as well as on the prefix",
-                    bucket = self.options.bucket,
-                ));
+                return Err(unreachable_marker());
             }
             return Err(self
                 .failure(
@@ -684,7 +687,9 @@ impl Inner {
             return match self.read_marker(ENVIRONMENT_OBJECT, true).await? {
                 Some(claimed) if &claimed == environment => Ok(()),
                 Some(claimed) => Err(refused(&claimed)),
-                None => Err("s3 blobs: the environment marker vanished while claiming".to_owned()),
+                // Its put says it exists, and its read answered as absent:
+                // AccessDenied on GetObject (or a delete in between).
+                None => Err(unreachable_marker()),
             };
         }
         self.expect_ok(response, "claim", ENVIRONMENT_OBJECT)
@@ -1186,6 +1191,32 @@ mod tests {
         assert!(bucket.names("prod/").is_empty());
     }
 
+    /// Keys that may put the root marker but not read it see an existing
+    /// marker as absent and their create-if-absent refused: the claim says
+    /// which permission is missing, not that the marker vanished.
+    #[test]
+    fn a_marker_that_cannot_be_read_names_the_missing_permission() {
+        let bucket = mock::MockS3::start();
+        let in_env = |prefix: &str| {
+            let mut options = bucket.options(prefix);
+            options.environment = Some("production".to_owned());
+            options
+        };
+        let (key, bytes) = node(7);
+        let first = S3ChunkStore::new(in_env("a/"), "store-a".to_owned()).unwrap();
+        block(first.put(&key, &bytes)).unwrap();
+        *bucket.state.only_prefix_reads.lock().unwrap() = Some("b/".to_owned());
+        let second = S3ChunkStore::new(in_env("b/"), "store-b".to_owned()).unwrap();
+        let error = block(second.put(&key, &bytes)).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("s3:GetObject and s3:PutObject on arn:aws:s3:::bucket/.jazz-environment"),
+            "{error}"
+        );
+        assert!(bucket.names("b/").is_empty());
+    }
+
     /// Without s3:ListBucket a missing key answers 403: it reads as absent.
     /// A body larger than any node is refused.
     #[test]
@@ -1293,6 +1324,8 @@ pub(crate) mod mock {
         /// Set: the keys may only touch objects under this prefix (an IAM
         /// policy on `bucket/prefix/*`); anything else answers 403.
         pub only_prefix: Mutex<Option<String>>,
+        /// Set: reads (GET) only under this prefix; puts anywhere.
+        pub only_prefix_reads: Mutex<Option<String>>,
         /// Keys by access key id; `test`/`test` is always valid.
         issued: Mutex<BTreeMap<String, (String, String)>>,
         /// What STS was last asked to accept.
@@ -1385,6 +1418,12 @@ pub(crate) mod mock {
         }
         let key = parts.uri.path().trim_start_matches('/').to_owned();
         if let Some(prefix) = state.only_prefix.lock().unwrap().as_deref()
+            && !key.starts_with(&format!("bucket/{prefix}"))
+        {
+            return error(StatusCode::FORBIDDEN, "AccessDenied");
+        }
+        if parts.method == axum::http::Method::GET
+            && let Some(prefix) = state.only_prefix_reads.lock().unwrap().as_deref()
             && !key.starts_with(&format!("bucket/{prefix}"))
         {
             return error(StatusCode::FORBIDDEN, "AccessDenied");

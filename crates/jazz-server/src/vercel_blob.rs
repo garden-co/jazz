@@ -474,8 +474,12 @@ impl Inner {
     /// same instant might both pass. The marker then holds one of them,
     /// and the other is refused the next time it starts (a `vercel()`
     /// core restarts with every deployment and every idle recycle), before
-    /// it reads or writes anything. Until then it only writes under its
-    /// own prefix, which the other environment never reads or deletes.
+    /// it reads or writes anything. Until then it writes under its own
+    /// prefix: with the default prefixes (`jazz/<app>/<store id>/`) the
+    /// other environment never reads or deletes there. Explicit prefixes
+    /// two cores share also share the owner claim's race (see
+    /// [`Self::claim`]), so give each environment's cores prefixes of
+    /// their own.
     async fn claim_environment(&self) -> Result<(), String> {
         let Some(environment) = &self.options.environment else {
             return Ok(());
