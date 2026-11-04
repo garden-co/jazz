@@ -8,7 +8,7 @@ import { definePermissions } from "../permissions/index.js";
 import type { RowRefValue } from "../permissions/index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 import { deploy } from "../dev/catalogue.js";
-import { startLocalJazzServer } from "../testing/index.js";
+import { startLocalJazzServer, startTestJazz } from "../testing/index.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import type { Db } from "./db.js";
@@ -909,16 +909,13 @@ it("keeps prepared claim domains complete across private and public policy reads
       ]),
     );
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app,
+    permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   const clients: Db[] = [];
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
     const owner = await createDb(await localAccountConfig(server.appId, server.url));
     clients.push(owner);
     const deviceId = randomUUID();
