@@ -6,7 +6,8 @@ import { createAccountManager, type AccountStore, type DbConfig } from "jazz-too
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
 import {
   getJazzServerInfo,
-  getJazzServerJwtForUser,
+  signInWithJazzApp,
+  startJazzApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server";
 import permissions from "../../permissions";
 import { app } from "../../schema";
@@ -155,26 +156,25 @@ it("negotiates persistent browser workers and renders the owner, join-request, m
   // still opening.  Admission may hold *delivery* until storage opens, but it
   // must not serially defer native registrations: that ordering used to leave
   // the policy-maintained member view without a Stream B witness.
-  const server = await getJazzServerInfo(
+  const core = await getJazzServerInfo(
     `019d4a17-4591-7c0a-a320-${crypto.randomUUID().slice(0, 12)}`,
   );
   await deploy({
-    appId: server.appId,
-    serverUrl: server.serverUrl,
-    adminSecret: server.adminSecret,
+    appId: core.appId,
+    serverUrl: core.serverUrl,
+    adminSecret: core.adminSecret,
     schema: app,
     permissions,
   });
-  const ownerToken = await getJazzServerJwtForUser("browser-owner", undefined, server.appId);
-  const guestToken = await getJazzServerJwtForUser("browser-guest", undefined, server.appId);
-  const ownerAccount = await enrollTestAccount(server, ownerToken);
-  const guestAccount = await enrollTestAccount(server, guestToken);
+  const server = await startJazzApp(core, { schema: app, permissions });
+  const ownerUser = await signInWithJazzApp(createAccountManager, server, "browser-owner");
+  const guestUser = await signInWithJazzApp(createAccountManager, server, "browser-guest");
   const owner = await mount(
     {
       appId: server.appId,
       driver: { type: "persistent", dbName: `band-chat-owner-${crypto.randomUUID()}` },
-      account: ownerAccount,
-      serverUrl: server.serverUrl,
+      account: ownerUser.account,
+      serverUrl: ownerUser.serverUrl,
     },
     "owner",
   );
@@ -194,8 +194,8 @@ it("negotiates persistent browser workers and renders the owner, join-request, m
     {
       appId: server.appId,
       driver: { type: "persistent", dbName: `band-chat-guest-${crypto.randomUUID()}` },
-      account: guestAccount,
-      serverUrl: server.serverUrl,
+      account: guestUser.account,
+      serverUrl: guestUser.serverUrl,
     },
     "guest",
     { join: roomId },
@@ -260,11 +260,6 @@ it("negotiates persistent browser workers and renders the owner, join-request, m
   // retained in the guest's local-first store. The permission receipt proves
   // that a post-removal write is rejected at the serving authority.
 }, 90_000);
-
-async function enrollTestAccount(server: { appId: string; serverUrl: string }, token: string) {
-  const accounts = await createAccountManager({ appId: server.appId, serverUrl: server.serverUrl });
-  return accounts.registerJWT({ getToken: async () => token });
-}
 
 it("creates a local room, sends and reacts to a message, and applies client-side picker validation", async () => {
   const element = await mount();

@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createAccountManager } from "../../../../../../packages/jazz-tools/src/accounts/create-account-manager.js";
 import type { AccountHandle } from "../../../../../../packages/jazz-tools/src/accounts/state.js";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import { createDb } from "../../../../../../packages/jazz-tools/src/runtime/default-create-db.js";
@@ -21,7 +20,9 @@ import {
   createJazzServerTransportControl,
   type JazzServerTransportControl,
   getJazzServerInfo,
-  getJazzServerJwtForUser,
+  jazzAppUserUrl,
+  loginAtJazzAppUser,
+  startJazzApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
 import { app, type Step } from "../../schema.js";
@@ -64,14 +65,13 @@ describe("Wequencer cross-topology recovery", () => {
     const requestedSeed = Number(__JAZZ_EXAMPLE_TOPOLOGY_SEED__);
     const seed = Number.isSafeInteger(requestedSeed) ? requestedSeed : 61;
     const scheduler = new TopologyEnvelopeScheduler(seed);
-    let server: Awaited<ReturnType<typeof getJazzServerInfo>>;
+    let server: Awaited<ReturnType<typeof startJazzApp>>;
     let owner: Db;
     let editor: Db;
     let editorTransport: JazzServerTransportControl;
-    let ownerToken: string;
+    let ownerUrl: string;
     let ownerAccount: AccountHandle;
     let ownerDbName: string;
-    let editorToken: string;
     let editorAccount: AccountHandle;
     let editorDbName: string;
     let session: { id: string };
@@ -105,7 +105,12 @@ describe("Wequencer cross-topology recovery", () => {
             restart: async () => {
               await owner.shutdown();
               ctx.untrack(owner);
-              owner = await openClient(server, "owner", ownerAccount, ownerDbName);
+              owner = await openClient(
+                { ...server, serverUrl: ownerUrl },
+                "owner",
+                ownerAccount,
+                ownerDbName,
+              );
             },
           },
           editor: {
@@ -136,15 +141,11 @@ describe("Wequencer cross-topology recovery", () => {
           },
           authorization: {
             failure: async () => {
-              const outsiderToken = await getJazzServerJwtForUser(
-                "wequencer-outsider",
-                undefined,
-                server.appId,
-              );
+              const outsiderUrl = await jazzAppUserUrl(server, "wequencer-outsider");
               const outsider = await openClient(
-                server,
+                { ...server, serverUrl: outsiderUrl },
                 "outsider",
-                await registerAccount(server, outsiderToken),
+                await signIn(server, outsiderUrl),
               );
               await expect(
                 outsider
@@ -163,31 +164,35 @@ describe("Wequencer cross-topology recovery", () => {
           {
             name: "owner bootstrap and editor admission",
             run: async () => {
-              server = await getJazzServerInfo(uniqueDbName("wequencer-topology"));
+              const core = await getJazzServerInfo(uniqueDbName("wequencer-topology"));
               await deploy({
-                appId: server.appId,
-                serverUrl: server.serverUrl,
-                adminSecret: server.adminSecret,
+                appId: core.appId,
+                serverUrl: core.serverUrl,
+                adminSecret: core.adminSecret,
                 schema: app,
                 permissions,
               });
-              const [issuedOwnerToken, issuedEditorToken] = await Promise.all([
-                getJazzServerJwtForUser("wequencer-owner", undefined, server.appId),
-                getJazzServerJwtForUser("wequencer-editor", undefined, server.appId),
+              server = await startJazzApp(core, { schema: app, permissions });
+              const [issuedOwnerUrl, editorUrl] = await Promise.all([
+                jazzAppUserUrl(server, "wequencer-owner"),
+                jazzAppUserUrl(server, "wequencer-editor"),
               ]);
-              ownerToken = issuedOwnerToken;
+              ownerUrl = issuedOwnerUrl;
               ownerDbName = uniqueDbName("wequencer-owner");
+              // The editor's faults partition only the editor: a proxy in
+              // front of their own origin, signed in as them.
               editorTransport = ctx.trackTransport(
-                await createJazzServerTransportControl(server.serverUrl),
+                await createJazzServerTransportControl(editorUrl),
               );
-              editorToken = issuedEditorToken;
               editorDbName = uniqueDbName("wequencer-editor");
-              ownerAccount = await registerAccount(server, ownerToken);
-              editorAccount = await registerAccount(
-                { ...server, serverUrl: editorTransport.url },
-                editorToken,
+              ownerAccount = await signIn(server, ownerUrl);
+              editorAccount = await signIn(server, editorTransport.url);
+              owner = await openClient(
+                { ...server, serverUrl: ownerUrl },
+                "owner",
+                ownerAccount,
+                ownerDbName,
               );
-              owner = await openClient(server, "owner", ownerAccount, ownerDbName);
               editor = await openClient(
                 { ...server, serverUrl: editorTransport.url },
                 "editor",
@@ -304,14 +309,7 @@ describe("Wequencer cross-topology recovery", () => {
                 .insert(app.session_members, {
                   session_id: session.id,
                   member_author: (
-                    await registerAccount(
-                      server,
-                      await getJazzServerJwtForUser(
-                        "wequencer-admin-proof",
-                        undefined,
-                        server.appId,
-                      ),
-                    )
+                    await signIn(server, await jazzAppUserUrl(server, "wequencer-admin-proof"))
                   ).id,
                   role: "viewer",
                 })
@@ -639,10 +637,8 @@ describe("Wequencer cross-topology recovery", () => {
           {
             name: "viewer and cross-session writes are rejected",
             run: async () => {
-              const viewerAccount = await registerAccount(
-                server,
-                await getJazzServerJwtForUser("wequencer-viewer", undefined, server.appId),
-              );
+              const viewerUrl = await jazzAppUserUrl(server, "wequencer-viewer");
+              const viewerAccount = await signIn(server, viewerUrl);
               await owner
                 .insert(app.session_members, {
                   session_id: session.id,
@@ -650,7 +646,11 @@ describe("Wequencer cross-topology recovery", () => {
                   role: "viewer",
                 })
                 .wait({ tier: "global" });
-              const viewer = await openClient(server, "viewer", viewerAccount);
+              const viewer = await openClient(
+                { ...server, serverUrl: viewerUrl },
+                "viewer",
+                viewerAccount,
+              );
               const viewerSteps = await waitForQuery(
                 viewer,
                 trackSteps(tracks[0].id, pattern.id),
@@ -777,6 +777,7 @@ function trackSteps(trackId: string, patternId: string) {
   return app.steps.where({ track_id: trackId, pattern_id: patternId }).orderBy("position", "asc");
 }
 
+/** A client syncing at a user's own origin (`serverUrl`, from `jazzAppUserUrl`) as `account`. */
 async function openClient(
   server: { appId: string; serverUrl: string },
   label: string,
@@ -793,14 +794,7 @@ async function openClient(
   );
 }
 
-async function registerAccount(
-  server: { appId: string; serverUrl: string },
-  jwtToken: string,
-): Promise<AccountHandle> {
-  const accounts = await createAccountManager({
-    appId: server.appId,
-    serverUrl: server.serverUrl,
-    env: `wequencer-topology-${crypto.randomUUID()}`,
-  });
-  return accounts.registerJWT(jwtToken);
+/** Sign in at a user's own origin (from `jazzAppUserUrl`, or a proxy in front of it). */
+function signIn(server: { appId: string }, userUrl: string): Promise<AccountHandle> {
+  return loginAtJazzAppUser(server.appId, userUrl);
 }

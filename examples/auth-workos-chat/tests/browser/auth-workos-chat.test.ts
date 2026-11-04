@@ -1,23 +1,42 @@
 /**
  * Jazz permission-DSL tests for auth-workos-chat.
  *
- * Mints WorkOS-shaped JWTs (role under `claims`, ES256) against a local
- * JWKS and asserts allow/deny outcomes for posting to ANNOUNCEMENTS_CHAT_ID
- * vs CHAT_ID.
+ * Signs test users in through the app's backend with the `role` claim its
+ * `authenticate` reads from a WorkOS session, or as a local-first guest, and
+ * asserts allow/deny outcomes for posting to ANNOUNCEMENTS_CHAT_ID vs CHAT_ID.
  *
  * NOT covered by `pnpm test`: the WorkOS OAuth flow, the
  * `@workos-inc/authkit-react` hook, or token refresh. Those are WorkOS's
- * responsibility — what matters here is that a verified JWT with a
+ * responsibility — what matters here is that a signed-in session with a
  * `role` claim is honoured by `definePermissions`.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { type JazzClient, createJazzClient } from "jazz-tools/react";
 import { createAccountManager, type AccountHandle } from "jazz-tools";
+import { deploy } from "../../../../packages/jazz-tools/src/dev/catalogue.js";
+import {
+  getJazzServerInfo,
+  signInWithJazzApp,
+  startJazzApp,
+  type JazzServerInfo,
+} from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import { app } from "../../schema.js";
+import permissions from "../../permissions.js";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "../../constants.js";
 
 const clients: JazzClient[] = [];
-const accountsByToken = new Map<string, Promise<AccountHandle>>();
+const accountsByRole = new Map<Role, Promise<{ serverUrl: string; account: AccountHandle }>>();
+let server: JazzServerInfo;
+
+type Role = "admin" | "member";
+
+// The app's backend (createJazz) in front of a test core, as the app runs
+// it. Its `authenticate` names each test user with their role claim.
+beforeAll(async () => {
+  const core = await getJazzServerInfo(__APP_ID__);
+  await deploy({ ...core, schema: app, permissions });
+  server = await startJazzApp(core, { schema: app, permissions });
+});
 
 afterEach(async () => {
   while (clients.length > 0) {
@@ -25,24 +44,27 @@ afterEach(async () => {
   }
 });
 
-async function makeClient(jwt?: string): Promise<JazzClient> {
-  const manager = await createAccountManager({ appId: __APP_ID__, serverUrl: __JAZZ_SERVER_URL__ });
-  let account: AccountHandle;
-  if (jwt) {
-    let registered = accountsByToken.get(jwt);
-    if (!registered) {
-      registered = manager.registerJWT({ getToken: async () => jwt });
-      accountsByToken.set(jwt, registered);
+/** A client signed in with `role`, or a local-first guest without one. */
+async function makeClient(role?: Role): Promise<JazzClient> {
+  let config: { serverUrl: string; account: AccountHandle };
+  if (role) {
+    let signedIn = accountsByRole.get(role);
+    if (!signedIn) {
+      signedIn = signInWithJazzApp(createAccountManager, server, `test-${role}`, { role });
+      accountsByRole.set(role, signedIn);
     }
-    account = await registered;
+    config = await signedIn;
   } else {
-    account = manager.createLocalFirst();
+    const manager = await createAccountManager({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+    });
+    config = { serverUrl: server.serverUrl, account: manager.createLocalFirst() };
   }
   const client = await createJazzClient({
-    appId: __APP_ID__,
-    serverUrl: __JAZZ_SERVER_URL__,
+    appId: server.appId,
     driver: { type: "memory" },
-    account,
+    ...config,
   });
   clients.push(client);
   return client;
@@ -71,29 +93,29 @@ async function remove(client: JazzClient, messageId: string): Promise<void> {
 }
 
 describe("auth-workos-chat permissions", () => {
-  it("admin JWT can post to Announcements and General", async () => {
-    const client = await makeClient(__ADMIN_JWT__);
+  it("an admin can post to Announcements and General", async () => {
+    const client = await makeClient("admin");
     await expect(send(client, ANNOUNCEMENTS_CHAT_ID, "admin-ann")).resolves.toEqual(
       expect.any(String),
     );
     await expect(send(client, CHAT_ID, "admin-gen")).resolves.toEqual(expect.any(String));
   });
 
-  it("member JWT is denied for Announcements but allowed for General", async () => {
-    const client = await makeClient(__MEMBER_JWT__);
+  it("a member is denied for Announcements but allowed for General", async () => {
+    const client = await makeClient("member");
     await expect(send(client, ANNOUNCEMENTS_CHAT_ID, "member-ann")).rejects.toThrow();
     await expect(send(client, CHAT_ID, "member-gen")).resolves.toEqual(expect.any(String));
   });
 
-  it("anonymous (no JWT) is denied for both chats", async () => {
+  it("a guest is denied for both chats", async () => {
     const client = await makeClient();
     await expect(send(client, ANNOUNCEMENTS_CHAT_ID, "anon-ann")).rejects.toThrow();
     await expect(send(client, CHAT_ID, "anon-gen")).rejects.toThrow();
   });
 
   it("keeps edits in their original chat while retaining admin and creator authority", async () => {
-    const admin = await makeClient(__ADMIN_JWT__);
-    const member = await makeClient(__MEMBER_JWT__);
+    const admin = await makeClient("admin");
+    const member = await makeClient("member");
 
     const announcementId = await send(admin, ANNOUNCEMENTS_CHAT_ID, "admin-ann");
     const adminGenericId = await send(admin, CHAT_ID, "admin-gen");

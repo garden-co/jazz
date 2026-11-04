@@ -10,18 +10,9 @@ import {
   type CreateJazzClient,
 } from "../react-core/provider.js";
 import { ConfiguredJazzAppProvider, type JazzAppViewProps } from "../react-core/app.js";
-import { authForUser, type JazzAuth } from "../session/app.js";
 import { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
-import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
+import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import { DevToolsAutoAttach } from "./devtools-auto-attach.js";
-
-// In dev builds, pull in a generated module that withJazz (next.ts/vite.ts/...)
-// rewrites on every schema push. The bundler tracks this as a dependency of the
-// React provider, so any push to the file forces a full reload of the host app
-// without each framework plugin needing its own dev-server WebSocket wiring.
-if (process.env.NODE_ENV === "development" && typeof window !== "undefined") {
-  import("jazz-tools/_dev/schema-hash").catch(() => {});
-}
 
 export { JazzClientProvider, type JazzClientProviderProps } from "../react-core/provider.js";
 
@@ -31,8 +22,12 @@ interface JazzClientContextValue {
   shutdown: CreatedJazzClient["shutdown"];
 }
 
-const createClient: CreateJazzClient = (config) =>
-  createJazzClient(config) as Promise<CreatedJazzClient>;
+// A provider given an explicit `config` opens the local-first client. It loads
+// on first use, so apps on the (default) thin client never bundle it eagerly.
+const createClient: CreateJazzClient = async (config) => {
+  const { createJazzClient } = await import("../web/create-jazz-client.js");
+  return (await createJazzClient(config)) as CreatedJazzClient;
+};
 
 type JazzProviderCommonProps = {
   fallback?: ReactNode;
@@ -43,15 +38,6 @@ type JazzProviderCommonProps = {
 
 export type JazzAppProviderProps = JazzSessionConfig &
   JazzAppViewProps<CreatedJazzClient> & {
-    /**
-     * Who your auth library says is signed in: `undefined` while it loads,
-     * `null` when signed out, and the user's stable id when signed in. When it
-     * changes, Jazz signs in again through your backend, whose `authenticate`
-     * decides who the user is; `null` closes the account's client and shows
-     * `signedOut`.
-     */
-    user?: string | null;
-    auth?: JazzAuth;
     autoAttachDevTools?: boolean;
   };
 export type JazzProviderProps =
@@ -108,22 +94,11 @@ export { useSession };
 export type { JazzClientContextValue };
 
 function ApplicationJazzProvider(props: JazzAppProviderProps) {
-  const {
-    auth: explicitAuth,
-    user,
-    children,
-    signedOut,
-    loading,
-    error,
-    autoAttachDevTools,
-    ...config
-  } = props;
+  const { children, signedOut, loading, error, autoAttachDevTools, ...config } = props;
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
-  const auth = authForUser(Object.hasOwn(props, "user"), user, explicitAuth);
   return (
     <ConfiguredJazzAppProvider
-      config={{ ...config, initial: config.initial ?? (auth ? undefined : "local-first") }}
-      auth={auth}
+      config={config}
       createJazzSession={createJazzSession}
       signedOut={signedOut}
       loading={loading === undefined ? <p role="status">Loading…</p> : loading}

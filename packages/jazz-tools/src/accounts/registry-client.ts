@@ -13,22 +13,29 @@ export class AccountAuthError extends Error {
   }
 }
 
-/** Shared bearer-only account protocol; never substitute a backend credential. */
-export async function requestAccountRegistry(
+/**
+ * The app's backend vouches to the core's registry for an identity it
+ * verified itself, with its backend secret: resolve its account
+ * (`resolve`), create it on first sign-in (`login-or-register`), or found a
+ * local-first guest's (`found-local-first`). `registry` is the app's
+ * `/accounts` URL; these routes live under `/admin/accounts`.
+ */
+export async function requestVouchedAccount(
   registry: string,
-  path: string,
-  token: string,
-  body?: unknown,
+  operation: "resolve" | "login-or-register" | "found-local-first",
+  identity: AccountIdentity,
+  backendSecret: string,
   fetcher: typeof fetch = fetchFor(registry),
 ): Promise<unknown> {
+  const admin = registry.replace(/\/accounts\/?$/, "/admin/accounts");
   return withAuthRequestDeadline(async (signal) => {
-    const response = await fetcher(`${registry}/${path}`, {
+    const response = await fetcher(`${admin}/${operation}`, {
       signal,
       method: "POST",
       credentials: "omit",
       redirect: "error",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      headers: { "X-Jazz-Backend-Secret": backendSecret, "Content-Type": "application/json" },
+      body: JSON.stringify({ identity }),
     });
     if (!response.ok) {
       const code = await response.text();

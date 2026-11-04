@@ -15,8 +15,7 @@ const JAZZ_CLOUD_SYNC_URL = "https://v2.sync.jazz.tools/";
 const BUNDLER_ITEMS = ["Vite", "Next.js", "SvelteKit", "Expo"] as const;
 type Bundler = (typeof BUNDLER_ITEMS)[number];
 
-// Client-exposed env var prefix per bundler, matching the dev plugins.
-// SvelteKit covers both SvelteKit itself and Svelte+Vite via jazzSvelteKit.
+// The env var prefix each bundler exposes to client code.
 const CLIENT_PREFIX: Record<Bundler, string> = {
   Vite: "VITE_",
   "Next.js": "NEXT_PUBLIC_",

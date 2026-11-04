@@ -3,7 +3,7 @@ import { schema as s } from "../schema-namespace.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { definePermissions } from "../permissions/index.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startLocalJazzServer, startTestJazz, type TestJazz } from "../testing/index.js";
 
 it.each(["inline", "large"])(
   "reads a nested reference inside a transaction without encryption (%s)",
@@ -23,12 +23,11 @@ it.each(["inline", "large"])(
     );
     const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
+    let front: TestJazz | undefined;
     try {
-      await deploy({
-        serverUrl: server.url,
-        appId: server.appId,
-        adminSecret: server.adminSecret,
-        schema: app,
+      front = await startTestJazz({
+        core: server,
+        app,
         permissions: definePermissions(app, ({ policy }) => {
           policy.projects.allowRead.always();
           policy.projects.allowInsert.always();
@@ -36,7 +35,7 @@ it.each(["inline", "large"])(
           policy.notes.allowInsert.always();
         }),
       });
-      db = await createDb(await localAccountConfig(server.appId, server.url));
+      db = await createDb(await localAccountConfig(server.appId, front.url));
       const project = db.insert(app.projects, { title: "Project" });
       await project.wait({ tier: "global" });
       const note = db.insert(app.notes, {
@@ -60,6 +59,7 @@ it.each(["inline", "large"])(
       }
     } finally {
       await db?.shutdown();
+      await front?.stop();
       await server.stop();
     }
   },
@@ -81,12 +81,11 @@ it.each(["local-first", "remote"] as const)(
     );
     const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
+    let front: TestJazz | undefined;
     try {
-      await deploy({
-        serverUrl: server.url,
-        appId: server.appId,
-        adminSecret: server.adminSecret,
-        schema: app,
+      front = await startTestJazz({
+        core: server,
+        app,
         permissions: definePermissions(app, ({ policy }) => {
           policy.parent.allowRead.always();
           policy.parent.allowInsert.always();
@@ -94,7 +93,7 @@ it.each(["local-first", "remote"] as const)(
           policy.child.allowInsert.always();
         }),
       });
-      db = await createDb(await localAccountConfig(server.appId, server.url));
+      db = await createDb(await localAccountConfig(server.appId, front.url));
       const parent = await db.insert(app.parent, { name: "Parent" }).wait({ tier: "global" });
       const child = await db
         .insert(app.child, { parentId: parent.id, name: "Child", metadata: { value: 1 } })
@@ -106,6 +105,7 @@ it.each(["local-first", "remote"] as const)(
       expect(await write.wait()).toEqual(expected);
     } finally {
       await db?.shutdown();
+      await front?.stop();
       await server.stop();
     }
   },
