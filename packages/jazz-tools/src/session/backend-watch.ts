@@ -14,6 +14,14 @@ export interface BackendWatchEvents {
   isVisible?(): boolean;
 }
 
+/**
+ * Who the backend says is signed in. `hasAccount: false` means the core holds
+ * no account for them yet (they just signed up), so a local-first guest on
+ * this device links to them and keeps its data. Left out, the user is taken
+ * to have one.
+ */
+export type BackendUser = AccountIdentity & { hasAccount?: boolean };
+
 export interface BackendWatch {
   /** The sync server refused this client's sign-in: ask the backend whether it still holds. */
   authRefused(): void;
@@ -27,6 +35,12 @@ export interface BackendWatch {
    * session in error for the same user retries.
    */
   reauthenticate(): Promise<void>;
+  /**
+   * The guest link this watch started and that is still running, if any, and
+   * the account its last link ended on. An app that calls `linkWithBackend`
+   * itself after its sign-up can then join the link the watch already made.
+   */
+  readonly linking: { done: Promise<void>; result: unknown } | undefined;
   stop(): void;
 }
 
@@ -39,7 +53,12 @@ export interface BackendWatch {
  * - A signed-out answer signs out a backend user, once a second answer
  *   `confirmMs` later agrees, so one failed session refresh in `authenticate`
  *   doesn't sign anyone out (or, with `clearOnSignOut`, wipe their writes).
- * - A local-first guest stays a guest until someone signs in.
+ * - A local-first guest stays a guest until someone signs in. When the user
+ *   who signs in has no account yet (they just signed up), the guest links to
+ *   them (`linkWithBackend`), so everything it wrote stays theirs, however
+ *   the session found out: the app's `reauthenticate`, focus after a popup or
+ *   the first check after a sign-up redirect. A user who already has an
+ *   account is signed in instead; the guest stays on this device.
  *
  * The app calls `reauthenticate` after its own sign-in or sign-out, so the
  * session follows at once.
@@ -53,7 +72,7 @@ export interface BackendWatch {
  */
 export function watchBackendUser<Client>(
   session: JazzSession<Client>,
-  probe: () => Promise<AccountIdentity | null>,
+  probe: () => Promise<BackendUser | null>,
   events: BackendWatchEvents,
   options: {
     confirmMs?: number;
@@ -88,6 +107,7 @@ export function watchBackendUser<Client>(
     refusedConfirm = undefined;
   };
   let stopped = false;
+  let linking: { done: Promise<void>; result: unknown } | undefined;
   let checking: Promise<void> | undefined;
   // Checks asked for while one runs: a plain one (may sign out), a refused
   // one (only reconnects) and an asked one (the app's auth changed: no
@@ -108,7 +128,7 @@ export function watchBackendUser<Client>(
   // its auth changed is how it recovers.
   const askable = () => settled() || session.getSnapshot().status === "error";
   const quiet = (asked = false) => stopped || !(asked ? askable() : settled());
-  async function ask(): Promise<AccountIdentity | null | { failed: unknown }> {
+  async function ask(): Promise<BackendUser | null | { failed: unknown }> {
     try {
       return await probe();
     } catch (cause) {
@@ -160,6 +180,23 @@ export function watchBackendUser<Client>(
       if (refused) return;
       if (backendUser) await attempt(session.logout());
       if (quiet(asked)) return busy();
+      // A guest of this device and a user with no account yet: link them,
+      // never sign the user in first (that would give them an account of
+      // their own, and the guest could never link to them after).
+      const guest = current?.issuer === LOCAL_FIRST_ISSUER;
+      if (guest && signedIn.hasAccount === false) {
+        const link = { done: session.linkWithBackend(), result: undefined as unknown };
+        linking = link;
+        link.done.then(
+          () => {
+            link.result = session.getSnapshot().account;
+          },
+          () => {
+            if (linking === link) linking = undefined;
+          },
+        );
+        return attempt(link.done);
+      }
       return attempt(session.loginWithBackend());
     }
     if (!backendUser) return;
@@ -265,6 +302,9 @@ export function watchBackendUser<Client>(
       check(true);
     },
     connected: resetRefusal,
+    get linking() {
+      return linking;
+    },
     reauthenticate() {
       const done = new Promise<void>((resolve, reject) => waiters.push({ resolve, reject }));
       whenSettled(() => check(false, true));

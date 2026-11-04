@@ -429,3 +429,114 @@ it("runs a focus check that arrives during a refused check as its own check", as
   t.watch.stop();
   await t.session.close();
 });
+
+it("links a guest to a user who has no account yet, however the watch finds out", async () => {
+  for (const trigger of ["start", "focus", "reauthenticate"] as const) {
+    let backendUser: AccountHandle | null = trigger === "start" ? user("alice") : null;
+    const linkWithBackend = vi.fn(async () => user("alice"));
+    const loginWithBackend = vi.fn(async () => backendUser!);
+    let focus: (() => void) | undefined;
+    const accounts = new AccountManager(
+      { createLocalFirst: () => guest, loginWithBackend, linkWithBackend, logout() {} },
+      guest,
+    );
+    const session = await createJazzSessionOwner({
+      accounts,
+      openClient: async () => ({ shutdown: async () => {} }),
+    });
+    const watch = watchBackendUser(
+      session,
+      async () => (backendUser ? { ...backendUser.identity, hasAccount: false } : null),
+      {
+        onFocus(check) {
+          focus = check;
+          return () => (focus = undefined);
+        },
+      },
+    );
+    await settle();
+    backendUser = user("alice");
+    if (trigger === "focus") focus?.();
+    if (trigger === "reauthenticate") await watch.reauthenticate();
+    await settle();
+    expect(linkWithBackend, trigger).toHaveBeenCalledOnce();
+    expect(loginWithBackend, trigger).not.toHaveBeenCalled();
+    expect(session.getSnapshot().account?.identity.subject).toBe("alice");
+    watch.stop();
+    await session.close();
+  }
+});
+
+it("signs a guest in as a user who already has an account, without linking", async () => {
+  const linkWithBackend = vi.fn(async () => user("alice"));
+  const loginWithBackend = vi.fn(async () => user("alice"));
+  const session = await createJazzSessionOwner({
+    accounts: new AccountManager(
+      { createLocalFirst: () => guest, loginWithBackend, linkWithBackend, logout() {} },
+      guest,
+    ),
+    openClient: async () => ({ shutdown: async () => {} }),
+  });
+  const watch = watchBackendUser(
+    session,
+    async () => ({ ...user("alice").identity, hasAccount: true }),
+    { onFocus: () => () => {} },
+  );
+  await settle();
+  expect(loginWithBackend).toHaveBeenCalledOnce();
+  expect(linkWithBackend).not.toHaveBeenCalled();
+  watch.stop();
+  await session.close();
+});
+
+it("an app's own linkWithBackend after sign-up joins the link the watch started", async () => {
+  let signedUp = false;
+  let releaseLink!: () => void;
+  const linkWithBackend = vi.fn(
+    () => new Promise<AccountHandle>((resolve) => (releaseLink = () => resolve(user("alice")))),
+  );
+  const fetch = vi.fn(async (url: string) => {
+    expect(url).toMatch(/\/backend-user$/);
+    return signedUp
+      ? Response.json({ account: null, identity: user("alice").identity })
+      : new Response("signed_out", { status: 401 });
+  });
+  let focus: (() => void) | undefined;
+  const following = await createJazzSessionOwner({
+    accounts: new AccountManager(
+      {
+        createLocalFirst: () => guest,
+        logout() {},
+        loginWithBackend: async () => user("alice"),
+        linkWithBackend,
+      },
+      guest,
+    ),
+    decorate: followUser({
+      registry: "https://app.example.test/jazz/apps/x/accounts",
+      events: {
+        onFocus(check) {
+          focus = check;
+          return () => (focus = undefined);
+        },
+      },
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    }),
+    openClient: async () => ({ shutdown: async () => {} }),
+  });
+  await settle();
+  // The sign-up's popup closes: focus returns and the watch starts the link.
+  signedUp = true;
+  focus?.();
+  await settle();
+  expect(linkWithBackend).toHaveBeenCalledOnce();
+  // The app's own call after its sign-up joins it instead of failing as busy.
+  const joined = following.linkWithBackend();
+  releaseLink();
+  await joined;
+  expect(following.getSnapshot().account?.identity.subject).toBe("alice");
+  // And once it is done, a late call is a no-op too.
+  await following.linkWithBackend();
+  expect(linkWithBackend).toHaveBeenCalledOnce();
+  await following.close();
+});

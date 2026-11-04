@@ -1092,6 +1092,35 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
 
   /**
+   * Who `request`'s user is, without changing anything: the user
+   * `authenticate` names, and whether the core already holds an account for
+   * them. A browser's session asks this to follow the backend; only a sign-in
+   * (`backend-sign-in`) or a link (`backend-link`) assigns an account, so a
+   * local-first guest whose user has none yet can still link to them.
+   */
+  async function backendUser(request: Request): Promise<Response> {
+    if (request.method !== "POST") return new Response(null, { status: 405 });
+    const user = await authenticate(request);
+    if (!user) return new Response("signed_out", { status: 401 });
+    let account: string | null;
+    const cached = accounts.get(user.userId);
+    if (cached && cached.until > Date.now()) {
+      account = cached.account;
+    } else {
+      try {
+        ({ account } = await adminAccounts("resolve", { identity: identity(user.userId) }));
+      } catch (error) {
+        if ((error as { status?: number }).status !== 404) throw error;
+        account = null;
+      }
+    }
+    return Response.json(
+      { account, identity: identity(user.userId), claims: user.claims ?? {} },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
+  /**
    * Link challenges: a guest links only on a proof made for one challenge,
    * never on its sync token, so a leaked token can't link it to someone
    * else. A challenge names the user it links to and expires quickly; it is
@@ -1824,6 +1853,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     }
     if (/^\/apps\/[^/]+\/accounts\/backend-sign-in$/.test(path)) {
       return backendSignIn(request);
+    }
+    if (/^\/apps\/[^/]+\/accounts\/backend-user$/.test(path)) {
+      return backendUser(request);
     }
     if (/^\/apps\/[^/]+\/backend\/admit$/.test(path)) {
       return admitBackendClient(request);

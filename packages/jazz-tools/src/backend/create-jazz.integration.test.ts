@@ -665,6 +665,53 @@ describe("createJazz", () => {
     60_000,
   );
 
+  it("says who is signed in without giving them an account, so a guest can still link", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate });
+    const appId = jazz.appId;
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const accounts = `${origin}/jazz/apps/${appId}/accounts`;
+    const post = (path: string, user?: string, body?: unknown) =>
+      fetch(`${accounts}/${path}`, {
+        method: "POST",
+        headers: {
+          ...(user ? { "x-test-user": user } : {}),
+          "content-type": "application/json",
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    expect((await post("backend-user")).status).toBe(401);
+    // Asked as often as a page focuses, it never assigns an account.
+    for (let i = 0; i < 2; i++) {
+      const answer = (await (await post("backend-user", "alice")).json()) as {
+        account: string | null;
+        identity: { issuer: string; subject: string };
+      };
+      expect(answer.account).toBeNull();
+      expect(answer.identity).toEqual({ issuer: `jazz:app:${appId}`, subject: "alice" });
+    }
+    // So the guest's link to alice still goes through, and the answer names
+    // the guest's account from then on.
+    const secret = generateSecret();
+    const { challenge } = (await (await post("backend-link/challenge", "alice")).json()) as {
+      challenge: string;
+    };
+    const linked = await post("backend-link", "alice", {
+      challenge,
+      proof: signChallenge(secret, challenge),
+    });
+    expect(linked.status).toBe(200);
+    const { account } = (await linked.json()) as { account: string };
+    const after = (await (await post("backend-user", "alice")).json()) as { account: string };
+    expect(after.account).toBe(account);
+    // A user who signed in has an account; a GET is refused.
+    await post("backend-sign-in", "bob");
+    expect(
+      ((await (await post("backend-user", "bob")).json()) as { account: string | null }).account,
+    ).not.toBeNull();
+    expect((await fetch(`${accounts}/backend-user`)).status).toBe(405);
+  });
+
   it("revokes the guest key on a retry when the first link's revoke didn't happen", async () => {
     const appId = randomUUID();
     const core = await startLocalJazzServer({ appId, inMemory: true });

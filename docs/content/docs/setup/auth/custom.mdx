@@ -114,6 +114,12 @@ The guest proves itself with its own local-first key; your backend checks that t
 user opens the guest's account and everything it wrote. An identity belongs to one account only,
 so linking a user who already has an account fails: Jazz doesn't merge accounts.
 
+The session links the guest on its own too, whenever it finds a signed-in user who has no Jazz
+account yet: after `reauthenticate()`, when the page regains focus after a sign-up popup, or on the
+first check after a sign-up redirect. Asking who is signed in never creates an account, so a sign-up
+can't race the link. A `linkWithBackend()` call that arrives while that link runs, or after it, joins
+it.
+
 To link from your own backend code instead (a second sign-in method, an anonymous id your app
 issued), call `jazz.linkIdentity({ from, to })`.
 
