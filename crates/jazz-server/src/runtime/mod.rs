@@ -365,6 +365,9 @@ struct ChunkIoRunner {
     /// Consecutive failed batches, and when the next may start.
     failures: std::cell::Cell<u32>,
     not_before: std::cell::Cell<Option<std::time::Instant>>,
+    /// The workload token generation the last failure saw: a fresh token
+    /// (often what the failure lacked) ends the wait.
+    failed_on_token: std::cell::Cell<u64>,
     /// Dropped to cancel the batch in flight.
     cancel: Option<futures::channel::oneshot::Sender<()>>,
     /// Disconnects once the thread has ended.
@@ -410,20 +413,16 @@ impl ChunkIoRunner {
             out: std::cell::Cell::new(false),
             failures: std::cell::Cell::new(0),
             not_before: std::cell::Cell::new(None),
+            failed_on_token: std::cell::Cell::new(0),
             cancel: Some(cancel),
             ended,
         })
     }
 
     /// Hand the runtime's next batch over, unless one is out or the last
-    /// failed too recently.
+    /// failed too recently and no fresh workload token arrived since.
     fn pump(&self, owner: &Owner) {
-        if self.out.get()
-            || self
-                .not_before
-                .get()
-                .is_some_and(|at| std::time::Instant::now() < at)
-        {
+        if !self.may_start() {
             return;
         }
         match owner.db.take_chunk_io() {
@@ -438,6 +437,28 @@ impl ChunkIoRunner {
             Ok(None) => {}
             Err(error) => tracing::warn!(%error, "take large-value store I/O"),
         }
+    }
+
+    /// Whether a batch may start: none is out, and the last failure's
+    /// backoff is over or a fresh workload token arrived since (which ends
+    /// it).
+    fn may_start(&self) -> bool {
+        if self.out.get() {
+            return false;
+        }
+        if self
+            .not_before
+            .get()
+            .is_some_and(|at| std::time::Instant::now() < at)
+        {
+            if crate::middleware::workload::workload_token_generation()
+                == self.failed_on_token.get()
+            {
+                return false;
+            }
+            self.not_before.set(None);
+        }
+        true
     }
 
     /// A batch came back; `failed` delays the next. Returns whether to log
@@ -457,6 +478,8 @@ impl ChunkIoRunner {
             .unwrap_or(longest)
             .min(longest);
         self.not_before.set(Some(std::time::Instant::now() + wait));
+        self.failed_on_token
+            .set(crate::middleware::workload::workload_token_generation());
         failures == 1 || wait == longest
     }
 }
@@ -2999,5 +3022,23 @@ mod tests {
         );
         assert!(!runner.returned(false));
         assert_eq!(wait(&runner), None);
+    }
+
+    /// A batch backed off after failing goes again once a fresh workload
+    /// token arrives, rather than waiting out the backoff on a stale one.
+    #[test]
+    fn a_fresh_workload_token_ends_the_chunk_io_backoff() {
+        let (work, _work) = std_mpsc::channel();
+        let store: Arc<dyn jazz::chunk_store::ChunkStore> = Arc::new(
+            jazz::chunk_store::FileChunkStore::new(tempfile::tempdir().unwrap().keep()).unwrap(),
+        );
+        let runner = ChunkIoRunner::start(store, work).unwrap();
+        for _ in 0..7 {
+            runner.returned(true);
+        }
+        assert!(!runner.may_start(), "backed off");
+        crate::middleware::workload::bump_workload_token_generation_for_test();
+        assert!(runner.may_start(), "a fresh token ends the wait");
+        assert_eq!(runner.not_before.get(), None);
     }
 }
