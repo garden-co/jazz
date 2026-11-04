@@ -110,6 +110,8 @@ jobs:
         run: cargo test -p jazz-native-relay --example rn_server_session_harness --no-fail-fast
       - name: Build the React Native JavaScript workspace entrypoints
         run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
+      - name: Build the Node runtime of the device app's backend
+        run: pnpm --filter rn-device-acceptance build:device-backend
       - name: Build and stage the relay XCFramework
         run: |
           pnpm --filter jazz-rn build:relay:ios
@@ -195,6 +197,8 @@ jobs:
         run: cargo test -p jazz-native-relay --example rn_server_session_harness --no-fail-fast
       - name: Build the React Native JavaScript workspace entrypoints
         run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
+      - name: Build the Node runtime of the device app's backend
+        run: pnpm --filter rn-device-acceptance build:device-backend
       - name: Bootstrap pinned lane-local Android toolchain
         run: dev/rn-device-acceptance/scripts/bootstrap-android.sh --emulator
       - name: Stage and verify all relay ABI artifacts
