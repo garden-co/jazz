@@ -177,7 +177,6 @@ To test your real `authenticate` instead of the stand-in, run `createJazz` with 
 store and sign in through it the way the browser does:
 
 ```typescript custom="noscroll"
-import { randomUUID } from "node:crypto";
 import { afterEach, expect, it } from "vitest";
 import { createJazz, memory, type Jazz } from "jazz-tools/backend";
 import permissions from "../permissions.js";
@@ -187,19 +186,19 @@ let jazz: Jazz | undefined;
 afterEach(() => jazz?.close());
 
 it("signs in the user authenticate names", async () => {
-  const appId = randomUUID();
   jazz = createJazz({
     app,
     permissions,
-    store: memory({ appId }),
+    store: memory(),
     // In tests, the user is named in a header instead of your session cookie.
     authenticate: (request) => {
       const userId = request.headers.get("x-test-user");
       return userId ? { userId, claims: { role: "admin" } } : null;
     },
   });
+  await jazz.ready(); // jazz.appId is known once the store is open
   const response = await jazz.handle(
-    new Request(`http://app/jazz/apps/${appId}/accounts/backend-sign-in`, {
+    new Request(`http://app/jazz/apps/${jazz.appId}/accounts/backend-sign-in`, {
       method: "POST",
       headers: { "x-test-user": "alice" },
     }),
