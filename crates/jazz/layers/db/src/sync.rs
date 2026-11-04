@@ -2356,6 +2356,15 @@ impl Watches {
         self.holders.contains_key(key)
     }
 
+    /// Whether an owner other than `owner` holds `key`.
+    fn held_by_other(&self, owner: u64, key: u64) -> bool {
+        let mine = self
+            .by_owner
+            .get(&owner)
+            .is_some_and(|keys| keys.contains(&key));
+        self.holders.get(&key).copied().unwrap_or(0) > u32::from(mine)
+    }
+
     /// Hold `key` for `owner`: (whether the session did not watch it yet,
     /// whether `owner` did not hold it yet).
     fn hold(&mut self, owner: u64, key: u64) -> (bool, bool) {
@@ -4995,28 +5004,6 @@ pub(crate) const WITHHELD_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_withheld
 const WATERMARKS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_watermarks \
     (key BLOB PRIMARY KEY, through INTEGER NOT NULL, context BLOB) WITHOUT ROWID";
 
-/// Forget watermarks a development store kept before they recorded the
-/// read context they were settled in (`context`): which bundle and
-/// claims each was read under is unknown, so none may resume a read. Watermarks only
-/// spare a reconnect the rows it already holds, so a read without one
-/// opens fresh and loses nothing. One statement, so a crash leaves either
-/// the old table or none.
-pub(crate) fn forget_unbundled_watermarks(conn: &rusqlite::Connection) -> Result<(), Error> {
-    let stale: bool = conn
-        .query_row(
-            "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' \
-             AND name = '_jazz_watermarks' AND sql NOT LIKE '%context BLOB%'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(storage)?;
-    if stale {
-        conn.execute_batch("DROP TABLE _jazz_watermarks")
-            .map_err(storage)?;
-    }
-    Ok(())
-}
-
 /// A remote query's `_jazz_watermarks` key: what it reads, and as whom.
 /// How far it reaches (tier and wait) is not part of it: every tier's
 /// result settles from the same server state.
@@ -6234,7 +6221,7 @@ impl Inner {
         // Membership inputs: every table the read and its policies read
         // (its own included: a filter or policy may read other rows of
         // it), and the supporting tables with their policies' inputs.
-        let mut inputs = self.read_dependencies(prepared, identity)?;
+        let mut inputs = self.read_dependencies_in(prepared, identity, read)?;
         // The policies that govern the read: a pinned session's bundle's,
         // as `read_dependencies` takes them.
         let policies = prepared
@@ -10566,8 +10553,10 @@ impl Db {
                 }
                 // Rows the client held in the result as of `since` that are
                 // in it no more, though they need not have changed (their
-                // membership inputs did): each ships as it is now, or its
-                // eviction.
+                // membership inputs did). The opening's listing evicts them
+                // from the replica, as a fresh opening would, unless another
+                // of the session's subscriptions still watches one, or it was
+                // deleted: that one ships as it is now, or its eviction.
                 if let (Some(prior), Some(group)) = (
                     resume.as_ref().and_then(|resume| resume.prior.as_ref()),
                     group.upgrade(),
@@ -10575,13 +10564,28 @@ impl Db {
                     let group = group.borrow();
                     let table = group.root().to_owned();
                     let now: HashSet<RowUuid> = group.rows.iter().map(|row| row.id).collect();
+                    let watched = |row: &RowUuid| {
+                        watch.held_by_other(
+                            id,
+                            wk((
+                                table.clone(),
+                                "id".to_owned(),
+                                watch_key(&Sql::Blob(row.0.as_bytes().to_vec())),
+                            )),
+                        )
+                    };
                     let gone = inner.rows_images(
                         &table,
                         prior.iter().filter(|row| !now.contains(row)).copied(),
                     )?;
                     for (row, images) in gone {
+                        let watched = watched(&row);
                         for image in images {
-                            touched.insert((table.clone(), row, image.key));
+                            // A deletion is a change the client learns of
+                            // as such; it leaves the result by itself.
+                            if watched || image.deleted {
+                                touched.insert((table.clone(), row, image.key));
+                            }
                         }
                     }
                 }
@@ -13162,45 +13166,6 @@ impl Db {
 mod tests {
     use super::*;
     use crate::ids::NodeUuid;
-
-    #[test]
-    fn watermarks_from_before_bundles_are_forgotten_and_current_ones_kept() {
-        let tables = |conn: &rusqlite::Connection| -> i64 {
-            conn.query_row(
-                "SELECT count(*) FROM sqlite_master WHERE name = '_jazz_watermarks'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap()
-        };
-        let old = rusqlite::Connection::open_in_memory().unwrap();
-        old.execute_batch(
-            "CREATE TABLE _jazz_watermarks (key BLOB PRIMARY KEY, through INTEGER NOT NULL) \
-             WITHOUT ROWID; INSERT INTO _jazz_watermarks VALUES (x'01', 5);",
-        )
-        .unwrap();
-        forget_unbundled_watermarks(&old).unwrap();
-        assert_eq!(
-            tables(&old),
-            0,
-            "a watermark of unknown bundle cannot resume"
-        );
-
-        let current = rusqlite::Connection::open_in_memory().unwrap();
-        current.execute_batch(WATERMARKS_DDL).unwrap();
-        current
-            .execute("INSERT INTO _jazz_watermarks VALUES (x'01', 5, NULL)", [])
-            .unwrap();
-        forget_unbundled_watermarks(&current).unwrap();
-        let kept: i64 = current
-            .query_row("SELECT count(*) FROM _jazz_watermarks", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(kept, 1);
-
-        let none = rusqlite::Connection::open_in_memory().unwrap();
-        forget_unbundled_watermarks(&none).unwrap();
-        assert_eq!(tables(&none), 0, "nothing is created");
-    }
 
     #[test]
     fn replace_name_rewrites_only_whole_names() {
