@@ -632,16 +632,9 @@ export async function verifyExternalJwt(
     try {
       await verifyJwtSignatureWithJwks(token, jwks);
     } catch {
-      try {
-        jwks = await getRemoteJwksDocument(config.jwksUrl, true);
-      } catch (refreshError) {
-        // The cached keys don't verify this token and the provider can't
-        // be reached for new ones: the token is refused, not the server.
-        throw new RequestAuthenticationError(
-          "Invalid JWT: no cached key verifies it, and the JWKS could not be refreshed",
-          { cause: refreshError },
-        );
-      }
+      // A refresh that fails throws, so the client retries; it also starts
+      // the cooldown, after which an unknown key is refused from the cache.
+      jwks = await getRemoteJwksDocument(config.jwksUrl, true);
       try {
         await verifyJwtSignatureWithJwks(token, jwks);
       } catch (refreshError) {

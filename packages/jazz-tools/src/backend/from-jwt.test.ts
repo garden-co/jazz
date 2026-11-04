@@ -181,7 +181,7 @@ describe("fromJWT", () => {
     await expect(authenticate(request(await sign({})))).rejects.toThrow(/Unable to fetch JWKS/);
   });
 
-  it("signs out an unknown key during an outage without refetching on every request", async () => {
+  it("retries one refresh for an unknown key during an outage, then signs it out", async () => {
     let up = true;
     const fetch = vi.fn(async () =>
       up ? Response.json({ keys: [jwk] }) : new Response("down", { status: 503 }),
@@ -192,7 +192,9 @@ describe("fromJWT", () => {
     vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 31_000 });
     up = false;
     const unknown = await sign({}, { key: otherKey, kid: "k9" });
-    expect(await authenticate(request(unknown))).toBeNull();
+    // The refresh fails: the request throws, so the client retries.
+    await expect(authenticate(request(unknown))).rejects.toThrow(/JWKS/);
+    // Within the cooldown no refetch: the cached keys refuse it.
     expect(await authenticate(request(unknown))).toBeNull();
     expect(await authenticate(request(unknown))).toBeNull();
     // One refresh attempt, then the cooldown holds; known keys still work.
