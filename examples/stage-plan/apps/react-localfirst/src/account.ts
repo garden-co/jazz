@@ -4,7 +4,14 @@ import type { JazzSessionConfig } from "jazz-tools/client";
  * A local-first account, like the todo example: no sign-up, the browser
  * profile holds the account secret. Crew join shows through invite links.
  */
-export function sessionConfig(overrides: Partial<JazzSessionConfig> = {}): JazzSessionConfig {
+/**
+ * Tests point the app at a sync server by its app id; a browser client takes
+ * that as its `scope` (it names no app of its own).
+ */
+type SessionOverrides = Omit<Partial<JazzSessionConfig>, "appId"> & { appId?: string };
+
+export function sessionConfig({ appId, ...rest }: SessionOverrides = {}): JazzSessionConfig {
+  const overrides = appId === undefined ? rest : { ...rest, scope: appId };
   // The app's backend serves Jazz on this origin (`/jazz`), so it needs no URL.
   return {
     env: "dev",

@@ -9,7 +9,7 @@ import type { Db, Jazz } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-const { createJazz, memory, sqlite } = createRequire(import.meta.url)(
+const { acceptLocalFirstAuth, createJazz, memory, sqlite } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
@@ -26,6 +26,8 @@ export function jazz(): Promise<Jazz> {
   const pending = (globalState.__jazzNextCsrSsr ??= createJazz({
     app: schemaApp,
     permissions,
+    // No sign-in: every browser is a guest, so let guests sync.
+    authenticate: acceptLocalFirstAuth,
     store: process.env.JAZZ_IN_MEMORY === "1" ? memory() : sqlite({ path: ".jazz" }),
   }).ready());
   // A failed start must not poison every later request.

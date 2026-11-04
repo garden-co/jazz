@@ -6,7 +6,6 @@ export function RuntimeConfigExample(props: ParentProps<{ account: AccountHandle
   return (
     <JazzProvider
       config={{
-        appId: "my-app",
         account: props.account, // Prepare with these same runtimeSources.
         serverUrl: "https://my-jazz-server.example.com",
         runtimeSources: {

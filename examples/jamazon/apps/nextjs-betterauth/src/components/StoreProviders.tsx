@@ -10,7 +10,6 @@ import type { Db } from "jazz-tools";
 import { JazzProvider, useDb, useJazzAuth, useSession } from "jazz-tools/react";
 import { createContext, useContext, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { authClient } from "@/src/lib/auth-client";
-import { LOCAL_DEFAULTS } from "@/src/lib/build-config.mjs";
 import { claimGuestCart, readGuestCart, type GuestCartLine } from "@/src/store/cart";
 import { StoreShell } from "./StoreShell";
 
@@ -18,9 +17,6 @@ import { StoreShell } from "./StoreShell";
 // offline writes) in its own chunk once the page has loaded.
 const loadLocalFirst = () => import("jazz-tools/local-first");
 
-const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID || LOCAL_DEFAULTS.appId;
-// Accounts the store's backend signs in are issued by this app.
-const backendIssuer = "jazz:backend";
 const GUEST_CART_KEY = "jamazon:guest-cart-to-claim";
 
 // Set while a sign-in, sign-up or sign-out runs, so the restore effect below
@@ -56,7 +52,6 @@ export function StoreProviders({ children }: { children: ReactNode }) {
   return (
     <Theme theme={jazzTheme} mode="system">
       <JazzProvider
-        appId={appId}
         serverUrl="/jazz"
         client={loadLocalFirst}
         initial="local-first"
@@ -98,7 +93,8 @@ function ShopperProvider({ children }: { children: ReactNode }) {
   const { sessionActions: actions, account: handle } = useJazzAuth();
   const { data: auth, isPending, error: authError } = authClient.useSession();
   const account = session?.user.account ?? handle?.id ?? "";
-  const isSignedIn = handle?.identity.issuer === backendIssuer;
+  // Signed in: an account the backend names, not this browser's guest.
+  const isSignedIn = !!handle && handle.identity.issuer !== "urn:jazz:local-first";
 
   // Restore: a Better Auth session exists (say, after signing in on this
   // browser in another tab) but Jazz still runs the guest account.

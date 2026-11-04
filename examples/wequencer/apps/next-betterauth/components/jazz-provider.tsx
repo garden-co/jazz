@@ -9,7 +9,6 @@ import { ErrorScreen, LoadingScreen } from "@/components/status-screen";
 // offline writes) in its own chunk once the page has loaded.
 const loadLocalFirst = () => import("jazz-tools/local-first");
 
-const APP_ID = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
 // Better Auth's session drives sign-in; Wequencer's backend (`createJazz` in
 // lib/jazz.server.ts) reads it in `authenticate`. Signing up creates the
 // bandmate's Jazz account, signing in opens it again.
@@ -75,7 +74,6 @@ export function useGracefulSignOut() {
 export function JazzProvider({ children }: { children: React.ReactNode }) {
   return (
     <Jazz
-      appId={APP_ID}
       serverUrl="/jazz"
       client={loadLocalFirst}
       // Signed-out pages (the sign-in form) need no Jazz.

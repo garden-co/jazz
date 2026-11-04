@@ -21,7 +21,7 @@ export function serverConfig(env = process.env) {
   const config = {
     production,
     origin: required("APP_ORIGIN", env.APP_ORIGIN, LOCAL_ORIGIN),
-    appId: required("VITE_JAZZ_APP_ID", env.VITE_JAZZ_APP_ID, LOCAL_APP_ID),
+    appId: required("JAZZ_APP_ID", env.JAZZ_APP_ID, LOCAL_APP_ID),
     betterAuthSecret: required(
       "BETTER_AUTH_SECRET",
       env.BETTER_AUTH_SECRET,
