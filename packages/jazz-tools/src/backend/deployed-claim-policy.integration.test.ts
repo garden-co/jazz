@@ -47,12 +47,7 @@ describe("deployed permissions with claims in referenced read policies", () => {
   it("authorizes inserts that check a row whose read policy compares a session claim", async () => {
     const issuer = await startTestJwtIssuer();
     const appId = randomUUID();
-    const server = await startLocalJazzServer({
-      appId,
-      jwksUrl: issuer.jwksUrl,
-      jwtIssuer: issuer.issuer,
-      jwtAudience: issuer.audience,
-    });
+    const server = await startLocalJazzServer({ appId });
     const owner = await createJazzSession({
       appId,
       app,

@@ -179,6 +179,7 @@ describe("backend request auth", () => {
         {
           appId: "app",
           accountRegistry: "https://core.example/apps/app/accounts",
+          backendSecret: "backend-secret",
           jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
         },
         { account: accountMode },
@@ -186,11 +187,11 @@ describe("backend request auth", () => {
       expect(session.account_id).toBe(account);
       expect(header).toHaveBeenCalledTimes(1);
       expect(fetcher).toHaveBeenCalledWith(
-        `https://core.example/apps/app/accounts/${accountMode}`,
+        `https://core.example/apps/app/admin/accounts/${accountMode === "login" ? "resolve" : accountMode}`,
         expect.objectContaining({
           credentials: "omit",
           redirect: "error",
-          headers: expect.objectContaining({ Authorization: `Bearer ${token}` }),
+          headers: expect.objectContaining({ "X-Jazz-Backend-Secret": "backend-secret" }),
         }),
       );
     },
@@ -213,6 +214,7 @@ describe("backend request auth", () => {
         {
           appId: "app",
           accountRegistry: "https://core.example/apps/app/accounts",
+          backendSecret: "backend-secret",
           jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
         },
       ),
@@ -248,6 +250,7 @@ describe("backend request auth", () => {
         {
           appId: "app",
           accountRegistry: "https://core.example/apps/app/accounts",
+          backendSecret: "backend-secret",
           jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
         },
       ),
@@ -287,6 +290,7 @@ describe("backend request auth", () => {
       {
         appId: "app",
         accountRegistry: "https://core.example/apps/app/accounts",
+        backendSecret: "backend-secret",
         jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
       },
     );
@@ -294,32 +298,38 @@ describe("backend request auth", () => {
     expect(session.user_id).toBe("method-first-user");
     expect(header).toHaveBeenCalledTimes(1);
     expect(fetcher).toHaveBeenCalledWith(
-      "https://core.example/apps/app/accounts/login",
+      "https://core.example/apps/app/admin/accounts/resolve",
       expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: `Bearer ${methodToken}` }),
+        headers: expect.objectContaining({ "X-Jazz-Backend-Secret": "backend-secret" }),
       }),
     );
   });
 
-  it.each(["identity_unassigned", "identity_revoked"])(
+  it.each([
+    ["identity_not_assigned", 404],
+    ["identity_not_authorized", 403],
+  ] as const)(
     "rejects registry %s without registering the external identity",
-    async (code) => {
+    async (code, status) => {
       const token = signHs256Jwt({ iss: "https://issuer.example", sub: "reader" });
       const fetcher = vi
         .spyOn(globalThis, "fetch")
-        .mockResolvedValue(new Response(code, { status: 403 }));
+        .mockResolvedValue(new Response(code, { status }));
       await expect(
         resolveRequestSession(
           { headers: { authorization: `Bearer ${token}` } },
           {
             appId: "app",
             accountRegistry: "https://core.example/apps/app/accounts",
+            backendSecret: "backend-secret",
             jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
           },
         ),
       ).rejects.toMatchObject({ code });
       expect(fetcher).toHaveBeenCalledTimes(1);
-      expect(fetcher.mock.calls[0]![0]).toBe("https://core.example/apps/app/accounts/login");
+      expect(fetcher.mock.calls[0]![0]).toBe(
+        "https://core.example/apps/app/admin/accounts/resolve",
+      );
     },
   );
 
@@ -339,6 +349,7 @@ describe("backend request auth", () => {
         {
           appId: "app",
           accountRegistry: "https://core.example/apps/app/accounts",
+          backendSecret: "backend-secret",
           jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
         },
       ),
@@ -349,21 +360,22 @@ describe("backend request auth", () => {
     const token = signHs256Jwt({ iss: "https://issuer.example", sub: "revoked" });
     const fetcher = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValue(new Response("identity_revoked", { status: 403 }));
+      .mockResolvedValue(new Response("identity_not_authorized", { status: 403 }));
     await expect(
       resolveRequestSession(
         { headers: { authorization: `Bearer ${token}` } },
         {
           appId: "app",
           accountRegistry: "https://core.example/apps/app/accounts",
+          backendSecret: "backend-secret",
           jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
         },
         { account: "login-or-register" },
       ),
-    ).rejects.toMatchObject({ code: "identity_revoked" });
+    ).rejects.toMatchObject({ code: "identity_not_authorized" });
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(fetcher.mock.calls[0]![0]).toBe(
-      "https://core.example/apps/app/accounts/login-or-register",
+      "https://core.example/apps/app/admin/accounts/login-or-register",
     );
   });
 
@@ -374,6 +386,7 @@ describe("backend request auth", () => {
       const config = {
         appId: "app",
         accountRegistry: "https://core.example/apps/app/accounts",
+        backendSecret: "backend-secret",
         jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
       };
       const badExternal = signHs256Jwt(
@@ -396,7 +409,7 @@ describe("backend request auth", () => {
     },
   );
 
-  it("founds a verified local-first account using the exact original proof", async () => {
+  it("founds a verified local-first account under its proven identity", async () => {
     const identity = {
       issuer: "urn:jazz:local-first",
       subject: "11111111-1111-1111-1111-111111111111",
@@ -412,13 +425,14 @@ describe("backend request auth", () => {
       {
         appId: "app",
         accountRegistry: "https://core.example/apps/app/accounts",
+        backendSecret: "backend-secret",
       },
     );
     expect(result.account_id).toBe(account);
     expect(fetcher).toHaveBeenCalledWith(
-      "https://core.example/apps/app/accounts/found-local-first",
+      "https://core.example/apps/app/admin/accounts/found-local-first",
       expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: `Bearer ${token}` }),
+        headers: expect.objectContaining({ "X-Jazz-Backend-Secret": "backend-secret" }),
       }),
     );
   });
@@ -435,6 +449,7 @@ describe("backend request auth", () => {
         {
           appId: "app",
           accountRegistry: "https://core.example/apps/app/accounts",
+          backendSecret: "backend-secret",
           jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
         },
       ),
@@ -525,6 +540,7 @@ describe("backend request auth", () => {
         {
           appId: "app",
           accountRegistry: "https://core.example/apps/app/accounts",
+          backendSecret: "backend-secret",
           allowLocalFirstAuth,
         },
       );
@@ -539,10 +555,10 @@ describe("backend request auth", () => {
         expect(mocks.verifyLocalFirstIdentityProof).toHaveBeenCalledWith(token, "app");
         expect(fetcher).toHaveBeenCalledTimes(1);
         expect(fetcher).toHaveBeenCalledWith(
-          "https://core.example/apps/app/accounts/found-local-first",
+          "https://core.example/apps/app/admin/accounts/found-local-first",
           expect.objectContaining({
             method: "POST",
-            headers: expect.objectContaining({ Authorization: `Bearer ${token}` }),
+            headers: expect.objectContaining({ "X-Jazz-Backend-Secret": "backend-secret" }),
           }),
         );
       } else {
@@ -553,14 +569,14 @@ describe("backend request auth", () => {
     },
   );
 
-  it("honours sync-server rejection when local-first auth is explicitly enabled in production", async () => {
+  it("honours a registry rejection when local-first auth is explicitly enabled in production", async () => {
     vi.stubEnv("NODE_ENV", "production");
     const userId = "11111111-1111-1111-1111-111111111111";
     const token = makeUnsignedJwt({ iss: "urn:jazz:local-first", sub: userId });
     mocks.verifyLocalFirstIdentityProof.mockReturnValue({ ok: true, id: userId });
     const fetcher = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValue(new Response("invalid account credential", { status: 401 }));
+      .mockResolvedValue(new Response("identity_not_authorized", { status: 403 }));
 
     await expect(
       resolveRequestSession(
@@ -568,6 +584,7 @@ describe("backend request auth", () => {
         {
           appId: "app",
           accountRegistry: "https://core.example/apps/app/accounts",
+          backendSecret: "backend-secret",
           allowLocalFirstAuth: true,
         },
       ),
@@ -575,9 +592,9 @@ describe("backend request auth", () => {
     expect(mocks.verifyLocalFirstIdentityProof).toHaveBeenCalledWith(token, "app");
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(fetcher).toHaveBeenCalledWith(
-      "https://core.example/apps/app/accounts/found-local-first",
+      "https://core.example/apps/app/admin/accounts/found-local-first",
       expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: `Bearer ${token}` }),
+        headers: expect.objectContaining({ "X-Jazz-Backend-Secret": "backend-secret" }),
       }),
     );
   });

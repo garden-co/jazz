@@ -1,7 +1,7 @@
 import { withAuthRequestDeadline } from "../runtime/auth-request-deadline.js";
 import {
   AccountAuthError,
-  requestAccountRegistry,
+  requestVouchedAccount,
   readAccountAssignment,
 } from "../accounts/registry-client.js";
 import {
@@ -75,19 +75,17 @@ const REGISTRY_REJECTIONS = new Map([
   ["identity_not_assigned", 404],
   ["identity_not_authorized", 403],
   ["identity_already_assigned", 409],
-  ["use_local_first_founding", 400],
-  ["local_first_proof_required", 400],
+  ["invalid_external_identity", 400],
+  ["local_first_auth_disabled", 403],
 ]);
 
 /**
  * Whether the account registry rejected the caller's identity, as opposed to
- * failing or being misconfigured. A 401 always rejects the bearer credential.
- * Other statuses count only with the registry's own rejection code: core's
- * app gate answers an unknown app id or path with a bare 404, which is the
- * server's configuration, not the caller's identity.
+ * failing or being misconfigured. Only the registry's own rejection codes
+ * count: a refused backend secret (401) is this server's configuration, and
+ * core's app gate answers an unknown app id or path with a bare 404.
  */
 function isRegistryRejection(error: AccountAuthError): boolean {
-  if (error.status === 401) return true;
   return error.status !== undefined && REGISTRY_REJECTIONS.get(error.code) === error.status;
 }
 
@@ -101,6 +99,11 @@ export interface BackendRequestAuthConfig {
   appId: string;
   /** Canonical core registry required by public request-derived contexts. */
   accountRegistry?: string;
+  /**
+   * The backend secret that vouches, to the core's registry, for the
+   * identities this backend verified. Required with `accountRegistry`.
+   */
+  backendSecret?: string;
   jwksUrl?: string;
   jwtPublicKey?: BackendJwtPublicKey;
   jwtIssuer?: string;
@@ -675,12 +678,17 @@ export async function resolveRequestSession(
     if (!config.accountRegistry) return session; // standalone signature-verification helper
     let assignment: unknown;
     try {
-      assignment = await requestAccountRegistry(
+      if (!config.backendSecret)
+        throw new Error("Request account admission requires the backend secret");
+      assignment = await requestVouchedAccount(
         config.accountRegistry,
         session.issuer === LOCAL_FIRST_JWT_ISSUER
           ? "found-local-first"
-          : (options.account ?? "login"),
-        token,
+          : options.account === "login-or-register"
+            ? "login-or-register"
+            : "resolve",
+        { issuer: session.issuer, subject: session.user_id },
+        config.backendSecret,
       );
     } catch (error) {
       // The registry refused this identity (unknown, revoked, not admitted).

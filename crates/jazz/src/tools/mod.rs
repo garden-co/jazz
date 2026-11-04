@@ -78,6 +78,10 @@ pub struct AppContext {
     /// Backend secret for session impersonation.
     /// Enables `for_session()` to act as any user.
     pub backend_secret: Option<String>,
+    /// With `backend_secret`: the user this client acts for, as the app's
+    /// backend states it (the way `createJazz` relays its users' clients).
+    /// The client is then that user's session, not the backend's own link.
+    pub backend_session: Option<Session>,
     /// Admin secret for privileged sync over WebSocket and `/admin/*` HTTP.
     /// On `/ws`, a valid admin secret authenticates this client as the backend.
     pub admin_secret: Option<String>,
@@ -103,6 +107,7 @@ impl AppContext {
             account_id: None,
             jwt_token: None,
             backend_secret: None,
+            backend_session: None,
             admin_secret: None,
             migrations: Default::default(),
         }

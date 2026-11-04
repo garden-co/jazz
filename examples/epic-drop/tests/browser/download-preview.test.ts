@@ -4,10 +4,10 @@ import { prepareTestAccount } from "../../../testing/accounts.js";
 import { app } from "../../schema.js";
 import { hexDump, readFileBlob, readFileRange } from "../../src/large-values.js";
 import { createInvite, inviteLink, parseInviteHash, redeemInvite } from "../../src/sharing.js";
-import { APP_ID, TEST_PORT } from "./test-constants.js";
+import { APP_ID, SERVER_URL } from "./test-constants.js";
 
 const dbs: Db[] = [];
-const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+const serverUrl = SERVER_URL;
 
 afterEach(async () => {
   await Promise.all(dbs.splice(0).map((db) => db.shutdown()));
