@@ -70,8 +70,8 @@ full docs index is https://jazz.tools/llms.txt.
    links for queries you run, the embedded inspector for local-first clients, and sync-state
    checks. Until then: /docs/tooling/inspector, /docs/tooling/testing, and "Showing sync status"
    on /docs/writing/writing-data.
-8. **Telemetry and feedback.** TODO: how to opt into telemetry and why it helps, and how agents
-   and humans leave feedback.
+8. **Feedback.** TODO: Jazz collects no telemetry; how agents and humans share what they built
+   and file context-rich reports on GitHub.
 
 ## You're done when
 
