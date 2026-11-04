@@ -329,7 +329,7 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
 
   @ReactMethod fun recordPublicClientWriteDiagnostic(detail: String, promise: Promise) {
     try {
-      require(Regex("^public-client-write-detail:[A-Za-z][A-Za-z0-9]{0,47}-(none|[a-z0-9_]{1,40})$").matches(detail)) { "invalid public client write diagnostic" }
+      require(Regex("^public-client-write-detail:[A-Za-z][A-Za-z0-9]{0,47}-(none|[a-z0-9_]{1,40})(:[A-Za-z0-9_.]{1,96})?$").matches(detail)) { "invalid public client write diagnostic" }
       Log.e("JazzPublicClientWrite", detail)
       promise.resolve(null)
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_DIAGNOSTIC", error) }

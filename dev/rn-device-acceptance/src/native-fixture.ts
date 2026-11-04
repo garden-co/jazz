@@ -174,7 +174,7 @@ export async function recordScopeWriterReadDiagnostic(detail: string): Promise<v
 }
 
 export const PUBLIC_CLIENT_WRITE_DETAIL =
-  /^public-client-write-detail:[A-Za-z][A-Za-z0-9]{0,47}-(none|[a-z0-9_]{1,40})$/;
+  /^public-client-write-detail:[A-Za-z][A-Za-z0-9]{0,47}-(none|[a-z0-9_]{1,40})(:[A-Za-z0-9_.]{1,96})?$/;
 
 /** Android-only: the failed public write's error class and code. */
 export async function recordPublicClientWriteDiagnostic(detail: string): Promise<void> {

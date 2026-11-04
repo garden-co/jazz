@@ -10,7 +10,7 @@ const WRITER_READ_DETAIL =
 const THREADTIME_WRITER_READ_DETAIL =
   /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzScopeWriterRead\s*:\s*(\S+)\s*$/;
 const PUBLIC_CLIENT_WRITE_DETAIL =
-  /^public-client-write-detail:[A-Za-z][A-Za-z0-9]{0,47}-(none|[a-z0-9_]{1,40})$/;
+  /^public-client-write-detail:[A-Za-z][A-Za-z0-9]{0,47}-(none|[a-z0-9_]{1,40})(:[A-Za-z0-9_.]{1,96})?$/;
 const THREADTIME_PUBLIC_CLIENT_WRITE =
   /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzPublicClientWrite\s*:\s*(\S+)\s*$/;
 const THREADTIME_FOREGROUND_WAKE =

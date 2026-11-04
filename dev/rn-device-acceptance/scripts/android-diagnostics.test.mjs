@@ -97,6 +97,18 @@ test("Android timeout names the failed public write's error class and code only"
   assert.doesNotMatch(failure, /secret|Forged/);
 });
 
+test("Android timeout carries an engine TypeError's squeezed message", () => {
+  const detail = "public-client-write-detail:TypeError-none:undefined_is_not_a_function";
+  const output = `08-29 22:52:21.495  4268  4288 E JazzPublicClientWrite: ${detail}`;
+  assert.equal(androidPublicClientWriteDiagnostic(output), detail);
+  assert.equal(
+    androidPublicClientWriteDiagnostic(
+      "08-29 22:52:21.495  4268  4288 E JazzPublicClientWrite: public-client-write-detail:TypeError-none:has space",
+    ),
+    undefined,
+  );
+});
+
 test("invalid Android receipt keeps its safe stage without echoing receipt contents", () => {
   const output = [
     "08-29 22:52:21.495  4268  4288 I ReactNativeJS: JAZZ_DEVICE_RESULT capability=secret-receipt-token",

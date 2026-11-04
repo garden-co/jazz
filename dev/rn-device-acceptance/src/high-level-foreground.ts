@@ -4,6 +4,7 @@ import type { DeviceDiagnosticCode } from "./device-diagnostics";
 import { finishSeedClient, type SeedBoundary } from "./seed-teardown";
 import { waitForPublication } from "./publication-wait";
 import { requireCoreRecoveryMarker } from "./recovery-marker.ts";
+import { publicClientWriteDetail } from "./write-detail.ts";
 import {
   composerEcho,
   measureTypingComposer,
@@ -16,21 +17,6 @@ const app = s.defineApp(
   },
   { migrations: "none" },
 );
-
-/**
- * The failed write's error class and code only: identifiers, never its
- * message, so nothing the app or Core wrote crosses into CI output.
- */
-export function publicClientWriteDetail(error: unknown): string {
-  const record = (error ?? {}) as { name?: unknown; code?: unknown };
-  const name =
-    typeof record.name === "string" && /^[A-Za-z][A-Za-z0-9]{0,47}$/.test(record.name)
-      ? record.name
-      : "unknown";
-  const code =
-    typeof record.code === "string" && /^[a-z0-9_]{1,40}$/.test(record.code) ? record.code : "none";
-  return `public-client-write-detail:${name}-${code}`;
-}
 
 /** Public foregrounds borrow the fixture lease using the genuine account. */
 function clientConfig(admitted: {
