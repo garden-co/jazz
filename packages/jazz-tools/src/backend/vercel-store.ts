@@ -294,7 +294,7 @@ printf '%s\\n' "$version" > "$run/jazz.version"
 echo $$ > "$run/jazz.pid"
 exec 9>&-
 # The core admits only the deploying function's own workload.${blobsSetup(blobs, q)}
-exec "$bin" server "$app_id" --port ${VERCEL_CORE_PORT} --data-dir "$data/store" ${blobsFlags(blobs, q)} \\
+exec "$bin" server "$app_id" --port ${VERCEL_CORE_PORT} --data-dir "$data/store" ${blobsFlags(blobs, environmentOf(trust), q)} \\
   --trusted-workload-issuer ${q(trust.issuer)} \\
   --trusted-workload-audience ${q(trust.audience)} \\
   --trusted-workload-subject ${q(trust.subject)}
@@ -318,16 +318,36 @@ function blobsSetup(blobs: VercelS3 | VercelBlob | undefined, q: (s: string) => 
 export S3_BUCKET_NAME=${q(blobs.bucket)} AWS_REGION=${q(blobs.region)} AWS_ROLE_ARN=${q(blobs.roleArn)}`;
 }
 
-function blobsFlags(blobs: VercelS3 | VercelBlob | undefined, q: (s: string) => string): string {
+/**
+ * The Vercel environment (`production`, `preview` or a custom one's slug)
+ * whose functions this core trusts, from the token's subject.
+ */
+export function environmentOf(trust: TrustedWorkload): string | undefined {
+  return /:environment:([^:]+)$/.exec(trust.subject)?.[1];
+}
+
+/**
+ * The server's flags for its blob store. A bucket or Blob store is claimed
+ * for the core's environment: one environment's OIDC token reaches the
+ * whole store, so preview and production never share one.
+ */
+function blobsFlags(
+  blobs: VercelS3 | VercelBlob | undefined,
+  environment: string | undefined,
+  q: (s: string) => string,
+): string {
   if (!blobs) return "--blobs sqlite";
+  const claim = environment === undefined ? [] : [`--blobs-environment ${q(environment)}`];
   if ("storeId" in blobs) {
     return [
       `--blobs vercel-blob --vercel-blob-token-from-workload --vercel-blob-store-id ${q(blobs.storeId)}`,
+      ...claim,
       ...(blobs.prefix === undefined ? [] : [`--vercel-blob-prefix ${q(blobs.prefix)}`]),
     ].join(" ");
   }
   return [
     "--blobs s3 --s3-role-from-workload",
+    ...claim,
     ...(blobs.endpoint === undefined ? [] : [`--s3-endpoint ${q(blobs.endpoint)}`]),
     ...(blobs.prefix === undefined ? [] : [`--s3-prefix ${q(blobs.prefix)}`]),
   ].join(" ");

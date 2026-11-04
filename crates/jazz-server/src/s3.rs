@@ -126,6 +126,12 @@ pub struct S3Options {
     /// The STS endpoint web identity roles are assumed at
     /// (`AWS_ENDPOINT_URL_STS`); `None` is AWS's, in `region`.
     pub sts_endpoint: Option<String>,
+    /// The deployment environment (`production`, `preview`, …) this
+    /// store runs in. When set, the bucket is claimed for that environment
+    /// by a marker at its root, and a store of any other environment is
+    /// refused: one environment's credentials then never reach another's
+    /// large values (a `vercel()` core sets it).
+    pub environment: Option<String>,
 }
 
 impl S3Options {
@@ -179,6 +185,7 @@ impl S3Options {
             prefix: prefix.unwrap_or_default(),
             credentials,
             sts_endpoint: env("AWS_ENDPOINT_URL_STS"),
+            environment: None,
         })
     }
 
@@ -200,6 +207,9 @@ const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 const ASSUME_FAILURE_HOLD: Duration = Duration::from_secs(5);
 /// Under the prefix: the id of the store that owns it.
 const OWNER_OBJECT: &str = ".jazz-owner";
+/// At the bucket's root: the one environment (production, preview, …)
+/// whose stores may use the bucket.
+pub(crate) const ENVIRONMENT_OBJECT: &str = ".jazz-environment";
 
 /// Large-value bytes in an S3-compatible bucket ([`S3Options`]).
 pub struct S3ChunkStore {
@@ -339,13 +349,19 @@ struct Request<'a> {
     body_hash: Option<[u8; 32]>,
     /// Put only if nothing is stored under the name.
     if_none_match: bool,
+    /// `name` is at the bucket's root, not under the prefix.
+    rooted: bool,
 }
 
 impl Inner {
     /// The object's URL and host, and its path as signed.
-    fn locate(&self, name: &str) -> (String, String, String) {
+    fn locate(&self, name: &str, rooted: bool) -> (String, String, String) {
         let o = &self.options;
-        let key = format!("{}{name}", o.prefix);
+        let key = if rooted {
+            name.to_owned()
+        } else {
+            format!("{}{name}", o.prefix)
+        };
         let base = o
             .endpoint
             .clone()
@@ -460,7 +476,7 @@ impl Inner {
     }
 
     async fn send(&self, request: Request<'_>) -> Result<reqwest::Response, String> {
-        let (url, host, path) = self.locate(request.name);
+        let (url, host, path) = self.locate(request.name, request.rooted);
         let keys = self.keys().await?;
         let payload = hex::encode(
             request
@@ -527,6 +543,7 @@ impl Inner {
                         self.owner
                     )
                 };
+                self.claim_environment().await?;
                 match self.read_owner().await? {
                     Some(owner) if owner == self.owner => return Ok(()),
                     Some(owner) => return Err(refused(&owner)),
@@ -540,6 +557,7 @@ impl Inner {
                         body_hash: Some(Sha256::digest(&body).into()),
                         body: Some(body),
                         if_none_match: true,
+                        rooted: false,
                     })
                     .await?;
                 if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
@@ -561,12 +579,70 @@ impl Inner {
     }
 
     async fn read_owner(&self) -> Result<Option<String>, String> {
-        let response = self.request(reqwest::Method::GET, OWNER_OBJECT).await?;
-        let Some(response) = self.found(response, "read", OWNER_OBJECT).await? else {
+        self.read_marker(OWNER_OBJECT, false).await
+    }
+
+    /// A small marker object's contents, or `None` if there is none.
+    async fn read_marker(&self, name: &str, rooted: bool) -> Result<Option<String>, String> {
+        let response = self
+            .send(Request {
+                method: reqwest::Method::GET,
+                name,
+                body: None,
+                body_hash: None,
+                if_none_match: false,
+                rooted,
+            })
+            .await?;
+        let Some(response) = self.found(response, "read", name).await? else {
             return Ok(None);
         };
-        let body = read_bounded(response, 1024, OWNER_OBJECT).await?;
+        let body = read_bounded(response, 1024, name).await?;
         Ok(Some(String::from_utf8_lossy(&body).trim().to_owned()))
+    }
+
+    /// With [`S3Options::environment`] set, check that the bucket serves
+    /// that environment only, claiming it for it if none has yet: a bucket
+    /// another environment claimed is refused. The marker sits at the
+    /// bucket's root, not under the prefix, since the whole bucket is what
+    /// one environment's credentials reach.
+    async fn claim_environment(&self) -> Result<(), String> {
+        let Some(environment) = &self.options.environment else {
+            return Ok(());
+        };
+        let refused = |other: &str| {
+            format!(
+                "s3 blobs: bucket {} serves the {other} environment, not {environment}; \
+                 give each environment its own bucket",
+                self.options.bucket
+            )
+        };
+        match self.read_marker(ENVIRONMENT_OBJECT, true).await? {
+            Some(claimed) if &claimed == environment => return Ok(()),
+            Some(claimed) => return Err(refused(&claimed)),
+            None => {}
+        }
+        let body = Bytes::from(format!("{environment}\n"));
+        let response = self
+            .send(Request {
+                method: reqwest::Method::PUT,
+                name: ENVIRONMENT_OBJECT,
+                body_hash: Some(Sha256::digest(&body).into()),
+                body: Some(body),
+                if_none_match: true,
+                rooted: true,
+            })
+            .await?;
+        if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
+            return match self.read_marker(ENVIRONMENT_OBJECT, true).await? {
+                Some(claimed) if &claimed == environment => Ok(()),
+                Some(claimed) => Err(refused(&claimed)),
+                None => Err("s3 blobs: the environment marker vanished while claiming".to_owned()),
+            };
+        }
+        self.expect_ok(response, "claim", ENVIRONMENT_OBJECT)
+            .await
+            .map(|_| ())
     }
 
     async fn request(
@@ -580,6 +656,7 @@ impl Inner {
             body: None,
             body_hash: None,
             if_none_match: false,
+            rooted: false,
         })
         .await
     }
@@ -595,6 +672,7 @@ impl Inner {
                 // The node's hash is the SHA-256 of its bytes.
                 body_hash: Some(node.hash),
                 if_none_match: false,
+                rooted: false,
             })
             .await?;
         self.expect_ok(response, "put", &name).await.map(|_| ())
@@ -998,6 +1076,49 @@ mod tests {
         assert_eq!(block(again.get(&key)).unwrap().as_deref(), Some(&bytes[..]));
     }
 
+    /// A bucket serves one environment: the first store with an
+    /// environment claims it at the bucket's root (create-if-absent), and
+    /// a store of another environment is refused under any prefix.
+    #[test]
+    fn a_bucket_serves_one_environment() {
+        let bucket = mock::MockS3::start();
+        let (key, bytes) = node(5);
+        let in_env = |prefix: &str, environment: &str| {
+            let mut options = bucket.options(prefix);
+            options.environment = Some(environment.to_owned());
+            options
+        };
+        let production =
+            S3ChunkStore::new(in_env("prod/", "production"), "store-a".to_owned()).unwrap();
+        block(production.put(&key, &bytes)).unwrap();
+        assert_eq!(
+            bucket
+                .state
+                .objects
+                .lock()
+                .unwrap()
+                .get(&format!("bucket/{ENVIRONMENT_OBJECT}"))
+                .map(|b| b.as_slice()),
+            Some(&b"production\n"[..])
+        );
+        let preview =
+            S3ChunkStore::new(in_env("preview/", "preview"), "store-b".to_owned()).unwrap();
+        let error = block(preview.get(&key)).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("serves the production environment, not preview"),
+            "{error}"
+        );
+        assert!(bucket.names("preview/").is_empty(), "nothing written");
+        // Without an environment, nothing is checked (self-hosted stores).
+        let plain = S3ChunkStore::new(bucket.options("plain/"), "store-c".to_owned()).unwrap();
+        block(plain.put(&key, &bytes)).unwrap();
+        let other =
+            S3ChunkStore::new(in_env("other/", "production"), "store-d".to_owned()).unwrap();
+        block(other.put(&key, &bytes)).unwrap();
+    }
+
     /// Without s3:ListBucket a missing key answers 403: it reads as absent.
     /// A body larger than any node is refused.
     #[test]
@@ -1051,16 +1172,17 @@ mod tests {
                 session_token: None,
             }),
             sts_endpoint: None,
+            environment: None,
         };
         let node = NodeKey { hash: [0xab; 32] }.object_name();
         let store = S3ChunkStore::new(options(None), "me".to_owned()).unwrap();
-        let (url, host, path) = store.inner.locate(&node);
+        let (url, host, path) = store.inner.locate(&node, false);
         assert_eq!(host, "jazz-app.s3.us-east-1.amazonaws.com");
         assert_eq!(path, format!("/blobs/{}", "ab".repeat(32)));
         assert_eq!(url, format!("https://{host}{path}"));
         let store =
             S3ChunkStore::new(options(Some("http://127.0.0.1:9000/")), "me".to_owned()).unwrap();
-        let (url, host, path) = store.inner.locate(&node);
+        let (url, host, path) = store.inner.locate(&node, false);
         assert_eq!(host, "127.0.0.1:9000");
         assert_eq!(path, format!("/jazz-app/blobs/{}", "ab".repeat(32)));
         assert_eq!(url, format!("http://{host}{path}"));
@@ -1068,7 +1190,7 @@ mod tests {
         let mut dotted = options(None);
         dotted.bucket = "jazz.app".to_owned();
         let store = S3ChunkStore::new(dotted, "me".to_owned()).unwrap();
-        let (_, host, path) = store.inner.locate(&node);
+        let (_, host, path) = store.inner.locate(&node, false);
         assert_eq!(host, "s3.us-east-1.amazonaws.com");
         assert!(path.starts_with("/jazz.app/blobs/"), "{path}");
     }
@@ -1149,6 +1271,7 @@ pub(crate) mod mock {
                     session_token: None,
                 }),
                 sts_endpoint: Some(format!("{}/sts", self.endpoint)),
+                environment: None,
             }
         }
 
