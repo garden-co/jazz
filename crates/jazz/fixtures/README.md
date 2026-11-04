@@ -27,3 +27,7 @@ code that defines its format.
 - `sqlite-storage-v1/`: stores written by storage format 1 (see its README).
 - `pre-sqlite/`: stores from before storage format 1, which must be refused
   (see its README).
+
+- `observation_scope_v1.json`, `local_observation_v1.sql`: owner-local provenance
+  hashes, full-u64 forward references and additive SQLite evidence/cleanup
+  contracts (`dev/proofs/owner-local-observation-v1.md`).

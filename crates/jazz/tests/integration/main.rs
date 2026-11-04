@@ -225,3 +225,6 @@ mod governance_claims_composition;
 
 #[path = "../governance_ordinary_composition.rs"]
 mod governance_ordinary_composition;
+
+#[path = "../local_observation_submission.rs"]
+mod local_observation_submission;
