@@ -1,8 +1,11 @@
 import { authClient } from "./auth-client";
 import { field, h } from "./dom";
 
-/** Sign in, or create an account; a session reloads into the chat. */
-export function signInScreen(): HTMLElement {
+/**
+ * Sign in, or create an account; a session reloads into the planner.
+ * `onSignedIn` tells Jazz to ask the backend who is signed in now.
+ */
+export function signInScreen(onSignedIn: () => Promise<void>): HTMLElement {
   let signingUp = false;
   const root = h("main", { class: "shell" });
 
@@ -42,8 +45,10 @@ export function signInScreen(): HTMLElement {
                     password: password.value,
                   })
                 : authClient.signIn.email({ email: email.value, password: password.value }));
-              if (error) render(error.message ?? "Sign-in failed");
-              // The session atom updates and main.ts opens the planner.
+              if (error) return render(error.message ?? "Sign-in failed");
+              // The session atom updates and main.ts opens the planner once
+              // Jazz has followed the backend to this user.
+              await onSignedIn();
             })();
           },
         },

@@ -102,13 +102,13 @@ export async function createJazzSessionOwner<
 >(options: {
   accounts: AccountManager<JWTAuth>;
   openClient(account: AccountHandle): Promise<Client>;
-  initial?: "local-first" | BackendAuth;
+  initial?: "local-first" | "signed-out" | BackendAuth;
   /**
    * Wipe the signed-out account's local storage, unsynced writes included,
    * instead of keeping it for that user's next sign-in (shared devices).
    */
   clearOnSignOut?: boolean;
-  /** Add host methods (e.g. `setUser`) to the session before it is sealed. */
+  /** Add host methods (e.g. `reauthenticate`) to the session before it is sealed. */
   decorate?(session: JazzSession<Client>): Extra;
 }): Promise<JazzSession<Client> & Extra> {
   const { accounts, openClient } = options;

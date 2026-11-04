@@ -45,5 +45,5 @@ export {
 } from "./session.js";
 
 export { useJazzAuth, type UseJazzAuth, type JazzAppProviderProps } from "./app.js";
-export { backendAuth, betterAuth, type JazzAuth, type JazzAppSnapshot } from "../session/app.js";
+export type { JazzAppSnapshot, JazzUser } from "../session/app.js";
 export type { JazzAppConfig } from "../session/create-jazz-app.js";
