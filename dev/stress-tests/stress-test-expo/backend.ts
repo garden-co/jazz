@@ -9,7 +9,7 @@ import { app } from "./schema";
 import permissions from "./permissions";
 
 const port = Number(process.env.PORT ?? 1625);
-const jazz = await createJazz({
+const jazz = createJazz({
   app,
   permissions,
   // No sign-in: every browser is a guest, so let guests sync.

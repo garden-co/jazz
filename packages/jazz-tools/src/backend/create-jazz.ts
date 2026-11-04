@@ -51,7 +51,7 @@ import {
   type BackendClientTrust,
 } from "./backend-clients.js";
 import { BACKEND_USER_ISSUER } from "./backend-issuer.js";
-import { earlyDb } from "./early-db.js";
+import { earlyDb, type EarlyDb } from "./early-db.js";
 import {
   defaultCoreName,
   onVercelDeployment,
@@ -1078,11 +1078,16 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   const appId = core.appId;
   const issuer = BACKEND_USER_ISSUER;
 
+  /** Publish `next`'s bundle: what it is pinned by. Publishing one already published changes nothing. */
+  const publish = (next: CreateJazzOptions) =>
+    applyBundle(core.serverUrl, { ...next, appId, adminSecret: core.adminSecret });
+
   /** Publish `next`'s bundle and open the backend's own session on it. */
   async function backendSession(
     next: CreateJazzOptions,
+    published?: string,
   ): Promise<{ session: JazzSession<JazzClient>; client: JazzClient }> {
-    pin = await applyBundle(core.serverUrl, { ...next, appId, adminSecret: core.adminSecret });
+    pin = published ?? (await publish(next));
     const session = await createJazzSession({
       appId,
       app: next.app,
@@ -1118,26 +1123,49 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    */
   async function reload(next: CreateJazzOptions): Promise<void> {
     const settings = jazzSettings(next);
-    // The same app and permissions (a reload of a module that imports
-    // them unchanged): the bundle and the backend's session stay.
-    let retired: JazzSession<JazzClient> | undefined;
+    // The same app and permissions (a reload of a module that imports them
+    // unchanged, or a hot reload that rebuilt equal ones): the bundle, and
+    // the backend's session with its writes and `forRequest` dbs, stay.
     if (next.app !== options.app || next.permissions !== options.permissions) {
-      const previousPin = pin;
-      let fresh: { session: JazzSession<JazzClient>; client: JazzClient };
-      try {
-        fresh = await backendSession(next);
-      } catch (error) {
-        pin = previousPin;
-        throw error;
+      const published = await publish(next);
+      if (published !== pin) {
+        const previousPin = pin;
+        let fresh: { session: JazzSession<JazzClient>; client: JazzClient };
+        try {
+          fresh = await backendSession(next, published);
+        } catch (error) {
+          pin = previousPin;
+          throw error;
+        }
+        retire(session);
+        ({ session, client: backend } = fresh);
       }
-      retired = session;
-      ({ session, client: backend } = fresh);
     }
     options = next;
     ({ basePath, publicUrls, allowedOrigins } = settings);
     backendClients = backendClientVerifier(next.backendClients ?? []);
     upgradesSockets = attached || (next.upgradesSockets ?? false);
-    await retired?.close();
+  }
+
+  /**
+   * Sessions a reload replaced. Each stays open for
+   * `RETIRED_SESSION_GRACE_MS`, so the writes it has in flight and the
+   * `forRequest` dbs requests still hold finish, then closes (draining its
+   * writes); a close of this Jazz closes those left.
+   */
+  const retiring = new Set<() => Promise<void>>();
+  function retire(old: JazzSession<JazzClient>): void {
+    let closed: Promise<void> | undefined;
+    const closeOld = (): Promise<void> => {
+      clearTimeout(timer);
+      return (closed ??= old
+        .close()
+        .catch((error: unknown) => console.error("jazz: a retired session did not close", error))
+        .finally(() => retiring.delete(closeOld)));
+    };
+    const timer = setTimeout(closeOld, RETIRED_SESSION_GRACE_MS);
+    (timer as { unref?: () => void }).unref?.();
+    retiring.add(closeOld);
   }
 
   /**
@@ -2253,6 +2281,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       closing ??= (async () => {
         for (const { session: stream } of streams.values()) stream.close();
         streams.clear();
+        await Promise.all([...retiring].map((close) => close()));
         await session.close();
         await core.close();
       })();
@@ -2273,7 +2302,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
  * `memory()` store's `appId`): a later `createJazz` for it (a dev server's
  * hot reload, another module graph) returns that same Jazz with the later
  * call's app, permissions and options. Each `remote()` store, and each
- * `memory()` store without an `appId`, is its own.
+ * `memory()` store without an `appId`, is its own: a module that hot reloads
+ * keeps that Jazz across reloads itself, or closes it.
  */
 export function createJazz(options: CreateJazzOptions): Jazz {
   jazzSettings(options);
@@ -2281,12 +2311,13 @@ export function createJazz(options: CreateJazzOptions): Jazz {
   const key = storeKey(store);
   const entries = registry();
   const shared = key === undefined ? undefined : entries.get(key);
-  if (shared) {
+  if (shared && !shared.closing) {
     adoptStore(shared, store);
     shared.options = options;
     return shared.jazz;
   }
-  const entry = newEntry(options, store, key);
+  // A Jazz for this store still closing: the new one opens once it let go.
+  const entry = newEntry(options, store, key, shared?.released);
   if (key !== undefined) entries.set(key, entry);
   return entry.jazz;
 }
@@ -2302,9 +2333,27 @@ interface Entry {
   /** The options `opened` runs with. */
   applied?: CreateJazzOptions;
   reloading?: Promise<void>;
+  /** The last open failed: the next try waits until `retryAt`. */
+  failure?: { error: unknown; retryAt: number; delayMs: number };
+  /** Set by `close()`: what it resolves with. */
   closing?: Promise<void>;
+  /** Resolves once the store is closed, even after a `close()` that gave up waiting. */
+  released?: Promise<void>;
+  /** A previous Jazz for this store, closing: this one opens once it is released. */
+  after?: Promise<void>;
   jazz: Jazz;
 }
+
+/** How long a session a reload replaced stays open for the requests still using it. */
+const RETIRED_SESSION_GRACE_MS = 60_000;
+/** How long `close()` waits for a store still opening before it gives up on it. */
+export const CLOSE_WAITS_FOR_OPEN_MS = 30_000;
+/** A failed open is tried again after this, doubling up to `MAX_OPEN_RETRY_MS`. */
+const FIRST_OPEN_RETRY_MS = 1_000;
+const MAX_OPEN_RETRY_MS = 30_000;
+/** At most this many sockets wait for the store to open, each holding at most this much. */
+export const MAX_HELD_SOCKETS = 1_000;
+export const MAX_HELD_SOCKET_BYTES = 4 * 1024 * 1024;
 
 const REGISTRY = Symbol.for("jazz-tools.createJazz.stores");
 
@@ -2318,27 +2367,74 @@ function registry(): Map<string, Entry> {
 }
 
 /**
- * The store's identity in this process. A `remote()` store has none: two
+ * The store's identity in this process: one Jazz runs per store, so a hot
+ * reload finds the one it opened. A `remote()` store has none: two
  * backends (deployments, tests) may each run their own Jazz on one remote
  * app, with their own permissions. Nor has a `memory()` store without an
- * `appId`.
+ * `appId`, a new, empty database each time. A module that hot reloads
+ * keeps such a Jazz across reloads itself (on `globalThis`), or closes it.
  */
 function storeKey(store: JazzStore): string | undefined {
   if (store.kind === "sqlite") return `sqlite:${resolve(store.path)}`;
   if (store.kind === "vercel") {
     const project = store.options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID;
-    const name = store.options.name ?? (project ? defaultCoreName(project, process.env) : "");
-    return `vercel:${name}`;
+    const name =
+      store.options.name ?? (project ? defaultCoreName(project, process.env) : undefined);
+    // Without a name the core is unknown: its open reports that.
+    return name ? `vercel:${name}` : undefined;
   }
   if (store.kind === "memory" && store.appId !== undefined) return `memory:${store.appId}`;
   return undefined;
 }
 
-/** What a store's settings are, apart from its key and the functions it holds. */
+/**
+ * What a store's settings are. The functions it holds (a credential hook)
+ * are not settings: the open store calls the latest call's. A Sandbox SDK
+ * is: another one is another setting.
+ */
 function storeSettings(store: JazzStore): string {
-  return JSON.stringify(store, (name, value: unknown) =>
-    name === "sdk" || name === "appId" ? undefined : value,
-  );
+  return JSON.stringify(store, (name, value: unknown) => {
+    if (name === "sdk" && value !== undefined) return `sdk#${identity(value as object)}`;
+    return typeof value === "function" ? "function" : value;
+  });
+}
+
+const identities = new WeakMap<object, number>();
+let lastIdentity = 0;
+function identity(value: object): number {
+  let id = identities.get(value);
+  if (id === undefined) identities.set(value, (id = ++lastIdentity));
+  return id;
+}
+
+/**
+ * The entry's store, its function settings (a credential hook) calling
+ * through to the latest `createJazz` call's, so a reload applies them.
+ */
+function liveStore(entry: Entry): JazzStore {
+  const through = <T extends object>(value: T, current: () => T | undefined): T => {
+    const out = { ...value } as Record<string, unknown>;
+    for (const [name, field] of Object.entries(value)) {
+      if (typeof field !== "function") continue;
+      out[name] = (...args: unknown[]) => {
+        const latest = (current() as Record<string, unknown> | undefined)?.[name];
+        return ((typeof latest === "function" ? latest : field) as (...a: unknown[]) => unknown)(
+          ...args,
+        );
+      };
+    }
+    return out as T;
+  };
+  const store = entry.store;
+  if (store.kind === "vercel") {
+    return {
+      ...store,
+      options: through(store.options, () =>
+        entry.store.kind === "vercel" ? entry.store.options : undefined,
+      ),
+    };
+  }
+  return through(store, () => entry.store);
 }
 
 /**
@@ -2347,8 +2443,10 @@ function storeSettings(store: JazzStore): string {
  * refused, so a change never silently goes unapplied.
  */
 function adoptStore(entry: Entry, store: JazzStore): void {
-  if (!entry.opening) {
+  if (!entry.opening && !entry.opened) {
     entry.store = store;
+    // A later call (a hot reload after a fix) tries the open again at once.
+    entry.failure = undefined;
     return;
   }
   const appId =
@@ -2367,40 +2465,102 @@ function adoptStore(entry: Entry, store: JazzStore): void {
       `createJazz(): ${entry.key} is already open in this process with other store settings; restart the process to change them`,
     );
   }
+  // The same settings: its function settings are the latest call's now.
+  entry.store = store;
 }
 
-function newEntry(options: CreateJazzOptions, store: JazzStore, key: string | undefined): Entry {
-  const entry = { key, store, options } as Entry;
+function newEntry(
+  options: CreateJazzOptions,
+  store: JazzStore,
+  key: string | undefined,
+  after?: Promise<void>,
+): Entry {
+  const entry = { key, store, options, after } as Entry;
   entry.jazz = facade(entry);
   return entry;
 }
 
-/** The entry's open Jazz, with the latest call's options applied. */
-async function settled(entry: Entry): Promise<OpenedJazz> {
+/**
+ * The entry's open Jazz, with the latest call's options applied. Once it is
+ * closing, only `draining` (the writes made before the close) still gets it.
+ */
+async function settled(entry: Entry, draining = false): Promise<OpenedJazz> {
   for (;;) {
-    if (entry.closing) throw new Error("createJazz: this Jazz was closed");
-    const opened = await (entry.opening ??= openEntry(entry));
-    if (entry.closing) throw new Error("createJazz: this Jazz was closed");
+    if (entry.closing && !draining) throw new Error("createJazz: this Jazz was closed");
+    const opened = await (entry.opening ?? openEntry(entry));
+    if (entry.closing && !draining) throw new Error("createJazz: this Jazz was closed");
     if (entry.applied === entry.options) return opened;
     await (entry.reloading ??= reloadEntry(entry, opened));
   }
 }
 
+/**
+ * Open the entry's store. A failed open is not tried again at once: until
+ * its backoff has passed, every use fails with the same error, so a store
+ * that is down is not asked again on every request.
+ */
 function openEntry(entry: Entry): Promise<OpenedJazz> {
+  const failed = entry.failure;
+  if (failed && Date.now() < failed.retryAt) return Promise.reject(failed.error);
   const options = entry.options;
-  const opening: Promise<OpenedJazz> = openJazz(options, entry.store).then(
+  const opening: Promise<OpenedJazz> = (async () => {
+    await entry.after;
+    return openJazz(options, liveStore(entry));
+  })().then(
     (opened) => {
+      entry.failure = undefined;
       entry.opened = opened;
       entry.applied = options;
       return opened;
     },
     (error: unknown) => {
-      // The next use tries again.
+      const delayMs = failed
+        ? Math.min(failed.delayMs * 2, MAX_OPEN_RETRY_MS)
+        : FIRST_OPEN_RETRY_MS;
+      entry.failure = { error, retryAt: Date.now() + delayMs, delayMs };
       if (entry.opening === opening) entry.opening = undefined;
       throw error;
     },
   );
+  entry.opening = opening;
   return opening;
+}
+
+/**
+ * Close the entry: apply the writes made before the close, then close its
+ * store. A store still opening is waited for at most
+ * `CLOSE_WAITS_FOR_OPEN_MS`; past that the writes still waiting fail and
+ * the store closes once it has opened. Until it has, a new `createJazz` for
+ * the store waits for it rather than finding the store held.
+ */
+async function closeEntry(entry: Entry, early: EarlyDb): Promise<void> {
+  let release!: () => void;
+  entry.released = new Promise<void>((resolve) => (release = resolve));
+  const stopped = (async () => {
+    await early.drain();
+    const opened = await entry.opening?.catch(() => undefined);
+    await entry.reloading?.catch(() => undefined);
+    await opened?.close();
+  })();
+  void stopped
+    .catch(() => undefined)
+    .finally(() => {
+      if (entry.key !== undefined && registry().get(entry.key) === entry) {
+        registry().delete(entry.key);
+      }
+      release();
+    });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const gaveUp = new Promise<true>((resolve) => {
+    timer = setTimeout(() => resolve(true), CLOSE_WAITS_FOR_OPEN_MS);
+  });
+  const late = await Promise.race([stopped.then(() => false), gaveUp]);
+  clearTimeout(timer);
+  if (!late) return;
+  early.abandon(new Error("createJazz: closed before its store opened"));
+  console.warn(
+    `jazz: close() gave up after ${CLOSE_WAITS_FOR_OPEN_MS / 1000}s waiting for ${entry.key ?? "its store"} to open; it closes once it has`,
+  );
 }
 
 async function reloadEntry(entry: Entry, opened: OpenedJazz): Promise<void> {
@@ -2420,18 +2580,30 @@ function settledNow(entry: Entry): OpenedJazz | undefined {
 
 /**
  * A socket handed over before the store opened: it keeps what arrives until
- * the session takes it over, so no message is lost while it waits.
+ * the session takes it over, so no message is lost while it waits. Past
+ * `MAX_HELD_SOCKET_BYTES` held, it is closed (1013, try again later).
  */
 function heldSocket(ws: WsLikeSocket): { socket: WsLikeSocket; refuse(reason: string): void } {
   type Event = ["message", unknown, boolean | undefined] | ["close"] | ["error", unknown];
   const held: Event[] = [];
+  let heldBytes = 0;
   let listeners: {
     message?: (data: unknown, isBinary?: boolean) => void;
     close?: () => void;
     error?: (error: unknown) => void;
   } | null = null;
   const deliver = (event: Event) => {
-    if (!listeners) return void held.push(event);
+    if (!listeners) {
+      if (event[0] === "message") {
+        heldBytes += byteLength(event[1]);
+        if (heldBytes > MAX_HELD_SOCKET_BYTES) {
+          held.length = 0;
+          ws.close(1013, "store still opening");
+          return;
+        }
+      }
+      return void held.push(event);
+    }
     if (event[0] === "message") listeners.message?.(event[1], event[2]);
     else if (event[0] === "close") listeners.close?.();
     else listeners.error?.(event[1]);
@@ -2458,16 +2630,26 @@ function heldSocket(ws: WsLikeSocket): { socket: WsLikeSocket; refuse(reason: st
   return { socket, refuse: (reason) => ws.close(1011, reason) };
 }
 
+function byteLength(data: unknown): number {
+  if (typeof data === "string") return data.length * 3;
+  if (Array.isArray(data)) return data.reduce((sum: number, part) => sum + byteLength(part), 0);
+  const sized = data as { byteLength?: unknown } | null;
+  return typeof sized?.byteLength === "number" ? sized.byteLength : 0;
+}
+
 /** The `Jazz` every `createJazz` for one store returns. */
 function facade(entry: Entry): Jazz {
   const use = () => settled(entry);
   const basePath = () => jazzSettings(entry.options).basePath;
   const handle = async (request: Request) => (await use()).handle(request);
   const nextHandler = async (request: Request) => (await use()).next().GET(request);
-  const db = earlyDb(
-    async () => (await use()).db,
+  // The writes made before a close still apply as it drains them.
+  const early = earlyDb(
+    async () => (await settled(entry, true)).db,
     () => settledNow(entry)?.db,
   );
+  const db = early.db;
+  let heldSockets = 0;
   const jazz = {
     get basePath() {
       return basePath();
@@ -2501,14 +2683,18 @@ function facade(entry: Entry): Jazz {
     acceptSocket(request, ws) {
       const now = settledNow(entry);
       if (now) return now.acceptSocket(request, ws);
+      if (heldSockets >= MAX_HELD_SOCKETS) return ws.close(1013, "store still opening");
+      heldSockets++;
       const { socket, refuse } = heldSocket(ws);
-      use().then(
-        (opened) => opened.acceptSocket(request, socket),
-        (error: unknown) => {
-          console.error("jazz: the store did not open", error);
-          refuse("store unavailable");
-        },
-      );
+      use()
+        .then(
+          (opened) => opened.acceptSocket(request, socket),
+          (error: unknown) => {
+            console.error("jazz: the store did not open", error);
+            refuse("store unavailable");
+          },
+        )
+        .finally(() => heldSockets--);
     },
     db,
     forRequest: async (request) => (await use()).forRequest(request),
@@ -2520,15 +2706,7 @@ function facade(entry: Entry): Jazz {
       return jazz;
     },
     close() {
-      entry.closing ??= (async () => {
-        if (entry.key !== undefined && registry().get(entry.key) === entry) {
-          registry().delete(entry.key);
-        }
-        const opened = await entry.opening?.catch(() => undefined);
-        await entry.reloading?.catch(() => undefined);
-        await opened?.close();
-      })();
-      return entry.closing;
+      return (entry.closing ??= closeEntry(entry, early));
     },
   } as Omit<Jazz, "appId"> as Jazz;
   // Not enumerable, so printing or comparing a Jazz before it opens reads it not.
