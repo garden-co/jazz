@@ -5,7 +5,7 @@ import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { appMigrations } from "../testing/client-migrations.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startTestJazz } from "../testing/index.js";
 
 it("preserves rows and their relationship through table and reference-column renames", async () => {
   const person = s.table({ name: s.string() }, {});
@@ -53,11 +53,13 @@ it("preserves rows and their relationship through table and reference-column ren
     policy.messages.allowRead.always();
     policy.messages.allowInsert.always();
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app: oldApp,
+    permissions: oldPermissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
-    const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };
-    await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
     const account = await localAccountConfig(server.appId, server.url);
     db = await createDb(account);
     const owner = await db.insert(oldApp.users, { name: "Alice" }).wait({ tier: "global" });
@@ -67,7 +69,7 @@ it("preserves rows and their relationship through table and reference-column ren
     await db.shutdown();
     db = undefined;
 
-    await deploy({ ...target, schema: newApp, permissions: newPermissions, migration });
+    await server.redeploy({ app: newApp, permissions: newPermissions, migration });
     db = await createDb(account);
     expect(await db.all(newApp.people, { tier: "remote" })).toEqual([owner]);
     expect(

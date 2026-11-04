@@ -8,9 +8,6 @@ use jazz::schema::JazzSchema;
 use tracing::info;
 
 use crate::middleware::AuthConfig;
-use crate::middleware::auth::{
-    JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
-};
 use crate::profiling::{self, HeapProfileDump};
 use crate::server::routes;
 use crate::server::{ServerState, StoredCatalogue};
@@ -72,13 +69,20 @@ pub enum StorageBackend {
 /// Where a persistent store keeps the bytes of large values once they
 /// settle (see [`jazz::chunk_store`]). The rows and the chunk metadata
 /// always stay in `jazz.sqlite`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum BlobStore {
     /// In `jazz.sqlite` itself. Simplest, but the file grows with every
     /// large value.
     Sqlite,
     /// As files under `dir`; `None` is `blobs/` in the data directory.
     Files { dir: Option<PathBuf> },
+    /// As objects in an S3-compatible bucket ([`crate::s3`]). The bucket
+    /// and prefix belong to this data directory alone: a store deletes the
+    /// values it reclaims.
+    S3(crate::s3::S3Options),
+    /// As private blobs in a Vercel Blob store ([`crate::vercel_blob`]),
+    /// under a prefix that belongs to this data directory alone.
+    VercelBlob(crate::vercel_blob::VercelBlobOptions),
 }
 
 /// Records which [`BlobStore`] a data directory was started with.
@@ -216,7 +220,6 @@ impl ServerBuilder {
         if let StorageBackend::Persistent { path } = &self.storage_backend {
             refuse_pre_sqlite_data_dir(path)?;
         }
-        let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config);
 
         // One store per app: the catalogue and the account registry are host
@@ -241,7 +244,6 @@ impl ServerBuilder {
             catalogue: crate::server::ServerCatalogue,
             app_id: self.app_id,
             auth_config,
-            jwt_verifier,
             backend_credential,
             workload_secrets,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
@@ -349,13 +351,49 @@ impl ServerBuilder {
             StorageBackend::Persistent { path } => {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
-                let plan = plan_blob_store(path, &self.blobs)?;
-                let config = match &plan.blob_dir {
-                    None => StorageConfig::data_dir(path),
-                    Some(dir) => {
+                let blobs = match &self.blobs {
+                    // A bucket's default prefix is this store's own.
+                    BlobStore::S3(options) if options.prefix.is_empty() => {
+                        let mut options = options.clone();
+                        options.prefix = format!("jazz/{}/{}/", self.app_id, store_id(path)?);
+                        BlobStore::S3(options)
+                    }
+                    BlobStore::VercelBlob(options) if options.prefix.is_empty() => {
+                        let mut options = options.clone();
+                        options.prefix = format!("jazz/{}/{}/", self.app_id, store_id(path)?);
+                        BlobStore::VercelBlob(options)
+                    }
+                    blobs => blobs.clone(),
+                };
+                let plan = plan_blob_store(path, &blobs)?;
+                let config = match (&plan.blob_dir, &blobs) {
+                    (Some(dir), _) => {
                         claim_blob_dir(path, dir)?;
                         StorageConfig::data_dir(path).with_blob_dir(dir.clone())
                     }
+                    (None, BlobStore::S3(options)) => {
+                        warn_on_distant_bucket(options);
+                        let store = crate::s3::S3ChunkStore::new(options.clone(), store_id(path)?)?;
+                        StorageConfig::data_dir(path).with_blobs(crate::runtime::Blobs::Network(
+                            crate::runtime::NetworkChunkStore {
+                                store: Arc::new(store),
+                                name: options.describe(),
+                            },
+                        ))
+                    }
+                    (None, BlobStore::VercelBlob(options)) => {
+                        let store = crate::vercel_blob::VercelBlobChunkStore::new(
+                            options.clone(),
+                            store_id(path)?,
+                        )?;
+                        StorageConfig::data_dir(path).with_blobs(crate::runtime::Blobs::Network(
+                            crate::runtime::NetworkChunkStore {
+                                store: Arc::new(store),
+                                name: options.describe(),
+                            },
+                        ))
+                    }
+                    (None, _) => StorageConfig::data_dir(path),
                 };
                 Ok((config, plan.record))
             }
@@ -419,6 +457,8 @@ fn plan_blob_store(data_dir: &Path, blobs: &BlobStore) -> Result<BlobStorePlan, 
             };
             (named, Some(dir))
         }
+        BlobStore::S3(options) => (options.describe(), None),
+        BlobStore::VercelBlob(options) => (options.describe(), None),
     };
     if recorded == wanted {
         return Ok(BlobStorePlan {
@@ -438,6 +478,56 @@ fn plan_blob_store(data_dir: &Path, blobs: &BlobStore) -> Result<BlobStorePlan, 
             marker,
             contents: format!("{wanted}\n"),
         }),
+    })
+}
+
+/// Vercel functions and Sandboxes run in AWS regions: a bucket in another
+/// region pays transfer both ways and adds latency to every cold read.
+fn warn_on_distant_bucket(options: &crate::s3::S3Options) {
+    if options.endpoint.is_some() {
+        return;
+    }
+    let Some(vercel) = std::env::var("VERCEL_REGION").ok() else {
+        return;
+    };
+    if let Some(aws) = aws_region_of_vercel(&vercel)
+        && aws != options.region
+    {
+        tracing::warn!(
+            bucket = %options.bucket,
+            bucket_region = %options.region,
+            vercel_region = %vercel,
+            "the large-value bucket is in {}, but this deployment runs in {vercel} ({aws}): \
+             put the bucket in {aws} to avoid cross-region transfer",
+            options.region,
+        );
+    }
+}
+
+/// The AWS region a Vercel region runs in.
+pub fn aws_region_of_vercel(vercel: &str) -> Option<&'static str> {
+    Some(match vercel {
+        "iad1" => "us-east-1",
+        "cle1" => "us-east-2",
+        "sfo1" => "us-west-1",
+        "pdx1" => "us-west-2",
+        "yul1" => "ca-central-1",
+        "gru1" => "sa-east-1",
+        "dub1" => "eu-west-1",
+        "lhr1" => "eu-west-2",
+        "cdg1" => "eu-west-3",
+        "fra1" => "eu-central-1",
+        "arn1" => "eu-north-1",
+        "cpt1" => "af-south-1",
+        "dxb1" => "me-central-1",
+        "bom1" => "ap-south-1",
+        "sin1" => "ap-southeast-1",
+        "syd1" => "ap-southeast-2",
+        "hkg1" => "ap-east-1",
+        "hnd1" => "ap-northeast-1",
+        "icn1" => "ap-northeast-2",
+        "kix1" => "ap-northeast-3",
+        _ => return None,
     })
 }
 
@@ -635,113 +725,7 @@ fn test_schema_branches(schema: Option<&Schema>) -> Vec<String> {
     schema.map(|_| "main".to_string()).into_iter().collect()
 }
 
-async fn build_jwt_verifier(auth_config: &AuthConfig) -> Result<Option<Arc<JwtVerifier>>, String> {
-    match (
-        auth_config.jwks_url.as_ref(),
-        auth_config.jwt_public_key.as_ref(),
-    ) {
-        (Some(_), Some(_)) => Err(
-            "configure either --jwks-url / JAZZ_JWKS_URL or --jwt-public-key / JAZZ_JWT_PUBLIC_KEY, not both"
-                .to_string(),
-        ),
-        (None, None) => Ok(None),
-        (None, Some(public_key)) => {
-            let verifier = StaticJwtVerifier::from_public_key(public_key)?;
-            Ok(Some(Arc::new(JwtVerifier::Static(verifier))))
-        }
-        (Some(jwks_url), None) => {
-            let jwks_ttl = std::env::var("JAZZ_JWKS_CACHE_TTL_SECS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(Duration::from_secs)
-                .unwrap_or(JWKS_CACHE_TTL);
-            let jwks_max_stale = std::env::var("JAZZ_JWKS_MAX_STALE_SECS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(Duration::from_secs)
-                .unwrap_or(JWKS_MAX_STALE);
-
-            let http_client = reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(10))
-                .build()
-                .map_err(|e| format!("failed to build JWKS HTTP client: {e}"))?;
-
-            let verifier = Arc::new(JwtVerifier::Jwks(JwksCache::new(
-                jwks_url.clone(),
-                http_client,
-                jwks_ttl,
-                jwks_max_stale,
-            )));
-
-            // Warm the cache in the background. The JWKS endpoint may not be
-            // available yet (e.g. Jazz server starts during Next.js config resolution,
-            // before the app is listening). First auth request will block on fetch
-            // if the background warm hasn't completed.
-            {
-                let verifier = Arc::clone(&verifier);
-                tokio::spawn(async move {
-                    if let JwtVerifier::Jwks(cache) = verifier.as_ref()
-                        && let Err(e) = cache.load(false).await
-                    {
-                        tracing::warn!(
-                            "Background JWKS warm failed (will retry on first auth request): {e}"
-                        );
-                    }
-                });
-            }
-
-            Ok(Some(verifier))
-        }
-    }
-}
-
 fn validate_server_config(auth_config: &AuthConfig) -> Result<(), String> {
-    let has_jwt_key = auth_config.jwks_url.is_some() || auth_config.jwt_public_key.is_some();
-    if auth_config
-        .jwt_issuer
-        .as_deref()
-        .is_some_and(|value| value.trim().is_empty())
-    {
-        return Err("external JWT issuer cannot be empty".to_owned());
-    }
-    if auth_config
-        .jwt_audience
-        .as_deref()
-        .is_some_and(|value| value.trim().is_empty())
-    {
-        return Err("external JWT audience cannot be empty".to_owned());
-    }
-
-    match (
-        auth_config.jwt_issuer.as_ref(),
-        auth_config.jwt_audience.as_ref(),
-    ) {
-        (Some(_), Some(_)) if !has_jwt_key => {
-            return Err(
-                "external JWT issuer/audience require --jwks-url / JAZZ_JWKS_URL or --jwt-public-key / JAZZ_JWT_PUBLIC_KEY"
-                    .to_owned(),
-            );
-        }
-        (Some(_), None) => {
-            return Err(
-                "external JWT verification requires --jwt-audience / JAZZ_JWT_AUDIENCE".to_owned(),
-            );
-        }
-        (None, Some(_)) => {
-            return Err(
-                "external JWT verification requires --jwt-issuer / JAZZ_JWT_ISSUER".to_owned(),
-            );
-        }
-        (None, None) if has_jwt_key && !auth_config.allow_local_first_auth => {
-            return Err(
-                "external JWT verification requires --jwt-issuer / JAZZ_JWT_ISSUER and --jwt-audience / JAZZ_JWT_AUDIENCE"
-                    .to_owned(),
-            );
-        }
-        _ => {}
-    }
-
     if let Some(workload) = &auth_config.trusted_workload {
         if auth_config.admin_secret.is_some() || auth_config.backend_secret.is_some() {
             return Err(
@@ -779,14 +763,8 @@ fn validate_server_config(auth_config: &AuthConfig) -> Result<(), String> {
 
 fn log_auth_config(auth_config: &AuthConfig) {
     info!(
-        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, jwt_issuer={}, jwt_audience={}, cookie={}, trust_forwarded_host={}, backend={}, admin={}",
+        "Auth configured: local_first={}, backend={}, admin={}",
         auth_config.allow_local_first_auth,
-        auth_config.jwks_url.is_some(),
-        auth_config.jwt_public_key.is_some(),
-        auth_config.jwt_issuer.is_some(),
-        auth_config.jwt_audience.is_some(),
-        auth_config.auth_cookie_name.is_some(),
-        auth_config.trust_forwarded_host,
         auth_config.backend_secret.is_some(),
         auth_config.admin_secret.is_some()
     );
@@ -807,26 +785,6 @@ mod tests {
                     .column("body", jazz::tools::public_schema::ColumnType::Text),
             )
             .build()
-    }
-
-    #[test]
-    fn local_first_server_may_start_with_unbound_jwks_but_external_only_may_not() {
-        let local_first = AuthConfig {
-            jwks_url: Some("http://127.0.0.1:9/jwks".to_owned()),
-            allow_local_first_auth: true,
-            ..Default::default()
-        };
-        validate_server_config(&local_first)
-            .expect("local-first admission does not require external JWT bindings");
-
-        let external_only = AuthConfig {
-            allow_local_first_auth: false,
-            ..local_first
-        };
-        let error = validate_server_config(&external_only)
-            .expect_err("an external-only verifier must be explicitly bound");
-        assert!(error.contains("--jwt-issuer"), "{error}");
-        assert!(error.contains("--jwt-audience"), "{error}");
     }
 
     #[tokio::test]
@@ -993,6 +951,136 @@ mod tests {
                 .await
                 .err()
                 .unwrap_or_else(|| panic!("{other:?} after files starts"));
+            assert!(error.contains("not supported yet"), "{error}");
+        }
+    }
+
+    /// Without a prefix, each data dir gets its own under the app's, so two
+    /// stores sharing a bucket (preview and production) never share keys.
+    #[tokio::test]
+    async fn a_bucket_without_a_prefix_gets_one_per_data_dir() {
+        let app = AppId::from_name("blob-store-prefix");
+        let blobs = BlobStore::S3(crate::s3::S3Options {
+            bucket: "jazz".to_owned(),
+            region: "auto".to_owned(),
+            endpoint: Some("http://127.0.0.1:9".to_owned()),
+            prefix: String::new(),
+            path_style: true,
+            credentials: crate::s3::S3Credentials::Static(crate::s3::Keys {
+                access_key_id: "k".to_owned(),
+                secret_access_key: "s".to_owned(),
+                session_token: None,
+            }),
+            sts_endpoint: None,
+        });
+        let mut recorded = Vec::new();
+        for _ in 0..2 {
+            let data_dir = tempfile::TempDir::new().expect("temp data dir");
+            ServerBuilder::new(app)
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .with_blob_store(blobs.clone())
+                .build()
+                .await
+                .expect("start")
+                .shutdown()
+                .await;
+            let id = std::fs::read_to_string(data_dir.path().join(STORE_ID_FILE)).unwrap();
+            let marker = std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap();
+            assert_eq!(
+                marker,
+                format!("s3 http://127.0.0.1:9 jazz/jazz/{app}/{}/\n", id.trim())
+            );
+            recorded.push(marker);
+        }
+        assert_ne!(recorded[0], recorded[1]);
+    }
+
+    /// A Blob store's default prefix is the data dir's own too.
+    #[tokio::test]
+    async fn a_vercel_blob_store_without_a_prefix_gets_one_per_data_dir() {
+        let app = AppId::from_name("vercel-blob-prefix");
+        let blobs = BlobStore::VercelBlob(crate::vercel_blob::VercelBlobOptions {
+            store_id: "abc".to_owned(),
+            prefix: String::new(),
+            credentials: crate::vercel_blob::VercelBlobCredentials::ReadWriteToken("t".to_owned()),
+            api_url: "http://127.0.0.1:9".to_owned(),
+            blob_url: Some("http://127.0.0.1:9".to_owned()),
+        });
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        ServerBuilder::new(app)
+            .with_storage(StorageBackend::Persistent {
+                path: data_dir.path().to_path_buf(),
+            })
+            .with_blob_store(blobs)
+            .build()
+            .await
+            .expect("start")
+            .shutdown()
+            .await;
+        let id = std::fs::read_to_string(data_dir.path().join(STORE_ID_FILE)).unwrap();
+        let marker = std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap();
+        assert_eq!(
+            marker,
+            format!("vercel-blob abc/jazz/{app}/{}/\n", id.trim())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_data_dir_may_move_its_blobs_from_sqlite_to_a_bucket_and_keeps_it() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let bucket = |prefix: &str| {
+            BlobStore::S3(crate::s3::S3Options {
+                bucket: "jazz".to_owned(),
+                region: "auto".to_owned(),
+                endpoint: Some("http://127.0.0.1:9".to_owned()),
+                prefix: prefix.to_owned(),
+                path_style: true,
+                credentials: crate::s3::S3Credentials::Static(crate::s3::Keys {
+                    access_key_id: "k".to_owned(),
+                    secret_access_key: "s".to_owned(),
+                    session_token: None,
+                }),
+                sts_endpoint: None,
+            })
+        };
+        let start = |blobs: BlobStore| {
+            ServerBuilder::new(AppId::from_name("blob-store-s3"))
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .with_blob_store(blobs)
+                .build()
+        };
+        start(BlobStore::Sqlite)
+            .await
+            .expect("sqlite")
+            .shutdown()
+            .await;
+        start(bucket("a/"))
+            .await
+            .expect("sqlite to s3")
+            .shutdown()
+            .await;
+        assert_eq!(
+            std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap(),
+            "s3 http://127.0.0.1:9 jazz/a/\n"
+        );
+        start(bucket("a/"))
+            .await
+            .expect("the same bucket")
+            .shutdown()
+            .await;
+        for other in [
+            bucket("b/"),
+            BlobStore::Files { dir: None },
+            BlobStore::Sqlite,
+        ] {
+            let error = start(other.clone())
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{other:?} after s3 starts"));
             assert!(error.contains("not supported yet"), "{error}");
         }
     }

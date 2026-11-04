@@ -63,7 +63,8 @@ export async function createTransportControl(serverUrl: string): Promise<Transpo
   }
 
   return {
-    url: `http://127.0.0.1:${address.port}`,
+    // Keep the upstream's path, e.g. an app's `/jazz` endpoint.
+    url: `http://127.0.0.1:${address.port}${upstream.pathname.replace(/\/$/, "")}`,
     block() {
       inboundBlocked = true;
       outboundBlocked = true;

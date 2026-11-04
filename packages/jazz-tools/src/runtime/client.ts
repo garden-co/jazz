@@ -158,6 +158,16 @@ export type AuthUpdate =
  * Common interface for the runtime backing `JazzClient`.
  */
 export interface Runtime {
+  /**
+   * Wait until every write committed so far reaches `tier`. `throughOutage`
+   * keeps the wait pending through outages until a terminal failure.
+   */
+  waitForPendingWrites?(
+    tier?: string,
+    options?: { throughOutage?: boolean; signal?: AbortSignal },
+  ): Promise<void>;
+  /** @internal Close mutation admission and report the foreground TxTime high-water. */
+  quiesceForegroundTxTimeHighWater?(): Promise<bigint>;
   beginTransaction(
     transactionKind: TransactionKind,
     id: OpenTransactionId,
@@ -298,6 +308,12 @@ export interface Runtime {
   nativeUpstreamConfigured?(): boolean;
   /** Push updated auth credentials into the live Rust transport. */
   updateAuth(auth_json: string): void;
+  /**
+   * The session this client resolved from its credentials, set before it
+   * connects and again whenever its auth changes. A runtime that serves
+   * only its connection's session (thin) compares calls against it.
+   */
+  useSession?(session: Session | null): void;
   /** End waits held for a refused credential that nothing will renew. */
   endCredentialWait?(): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
@@ -1149,6 +1165,7 @@ export class JazzClient {
     this.scheduler = getScheduler();
     this.context = context;
     this.resolvedSession = this.resolveSessionFromContext();
+    this.runtime.useSession?.(this.resolvedSession);
 
     const onAuthFailure = runtimeOptions?.onAuthFailure;
     this.runtime.onAuthFailure((rawReason: string) => {
@@ -1437,6 +1454,7 @@ export class JazzClient {
 
     try {
       this.resolvedSession = this.resolveSessionFromContext();
+      this.runtime.useSession?.(this.resolvedSession);
       if (updateRuntime) {
         this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
       }
@@ -1445,6 +1463,7 @@ export class JazzClient {
       this.context.cookieSession = previousCookieSession;
       setTrustedReservedSession(this.context, previousTrustedReservedSession);
       this.resolvedSession = previousResolvedSession;
+      this.runtime.useSession?.(previousResolvedSession);
       throw error;
     }
   }
@@ -1640,11 +1659,74 @@ export class JazzClient {
     attribution?: string,
     objectId?: string,
   ): Promise<WriteHandle<{ id: string }>> {
+    const result = await this.runStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+      objectId,
+    );
+    if (result.kind !== "committed") {
+      throw new Error("Streaming mutations cannot be staged inside an open transaction");
+    }
+    return new WriteHandle(result.txId, this, { id: result.id });
+  }
+
+  /**
+   * @internal Stage a streamed mutation in open transaction
+   * `openTransactionId`; it commits with the transaction.
+   */
+  async streamingMutationInTransaction(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    openTransactionId: OpenTransactionId,
+    options?: InsertOptions | UpdateOptions,
+    session?: Session,
+    attribution?: string,
+    objectId?: string,
+  ): Promise<{ id: string }> {
+    const result = await this.runStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+      objectId,
+      openTransactionId,
+    );
+    if (result.kind !== "staged") {
+      throw new Error("A streaming mutation in a transaction must be staged in it");
+    }
+    return { id: result.id };
+  }
+
+  private async runStreamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: InsertOptions | UpdateOptions,
+    session?: Session,
+    attribution?: string,
+    objectId?: string,
+    openTransactionId?: OpenTransactionId,
+  ): Promise<StreamingInsertResult> {
     if (!this.runtime.streamingMutation) {
       throw new Error("This runtime does not support streaming mutations");
     }
-    const writeContext = this.writeContext(session, attribution, undefined, options);
-    const result = await this.runtime.streamingMutation(
+    const writeContext = this.writeContext(session, attribution, openTransactionId, options);
+    return this.runtime.streamingMutation(
       mutation,
       table,
       values,
@@ -1653,10 +1735,6 @@ export class JazzClient {
       writeContext,
       objectId ?? ("id" in (options ?? {}) ? (options as InsertOptions).id : undefined),
     );
-    if (result.kind !== "committed") {
-      throw new Error("Streaming mutations cannot be staged inside an open transaction");
-    }
-    return new WriteHandle(result.txId, this, { id: result.id });
   }
 
   /**

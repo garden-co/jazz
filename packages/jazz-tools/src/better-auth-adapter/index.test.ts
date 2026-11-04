@@ -1,5 +1,3 @@
-import { accountRegistryUrl } from "../accounts/context.js";
-import { requestAccountRegistry } from "../accounts/registry-client.js";
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth";
 import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
@@ -71,9 +69,6 @@ describe("jazzAdapter", () => {
     const jwtIssuer = await startTestJwtIssuer();
     const server = await startLocalJazzServer({
       allowLocalFirstAuth: true,
-      jwksUrl: jwtIssuer.jwksUrl,
-      jwtIssuer: jwtIssuer.issuer,
-      jwtAudience: jwtIssuer.audience,
     });
     await deployFixture({
       serverUrl: server.url,
@@ -109,11 +104,12 @@ describe("jazzAdapter", () => {
         },
       });
 
-      const token = jwtIssuer.jwtForUser("ordinary-session-user");
-      await requestAccountRegistry(accountRegistryUrl(server.url, server.appId), "register", token);
-      const sessionDb = await context.forRequest({
-        headers: { authorization: `Bearer ${token}` },
-      });
+      const token = await jwtIssuer.jwtForUser("ordinary-session-user");
+      const sessionDb = await context.forRequest(
+        { headers: { authorization: `Bearer ${token}` } },
+        undefined,
+        { account: "login-or-register" },
+      );
 
       await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "remote" })).resolves.toEqual(
         [],
@@ -138,11 +134,7 @@ describe("jazzAdapter", () => {
 
   it("applies generated deny-all policies to a verified external session", async () => {
     const jwtIssuer = await startTestJwtIssuer();
-    const server = await startLocalJazzServer({
-      jwksUrl: jwtIssuer.jwksUrl,
-      jwtIssuer: jwtIssuer.issuer,
-      jwtAudience: jwtIssuer.audience,
-    });
+    const server = await startLocalJazzServer();
     await deployFixture({
       serverUrl: server.url,
       appId: server.appId,
@@ -226,11 +218,12 @@ describe("jazzAdapter", () => {
         })
         .wait({ tier: "global" });
 
-      const token = jwtIssuer.jwtForUser("external-policy-user");
-      await requestAccountRegistry(accountRegistryUrl(server.url, server.appId), "register", token);
-      const sessionDb = await context.forRequest({
-        headers: { authorization: `Bearer ${token}` },
-      });
+      const token = await jwtIssuer.jwtForUser("external-policy-user");
+      const sessionDb = await context.forRequest(
+        { headers: { authorization: `Bearer ${token}` } },
+        undefined,
+        { account: "login-or-register" },
+      );
       await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "remote" })).resolves.toEqual(
         [],
       );

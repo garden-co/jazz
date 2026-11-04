@@ -140,28 +140,27 @@ function playBeats({ id, stage, pages, actions, state }) {
   };
 }
 
-/** Server spec for a Vite example (the Jazz Vite plugin starts the sync server). */
+/**
+ * Server spec for a Vite example whose Jazz runs inside its Vite server
+ * (jazz.server.ts): empty and in memory unless `fresh` is false.
+ */
 export function viteServer({ dir, port, env, fresh = true }) {
   return {
-    before: () =>
-      fresh &&
-      rm(join(dir, "node_modules/.cache/jazz-dev-server"), { recursive: true, force: true }),
     command: "pnpm",
     args: ["exec", "vite", "--port", String(port), "--strictPort", "--host", "127.0.0.1"],
-    env,
+    env: { ...(fresh ? { JAZZ_IN_MEMORY: "1" } : {}), ...env },
     ready: /Local:\s+http/,
   };
 }
 
 /**
- * Server spec for a Next.js example (`withJazz` starts the sync server).
- * Starts from an empty sync server and build cache, and removes both after.
+ * Server spec for a Next.js example (Jazz runs inside the app via createJazz).
+ * Starts from an empty build cache and removes it after.
  */
 export function nextServer({ dir, port, env }) {
   const origin = `http://127.0.0.1:${port}`;
   const clean = async () => {
     await rm(join(dir, ".next"), { recursive: true, force: true });
-    await rm(join(dir, "node_modules/.cache/jazz-dev-server"), { recursive: true, force: true });
   };
   return {
     before: clean,
