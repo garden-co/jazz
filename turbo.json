@@ -66,6 +66,9 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "passThroughEnv": [
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_JOBS",
+        "CARGO_NET_OFFLINE",
         "JAZZ_RN_TEST_BRIDGE",
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
         "JAZZ_ARTIFACT_BUILD_LEASE",
@@ -88,6 +91,7 @@
         "$TURBO_ROOT$/crates/jazz-text/**",
         "$TURBO_ROOT$/crates/jazz-compression/**",
         "$TURBO_ROOT$/vendor/ruzstd/**",
+        "$TURBO_ROOT$/vendor/sqlite-wasm-vfs/**",
         "$TURBO_ROOT$/crates/wasm-tracing/**",
         "$TURBO_ROOT$/Cargo.toml",
         "$TURBO_ROOT$/Cargo.lock",
@@ -99,6 +103,9 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "passThroughEnv": [
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_JOBS",
+        "CARGO_NET_OFFLINE",
         "AR_wasm32-unknown-unknown",
         "AR_wasm32_unknown_unknown",
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
@@ -119,6 +126,7 @@
         "$TURBO_ROOT$/crates/jazz-text/**",
         "$TURBO_ROOT$/crates/jazz-compression/**",
         "$TURBO_ROOT$/vendor/ruzstd/**",
+        "$TURBO_ROOT$/vendor/sqlite-wasm-vfs/**",
         "$TURBO_ROOT$/crates/wasm-tracing/**",
         "$TURBO_ROOT$/Cargo.toml",
         "$TURBO_ROOT$/Cargo.lock",
@@ -130,6 +138,9 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "passThroughEnv": [
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_JOBS",
+        "CARGO_NET_OFFLINE",
         "AR_wasm32-unknown-unknown",
         "AR_wasm32_unknown_unknown",
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
