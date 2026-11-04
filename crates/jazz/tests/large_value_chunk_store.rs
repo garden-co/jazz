@@ -928,3 +928,53 @@ fn fetched_chunks_are_served_even_when_the_puts_beside_them_fail() {
         );
     }
 }
+
+/// While a batch of uploads is out, the leaves a replica waits on are
+/// fetched beside it: the replica is served without waiting for the
+/// uploads. Fetches dropped unanswered are wanted again.
+#[test]
+fn reads_are_fetched_beside_a_batch_that_is_out() {
+    let (_dir, path) = scratch();
+    let remote = Remote::default();
+    let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
+    let value = text(69, LARGE);
+    moved_to(&path, &store, &value);
+    let server = open_host_io(&path, store.clone());
+    insert(&server, 2, &text(70, LARGE));
+    let uploads = server.take_chunk_io().unwrap().expect("a batch");
+    assert!(uploads.counts().1 > 2, "{:?}", uploads.counts());
+    let sub = subscribe_to(&server);
+    let mut dropped = false;
+    let mut fetched = 0;
+    for _ in 0..16 {
+        block_on(sub.alice.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+        assert!(
+            server.take_chunk_io().unwrap().is_none(),
+            "the uploads are out"
+        );
+        let Some(fetches) = server.take_chunk_fetches().unwrap() else {
+            continue;
+        };
+        assert_eq!(fetches.counts().1, 0, "no uploads among them");
+        if !dropped {
+            dropped = true;
+            drop(fetches);
+            continue;
+        }
+        fetched += fetches.counts().0;
+        server
+            .finish_chunk_fetches(run_elsewhere(fetches, store.clone()))
+            .unwrap();
+    }
+    block_on(sub.alice.tick()).unwrap();
+    assert!(dropped && fetched > 0, "{fetched}");
+    assert_eq!(
+        body(&sub.alice, 1),
+        value,
+        "served with the uploads still out"
+    );
+    server
+        .finish_chunk_io(run_elsewhere(uploads, store.clone()))
+        .unwrap();
+}

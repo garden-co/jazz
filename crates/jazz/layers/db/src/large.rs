@@ -668,6 +668,13 @@ impl Chunks {
         self.store.as_ref().filter(|_| !self.in_memory())
     }
 
+    /// Want `requests` again: fetches run beside a batch were dropped
+    /// before they were answered.
+    pub(crate) fn want_again(&self, requests: Vec<ChunkRequest>) {
+        let mut state = self.state.lock().expect("chunk cache");
+        state.fetch.extend(requests);
+    }
+
     /// Record that a read waits on an offloaded node.
     fn want(&self, request: &ChunkRequest) {
         let mut state = self.state.lock().expect("chunk cache");

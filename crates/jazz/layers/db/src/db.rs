@@ -1723,6 +1723,67 @@ impl Db {
         self.begin_chunk_io(&chunks)
     }
 
+    /// The offloaded nodes reads wait on, to fetch beside the batch that is
+    /// out (or backing off) so they do not wait for its uploads: `None`
+    /// when no read waits. Hand what running it came to back with
+    /// [`Self::finish_chunk_fetches`]. A node a read waits on is
+    /// referenced, so no delete in the batch removes it. Dropped instead,
+    /// its nodes are wanted again.
+    pub fn take_chunk_fetches(&self) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
+        let chunks = self.inner().chunks.clone();
+        if !chunks.host_io() {
+            return Err(not_host_run());
+        }
+        if chunks.store().is_none() {
+            return Ok(None);
+        }
+        let wanted = chunks.take_fetch();
+        if wanted.is_empty() {
+            return Ok(None);
+        }
+        let mut io = crate::chunk_store::ChunkIo::unleased(wanted.clone());
+        io.refetch = Some(crate::chunk_store::Refetch {
+            chunks: std::sync::Arc::downgrade(&chunks),
+            unfetched: wanted,
+        });
+        Ok(Some(io))
+    }
+
+    /// Install fetches [`Self::take_chunk_fetches`] handed out, and serve
+    /// the messages held for them. Reads of a node the store failed to
+    /// answer are refused with why until the next batch starts; the first
+    /// failure is returned. Anything else is refused.
+    pub fn finish_chunk_fetches(
+        &self,
+        mut done: crate::chunk_store::ChunkIoDone,
+    ) -> Result<(), Error> {
+        let chunks = self.inner().chunks.clone();
+        if !chunks.host_io() {
+            return Err(not_host_run());
+        }
+        let ours = done.io.refetch.as_ref().is_some_and(|refetch| {
+            std::ptr::eq(refetch.chunks.as_ptr(), std::sync::Arc::as_ptr(&chunks))
+        });
+        if !ours
+            || done.io.lease.is_some()
+            || !done.io.puts.is_empty()
+            || !done.io.deletes.is_empty()
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "chunk I/O: these are not fetches this store handed out",
+            ));
+        }
+        // Answered: nothing goes back to the wanted nodes.
+        if let Some(mut refetch) = done.io.refetch.take() {
+            refetch.unfetched.clear();
+        }
+        let mut first = None;
+        self.install_fetched(&chunks, &done.io.fetch, done.fetched, true, &mut first);
+        self.sync_tick()?;
+        first.map_or(Ok(()), Err)
+    }
+
     /// Apply a batch [`Self::take_chunk_io`] handed out: fetched nodes are
     /// installed and the reads and requests waiting on them run again,
     /// moved leaves leave SQLite, deleted ones leave the queue. Failed

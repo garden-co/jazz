@@ -238,8 +238,34 @@ pub struct ChunkIo {
     pub(crate) puts: Vec<(NodeKey, Vec<u8>)>,
     pub(crate) deletes: Vec<NodeKey>,
     /// The store's claim on this batch; `None` for the fetches a read
-    /// runs itself, which no host sees.
+    /// runs itself, which no host sees, and for fetches run beside a batch.
     pub(crate) lease: Option<Lease>,
+    /// For fetches run beside a batch: what goes back to the store's
+    /// wanted nodes if they are dropped unanswered.
+    pub(crate) refetch: Option<Refetch>,
+}
+
+/// Fetches run beside a batch ([`crate::db::Db::take_chunk_fetches`]):
+/// dropped unanswered, the reads they were for want them again.
+pub(crate) struct Refetch {
+    pub(crate) chunks: std::sync::Weak<crate::large::Chunks>,
+    pub(crate) unfetched: Vec<ChunkRequest>,
+}
+
+impl std::fmt::Debug for Refetch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Refetch")
+            .field("nodes", &self.unfetched.len())
+            .finish()
+    }
+}
+
+impl Drop for Refetch {
+    fn drop(&mut self) {
+        if let Some(chunks) = self.chunks.upgrade() {
+            chunks.want_again(std::mem::take(&mut self.unfetched));
+        }
+    }
 }
 
 /// A batch's hold on the store that handed it out: dropping it ends the
@@ -282,6 +308,7 @@ impl ChunkIo {
             puts: Vec::new(),
             deletes: Vec::new(),
             lease: None,
+            refetch: None,
         }
     }
 

@@ -359,13 +359,27 @@ struct ChunkStoreChoice {
 /// as runtime work, which applies it and ticks. One batch is out at a time.
 /// After a batch fails, the next waits (1 s, doubling up to a minute), so
 /// a bucket that refuses every request is not asked again on every tick.
+///
+/// While a batch is out or backing off, the nodes reads wait on are
+/// fetched beside it on a second thread
+/// ([`jazz::db::Db::take_chunk_fetches`]), so a read never waits for a
+/// batch's uploads, nor for the backoff of puts that failed.
 struct ChunkIoRunner {
-    batches: std_mpsc::Sender<jazz::chunk_store::ChunkIo>,
+    batches: Lane,
     out: std::cell::Cell<bool>,
     /// Consecutive failed batches, and when the next may start.
     failures: std::cell::Cell<u32>,
     not_before: std::cell::Cell<Option<std::time::Instant>>,
-    /// Dropped to cancel the batch in flight.
+    fetches: Lane,
+    /// Whether fetches are out on [`Self::fetches`].
+    fetching: std::cell::Cell<bool>,
+}
+
+/// A thread that runs chunk I/O and hands each outcome to `finish` on the
+/// store thread.
+struct Lane {
+    sender: std_mpsc::Sender<jazz::chunk_store::ChunkIo>,
+    /// Dropped to cancel the work in flight.
     cancel: Option<futures::channel::oneshot::Sender<()>>,
     /// Disconnects once the thread has ended.
     ended: std_mpsc::Receiver<()>,
@@ -376,67 +390,115 @@ const CHUNK_IO_BACKOFF: (Duration, Duration) = (Duration::from_secs(1), Duration
 /// How long dropping a runner waits for its cancelled batch to stop.
 const CHUNK_IO_STOP: Duration = Duration::from_secs(5);
 
-impl ChunkIoRunner {
+impl Lane {
     fn start(
+        name: &str,
         store: Arc<dyn jazz::chunk_store::ChunkStore>,
         work: std_mpsc::Sender<Work>,
+        finish: fn(&mut Owner, jazz::chunk_store::ChunkIoDone),
     ) -> Result<Self, String> {
-        let (batches, receiver) = std_mpsc::channel::<jazz::chunk_store::ChunkIo>();
+        let (sender, receiver) = std_mpsc::channel::<jazz::chunk_store::ChunkIo>();
         let (cancel, mut cancelled) = futures::channel::oneshot::channel::<()>();
         let (ended_tx, ended) = std_mpsc::channel::<()>();
         thread::Builder::new()
-            .name("jazz-chunk-io".to_owned())
+            .name(name.to_owned())
             .spawn(move || {
                 let _ended = ended_tx;
                 for io in receiver {
-                    // A cancelled batch is dropped mid-flight: its requests
-                    // are aborted and its work goes to the store's next one.
+                    // Cancelled work is dropped mid-flight: its requests are
+                    // aborted and it goes to the store's next batch.
                     let run = io.run(&*store);
                     let done =
                         match block_on(futures::future::select(Box::pin(run), &mut cancelled)) {
                             futures::future::Either::Left((done, _)) => done,
                             futures::future::Either::Right(_) => return,
                         };
-                    let finish: Job =
-                        Box::new(move |owner: &mut Owner| owner.finish_chunk_io(done));
+                    let finish: Job = Box::new(move |owner: &mut Owner| finish(owner, done));
                     if work.send(Work::Owner(finish)).is_err() {
                         return;
                     }
                 }
             })
-            .map_err(|error| format!("start chunk I/O thread: {error}"))?;
+            .map_err(|error| format!("start {name} thread: {error}"))?;
         Ok(Self {
-            batches,
-            out: std::cell::Cell::new(false),
-            failures: std::cell::Cell::new(0),
-            not_before: std::cell::Cell::new(None),
+            sender,
             cancel: Some(cancel),
             ended,
         })
     }
 
+    fn send(&self, io: jazz::chunk_store::ChunkIo) -> bool {
+        self.sender.send(io).is_ok()
+    }
+}
+
+impl Drop for Lane {
+    fn drop(&mut self) {
+        // Cancel the work in flight and close the channel; wait a little
+        // for the thread to stop, and never for the bucket.
+        drop(self.cancel.take());
+        let (closed, _) = std_mpsc::channel();
+        drop(std::mem::replace(&mut self.sender, closed));
+        if let Err(std_mpsc::RecvTimeoutError::Timeout) = self.ended.recv_timeout(CHUNK_IO_STOP) {
+            tracing::warn!("the large-value store I/O thread did not stop in time; leaving it");
+        }
+    }
+}
+
+impl ChunkIoRunner {
+    fn start(
+        store: Arc<dyn jazz::chunk_store::ChunkStore>,
+        work: std_mpsc::Sender<Work>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            batches: Lane::start(
+                "jazz-chunk-io",
+                Arc::clone(&store),
+                work.clone(),
+                Owner::finish_chunk_io,
+            )?,
+            out: std::cell::Cell::new(false),
+            failures: std::cell::Cell::new(0),
+            not_before: std::cell::Cell::new(None),
+            fetches: Lane::start("jazz-chunk-fetch", store, work, Owner::finish_chunk_fetches)?,
+            fetching: std::cell::Cell::new(false),
+        })
+    }
+
     /// Hand the runtime's next batch over, unless one is out or the last
-    /// failed too recently.
+    /// failed too recently; then hand over what reads wait on beside it.
     fn pump(&self, owner: &Owner) {
-        if self.out.get()
+        if !(self.out.get()
             || self
                 .not_before
                 .get()
-                .is_some_and(|at| std::time::Instant::now() < at)
+                .is_some_and(|at| std::time::Instant::now() < at))
         {
+            match owner.db.take_chunk_io() {
+                // Nothing to do: dropping an empty batch ends it.
+                Ok(Some(io)) if io.is_empty() => {}
+                Ok(Some(io)) => {
+                    self.out.set(true);
+                    if !self.batches.send(io) {
+                        tracing::error!("the chunk I/O thread is gone");
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(%error, "take large-value store I/O"),
+            }
+        }
+        if self.fetching.get() {
             return;
         }
-        match owner.db.take_chunk_io() {
-            // Nothing to do: dropping an empty batch ends it.
-            Ok(Some(io)) if io.is_empty() => {}
+        match owner.db.take_chunk_fetches() {
             Ok(Some(io)) => {
-                self.out.set(true);
-                if self.batches.send(io).is_err() {
-                    tracing::error!("the chunk I/O thread is gone");
+                self.fetching.set(true);
+                if !self.fetches.send(io) {
+                    tracing::error!("the chunk fetch thread is gone");
                 }
             }
             Ok(None) => {}
-            Err(error) => tracing::warn!(%error, "take large-value store I/O"),
+            Err(error) => tracing::warn!(%error, "take large-value store fetches"),
         }
     }
 
@@ -458,19 +520,6 @@ impl ChunkIoRunner {
             .min(longest);
         self.not_before.set(Some(std::time::Instant::now() + wait));
         failures == 1 || wait == longest
-    }
-}
-
-impl Drop for ChunkIoRunner {
-    fn drop(&mut self) {
-        // Cancel the batch in flight and close the channel; wait a little
-        // for the thread to stop, and never for the bucket.
-        drop(self.cancel.take());
-        let (closed, _) = std_mpsc::channel();
-        drop(std::mem::replace(&mut self.batches, closed));
-        if let Err(std_mpsc::RecvTimeoutError::Timeout) = self.ended.recv_timeout(CHUNK_IO_STOP) {
-            tracing::warn!("the large-value store I/O thread did not stop in time; leaving it");
-        }
     }
 }
 
@@ -2235,6 +2284,17 @@ impl Owner {
     /// served between its parts.
     /// A network chunk store's batch came back: apply it (the tick that
     /// follows this job hands the next one over).
+    /// Fetches run beside a batch came back: install them. A failure
+    /// refuses the reads waiting on them; it does not delay batches.
+    fn finish_chunk_fetches(&mut self, done: jazz::chunk_store::ChunkIoDone) {
+        if let Some(runner) = &self.chunk_io {
+            runner.fetching.set(false);
+        }
+        if let Err(error) = self.db.finish_chunk_fetches(done) {
+            tracing::warn!(%error, app = self.app.as_deref().unwrap_or("?"), "large-value store fetch failed; the reads waiting on it are refused");
+        }
+    }
+
     fn finish_chunk_io(&mut self, done: jazz::chunk_store::ChunkIoDone) {
         let finished = self.db.finish_chunk_io(done);
         let log = match &self.chunk_io {
