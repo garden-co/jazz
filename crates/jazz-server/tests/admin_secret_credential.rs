@@ -10,14 +10,14 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 async fn the_admin_secret_is_a_backend_credential() {
     let server = JazzServer::builder().start().await.expect("server starts");
     let http = reqwest::Client::new();
-    let permissions = format!(
-        "{}/apps/{}/admin/permissions",
+    let bundles = format!(
+        "{}/apps/{}/admin/bundles",
         server.base_url(),
         server.app_id()
     );
     let admin = server.admin_secret().to_owned();
     let get = |headers: Vec<(&'static str, String)>| {
-        let mut request = http.get(&permissions);
+        let mut request = http.get(&bundles);
         for (name, value) in headers {
             request = request.header(name, value);
         }

@@ -25,7 +25,7 @@ mod shutdown;
 mod testing;
 
 pub use builder::{BlobStore, BuiltServer, ServerBuilder, StorageBackend};
-pub(crate) use catalogue::{ActiveSchemaSummary, ServerCatalogue, StoredCatalogue};
+pub(crate) use catalogue::{ServerCatalogue, StoredCatalogue};
 pub(crate) use catalogue_storage::CatalogueStorage;
 #[cfg(feature = "embedded-server")]
 pub use embedded::{

@@ -143,7 +143,7 @@ describe("createJazz", () => {
     });
     expect(signedOut.status).toBe(401);
     // Admin and backend routes never leave the process.
-    for (const route of ["admin/bundles", "backend/admit", "admin/permissions"]) {
+    for (const route of ["admin/bundles", "backend/admit"]) {
       const response = await fetch(`${origin}/jazz/apps/${appId}/${route}`, {
         method: "POST",
         headers: { "X-Jazz-Admin-Secret": "guess" },
@@ -1101,7 +1101,7 @@ describe("createJazz", () => {
     ["has no route for bundles", 404, /predates per-deployment permissions bundles/],
     ["publishes no bundle", 200, /did not publish a permissions bundle/],
   ] as const)(
-    "refuses a core that %s instead of activating its deployment",
+    "refuses a core that %s",
     async (_label, status, error) => {
       const appId = randomUUID();
       const core = await startLocalJazzServer({ appId, inMemory: true });
@@ -1136,11 +1136,11 @@ describe("createJazz", () => {
       await expect(
         createJazz({ app, permissions, store: remote({ url, appId, secret: core.adminSecret }) }),
       ).rejects.toThrow(error);
-      // Nothing was activated as the app's current permissions.
-      const head = await fetch(`${core.url}/apps/${appId}/admin/permissions`, {
+      // The real core published no bundle, so no session can pin to it.
+      const listed = await fetch(`${core.url}/apps/${appId}/admin/bundles`, {
         headers: { "X-Jazz-Admin-Secret": core.adminSecret },
       });
-      expect(((await head.json()) as { head: unknown }).head).toBeNull();
+      expect(((await listed.json()) as { bundles: unknown[] }).bundles).toEqual([]);
     },
   );
 

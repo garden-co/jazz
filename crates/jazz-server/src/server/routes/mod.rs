@@ -31,8 +31,8 @@ use crate::server::{MAX_CATALOGUE_REQUEST_BODY_BYTES, ServerState};
 
 use http::{
     admin_subscription_introspection_handler, health_handler, internal_shutdown_handler,
-    migration_graph_handler, permissions_handler, publish_bundle_handler,
-    published_bundles_handler, schema_handler, schema_hashes_handler,
+    migration_graph_handler, publish_bundle_handler, published_bundles_handler, schema_handler,
+    schema_hashes_handler,
 };
 use utils::parse_app_id_param;
 pub(crate) use websocket::WebSocketAdmissionState;
@@ -102,7 +102,6 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             post(accounts::found_local_first_for_admin),
         )
         .route("/accounts/revoke", post(accounts::revoke_for_admin))
-        .route("/permissions", get(permissions_handler))
         .route("/migrations/graph", get(migration_graph_handler))
         .route(
             "/introspection/subscriptions",
@@ -841,33 +840,6 @@ mod tests {
             Some(&PolicyExpr::False),
             "runtime policy must converge to the durable H2 head"
         );
-    }
-
-    #[tokio::test]
-    async fn permissions_handler_returns_nulls_before_any_publish() {
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("users").column("name", ColumnType::Text))
-            .build();
-        let state = make_state_with_schema(schema).await;
-        let app = make_test_router(state);
-
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route("/admin/permissions"))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("permissions body");
-        let json: Value = serde_json::from_slice(&body).expect("permissions json");
-        assert!(json["head"].is_null());
-        assert!(json["permissions"].is_null());
     }
 
     async fn read_migration_graph(app: &axum::Router) -> Value {
