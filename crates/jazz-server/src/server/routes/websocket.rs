@@ -2859,12 +2859,11 @@ mod tests {
                 }],
                 migrations: Vec::new(),
                 permissions,
-                activate: false,
             },
         )
         .await
         .unwrap_or_else(|error| panic!("publish bundle: {}", error.body));
-        response.bundle.expect("a bundle id")
+        response.bundle
     }
 
     /// The bundle the store published last, which the backend pins its
@@ -4503,7 +4502,7 @@ mod tests {
             ],
         ));
         let response = reqwest::Client::new()
-            .post(format!("http://{addr}/apps/{}/admin/deploy", state.app_id))
+            .post(format!("http://{addr}/apps/{}/admin/bundles", state.app_id))
             .header("X-Jazz-Admin-Secret", "admin-secret")
             .header("Content-Type", "application/json")
             .body(

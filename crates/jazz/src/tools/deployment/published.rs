@@ -1,4 +1,4 @@
-//! Migrations as the CLI publishes them (`POST .../admin/deploy`) and as an
+//! Migrations as createJazz publishes them (`POST .../admin/bundles`) and as an
 //! app ships them to its clients: per-table lens edits between two schema
 //! hashes, lowered against the resolved source and target schemas.
 
