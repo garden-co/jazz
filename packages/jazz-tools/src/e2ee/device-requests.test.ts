@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
 import type { Db } from "../runtime/db.js";
@@ -6,13 +7,17 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js";
 
 it("keeps device administration account-scoped despite public-key visibility", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   try {
     await deploy({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });
@@ -58,13 +63,17 @@ it("keeps device administration account-scoped despite public-key visibility", a
 }, 30_000);
 
 it("keeps enrolment requests private to their verified author account and immutable", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   try {
     await deploy({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });

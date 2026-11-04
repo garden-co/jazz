@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -26,7 +27,7 @@ it.each([
       policy.notes.allowInsert.where({ "$createdBy.account": session.user.account });
       policy.notes.allowRead.where({ "$createdBy.account": session.user.account });
     });
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     let second: Awaited<ReturnType<typeof createDb>> | undefined;
     let retained: string | null = null;
@@ -35,6 +36,10 @@ it.each([
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
+        schema: app,
+        permissions: { ...deviceRequestPermissions, notes: applicationPermissions.notes! },
+      });
+      server = await frontE2eeCore(server, {
         schema: app,
         permissions: { ...deviceRequestPermissions, notes: applicationPermissions.notes! },
       });

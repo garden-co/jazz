@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
 import type { Db } from "../runtime/db.js";
@@ -7,7 +8,7 @@ import { createNativeCrypto } from "./native.js";
 import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js";
 
 it("preserves membership on bad successor delivery and propagates history signer failures", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   let corruptSuccessorDelivery = false;
   const signerError = new Error("Successor history signer unavailable");
@@ -18,6 +19,10 @@ it("preserves membership on bad successor delivery and propagates history signer
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });
@@ -121,7 +126,7 @@ it("preserves membership on bad successor delivery and propagates history signer
 }, 60_000);
 
 it("reports signer failure when a shared device reconciles an accepted proof", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   const signerError = new Error("Accepted proof signer unavailable");
   let releaseResponses!: () => void;
@@ -140,6 +145,10 @@ it("reports signer failure when a shared device reconciles an accepted proof", a
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });

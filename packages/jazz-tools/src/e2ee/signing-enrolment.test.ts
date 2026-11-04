@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -6,7 +7,7 @@ import { createNativeCrypto } from "./native.js";
 import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js";
 
 it("checks signing keys before storage and binds the retained signing identity to its device request", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   let persisted: string | null = null;
   let generated: Uint8Array | undefined;
@@ -24,6 +25,10 @@ it("checks signing keys before storage and binds the retained signing identity t
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });

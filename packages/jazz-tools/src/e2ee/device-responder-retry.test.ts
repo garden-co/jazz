@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it, vi } from "vitest";
 import type { Db } from "../runtime/db.js";
 import type { AcceptedDeviceTransactionScope } from "./accepted-membership.js";
@@ -10,7 +11,7 @@ import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js
 import { createNativeCrypto } from "./native.js";
 
 it("retries a conflicted background response from fresh authority without hiding signer failures", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   let first: Db;
   let target: Db | undefined;
@@ -67,6 +68,10 @@ it("retries a conflicted background response from fresh authority without hiding
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });

@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -6,7 +7,7 @@ import { createNativeCrypto } from "./native.js";
 import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js";
 
 it("revokes a device with a fresh epoch delivered only to remaining devices", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const delivered: { recipient: Uint8Array; secret: Uint8Array }[] = [];
   try {
@@ -14,6 +15,10 @@ it("revokes a device with a fresh epoch delivered only to remaining devices", as
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });

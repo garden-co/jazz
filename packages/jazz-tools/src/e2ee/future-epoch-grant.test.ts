@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -25,7 +26,7 @@ function append(context: Uint8Array, value: Uint8Array): Uint8Array {
 it.each(["before", "same transaction"])(
   "rejects a valid grant published %s as its epoch creation",
   async (when) => {
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const clients: Awaited<ReturnType<typeof createDb>>[] = [];
     const secrets: Uint8Array[] = [];
     try {
@@ -36,6 +37,7 @@ it.each(["before", "same transaction"])(
         schema: app,
         permissions: deviceRequestPermissions,
       });
+      server = await frontE2eeCore(server, { schema: app, permissions: deviceRequestPermissions });
       const account = await localAccountConfig(server.appId, server.url);
       const crypto = await createNativeCrypto();
       const open = async () => {

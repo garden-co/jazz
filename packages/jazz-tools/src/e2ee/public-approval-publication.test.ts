@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { acceptedDeviceTransaction } from "./accepted-membership.js";
 import { expect, it } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
@@ -11,7 +12,7 @@ import {
 } from "./device-requests.js";
 
 it("publishes a verifiable key-free approval while keeping the handshake account-private", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
     await deploy({
@@ -21,6 +22,7 @@ it("publishes a verifiable key-free approval while keeping the handshake account
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     const account = await localAccountConfig(server.appId, server.url);
     let creatorStore: string | null = null;
     const owner = await createDb({
