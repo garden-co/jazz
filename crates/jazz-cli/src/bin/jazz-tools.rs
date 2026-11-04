@@ -88,6 +88,14 @@ struct Cli {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
+    /// Import an alpha.59 server data dir into a new one, from the dump that
+    /// `jazz-alpha59-export` writes (`import`), and check the result
+    /// (`verify`). Run `jazz-tools migrate-alpha59` for its usage.
+    #[command(name = "migrate-alpha59")]
+    MigrateAlpha59 {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Create a new resource
     Create {
         #[command(subcommand)]
@@ -305,6 +313,11 @@ async fn run() {
     }
 
     match cli.command {
+        Commands::MigrateAlpha59 { args } => {
+            let code = jazz_cli::migrate_alpha59::main(args).await;
+            shutdown_tracing();
+            std::process::exit(code);
+        }
         Commands::Create { resource } => match resource {
             CreateResource::App { name } => {
                 let app_id = name.map_or_else(AppId::random, |name| AppId::from_name(&name));

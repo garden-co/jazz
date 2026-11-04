@@ -1,12 +1,16 @@
-//! `sqlite-import`: build a SQLite-engine server data dir from an alpha.59
-//! dump. See ../README.md.
+//! `jazz-tools migrate-alpha59`: build a new server data dir from a dump of
+//! an alpha.59 server data dir, and verify it. The dump comes from
+//! `jazz-alpha59-export`, a separate binary built against alpha.59 (see
+//! `dev/migrate-alpha59/`).
 //!
-//! Everything goes through the new server's own code: the admin catalogue
-//! is replayed as one deployment per permissions bundle (what
-//! `POST /admin/deploy` runs), the account journal command by command, and
-//! every stored row version through the public Db API, attributed to its
-//! original author and timestamp. Nothing is written into the SQLite files
-//! directly.
+//! Everything goes through the new server's own code: the active schema and
+//! its permissions as one deployment, the account journal command by
+//! command, and every stored row version through the public Db API,
+//! attributed to its original author and timestamp. Nothing is written into
+//! the SQLite files directly.
+//!
+//! Self-hosters moving off alpha.59 need it; it stays until they no longer
+//! do.
 
 mod active;
 mod links;
@@ -14,7 +18,6 @@ mod verify;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::process::ExitCode;
 use std::sync::Arc;
 
 use jazz::account_registry::AccountId;
@@ -25,9 +28,9 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::AppId;
-use jazz_server::server::migrate_import::{migrate_import_account, migrate_import_deploy};
+use jazz_alpha59_dump as dump;
+use jazz_server::server::migrate_alpha59::{migrate_import_account, migrate_import_deploy};
 use jazz_server::{ServerBuilder, ServerState, StorageBackend};
-use migrate_alpha59_dump as dump;
 use serde_json::{Value as Json, json};
 
 /// Row versions written per owner-thread job.
@@ -76,22 +79,26 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     })
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1).peekable();
-    let verifying = args.peek().is_some_and(|arg| arg == "verify");
-    if verifying {
-        args.next();
-    }
+const USAGE: &str = "usage: jazz-tools migrate-alpha59 (import | verify) --dump <dump> \
+    --data-dir <dir> --app-id <app id> [--no-backend-identity-links] [--drop-transaction-metadata]";
+
+/// Run `jazz-tools migrate-alpha59 <args>`; the process exit code.
+pub async fn main(args: Vec<String>) -> i32 {
+    let mut args = args.into_iter().peekable();
+    let verifying = match args.next().as_deref() {
+        Some("import") => false,
+        Some("verify") => true,
+        _ => {
+            eprintln!("{USAGE}");
+            return 2;
+        }
+    };
     let args = match parse_args(args) {
         Ok(args) => args,
         Err(error) => {
-            eprintln!("sqlite-import: {error}");
-            eprintln!(
-                "usage: sqlite-import [verify] --dump <dump> --data-dir <dir> --app-id <uuid> \
-                 [--no-backend-identity-links] [--drop-transaction-metadata]"
-            );
-            return ExitCode::from(2);
+            eprintln!("jazz-tools migrate-alpha59: {error}");
+            eprintln!("{USAGE}");
+            return 2;
         }
     };
     let result = if verifying {
@@ -103,13 +110,13 @@ async fn main() -> ExitCode {
         Ok(summary) => {
             println!("{summary}");
             if summary["ok"] == Json::Bool(false) {
-                return ExitCode::FAILURE;
+                return 1;
             }
-            ExitCode::SUCCESS
+            0
         }
         Err(error) => {
-            eprintln!("sqlite-import: {error}");
-            ExitCode::FAILURE
+            eprintln!("jazz-tools migrate-alpha59: {error}");
+            1
         }
     }
 }
@@ -143,13 +150,14 @@ async fn import(args: &Args) -> Result<Json, String> {
     }
     check_dump(args)?;
     let result = run(args).await;
-    if result.is_err() && args.data_dir.exists() {
-        if let Err(error) = remove_built(&args.data_dir, existed) {
-            eprintln!(
-                "sqlite-import: could not remove the half-built {}: {error}",
-                args.data_dir.display()
-            );
-        }
+    if result.is_err()
+        && args.data_dir.exists()
+        && let Err(error) = remove_built(&args.data_dir, existed)
+    {
+        eprintln!(
+            "jazz-tools migrate-alpha59: could not remove the half-built {}: {error}",
+            args.data_dir.display()
+        );
     }
     result
 }
@@ -183,7 +191,7 @@ async fn run(args: &Args) -> Result<Json, String> {
     let (mut reader, header) = dump::Reader::open(std::io::BufReader::new(file)).map_err(err)?;
     if header.format != dump::DUMP_FORMAT {
         return Err(format!(
-            "dump format {} is not {}: re-export the store with this tool's a59-export",
+            "dump format {} is not {}: re-export the store with the matching jazz-alpha59-export",
             header.format,
             dump::DUMP_FORMAT
         ));
@@ -596,12 +604,13 @@ impl RowImport {
                 let mut views: HashMap<jazz::ids::SchemaVersionId, Db> = HashMap::new();
                 for write in writes {
                     let id = write.schema.version_id();
-                    if !views.contains_key(&id) {
-                        let view =
-                            block_on(db.register_schema_view(write.schema.clone())).map_err(err)?;
-                        views.insert(id, view);
-                    }
-                    let view = &views[&id];
+                    let view = match views.entry(id) {
+                        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                        std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
+                            block_on(db.register_schema_view(write.schema.clone())).map_err(err)?,
+                        ),
+                    };
+                    let view = &*view;
                     let identity = WriteIdentity::Attribution(write.author);
                     let at = Some(write.at_ms);
                     let (table, row) = (write.table.as_str(), write.row);
