@@ -228,7 +228,7 @@ describe("vercel() store", () => {
     ).rejects.toThrow(/401/);
 
     // No secret gets past it either: only the token's stated access counts.
-    const guessed = await fetch(`${core.url}/apps/${appId}/admin/permissions`, {
+    const guessed = await fetch(`${core.url}/apps/${appId}/admin/bundles`, {
       headers: { "X-Jazz-Admin-Secret": "stated-by-backend-credential" },
     });
     expect(guessed.status).toBe(401);

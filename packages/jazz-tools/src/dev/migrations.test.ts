@@ -592,7 +592,7 @@ export const app = s.defineApp({
             return Response.json({
               schemas: [fromHash],
               migrations: [],
-              activeSchemaHash: fromHash,
+              latestBundleSchemaHash: fromHash,
             });
           if (input.endsWith(`/schema/${fromHash}`))
             return new Response(

@@ -3,7 +3,6 @@ import { wasmSchemasEqual } from "./schema-utils.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   fetchPublishedBundles,
-  fetchStoredPermissions,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
 } from "./catalogue-api.js";
@@ -175,65 +174,6 @@ describe("catalogue-api", () => {
     );
   });
 
-  it("fetches stored permissions with admin secret header", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      json: async () => ({
-        head: {
-          schemaHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          version: 2,
-          parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
-          bundleObjectId: "22222222-2222-2222-2222-222222222222",
-        },
-        permissions: {
-          users: {
-            select: {
-              using: {
-                type: "True",
-              },
-            },
-          },
-        },
-      }),
-    });
-    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
-
-    const result = await fetchStoredPermissions("http://localhost:1625/", {
-      appId: "app-123",
-      adminSecret: "admin-secret",
-    });
-
-    expect(result).toEqual({
-      head: {
-        schemaHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        version: 2,
-        parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
-        bundleObjectId: "22222222-2222-2222-2222-222222222222",
-      },
-      permissions: {
-        users: {
-          select: {
-            using: {
-              type: "True",
-            },
-          },
-        },
-      },
-    });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0]![0]).toBe(
-      "http://localhost:1625/apps/app-123/admin/permissions",
-    );
-    expect(fetchMock.mock.calls[0]![1]).toMatchObject({
-      method: "GET",
-      headers: {
-        "X-Jazz-Admin-Secret": "admin-secret",
-      },
-    });
-  });
-
   it("lists published bundles with admin secret header", async () => {
     const bundle = {
       bundle: "b".repeat(64),
@@ -262,7 +202,7 @@ describe("catalogue-api", () => {
     });
   });
 
-  it("throws a descriptive error when fetching stored permissions fails", async () => {
+  it("throws a descriptive error when listing bundles fails", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
       status: 401,
@@ -272,11 +212,11 @@ describe("catalogue-api", () => {
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     await expect(
-      fetchStoredPermissions("http://localhost:1625", {
+      fetchPublishedBundles("http://localhost:1625", {
         appId: "test-app",
         adminSecret: "admin-secret",
       }),
-    ).rejects.toThrow('Permissions fetch failed: 401 Unauthorized - {"error":"bad secret"}');
+    ).rejects.toThrow('Bundles fetch failed: 401 Unauthorized - {"error":"bad secret"}');
   });
 
   it("fetches grouped server subscriptions with admin secret and app id", async () => {

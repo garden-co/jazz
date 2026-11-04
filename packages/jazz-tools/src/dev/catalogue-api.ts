@@ -123,39 +123,9 @@ export async function fetchSchemaHashes(
   };
 }
 
-export interface StoredPermissionsHead {
-  schemaHash: string;
-  version: number;
-  parentBundleObjectId: string | null;
-  bundleObjectId: string;
-}
-
-export interface StoredPermissionsResponse {
-  head: StoredPermissionsHead | null;
-  permissions: Record<string, TablePolicies> | null;
-}
-
-export interface FetchStoredPermissionsOptions {
+export interface FetchPublishedBundlesOptions {
   appId: string;
   adminSecret: string;
-}
-
-export async function fetchStoredPermissions(
-  serverUrl: string,
-  options: FetchStoredPermissionsOptions,
-): Promise<StoredPermissionsResponse> {
-  const body = (await fetchAdminJson(
-    appScopedUrl(serverUrl, options.appId, "admin/permissions"),
-    options.adminSecret,
-    "Permissions",
-  )) as {
-    head?: StoredPermissionsHead | null;
-    permissions?: Record<string, TablePolicies> | null;
-  };
-  return {
-    head: body.head ?? null,
-    permissions: body.permissions ?? null,
-  };
 }
 
 /** A permissions bundle the core has published: what sessions pin to. */
@@ -169,7 +139,7 @@ export interface PublishedBundle {
 /** Every bundle the core has published, oldest first. */
 export async function fetchPublishedBundles(
   serverUrl: string,
-  options: FetchStoredPermissionsOptions,
+  options: FetchPublishedBundlesOptions,
 ): Promise<PublishedBundle[]> {
   const body = (await fetchAdminJson(
     appScopedUrl(serverUrl, options.appId, "admin/bundles"),

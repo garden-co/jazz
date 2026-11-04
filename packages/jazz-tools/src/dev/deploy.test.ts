@@ -19,7 +19,7 @@ it("deploys once per invocation and re-fetches the graph on the next invocation"
       calls.push(input.split("/admin/")[1]!);
       if (input.endsWith("/migrations/graph"))
         return reply({
-          activeSchemaHash: stored ? hash : null,
+          latestBundleSchemaHash: stored ? hash : null,
           schemas: stored ? [hash] : [],
           migrations: [],
         });
@@ -49,7 +49,7 @@ it("surfaces server validation failures without retrying or publishing individua
   const hash = await computeSchemaHash(app.wasmSchema);
   const fetchMock = vi.fn(async (input: string) => {
     if (input.endsWith("/migrations/graph"))
-      return reply({ activeSchemaHash: hash, schemas: [hash], migrations: [] });
+      return reply({ latestBundleSchemaHash: hash, schemas: [hash], migrations: [] });
     expect(input.endsWith("/admin/bundles")).toBe(true);
     return reply(
       {
@@ -96,7 +96,7 @@ it("includes historical schemas and multiple migrations in a single request", as
     "fetch",
     vi.fn(async (input: string, init?: RequestInit) => {
       if (input.endsWith("/migrations/graph"))
-        return reply({ activeSchemaHash: hashes[0], schemas: [hashes[0]], migrations: [] });
+        return reply({ latestBundleSchemaHash: hashes[0], schemas: [hashes[0]], migrations: [] });
       expect(input.endsWith("/admin/bundles")).toBe(true);
       const body = JSON.parse(String(init?.body)) as DeploymentRequest;
       expect(body.schemas.map((schema) => schema.hash).sort()).toEqual(hashes.slice(1).sort());
@@ -141,7 +141,7 @@ it("preserves bigint and byte defaults in the deployment JSON", async () => {
     "fetch",
     vi.fn(async (input: string, init?: RequestInit) => {
       if (input.endsWith("/migrations/graph"))
-        return reply({ activeSchemaHash: fromHash, schemas: [fromHash], migrations: [] });
+        return reply({ latestBundleSchemaHash: fromHash, schemas: [fromHash], migrations: [] });
       expect(input.endsWith("/admin/bundles")).toBe(true);
       const body = JSON.parse(String(init?.body));
       expect(body.migrations[0].forward[0].operations).toEqual([

@@ -169,15 +169,6 @@ pub(crate) async fn deploy(
             permissions: request.permissions,
         },
     )?;
-    let active = state
-        .catalogue
-        .active_schema_summary(&state.catalogue_store)
-        .map_err(DeployError::internal)?;
-    let revision = active
-        .map(|head| head.version)
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or_else(|| DeployError::invalid("deployment revision overflow"))?;
     let staged = state
         .catalogue_store
         .stage_deployment(&prepared)
@@ -200,7 +191,7 @@ pub(crate) async fn deploy(
             let probe =
                 ServerRuntimeHandle::start_with_storage(genesis.clone(), StorageConfig::InMemory)
                     .map_err(DeployError::internal)?;
-            let applied = match change(&probe, &prepared, staged.put.clone(), revision).await {
+            let applied = match change(&probe, &prepared, staged.put.clone()).await {
                 Ok(change) => probe
                     .apply_catalogue(change, None)
                     .await
@@ -218,14 +209,14 @@ pub(crate) async fn deploy(
         .catalogue_store
         .check_unchanged(&staged)
         .map_err(DeployError::invalid)?;
-    let change = change(&runtime, &prepared, staged.put, revision).await?;
-    // The deployment's rows, admissions and activation commit together on
-    // the store's thread, or not at all. New permissions reach every session
-    // at once: with a bundle new to this store, the same job ends the
-    // sessions pinned to other bundles, which reconnect and are pinned again
-    // by whichever backend serves them now. Publishing a known bundle again
-    // (a cold start, a rollback, a deployment running beside one that
-    // published the same permissions) ends no one.
+    let change = change(&runtime, &prepared, staged.put).await?;
+    // The deployment's rows and admissions commit together on the store's
+    // thread, or not at all. New permissions reach every session at once:
+    // with a bundle new to this store, the same job ends the sessions pinned
+    // to other bundles, which reconnect and are pinned again by whichever
+    // backend serves them now. Publishing a known bundle again (a cold
+    // start, a rollback, a deployment running beside one that published the
+    // same permissions) ends no one.
     let applied = runtime.apply_catalogue(change, new_bundle).await;
     state
         .catalogue_store
@@ -270,30 +261,14 @@ pub(crate) async fn publish_source_bundle(
 }
 
 /// What applying `prepared` to `runtime`'s catalogue changes: its rows,
-/// and the admission of its schemas, the target among them so sessions
-/// pinned to its bundle can write by it. Nothing becomes current.
+/// and the admission of its schemas. Nothing becomes current.
 async fn change(
     runtime: &ServerRuntimeHandle,
     prepared: &deployment::PreparedDeployment,
     put: jazz::catalogue::CataloguePut,
-    revision: u64,
 ) -> Result<jazz::catalogue::CatalogueChange, DeployError> {
     let stored = runtime.catalogue().await.map_err(DeployError::internal)?;
-    let mut change = deployment::prepare_catalogue_change(prepared, &stored, put, revision)
-        .map_err(DeployError::invalid)?;
-    if let Some((_, target, lenses)) = change.activate.take()
-        && !stored
-            .schemas
-            .iter()
-            .any(|schema| schema.version == Some(target.version_id()))
-        && change
-            .admit
-            .iter()
-            .all(|(schema, _)| schema.version_id() != target.version_id())
-    {
-        change.admit.push((target, lenses));
-    }
-    Ok(change)
+    deployment::prepare_catalogue_change(prepared, &stored, put).map_err(DeployError::invalid)
 }
 
 impl From<CatalogueApplyError> for DeployError {

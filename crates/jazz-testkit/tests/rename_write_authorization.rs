@@ -547,33 +547,14 @@ async fn sibling_schema_paths_translate_rows_defaults_and_owner_policies_inner()
 }
 
 // These fixtures exercise historical graphs that public deploy now rejects.
-// Select their policies directly in the runtime to retain projection coverage.
+// Publish their policies as a bundle the sessions pin, to retain projection coverage.
 async fn activate_legacy_fixture(
     server: &JazzServer,
     schema: &jazz::tools::Schema,
     permissions: impl IntoIterator<Item = (jazz::tools::TableName, jazz::tools::TablePolicies)>,
 ) {
     let permissions = permissions.into_iter().collect::<HashMap<_, _>>();
-    let mut source = schema.clone();
-    for (name, table) in &mut source {
-        table.policies = permissions.get(name).cloned().unwrap_or_default();
-    }
     let runtime = server.server_state().runtime().unwrap();
-    let revision = runtime
-        .catalogue()
-        .await
-        .unwrap()
-        .head()
-        .map_or(0, |head| head.revision)
-        + 1;
-    runtime
-        .activate_schema(
-            revision,
-            jazz::schema::JazzSchema::new(&source).unwrap(),
-            permissions.clone(),
-        )
-        .await
-        .unwrap();
     // Sessions are pinned to a published bundle, as createJazz pins them:
     // publish this schema's permissions as one, for the clients made next.
     runtime
