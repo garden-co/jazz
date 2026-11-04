@@ -152,14 +152,21 @@ it("keeps enrolment requests private to their verified author account and immuta
         version: 1,
         challenge: new Uint8Array(32).fill(4),
       };
-      for (const replace of [
-        () => client.insert(requests, replacement, { id: request.id }),
-        () => client.upsert(requests, request.id, replacement),
-        () => client.restore(requests, request.id, replacement),
-      ]) {
-        await expect(async () => replace().wait({ tier: "global" })).rejects.toThrow(
-          /already exists|authorization|policy denied|not deleted|not_deleted|conflict/i,
-        );
+      for (const [operation, replace] of [
+        ["insert", () => client.insert(requests, replacement, { id: request.id })],
+        ["upsert", () => client.upsert(requests, request.id, replacement)],
+        ["restore", () => client.restore(requests, request.id, replacement)],
+      ] as const) {
+        if (client === bob && operation === "restore") {
+          // A private target absent from Bob's replica is refused before any restore write.
+          await expect(async () => replace().wait({ tier: "global" })).rejects.toThrow(
+            "NotObserved: RESTORE on table __e2ee_device_requests",
+          );
+        } else {
+          await expect(async () => replace().wait({ tier: "global" })).rejects.toThrow(
+            /already exists|authorization|policy denied|not deleted|not_deleted|conflict/i,
+          );
+        }
       }
       await expect(
         client
@@ -173,6 +180,7 @@ it("keeps enrolment requests private to their verified author account and immuta
     await expect(
       alice.one(requests.where({ id: request.id }), { tier: "remote" }),
     ).resolves.toEqual(request);
+    await expect(bob.all(requests, { tier: "remote" })).resolves.toEqual([]);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
