@@ -103,7 +103,8 @@ export async function createJazzSessionOwner<
   initial?: "local-first" | "signed-out";
   /**
    * @internal Open as the backend this core admits with `auth`: only the
-   * session `createJazz` opens on its own core passes it.
+   * Node host passes it, for the session `createJazz` opens on its own core
+   * and for a backend client its main backend trusts as a machine.
    */
   backend?: BackendAuth;
   /**
