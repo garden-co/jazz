@@ -69,10 +69,11 @@ export interface VercelStoreOptions {
    */
   idleMs?: number;
   /**
-   * Where the core's server binary comes from: an npm tarball of
-   * `jazz-tools`. Defaults to the registry's tarball of the installed version.
+   * Where the core comes from: an npm tarball of
+   * `@garden-co/jazz-napi-linux-x64-gnu`, the Node addon the Sandbox runs
+   * it with. Defaults to the registry's tarball of the installed version.
    */
-  serverTarballUrl?: string;
+  coreTarballUrl?: string;
   /** Vercel credentials for scripts outside a Vercel function. Defaults to the function's OIDC token. */
   credentials?: { token: string; teamId: string; projectId: string };
   /**
@@ -211,9 +212,26 @@ export function newerVersion(a: string, b: string): boolean {
   return false;
 }
 
+/** The addon's file in its npm tarball. */
+const CORE_ADDON = "package/jazz-napi.linux-x64-gnu.node";
+
 /**
- * Start the core: install the server binary for `version` on the Drive,
- * generate the app id once, and run the newest server version
+ * Runs the core in the Sandbox's Node: `node -e` with the addon, the app id
+ * and the core's options, in that order. Node owns the process's signals: a
+ * SIGTERM asks the core to drain, and the process exits once it has. The addon's path stays in the
+ * process's command line, which is how a later start recognises it.
+ *
+ * @internal
+ */
+export const CORE_LAUNCHER =
+  "const [addon, appId, options] = process.argv.slice(1);" +
+  " const core = require(addon).serveCore({ ...JSON.parse(options), appId });" +
+  " for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => core.stop());" +
+  " core.closed().then(() => process.exit(0), (error) => { console.error(error); process.exit(1); });";
+
+/**
+ * Start the core: install the core addon for `version` on the Drive,
+ * generate the app id once, and run the newest core version
  * this Drive has seen, so an instance from an older deployment never
  * downgrades data a newer one already wrote. A different running version is
  * stopped first; the same one is left alone.
@@ -253,26 +271,28 @@ fi
 [ -n "$pinned" ] || { printf '%s\\n' "$trust" > "$data/trust.tmp" && mv "$data/trust.tmp" "$data/trust"; }
 highest=$(cat "$data/version" 2>/dev/null || true)
 if [ -n "$highest" ] && newer "$highest" "$version"; then
-  # A newer deployment owns this Drive: run its server, never ours.
-  if [ ! -x "$data/bin/jazz-tools-$highest" ]; then
-    echo "jazz: $highest owns this Drive but its server is missing; not starting $version" >&2
+  # A newer deployment owns this Drive: run its core, never ours.
+  if [ ! -s "$data/bin/jazz-napi-$highest.node" ]; then
+    echo "jazz: $highest owns this Drive but its core is missing; not starting $version" >&2
     exit 1
   fi
   version=$highest
 fi
-bin=$data/bin/jazz-tools-$version
-# Fetch before stopping anything, so a failed download leaves the old server up.
-if [ ! -x "$bin" ]; then
+addon=$data/bin/jazz-napi-$version.node
+# Fetch before stopping anything, so a failed download leaves the old core up.
+if [ ! -s "$addon" ]; then
   mkdir -p "$data/bin"
   # The Sandbox image has node but no curl.
   node -e 'fetch(process.argv[1]).then(async (r) => { if (!r.ok) throw new Error(r.status); process.stdout.write(Buffer.from(await r.arrayBuffer())); })' ${q(tarballUrl)} \\
-    | tar xz -O package/bin/native/jazz-tools-linux-x64 > "$bin.tmp"
-  chmod 755 "$bin.tmp" && mv "$bin.tmp" "$bin"
+    | tar xz -O ${CORE_ADDON} > "$addon.tmp"
+  [ -s "$addon.tmp" ] || { echo "jazz: the core download for $version was empty" >&2; exit 1; }
+  mv "$addon.tmp" "$addon"
 fi
 # The pid file may be stale (a resumed snapshot): trust it only if that
-# process runs one of our server binaries.
+# process runs one of our cores.
 pid=$(cat "$run/jazz.pid" 2>/dev/null || true)
-if [ -n "$pid" ] && [[ "$(tr '\\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" == *"$data/bin/jazz-tools-"* ]]; then
+cmdline=$(tr '\\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+if [ -n "$pid" ] && [[ "$cmdline" == *"$data/bin/jazz-napi-"* ]]; then
   [ "$(cat "$run/jazz.version" 2>/dev/null)" = "$version" ] && exit 0
   kill -TERM "$pid" 2>/dev/null || true
   for _ in $(seq 150); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
@@ -286,16 +306,15 @@ app_id=$(cat "$data/app-id")
 export NODE_ENV=production
 mkdir -p "$data/store"
 printf '%s\\n' "$version" > "$data/version.tmp" && mv "$data/version.tmp" "$data/version"
-# Older servers are never started again (see above).
-find "$data/bin" -name 'jazz-tools-*' ! -name "jazz-tools-$version" -delete
+# Older cores are never started again (see above).
+find "$data/bin" -name 'jazz-napi-*' ! -name "jazz-napi-$version.node" -delete
 printf '%s\\n' "$version" > "$run/jazz.version"
 echo $$ > "$run/jazz.pid"
 exec 9>&-
 # The core admits only the deploying function's own workload.${blobsSetup(blobs, q)}
-exec "$bin" server "$app_id" --port ${VERCEL_CORE_PORT} --data-dir "$data/store" ${blobsFlags(blobs, environmentOf(trust), q)} \\
-  --trusted-workload-issuer ${q(trust.issuer)} \\
-  --trusted-workload-audience ${q(trust.audience)} \\
-  --trusted-workload-subject ${q(trust.subject)}
+exec node -e ${q(CORE_LAUNCHER)} "$addon" "$app_id" ${q(
+    JSON.stringify(coreOptions(`${root}/data/store`, trust, blobs)),
+  )}
 `;
 }
 
@@ -324,31 +343,39 @@ export function environmentOf(trust: TrustedWorkload): string | undefined {
   return /:environment:([^:]+)$/.exec(trust.subject)?.[1];
 }
 
-/**
- * The server's flags for its blob store. A bucket or Blob store is claimed
- * for the core's environment: one environment's OIDC token reaches the
- * whole store, so preview and production never share one.
- */
-function blobsFlags(
+/** The core's options, but its app id, which the Drive keeps. */
+function coreOptions(
+  dataDir: string,
+  trust: TrustedWorkload,
   blobs: VercelS3 | VercelBlob | undefined,
-  environment: string | undefined,
-  q: (s: string) => string,
-): string {
-  if (!blobs) return "--blobs sqlite";
-  const claim = environment === undefined ? [] : [`--blobs-environment ${q(environment)}`];
-  if ("storeId" in blobs) {
-    return [
-      `--blobs vercel-blob --vercel-blob-token-from-workload --vercel-blob-store-id ${q(blobs.storeId)}`,
-      ...claim,
-      ...(blobs.prefix === undefined ? [] : [`--vercel-blob-prefix ${q(blobs.prefix)}`]),
-    ].join(" ");
-  }
-  return [
-    "--blobs s3 --s3-role-from-workload",
-    ...claim,
-    ...(blobs.endpoint === undefined ? [] : [`--s3-endpoint ${q(blobs.endpoint)}`]),
-    ...(blobs.prefix === undefined ? [] : [`--s3-prefix ${q(blobs.prefix)}`]),
-  ].join(" ");
+): Record<string, unknown> {
+  // A bucket or Blob store is claimed for the core's environment: one
+  // environment's OIDC token reaches the whole store, so preview and
+  // production never share one.
+  const environment = environmentOf(trust);
+  const claim = environment === undefined ? {} : { environment };
+  return {
+    port: VERCEL_CORE_PORT,
+    dataDir,
+    blobs: !blobs
+      ? { kind: "sqlite" }
+      : "storeId" in blobs
+        ? {
+            kind: "vercel-blob",
+            tokenFromWorkload: true,
+            storeId: blobs.storeId,
+            ...claim,
+            ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
+          }
+        : {
+            kind: "s3",
+            roleFromWorkload: true,
+            ...claim,
+            ...(blobs.endpoint === undefined ? {} : { endpoint: blobs.endpoint }),
+            ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
+          },
+    trustedWorkload: { issuer: trust.issuer, audience: trust.audience, subject: trust.subject },
+  };
 }
 
 let warnedNoBlobStore = false;
@@ -513,7 +540,8 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     })) as SandboxSdk);
   const version = params.version ?? (await installedVersion());
   const tarballUrl =
-    options.serverTarballUrl ?? `https://registry.npmjs.org/jazz-tools/-/jazz-tools-${version}.tgz`;
+    options.coreTarballUrl ??
+    `https://registry.npmjs.org/@garden-co/jazz-napi-linux-x64-gnu/-/jazz-napi-linux-x64-gnu-${version}.tgz`;
   const project = options.credentials?.projectId ?? env.VERCEL_PROJECT_ID;
   if (!options.name && !project) {
     throw new Error(

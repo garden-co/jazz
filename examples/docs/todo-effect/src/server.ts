@@ -1,28 +1,25 @@
 // #region quickstart-server-setup-effect
 import { serve } from "@hono/node-server";
-import { Config, Effect, Layer, ManagedRuntime, Option, Schema } from "effect";
+import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
+import { sqlite } from "jazz-tools/backend";
 import { Jazz, JazzBackend } from "jazz-tools/effect/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
-// One backend session for the whole server, closed when the server stops.
-const JazzLive = Layer.unwrap(
-  Effect.gen(function* () {
-    return JazzBackend.layer({
-      appId: yield* Config.String("JAZZ_APP_ID").pipe(Config.withDefault("todo-server-effect")),
-      app: schemaApp,
-      permissions,
-      driver: { type: "persistent", dataPath: "./data/jazz.db" },
-      serverUrl: yield* Config.String("JAZZ_SERVER_URL"),
-      initial: { backendSecret: yield* Config.String("JAZZ_BACKEND_SECRET") },
-      jwksUrl: Option.getOrUndefined(yield* Config.option(Config.String("JAZZ_JWKS_URL"))),
-      allowLocalFirstAuth: Option.getOrUndefined(
-        yield* Config.option(Config.Boolean("JAZZ_ALLOW_LOCAL_FIRST_AUTH")),
-      ),
-    });
-  }),
-);
+// Your own auth decides who a request is (a session cookie, a header).
+declare function currentUser(request: Request): Promise<{ id: string } | null>;
+
+// The app's Jazz for the whole server, closed when the server stops.
+const JazzLive = JazzBackend.layer({
+  app: schemaApp,
+  permissions,
+  store: sqlite({ path: "./data/jazz" }),
+  async authenticate(request) {
+    const user = await currentUser(request);
+    return user ? { userId: user.id } : null;
+  },
+});
 
 const TodoInput = Schema.Struct({ title: Schema.String });
 const TodoPatch = Schema.Struct({ done: Schema.Boolean });
@@ -37,8 +34,8 @@ const createTodo = HttpRouter.add(
   "/api/todos",
   Effect.gen(function* () {
     const jazz = yield* Jazz;
-    // A missing or invalid bearer token fails `forCurrentRequest` before this
-    // runs, and currently surfaces as a 500 (typed auth errors: #3655).
+    // A request without a signed-in user fails `forCurrentRequest` before
+    // this runs.
     const account = jazz.db.getAuthState().session?.user.account;
     if (!account) {
       return yield* HttpServerResponse.json({ error: "Account required" }, { status: 401 });
@@ -117,7 +114,7 @@ export const listDoneTodosRoute = HttpRouter.add(
 const Routes = Layer.mergeAll(createTodo, listTodos, updateTodo, deleteTodo);
 
 // `toWebHandler` turns the routes into a fetch handler that any Node or edge
-// server can host. The Jazz session is opened once and shared by every request.
+// server can host. Jazz is opened once and shared by every request.
 const jazzRuntime = ManagedRuntime.make(JazzLive);
 const services = await jazzRuntime.context();
 const { handler, dispose } = HttpRouter.toWebHandler(Routes);

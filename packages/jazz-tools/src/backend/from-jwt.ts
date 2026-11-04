@@ -1,7 +1,7 @@
 import { parseJwtPayload, type JwtPayload } from "../runtime/client-session.js";
-import type { BackendJwtPublicKey } from "./create-jazz-context.js";
+import { verifyExternalJwt, type BackendJwtPublicKey } from "./external-jwt.js";
 import type { JazzUser } from "./create-jazz.js";
-import { isRequestAuthenticationError, verifyExternalJwt } from "./request-auth.js";
+import { isRequestAuthenticationError } from "./request-auth.js";
 
 export interface FromJWTOptions {
   /** The issuer's JWKS endpoint. HTTPS, or HTTP on loopback in development. */

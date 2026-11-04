@@ -1,4 +1,3 @@
-import type { BackendAuth } from "../accounts/enrollment.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { followUser, type UserFollowingSession } from "../session/follow-user.js";
 import { nativeBackendWatchEvents } from "../session/native-backend-watch.js";
@@ -27,7 +26,7 @@ export type JazzSessionConfig = Omit<JazzClientConfig, "account" | "serverUrl" |
      * (`linkWithBackend`). Your backend must accept guests
      * (`acceptLocalFirstAuth`).
      */
-    initial?: "local-first" | "signed-out" | BackendAuth;
+    initial?: "local-first" | "signed-out";
     /**
      * When a local-first guest is on this device and the user who signs in
      * has no Jazz account yet (they just signed up, or they are an existing

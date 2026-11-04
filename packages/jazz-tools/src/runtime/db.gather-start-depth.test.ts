@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
-import { createJazzSession } from "../backend/index.js";
 import { createDb } from "./default-create-db.js";
 import type { Db } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
@@ -29,7 +28,6 @@ const permissions = definePermissions(app, ({ policy, session }) => {
 });
 
 let server: Awaited<ReturnType<typeof startTestJazz>>;
-let backendSession: Awaited<ReturnType<typeof createJazzSession>>;
 let backend: Db;
 let user: Db;
 const ids: Record<string, string> = {};
@@ -61,23 +59,12 @@ beforeAll(async () => {
       .wait({ tier: "global" });
     ids[name] = row.id;
   }
-  backendSession = await createJazzSession({
-    appId: server.appId,
-    app,
-    permissions,
-    serverUrl: server.core.url,
-    driver: { type: "memory" },
-    initial: { backendSecret: server.backendSecret },
-  });
-  const snapshot = backendSession.getSnapshot();
-  if (!snapshot.client) throw snapshot.error ?? new Error(snapshot.status);
-  backend = snapshot.client.db;
+  // The app's own backend database.
+  backend = server.jazz.db;
 }, 60_000);
 
 afterAll(async () => {
   await user?.shutdown();
-  await backendSession?.getSnapshot().client?.shutdown({ waitForSync: false });
-  await backendSession?.close();
   await server?.stop();
 });
 
