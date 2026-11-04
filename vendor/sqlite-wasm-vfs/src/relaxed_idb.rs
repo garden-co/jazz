@@ -402,6 +402,17 @@ impl RelaxedIdb {
         Ok(())
     }
 
+    async fn reload_db(&self, filename: &str) -> Result<()> {
+        self.check_file(filename)?;
+        let reloaded = preload_db_impl(&self.idb, &Preload::Paths(vec![filename.into()])).await?;
+        // Only replace this file after the read succeeds. Absence must also
+        // evict its stale image, so require-existing admission sees deletion.
+        let mut files = self.name2file.borrow_mut();
+        files.remove(filename);
+        files.extend(reloaded);
+        Ok(())
+    }
+
     fn import_db(&self, filename: &str, bytes: &[u8]) -> Result<WaitCommit> {
         let page_size = check_import_db(bytes)?;
         self.import_db_unchecked(filename, bytes, page_size, true)
@@ -928,6 +939,16 @@ impl RelaxedIdbUtil {
     /// the db must be preloaded into memory before opening the sqlite db.
     pub async fn preload_db(&self, preload: Vec<String>) -> Result<()> {
         self.pool.preload_db(preload).await
+    }
+
+    /// Refresh one closed file from IndexedDB, including removal if absent.
+    ///
+    /// The host must hold its exclusive physical ownership lock, have closed
+    /// or irrevocably retired every SQLite connection to this file, and have
+    /// awaited prior commits.
+    /// This reads storage without writing it or disturbing unrelated files.
+    pub async fn reload_db(&self, filename: &str) -> Result<()> {
+        self.pool.reload_db(filename).await
     }
 
     /// Import the database.
