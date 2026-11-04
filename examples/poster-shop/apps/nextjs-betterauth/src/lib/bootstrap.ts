@@ -15,7 +15,7 @@ const inFlight = new Map<string, Promise<string>>();
 /**
  * The only first-open side effect, and the only place a canvas is created. It
  * runs server-side on a backend-authority `db` (the routes pass
- * `client.withAttributionForRequest(request)`), never from a query hook or a
+ * `jazz.withAttribution(request)`), never from a query hook or a
  * browser-held secret. The serializable transaction makes it idempotent: a user
  * who already has a membership gets nothing new, and two racing first opens
  * cannot both seed a poster. Resolves to the user's first canvas id.
