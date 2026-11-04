@@ -238,6 +238,10 @@ struct Inner {
     /// The last claim that failed, and when: it answers every operation
     /// for a while, as a failed role assumption does.
     claim_failed: Mutex<Option<(Instant, String)>>,
+    /// The region requests are signed for: [`S3Options::region`], until
+    /// AWS answers that the bucket is in another (on Vercel `AWS_REGION`
+    /// is the function's own region, not necessarily the bucket's).
+    region: Mutex<String>,
 }
 
 #[derive(Default)]
@@ -275,6 +279,7 @@ impl S3ChunkStore {
         };
         Ok(Self {
             inner: Arc::new(Inner {
+                region: Mutex::new(options.region.clone()),
                 options,
                 http,
                 keys: tokio::sync::Mutex::new(keys),
@@ -373,6 +378,13 @@ impl ChunkStore for S3ChunkStore {
     }
 }
 
+/// A response rebuilt from its status and body, once the body was read.
+fn rebuilt(status: reqwest::StatusCode, body: &[u8]) -> reqwest::Response {
+    let mut response = http::Response::new(body.to_vec());
+    *response.status_mut() = status;
+    reqwest::Response::from(response)
+}
+
 /// What one request to the bucket was.
 struct Request<'a> {
     method: reqwest::Method,
@@ -399,7 +411,7 @@ impl Inner {
         let base = o
             .endpoint
             .clone()
-            .unwrap_or_else(|| format!("https://s3.{}.amazonaws.com", o.region));
+            .unwrap_or_else(|| format!("https://s3.{}.amazonaws.com", self.region()));
         let base = base.trim_end_matches('/');
         let (scheme, authority) = base.split_once("://").unwrap_or(("https", base));
         let (host, path) = if o.path_style || o.bucket.contains('.') {
@@ -509,7 +521,50 @@ impl Inner {
         }
     }
 
+    /// The region requests are signed for now.
+    fn region(&self) -> String {
+        self.region.lock().expect("region").clone()
+    }
+
+    /// Send `request`. A bucket that answers it is in another region than
+    /// the one signed for (AWS does, with `x-amz-bucket-region` or a
+    /// `<Region>`) is asked again in that one, which is kept from then on.
     async fn send(&self, request: Request<'_>) -> Result<reqwest::Response, String> {
+        let signed_for = self.region();
+        let response = self.send_once(&request).await?;
+        let status = response.status();
+        if status != reqwest::StatusCode::MOVED_PERMANENTLY
+            && status != reqwest::StatusCode::BAD_REQUEST
+        {
+            return Ok(response);
+        }
+        let header = response
+            .headers()
+            .get("x-amz-bucket-region")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| format!("s3 blobs: {}", error.without_url()))?;
+        let named = header.or_else(|| xml_field(&String::from_utf8_lossy(&body), "Region"));
+        let Some(region) = named.filter(|region| !region.is_empty() && *region != signed_for)
+        else {
+            return Ok(rebuilt(status, &body));
+        };
+        tracing::warn!(
+            bucket = %self.options.bucket,
+            configured = %signed_for,
+            region = %region,
+            "s3 blobs: bucket {} is in {region}, not {signed_for}; signing for {region} from now on. \
+             Set the region explicitly (s3({{ region }}) or a project AWS_REGION) to skip this",
+            self.options.bucket,
+        );
+        *self.region.lock().expect("region") = region;
+        self.send_once(&request).await
+    }
+
+    async fn send_once(&self, request: &Request<'_>) -> Result<reqwest::Response, String> {
         let (url, host, path) = self.locate(request.name, request.rooted);
         let keys = self.keys().await?;
         let payload = hex::encode(
@@ -534,7 +589,7 @@ impl Inner {
         if let Some(token) = &keys.session_token {
             headers.push(("x-amz-security-token".to_owned(), token.clone()));
         }
-        let method = request.method;
+        let method = request.method.clone();
         let authorization = sign(
             method.as_str(),
             &path,
@@ -542,15 +597,15 @@ impl Inner {
             &mut headers,
             &payload,
             &keys,
-            &self.options.region,
+            &self.region(),
         );
         let mut http = self.http.request(method, url);
         for (name, value) in headers.iter().filter(|(name, _)| name != "host") {
             http = http.header(name, value);
         }
         http = http.header("authorization", authorization);
-        if let Some(body) = request.body {
-            http = http.body(body);
+        if let Some(body) = &request.body {
+            http = http.body(body.clone());
         }
         http.send()
             .await
@@ -1170,6 +1225,22 @@ mod tests {
     /// A bucket serves one environment: the first store with an
     /// environment claims it at the bucket's root (create-if-absent), and
     /// a store of another environment is refused under any prefix.
+    /// A bucket in another region than the store was given (on Vercel,
+    /// `AWS_REGION` is the function's region) answers naming its own: the
+    /// store signs for that one from then on.
+    #[test]
+    fn a_bucket_in_another_region_is_signed_for_its_own() {
+        let bucket = mock::MockS3::start();
+        *bucket.state.bucket_region.lock().unwrap() = Some("eu-west-1".to_owned());
+        let options = bucket.options("app/");
+        assert_eq!(options.region, "auto");
+        let store = S3ChunkStore::new(options, "me".to_owned()).unwrap();
+        let (key, bytes) = node(9);
+        block(store.put(&key, &bytes)).unwrap();
+        assert_eq!(block(store.get(&key)).unwrap().as_deref(), Some(&bytes[..]));
+        assert_eq!(store.inner.region(), "eu-west-1");
+    }
+
     #[test]
     fn a_bucket_serves_one_environment() {
         let bucket = mock::MockS3::start();
@@ -1380,6 +1451,9 @@ pub(crate) mod mock {
         /// Set: the keys may only touch objects under this prefix (an IAM
         /// policy on `bucket/prefix/*`); anything else answers 403.
         pub only_prefix: Mutex<Option<String>>,
+        /// Set: the bucket's region; a request signed for another is
+        /// refused naming it, as AWS refuses one.
+        pub bucket_region: Mutex<Option<String>>,
         /// Set: reads (GET) only under this prefix; puts anywhere.
         pub only_prefix_reads: Mutex<Option<String>>,
         /// Set: a create-if-absent put of this key answers 412 while the key
@@ -1472,6 +1546,27 @@ pub(crate) mod mock {
         }
         if parts.uri.path() == "/sts" {
             return sts(state, &parts, &body);
+        }
+        if let Some(region) = state.bucket_region.lock().unwrap().clone() {
+            let signed_for = parts
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split("Credential=").nth(1))
+                .and_then(|credential| credential.split('/').nth(2))
+                .unwrap_or_default()
+                .to_owned();
+            if signed_for != region {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "<Error><Code>AuthorizationHeaderMalformed</Code><Message>the region \
+                         '{signed_for}' is wrong; expecting '{region}'</Message>\
+                         <Region>{region}</Region></Error>"
+                    )
+                    .into_bytes(),
+                );
+            }
         }
         if let Err(code) = verify(state, &parts) {
             return error(StatusCode::FORBIDDEN, code);
