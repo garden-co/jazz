@@ -309,10 +309,10 @@ fn main() {
 }
 
 async fn run() {
-    // Initialize tracing with layered subscriber
-    init_tracing();
-
     let cli = Cli::parse();
+    // migrate-alpha59 prints its JSON summary on stdout, so its logs go to
+    // stderr.
+    init_tracing(matches!(cli.command, Commands::MigrateAlpha59 { .. }));
     if let Err(error) = validate_server_cli_options(&cli.command) {
         eprintln!("Server error: {error}");
         shutdown_tracing();
@@ -547,11 +547,17 @@ static OTEL_LOGGER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLog
 static OTEL_METER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::metrics::SdkMeterProvider> =
     std::sync::OnceLock::new();
 
-fn init_tracing() {
+fn init_tracing(to_stderr: bool) {
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let fmt_layer = tracing_subscriber::fmt::layer();
+    let writer = if to_stderr {
+        BoxMakeWriter::new(std::io::stderr)
+    } else {
+        BoxMakeWriter::new(std::io::stdout)
+    };
+    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(writer);
 
     #[cfg(feature = "otel")]
     {
