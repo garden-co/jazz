@@ -6,7 +6,7 @@ permissions, transaction guarantees, and sync protocol. Use the
 as starting points. The experiment demonstrates working sync in local workerd;
 its counted savepoints and unsupported rollback are not production semantics.
 
-## 1. Refresh the compatibility baseline
+## 1. Refresh the compatibility baseline — completed
 
 Adapt the experiment's build and harness to current code and rerun the SQL
 probes and limits tests. Current tables have 12 engine columns, leaving 88
@@ -32,7 +32,7 @@ boundary. Use the experiment's SQLite C shim as a reference; avoid making its
 partial SQLite emulation the permanent contract. Express backend differences
 as storage capabilities rather than scattered provider checks.
 
-## 3. Make synchronous transactions callback-owned
+## 3. Make synchronous transactions callback-owned — native scopes completed
 
 Replace separate savepoint begin/end calls with a scope callback: native
 SAVEPOINT/RELEASE/ROLLBACK TO and DO `transactionSync`. Support both committing
@@ -41,6 +41,21 @@ and advisory reads require. Preserve nested rollback, enum-tag undo logs,
 cache invalidation, chunk pins, and speculative engine-state cleanup. Separate
 scope completion from durable publication: no acknowledgement or sync update
 may escape before its required persistence boundary.
+
+### Native callback scopes — completed
+
+Converted synchronous write, commit, catalogue, sync, and speculative-read
+scopes to callbacks with explicit commit/rollback outcomes. Existing native
+savepoint bookkeeping remains in use. Local subscription notifications now
+run after the outer upload scope completes. Validated with 905 integration
+tests and 69 database-layer tests (2026-11-04).
+
+### DO callback scopes — pending
+
+Implement the same scope contract through DO `transactionSync` and validate
+rollback and publication behavior in workerd. The persistent overlay and Rust
+transaction that spans `await` retain their existing lifetimes; those are
+covered by sections 5 and 4 respectively. Section 3 is not yet complete for DOs.
 
 ## 4. Support transactions across await explicitly
 

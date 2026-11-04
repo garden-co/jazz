@@ -1791,7 +1791,7 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
   }
   let committed: TransactionCommitHandle<TKind>;
   try {
-    committed = await transaction.commit();
+    committed = transaction.commit();
   } catch (error) {
     try {
       await transaction.rollback();

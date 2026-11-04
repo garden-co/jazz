@@ -49,9 +49,9 @@ pub use crate::options::REMOTE_LINK_ATTEMPT_WINDOW;
 use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
 use crate::values::{
-    AuthorKey, STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, author_key,
-    begin_savepoint, cell_from_sql, column_from_sql, end_savepoint, in_savepoint, quote, storage,
-    to_sql, unsupported,
+    AuthorKey, STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, ScopeOutcome, Sql, Table,
+    author_key, begin_savepoint, cell_from_sql, column_from_sql, end_savepoint, in_savepoint,
+    quote, storage, to_sql, unsupported,
 };
 pub use sync::{
     ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
@@ -1230,6 +1230,38 @@ impl Error {
     /// Whether a policy rejected the write.
     pub fn is_authorization_denied(&self) -> bool {
         self.reason == Some(Reason::AuthorizationDenied)
+    }
+}
+
+impl crate::values::ScopeConnection for &Db {
+    fn with_scope_connection<R>(&self, f: impl FnOnce(&rusqlite::Connection) -> R) -> R {
+        f(&self.inner.borrow().conn)
+    }
+}
+
+impl crate::values::ScopeConnection for Inner {
+    fn with_scope_connection<R>(&self, f: impl FnOnce(&rusqlite::Connection) -> R) -> R {
+        f(&self.conn)
+    }
+}
+
+impl Inner {
+    fn scope<T>(
+        &mut self,
+        name: &str,
+        f: impl FnOnce(&mut Self) -> Result<ScopeOutcome<T>, Error>,
+    ) -> Result<T, Error> {
+        crate::values::in_scope(self, name, f)
+    }
+}
+
+impl Db {
+    fn scope<T>(
+        &self,
+        name: &str,
+        f: impl FnOnce() -> Result<ScopeOutcome<T>, Error>,
+    ) -> Result<T, Error> {
+        crate::values::in_scope(&mut &*self, name, |_| f())
     }
 }
 
@@ -2786,7 +2818,7 @@ impl Db {
     /// upload: it is recorded for the authority, which decides its fate.
     fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
         self.inner().require_mutation_admission()?;
-        self.with_upload(|| {
+        let (notify, handle) = self.with_upload(|| {
             let table = op.table().to_owned();
             let (prior, mark) = {
                 let inner = self.inner();
@@ -2818,11 +2850,12 @@ impl Db {
                 inner.changed.borrow_mut().truncate(mark);
                 return Err(error);
             }
-            if notify {
-                self.notify();
-            }
-            Ok(handle)
-        })
+            Ok((notify, handle))
+        })?;
+        if notify {
+            self.notify();
+        }
+        Ok(handle)
     }
 
     /// On a replica, a local commit and its upload record are one SQLite
@@ -2835,10 +2868,7 @@ impl Db {
         if !wrap {
             return f();
         }
-        begin_savepoint(&self.inner.borrow().conn, "upload_local")?;
-        let result = f();
-        end_savepoint(&self.inner.borrow().conn, "upload_local", result.is_ok())?;
-        result
+        self.scope("upload_local", || f().map(ScopeOutcome::Commit))
     }
 
     /// Run one write atomically. Inside a transaction it joins the
@@ -2856,27 +2886,25 @@ impl Db {
                 Some((seq, _)) => (*seq, false),
                 None => (inner.next_seq(), true),
             };
-            begin_savepoint(&inner.conn, "w")?;
-            let mark = inner.changed.borrow().len();
-            match apply(&mut inner, seq) {
-                Ok(handle) => {
-                    end_savepoint(&inner.conn, "w", true)?;
-                    let wrote = handle.seq == inner.own_pos(seq);
-                    if wrote {
-                        if standalone {
-                            inner.seq = inner.seq.max(seq);
-                        } else if let Some((_, tables)) = &mut inner.tx {
-                            tables.insert(table.to_owned());
-                        }
+            let handle = inner.scope("w", |inner| {
+                let mark = inner.changed.borrow().len();
+                match apply(inner, seq) {
+                    Ok(handle) => Ok(ScopeOutcome::Commit(handle)),
+                    Err(error) => {
+                        inner.changed.borrow_mut().truncate(mark);
+                        Err(error)
                     }
-                    (standalone && wrote, handle)
                 }
-                Err(error) => {
-                    inner.changed.borrow_mut().truncate(mark);
-                    end_savepoint(&inner.conn, "w", false)?;
-                    return Err(error);
+            })?;
+            let wrote = handle.seq == inner.own_pos(seq);
+            if wrote {
+                if standalone {
+                    inner.seq = inner.seq.max(seq);
+                } else if let Some((_, tables)) = &mut inner.tx {
+                    tables.insert(table.to_owned());
                 }
             }
+            (standalone && wrote, handle)
         };
         Ok(standalone)
     }
@@ -3070,8 +3098,7 @@ impl Db {
                 inner.owner_version,
             )
         };
-        begin_savepoint(&self.inner().conn, "jazz_catalogue")?;
-        let applied = (|| {
+        let result = self.scope("jazz_catalogue", || {
             crate::catalogue::put(&self.inner().conn, &change.put)?;
             for (schema, lenses) in change.admit {
                 self.admit(schema, &lenses, None)?;
@@ -3079,10 +3106,8 @@ impl Db {
             if let Some((revision, schema, lenses)) = change.activate {
                 self.admit(schema, &lenses, Some(Some(revision)))?;
             }
-            Ok(())
-        })();
-        let ended = end_savepoint(&self.inner().conn, "jazz_catalogue", applied.is_ok());
-        let result = applied.and(ended);
+            Ok(ScopeOutcome::Commit(()))
+        });
         if result.is_err() {
             let mut inner = self.inner();
             let (physical, names, admitted, owner, owner_version) = saved;
@@ -3323,10 +3348,12 @@ impl Inner {
             self.admitted.clone(),
         );
         let tags = self.names.tags().snapshot();
-        begin_savepoint(&self.conn, "jazz_mirror")?;
-        let mirrored = self.mirror_versions_steps(versions, cells);
-        let ended = end_savepoint(&self.conn, "jazz_mirror", mirrored.is_ok());
-        if let Err(error) = mirrored.and(ended) {
+        let mirrored = self.scope("jazz_mirror", |inner| {
+            inner
+                .mirror_versions_steps(versions, cells)
+                .map(ScopeOutcome::Commit)
+        });
+        if let Err(error) = mirrored {
             self.physical = physical;
             self.names = names;
             self.admitted = admitted;
@@ -3450,10 +3477,11 @@ impl Inner {
     ) -> Result<(), Error> {
         let (physical, names) = (self.physical.clone(), self.names.clone());
         let tags = self.names.tags().snapshot();
-        begin_savepoint(&self.conn, "jazz_admit")?;
-        let written = self.write_admission_steps(target, cells, current);
-        let ended = end_savepoint(&self.conn, "jazz_admit", written.is_ok());
-        let written = written.and(ended);
+        let written = self.scope("jazz_admit", |inner| {
+            inner
+                .write_admission_steps(target, cells, current)
+                .map(ScopeOutcome::Commit)
+        });
         if written.is_err() {
             self.physical = physical;
             self.names = names;
@@ -8602,7 +8630,9 @@ impl Db {
 
     fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
         crate::db::large_ops::renew_upload_leases(&self.inner(), &batch.uploads)?;
-        self.with_upload(|| self.commit_ops_now(batch, kind))
+        let receipt = self.with_upload(|| self.commit_ops_now(batch, kind))?;
+        self.notify();
+        Ok(receipt)
     }
 
     fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
@@ -8611,19 +8641,19 @@ impl Db {
         let (seq, prior, mark) = {
             let mut inner = self.inner();
             let seq = inner.next_seq();
-            begin_savepoint(&inner.conn, "commit_batch")?;
-            let mark = inner.changed.borrow().len();
-            inner.defer_checks();
-            let applied = inner
-                .apply_with_edits(ops, &batch.edits, ops.len(), seq)
-                .and_then(|()| inner.finish_checks(seq));
-            if let Err(error) = applied {
-                inner.abandon_checks();
-                inner.changed.borrow_mut().truncate(mark);
-                end_savepoint(&inner.conn, "commit_batch", false)?;
-                return Err(error);
-            }
-            end_savepoint(&inner.conn, "commit_batch", true)?;
+            let mark = inner.scope("commit_batch", |inner| {
+                let mark = inner.changed.borrow().len();
+                inner.defer_checks();
+                let applied = inner
+                    .apply_with_edits(ops, &batch.edits, ops.len(), seq)
+                    .and_then(|()| inner.finish_checks(seq));
+                if let Err(error) = applied {
+                    inner.abandon_checks();
+                    inner.changed.borrow_mut().truncate(mark);
+                    return Err(error);
+                }
+                Ok(ScopeOutcome::Commit(mark))
+            })?;
             let prior = inner.seq;
             if !ops.is_empty() || kind.validates_reads() {
                 inner.seq = inner.seq.max(seq);
@@ -8645,7 +8675,6 @@ impl Db {
             inner.changed.borrow_mut().truncate(mark);
             return Err(error);
         }
-        self.notify();
         Ok(TxReceipt(seq))
     }
 
@@ -8705,33 +8734,37 @@ impl Db {
                 mark,
             });
         }
-        if let Err(error) = begin_savepoint(&inner.conn, "overlay_step") {
-            inner.clear_derived();
-            inner.settle_overlay();
-            return Err(error);
-        }
-        let mark = inner.changed.borrow().len();
         let joins = extra.is_some();
-        let applied = match extra {
-            Some(op) => inner.counter_deltas(op).and_then(|()| {
-                let schema = inner.schema.clone();
-                inner.apply_all_checking(&[(schema, op.clone())], 0, own)
-            }),
-            None => Ok(()),
-        };
-        inner.clear_derived();
-        let result = applied.and_then(|()| {
-            let own = inner.own_rank(own);
-            read(&mut inner, snapshot.map(|cut| Cut { own, ..cut }))
+        let result = inner.scope("overlay_step", |inner| {
+            let mark = inner.changed.borrow().len();
+            let applied = match extra {
+                Some(op) => inner.counter_deltas(op).and_then(|()| {
+                    let schema = inner.schema.clone();
+                    inner.apply_all_checking(&[(schema, op.clone())], 0, own)
+                }),
+                None => Ok(()),
+            };
+            inner.clear_derived();
+            let result = applied.and_then(|()| {
+                let own = inner.own_rank(own);
+                read(inner, snapshot.map(|cut| Cut { own, ..cut }))
+            });
+            if joins && result.is_ok() {
+                Ok(ScopeOutcome::Commit(result))
+            } else {
+                inner.changed.borrow_mut().truncate(mark);
+                Ok(ScopeOutcome::Rollback(result))
+            }
         });
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                inner.clear_derived();
+                inner.settle_overlay();
+                return Err(error);
+            }
+        };
         let keep = joins && result.is_ok();
-        if !keep {
-            inner.changed.borrow_mut().truncate(mark);
-        }
-        if let Err(error) = end_savepoint(&inner.conn, "overlay_step", keep) {
-            inner.settle_overlay();
-            return Err(error);
-        }
         if keep && let Some(overlay) = inner.overlay.as_mut() {
             overlay.applied += 1;
         }
@@ -8797,17 +8830,17 @@ impl Db {
             }
         };
         let own = inner.seq + 1;
-        begin_savepoint(&inner.conn, "overlay")?;
-        let mark = inner.changed.borrow().len();
-        let result = inner
-            .apply_with_edits(&ops, &edits, ops.len(), own)
-            .and_then(|()| {
-                let own = inner.own_rank(own);
-                read(&mut inner, snapshot.map(|cut| Cut { own, ..cut }))
-            });
-        inner.changed.borrow_mut().truncate(mark);
-        end_savepoint(&inner.conn, "overlay", false)?;
-        result
+        inner.scope("overlay", |inner| {
+            let mark = inner.changed.borrow().len();
+            let result = inner
+                .apply_with_edits(&ops, &edits, ops.len(), own)
+                .and_then(|()| {
+                    let own = inner.own_rank(own);
+                    read(inner, snapshot.map(|cut| Cut { own, ..cut }))
+                });
+            inner.changed.borrow_mut().truncate(mark);
+            result.map(ScopeOutcome::Rollback)
+        })
     }
 
     fn stage(&self, id: OpenTransactionId, op: StagedOp) -> Result<(), Error> {

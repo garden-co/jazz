@@ -207,16 +207,51 @@ pub(crate) fn end_savepoint(
     }
 }
 
-/// Run `f` inside `SAVEPOINT name`: kept if it succeeds, undone if not.
+/// A scope may deliberately discard SQL changes while returning a value
+/// (permission advice and speculative reads do this). Errors always roll back.
+pub(crate) enum ScopeOutcome<T> {
+    Commit(T),
+    Rollback(T),
+}
+
+/// Access the owning connection without holding a RefCell borrow across the
+/// callback. Implementations must always select the same connection.
+pub(crate) trait ScopeConnection {
+    fn with_scope_connection<R>(&self, f: impl FnOnce(&rusqlite::Connection) -> R) -> R;
+}
+
+impl ScopeConnection for &rusqlite::Connection {
+    fn with_scope_connection<R>(&self, f: impl FnOnce(&rusqlite::Connection) -> R) -> R {
+        f(self)
+    }
+}
+
+/// Native callback-owned scope. The context is returned to the callback so
+/// callers can mutate engine state without retaining a borrow of its connection.
+/// Scope completion is not necessarily durable publication: a parent scope can
+/// still roll back. A managed-SQL backend must own the callback's full lifetime,
+/// rather than emulate these SQL statements separately.
+pub(crate) fn in_scope<C: ScopeConnection, T>(
+    context: &mut C,
+    name: &str,
+    f: impl FnOnce(&mut C) -> Result<ScopeOutcome<T>, Error>,
+) -> Result<T, Error> {
+    context.with_scope_connection(|conn| begin_savepoint(conn, name))?;
+    let result = f(context);
+    let keep = matches!(&result, Ok(ScopeOutcome::Commit(_)));
+    context.with_scope_connection(|conn| end_savepoint(conn, name, keep))?;
+    result.map(|outcome| match outcome {
+        ScopeOutcome::Commit(value) | ScopeOutcome::Rollback(value) => value,
+    })
+}
+
+/// Run `f` inside a scope: kept if it succeeds, undone if not.
 pub(crate) fn in_savepoint<T>(
     conn: &rusqlite::Connection,
     name: &str,
     f: impl FnOnce() -> Result<T, Error>,
 ) -> Result<T, Error> {
-    begin_savepoint(conn, name)?;
-    let result = f();
-    end_savepoint(conn, name, result.is_ok())?;
-    result
+    in_scope(&mut &*conn, name, |_| f().map(ScopeOutcome::Commit))
 }
 
 /// One SQLite value, as bound or read. Text holds raw bytes, which SQLite
@@ -2251,5 +2286,93 @@ impl JsonCheck {
         let compiled = crate::tools::CompiledSchema::new(schema)
             .map_err(|error| crate::tools::json_schema_failure(error, path))?;
         Ok(Some(self.compiled.get_or_init(|| compiled)))
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Alice's failed inner write leaves her outer write intact; Bob sees it
+    /// only after the outer commit. This lower-level test observes SQLite's
+    /// commit hook, which the public API intentionally does not expose.
+    #[test]
+    fn nested_error_rolls_back_without_publishing_the_parent() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE writes (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        let commits = Arc::new(AtomicUsize::new(0));
+        let seen = commits.clone();
+        conn.commit_hook(Some(move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+            false
+        }))
+        .unwrap();
+        in_savepoint(&conn, "alice", || {
+            conn.execute("INSERT INTO writes VALUES (1)", [])
+                .map_err(storage)?;
+            let failed = in_savepoint(&conn, "failed", || {
+                conn.execute("INSERT INTO writes VALUES (2)", [])
+                    .map_err(storage)?;
+                conn.execute("INSERT INTO writes VALUES (1)", [])
+                    .map_err(storage)?;
+                Ok(())
+            });
+            assert!(failed.is_err());
+            assert_eq!(
+                conn.query_row("SELECT count(*) FROM writes", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            in_savepoint(&conn, "kept", || {
+                conn.execute("INSERT INTO writes VALUES (3)", [])
+                    .map_err(storage)?;
+                Ok(())
+            })?;
+            assert_eq!(commits.load(Ordering::SeqCst), 0);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(commits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            conn.query_row("SELECT sum(id) FROM writes", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
+        assert!(conn.is_autocommit());
+        forget_tag_undo(&conn);
+    }
+
+    /// Alice can return a preview while discarding even a successful nested
+    /// write; Bob sees no changes. This lower-level test checks the explicit
+    /// rollback outcome and cache rollback generation, absent from public APIs.
+    #[test]
+    fn rollback_returns_a_value_and_undoes_released_children() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE writes (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        let before = rollbacks(&conn);
+        let preview = in_scope(&mut &conn, "preview", |_| {
+            in_savepoint(&conn, "child", || {
+                conn.execute("INSERT INTO writes VALUES (7)", [])
+                    .map_err(storage)?;
+                Ok(())
+            })?;
+            let value: i64 = conn
+                .query_row("SELECT id FROM writes", [], |r| r.get(0))
+                .map_err(storage)?;
+            Ok(ScopeOutcome::Rollback(value))
+        })
+        .unwrap();
+        assert_eq!(preview, 7);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM writes", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(rollbacks(&conn) > before);
+        assert!(conn.is_autocommit());
+        forget_tag_undo(&conn);
     }
 }
