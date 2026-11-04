@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { acceptedDeviceTransaction } from "./accepted-membership.js";
 import { expect, it } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
@@ -15,7 +16,7 @@ import {
 } from "./account-successor.js";
 
 it("rejects a correctly sealed but substituted account epoch key", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   let record: string | null = null;
   try {
@@ -23,6 +24,10 @@ it("rejects a correctly sealed but substituted account epoch key", async () => {
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });
@@ -61,13 +66,17 @@ it("rejects a correctly sealed but substituted account epoch key", async () => {
 }, 15_000);
 
 it("rejects an initial identity referring to another account's device request", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
     await deploy({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });
@@ -110,13 +119,17 @@ it("rejects an initial identity referring to another account's device request", 
 }, 15_000);
 
 it("accepts only one first device and never reinitialises an existing account for a new device", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
     await deploy({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });
@@ -218,7 +231,7 @@ it("accepts only one first device and never reinitialises an existing account fo
 }, 15_000);
 
 it("repairs a missing initial root without granting authority to pre-root successors", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Db | undefined;
   const secrets: Uint8Array[] = [];
   try {
@@ -226,6 +239,10 @@ it("repairs a missing initial root without granting authority to pre-root succes
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });
