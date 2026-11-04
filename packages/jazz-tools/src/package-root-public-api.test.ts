@@ -372,7 +372,6 @@ describe("package root public API", () => {
       "createDb",
       "fetchPublishedBundles",
       "fetchSchemaHashes",
-      "fetchStoredPermissions",
       "fetchStoredWasmSchema",
       "generateAuthSecret",
       "isUnsupportedStorageCodecsError",
