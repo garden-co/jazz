@@ -52,6 +52,14 @@ pub fn disconnect_client(client: &JazzClient) -> bool {
     client.disconnect_upstream_for_test()
 }
 
+/// The engine subscriptions `client` still holds for its public streams.
+/// Dropping a stream releases its engine subscription before `drop`
+/// returns, so its unsubscription is queued ahead of the next command.
+#[cfg(feature = "testing")]
+pub fn live_subscriptions(client: &JazzClient) -> usize {
+    client.live_subscriptions_for_test()
+}
+
 /// Sanctioned test-support reconnect control: reattaches the preserved client
 /// state to the original upstream transport.
 #[cfg(feature = "testing")]
