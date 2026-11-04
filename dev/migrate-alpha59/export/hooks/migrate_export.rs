@@ -116,7 +116,7 @@ where
     pub async fn migrate_export_current(
         &mut self,
         rows: &[(SchemaVersionId, String, RowUuid)],
-    ) -> Result<Vec<(RowUuid, Option<TxId>, Option<TxId>)>, Error> {
+    ) -> Result<Vec<(SchemaVersionId, String, RowUuid, Option<TxId>, Option<TxId>)>, Error> {
         let mut seen = std::collections::BTreeSet::new();
         let mut out = Vec::new();
         for (schema, table, row) in rows {
@@ -144,7 +144,7 @@ where
                     VersionLayer::Deletion,
                 )
                 .await;
-            out.push((*row, content, deletion));
+            out.push((*schema, table.clone(), *row, content, deletion));
         }
         Ok(out)
     }

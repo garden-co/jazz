@@ -237,12 +237,30 @@ async fn export_versions<W: std::io::Write>(
         node: *tx.node.as_bytes(),
         time: tx.time.0,
     };
-    for (row, content, deletion) in node.migrate_export_current(&rows).await.map_err(err)? {
+    let creations: std::collections::HashMap<([u8; 16], dump::TxRef), (dump::Author, u64)> =
+        versions
+            .iter()
+            .filter(|version| version.deletion.is_none())
+            .map(|version| {
+                (
+                    (*version.row.0.as_bytes(), tx_ref(version.tx)),
+                    (convert_author(&version.created_by), version.created_at.0),
+                )
+            })
+            .collect();
+    for (schema, table, row, content, deletion) in
+        node.migrate_export_current(&rows).await.map_err(err)?
+    {
+        let content = content.map(tx_ref);
+        let created = content.and_then(|tx| creations.get(&(*row.0.as_bytes(), tx)).cloned());
         writer
             .write(&dump::Record::Current(dump::Current {
+                schema: *schema.0.as_bytes(),
+                table,
                 row: *row.0.as_bytes(),
-                content: content.map(tx_ref),
+                content,
                 deletion: deletion.map(tx_ref),
+                created,
             }))
             .map_err(err)?;
     }

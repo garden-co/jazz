@@ -480,6 +480,79 @@ fn v2_rows(db: &Db) {
         13,
         &[("rank", Value::Nullable(None))],
     );
+    // A local-first user's row: its author is in a Jazz-owned issuer.
+    let local_first = AuthorSubject::reserved(AuthorSubject::LOCAL_FIRST_ISSUER, "lf-device-1")
+        .expect("valid")
+        .with_account(AccountId(uuid::Uuid::from_bytes([0xaf; 16])));
+    insert(
+        db,
+        "projects",
+        row(1, 4),
+        local_first,
+        14,
+        &[
+            ("name", s("Offline")),
+            ("archived", Value::Bool(false)),
+            ("status", s("active")),
+        ],
+    );
+    // A row id is per table: a document with a project's id.
+    insert(
+        db,
+        "documents",
+        row(1, 1),
+        user(1),
+        15,
+        &[
+            ("project", Value::Uuid(row(1, 1).0)),
+            ("heading", s("Same id as Alpha")),
+            ("body", s("another table")),
+            ("blob", Value::Nullable(None)),
+            ("rank", Value::Nullable(None)),
+            ("pinned", Value::Bool(false)),
+        ],
+    );
+    update(
+        db,
+        "documents",
+        row(1, 1),
+        user(2),
+        16,
+        &[("body", s("edited"))],
+    );
+    // Settled out of order, as an insert synced late from an offline client
+    // is: its update commits first, and the insert after it wins. alpha.59
+    // then credits the row's creation to the insert, not to the version
+    // first in commit order.
+    let inserted = block_on(db.insert(
+        "projects",
+        cells(&[
+            ("name", s("Late")),
+            ("archived", Value::Bool(false)),
+            ("status", s("active")),
+        ]),
+        InsertOptions {
+            row_id: Some(row(1, 5)),
+            identity: WriteIdentity::Session(user(1)),
+            updated_at_ms: at(17),
+            ..Default::default()
+        },
+    ))
+    .expect("insert");
+    let updated = block_on(db.update(
+        "projects",
+        row(1, 5),
+        cells(&[("status", s("paused"))]),
+        UpdateOptions {
+            identity: WriteIdentity::Session(user(2)),
+            updated_at_ms: at(18),
+            ..Default::default()
+        },
+    ))
+    .expect("update");
+    accept(db, updated.mergeable_tx_id());
+    accept(db, inserted.mergeable_tx_id());
+    delete(db, "projects", row(1, 4), user(1), 19);
 }
 
 fn principal(n: u8) -> Principal {

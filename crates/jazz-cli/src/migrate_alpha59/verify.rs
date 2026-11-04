@@ -30,7 +30,8 @@ use serde_json::{Value as Json, json};
 
 use super::active::{ToHead, Translated};
 use super::{
-    Args, active_deployment, convert_author, convert_value, err, match_schemas, uuid_string,
+    Args, RowKey, active_deployment, convert_author, convert_value, err, keyed_currents,
+    match_schemas, uuid_string,
 };
 
 const MAX_REPORTED: usize = 20;
@@ -52,6 +53,8 @@ struct Report {
     checked: BTreeMap<&'static str, u64>,
     mismatches: u64,
     details: Vec<String>,
+    /// Mismatches per check and table (and field, where one is named).
+    counts: BTreeMap<&'static str, BTreeMap<String, u64>>,
 }
 
 impl Report {
@@ -63,6 +66,16 @@ impl Report {
                 self.details.push(format!("{what}: {}", detail()));
             }
         }
+    }
+
+    /// Count a mismatch of `what` under `place` (a table, or `table.field`).
+    fn count(&mut self, what: &'static str, place: String) {
+        *self
+            .counts
+            .entry(what)
+            .or_default()
+            .entry(place)
+            .or_default() += 1;
     }
 }
 
@@ -76,12 +89,12 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
     let mut admin = Vec::new();
     let mut logins = Vec::new();
     let mut accounts = Vec::new();
-    let mut currents: HashMap<[u8; 16], dump::Current> = HashMap::new();
+    let mut raw_currents = Vec::new();
+    let mut currents: HashMap<RowKey, dump::Current> = HashMap::new();
     // Per row: its content winner and its deletion winner, each with its
     // position in commit order.
-    let mut content: HashMap<[u8; 16], (u64, dump::Version)> = HashMap::new();
-    let mut deletion: HashMap<[u8; 16], (u64, dump::Version)> = HashMap::new();
-    let mut gone: std::collections::HashSet<[u8; 16]> = Default::default();
+    let mut content: HashMap<RowKey, (u64, dump::Version)> = HashMap::new();
+    let mut deletion: HashMap<RowKey, (u64, dump::Version)> = HashMap::new();
     let mut position = 0u64;
     while let Some(record) = reader.next_record().map_err(err)? {
         match record {
@@ -94,16 +107,29 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
                 principal_json,
                 login_json,
             } => logins.push((principal_json, login_json)),
-            dump::Record::Current(current) => {
-                currents.insert(current.row, current);
-            }
+            dump::Record::Current(current) => raw_currents.push(current),
             dump::Record::Version(version) => {
                 position += 1;
+                if to_head.is_none() {
+                    let built = ToHead::new(
+                        active_schema.ok_or("the dump has rows but no active schema")?,
+                        &runtime_schemas,
+                        std::mem::take(&mut runtime_lenses),
+                    )?;
+                    currents = keyed_currents(&built, std::mem::take(&mut raw_currents))?;
+                    to_head = Some(built);
+                }
+                let to_head = to_head.as_ref().expect("set above");
                 let tx = dump::TxRef {
                     node: version.tx_node,
                     time: version.tx_time,
                 };
-                let Some(current) = currents.get(&version.row) else {
+                // Its table is not in the active schema.
+                let Some(table) = to_head.head_table(version.schema, &version.table)? else {
+                    continue;
+                };
+                let key: RowKey = (table, version.row);
+                let Some(current) = currents.get(&key) else {
                     continue;
                 };
                 let winner = if version.deletion.is_none() {
@@ -114,38 +140,24 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
                 if winner != Some(tx) {
                     continue;
                 }
-                if to_head.is_none() {
-                    to_head = Some(ToHead::new(
-                        active_schema.ok_or("the dump has rows but no active schema")?,
-                        &runtime_schemas,
-                        std::mem::take(&mut runtime_lenses),
-                    )?);
-                }
-                let to_head = to_head.as_ref().expect("set above");
                 let version = match to_head.translate(version)? {
                     Translated::Kept(version) => version,
-                    Translated::TableGone => {
-                        gone.insert(current.row);
-                        continue;
-                    }
+                    Translated::TableGone => unreachable!("its table is in the active schema"),
                 };
                 let winners = if version.deletion.is_none() {
                     &mut content
                 } else {
                     &mut deletion
                 };
-                winners.insert(version.row, (position, version));
+                winners.insert(key, (position, version));
             }
             _ => {}
         }
     }
     let mut report = Report::default();
-    let mut rows: HashMap<[u8; 16], Expected> = HashMap::new();
-    for (row, current) in &currents {
-        if gone.contains(row) {
-            continue;
-        }
-        let label = || format!("row {}", uuid_string(*row));
+    let mut rows: HashMap<RowKey, Expected> = HashMap::new();
+    for (key, current) in &currents {
+        let label = || format!("{} row {}", key.0, uuid_string(key.1));
         // Every version of the row was rejected: alpha.59 has no such row.
         if current.content.is_none() && current.deletion.is_none() {
             continue;
@@ -159,13 +171,13 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
             });
             continue;
         }
-        let Some((content_at, content)) = content.remove(row) else {
+        let Some((content_at, content)) = content.remove(key) else {
             report.check("alpha.59 current state", false, || {
                 format!("{}: its current content version is missing", label())
             });
             continue;
         };
-        let deletion = deletion.remove(row);
+        let deletion = deletion.remove(key);
         if current.deletion.is_some() && deletion.is_none() {
             report.check("alpha.59 current state", false, || {
                 format!("{}: its current deletion event is missing", label())
@@ -178,7 +190,7 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
             _ => (content.updated_by.clone(), content.updated_at),
         };
         rows.insert(
-            *row,
+            key.clone(),
             Expected {
                 table: content.table,
                 schema: content.schema,
@@ -252,6 +264,7 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
         "ok": report.mismatches == 0,
         "checked": report.checked,
         "mismatches": report.mismatches,
+        "mismatch_counts": report.counts,
         "first_mismatches": report.details,
     }))
 }
@@ -292,11 +305,11 @@ struct Actual {
 async fn verify_rows(
     runtime: &jazz_server::runtime::ServerRuntimeHandle,
     views: &HashMap<[u8; 16], JazzSchema>,
-    rows: HashMap<[u8; 16], Expected>,
+    rows: HashMap<RowKey, Expected>,
     report: &mut Report,
 ) -> Result<(), String> {
     let mut groups: BTreeMap<([u8; 16], String), Vec<[u8; 16]>> = BTreeMap::new();
-    for (row, expected) in &rows {
+    for ((_, row), expected) in &rows {
         groups
             .entry((expected.schema, expected.table.clone()))
             .or_default()
@@ -351,11 +364,20 @@ async fn verify_rows(
         report.check("no extra rows", extra == 0, || {
             format!("{table}: {extra} rows alpha.59 does not have")
         });
+        if extra > 0 {
+            *report
+                .counts
+                .entry("no extra rows")
+                .or_default()
+                .entry(table.clone())
+                .or_default() += extra as u64;
+        }
         for id in ids {
-            let expected = &rows[&id];
+            let expected = &rows[&(table.clone(), id)];
             let label = || format!("{table} row {}", uuid_string(id));
             let Some(actual) = actual.get(&id) else {
                 report.check("rows present", false, label);
+                report.count("rows present", table.clone());
                 continue;
             };
             report.check("rows present", true, label);
@@ -371,6 +393,9 @@ async fn verify_rows(
                     )
                 },
             );
+            if actual.deleted != expected.deleted {
+                report.count("row deleted flags", table.clone());
+            }
             let mut differing = Vec::new();
             for (name, value) in &actual.cells {
                 let want = expected.cells.get(name).cloned().map(convert_value);
@@ -389,6 +414,9 @@ async fn verify_rows(
                     differing.push(format!("{name} (missing)"));
                 }
             }
+            for name in &differing {
+                report.count("row cells", format!("{table}.{name}"));
+            }
             report.check("row cells", differing.is_empty(), || {
                 format!("{}: columns {}", label(), differing.join(", "))
             });
@@ -398,8 +426,8 @@ async fn verify_rows(
                 dump::Version::millis(expected.updated_at),
                 canonical(&convert_author(&expected.updated_by)?),
             );
-            let differing = match &actual.provenance {
-                None => "all".to_owned(),
+            let differing: Vec<&str> = match &actual.provenance {
+                None => vec!["all"],
                 Some(actual) => [
                     ("created_at", actual.0 == want.0),
                     ("created_by", actual.1 == want.1),
@@ -409,9 +437,12 @@ async fn verify_rows(
                 .iter()
                 .filter(|(_, same)| !same)
                 .map(|(field, _)| *field)
-                .collect::<Vec<_>>()
-                .join(", "),
+                .collect(),
             };
+            for field in &differing {
+                report.count("row provenance", format!("{table}.{field}"));
+            }
+            let differing = differing.join(", ");
             report.check("row provenance", differing.is_empty(), || {
                 format!("{}: {differing}", label())
             });

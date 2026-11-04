@@ -37,6 +37,9 @@ grep -q '"unsupported_by_sqlite":\[\]' "$work/census.json"
   tee "$work/import.json"
 # user-1, user-2 and user-9 link as createJazz users; revoked user-3 does not.
 grep -q '"backend_identities_linked":3' "$work/import.json"
+# The row settled out of order takes its creation from the late insert.
+# (Repeated deletes need two alpha.59 clients; unit tests cover them.)
+grep -q '"inserts_with_their_own_creation":1' "$work/import.json"
 "${import[@]}" verify --dump "$work/dump" --data-dir "$work/a60" --app-id "$app"
 
 # Only the active schema came over, and rows written under v1 read under

@@ -131,8 +131,44 @@ struct Head {
     accounts: Vec<dump::Account>,
     /// Every principal the account journal names.
     principals: Vec<String>,
-    /// What alpha.59 reads as each row's current state.
-    currents: HashMap<[u8; 16], dump::Current>,
+    /// What alpha.59 reads as each row's current state, keyed once the
+    /// active schema is known.
+    currents: Vec<dump::Current>,
+}
+
+/// A row: the active-schema table it lands in, and its id. A row id names a
+/// row within one table, so the same id can occur in several.
+pub(crate) type RowKey = (String, [u8; 16]);
+
+/// alpha.59's current state of each row, by the active-schema row it lands
+/// in. Rows whose table the active schema dropped are left out.
+pub(crate) fn keyed_currents(
+    to_head: &active::ToHead,
+    currents: Vec<dump::Current>,
+) -> Result<HashMap<RowKey, dump::Current>, String> {
+    let mut keyed: HashMap<RowKey, dump::Current> = HashMap::new();
+    for current in currents {
+        let Some(table) = to_head.head_table(current.schema, &current.table)? else {
+            continue;
+        };
+        match keyed.entry((table, current.row)) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(current);
+            }
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                let held = entry.get();
+                if (held.content, held.deletion) != (current.content, current.deletion) {
+                    return Err(format!(
+                        "{} row {} has two current states in alpha.59, under two schemas: \
+                         not supported yet",
+                        entry.key().0,
+                        uuid_string(current.row)
+                    ));
+                }
+            }
+        }
+    }
+    Ok(keyed)
 }
 
 /// Import into a new, empty data dir; a failed import removes what it built,
@@ -210,9 +246,7 @@ async fn run(args: &Args) -> Result<Json, String> {
                 head.principals.push(principal_json)
             }
             // For verify.
-            dump::Record::Current(current) => {
-                head.currents.insert(current.row, current);
-            }
+            dump::Record::Current(current) => head.currents.push(current),
             dump::Record::Version(version) => {
                 first_version = Some(version);
                 break;
@@ -258,6 +292,11 @@ async fn run(args: &Args) -> Result<Json, String> {
             .cloned()
             .collect();
         let views = match_schemas(&active, runtime.migrate_import_schemas().await?)?;
+        let currents = keyed_currents(&to_head, std::mem::take(&mut head.currents))?;
+        rows.creations = currents
+            .iter()
+            .filter_map(|(key, current)| Some((key.clone(), current.created.clone()?)))
+            .collect();
         rows.to_head = Some(to_head);
         rows.drop_transaction_metadata = args.drop_transaction_metadata;
         let mut batch = vec![first];
@@ -272,7 +311,8 @@ async fn run(args: &Args) -> Result<Json, String> {
             }
         }
         rows.write(&runtime, &views, batch).await?;
-        rows.check_against(&head.currents)?;
+        rows.flush(&runtime).await?;
+        rows.check_against(&currents)?;
         runtime
             .migrate_import_with_db(|db| {
                 for _ in 0..4 {
@@ -294,6 +334,9 @@ async fn run(args: &Args) -> Result<Json, String> {
         "versions_written": rows.written,
         "versions_skipped_rejected": rows.rejected,
         "versions_dropped_with_their_table": rows.table_gone,
+        "repeated_deletions_coalesced": rows.coalesced,
+        "inserts_with_their_own_creation": rows.created_apart,
+        "versions_settled_after_a_newer_one": rows.superseded,
         "transaction_metadata_dropped": rows.metadata_dropped,
         "shutdown": format!("{phase:?}"),
     }))
@@ -453,48 +496,97 @@ struct Write {
 struct RowImport {
     to_head: Option<active::ToHead>,
     drop_transaction_metadata: bool,
-    seen: HashSet<[u8; 16]>,
+    seen: HashSet<RowKey>,
     /// Per row, the last content and the last deletion transaction written.
-    last: HashMap<[u8; 16], (Option<dump::TxRef>, Option<dump::TxRef>)>,
-    /// Rows whose table the active schema dropped.
-    gone: HashSet<[u8; 16]>,
-    /// Rows the replay has deleted so far.
-    deleted: HashSet<[u8; 16]>,
+    last: HashMap<RowKey, (Option<dump::TxRef>, Option<dump::TxRef>)>,
+    /// Rows deleted after every event so far.
+    deleted: HashSet<RowKey>,
+    /// Rows deleted in the new store, with the deletion events not yet
+    /// written held apart.
+    stored_deleted: HashSet<RowKey>,
+    /// Per row, its latest delete or restore not yet written. alpha.59 takes
+    /// a row's latest deletion event as its current one, so a repeat (two
+    /// clients deleting one row) replaces the one it repeats rather than
+    /// being written onto a row already deleted.
+    pending: HashMap<RowKey, Write>,
+    /// Per row, its creation as alpha.59 reads it.
+    creations: HashMap<RowKey, (dump::Author, u64)>,
+    /// Per row and layer (content, deletion), the write time and node of
+    /// its winner so far.
+    winners: HashMap<(RowKey, bool), (u64, [u8; 16])>,
     written: u64,
     rejected: u64,
     table_gone: u64,
     metadata_dropped: u64,
+    coalesced: u64,
+    created_apart: u64,
+    superseded: u64,
 }
 
 impl RowImport {
     /// The replay leaves each row with the content and deletion that
     /// alpha.59 itself reads as current; refuse the import otherwise.
-    fn check_against(&self, currents: &HashMap<[u8; 16], dump::Current>) -> Result<(), String> {
+    fn check_against(&self, currents: &HashMap<RowKey, dump::Current>) -> Result<(), String> {
         let mut differing = 0;
         let mut first = None;
-        for (row, current) in currents {
-            if self.gone.contains(row) {
-                continue;
-            }
-            let written = self.last.get(row).cloned().unwrap_or_default();
+        for (key, current) in currents {
+            let written = self.last.get(key).cloned().unwrap_or_default();
             if written != (current.content, current.deletion) {
                 differing += 1;
-                first.get_or_insert(*row);
+                first.get_or_insert(key);
             }
         }
-        for row in self.last.keys() {
-            if !currents.contains_key(row) {
+        for key in self.last.keys() {
+            if !currents.contains_key(key) {
                 differing += 1;
-                first.get_or_insert(*row);
+                first.get_or_insert(key);
             }
         }
         match first {
             None => Ok(()),
-            Some(row) => Err(format!(
-                "{differing} rows end in another state than alpha.59 reads for them (first: row {})",
-                uuid_string(row)
+            Some((table, row)) => Err(format!(
+                "{differing} rows end in another state than alpha.59 reads for them (first: {table} row {})",
+                uuid_string(*row)
             )),
         }
+    }
+
+    /// Queue `pending`'s write for `key` when it changes the stored row.
+    fn release(&mut self, key: &RowKey, writes: &mut Vec<Write>) {
+        let Some(write) = self.pending.remove(key) else {
+            return;
+        };
+        let deleting = matches!(write.op, Op::Delete);
+        if self.stored_deleted.contains(key) == deleting {
+            // A restore of a live row: nothing to write.
+            self.coalesced += 1;
+            return;
+        }
+        if deleting {
+            self.stored_deleted.insert(key.clone());
+        } else {
+            self.stored_deleted.remove(key);
+        }
+        writes.push(write);
+    }
+
+    /// Write every deletion event still held.
+    async fn flush(
+        &mut self,
+        runtime: &jazz_server::runtime::ServerRuntimeHandle,
+    ) -> Result<(), String> {
+        let writes = self.plan_flush();
+        self.apply(runtime, writes).await
+    }
+
+    fn plan_flush(&mut self) -> Vec<Write> {
+        let mut keys: Vec<RowKey> = self.pending.keys().cloned().collect();
+        keys.sort();
+        let mut writes = Vec::new();
+        for key in keys {
+            self.release(&key, &mut writes);
+        }
+        writes
     }
 
     async fn write(
@@ -503,6 +595,16 @@ impl RowImport {
         views: &HashMap<[u8; 16], JazzSchema>,
         versions: Vec<dump::Version>,
     ) -> Result<(), String> {
+        let writes = self.plan(views, versions)?;
+        self.apply(runtime, writes).await
+    }
+
+    /// The writes that replay `versions`, in order.
+    fn plan(
+        &mut self,
+        views: &HashMap<[u8; 16], JazzSchema>,
+        versions: Vec<dump::Version>,
+    ) -> Result<Vec<Write>, String> {
         let mut writes = Vec::with_capacity(versions.len());
         for version in versions {
             if version.fate.starts_with("rejected") {
@@ -536,47 +638,39 @@ impl RowImport {
                 ));
             }
             let to_head = self.to_head.as_ref().ok_or("rows before the catalogue")?;
-            let row = version.row;
             let version = match to_head.translate(version)? {
                 active::Translated::Kept(version) => version,
                 active::Translated::TableGone => {
                     self.table_gone += 1;
-                    self.gone.insert(row);
                     continue;
                 }
             };
+            let key: RowKey = (version.table.clone(), version.row);
+            // alpha.59 settles versions in the authority's order, but one
+            // replaces a row's winner only when it was written later (by
+            // its transaction's time, then node): a write settled late that
+            // an older one never saw. One settled after a newer winner
+            // changes nothing.
+            let stamp = (version.tx_time, version.tx_node);
+            let winner = self
+                .winners
+                .entry((key.clone(), version.deletion.is_some()))
+                .or_default();
+            if *winner >= stamp {
+                self.superseded += 1;
+                continue;
+            }
+            *winner = stamp;
             let tx = dump::TxRef {
                 node: version.tx_node,
                 time: version.tx_time,
             };
-            let last = self.last.entry(version.row).or_default();
+            let last = self.last.entry(key.clone()).or_default();
             if version.deletion.is_none() {
                 last.0 = Some(tx);
             } else {
                 last.1 = Some(tx);
             }
-            // alpha.59 keeps content and deletion apart: content written
-            // while a row is deleted stays under the deletion. The SQLite
-            // engine keeps a deleted row's content fixed until a restore.
-            let op = match version.deletion {
-                Some(dump::Deletion::Deleted) => {
-                    self.deleted.insert(version.row);
-                    Op::Delete
-                }
-                Some(dump::Deletion::Restored) => {
-                    self.deleted.remove(&version.row);
-                    Op::Restore
-                }
-                None if self.deleted.contains(&version.row) => {
-                    return Err(format!(
-                        "row {} of {} has content written while it was deleted: not supported yet",
-                        uuid_string(version.row),
-                        version.table
-                    ));
-                }
-                None if self.seen.insert(version.row) => Op::Insert,
-                None => Op::Update,
-            };
             let schema = views
                 .get(&version.schema)
                 .ok_or(format!(
@@ -584,20 +678,99 @@ impl RowImport {
                     uuid_string(version.schema)
                 ))?
                 .clone();
-            let cells = match op {
-                Op::Insert | Op::Update => full_cells(&schema, &version.table, version.cells)?,
-                Op::Delete | Op::Restore => BTreeMap::new(),
+            let write = |op, author: &dump::Author, at: u64, cells| -> Result<Write, String> {
+                Ok(Write {
+                    op,
+                    schema: schema.clone(),
+                    table: version.table.clone(),
+                    row: RowUuid::from_bytes(version.row),
+                    author: convert_author(author)?,
+                    at_ms: dump::Version::millis(at),
+                    cells,
+                })
             };
-            writes.push(Write {
-                op,
-                schema,
-                table: version.table,
-                row: RowUuid::from_bytes(version.row),
-                author: convert_author(&version.updated_by)?,
-                at_ms: dump::Version::millis(version.updated_at),
-                cells,
-            });
+            // alpha.59 keeps content and deletion apart: content written
+            // while a row is deleted stays under the deletion. The SQLite
+            // engine keeps a deleted row's content fixed until a restore.
+            match version.deletion {
+                Some(deletion) => {
+                    let (op, deleted) = match deletion {
+                        dump::Deletion::Deleted => (Op::Delete, true),
+                        dump::Deletion::Restored => (Op::Restore, false),
+                    };
+                    if deleted {
+                        self.deleted.insert(key.clone());
+                    } else {
+                        self.deleted.remove(&key);
+                    }
+                    let event =
+                        write(op, &version.updated_by, version.updated_at, BTreeMap::new())?;
+                    match self.pending.get(&key) {
+                        Some(held) if matches!(held.op, Op::Delete) == deleted => {
+                            self.coalesced += 1;
+                        }
+                        Some(_) => self.release(&key, &mut writes),
+                        None => {}
+                    }
+                    self.pending.insert(key, event);
+                }
+                None if self.deleted.contains(&key) => {
+                    return Err(format!(
+                        "row {} of {} has content written while it was deleted: not supported yet",
+                        uuid_string(version.row),
+                        version.table
+                    ));
+                }
+                None => {
+                    self.release(&key, &mut writes);
+                    let cells = full_cells(&schema, &version.table, version.cells.clone())?;
+                    if !self.seen.contains(&key) {
+                        // alpha.59 reads a row's creation off its content
+                        // winner, which takes it from whichever version won
+                        // when it was committed: not always the first one in
+                        // commit order (two clients inserting one row, say).
+                        // The insert carries that creation; an update then
+                        // carries this version's own authorship.
+                        let (created_by, created_at) = self
+                            .creations
+                            .get(&key)
+                            .cloned()
+                            .unwrap_or((version.created_by.clone(), version.created_at));
+                        self.seen.insert(key);
+                        let created = (&created_by, dump::Version::millis(created_at));
+                        let updated = (
+                            &version.updated_by,
+                            dump::Version::millis(version.updated_at),
+                        );
+                        writes.push(write(Op::Insert, &created_by, created_at, cells.clone())?);
+                        if created != updated {
+                            self.created_apart += 1;
+                            writes.push(write(
+                                Op::Update,
+                                &version.updated_by,
+                                version.updated_at,
+                                cells,
+                            )?);
+                        }
+                    } else {
+                        writes.push(write(
+                            Op::Update,
+                            &version.updated_by,
+                            version.updated_at,
+                            cells,
+                        )?);
+                    }
+                }
+            }
         }
+        Ok(writes)
+    }
+
+    async fn apply(
+        &mut self,
+        runtime: &jazz_server::runtime::ServerRuntimeHandle,
+        writes: Vec<Write>,
+    ) -> Result<(), String> {
         self.written += writes.len() as u64;
         runtime
             .migrate_import_with_db(move |db| {
@@ -710,7 +883,15 @@ fn convert_author(author: &dump::Author) -> Result<AuthorSubject, String> {
             issuer,
             subject,
         } => {
-            let author = AuthorSubject::authenticated(issuer, subject).map_err(err)?;
+            // Local-first, static-bearer and anonymous principals live in
+            // Jazz-owned issuer namespaces.
+            let author = match issuer.as_str() {
+                AuthorSubject::LOCAL_FIRST_ISSUER
+                | AuthorSubject::STATIC_BEARER_ISSUER
+                | AuthorSubject::ANONYMOUS_ISSUER => AuthorSubject::reserved(issuer, subject),
+                _ => AuthorSubject::authenticated(issuer, subject),
+            }
+            .map_err(err)?;
             match account {
                 Some(account) => author.with_account(AccountId(uuid::Uuid::from_bytes(*account))),
                 None => author,
@@ -749,4 +930,135 @@ fn uuid_string(bytes: [u8; 16]) -> String {
 
 fn err(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HEAD: [u8; 16] = [7; 16];
+    const ROW: [u8; 16] = [1; 16];
+
+    fn author(subject: &str) -> dump::Author {
+        dump::Author::Authenticated {
+            account: Some([0xa1; 16]),
+            issuer: "https://issuer.example".to_owned(),
+            subject: subject.to_owned(),
+        }
+    }
+
+    fn version(n: u64, by: &str, deletion: Option<dump::Deletion>) -> dump::Version {
+        dump::Version {
+            table: "notes".to_owned(),
+            schema: HEAD,
+            branch: Vec::new(),
+            row: ROW,
+            tx_node: [9; 16],
+            tx_time: n << 18,
+            global_time: Some(n),
+            fate: "accepted".to_owned(),
+            made_by: author(by),
+            created_by: author("creator"),
+            created_at: 1 << 18,
+            updated_by: author(by),
+            updated_at: n << 18,
+            deletion,
+            cells: [("body".to_owned(), dump::Value::String(format!("v{n}")))].into(),
+            user_metadata_json: None,
+        }
+    }
+
+    fn replay(versions: Vec<dump::Version>) -> (RowImport, Vec<(String, String, u64)>) {
+        use jazz::tools::public_schema::{ColumnType, SchemaBuilder, TableSchema};
+        let public = SchemaBuilder::new()
+            .table(TableSchema::builder("notes").column("body", ColumnType::Text))
+            .build();
+        let schema = dump::Schema {
+            id: HEAD,
+            public_schema_json: serde_json::to_string(&public).unwrap(),
+        };
+        let mut rows = RowImport {
+            to_head: Some(active::ToHead::new(HEAD, &[schema], Vec::new()).unwrap()),
+            ..Default::default()
+        };
+        rows.creations
+            .insert(("notes".to_owned(), ROW), (author("creator"), 1 << 18));
+        let views = HashMap::from([(HEAD, JazzSchema::new(&public).unwrap())]);
+        let mut writes = rows.plan(&views, versions).unwrap();
+        writes.extend(rows.plan_flush());
+        let summary = writes
+            .iter()
+            .map(|write| {
+                let op = match write.op {
+                    Op::Insert => "insert",
+                    Op::Update => "update",
+                    Op::Delete => "delete",
+                    Op::Restore => "restore",
+                };
+                let (_, subject) = write.author.principal_parts();
+                (op.to_owned(), subject.to_owned(), write.at_ms)
+            })
+            .collect();
+        (rows, summary)
+    }
+
+    fn op(op: &str, by: &str, at: u64) -> (String, String, u64) {
+        (op.to_owned(), by.to_owned(), at)
+    }
+
+    #[test]
+    fn repeated_deletes_write_the_last_one_only() {
+        let deleted = Some(dump::Deletion::Deleted);
+        let (rows, writes) = replay(vec![
+            version(2, "a", None),
+            version(3, "a", deleted),
+            version(4, "b", deleted),
+        ]);
+        // The insert carries alpha.59's creation, then the first version's
+        // own update; the second delete replaces the first.
+        assert_eq!(
+            writes,
+            [
+                op("insert", "creator", 1),
+                op("update", "a", 2),
+                op("delete", "b", 4)
+            ]
+        );
+        assert_eq!(rows.coalesced, 1);
+    }
+
+    #[test]
+    fn a_version_settled_after_a_newer_one_changes_nothing() {
+        // Written at 2 and 3, settled 3 first: alpha.59 keeps 3.
+        let mut older = version(2, "a", None);
+        older.global_time = Some(9);
+        let (rows, writes) = replay(vec![version(3, "b", None), older]);
+        assert_eq!(writes, [op("insert", "creator", 1), op("update", "b", 3)]);
+        assert_eq!(rows.superseded, 1);
+    }
+
+    #[test]
+    fn a_delete_and_restore_both_write_and_a_restore_of_a_live_row_does_not() {
+        let (deleted, restored) = (
+            Some(dump::Deletion::Deleted),
+            Some(dump::Deletion::Restored),
+        );
+        let (rows, writes) = replay(vec![
+            version(1, "creator", None),
+            version(2, "a", deleted),
+            version(3, "b", restored),
+            version(4, "c", restored),
+            version(5, "c", None),
+        ]);
+        assert_eq!(
+            writes,
+            [
+                op("insert", "creator", 1),
+                op("delete", "a", 2),
+                op("restore", "c", 4),
+                op("update", "c", 5)
+            ]
+        );
+        assert_eq!(rows.coalesced, 1);
+    }
 }

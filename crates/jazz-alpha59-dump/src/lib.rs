@@ -13,7 +13,7 @@ use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 
 /// Bumped when a record changes shape.
-pub const DUMP_FORMAT: u32 = 2;
+pub const DUMP_FORMAT: u32 = 3;
 
 // Records are read and written one at a time; boxing the large ones buys
 // nothing.
@@ -74,12 +74,21 @@ pub struct TxRef {
 }
 
 /// A row's settled winners as alpha.59 reads them: the transaction of its
-/// current content version, and of its current delete or restore.
+/// current content version, and of its current delete or restore. A row id
+/// names a row within one table, so the same id can have one per table.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Current {
+    /// A schema and table the row was written under, which locate it.
+    pub schema: [u8; 16],
+    pub table: String,
     pub row: [u8; 16],
     pub content: Option<TxRef>,
     pub deletion: Option<TxRef>,
+    /// The row's creation as alpha.59 reads it: its content winner's
+    /// `created_by` and `created_at`. alpha.59 takes a version's creation
+    /// from the content winner when it was committed, so it need not be the
+    /// first version's in commit order.
+    pub created: Option<(Author, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

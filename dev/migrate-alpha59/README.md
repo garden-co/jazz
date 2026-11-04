@@ -60,7 +60,11 @@ checks before it builds anything.
   never creates one). It also refuses, naming only issuers, when two issuers
   hold a subject on different accounts, revoked or not. Pass
   `--no-backend-identity-links` to skip this.
-- **Rows:** every version, brought forward to the active schema along
+- **Rows:** each row (a row id names a row within its table) replayed the
+  way alpha.59 settled it: a version replaces the row's content or deletion
+  only when it was written after the one it would replace, a repeated delete
+  replaces the one before it, and the insert carries the creation alpha.59
+  reads for the row. Each version written is brought forward to the active schema along
   alpha.59's own runtime lenses (columns those lenses dropped stay dropped),
   then written through the public Db API as `WriteIdentity::Attribution` of
   its original author with its original timestamp. Each insert and update
