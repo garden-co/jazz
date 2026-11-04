@@ -118,7 +118,15 @@ The session links the guest on its own too, whenever it finds a signed-in user w
 account yet: after `reauthenticate()`, when the page regains focus after a sign-up popup, or on the
 first check after a sign-up redirect. Asking who is signed in never creates an account, so a sign-up
 can't race the link. A `linkWithBackend()` call that arrives while that link runs, or after it, joins
-it.
+it. If your backend refuses the link (the guest's key was retired, or the user got an account of
+their own meanwhile), the session signs the user in to their own account instead and never retries
+that link; the guest stays on this device.
+
+"No Jazz account yet" includes an existing user of your app who signs in to Jazz for the first time.
+On a shared device, where the guest may be someone else's, that user would get the guest's data.
+Pass `linkGuestOnSignUp: false` to `createJazzSession` (or `<JazzProvider>`) to stop the session
+linking on its own: the user then signs in to an account of their own, and you can still call
+`linkWithBackend()` after your own sign-up.
 
 To link from your own backend code instead (a second sign-in method, an anonymous id your app
 issued), call `jazz.linkIdentity({ from, to })`.

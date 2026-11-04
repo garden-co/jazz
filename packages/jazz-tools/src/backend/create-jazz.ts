@@ -1110,7 +1110,11 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       try {
         ({ account } = await adminAccounts("resolve", { identity: identity(user.userId) }));
       } catch (error) {
-        if ((error as { status?: number }).status !== 404) throw error;
+        const status = (error as { status?: number }).status;
+        // The core refuses this identity (it was revoked): say so, as the
+        // core does, rather than fail as a server error.
+        if (status === 403) return new Response("identity_not_authorized", { status: 403 });
+        if (status !== 404) throw error;
         account = null;
       }
     }
@@ -1231,11 +1235,12 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         } catch (error) {
           // Linking is idempotent for this guest and this user: when the user
           // already belongs to the guest's account (an earlier link went
-          // through, then perhaps its revoke failed), this link is done. A
+          // through, then perhaps its revoke failed, or another tab's link
+          // won the race and revoked the key since), this link is done. A
           // used challenge (the core refuses its nonce first) and a user of
           // another account are still refused.
-          if ((error as { status?: number }).status !== 409 || !(await userIs(account)))
-            throw error;
+          const status = (error as { status?: number }).status;
+          if ((status !== 409 && status !== 403) || !(await userIs(account))) throw error;
         }
       }
     } catch {

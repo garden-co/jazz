@@ -16,9 +16,10 @@ export interface BackendWatchEvents {
 
 /**
  * Who the backend says is signed in. `hasAccount: false` means the core holds
- * no account for them yet (they just signed up), so a local-first guest on
- * this device links to them and keeps its data. Left out, the user is taken
- * to have one.
+ * no account for them yet (they just signed up, or they are an existing user
+ * of the app signing in to Jazz for the first time), so a local-first guest
+ * on this device links to them and keeps its data, unless `linkGuest` is
+ * off. Left out, the user is taken to have one.
  */
 export type BackendUser = AccountIdentity & { hasAccount?: boolean };
 
@@ -58,7 +59,10 @@ export interface BackendWatch {
  *   them (`linkWithBackend`), so everything it wrote stays theirs, however
  *   the session found out: the app's `reauthenticate`, focus after a popup or
  *   the first check after a sign-up redirect. A user who already has an
- *   account is signed in instead; the guest stays on this device.
+ *   account is signed in instead; the guest stays on this device. So is a
+ *   user the guest's link was refused for (its key retired, or another app's
+ *   guest), and once refused the watch never links that guest to that user
+ *   again. With `linkGuest: false` the watch never links on its own.
  *
  * The app calls `reauthenticate` after its own sign-in or sign-out, so the
  * session follows at once.
@@ -86,6 +90,13 @@ export function watchBackendUser<Client>(
      * revoked user in a tab that stays focused is signed out. Default 30s.
      */
     refusedConfirmMs?: number;
+    /**
+     * Link a local-first guest to a signed-in user who has no account yet
+     * (default true). Off, that user signs in to an account of their own and
+     * the guest stays on this device; the app can still call
+     * `linkWithBackend` itself.
+     */
+    linkGuest?: boolean;
   } = {},
 ): BackendWatch {
   const confirmMs = options.confirmMs ?? 2000;
@@ -107,7 +118,14 @@ export function watchBackendUser<Client>(
     refusedConfirm = undefined;
   };
   let stopped = false;
+  const linkGuest = options.linkGuest ?? true;
+  // The session's own link, not one a `decorate` (followUser) put over it:
+  // that one joins the link this watch runs.
+  const linkWithBackend = session.linkWithBackend;
   let linking: { done: Promise<void>; result: unknown } | undefined;
+  // A guest whose link to a user was refused for good, so later checks sign
+  // that user in instead of reopening the guest for the same refusal.
+  let refusedLink: { account: unknown; issuer: string; subject: string } | undefined;
   let checking: Promise<void> | undefined;
   // Checks asked for while one runs: a plain one (may sign out), a refused
   // one (only reconnects) and an asked one (the app's auth changed: no
@@ -132,6 +150,9 @@ export function watchBackendUser<Client>(
     try {
       return await probe();
     } catch (cause) {
+      // A backend without the backend-user route (a createJazz older than
+      // this client) answers 404 too, and stops the watch. Clients and the
+      // backend upgrade in lockstep, so that is not supported.
       if (cause instanceof AccountAuthError && cause.status === 404) {
         // No backend to ask: reauthenticates still waiting fail like this one.
         const queued = waiters.splice(0);
@@ -184,18 +205,40 @@ export function watchBackendUser<Client>(
       // never sign the user in first (that would give them an account of
       // their own, and the guest could never link to them after).
       const guest = current?.issuer === LOCAL_FIRST_ISSUER;
-      if (guest && signedIn.hasAccount === false) {
-        const link = { done: session.linkWithBackend(), result: undefined as unknown };
+      const account = session.getSnapshot().account;
+      const refusedBefore =
+        refusedLink !== undefined &&
+        refusedLink.account === account &&
+        refusedLink.issuer === signedIn.issuer &&
+        refusedLink.subject === signedIn.subject;
+      if (guest && linkGuest && signedIn.hasAccount === false && !refusedBefore) {
+        const link = { done: linkWithBackend(), result: undefined as unknown };
         linking = link;
-        link.done.then(
-          () => {
-            link.result = session.getSnapshot().account;
-          },
-          () => {
-            if (linking === link) linking = undefined;
-          },
-        );
-        return attempt(link.done);
+        try {
+          await link.done;
+          link.result = session.getSnapshot().account;
+          return;
+        } catch (cause) {
+          if (linking === link) linking = undefined;
+          if (stopped) return;
+          if (signedOutMeanwhile(cause)) {
+            // Signed out while linking: follow the backend's new answer.
+            if (asked) return "again";
+            check();
+            return;
+          }
+          if (!linkRefused(cause)) {
+            // A network error or a 5xx: a later check tries again.
+            if (asked) throw cause;
+            return;
+          }
+          refusedLink = { account, issuer: signedIn.issuer, subject: signedIn.subject };
+          console.warn(
+            "Jazz could not link this device's guest to the user who signed in, so it signs them in to their own account. The guest stays on this device.",
+            cause,
+          );
+        }
+        if (quiet(asked)) return busy();
       }
       return attempt(session.loginWithBackend());
     }
@@ -322,6 +365,29 @@ export function watchBackendUser<Client>(
     },
   };
   return watch;
+}
+
+/** The backend says no one is signed in any more (its `authenticate` answered no user). */
+function signedOutMeanwhile(cause: unknown): boolean {
+  return cause instanceof AccountAuthError && cause.status === 401 && cause.code === "signed_out";
+}
+
+/**
+ * The backend or the core refused the link itself, and would again: the
+ * guest's proof or key (`invalid_local_first_proof`, a retired key), the
+ * user (`link_refused`: they belong to another account by now, or the guest
+ * to another user), or a guest this host can't link. Network errors, 5xx and
+ * timeouts are not refusals.
+ */
+function linkRefused(cause: unknown): boolean {
+  if (!(cause instanceof AccountAuthError)) return false;
+  if (cause.status === undefined)
+    return (
+      cause.code === "local_first_account_required" || cause.code === "linked_account_mismatch"
+    );
+  return (
+    cause.status === 400 || cause.status === 401 || cause.status === 403 || cause.status === 409
+  );
 }
 
 /** Focus, visibility and BroadcastChannel events for a browser page. */

@@ -40,6 +40,8 @@ export function followUser(options: {
   registry: string;
   events: BackendWatchEvents;
   fetch?: typeof fetch;
+  /** See `linkGuestOnSignUp` on `createJazzSession`. Default true. */
+  linkGuest?: boolean;
 }) {
   return <Client>(session: JazzSession<Client>) => decorate(session, options);
 }
@@ -50,6 +52,7 @@ function decorate<Client>(
     registry: string;
     events: BackendWatchEvents;
     fetch?: typeof fetch;
+    linkGuest?: boolean;
   },
 ): Pick<UserFollowingSession<Client>, "reauthenticate" | "linkWithBackend" | "close"> {
   const watch = watchBackendUser(
@@ -57,6 +60,7 @@ function decorate<Client>(
     () => signedInIdentity(options.registry, options.fetch),
     options.events,
     {
+      linkGuest: options.linkGuest,
       reconnect: () =>
         void (session.getSnapshot().client as ObservedClient | undefined)?.db
           ?.reconnect?.()

@@ -712,6 +712,52 @@ describe("createJazz", () => {
     expect((await fetch(`${accounts}/backend-user`)).status).toBe(405);
   });
 
+  it("links one guest to one user from two tabs at once, both to the guest's account", async () => {
+    for (const guestKeyAfterLink of ["keep", "revoke"] as const) {
+      const jazz = await createJazz({
+        app,
+        permissions,
+        store: memory(),
+        authenticate,
+        guestKeyAfterLink,
+      });
+      const appId = jazz.appId;
+      cleanups.push(() => jazz.close());
+      const origin = await serve(jazz, { sockets: true });
+      const accounts = `${origin}/jazz/apps/${appId}/accounts`;
+      const post = (path: string, body?: unknown) =>
+        fetch(`${accounts}/${path}`, {
+          method: "POST",
+          headers: { "x-test-user": "alice", "content-type": "application/json" },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+      const secret = generateSecret();
+      // Each tab asks for its own challenge, then both links race.
+      const challenges = await Promise.all(
+        [0, 1].map(
+          async () =>
+            ((await (await post("backend-link/challenge")).json()) as { challenge: string })
+              .challenge,
+        ),
+      );
+      const links = await Promise.all(
+        challenges.map((challenge) =>
+          post("backend-link", { challenge, proof: signChallenge(secret, challenge) }),
+        ),
+      );
+      expect(
+        links.map((link) => link.status),
+        guestKeyAfterLink,
+      ).toEqual([200, 200]);
+      const [first, second] = (await Promise.all(links.map((link) => link.json()))) as {
+        account: string;
+      }[];
+      expect(second!.account, guestKeyAfterLink).toBe(first!.account);
+      const after = (await (await post("backend-user")).json()) as { account: string };
+      expect(after.account, guestKeyAfterLink).toBe(first!.account);
+    }
+  });
+
   it("revokes the guest key on a retry when the first link's revoke didn't happen", async () => {
     const appId = randomUUID();
     const core = await startLocalJazzServer({ appId, inMemory: true });
