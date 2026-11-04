@@ -31,7 +31,11 @@ app=0a590000-0000-4000-8000-000000000059
 "$t59/release/dump-census" "$work/census" | tee "$work/census.json"
 grep -q '"unsupported_by_sqlite":\[\]' "$work/census.json"
 
-"$t60/release/sqlite-import" --dump "$work/dump" --data-dir "$work/a60" --app-id "$app"
+(cd "$a60" && CARGO_TARGET_DIR="$t60" cargo test --release -p migrate-alpha59-import)
+"$t60/release/sqlite-import" --dump "$work/dump" --data-dir "$work/a60" --app-id "$app" |
+  tee "$work/import.json"
+# user-1, user-2 and user-9 link as createJazz users; revoked user-3 does not.
+grep -q '"backend_identities_linked":3' "$work/import.json"
 "$t60/release/sqlite-import" verify --dump "$work/dump" --data-dir "$work/a60" --app-id "$app"
 
 # Only the active schema came over, and rows written under v1 read under
@@ -56,7 +60,14 @@ port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); pr
   >"$work/boot.log" 2>&1 &
 server=$!
 for _ in $(seq 1 100); do curl -sf "localhost:$port/health" >/dev/null && break; sleep 0.1; done
-curl -sf -H "X-Jazz-Admin-Secret: test" "localhost:$port/apps/$app/admin/permissions" | grep -q '"version":1'
+# The import's one deployment is the bundle a backend booting now pins to.
+curl -sf -H "X-Jazz-Admin-Secret: test" "localhost:$port/apps/$app/admin/bundles" >"$work/bundles.json"
+python3 - "$work/bundles.json" <<'PY'
+import json, sys
+bundles = json.load(open(sys.argv[1]))["bundles"]
+assert len(bundles) == 1, bundles
+assert bundles[0]["schemaHash"] and bundles[0]["permissions"], bundles
+PY
 kill -TERM "$server"
 wait "$server" || true
 

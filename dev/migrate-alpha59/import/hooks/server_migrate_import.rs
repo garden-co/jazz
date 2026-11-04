@@ -2,7 +2,7 @@
 //!
 //! `dev/migrate-alpha59/prepare.sh` copies this file into a SQLite-engine
 //! checkout as `jazz_server::server::migrate_import`. It drives the same
-//! code the admin `POST /deploy` route and the account routes run, without
+//! code `deploy()` and the account routes run, without
 //! HTTP. Nothing in released Jazz contains it.
 #![allow(missing_docs)]
 
@@ -13,7 +13,7 @@ use jazz::account_registry::AccountCommand;
 use super::ServerState;
 use super::deployment::{DeployRequest, deploy};
 
-/// One deployment, as the JSON body of `POST /apps/{app}/admin/deploy`.
+/// One deployment, as a `DeployRequest` in JSON; it publishes a bundle.
 pub async fn migrate_import_deploy(
     state: &Arc<ServerState>,
     request: serde_json::Value,
@@ -57,19 +57,16 @@ pub async fn migrate_import_login(
     })
 }
 
-/// The active permissions head: `{"schema_hash", "version", "permissions"}`.
+/// The permissions bundle published last: `{"schema_hash", "bundle",
+/// "permissions"}`. A deployment publishes a bundle; nothing is activated.
 pub fn migrate_import_active_permissions(state: &ServerState) -> Result<serde_json::Value, String> {
-    let Some(active) = state
-        .catalogue
-        .active_schema(&state.catalogue_store)
-        .map_err(|error| error.to_string())?
-    else {
+    let Some(bundle) = state.catalogue_store.published_bundles().pop() else {
         return Ok(serde_json::Value::Null);
     };
-    let permissions: std::collections::BTreeMap<_, _> = active.permissions.into_iter().collect();
+    let permissions: std::collections::BTreeMap<_, _> = bundle.permissions.into_iter().collect();
     Ok(serde_json::json!({
-        "schema_hash": active.summary.schema_hash.to_string(),
-        "version": active.summary.version,
+        "schema_hash": bundle.schema.to_string(),
+        "bundle": bundle.id.to_hex(),
         "permissions": permissions,
     }))
 }

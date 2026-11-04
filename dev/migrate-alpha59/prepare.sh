@@ -18,9 +18,9 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="${JAZZ_REPO:-https://github.com/garden-co/jazz.git}"
 a59_ref="v2.0.0-alpha.59"
-# Main with the catalogue stored in the app file (#4439). Repin to the
+# Main with every deployment published as a bundle (#4674). Repin to the
 # alpha.60 release commit before any production run.
-a60_ref="${A60_REF:-daf01bb9}"
+a60_ref="${A60_REF:-d87b3caad}"
 
 checkout() { # dir ref
   local dir="$1" ref="$2"

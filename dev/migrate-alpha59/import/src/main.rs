@@ -9,6 +9,7 @@
 //! directly.
 
 mod active;
+mod links;
 mod verify;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -36,10 +37,13 @@ struct Args {
     dump: PathBuf,
     data_dir: PathBuf,
     app_id: AppId,
+    /// Link each external identity's subject as a `createJazz` user id.
+    link_backend_identities: bool,
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut dump, mut data_dir, mut app_id) = (None, None, None);
+    let mut link_backend_identities = true;
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -48,6 +52,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
             "--app-id" => {
                 app_id = Some(AppId::from_string(&value()?).map_err(|error| error.to_string())?)
             }
+            "--no-backend-identity-links" => link_backend_identities = false,
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
@@ -55,6 +60,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         dump: dump.ok_or("--dump is required")?,
         data_dir: data_dir.ok_or("--data-dir (a new, empty dir) is required")?,
         app_id: app_id.ok_or("--app-id is required")?,
+        link_backend_identities,
     })
 }
 
@@ -70,7 +76,8 @@ async fn main() -> ExitCode {
         Err(error) => {
             eprintln!("sqlite-import: {error}");
             eprintln!(
-                "usage: sqlite-import [verify] --dump <dump> --data-dir <dir> --app-id <uuid>"
+                "usage: sqlite-import [verify] --dump <dump> --data-dir <dir> --app-id <uuid> \
+                 [--no-backend-identity-links]"
             );
             return ExitCode::from(2);
         }
@@ -103,6 +110,8 @@ struct Head {
     active_schema: Option<[u8; 16]>,
     admin: Vec<dump::AdminEntry>,
     accounts: Vec<dump::Account>,
+    /// Every principal the account journal names.
+    principals: Vec<String>,
 }
 
 async fn run(args: &Args) -> Result<Json, String> {
@@ -133,7 +142,9 @@ async fn run(args: &Args) -> Result<Json, String> {
             dump::Record::Account(account) => head.accounts.push(account),
             dump::Record::Lens(lens) => head.runtime_lenses.push(lens),
             dump::Record::ActiveSchema { schema } => head.active_schema = Some(schema),
-            dump::Record::AccountLogin { .. } => {}
+            dump::Record::AccountLogin { principal_json, .. } => {
+                head.principals.push(principal_json)
+            }
             dump::Record::Version(version) => {
                 first_version = Some(version);
                 break;
@@ -154,6 +165,12 @@ async fn run(args: &Args) -> Result<Json, String> {
         migrate_import_account(&state, &account.command_json)
             .await
             .map_err(|error| format!("account command {}: {error}", account.revision))?;
+    }
+    let mut linked = 0;
+    if args.link_backend_identities {
+        let admitted = links::admitted(&state, &head.principals).await?;
+        let planned = links::plan(&admitted)?;
+        linked = links::apply(&state, &args.app_id.to_string(), &planned).await?;
     }
 
     let mut rows = RowImport::default();
@@ -203,6 +220,7 @@ async fn run(args: &Args) -> Result<Json, String> {
         "data_dir": args.data_dir,
         "deployments": deployments,
         "account_commands": head.accounts.len(),
+        "backend_identities_linked": linked,
         "versions_in_dump": footer.versions,
         "versions_written": rows.written,
         "versions_skipped_rejected": rows.rejected,

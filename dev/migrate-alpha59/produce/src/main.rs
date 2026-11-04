@@ -488,6 +488,14 @@ fn accounts(path: &Path) {
             principal: principal(2),
             account: AccountId(uuid::Uuid::from_bytes([0xa2; 16])),
         },
+        // A second issuer, so the createJazz identity links cover several.
+        AccountCommand::Register {
+            principal: Principal {
+                issuer: "https://other-issuer.example".to_owned(),
+                subject: "user-9".to_owned(),
+            },
+            account: AccountId(uuid::Uuid::from_bytes([0xa9; 16])),
+        },
         AccountCommand::RequestLink {
             approver: principal(1),
             candidate: principal(3),

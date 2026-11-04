@@ -1,7 +1,7 @@
 //! `sqlite-import verify`: compare a migrated data dir with the dump it was
 //! built from, through the new server's own read paths.
 //!
-//! - the active permissions head: schema, version and policies;
+//! - the bundle the one deployment published: schema and policies;
 //! - every principal's login answer, against what alpha.59 itself answered;
 //! - every row: deleted or not, every cell (read through the schema version
 //!   its last version was written under), and its created/updated author
@@ -150,6 +150,21 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
             )
         });
     }
+    if args.link_backend_identities {
+        let principals: Vec<String> = logins.iter().map(|(p, _)| p.clone()).collect();
+        let planned = crate::links::plan(&crate::links::admitted(&state, &principals).await?)?;
+        let issuer = crate::links::app_issuer(&args.app_id.to_string());
+        for (index, link) in planned.iter().enumerate() {
+            let candidate = json!({ "issuer": issuer, "subject": link.subject }).to_string();
+            let login = migrate_import_login(&state, &candidate).await?;
+            let ok = login
+                .get("Ok")
+                .is_some_and(|assignment| assignment["account"].to_string() == link.account);
+            report.check("backend identity links", ok, || {
+                format!("link #{index}: the {issuer} identity does not open its account")
+            });
+        }
+    }
     if !rows.is_empty() {
         let runtime = state
             .runtime()
@@ -177,7 +192,7 @@ fn verify_permissions(
     admin: &[dump::AdminEntry],
     report: &mut Report,
 ) -> Result<(), String> {
-    // The revision number restarts with the one deployment the import makes.
+    // The one deployment the import makes publishes this bundle.
     let expected = match active_deployment(admin)? {
         None => Json::Null,
         Some(deployment) => json!({
@@ -187,9 +202,9 @@ fn verify_permissions(
     };
     let mut actual = migrate_import_active_permissions(state)?;
     if let Some(actual) = actual.as_object_mut() {
-        actual.remove("version");
+        actual.remove("bundle");
     }
-    report.check("permissions head", actual == expected, || {
+    report.check("published bundle", actual == expected, || {
         format!(
             "alpha.59 schema {}, SQLite schema {}",
             expected["schema_hash"], actual["schema_hash"]

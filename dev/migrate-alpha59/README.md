@@ -27,17 +27,26 @@ order with its authors and timestamps. It ends with a BLAKE3 digest.
 Import:
 
 - **Admin catalogue:** only the active schema and its permissions, as one
-  fresh deployment (the code `POST /admin/deploy` runs). Old schemas,
+  fresh deployment, which publishes it as a bundle. Old schemas,
   migrations and permission revisions stay behind, so the store matches a
   client that ships only the current schema. Schema hashes are recomputed
   with the SQLite engine's own hash function.
 - **Accounts:** the journal replayed command by command.
+- **Backend identity links:** apps moving to `createJazz` name users
+  `(jazz:app:<appId>, userId)`. So that `authenticate` answering
+  `{ userId: sub }` opens a returning user's old account, each admitted
+  external identity `(iss, sub)` gets `(jazz:app:<appId>, sub)` linked to the
+  same account, through the registry's own link commands. Built-in issuers
+  (`urn:jazz:*`) are left alone. The import refuses, naming only issuers,
+  when two issuers share a subject on different accounts. Pass
+  `--no-backend-identity-links` to skip this.
 - **Rows:** every version, brought forward to the active schema along
   alpha.59's own runtime lenses (columns those lenses dropped stay dropped),
   then written through the public Db API as `WriteIdentity::Attribution` of
   its original author with its original timestamp.
 
-`sqlite-import verify` checks the active schema and its permissions, every login answer,
+`sqlite-import verify` checks the published bundle's schema and permissions, every login answer,
+every backend identity link,
 and every row's deleted flag, cells and created/updated provenance. It
 prints row ids and column names only, never values or authors.
 
