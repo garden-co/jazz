@@ -388,22 +388,10 @@ mod tests {
         assert!(reason.contains("injected runtime failure"), "{reason}");
     }
 }
-/// Commit a complete, validated deployment. Detached execution makes request
-/// cancellation independent of the durable commit/activation boundary.
-pub(super) async fn deploy_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    body: Result<
-        Json<crate::server::deployment::DeployRequest>,
-        axum::extract::rejection::JsonRejection,
-    >,
-) -> Response {
-    deploy_route(state, headers, body, true).await
-}
 
-/// `/bundles`: publish a deployment as a permissions bundle that sessions
-/// are pinned to, activating nothing (createJazz). A server that predates
-/// bundles answers 404 here instead of activating it.
+/// `/bundles`: publish a complete, validated deployment as a permissions
+/// bundle that sessions are pinned to. Nothing becomes current. Detached
+/// execution makes request cancellation independent of the durable commit.
 pub(super) async fn publish_bundle_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -412,22 +400,10 @@ pub(super) async fn publish_bundle_handler(
         axum::extract::rejection::JsonRejection,
     >,
 ) -> Response {
-    deploy_route(state, headers, body, false).await
-}
-
-async fn deploy_route(
-    state: Arc<ServerState>,
-    headers: HeaderMap,
-    body: Result<
-        Json<crate::server::deployment::DeployRequest>,
-        axum::extract::rejection::JsonRejection,
-    >,
-    activate: bool,
-) -> Response {
     if let Err(response) = require_admin(&state, &headers) {
         return response;
     }
-    let mut request = match body {
+    let request = match body {
         Ok(Json(request)) => request,
         Err(error) => {
             let status = if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
@@ -438,7 +414,6 @@ async fn deploy_route(
             return (status, Json(ErrorResponse::bad_request(error.body_text()))).into_response();
         }
     };
-    request.activate = activate;
     match tokio::spawn(crate::server::deployment::deploy(state, request)).await {
         Ok(Ok(response)) => (StatusCode::OK, Json(response)).into_response(),
         Ok(Err(error)) => (error.status, Json(error.body)).into_response(),

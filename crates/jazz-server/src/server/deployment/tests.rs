@@ -68,7 +68,7 @@ async fn http(router: &Router, method: &str, path: &str, body: Value) -> (Status
     (status, value)
 }
 async fn deploy_ok(router: &Router, request: Value) -> Value {
-    let (status, body) = http(router, "POST", "/deploy", request).await;
+    let (status, body) = http(router, "POST", "/bundles", request).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     body
 }
@@ -95,7 +95,7 @@ async fn deploy_initial_permission_only_and_unchanged_requests() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/apps/{}/admin/deploy", app_id()))
+                .uri(format!("/apps/{}/admin/bundles", app_id()))
                 .header("Content-Type", "application/json")
                 .body(Body::from(initial.to_string()))
                 .unwrap(),
@@ -106,7 +106,7 @@ async fn deploy_initial_permission_only_and_unchanged_requests() {
     let mut missing = initial.clone();
     missing.as_object_mut().unwrap().remove("permissions");
     assert_eq!(
-        http(&router, "POST", "/deploy", missing).await.0,
+        http(&router, "POST", "/bundles", missing).await.0,
         StatusCode::BAD_REQUEST
     );
     assert_eq!(graph(&router).await["schemas"], json!([]));
@@ -116,12 +116,10 @@ async fn deploy_initial_permission_only_and_unchanged_requests() {
         result["published"]["schemas"],
         json!([SchemaHash::compute(&base).to_string()])
     );
-    let head = http(&router, "GET", "/permissions", Value::Null).await.1;
-    assert_eq!(deploy_ok(&router, initial).await["changed"], false);
-    assert_eq!(
-        http(&router, "GET", "/permissions", Value::Null).await.1,
-        head
-    );
+    let first = result["bundle"].clone();
+    let again = deploy_ok(&router, initial).await;
+    assert_eq!(again["changed"], false);
+    assert_eq!(again["bundle"], first);
     let mut allow_read = request(&base, &[], vec![]);
     allow_read["permissions"] = serde_json::to_value(HashMap::from([(
         TableName::new("notes"),
@@ -129,18 +127,21 @@ async fn deploy_initial_permission_only_and_unchanged_requests() {
     )]))
     .unwrap();
     let result = deploy_ok(&router, allow_read.clone()).await;
+    assert_eq!(result["changed"], true);
     assert_eq!(
-        result,
-        json!({"changed":true,"published":{"schemas":[],"migrations":[]}})
+        result["published"],
+        json!({"schemas":[],"migrations":[]}),
+        "a permission-only change publishes only its bundle"
     );
-    assert_eq!(deploy_ok(&router, allow_read).await["changed"], false);
-    let stored = http(&router, "GET", "/permissions", Value::Null).await.1;
-    assert!(stored["permissions"]["notes"].is_object(), "{stored}");
+    assert_ne!(result["bundle"], first);
+    let again = deploy_ok(&router, allow_read).await;
+    assert_eq!(again["changed"], false);
+    assert_eq!(again["bundle"], result["bundle"]);
     server.shutdown().await;
 }
 
 #[tokio::test]
-async fn deploy_complete_diamond_reopens_and_rejects_incomplete_history() {
+async fn deploy_complete_diamond_reopens_and_rejects_lossy_history() {
     let dir = tempfile::tempdir().unwrap();
     let server = builder(Some(dir.path())).build().await.unwrap();
     let router = create_router(server.state.clone());
@@ -154,16 +155,11 @@ async fn deploy_complete_diamond_reopens_and_rejects_incomplete_history() {
     // Publish B first, then merge C and D in one deployment using the stored A/B.
     deploy_ok(&router, request(&b, &[&b], vec![migration(&a, &b, &["a"])])).await;
     let before = graph(&router).await;
-    // The sibling-detour case must fail: B has no forward migration to D.
     let incomplete = request(
         &d,
         &[&c, &d],
         vec![migration(&a, &c, &["b"]), migration(&c, &d, &["a"])],
     );
-    let (status, error) = http(&router, "POST", "/deploy", incomplete.clone()).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
-    assert_eq!(error["code"], "unreachable_deployment_target");
-    assert_eq!(graph(&router).await, before);
     // Completing it with B -> D introducing `b` leaves the two lenses into D
     // disagreeing on `a` (C's introduces it, B's keeps B's): not supported yet.
     let mut lossy = incomplete;
@@ -171,7 +167,7 @@ async fn deploy_complete_diamond_reopens_and_rejects_incomplete_history() {
         .as_array_mut()
         .unwrap()
         .push(migration(&b, &d, &["b"]));
-    let (status, error) = http(&router, "POST", "/deploy", lossy).await;
+    let (status, error) = http(&router, "POST", "/bundles", lossy).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
     assert!(
         error["error"]
@@ -204,31 +200,24 @@ async fn deploy_complete_diamond_reopens_and_rejects_incomplete_history() {
         3
     );
     let expected = graph(&router).await;
-    assert_eq!(
-        expected["activeSchemaHash"],
-        SchemaHash::compute(&d).to_string()
-    );
     assert_eq!(expected["schemas"].as_array().unwrap().len(), 4);
+    // D is admitted, reached by both branches of the diamond.
     let catalogue = server.state.runtime().unwrap().catalogue().await.unwrap();
-    let head = catalogue.head().unwrap();
-    assert_eq!(
-        catalogue.schema(&head.schema).unwrap().version,
-        Some(JazzSchema::new(&d).unwrap().version_id())
-    );
+    let merged = catalogue
+        .schemas
+        .iter()
+        .find(|schema| schema.version == Some(JazzSchema::new(&d).unwrap().version_id()))
+        .expect("D is admitted");
     assert_eq!(
         catalogue
             .lenses
             .iter()
-            .filter(|lens| lens.target == head.schema)
+            .filter(|lens| lens.target == merged.hash)
             .count(),
         2
     );
+    // Publishing B's bundle again (a rollback) leaves the graph as it is.
     deploy_ok(&router, request(&b, &[], vec![])).await;
-    assert_eq!(
-        graph(&router).await["activeSchemaHash"],
-        SchemaHash::compute(&b).to_string()
-    );
-    deploy_ok(&router, request(&d, &[], vec![])).await;
     server.shutdown().await;
     drop(router);
     drop(server);
@@ -279,7 +268,7 @@ async fn deploy_validation_failure_leaves_no_durable_partial_catalogue() {
             "disconnected_migration_graph",
         ),
     ] {
-        let (status, error) = http(&router, "POST", "/deploy", body).await;
+        let (status, error) = http(&router, "POST", "/bundles", body).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
         assert_eq!(error["code"], code, "{error}");
         assert_eq!(graph(&router).await["schemas"], json!([]));
@@ -295,7 +284,7 @@ async fn deploy_validation_failure_leaves_no_durable_partial_catalogue() {
 }
 
 #[tokio::test]
-async fn deploy_concurrent_branches_revalidate_against_the_committed_graph() {
+async fn deploy_concurrent_branches_both_publish() {
     let server = builder(None).build().await.unwrap();
     let router = create_router(server.state.clone());
     let (a, b, c) = (schema(&[]), schema(&["a"]), schema(&["b"]));
@@ -304,35 +293,32 @@ async fn deploy_concurrent_branches_revalidate_against_the_committed_graph() {
         http(
             &router,
             "POST",
-            "/deploy",
+            "/bundles",
             request(&b, &[&b], vec![migration(&a, &b, &["a"])])
         ),
         http(
             &router,
             "POST",
-            "/deploy",
+            "/bundles",
             request(&c, &[&c], vec![migration(&a, &c, &["b"])])
         ),
     );
-    let (accepted, rejected) = if left.0 == StatusCode::OK {
-        (b, right)
-    } else {
-        assert_eq!(right.0, StatusCode::OK, "{}", right.1);
-        (c, left)
-    };
-    assert_eq!(
-        rejected.0,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{}",
-        rejected.1
-    );
-    assert_eq!(rejected.1["code"], "unreachable_deployment_target");
+    // Two backends publishing sibling branches of A serve side by side.
+    assert_eq!(left.0, StatusCode::OK, "{}", left.1);
+    assert_eq!(right.0, StatusCode::OK, "{}", right.1);
     let graph = graph(&router).await;
-    assert_eq!(
-        graph["activeSchemaHash"],
-        SchemaHash::compute(&accepted).to_string()
-    );
-    assert_eq!(graph["schemas"].as_array().unwrap().len(), 2);
+    let mut schemas = graph["schemas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|schema| schema.as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    schemas.sort();
+    let mut expected = [&a, &b, &c]
+        .map(|schema| SchemaHash::compute(schema).to_string())
+        .to_vec();
+    expected.sort();
+    assert_eq!(schemas, expected);
     server.shutdown().await;
 }
 
@@ -349,8 +335,9 @@ async fn deploy_explicit_empty_schema_is_not_a_legacy_initialization_sentinel() 
     let reopened = builder(Some(dir.path())).build().await.unwrap();
     let router = create_router(reopened.state.clone());
     assert_eq!(
-        graph(&router).await["activeSchemaHash"],
-        SchemaHash::compute(&empty).to_string()
+        graph(&router).await["schemas"].as_array().unwrap().len(),
+        1,
+        "the empty schema outlives a restart"
     );
     assert_eq!(
         deploy_ok(&router, request(&empty, &[], vec![])).await["changed"],
@@ -384,7 +371,7 @@ async fn deploy_runtime_predecessor_validation_precedes_storage_writes() {
     let (status, error) = http(
         &router,
         "POST",
-        "/deploy",
+        "/bundles",
         request(
             &d,
             &[&c],
@@ -462,7 +449,7 @@ async fn deploy_refuses_a_different_lens_from_an_equivalent_predecessor_hash() {
     let (status, error) = http(
         &router,
         "POST",
-        "/deploy",
+        "/bundles",
         request(&b, &[&indexed], vec![different]),
     )
     .await;
@@ -514,10 +501,6 @@ async fn compatible_deployment_preserves_hashes_and_history() {
         .build();
     deploy_ok(&router, request(&c, &[&historical], vec![])).await;
     let inventory = graph(&router).await;
-    assert_eq!(
-        inventory["activeSchemaHash"],
-        SchemaHash::compute(&c).to_string()
-    );
     assert_eq!(inventory["schemas"].as_array().unwrap().len(), 4);
     let edges = inventory["migrations"].as_array().unwrap();
     assert_eq!(
@@ -580,7 +563,7 @@ async fn compatible_defaults_and_indexes_share_runtime_identity() {
     let c = schema(&["extra"]);
     let before = graph(&router).await;
     assert_eq!(
-        http(&router, "POST", "/deploy", request(&c, &[&c], vec![]))
+        http(&router, "POST", "/bundles", request(&c, &[&c], vec![]))
             .await
             .0,
         StatusCode::UNPROCESSABLE_ENTITY
@@ -616,7 +599,7 @@ async fn compatible_connections_preserve_branch_and_convergence_validation() {
     deploy_ok(&router, request(&a, &[&a], vec![])).await;
     let before = graph(&router).await;
     assert_eq!(
-        http(&router, "POST", "/deploy", request(&b, &[&b], vec![]))
+        http(&router, "POST", "/bundles", request(&b, &[&b], vec![]))
             .await
             .0,
         StatusCode::UNPROCESSABLE_ENTITY
@@ -641,7 +624,7 @@ async fn compatible_connections_preserve_branch_and_convergence_validation() {
     let (status, error) = http(
         &router,
         "POST",
-        "/deploy",
+        "/bundles",
         request(
             &c,
             &[&a, &b, &c],
@@ -652,76 +635,6 @@ async fn compatible_connections_preserve_branch_and_convergence_validation() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(error["code"], "conflicting_paths");
     assert_eq!(graph(&router).await["schemas"], json!([]));
-    server.shutdown().await;
-}
-
-/// Alice reverts B to A, then deploys C; Bob cannot directly switch C to sibling B.
-/// A -> B; B -> A (activation only); A -> C; reopen -> C.
-#[tokio::test]
-async fn deploy_revert_then_new_branch_reopens_and_rejects_stored_sibling() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = builder(Some(dir.path())).build().await.unwrap();
-    let router = create_router(server.state.clone());
-    let (a, b, c) = (schema(&[]), schema(&["a"]), schema(&["b"]));
-    deploy_ok(&router, request(&a, &[&a], vec![])).await;
-    deploy_ok(&router, request(&b, &[&b], vec![migration(&a, &b, &["a"])])).await;
-    let reverted = deploy_ok(&router, request(&a, &[], vec![])).await;
-    assert_eq!(
-        reverted["published"],
-        json!({"schemas":[], "migrations":[]})
-    );
-    deploy_ok(&router, request(&c, &[&c], vec![migration(&a, &c, &["b"])])).await;
-    let expected = graph(&router).await;
-    assert_eq!(
-        expected["activeSchemaHash"],
-        SchemaHash::compute(&c).to_string()
-    );
-    let (status, error) = http(&router, "POST", "/deploy", request(&b, &[], vec![])).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(error["code"], "unreachable_deployment_target");
-    assert_eq!(
-        error["details"]["active"],
-        SchemaHash::compute(&c).to_string()
-    );
-    assert_eq!(
-        error["details"]["target"],
-        SchemaHash::compute(&b).to_string()
-    );
-    assert!(
-        error["error"]
-            .as_str()
-            .unwrap()
-            .contains("no forward migration path exists")
-    );
-    assert_eq!(graph(&router).await, expected);
-    server.shutdown().await;
-    drop(router);
-    drop(server);
-    let reopened = builder(Some(dir.path())).build().await.unwrap();
-    let router = create_router(reopened.state.clone());
-    assert_eq!(graph(&router).await, expected);
-    deploy_ok(&router, request(&a, &[], vec![])).await;
-    deploy_ok(&router, request(&b, &[], vec![])).await;
-    reopened.shutdown().await;
-}
-
-/// Only the route chooses whether a deployment activates: an `activate`
-/// field in a `/deploy` body is ignored, as an older server ignores it.
-#[tokio::test]
-async fn deploy_bodies_cannot_opt_out_of_activation() {
-    let server = builder(None).build().await.unwrap();
-    let router = create_router(server.state.clone());
-    let base = schema(&[]);
-    let mut body = request(&base, &[&base], vec![]);
-    body["activate"] = json!(false);
-    let deployed = deploy_ok(&router, body).await;
-    assert_eq!(deployed["bundle"], Value::Null, "{deployed}");
-    let head = http(&router, "GET", "/permissions", Value::Null).await.1;
-    assert_ne!(
-        head["head"],
-        Value::Null,
-        "the deployment activated: {head}"
-    );
     server.shutdown().await;
 }
 

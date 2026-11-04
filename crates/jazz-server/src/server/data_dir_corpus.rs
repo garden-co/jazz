@@ -240,9 +240,9 @@ async fn produce_server_data_dir_corpus_v1() {
     let dir = tempfile::tempdir().unwrap();
     {
         let server = open(dir.path()).await;
-        admin(&server, "POST", "/deploy", deploy_v1()).await;
+        admin(&server, "POST", "/bundles", deploy_v1()).await;
         insert_note(&server, "before the migration", None).await;
-        admin(&server, "POST", "/deploy", deploy_v2()).await;
+        admin(&server, "POST", "/bundles", deploy_v2()).await;
         insert_note(&server, "after the migration", Some("written with v2")).await;
         let alice = login(&server, alice()).await;
         println!("ALICE_ACCOUNT: {}", alice.account.0);
@@ -296,9 +296,16 @@ async fn pinned_server_data_dir_reopens_and_accepts_current_writes() {
         assert_eq!(login(&server, alice()).await.account, pinned);
         assert_eq!(notes(&server).await, before);
 
-        // Unchanged deployments stay unchanged; current writes are accepted.
+        // The pinned store activated v2; publishing it now adds only its
+        // bundle, and again changes nothing. Current writes are accepted.
+        let published = admin(&server, "POST", "/bundles", deploy_v2()).await;
         assert_eq!(
-            admin(&server, "POST", "/deploy", deploy_v2()).await["changed"],
+            published["published"],
+            json!({"schemas": [], "migrations": []}),
+            "{published}"
+        );
+        assert_eq!(
+            admin(&server, "POST", "/bundles", deploy_v2()).await["changed"],
             false
         );
         insert_note(&server, "after reopening", Some("current")).await;
