@@ -22,7 +22,7 @@ from the old profile. A captured S1 policy/history query exceeds it; its
 reproduction is kept in `fixtures/s1-policy-prepare.json`. The baseline is not
 a blanket compatibility pass.
 
-## 2. Introduce the SQL storage boundary
+## 2. Introduce the SQL storage boundary — completed
 
 Add a small internal interface in `jazz-db` for typed parameters/results,
 statement execution, affected-row counts, bounded result consumption, and
@@ -32,7 +32,20 @@ boundary. Use the experiment's SQLite C shim as a reference; avoid making its
 partial SQLite emulation the permanent contract. Express backend differences
 as storage capabilities rather than scattered provider checks.
 
-## 3. Make synchronous transactions callback-owned — native scopes completed
+`Db::open_storage` takes one owned `Storage` for SQL and transaction scopes.
+Storage selects its native or managed implementation with an enum. Native
+operations use rusqlite cached statements and borrowed rows directly; the DO
+backend implements typed execution, a forward-only cursor, and callback scopes.
+The positive `sqlite` feature includes native execution; native hosts and browser
+builds enable it, while the DO build omits it. There is no separate scope driver
+or connection registry. Rusqlite value/error conversion types are still reused.
+No storage or wire encoding changed; sections 6 and 7 remain.
+
+The uniform dynamic-dispatch and owned-result trials were discarded after
+native regressions. The original execution paths have been restored with
+`sqlite` replacing `managed-sql-only`.
+
+## 3. Make synchronous transactions callback-owned — completed
 
 Replace separate savepoint begin/end calls with a scope callback: native
 SAVEPOINT/RELEASE/ROLLBACK TO and DO `transactionSync`. Support both committing
@@ -50,12 +63,20 @@ savepoint bookkeeping remains in use. Local subscription notifications now
 run after the outer upload scope completes. Validated with 905 integration
 tests and 69 database-layer tests (2026-11-04).
 
-### DO callback scopes — pending
+### DO callback scopes — completed
 
-Implement the same scope contract through DO `transactionSync` and validate
-rollback and publication behavior in workerd. The persistent overlay and Rust
-transaction that spans `await` retain their existing lifetimes; those are
-covered by sections 5 and 4 respectively. Section 3 is not yet complete for DOs.
+The owned DO SQL backend runs callbacks through `transactionSync`, with nested
+rollback, Rust undo bookkeeping, and outer-scope hooks. The workerd
+harness checks rollback with a returned value, enum tags/cache invalidation,
+rejected two-row sync writes (no residual data, history or subscriber update),
+and successful writes after workerd restart with persisted SQLite. Two objects
+in the same workerd process are checked for independent storage ownership. Run
+`native-sqlite/harness/test-scopes.mjs` as documented in the README.
+
+This completes synchronous callback scopes, not all transaction APIs. Raw SQL
+savepoints are now refused. The Rust transaction spanning `await` and persistent
+overlay fail explicitly; their implementations remain in sections 4 and 5.
+Single-connection chunk storage and bounded caching remain in section 7.
 
 ## 4. Support transactions across await explicitly
 

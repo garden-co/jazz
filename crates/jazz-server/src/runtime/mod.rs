@@ -926,7 +926,7 @@ impl HostTables for Unavailable {
     }
     fn host_sql(
         &self,
-        _: &mut dyn FnMut(&rusqlite::Connection) -> Result<(), jazz::db::Error>,
+        _: &mut dyn FnMut(&jazz::storage::Storage) -> Result<(), jazz::db::Error>,
     ) -> Result<(), jazz::db::Error> {
         Err(self.error())
     }

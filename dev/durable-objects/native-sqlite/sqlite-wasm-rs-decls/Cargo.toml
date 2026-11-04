@@ -1,7 +1,6 @@
-# sqlite-wasm-rs 0.5.5's declarations without its SQLite: rusqlite links
-# against whatever defines the `sqlite3_*` symbols, which in this build is
-# jazz-wasm's Durable Object shim over `ctx.storage.sql`. Patched in by the
-# workspace one level up; never published.
+# Keep rusqlite's SQL value/error conversion types without bundling SQLite C.
+# Omitting the sqlite adapter excludes native execution: this build neither calls nor
+# supplies sqlite3_* functions. The isolated workspace patch is never published.
 [package]
 name = "sqlite-wasm-rs"
 version = "0.5.5"

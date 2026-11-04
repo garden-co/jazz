@@ -1,4 +1,4 @@
-//! The `sqlite3_*` declarations rusqlite calls, with no SQLite behind them.
+//! Declarations needed to compile rusqlite types without native SQL execution.
 //! See this crate's Cargo.toml.
 #![no_std]
 #![allow(clippy::missing_safety_doc)]

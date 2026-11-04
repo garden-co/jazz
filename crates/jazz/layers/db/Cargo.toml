@@ -5,7 +5,9 @@ edition = "2024"
 description = "Jazz's database: the thread-affine Db facade over SQLite."
 
 [features]
-default = []
+default = ["sqlite"]
+# Include the SQLite adapter. Managed hosts inject their own backend.
+sqlite = []
 # Test helpers shared with the crates above this one.
 testing = ["jazz-types/testing", "jazz-model/testing", "jazz-protocol/testing"]
 # Log every statement to the file named by JAZZ_SQL_TRACE, for checking the

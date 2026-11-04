@@ -14,11 +14,11 @@ use crate::protocol::{
 use crate::query::Query;
 use crate::records::{Value, ValueType};
 use crate::schema::{JazzSchema, MergeStrategy};
+use crate::storage::{OptionalExtension, Storage, params_from_iter};
 use crate::tools::OpenTransactionId;
 use crate::tools::Operation;
 use crate::tx::DurabilityTier;
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, OptionalExtension, params_from_iter};
 
 pub use crate::options::{
     DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, InsertOptions,
@@ -498,7 +498,7 @@ pub struct SchemaPublication {
 }
 
 struct Inner {
-    conn: Connection,
+    conn: Storage,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
     /// Enum variants a write may hold though its schema does not declare
@@ -839,7 +839,7 @@ impl Stamp {
 const STATEMENT_CACHE_CAPACITY: usize = 512;
 
 /// The application tables a store holds, by their stored columns.
-fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> {
+fn stored_schema(conn: &Storage, jazz: &JazzSchema) -> Result<Schema, Error> {
     let names: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
         .and_then(|mut statement| {
@@ -897,24 +897,8 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
 /// Run a script of statements one at a time. SQLite's statement length
 /// limit applies to the whole text handed to one prepare, and schema DDL
 /// outgrows Durable Object SQLite's 100 KB.
-pub(crate) fn execute_script(conn: &Connection, script: &str) -> Result<(), Error> {
-    let mut start = 0;
-    for (end, _) in script.match_indices(';') {
-        let statement = &script[start..=end];
-        let text = std::ffi::CString::new(statement)
-            .map_err(|_| Error::new(ErrorCode::Storage, "NUL in SQL"))?;
-        // SAFETY: a NUL-terminated string; `sqlite3_complete` only reads it.
-        // A `;` inside a trigger body or a literal leaves it incomplete.
-        if unsafe { rusqlite::ffi::sqlite3_complete(text.as_ptr()) } != 0 {
-            conn.execute_batch(statement).map_err(storage)?;
-            start = end + 1;
-        }
-    }
-    let rest = &script[start..];
-    if !rest.trim().is_empty() {
-        conn.execute_batch(rest).map_err(storage)?;
-    }
-    Ok(())
+pub(crate) fn execute_script(conn: &Storage, script: &str) -> Result<(), Error> {
+    conn.execute_script(script).map_err(storage)
 }
 
 pub(crate) fn rejected(message: impl Into<String>) -> Error {
@@ -1233,14 +1217,14 @@ impl Error {
     }
 }
 
-impl crate::values::ScopeConnection for &Db {
-    fn with_scope_connection<R>(&self, f: impl FnOnce(&rusqlite::Connection) -> R) -> R {
+impl crate::storage::StorageContext for &Db {
+    fn with_storage<R>(&self, f: impl FnOnce(&crate::storage::Storage) -> R) -> R {
         f(&self.inner.borrow().conn)
     }
 }
 
-impl crate::values::ScopeConnection for Inner {
-    fn with_scope_connection<R>(&self, f: impl FnOnce(&rusqlite::Connection) -> R) -> R {
+impl crate::storage::StorageContext for Inner {
+    fn with_storage<R>(&self, f: impl FnOnce(&crate::storage::Storage) -> R) -> R {
         f(&self.conn)
     }
 }
@@ -1267,7 +1251,14 @@ impl Db {
 
 impl Db {
     pub async fn open(config: DbConfig) -> Result<Self, Error> {
-        let conn = Connection::open_in_memory().map_err(storage)?;
+        let conn = Storage::open_in_memory().map_err(storage)?;
+        crate::format::admit(&conn)?;
+        Self::open_on(config, conn, None)
+    }
+
+    /// Open an explicitly owned SQL backend. Its execution and transaction
+    /// methods remain together for the lifetime of this database.
+    pub async fn open_storage(config: DbConfig, conn: Storage) -> Result<Self, Error> {
         crate::format::admit(&conn)?;
         Self::open_on(config, conn, None)
     }
@@ -1299,7 +1290,7 @@ impl Db {
     /// overlay (see [`crate::host`]).
     pub(crate) fn with_host_connection<T>(
         &self,
-        f: impl FnOnce(&Connection) -> Result<T, Error>,
+        f: impl FnOnce(&Storage) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let inner = self.inner.borrow_mut();
         f(&inner.conn)
@@ -1307,7 +1298,7 @@ impl Db {
 
     fn open_on(
         mut config: DbConfig,
-        conn: Connection,
+        conn: Storage,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
         // A schema this store has not admitted is reached along the lenses
@@ -1376,12 +1367,14 @@ impl Db {
 
     fn open_named(
         config: DbConfig,
-        conn: Connection,
+        conn: Storage,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
         // Before the first statement, so both see all of them.
         #[cfg(feature = "durable-object-limits")]
-        crate::durable_object_limits::apply(&conn);
+        if let Some(native) = conn.native() {
+            crate::durable_object_limits::apply(native);
+        }
         #[cfg(feature = "sql-trace")]
         crate::sql_trace::install(&conn);
         // A version this file admitted keeps its names; another one is
@@ -4093,7 +4086,7 @@ impl Inner {
     /// fire the large-value refcount triggers, so preparing one compiles
     /// those trigger programs too; re-preparing per row dominated bulk
     /// writes.
-    fn exec<P: rusqlite::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
+    fn exec<P: crate::storage::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
         self.conn.prepare_cached(sql)?.execute(params)
     }
 
@@ -5358,7 +5351,7 @@ impl Inner {
         }
         let (account, issuer, subject) = key;
         let account = account.as_bytes().to_vec();
-        let find = |conn: &rusqlite::Connection| {
+        let find = |conn: &crate::storage::Storage| {
             conn.cached_row(
                 "SELECT n FROM _jazz_authors WHERE account = ?1 AND issuer = ?2 AND subject = ?3",
                 rusqlite::params![account, issuer, subject],
@@ -5375,7 +5368,7 @@ impl Inner {
                     rusqlite::params![account, issuer, subject],
                 )
                 .map_err(storage)?;
-                self.conn.last_insert_rowid()
+                self.conn.last_insert_rowid().map_err(storage)?
             }
         };
         self.remember_author(key, code);
@@ -5452,7 +5445,7 @@ impl Inner {
     /// A pass runs only when one could find work: a row changed since the
     /// last pass that emptied the queue, or an upload was dropped.
     fn reclaim_large_values(&mut self, budget: usize) -> Result<usize, Error> {
-        if self.reclaimed_at == Some(self.conn.total_changes())
+        if self.reclaimed_at == Some(self.conn.total_changes().map_err(storage)?)
             && self.upload_cleanup.borrow().is_empty()
         {
             return Ok(0);
@@ -5466,7 +5459,7 @@ impl Inner {
         // A pass inside an open transaction may yet roll back, and one
         // that ran out of budget left work queued: both run again.
         if self.conn.is_autocommit() && !crate::large::reclaim_queued(&self.conn)? {
-            self.reclaimed_at = Some(self.conn.total_changes());
+            self.reclaimed_at = Some(self.conn.total_changes().map_err(storage)?);
         }
         Ok(deleted)
     }
@@ -9450,3 +9443,7 @@ fn migration_path(
         _ => Vec::new(),
     }
 }
+
+#[cfg(any(test, feature = "testing"))]
+#[path = "scope_checks.rs"]
+mod scope_checks;

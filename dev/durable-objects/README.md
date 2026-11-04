@@ -87,9 +87,12 @@ DO authorizer, JS value bridge, or callback transaction lifetime.
 `native-sqlite/` ports the isolated build from
 [PR #4579](https://github.com/garden-co/jazz/pull/4579), source head
 `838e7fa8b927292a29853b66c4c05c80cb81f0e6`, to the current tree. Its workspace
-patches `sqlite-wasm-rs` to declarations only; Rust implements the SQLite C
-symbols over DO SQL. Browser stores remain enabled by default in `jazz-wasm`;
-this experiment disables them. The patch does not apply to browser builds.
+patches `sqlite-wasm-rs` to declarations only so reuse of rusqlite's conversion
+and error types does not bundle SQLite C. This build omits the optional
+`sqlite` adapter; native shells and the browser feature select it. `durable_object.rs` now implements Jazz's typed storage
+backend directly over DO SQL; it defines no `sqlite3_*` shim functions. Browser
+stores retain the native SQLite adapter by default; the isolated patch does
+not apply to browser builds.
 
 ```sh
 # Requires wasm-pack and the wasm32-unknown-unknown Rust target.
@@ -108,13 +111,43 @@ retains DO storage, `TRACE=1` counts SQL statements, and `INSPECTOR_PORT=9229`
 enables the optional CPU profiler. The harness accepts fixture identities from
 its caller; bind it only to local loopback. It is not production authentication.
 
-The shim still counts SAVEPOINT/RELEASE without opening real scopes, and
-ROLLBACK TO fails. Wide integer bindings now fail explicitly: the older
+Synchronous callback scopes now use the owning `ctx.storage.transactionSync`.
+`WasmDb.openDurableObject` takes `ctx.storage`, not just `ctx.storage.sql`.
+`Db::open_storage` receives one owner for SQL execution and transactions, with
+no connection registry or global storage slot. Native execution uses rusqlite
+cached statements and borrowed rows directly; managed execution uses the DO
+backend and a forward-only cursor. The `sqlite` feature includes the native
+implementation and is omitted from DO builds. Rust retains scope outcomes and
+undo logs, and the JS bridge throws a private marker for deliberate rollback. Nested
+scopes roll back independently. SQLite commit/rollback hooks run at the
+outermost scope boundary; Cloudflare output gates govern external durability.
+Raw SQL transaction statements are refused. The Rust transaction spanning
+`await` and persistent transaction overlay return typed unsupported errors;
+they are not implemented by this synchronous adapter.
+
+Run the actual WASM/workerd scope and restart checks with:
+
+```sh
+FAST=1 dev/durable-objects/native-sqlite/build.sh --features scope-tests
+cargo build -p jazz-example-doc-shelf-benchmark --bin doc-shelf-do-ceiling-ws
+node dev/durable-objects/native-sqlite/harness/test-scopes.mjs
+```
+
+The optional test build includes database-layer conformance probes. The runner
+checks nested rollback, rollback with a returned value, enum-tag undo and cache
+rollback tracking. A stale replica's two-row insert fails on its second row;
+the first leaves no data, history or subscriber update. Subsequent successful
+writes are verified after restarting workerd with the same persisted SQLite
+and connecting fresh replicas. Two objects in the same process run the same
+fixture independently. This remains a local harness, not deployment or
+hibernation validation.
+
+Wide integer bindings fail explicitly: the older
 experiment's decimal-text binding would silently change current app values.
 Wide reads and non-UTF-8 text also fail; integral REAL results lose their storage
-class in the bridge. It buffers whole result sets and opens the engine through
-the memory-store path, so its chunk-cache behavior is not a production durable
-store. These limitations are intentional evidence for the storage and
+class in the bridge. SQL results are streamed one row at a time. The backend
+is opened explicitly, but chunk caching still uses the pathless configuration;
+its memory budget and durable chunk-reader behavior require section 7. These limitations are intentional evidence for the storage and
 transaction work in the plan, not supported Jazz semantics.
 
 ## Validation of this refresh

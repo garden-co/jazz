@@ -341,6 +341,8 @@ fn main() {
     let writers = groups.min(env("WRITERS", 20)).max(1);
 
     let native = std::env::var_os("NATIVE").is_some();
+    let scope_test = std::env::var_os("SCOPE_TEST").is_some();
+    let verify_only = std::env::var_os("VERIFY_ONLY").is_some();
     let mut control_socket = (!native).then(|| connect(&format!("{base}/control")));
     if native {
         let config = DbConfig::new(
@@ -374,12 +376,22 @@ fn main() {
         }),
     );
     eprintln!("opened in {} ms", opened["openMs"]);
+    if scope_test {
+        if verify_only {
+            control(
+                &mut control_socket,
+                json!({ "op": "checkRejected", "row": task_id(store + 1).to_bytes() }),
+            );
+        } else {
+            control(&mut control_socket, json!({ "op": "scopeChecks" }));
+        }
+    }
 
     let replica = |s: usize| {
         let config = DbConfig::new(
             JazzSchema::new(&schema()).expect("schema compiles"),
             DbIdentity {
-                node: node(1 + s as u16),
+                node: node(1 + s as u16 + if verify_only { 1000 } else { 0 }),
                 author: author(s),
             },
         );
@@ -407,7 +419,7 @@ fn main() {
     // Seed through one replica, a thousand rows per upload.
     let seeding = Instant::now();
     let (seeder, _seed_link) = replica(10_000);
-    for chunk in (0..store).step_by(1000) {
+    for chunk in (0..if verify_only { 0 } else { store }).step_by(1000) {
         let (_, receipt) = block_on(seeder.transaction(async |tx| {
             for n in chunk..(chunk + 1000).min(store) {
                 tx.insert(
@@ -480,6 +492,59 @@ fn main() {
     let connected = connecting.elapsed();
     let after_connect = control(&mut control_socket, json!({ "op": "stats", "reset": true }));
 
+    if scope_test && !verify_only {
+        use futures_util::FutureExt;
+        // Mallory has no subscription and therefore no copy of the seeded
+        // rows. Her local commit succeeds; the authority must reject the
+        // second insert and roll back the first, including its history.
+        let (mallory, _link) = replica(20_000);
+        let (_, receipt) = block_on(mallory.transaction(async |tx| {
+            for n in [store + 1, 0] {
+                let mut cells = task(n);
+                cells.insert("project".into(), Value::String(project(0)));
+                tx.insert(
+                    "tasks",
+                    cells,
+                    InsertOptions {
+                        row_id: Some(task_id(n)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+            Ok(())
+        }))
+        .expect("stale replica accepts its local batch");
+        pump(&mallory, || {
+            match mallory
+                .wait_for_transaction(receipt.0, DurabilityTier::Global)
+                .now_or_never()
+            {
+                None => false,
+                Some(Ok(_)) => panic!("authority accepted a conflicting batch"),
+                Some(Err(error)) => {
+                    assert_eq!(error.code, jazz::db::ErrorCode::WriteRejected);
+                    true
+                }
+            }
+        });
+        // Capture every subscriber update after rejection, before valid
+        // writes begin; no speculative row may have been published.
+        for _ in 0..20 {
+            assert_eq!(
+                tick_all(&mut replicas),
+                0,
+                "rejected batch published a subscriber update"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        control(
+            &mut control_socket,
+            json!({ "op": "checkRejected", "row": task_id(store + 1).to_bytes() }),
+        );
+        eprintln!("scope rejection passed");
+    }
+
     let writer_slots: Vec<usize> = (0..sessions)
         .filter(|s| s % group == 0 && s / group < writers)
         .collect();
@@ -487,7 +552,7 @@ fn main() {
     eprintln!("phase: writing");
     let mut trips = Vec::with_capacity(writes);
     let mut events = 0;
-    for done in 0..writes {
+    for done in 0..if verify_only { 0 } else { writes } {
         let (db, g, ..) = &replicas[writer_slots[done % writer_slots.len()]];
         let base_row = g * project_tasks();
         let offset = (done * 7) % (project_tasks() - rows + 1);
@@ -558,9 +623,15 @@ fn main() {
                 .collect::<BTreeMap<_, _>>();
             assert_eq!(actual, expected, "subscriber in project {group_id}");
         }
-        println!(
-            "Smoke passed: {store} seeded rows, {sessions} subscribers, {writes} acknowledged writes; subscriber contents agree."
-        );
+        if verify_only {
+            println!(
+                "Restart verification passed: {store} rows, {sessions} fresh subscribers; persisted contents agree."
+            );
+        } else {
+            println!(
+                "Smoke passed: {store} seeded rows, {sessions} subscribers, {writes} acknowledged writes; subscriber contents agree."
+            );
+        }
         LOCAL.with(|local| std::mem::forget(local.borrow_mut().take()));
         return;
     }

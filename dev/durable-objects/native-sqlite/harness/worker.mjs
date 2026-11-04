@@ -43,7 +43,7 @@ export class Authority {
     wasm ??= initSync({ module: wasmModule });
     if (this.trace) durableObjectSqlTrace(true);
     const start = performance.now();
-    this.db = WasmDb.openDurableObject(this.ctx.storage.sql, bytes(schema), bytes(config));
+    this.db = WasmDb.openDurableObject(this.ctx.storage, bytes(schema), bytes(config));
     this.db.setTickScheduler(() => this.schedule());
     this.db.onMutationError?.((error) => this.errors.push(`mutation: ${error}`));
     return performance.now() - start;
@@ -124,6 +124,12 @@ export class Authority {
             server.send(
               JSON.stringify({ ok: true, openMs: this.open(message.schema, message.config) }),
             );
+          } else if (message.op === "checkRejected") {
+            this.db.checkRejectedRow(new Uint8Array(message.row));
+            server.send(JSON.stringify({ ok: true }));
+          } else if (message.op === "scopeChecks") {
+            this.db.checkSqlScopes();
+            server.send(JSON.stringify({ ok: true }));
           } else if (message.op === "stats") {
             server.send(JSON.stringify({ ok: true, ...this.stats(message.reset) }));
           } else {
@@ -162,6 +168,10 @@ export class Authority {
 
 export default {
   fetch(request, env) {
-    return env.AUTHORITY.get(env.AUTHORITY.idFromName("app")).fetch(request);
+    const url = new URL(request.url);
+    const parts = url.pathname.split("/").filter(Boolean);
+    const name = parts.length === 2 ? parts.shift() : "app";
+    url.pathname = `/${parts.join("/")}`;
+    return env.AUTHORITY.get(env.AUTHORITY.idFromName(name)).fetch(new Request(url, request));
   },
 };

@@ -11,12 +11,15 @@ use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rusqlite::{Connection, ffi};
+use rusqlite::ffi;
 
 static SINK: Mutex<Option<std::fs::File>> = Mutex::new(None);
 static CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
-pub(crate) fn install(conn: &Connection) {
+pub(crate) fn install(store: &crate::storage::Storage) {
+    let Some(conn) = store.native() else {
+        return;
+    };
     let Some(path) = std::env::var_os("JAZZ_SQL_TRACE") else {
         return;
     };

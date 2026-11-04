@@ -39,7 +39,7 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use crate::storage::{OptionalExtension, Storage, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -327,7 +327,7 @@ pub(crate) fn now_millis() -> u64 {
 }
 
 /// Write `put` (the caller holds a savepoint or transaction).
-pub(crate) fn put(conn: &Connection, put: &CataloguePut) -> Result<(), Error> {
+pub(crate) fn put(conn: &Storage, put: &CataloguePut) -> Result<(), Error> {
     conn.execute_batch(DDL).map_err(storage)?;
     for (schema, published_at) in &put.schemas {
         let (hash, def) = structural_def(schema)?;
@@ -420,7 +420,7 @@ pub(crate) fn put(conn: &Connection, put: &CataloguePut) -> Result<(), Error> {
     Ok(())
 }
 
-fn has_bundles(conn: &Connection) -> Result<bool, Error> {
+fn has_bundles(conn: &Storage) -> Result<bool, Error> {
     conn.cached_row(
         "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '_jazz_bundles'",
         [],
@@ -431,7 +431,7 @@ fn has_bundles(conn: &Connection) -> Result<bool, Error> {
 
 /// Whether this store has published any permissions bundle: its app is
 /// served through createJazz, which pins every session it opens.
-pub(crate) fn serves_bundles(conn: &Connection) -> Result<bool, Error> {
+pub(crate) fn serves_bundles(conn: &Storage) -> Result<bool, Error> {
     if !has_bundles(conn)? {
         return Ok(false);
     }
@@ -443,7 +443,7 @@ pub(crate) fn serves_bundles(conn: &Connection) -> Result<bool, Error> {
 
 /// The published bundle `id`: its write schema and permissions.
 pub(crate) fn bundle(
-    conn: &Connection,
+    conn: &Storage,
     id: &BundleId,
 ) -> Result<Option<(SchemaHash, Permissions)>, Error> {
     if !has_bundles(conn)? {
@@ -467,7 +467,7 @@ pub(crate) fn bundle(
         .transpose()
 }
 
-fn exists(conn: &Connection) -> Result<bool, Error> {
+fn exists(conn: &Storage) -> Result<bool, Error> {
     conn.cached_row(
         "SELECT count(*) = 3 FROM sqlite_master WHERE type = 'table' \
          AND name IN ('_jazz_schemas', '_jazz_lenses', '_jazz_permissions')",
@@ -479,7 +479,7 @@ fn exists(conn: &Connection) -> Result<bool, Error> {
 
 /// The whole catalogue. A file with none (a store no version was admitted
 /// to yet) reads empty.
-pub(crate) fn read(conn: &Connection) -> Result<CatalogueRows, Error> {
+pub(crate) fn read(conn: &Storage) -> Result<CatalogueRows, Error> {
     let mut rows = CatalogueRows::default();
     if !exists(conn)? {
         return Ok(rows);
@@ -632,7 +632,7 @@ pub(crate) fn read(conn: &Connection) -> Result<CatalogueRows, Error> {
 /// Record that admitted version `n` is `schema` (structural). A schema
 /// with no public source (an engine test's, built from compiled tables)
 /// has no definition to keep, so it is not recorded.
-pub(crate) fn record_admitted(conn: &Connection, n: i64, schema: &JazzSchema) -> Result<(), Error> {
+pub(crate) fn record_admitted(conn: &Storage, n: i64, schema: &JazzSchema) -> Result<(), Error> {
     if schema.public_schema().is_empty() && !schema.tables().is_empty() {
         return Ok(());
     }
@@ -694,7 +694,7 @@ pub(crate) fn schema(conn: &Connection, hash: &SchemaHash) -> Result<Option<Publ
 
 /// The admitted versions' schemas, in admission order, each checked to
 /// compile to the version it was admitted as.
-pub(crate) fn admitted(conn: &Connection) -> Result<Vec<(SchemaVersionId, JazzSchema)>, Error> {
+pub(crate) fn admitted(conn: &Storage) -> Result<Vec<(SchemaVersionId, JazzSchema)>, Error> {
     let mut statement = conn
         .prepare(
             "SELECT v.version, s.def FROM _jazz_schemas s JOIN _jazz_versions v ON v.n = s.n \
@@ -732,7 +732,7 @@ pub(crate) fn admitted(conn: &Connection) -> Result<Vec<(SchemaVersionId, JazzSc
 }
 
 /// The seq the current read policies took effect at.
-pub(crate) fn activated_seq(conn: &Connection) -> Result<Option<u64>, Error> {
+pub(crate) fn activated_seq(conn: &Storage) -> Result<Option<u64>, Error> {
     conn.cached_row(
         "SELECT activated_seq FROM _jazz_permissions WHERE activated_seq IS NOT NULL \
          ORDER BY revision DESC LIMIT 1",
@@ -750,7 +750,7 @@ pub(crate) fn activated_seq(conn: &Connection) -> Result<Option<u64>, Error> {
 /// at the next. The read policies take effect at `seq` only if their digest
 /// changed since the last activation.
 pub(crate) fn record_activation(
-    conn: &Connection,
+    conn: &Storage,
     revision: Option<u64>,
     schema: &JazzSchema,
     read_digest: u64,

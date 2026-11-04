@@ -27,15 +27,15 @@ pub(crate) fn query_error(what: impl std::fmt::Display) -> Error {
 pub(crate) trait CachedRow {
     fn cached_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
     where
-        P: rusqlite::Params,
-        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>;
+        P: crate::storage::Params,
+        F: FnOnce(&crate::storage::Row<'_>) -> rusqlite::Result<T>;
 }
 
-impl CachedRow for rusqlite::Connection {
+impl CachedRow for crate::storage::Storage {
     fn cached_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
     where
-        P: rusqlite::Params,
-        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+        P: crate::storage::Params,
+        F: FnOnce(&crate::storage::Row<'_>) -> rusqlite::Result<T>,
     {
         self.prepare_cached(sql)?.query_row(params, f)
     }
@@ -51,16 +51,25 @@ pub(crate) fn storage(error: rusqlite::Error) -> Error {
 }
 
 /// Open `SAVEPOINT name`; [`end_savepoint`] closes it.
-pub(crate) fn begin_savepoint(conn: &rusqlite::Connection, name: &str) -> Result<(), Error> {
+pub(crate) fn begin_savepoint(conn: &crate::storage::Storage, name: &str) -> Result<(), Error> {
+    if !conn.supports_open_scopes() {
+        return Err(unsupported(format!(
+            "SQL savepoint `{name}` outside a callback on managed SQL storage"
+        )));
+    }
     conn.execute_batch(&format!("SAVEPOINT {name}"))
         .map_err(storage)?;
+    open_tag_undo(conn);
+    Ok(())
+}
+
+pub(crate) fn open_tag_undo(conn: &crate::storage::Storage) {
     TAG_UNDO.with(|undo| {
         undo.borrow_mut()
             .entry(undo_key(conn))
             .or_default()
             .push(Vec::new())
     });
-    Ok(())
 }
 
 thread_local! {
@@ -70,16 +79,14 @@ thread_local! {
         RefCell::default();
 }
 
-/// A connection's key in [`TAG_UNDO`]: its SQLite handle, which moving the
-/// `Connection` keeps.
-fn undo_key(conn: &rusqlite::Connection) -> usize {
-    // SAFETY: the handle is only compared, never dereferenced.
-    unsafe { conn.handle() as usize }
+/// The stable identity of the storage owner, independent of native handles.
+fn undo_key(conn: &crate::storage::Storage) -> usize {
+    conn.identity()
 }
 
 /// Drop `conn`'s undo logs as it closes: a savepoint left open dies with
-/// it, and a later connection may get its handle's address.
-pub(crate) fn forget_tag_undo(conn: &rusqlite::Connection) {
+/// it. Storage identities are never reused.
+pub(crate) fn forget_tag_undo(conn: &crate::storage::Storage) {
     TAG_UNDO.with(|undo| undo.borrow_mut().remove(&undo_key(conn)));
     ROLLBACKS.with(|rollbacks| rollbacks.borrow_mut().remove(&undo_key(conn)));
 }
@@ -92,7 +99,7 @@ thread_local! {
 }
 
 /// How many rollbacks `conn` has seen (see [`ROLLBACKS`]).
-pub(crate) fn rollbacks(conn: &rusqlite::Connection) -> u64 {
+pub(crate) fn rollbacks(conn: &crate::storage::Storage) -> u64 {
     ROLLBACKS.with(|rollbacks| {
         rollbacks
             .borrow()
@@ -108,13 +115,13 @@ pub(crate) fn note_rollback(key: usize) {
 }
 
 /// `conn`'s key for [`note_rollback`], for a hook that cannot borrow it.
-pub(crate) fn rollback_key(conn: &rusqlite::Connection) -> usize {
+pub(crate) fn rollback_key(conn: &crate::storage::Storage) -> usize {
     undo_key(conn)
 }
 
 /// Stored enum column `tags` is about to change on `conn`: the innermost
 /// open savepoint logs how it was, once, to put back if it rolls back.
-pub(crate) fn tags_changing(conn: &rusqlite::Connection, tags: &ColumnTags) {
+pub(crate) fn tags_changing(conn: &crate::storage::Storage, tags: &ColumnTags) {
     TAG_UNDO.with(|undo| {
         if let Some(frame) = undo
             .borrow_mut()
@@ -131,7 +138,7 @@ pub(crate) fn tags_changing(conn: &rusqlite::Connection, tags: &ColumnTags) {
 /// the enclosing savepoint's (the outermost's are committed); rolled back,
 /// its columns' tags are put back. `all` closes every open log (SQLite
 /// rolled the whole transaction back).
-fn close_tag_undo(conn: &rusqlite::Connection, kept: bool, all: bool) {
+pub(crate) fn close_tag_undo(conn: &crate::storage::Storage, kept: bool, all: bool) {
     TAG_UNDO.with(|undo| {
         let mut undo = undo.borrow_mut();
         let key = undo_key(conn);
@@ -169,7 +176,7 @@ fn close_tag_undo(conn: &rusqlite::Connection, kept: bool, all: bool) {
 /// rolls a whole transaction back by itself after some errors (a full disk,
 /// an I/O error); then the savepoint is gone and there is nothing to undo.
 pub(crate) fn end_savepoint(
-    conn: &rusqlite::Connection,
+    conn: &crate::storage::Storage,
     name: &str,
     keep: bool,
 ) -> Result<(), Error> {
@@ -207,47 +214,20 @@ pub(crate) fn end_savepoint(
     }
 }
 
-/// A scope may deliberately discard SQL changes while returning a value
-/// (permission advice and speculative reads do this). Errors always roll back.
-pub(crate) enum ScopeOutcome<T> {
-    Commit(T),
-    Rollback(T),
-}
+pub(crate) use crate::storage::ScopeOutcome;
+use crate::storage::StorageContext;
 
-/// Access the owning connection without holding a RefCell borrow across the
-/// callback. Implementations must always select the same connection.
-pub(crate) trait ScopeConnection {
-    fn with_scope_connection<R>(&self, f: impl FnOnce(&rusqlite::Connection) -> R) -> R;
-}
-
-impl ScopeConnection for &rusqlite::Connection {
-    fn with_scope_connection<R>(&self, f: impl FnOnce(&rusqlite::Connection) -> R) -> R {
-        f(self)
-    }
-}
-
-/// Native callback-owned scope. The context is returned to the callback so
-/// callers can mutate engine state without retaining a borrow of its connection.
-/// Scope completion is not necessarily durable publication: a parent scope can
-/// still roll back. A managed-SQL backend must own the callback's full lifetime,
-/// rather than emulate these SQL statements separately.
-pub(crate) fn in_scope<C: ScopeConnection, T>(
+pub(crate) fn in_scope<C: StorageContext, T>(
     context: &mut C,
     name: &str,
     f: impl FnOnce(&mut C) -> Result<ScopeOutcome<T>, Error>,
 ) -> Result<T, Error> {
-    context.with_scope_connection(|conn| begin_savepoint(conn, name))?;
-    let result = f(context);
-    let keep = matches!(&result, Ok(ScopeOutcome::Commit(_)));
-    context.with_scope_connection(|conn| end_savepoint(conn, name, keep))?;
-    result.map(|outcome| match outcome {
-        ScopeOutcome::Commit(value) | ScopeOutcome::Rollback(value) => value,
-    })
+    crate::storage::Storage::transaction(context, name, f)
 }
 
 /// Run `f` inside a scope: kept if it succeeds, undone if not.
 pub(crate) fn in_savepoint<T>(
-    conn: &rusqlite::Connection,
+    conn: &crate::storage::Storage,
     name: &str,
     f: impl FnOnce() -> Result<T, Error>,
 ) -> Result<T, Error> {
@@ -2299,7 +2279,7 @@ mod scope_tests {
     /// commit hook, which the public API intentionally does not expose.
     #[test]
     fn nested_error_rolls_back_without_publishing_the_parent() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = crate::storage::Storage::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE writes (id INTEGER PRIMARY KEY)")
             .unwrap();
         let commits = Arc::new(AtomicUsize::new(0));
@@ -2349,7 +2329,7 @@ mod scope_tests {
     /// rollback outcome and cache rollback generation, absent from public APIs.
     #[test]
     fn rollback_returns_a_value_and_undoes_released_children() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = crate::storage::Storage::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE writes (id INTEGER PRIMARY KEY)")
             .unwrap();
         let before = rollbacks(&conn);

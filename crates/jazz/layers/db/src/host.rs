@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use crate::storage::{OptionalExtension, Storage, params};
 
 use crate::catalogue::{CataloguePut, CatalogueRows};
 use crate::db::{Db, FileOptions, Journal};
@@ -87,13 +87,13 @@ pub trait HostTables {
     /// For host tables with columns of their own (`_jazz_host_<name>`,
     /// created by `f` itself), which plain key-value pairs would hide from
     /// SQL.
-    fn host_sql(&self, f: &mut dyn FnMut(&Connection) -> Result<(), Error>) -> Result<(), Error>;
+    fn host_sql(&self, f: &mut dyn FnMut(&Storage) -> Result<(), Error>) -> Result<(), Error>;
 }
 
 /// A store's file opened and admitted, before a [`Db`] is opened on it:
 /// [`StoreFile::open`] then [`Db::open_file`] is [`Db::open_at`].
 pub struct StoreFile {
-    pub(crate) conn: Connection,
+    pub(crate) conn: Storage,
     pub(crate) path: Option<(PathBuf, Option<&'static str>)>,
 }
 
@@ -109,8 +109,8 @@ impl StoreFile {
         }
         let flags = rusqlite::OpenFlags::default();
         let conn = match options.vfs {
-            None => Connection::open_with_flags(path, flags),
-            Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs),
+            None => Storage::open_with_flags(path, flags),
+            Some(vfs) => Storage::open_with_flags_and_vfs(path, flags, vfs),
         }
         .map_err(storage)?;
         let synchronous = match (options.journal, options.synchronous_full) {
@@ -161,7 +161,7 @@ impl StoreFile {
 
     /// A store that lives only as long as what is opened on it.
     pub fn memory() -> Result<Self, Error> {
-        let conn = Connection::open_in_memory().map_err(storage)?;
+        let conn = Storage::open_in_memory().map_err(storage)?;
         crate::format::admit(&conn)?;
         Ok(Self { conn, path: None })
     }
@@ -171,7 +171,7 @@ impl StoreFile {
     /// (or read it with a [`HostReader`]) without losing it.
     pub fn shared_memory(name: &str) -> Result<Self, Error> {
         let conn =
-            Connection::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?;
+            Storage::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?;
         crate::format::admit(&conn)?;
         Ok(Self { conn, path: None })
     }
@@ -182,7 +182,7 @@ impl StoreFile {
 /// file serves readers beside its writer). It sees every write that
 /// returned before the read began.
 pub struct HostReader {
-    conn: Mutex<Option<Connection>>,
+    conn: Mutex<Option<Storage>>,
 }
 
 impl HostReader {
@@ -192,8 +192,8 @@ impl HostReader {
             | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
             | rusqlite::OpenFlags::SQLITE_OPEN_URI;
         let conn = match vfs {
-            None => Connection::open_with_flags(path, flags),
-            Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs),
+            None => Storage::open_with_flags(path, flags),
+            Some(vfs) => Storage::open_with_flags_and_vfs(path, flags, vfs),
         }
         .map_err(storage)?;
         Self::with(conn)
@@ -201,12 +201,10 @@ impl HostReader {
 
     /// Read the store [`StoreFile::shared_memory`] opened by `name`.
     pub fn shared_memory(name: &str) -> Result<Self, Error> {
-        Self::with(
-            Connection::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?,
-        )
+        Self::with(Storage::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?)
     }
 
-    fn with(conn: Connection) -> Result<Self, Error> {
+    fn with(conn: Storage) -> Result<Self, Error> {
         // A WAL reader waits only while another connection recovers the
         // log.
         conn.busy_timeout(Duration::from_secs(5)).map_err(storage)?;
@@ -215,7 +213,7 @@ impl HostReader {
         })
     }
 
-    fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T, Error>) -> Result<T, Error> {
+    fn read<T>(&self, f: impl FnOnce(&Storage) -> Result<T, Error>) -> Result<T, Error> {
         let conn = self
             .conn
             .lock()
@@ -244,7 +242,7 @@ impl HostReader {
     /// Run `f` on the read-only connection, for host tables that
     /// [`HostTables::host_sql`] shaped. A table no write created yet is
     /// missing here: `f` must not assume it exists.
-    pub fn sql<T>(&self, f: impl FnOnce(&Connection) -> Result<T, Error>) -> Result<T, Error> {
+    pub fn sql<T>(&self, f: impl FnOnce(&Storage) -> Result<T, Error>) -> Result<T, Error> {
         self.read(f)
     }
 
@@ -304,7 +302,7 @@ impl HostTables for StoreFile {
         })
     }
 
-    fn host_sql(&self, f: &mut dyn FnMut(&Connection) -> Result<(), Error>) -> Result<(), Error> {
+    fn host_sql(&self, f: &mut dyn FnMut(&Storage) -> Result<(), Error>) -> Result<(), Error> {
         in_savepoint(&self.conn, "host_write", || f(&self.conn))
     }
 }
@@ -345,7 +343,7 @@ impl HostTables for Db {
         })
     }
 
-    fn host_sql(&self, f: &mut dyn FnMut(&Connection) -> Result<(), Error>) -> Result<(), Error> {
+    fn host_sql(&self, f: &mut dyn FnMut(&Storage) -> Result<(), Error>) -> Result<(), Error> {
         self.with_host_connection(|conn| in_savepoint(conn, "host_write", || f(conn)))
     }
 }
@@ -378,13 +376,13 @@ impl Db {
 }
 
 /// Whether `table` exists yet; reads of one that does not find nothing.
-fn exists(conn: &Connection, table: HostTable) -> Result<bool, Error> {
+fn exists(conn: &Storage, table: HostTable) -> Result<bool, Error> {
     conn.prepare_cached("SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1")
         .and_then(|mut statement| statement.query_row([table.sql_name()], |row| row.get(0)))
         .map_err(storage)
 }
 
-fn create(conn: &Connection, table: HostTable) -> Result<(), Error> {
+fn create(conn: &Storage, table: HostTable) -> Result<(), Error> {
     conn.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS {} (k BLOB PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID",
         table.sql_name()
@@ -392,7 +390,7 @@ fn create(conn: &Connection, table: HostTable) -> Result<(), Error> {
     .map_err(storage)
 }
 
-fn get(conn: &Connection, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+fn get(conn: &Storage, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
     if !exists(conn, table)? {
         return Ok(None);
     }
@@ -401,7 +399,7 @@ fn get(conn: &Connection, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>
         .map_err(storage)
 }
 
-fn prefix_scan(conn: &Connection, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error> {
+fn prefix_scan(conn: &Storage, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error> {
     if !exists(conn, table)? {
         return Ok(Vec::new());
     }
@@ -425,7 +423,7 @@ fn prefix_scan(conn: &Connection, table: HostTable, prefix: &[u8]) -> Result<Vec
     Ok(out)
 }
 
-fn put_many(conn: &Connection, table: HostTable, pairs: &[HostPair]) -> Result<(), Error> {
+fn put_many(conn: &Storage, table: HostTable, pairs: &[HostPair]) -> Result<(), Error> {
     if pairs.is_empty() {
         return Ok(());
     }
@@ -445,7 +443,7 @@ fn put_many(conn: &Connection, table: HostTable, pairs: &[HostPair]) -> Result<(
 }
 
 fn put_if_absent(
-    conn: &Connection,
+    conn: &Storage,
     table: HostTable,
     key: &[u8],
     value: &[u8],
@@ -468,7 +466,7 @@ fn put_if_absent(
     })
 }
 
-fn delete(conn: &Connection, table: HostTable, key: &[u8]) -> Result<(), Error> {
+fn delete(conn: &Storage, table: HostTable, key: &[u8]) -> Result<(), Error> {
     if !exists(conn, table)? {
         return Ok(());
     }
