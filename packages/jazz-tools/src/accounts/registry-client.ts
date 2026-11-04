@@ -70,6 +70,20 @@ export async function requestBackendSignIn(
 }
 
 /**
+ * Ask the app's backend (`createJazz`) who is signed in, without signing them
+ * in: the user its `authenticate` names, and their account if the core holds
+ * one yet (`null` before their first sign-in). Unlike
+ * {@link requestBackendSignIn} it never creates an account, so a local-first
+ * guest can still link to a user who has none.
+ */
+export async function requestBackendUser(
+  registry: string,
+  fetcher: typeof fetch = fetchFor(registry),
+): Promise<unknown> {
+  return backendRequest(registry, "backend-user", fetcher);
+}
+
+/**
  * A challenge from the app's backend for a local-first guest to sign before
  * it links to the user the backend names. It names that user, expires
  * quickly and links once.
