@@ -1762,7 +1762,7 @@ impl Catalogue {
         let compile = |schema: &jazz::tools::public_schema::Schema| {
             JazzSchema::new(schema).map_err(|error| format!("catalogue schema: {error}"))
         };
-        let mut catalogue = Self { ..Self::default() };
+        let mut catalogue = Self::default();
         for schema in &rows.schemas {
             if let Some(version) = schema.version {
                 catalogue.schemas.insert(version, compile(&schema.schema)?);
