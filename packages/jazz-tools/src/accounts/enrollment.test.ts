@@ -181,7 +181,7 @@ it("keeps backend authority opaque, scoped, and revocable", async () => {
     localFirst: { create: () => ({ accountId: id, identity, auth: token() }) },
     backend: { admitBackend: async () => ({ nodeId: id }) },
   });
-  const backend = await manager.becomeBackend({ backendSecret: "private-backend-credential" });
+  const backend = await manager.admitBackend({ backendSecret: "private-backend-credential" });
   expect(backend.id).toBe("00000000-0000-0000-0000-000000000000");
   expect(backend.identity).toEqual({ issuer: "urn:jazz:system", subject: id });
   expect(JSON.stringify(manager.getSnapshot())).not.toContain("private-backend-credential");
@@ -204,7 +204,7 @@ it("keeps backend authority opaque, scoped, and revocable", async () => {
 });
 
 it("rejects unsupported backend hosts and fences late backend admission on logout", async () => {
-  await expect(setup().becomeBackend({ backendSecret: "secret" })).rejects.toThrow(
+  await expect(setup().admitBackend({ backendSecret: "secret" })).rejects.toThrow(
     /backend_host_unavailable/,
   );
   let finish!: (value: { nodeId: string }) => void;
@@ -218,7 +218,7 @@ it("rejects unsupported backend hosts and fences late backend admission on logou
         }),
     },
   });
-  const pending = manager.becomeBackend({ backendSecret: "secret" });
+  const pending = manager.admitBackend({ backendSecret: "secret" });
   manager.logout();
   finish({ nodeId: id });
   await expect(pending).rejects.toThrow(/account_logged_out/);

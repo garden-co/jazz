@@ -226,7 +226,11 @@ function memoryAccountStore(): AccountStore {
 export async function createJazzSession(
   input: JazzSessionConfig,
 ): Promise<JazzSession<JazzClient>> {
-  if (typeof input.initial === "object" && input.initial !== null) {
+  if (
+    (typeof input.initial === "object" && input.initial !== null) ||
+    Object.hasOwn(input, "backendSecret") ||
+    Object.hasOwn(input, "adminSecret")
+  ) {
     throw new Error(
       "createJazzSession: connecting to a Jazz core with a backend secret is not supported. " +
         "Run Jazz in your backend with createJazz (it holds the core's secrets), or connect " +
@@ -252,9 +256,7 @@ export async function openJazzSession(
 ): Promise<JazzSession<JazzClient>> {
   if (Object.hasOwn(input, "webSocket")) throw new Error("Use credential instead of webSocket");
   if (input.credential !== undefined && input.initial !== undefined) {
-    throw new Error(
-      "createJazzSession: a backend client's credential decides how it opens; leave out initial",
-    );
+    throw new Error("A backend client's credential decides how it opens; leave out initial");
   }
   const transport =
     input.credential === undefined

@@ -22,7 +22,6 @@ type WipeableClient = {
 export type JazzSessionOperation =
   | "createLocalFirst"
   | "restoreLocalFirst"
-  | "becomeBackend"
   | "loginWithBackend"
   | "linkWithBackend"
   | "logout"
@@ -39,7 +38,6 @@ export interface JazzSessionSnapshot<Client> {
 export interface JazzSessionActions {
   createLocalFirst(): Promise<void>;
   restoreLocalFirst(secret: string): Promise<void>;
-  becomeBackend(auth: BackendAuth): Promise<void>;
   /**
    * Sign in as whoever the app's own backend says is signed in. For apps that
    * mount Jazz with `createJazz`: the backend's `authenticate` decides, from
@@ -115,7 +113,7 @@ export async function createJazzSessionOwner<
   let selected = accounts.getLoggedIn();
   if (!selected && options.initial === "local-first")
     selected = await ensureAutomaticLocalFirst(accounts);
-  if (typeof options.initial === "object") selected = await accounts.becomeBackend(options.initial);
+  if (typeof options.initial === "object") selected = await accounts.admitBackend(options.initial);
   await accounts.settleSelection();
   let client = selected ? await openClient(selected) : undefined;
   let snapshot: JazzSessionSnapshot<Client> = Object.freeze({
@@ -260,7 +258,6 @@ export async function createJazzSessionOwner<
     createLocalFirst: () => run("createLocalFirst", () => accounts.createLocalFirst()),
     restoreLocalFirst: (secret) =>
       run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret)),
-    becomeBackend: (auth) => run("becomeBackend", () => accounts.becomeBackend(auth)),
     loginWithBackend: () => run("loginWithBackend", () => accounts.loginWithBackend()),
     linkWithBackend: () => run("linkWithBackend", () => accounts.linkWithBackend()),
     retry: () => run("retry", () => selected),
