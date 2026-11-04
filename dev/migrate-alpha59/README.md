@@ -24,8 +24,11 @@ admin catalogue entry decoded to JSON, the account journal, what alpha.59
 answers for each principal's login, what alpha.59 reads as each row's
 current state (its settled content and deletion winners), then every stored
 row version in commit order with its authors and timestamps. It ends with a
-BLAKE3 digest, which the import checks before it builds anything. A failed
-import removes the dir it was building.
+BLAKE3 digest, which the import checks before it builds anything. The
+import also refuses to finish when its replay leaves any row in another
+state than alpha.59 reads for it; `verify` then checks the result through
+the new server's own read paths. A failed import removes what it built
+(a dir that existed beforehand is kept, emptied).
 
 Import:
 
@@ -40,8 +43,8 @@ Import:
   `{ userId: sub }` opens a returning user's old account, each admitted
   external identity `(iss, sub)` gets `(jazz:app:<appId>, sub)` linked to the
   same account, through the registry's own link commands. `<appId>` is
-  `--app-id` exactly as given, which must be the app id the app passes to
-  `remote()`. Built-in issuers (`urn:jazz:*`) are left alone, and revoked
+  `--app-id` exactly as given, which must match the app id the app passes
+  to `remote()` character for character, case included. Built-in issuers (`urn:jazz:*`) are left alone, and revoked
   identities get no link. The registry grants every linked identity the
   right to manage the account's identities, so the import refuses an
   identity that lacks it (alpha.59 never creates one). It also refuses,

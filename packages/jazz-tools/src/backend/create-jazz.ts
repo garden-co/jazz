@@ -1092,6 +1092,39 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   }
 
   /**
+   * Who `request`'s user is, without changing anything: the user
+   * `authenticate` names, and whether the core already holds an account for
+   * them. A browser's session asks this to follow the backend; only a sign-in
+   * (`backend-sign-in`) or a link (`backend-link`) assigns an account, so a
+   * local-first guest whose user has none yet can still link to them.
+   */
+  async function backendUser(request: Request): Promise<Response> {
+    if (request.method !== "POST") return new Response(null, { status: 405 });
+    const user = await authenticate(request);
+    if (!user) return new Response("signed_out", { status: 401 });
+    let account: string | null;
+    const cached = accounts.get(user.userId);
+    if (cached && cached.until > Date.now()) {
+      account = cached.account;
+    } else {
+      try {
+        ({ account } = await adminAccounts("resolve", { identity: identity(user.userId) }));
+      } catch (error) {
+        const status = (error as { status?: number }).status;
+        // The core refuses this identity (it was revoked): say so, as the
+        // core does, rather than fail as a server error.
+        if (status === 403) return new Response("identity_not_authorized", { status: 403 });
+        if (status !== 404) throw error;
+        account = null;
+      }
+    }
+    return Response.json(
+      { account, identity: identity(user.userId), claims: user.claims ?? {} },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
+  /**
    * Link challenges: a guest links only on a proof made for one challenge,
    * never on its sync token, so a leaked token can't link it to someone
    * else. A challenge names the user it links to and expires quickly; it is
@@ -1202,17 +1235,29 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         } catch (error) {
           // Linking is idempotent for this guest and this user: when the user
           // already belongs to the guest's account (an earlier link went
-          // through, then perhaps its revoke failed), this link is done. A
+          // through, then perhaps its revoke failed, or another tab's link
+          // won the race and revoked the key since), this link is done. A
           // used challenge (the core refuses its nonce first) and a user of
           // another account are still refused.
-          if ((error as { status?: number }).status !== 409 || !(await userIs(account)))
-            throw error;
+          const status = (error as { status?: number }).status;
+          if ((status !== 409 && status !== 403) || !(await userIs(account))) throw error;
+          // Refused for a retired key: the link that won already retired it.
+          if (status === 403) guestRevoked = true;
         }
       }
-    } catch {
-      // The core's reason (e.g. the identity already belongs to another
-      // account, or the challenge was used) stays on the backend.
-      return new Response("link_refused", { status: 409 });
+    } catch (error) {
+      const status = (error as { status?: number }).status;
+      // Only the core's own refusals refuse the link for good: an invalid
+      // link intent (400), a retired or foreign identity (403), a user with
+      // no account to check (404), an identity of another account (409).
+      // Its reason stays on the backend.
+      if (status === 400 || status === 403 || status === 404 || status === 409)
+        return new Response("link_refused", { status: 409 });
+      // Anything else (the core down or failing, its credential check
+      // refusing this backend mid-rotation, a proxy's 408 or 429) may pass on
+      // a retry, so say so rather than strand the guest.
+      console.error("Jazz: linking a guest failed on the core", error);
+      return new Response("account_registry_unavailable", { status: 503 });
     }
     if (options.guestKeyAfterLink === "revoke" && !guestRevoked) {
       // The link already stands. If the revoke fails, the guest key stays
@@ -1824,6 +1869,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     }
     if (/^\/apps\/[^/]+\/accounts\/backend-sign-in$/.test(path)) {
       return backendSignIn(request);
+    }
+    if (/^\/apps\/[^/]+\/accounts\/backend-user$/.test(path)) {
+      return backendUser(request);
     }
     if (/^\/apps\/[^/]+\/backend\/admit$/.test(path)) {
       return admitBackendClient(request);

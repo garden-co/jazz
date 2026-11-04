@@ -60,14 +60,16 @@ pub fn identities(
 ) -> Result<Vec<Identity>, String> {
     let mut registry = AccountRegistry::default();
     for account in accounts {
-        let command: AccountCommand = serde_json::from_str(&account.command_json).map_err(err)?;
+        let command: AccountCommand = serde_json::from_str(&account.command_json)
+            .map_err(|_| format!("account command {} does not decode", account.revision))?;
         registry
             .apply(&command)
             .map_err(|error| format!("account command {}: {error}", account.revision))?;
     }
     let mut out = Vec::new();
     for principal_json in principals {
-        let principal: Principal = serde_json::from_str(principal_json).map_err(err)?;
+        let principal: Principal = serde_json::from_str(principal_json)
+            .map_err(|_| "a principal in the dump does not decode".to_owned())?;
         let Some(assignment) = registry.assignment(&principal).map_err(err)? else {
             continue;
         };

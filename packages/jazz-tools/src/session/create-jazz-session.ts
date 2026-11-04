@@ -35,6 +35,18 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account"> &
      */
     initial?: "local-first" | "signed-out";
     /**
+     * When a local-first guest is on this device and the user who signs in
+     * has no Jazz account yet (they just signed up, or they are an existing
+     * user signing in to Jazz for the first time), link the guest to them:
+     * the account and everything the guest wrote become theirs. On by
+     * default. Turn it off on shared devices, where the guest may be someone
+     * else's: the session then leaves such a guest as it is, and your app
+     * decides after its own sign-in, with `linkWithBackend()` (the guest's
+     * data becomes the user's) or `loginWithBackend()` (an account of the
+     * user's own; the guest stays on this device).
+     */
+    linkGuestOnSignUp?: boolean;
+    /**
      * On sign-out (or a switch to another user), wipe the account's local
      * storage instead of keeping it for that user's next sign-in. For shared
      * devices. Jazz first waits up to 5 seconds for pending writes to upload;
@@ -62,6 +74,7 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
   const {
     initial,
     clearOnSignOut,
+    linkGuestOnSignUp,
     client: loadLocalFirst,
     store: _store,
     ...clientConfig
@@ -138,6 +151,7 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
     decorate: followUser({
       registry,
       events: browserBackendWatchEvents(`jazz-account:${registry}`),
+      linkGuest: linkGuestOnSignUp,
     }),
   });
   if (loadLocalFirst) upgradeInBackground(session, loadLocalFirst);

@@ -124,12 +124,16 @@ struct Head {
     accounts: Vec<dump::Account>,
     /// Every principal the account journal names.
     principals: Vec<String>,
+    /// What alpha.59 reads as each row's current state.
+    currents: HashMap<[u8; 16], dump::Current>,
 }
 
 /// Import into a new, empty data dir; a failed import removes what it built,
-/// so a half-built dir is never left to boot.
+/// so a half-built dir is never left to boot. A dir that existed beforehand
+/// (a mount point, say) is kept, emptied.
 async fn import(args: &Args) -> Result<Json, String> {
-    if args.data_dir.exists()
+    let existed = args.data_dir.exists();
+    if existed
         && std::fs::read_dir(&args.data_dir)
             .map_err(err)?
             .next()
@@ -140,7 +144,7 @@ async fn import(args: &Args) -> Result<Json, String> {
     check_dump(args)?;
     let result = run(args).await;
     if result.is_err() && args.data_dir.exists() {
-        if let Err(error) = std::fs::remove_dir_all(&args.data_dir) {
+        if let Err(error) = remove_built(&args.data_dir, existed) {
             eprintln!(
                 "sqlite-import: could not remove the half-built {}: {error}",
                 args.data_dir.display()
@@ -148,6 +152,21 @@ async fn import(args: &Args) -> Result<Json, String> {
         }
     }
     result
+}
+
+fn remove_built(dir: &std::path::Path, keep_dir: bool) -> std::io::Result<()> {
+    if !keep_dir {
+        return std::fs::remove_dir_all(dir);
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Read the whole dump once, so its digest and counts are checked before
@@ -164,7 +183,7 @@ async fn run(args: &Args) -> Result<Json, String> {
     let (mut reader, header) = dump::Reader::open(std::io::BufReader::new(file)).map_err(err)?;
     if header.format != dump::DUMP_FORMAT {
         return Err(format!(
-            "dump format {} is not {}",
+            "dump format {} is not {}: re-export the store with this tool's a59-export",
             header.format,
             dump::DUMP_FORMAT
         ));
@@ -183,7 +202,9 @@ async fn run(args: &Args) -> Result<Json, String> {
                 head.principals.push(principal_json)
             }
             // For verify.
-            dump::Record::Current(_) => {}
+            dump::Record::Current(current) => {
+                head.currents.insert(current.row, current);
+            }
             dump::Record::Version(version) => {
                 first_version = Some(version);
                 break;
@@ -243,6 +264,7 @@ async fn run(args: &Args) -> Result<Json, String> {
             }
         }
         rows.write(&runtime, &views, batch).await?;
+        rows.check_against(&head.currents)?;
         runtime
             .migrate_import_with_db(|db| {
                 for _ in 0..4 {
@@ -424,6 +446,10 @@ struct RowImport {
     to_head: Option<active::ToHead>,
     drop_transaction_metadata: bool,
     seen: HashSet<[u8; 16]>,
+    /// Per row, the last content and the last deletion transaction written.
+    last: HashMap<[u8; 16], (Option<dump::TxRef>, Option<dump::TxRef>)>,
+    /// Rows whose table the active schema dropped.
+    gone: HashSet<[u8; 16]>,
     /// Rows the replay has deleted so far.
     deleted: HashSet<[u8; 16]>,
     written: u64,
@@ -433,6 +459,36 @@ struct RowImport {
 }
 
 impl RowImport {
+    /// The replay leaves each row with the content and deletion that
+    /// alpha.59 itself reads as current; refuse the import otherwise.
+    fn check_against(&self, currents: &HashMap<[u8; 16], dump::Current>) -> Result<(), String> {
+        let mut differing = 0;
+        let mut first = None;
+        for (row, current) in currents {
+            if self.gone.contains(row) {
+                continue;
+            }
+            let written = self.last.get(row).cloned().unwrap_or_default();
+            if written != (current.content, current.deletion) {
+                differing += 1;
+                first.get_or_insert(*row);
+            }
+        }
+        for row in self.last.keys() {
+            if !currents.contains_key(row) {
+                differing += 1;
+                first.get_or_insert(*row);
+            }
+        }
+        match first {
+            None => Ok(()),
+            Some(row) => Err(format!(
+                "{differing} rows end in another state than alpha.59 reads for them (first: row {})",
+                uuid_string(row)
+            )),
+        }
+    }
+
     async fn write(
         &mut self,
         runtime: &jazz_server::runtime::ServerRuntimeHandle,
@@ -472,13 +528,25 @@ impl RowImport {
                 ));
             }
             let to_head = self.to_head.as_ref().ok_or("rows before the catalogue")?;
+            let row = version.row;
             let version = match to_head.translate(version)? {
                 active::Translated::Kept(version) => version,
                 active::Translated::TableGone => {
                     self.table_gone += 1;
+                    self.gone.insert(row);
                     continue;
                 }
             };
+            let tx = dump::TxRef {
+                node: version.tx_node,
+                time: version.tx_time,
+            };
+            let last = self.last.entry(version.row).or_default();
+            if version.deletion.is_none() {
+                last.0 = Some(tx);
+            } else {
+                last.1 = Some(tx);
+            }
             // alpha.59 keeps content and deletion apart: content written
             // while a row is deleted stays under the deletion. The SQLite
             // engine keeps a deleted row's content fixed until a restore.

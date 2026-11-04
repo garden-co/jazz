@@ -1,7 +1,7 @@
-import { AccountAuthError, requestBackendSignIn } from "../accounts/registry-client.js";
+import { AccountAuthError, requestBackendUser } from "../accounts/registry-client.js";
 import type { AccountIdentity } from "../accounts/state.js";
 import type { SyncStatus } from "../runtime/sync-status.js";
-import { watchBackendUser, type BackendWatchEvents } from "./backend-watch.js";
+import { watchBackendUser, type BackendUser, type BackendWatchEvents } from "./backend-watch.js";
 import type { JazzSession } from "./state.js";
 
 /**
@@ -40,6 +40,8 @@ export function followUser(options: {
   registry: string;
   events: BackendWatchEvents;
   fetch?: typeof fetch;
+  /** See `linkGuestOnSignUp` on `createJazzClient`. Default true. */
+  linkGuest?: boolean;
 }) {
   return <Client>(session: JazzSession<Client>) => decorate(session, options);
 }
@@ -50,13 +52,15 @@ function decorate<Client>(
     registry: string;
     events: BackendWatchEvents;
     fetch?: typeof fetch;
+    linkGuest?: boolean;
   },
-): Pick<UserFollowingSession<Client>, "reauthenticate" | "close"> {
+): Pick<UserFollowingSession<Client>, "reauthenticate" | "linkWithBackend" | "close"> {
   const watch = watchBackendUser(
     session,
     () => signedInIdentity(options.registry, options.fetch),
     options.events,
     {
+      linkGuest: options.linkGuest,
       reconnect: () =>
         void (session.getSnapshot().client as ObservedClient | undefined)?.db
           ?.reconnect?.()
@@ -80,8 +84,18 @@ function decorate<Client>(
   const unsubscribe = session.subscribe(followClient);
   followClient();
   const close = session.close;
+  const link = session.linkWithBackend;
   return {
     reauthenticate: () => watch.reauthenticate(),
+    // The watch links a guest to a user who just signed up as soon as it
+    // sees them (see `watchBackendUser`). An app that also calls this after
+    // its sign-up joins that link instead of failing on it.
+    async linkWithBackend() {
+      const joined = watch.linking;
+      if (joined && joined.result === undefined) return joined.done;
+      if (joined && session.getSnapshot().account === joined.result) return;
+      return link();
+    },
     close() {
       watch.stop();
       unsubscribe();
@@ -94,12 +108,14 @@ function decorate<Client>(
 async function signedInIdentity(
   registry: string,
   fetcher?: typeof fetch,
-): Promise<AccountIdentity | null> {
+): Promise<BackendUser | null> {
   try {
-    const answer = (await requestBackendSignIn(registry, fetcher)) as {
+    const answer = (await requestBackendUser(registry, fetcher)) as {
       identity?: AccountIdentity;
+      account?: string | null;
     };
-    return answer.identity ?? null;
+    if (!answer.identity) return null;
+    return { ...answer.identity, hasAccount: answer.account != null };
   } catch (cause) {
     if (cause instanceof AccountAuthError && cause.status === 401) return null;
     throw cause;
