@@ -53,12 +53,23 @@ fn schema() -> JazzSchema {
                 TableSchemaBuilder::new("notes")
                     .fk_column("room", "rooms")
                     .column("body", ColumnType::Text)
+                    .array_fk_column("stickers", "stickers")
                     .policies(allow_all_policies()),
             )
             .table(
                 TableSchemaBuilder::new("reactions")
                     .fk_column("note", "notes")
                     .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("stickers")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("likes")
+                    .fk_column("sticker", "stickers")
                     .policies(allow_all_policies()),
             )
             .build(),
@@ -1266,6 +1277,7 @@ fn an_included_row_one_subscription_lost_stays_for_the_other(lost_first: bool) {
             cells(&[
                 ("room", Value::Uuid(id(1, 0).0)),
                 ("body", Value::String("n0".into())),
+                ("stickers", Value::Array(Vec::new())),
             ]),
         )
         .unwrap();
@@ -1392,6 +1404,7 @@ fn a_pending_write_does_not_move_what_another_read_holds(member_of_first: bool) 
             cells(&[
                 ("room", Value::Uuid(id(1, 0).0)),
                 ("body", Value::String("n0".into())),
+                ("stickers", Value::Array(Vec::new())),
             ]),
         )
         .unwrap();
@@ -1484,6 +1497,7 @@ fn a_pending_write_does_not_move_support_below_the_first_hop(joined_first: bool)
         cells(&[
             ("room", Value::Uuid(id(1, 0).0)),
             ("body", Value::String("n0".into())),
+            ("stickers", Value::Array(Vec::new())),
         ]),
     );
     seed(
@@ -1570,4 +1584,117 @@ fn a_pending_write_does_not_move_support_below_the_first_hop_joined_first() {
 #[test]
 fn a_pending_write_does_not_move_support_below_the_first_hop_room_first() {
     a_pending_write_does_not_move_support_below_the_first_hop(false);
+}
+
+/// The stickers `db` holds, read locally.
+fn local_stickers(db: &Db) -> Vec<RowUuid> {
+    let prepared = db.prepare_query(&Query::from("stickers")).unwrap();
+    let opts = ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let mut rows: Vec<RowUuid> = block_on(db.all(&prepared, opts))
+        .unwrap()
+        .iter()
+        .map(|row| row.row_uuid())
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// A support hop below the first follows the value the server settled: a
+/// pending write that empties a note's stickers does not stop room 0's
+/// read from holding the sticker the settled note names, when the read
+/// that held it too loses it.
+fn a_pending_write_does_not_drop_a_sticker_the_settled_note_names(liked_first: bool) {
+    use jazz::query::{ArraySubquery, col, eq, lit};
+    let server = seeded(1);
+    let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
+        server
+            .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
+            .unwrap();
+    };
+    seed(
+        "stickers",
+        id(6, 0),
+        cells(&[("body", Value::String("s0".into()))]),
+    );
+    seed(
+        "notes",
+        id(4, 0),
+        cells(&[
+            ("room", Value::Uuid(id(1, 0).0)),
+            ("body", Value::String("n0".into())),
+            ("stickers", Value::Array(vec![Value::Uuid(id(6, 0).0)])),
+        ]),
+    );
+    seed(
+        "likes",
+        id(7, 0),
+        cells(&[("sticker", Value::Uuid(id(6, 0).0))]),
+    );
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    // Liked stickers, and room 0 with its notes' stickers.
+    let liked = client
+        .prepare_query(&Query::from("stickers").join_via("likes", "sticker", []))
+        .unwrap();
+    let mut notes = ArraySubquery::new("notes", "notes", "room", "id");
+    notes
+        .nested_arrays
+        .push(ArraySubquery::new("stickers", "stickers", "id", "stickers"));
+    let room = client
+        .prepare_query(
+            &Query::from("rooms")
+                .filter(eq(col("name"), lit(Value::String("room 0".into()))))
+                .array_subquery(notes),
+        )
+        .unwrap();
+    let (first, second) = if liked_first {
+        (&liked, &room)
+    } else {
+        (&room, &liked)
+    };
+    let _first = block_on(client.subscribe(first, ReadOpts::default())).unwrap();
+    let _second = block_on(client.subscribe(second, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(local_stickers(&client), [id(6, 0)]);
+
+    // Away, the note's stickers are emptied locally, and the server
+    // deletes the like: the liked read loses sticker 0.
+    assert!(client.detach_connection(&upstream));
+    block_on(client.update(
+        "notes",
+        id(4, 0),
+        cells(&[("stickers", Value::Array(Vec::new()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(server.delete("likes", id(7, 0), Default::default())).unwrap();
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(Box::new(HoldCommits(client_side))));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        client.pending_upload_count(),
+        1,
+        "the edit is still pending"
+    );
+    assert_eq!(
+        local_stickers(&client),
+        [id(6, 0)],
+        "sticker 0 is the settled note's, which the room's read holds"
+    );
+}
+
+#[test]
+fn a_pending_write_does_not_drop_a_sticker_the_settled_note_names_liked_first() {
+    a_pending_write_does_not_drop_a_sticker_the_settled_note_names(true);
+}
+
+#[test]
+fn a_pending_write_does_not_drop_a_sticker_the_settled_note_names_room_first() {
+    a_pending_write_does_not_drop_a_sticker_the_settled_note_names(false);
 }

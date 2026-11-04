@@ -3584,7 +3584,13 @@ impl Inner {
             } else {
                 format!("{} = ?1", quote(reach.member))
             };
-            for found in self.images_where(reach.edges, false, &filter, &[&value])? {
+            let found = match follow.settled {
+                Some(through) => {
+                    self.settled_where(reach.edges, &filter, reach.member, &value, false, through)?
+                }
+                None => self.images_where(reach.edges, false, &filter, &[&value])?,
+            };
+            for found in found {
                 let row = RowUuid::from_bytes(found.id);
                 let can = readable(
                     self,
@@ -4298,10 +4304,17 @@ impl Inner {
         contains: bool,
         through: u64,
     ) -> Result<Vec<Image>, Error> {
+        // History only holds a settled match at or below `through`.
+        let settled_clock = Pos::at(through.min(MAX_SEQ)).t();
         let mut ids: Vec<RowUuid> = self
             .images_where(table, false, filter, &[value])?
             .into_iter()
-            .chain(self.images_where(table, true, filter, &[value])?)
+            .chain(self.images_where(
+                table,
+                true,
+                &format!("({filter}) AND _clock <= ?2"),
+                &[value, &settled_clock],
+            )?)
             .map(|image| RowUuid::from_bytes(image.id))
             .collect();
         ids.sort();
@@ -7058,11 +7071,10 @@ impl Db {
                 if history_source_table(&other.table).is_some() || other.flat_join.is_some() {
                     continue;
                 }
-                // The read's own includes and relations, which its listing
-                // view drops.
                 // A union's rows carry their arm, and its listing names
                 // rows by id alone: no listing judges them (see
-                // `evict_unanswered`), so it is not consulted here either.
+                // `evict_unanswered`), and its plan is not followed for
+                // support, so it holds nothing here.
                 if crate::db::union_plan(&other, &inner.schema)?.is_some() {
                     continue;
                 }
@@ -7089,7 +7101,7 @@ impl Db {
                 }
                 rows => rows?
                     .into_iter()
-                    .filter(|row| row.union_arm.is_none() && listed.contains(row.id.0.as_bytes()))
+                    .filter(|row| listed.contains(row.id.0.as_bytes()))
                     .map(|row| row.id)
                     .collect(),
             };
