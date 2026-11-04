@@ -9169,6 +9169,25 @@ impl Inner {
         self.governed_by(version, self.owner.clone())
     }
 
+    /// Admitted `version` governed again by `policies`, a schema that
+    /// governed it before a reset: a published bundle's policies are kept,
+    /// any other schema's give way to the current one's.
+    pub(crate) fn regoverned(
+        &self,
+        version: crate::ids::SchemaVersionId,
+        policies: &Rc<Schema>,
+    ) -> Option<Rc<Schema>> {
+        let bundled = self
+            .bundles
+            .values()
+            .any(|(_, governing)| Rc::ptr_eq(governing, policies));
+        if bundled {
+            self.governed_by(version, policies.clone())
+        } else {
+            self.governed(version)
+        }
+    }
+
     /// Admitted `version` under its stored names, governed by `policies`'
     /// policies.
     pub(crate) fn governed_by(
@@ -9503,13 +9522,13 @@ impl Db {
                 },
             ));
         }
-        // Once createJazz publishes bundles here, its backend pins every
-        // session it opens. An unpinned policy session would be governed by
-        // the current permissions, which createJazz no longer advances, so
-        // a later tightening or rollback would never reach it.
+        // A core's backend (createJazz) pins every session it opens. An
+        // unpinned policy session would be governed by this store's own
+        // permissions, which nothing deploys, so a tightening or rollback
+        // would never reach it.
         if bundle.is_none()
             && identity != AuthorSubject::SYSTEM
-            && crate::catalogue::serves_bundles(&inner.conn)?
+            && (inner.pins_required || crate::catalogue::serves_bundles(&inner.conn)?)
         {
             return Err(Error::new(
                 ErrorCode::Protocol,

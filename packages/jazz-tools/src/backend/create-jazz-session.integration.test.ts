@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
 import { resolveSchemaSource } from "../schema-source.js";
+import { publishTestBundle } from "../testing/publish-test-bundle.js";
 import type { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { createJazzSession } from "./index.js";
 
@@ -36,13 +37,20 @@ describe("Node shared backend session", () => {
       jwtIssuer: issuer.issuer,
       jwtAudience: issuer.audience,
     };
+    // Published as createJazz publishes it; the backend link is pinned to it.
     const server = await startLocalJazzServer({ appId });
+    const bundle = await publishTestBundle(
+      { appId, serverUrl: server.url, adminSecret: server.adminSecret },
+      app,
+      permissions,
+    );
     const owner = await createJazzSession({
       appId,
       serverUrl: server.url,
       app,
       permissions,
       ...auth,
+      bundle,
       driver: { type: "memory" },
       initial: { backendSecret: server.backendSecret },
     });
@@ -191,11 +199,17 @@ describe("Node shared backend session", () => {
     const appId = randomUUID();
     const backendSecret = "pending-service-secret";
     const server = await startLocalJazzServer({ appId, backendSecret });
+    const bundle = await publishTestBundle(
+      { appId, serverUrl: server.url, adminSecret: server.adminSecret },
+      app,
+      permissions,
+    );
     const owner = await createJazzSession({
       appId,
       serverUrl: server.url,
       app,
       permissions,
+      bundle,
       driver: { type: "memory" },
       initial: { backendSecret },
     });
@@ -248,11 +262,17 @@ describe("Node shared backend session", () => {
     const backendSecret = "session-service-secret";
     const adminSecret = "session-publication-secret";
     const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
+    const bundle = await publishTestBundle(
+      { appId, serverUrl: server.url, adminSecret },
+      app,
+      permissions,
+    );
     const session = await createJazzSession({
       appId,
       serverUrl: server.url,
       app,
       permissions,
+      bundle,
       driver: { type: "memory" },
     });
     try {

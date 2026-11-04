@@ -31,17 +31,18 @@ fn allow_all() -> TablePolicies {
         .with_delete(PolicyExpr::True)
 }
 
+fn public_schema() -> jazz::tools::public_schema::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("messages")
+                .column("body", ColumnType::Text)
+                .policies(allow_all()),
+        )
+        .build()
+}
+
 fn schema() -> JazzSchema {
-    JazzSchema::new(
-        &SchemaBuilder::new()
-            .table(
-                TableSchemaBuilder::new("messages")
-                    .column("body", ColumnType::Text)
-                    .policies(allow_all()),
-            )
-            .build(),
-    )
-    .unwrap()
+    JazzSchema::new(&public_schema()).unwrap()
 }
 
 fn user(n: u8) -> AuthorSubject {

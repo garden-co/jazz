@@ -153,6 +153,11 @@ pub(crate) struct StoredCatalogue {
 }
 
 impl StoredCatalogue {
+    /// The permissions bundle published last, if any.
+    pub(crate) fn latest_bundle(&self) -> Option<jazz::catalogue::BundleId> {
+        self.index.lock().ok()?.latest_bundle
+    }
+
     pub(crate) fn new(
         app_id: AppId,
         initial_schema: Option<Schema>,
@@ -300,6 +305,8 @@ struct CatalogueIndex {
     revisions: Vec<ActiveSchema>,
     /// Every published permissions bundle (see [`jazz::catalogue`]).
     bundles: HashSet<jazz::catalogue::BundleId>,
+    /// The bundle published last: what a backend booting now pins to.
+    latest_bundle: Option<jazz::catalogue::BundleId>,
 }
 
 impl CatalogueIndex {
@@ -352,6 +359,11 @@ impl CatalogueIndex {
             parent = Some(bundle_object_id);
         }
         index.bundles = rows.bundles.iter().map(|bundle| bundle.id).collect();
+        index.latest_bundle = rows
+            .bundles
+            .iter()
+            .max_by_key(|bundle| bundle.published_at)
+            .map(|bundle| bundle.id);
         if let Some(schema) = initial_schema {
             index.add_schema(schema.clone());
         }

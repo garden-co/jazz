@@ -282,11 +282,13 @@ If the note is forbidden, none of the otherwise permitted siblings is admitted.
 
 ### 9.7 Server readiness
 
-A dynamically catalogued Core must have a published permissions head selecting
-its write schema and policies before accepting uploads (`INV-EDGE-19`). Missing
-permissions must produce the existing actionable permissions-head error rather
-than silently accepting a write. Schema and permission publication, account
-registry operations, and query authorization all terminate at Core.
+A Core serves a user's session only pinned to a published bundle, which
+selects its write schema and policies (`INV-EDGE-19`): the app's backend
+(`createJazz`) publishes its bundle and pins every session it opens to it.
+An unpinned user session is refused with an actionable error rather than
+checked by permissions no deployment chose. Schema and bundle
+publication, account registry operations, and query authorization all
+terminate at Core.
 
 The historical `INV-EDGE` identifiers retained above describe client-relay and
 session boundaries; their names do not imply a remaining semantic edge role.
