@@ -72,6 +72,20 @@ account.
 
 ### Self-hosted alpha.59 servers
 
-Moving a self-hosted alpha.59 data directory is not supported yet. If you run your own alpha.59
-server, get in touch on [Discord](https://discord.gg/jazz) before upgrading, and keep it on
-alpha.59 until then.
+Move a self-hosted data directory with the same import tool Jazz Cloud uses. It runs in three steps,
+and none of them touch the original directory:
+
+1. **Export** reads a copy of your alpha.59 data directory with alpha.59's own code and writes a
+   dump.
+2. **Import** builds a new alpha.60 data directory from the dump. It needs your app's ID, which it uses
+   to link returning users' identities to their accounts.
+3. **Verify** checks the new directory against what alpha.59 read: every row, every sign-in and
+   every identity link.
+
+Stop the alpha.59 server, run all three, then point your new backend's `sqlite({ path })` at the new
+directory. Keep the old directory until you've checked the new one. The dump holds all your data,
+so keep it where your data lives and delete it afterwards.
+
+A few things alpha.59 could store are not supported yet, and the import stops with an error naming
+them rather than leaving them out: branched rows, schemas published but never activated, and writes
+the server hadn't settled yet.
