@@ -182,24 +182,6 @@ pub(crate) async fn deploy(
         .catalogue_store
         .stage_deployment(&prepared)
         .map_err(DeployError::invalid)?;
-    // A revoked bundle stays published (its id is its content), so
-    // publishing it again is otherwise a no-op that boots a backend whose
-    // every session is refused.
-    if state
-        .catalogue_store
-        .published_bundles()
-        .iter()
-        .any(|known| known.id.to_hex() == staged.response.bundle && known.revoked_at.is_some())
-    {
-        return Err(DeployError::new(
-            StatusCode::CONFLICT,
-            "bundle_revoked",
-            format!(
-                "permissions bundle {} was revoked; deploy with other permissions",
-                staged.response.bundle
-            ),
-        ));
-    }
     if !staged.response.changed {
         return Ok(staged.response);
     }

@@ -29,10 +29,6 @@
 //!   to the bundle of the backend that admitted it and is governed by its
 //!   policies, so two deployments of one app can serve at once and a
 //!   rollback is publishing the older bundle again (a no-op).
-//! - `_jazz_revoked_bundles`: the bundles an admin revoked, with when. A
-//!   revoked bundle stays published (its id is content), but no session is
-//!   pinned to it again and publishing it again is refused. Created by the
-//!   first revocation.
 //!
 //! An authority's server writes these in the same transaction as the
 //! admission they describe, so a deploy is never half written. A store
@@ -67,11 +63,6 @@ pub(crate) const DDL: &str = "\
 const BUNDLES_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_bundles (id BLOB PRIMARY KEY, hash BLOB NOT NULL, \
      published_at INTEGER NOT NULL, def TEXT NOT NULL) WITHOUT ROWID;";
-
-/// Created by the first revocation, like [`BUNDLES_DDL`] by the first bundle.
-const REVOKED_DDL: &str = "\
-    CREATE TABLE IF NOT EXISTS _jazz_revoked_bundles (id BLOB PRIMARY KEY, \
-     revoked_at INTEGER NOT NULL) WITHOUT ROWID;";
 
 /// A table's policies, by table name.
 pub type Permissions = BTreeMap<TableName, TablePolicies>;
@@ -173,8 +164,6 @@ pub struct CatalogueBundle {
     /// Unix milliseconds, when this store first had it.
     pub published_at: u64,
     pub permissions: Permissions,
-    /// Unix milliseconds, when an admin revoked it; `None` while it serves.
-    pub revoked_at: Option<u64>,
 }
 
 /// Everything in the catalogue, each list in key order (permissions by
@@ -394,13 +383,6 @@ pub(crate) fn put(conn: &Connection, put: &CataloguePut) -> Result<(), Error> {
     for (schema, permissions, published_at) in &put.bundles {
         let def = canonical_json(&without_defaults(permissions))?;
         let id = bundle_hash(schema, &def);
-        let bundle = BundleId(*id.as_bytes());
-        if revoked_at(conn, &bundle)?.is_some() {
-            return Err(Error::new(
-                ErrorCode::Schema,
-                format!("permissions bundle {bundle} was revoked; publish other permissions"),
-            ));
-        }
         conn.prepare_cached(
             "INSERT INTO _jazz_bundles (id, hash, published_at, def) VALUES (?1, ?2, ?3, ?4) \
              ON CONFLICT (id) DO NOTHING",
@@ -437,52 +419,6 @@ pub(crate) fn serves_bundles(conn: &Connection) -> Result<bool, Error> {
         r.get(0)
     })
     .map_err(storage)
-}
-
-fn has_revocations(conn: &Connection) -> Result<bool, Error> {
-    conn.cached_row(
-        "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' \
-         AND name = '_jazz_revoked_bundles'",
-        [],
-        |r| r.get(0),
-    )
-    .map_err(storage)
-}
-
-/// When published bundle `id` was revoked, if it was.
-pub(crate) fn revoked_at(conn: &Connection, id: &BundleId) -> Result<Option<u64>, Error> {
-    if !has_revocations(conn)? {
-        return Ok(None);
-    }
-    conn.cached_row(
-        "SELECT revoked_at FROM _jazz_revoked_bundles WHERE id = ?1",
-        [id.0.to_vec()],
-        |r| r.get::<_, i64>(0),
-    )
-    .optional()
-    .map(|at| at.map(|at| at as u64))
-    .map_err(storage)
-}
-
-/// Revoke published bundle `id` at `at` (unix milliseconds). `false` when
-/// it was revoked already (its first revocation time stays); an error when
-/// this store never published it.
-pub(crate) fn revoke(conn: &Connection, id: &BundleId, at: u64) -> Result<bool, Error> {
-    if bundle(conn, id)?.is_none() {
-        return Err(Error::new(
-            ErrorCode::Schema,
-            format!("permissions bundle {id} is not published on this store"),
-        ));
-    }
-    conn.execute_batch(REVOKED_DDL).map_err(storage)?;
-    let inserted = conn
-        .prepare_cached(
-            "INSERT INTO _jazz_revoked_bundles (id, revoked_at) VALUES (?1, ?2) \
-             ON CONFLICT (id) DO NOTHING",
-        )
-        .and_then(|mut statement| statement.execute(params![id.0.to_vec(), at as i64]))
-        .map_err(storage)?;
-    Ok(inserted == 1)
 }
 
 /// The published bundle `id`: its write schema and permissions.
@@ -667,13 +603,7 @@ pub(crate) fn read(conn: &Connection) -> Result<CatalogueRows, Error> {
                 schema: hash_of(hash, "_jazz_bundles")?,
                 published_at: published_at as u64,
                 permissions: decode(&def, format_args!("bundle {id} in _jazz_bundles"))?,
-                revoked_at: None,
             });
-        }
-    }
-    if has_revocations(conn)? {
-        for bundle in &mut rows.bundles {
-            bundle.revoked_at = revoked_at(conn, &bundle.id)?;
         }
     }
     Ok(rows)

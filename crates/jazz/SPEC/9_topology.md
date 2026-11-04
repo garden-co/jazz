@@ -306,14 +306,11 @@ again. Unpinned links (`SYSTEM`, an admin's) are pinned to no bundle and are
 never ended by a publish. Schema-only changes need no reconnect: lenses carry
 sessions across schema versions.
 
-An admin can revoke a published bundle (`INV-EDGE-28`). Every session pinned to
-it ends with a terminal close (`AuthFailed`, `Never`), no backend can pin a
-session to it again, and publishing it again is refused with `bundle_revoked`,
-across restarts. A rollback to a known bundle ends no session on a newer one,
-so revocation is how a newer bundle that leaks is cut off. Revocation cannot be
-undone and a revoked bundle's backend cannot boot until it is redeployed with
-other permissions, so revoking the newest bundle still serving requires an
-explicit confirmation.
+Retiring a bundle is the app's own job: there is no revocation list. A bundle
+stays pinnable for as long as a deployment that publishes it is reachable, so a
+deployment whose permissions leak is stopped by deleting every deployment that
+still serves it; its sessions drop with their backend and reconnect through one
+that serves other permissions.
 
 The historical `INV-EDGE` identifiers retained above describe client-relay and
 session boundaries; their names do not imply a remaining semantic edge role.

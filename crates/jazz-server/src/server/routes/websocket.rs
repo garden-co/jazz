@@ -5439,38 +5439,6 @@ mod tests {
         .flatten()
     }
 
-    async fn admin_post(
-        addr: std::net::SocketAddr,
-        state: &Arc<ServerState>,
-        path: &str,
-        body: Option<serde_json::Value>,
-    ) -> (reqwest::StatusCode, serde_json::Value) {
-        let mut request = reqwest::Client::new()
-            .post(format!("http://{addr}/apps/{}/admin{path}", state.app_id))
-            .header("X-Jazz-Admin-Secret", "admin-secret");
-        if let Some(body) = body {
-            request = request
-                .header("Content-Type", "application/json")
-                .body(body.to_string());
-        }
-        let response = request.send().await.expect("admin request");
-        let status = response.status();
-        (
-            status,
-            response.json().await.unwrap_or(serde_json::Value::Null),
-        )
-    }
-
-    fn docs_bundle_request(schema: &Schema, select: PolicyExpr) -> serde_json::Value {
-        let hash = jazz::tools::public_schema::SchemaHash::compute(schema).to_string();
-        serde_json::json!({
-            "targetSchemaHash": hash,
-            "schemas": [{ "hash": hash, "schema": schema }],
-            "migrations": [],
-            "permissions": { "docs": public_table_policies().with_select(select) },
-        })
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_new_bundle_ends_the_sessions_pinned_to_other_bundles() {
         let schema = private_docs_public_schema();
@@ -5546,7 +5514,8 @@ mod tests {
         assert!(thin_titles(&mut again, 1, None).await.is_empty());
 
         // Rolling back to a bundle this store already has ends no one, on
-        // either bundle: to cut off sessions on the newer bundle, revoke it.
+        // either bundle: sessions on the newer one end only when the
+        // deployments serving it are deleted.
         let mut on_second = open_negotiated_ws_with_prelude_and_features(
             addr,
             &state,
@@ -5570,130 +5539,6 @@ mod tests {
                 "a rollback leaves the {kind}'s session alone"
             );
         }
-
-        // An older bundle revokes without confirmation, ending its sessions
-        // and none on the newest.
-        let (status, body) =
-            admin_post(addr, &state, &format!("/bundles/{first}/revoke"), None).await;
-        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-        let error = next_wire_error(&mut again, Duration::from_secs(5))
-            .await
-            .expect("the revoked bundle's session ends");
-        assert_eq!(
-            (error.code, error.retry),
-            (WireErrorCode::AuthFailed, WireRetry::Never),
-            "{error:?}"
-        );
-        assert_eq!(
-            next_wire_error(&mut on_second, Duration::from_millis(300)).await,
-            None,
-            "the newest bundle's session stays"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_revoked_bundle_ends_its_sessions_and_serves_none_again() {
-        let schema = private_docs_public_schema();
-        let state = bundle_test_state().await;
-        let addr = start_ws_test_server(state.clone()).await;
-        let leaky = publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await;
-        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
-        let mut ws = open_negotiated_ws_with_prelude_and_features(
-            addr,
-            &state,
-            pinned_thin_prelude(alice, Some(&leaky)),
-            jazz::wire::FEATURE_THIN_RESULTS,
-        )
-        .await;
-        bind_thin_schema(&mut ws, &schema).await;
-
-        // The only (newest) bundle: revoking it stops the latest deployment
-        // and cannot be undone, so it takes an explicit confirmation.
-        let (status, body) =
-            admin_post(addr, &state, &format!("/bundles/{leaky}/revoke"), None).await;
-        assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
-        assert_eq!(body["code"], "bundle_is_latest");
-        assert_eq!(
-            next_wire_error(&mut ws, Duration::from_millis(300)).await,
-            None,
-            "a refused revocation ends no one"
-        );
-        let (status, body) = admin_post(
-            addr,
-            &state,
-            &format!("/bundles/{leaky}/revoke?confirmLatest=true"),
-            None,
-        )
-        .await;
-        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-        assert_eq!(body["revoked"], true);
-        let error = next_wire_error(&mut ws, Duration::from_secs(5))
-            .await
-            .expect("the revoked bundle's session ends");
-        assert_eq!(
-            (error.code, error.retry),
-            (WireErrorCode::AuthFailed, WireRetry::Never),
-            "{error:?}"
-        );
-
-        // No backend can pin a session to it again, sync or thin.
-        for features in [jazz::wire::FEATURE_THIN_RESULTS, 0] {
-            let refused = thin_refusal(
-                addr,
-                &state,
-                pinned_thin_prelude(alice, Some(&leaky)),
-                features,
-            )
-            .await;
-            assert!(refused.message.contains("was revoked"), "{refused:?}");
-            assert_eq!(
-                (refused.code, refused.retry),
-                (WireErrorCode::AuthFailed, WireRetry::Never)
-            );
-        }
-        // Nor publish it again (a backend of the leaky deployment booting).
-        let (status, body) = admin_post(
-            addr,
-            &state,
-            "/bundles",
-            Some(docs_bundle_request(&schema, PolicyExpr::True)),
-        )
-        .await;
-        assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
-        assert_eq!(body["code"], "bundle_revoked");
-        // Other permissions still deploy.
-        publish_docs_bundle(addr, &state, &schema, PolicyExpr::False).await;
-
-        let (status, body) =
-            admin_post(addr, &state, &format!("/bundles/{leaky}/revoke"), None).await;
-        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-        assert_eq!(body["revoked"], false, "revoking again changes nothing");
-        let unknown = "cd".repeat(32);
-        let (status, _) =
-            admin_post(addr, &state, &format!("/bundles/{unknown}/revoke"), None).await;
-        assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
-
-        let listed: serde_json::Value = reqwest::Client::new()
-            .get(format!("http://{addr}/apps/{}/admin/bundles", state.app_id))
-            .header("X-Jazz-Admin-Secret", "admin-secret")
-            .send()
-            .await
-            .expect("list bundles")
-            .json()
-            .await
-            .expect("bundles json");
-        let listed = listed["bundles"].as_array().expect("bundles");
-        let revoked = listed
-            .iter()
-            .find(|bundle| bundle["bundle"] == leaky.as_str())
-            .expect("the revoked bundle is still listed");
-        assert!(revoked["revokedAt"].is_u64(), "{revoked}");
-        assert!(
-            listed
-                .iter()
-                .filter(|bundle| bundle["bundle"] != leaky.as_str())
-                .all(|bundle| bundle.get("revokedAt").is_none())
-        );
     }
 
     /// The error a connection opening with `prelude` and negotiating

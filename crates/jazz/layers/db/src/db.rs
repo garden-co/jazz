@@ -2846,15 +2846,6 @@ impl Db {
         Ok(id)
     }
 
-    /// Revoke published bundle `id`: no session is pinned to it again
-    /// ([`Db::check_session_pin`] refuses it) and publishing it again is
-    /// refused, while it stays in the catalogue. The host closes the
-    /// sessions pinned to it. `false` when it was revoked already; an
-    /// error when this store never published it.
-    pub fn revoke_bundle(&self, id: &crate::catalogue::BundleId) -> Result<bool, Error> {
-        crate::catalogue::revoke(&self.inner().conn, id, crate::catalogue::now_millis())
-    }
-
     /// The current schema, with its policies.
     pub fn current_schema(&self) -> JazzSchema {
         self.inner().owner.jazz.clone()

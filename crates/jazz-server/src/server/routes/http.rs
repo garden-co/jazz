@@ -115,9 +115,6 @@ pub(super) struct PublishedBundleView {
     bundle: String,
     schema_hash: String,
     published_at: u64,
-    /// When an admin revoked it; absent while it serves.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    revoked_at: Option<u64>,
     permissions: std::collections::HashMap<String, TablePolicies>,
 }
 
@@ -248,7 +245,6 @@ pub(super) async fn published_bundles_handler(
             bundle: bundle.id.to_string(),
             schema_hash: bundle.schema.to_string(),
             published_at: bundle.published_at,
-            revoked_at: bundle.revoked_at,
             permissions: bundle
                 .permissions
                 .into_iter()
@@ -257,125 +253,6 @@ pub(super) async fn published_bundles_handler(
         })
         .collect();
     Ok(Json(PublishedBundlesResponse { bundles }))
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct RevokedBundleResponse {
-    bundle: String,
-    /// `false` when it was revoked already.
-    revoked: bool,
-}
-
-fn shutting_down() -> Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({
-            "code": "server_shutting_down",
-            "error": "server is shutting down",
-        })),
-    )
-        .into_response()
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct RevokeBundleParams {
-    /// Revoke the newest bundle still serving (or the only one) too.
-    #[serde(default)]
-    confirm_latest: bool,
-}
-
-/// `/bundles/{bundle}/revoke`: revoke a published bundle. Every session
-/// pinned to it ends at once, no backend can pin a session to it again,
-/// and publishing it again is refused, so a deployment whose permissions
-/// leak can be stopped without waiting for its backends to be retired.
-///
-/// A revocation cannot be undone. Revoking the newest bundle still serving
-/// (or the only one) stops the latest deployment: its backend cannot boot
-/// (publishing its bundle is refused with `bundle_revoked`) until it is
-/// redeployed with other permissions. That is the way to cut off a newer
-/// bundle that leaks, so it is allowed, but only with `?confirmLatest=true`;
-/// without it the request is refused with 409 `bundle_is_latest`.
-pub(super) async fn revoke_bundle_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(params): Path<HashMap<String, String>>,
-    Query(query): Query<RevokeBundleParams>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(response) = require_admin(&state, &headers) {
-        return response;
-    }
-    let Some(id) = params
-        .get("bundle")
-        .and_then(|text| jazz::catalogue::BundleId::from_hex(text))
-    else {
-        return bad_request("invalid permissions bundle id");
-    };
-    // Shutdown waits for a revocation that started, as for a deployment.
-    let Some(_request) = state.shutdown.try_enter_app_request() else {
-        return shutting_down();
-    };
-    let Some(runtime) = state.runtime() else {
-        return not_found(format!(
-            "permissions bundle {id} is not published on this store"
-        ));
-    };
-    let _publication = state.runtime_catalogue_publication.lock().await;
-    if state.shutdown.is_shutting_down() {
-        return shutting_down();
-    }
-    if !query.confirm_latest {
-        // The newest by first publication (any tied with it count too).
-        let serving: Vec<_> = state
-            .catalogue_store
-            .published_bundles()
-            .into_iter()
-            .filter(|bundle| bundle.revoked_at.is_none())
-            .collect();
-        let newest = serving.iter().map(|bundle| bundle.published_at).max();
-        if serving
-            .iter()
-            .any(|bundle| bundle.id == id && Some(bundle.published_at) == newest)
-        {
-            return (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "code": "bundle_is_latest",
-                    "error": format!(
-                        "permissions bundle {id} is the newest one still serving: revoking it \
-                         stops the latest deployment, whose backend cannot boot again until it \
-                         is redeployed with other permissions, and cannot be undone; repeat \
-                         with ?confirmLatest=true to revoke it anyway"
-                    ),
-                })),
-            )
-                .into_response();
-        }
-    }
-    let revoked = runtime.revoke_bundle(id).await;
-    // The revocation is committed (or refused) by now; a stale listing only
-    // delays `revokedAt` there, since the store itself refuses to publish
-    // or pin a revoked bundle.
-    if let Err(error) = state.catalogue_store.refresh() {
-        tracing::warn!(bundle = %id, %error, "catalogue refresh after a revocation failed");
-    }
-    match revoked {
-        Ok(revoked) => (
-            StatusCode::OK,
-            Json(RevokedBundleResponse {
-                bundle: id.to_hex(),
-                revoked,
-            }),
-        )
-            .into_response(),
-        Err(crate::runtime::CatalogueApplyError::Rejected(message)) => not_found(message),
-        Err(crate::runtime::CatalogueApplyError::Failed(message)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(message)),
-        )
-            .into_response(),
-    }
 }
 
 pub(super) async fn admin_subscription_introspection_handler(
