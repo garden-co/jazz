@@ -67,7 +67,9 @@ export async function firstAccountEpoch(
     assertOpen();
     try {
       const proposal = await acceptedDeviceTransaction(db, async (tx) => {
-        const existing = await tx.one(identities.where({ id: accountId }), { tier: "local-first" });
+        // A fresh replica's empty cache is not an authoritative absence proof.
+        const snapshot = await tx.readAccepted(identities.where({ id: accountId }));
+        const existing = snapshot.rows[0];
         assertOpen();
         if (existing) return existing;
         const epochId = crypto.randomUUID();
@@ -97,7 +99,7 @@ export async function firstAccountEpoch(
         }
       });
       // New identities and their public activation settle atomically. Even an
-      // existing identity is validated by a globally accepted exclusive commit.
+      // existing identity is validated by a globally accepted serializable commit.
       const accepted = await proposal.wait();
       assertOpen();
       if (accepted.ledgerVersion !== 1)
