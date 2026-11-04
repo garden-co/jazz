@@ -66,6 +66,11 @@ function compareCodePoints(left: string, right: string): number {
 }
 
 export function structuralSchemaHash(schema: WasmSchema): string {
+  return bytesToHex(sha256(structuralSchemaBytes(schema)));
+}
+
+/** The canonical bytes a schema's structural hash is taken over. */
+export function structuralSchemaBytes(schema: WasmSchema): Uint8Array {
   const writer = new StructuralHashWriter();
 
   for (const tableName of Object.keys(schema).sort()) {
@@ -93,7 +98,7 @@ export function structuralSchemaHash(schema: WasmSchema): string {
     }
   }
 
-  return bytesToHex(sha256(writer.bytes()));
+  return writer.bytes();
 }
 
 export { columnTypeSignature };

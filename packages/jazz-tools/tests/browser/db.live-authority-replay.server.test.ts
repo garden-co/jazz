@@ -7,7 +7,7 @@ import {
   liveAuthorityPermissions,
   type LiveAuthoritySeed,
 } from "./live-authority-replay-schema.js";
-import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
+import { type JazzServerInfo, getJazzServerInfo, startJazzApp } from "./testing-server.js";
 import {
   TestCleanup,
   createBrowserTestDb,
@@ -41,6 +41,10 @@ describe("live authoritative overlapping relation replay", () => {
   it("keeps fresh, reopened and reconnected persistent roots usable after live inserts", async () => {
     const info = await getJazzServerInfo(uniqueDbName("live-authority-replay"));
     await deploy({ ...info, schema: app.wasmSchema, permissions: liveAuthorityPermissions });
+    const appBackend = await startJazzApp(info, {
+      schema: app.wasmSchema,
+      permissions: liveAuthorityPermissions,
+    });
     backendAppId = info.appId;
     const seed = await withTimeout(backend.liveAuthorityBackendOpen(info), 20_000, "backend seed");
     const expected = [seed.itemId];
@@ -49,7 +53,7 @@ describe("live authoritative overlapping relation replay", () => {
     for (let fresh = 0; fresh < 2; fresh++) {
       const config = {
         appId: info.appId,
-        serverUrl: info.serverUrl,
+        serverUrl: appBackend.serverUrl,
         secret,
         driver: { type: "persistent" as const, dbName: uniqueDbName("live-authority-root") },
       };

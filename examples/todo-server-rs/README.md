@@ -5,7 +5,7 @@ Axum REST + SSE service backed by the `jazz` Rust client, SQLite storage and the
 ## What it demonstrates
 
 - Using `JazzClient::connect_with_native_transport` with persistent storage and a remote sync server.
-- Enrolling an ordinary user with `JAZZ_JWT_TOKEN` through `/accounts/login-or-register` before connecting. The returned account supplies `AppContext.account_id`; neither backend nor admin credentials are used by the todo worker. Local-first tokens use `/accounts/found-local-first`.
+- Running as the app's backend: the service holds the sync server's backend secret (`JAZZ_BACKEND_SECRET`) and acts as one user of the app (`TODO_USER_ID`), named `jazz:app:<appId>` as `createJazz` names its users. Before connecting it vouches for that user at `/admin/accounts/login-or-register`, and the returned account goes into its `backend_session`. It never holds the admin secret.
 - Loading a TypeScript schema from Rust by shelling out to the `jazz-tools` CLI (`schema compile`) at startup &mdash; the schema is authored once in `schema.ts` and consumed both by the JS tooling and the Rust client.
 - CRUD over `/todos` (`GET`, `POST`, `PUT /:id`, `DELETE /:id`) backed by Jazz inserts / updates / deletes.
 - Server-Sent Events on `/todos/live` broadcasting the full todo list whenever it changes, via a `tokio::sync::broadcast` channel.
@@ -29,30 +29,30 @@ pnpm build:core
 cargo build -p jazz-cli --bin jazz-tools
 export JAZZ_TOOLS_BIN="$PWD/target/debug/jazz-tools"
 
-# Use an existing Jazz server configured with this schema, its permissions,
-# and a JWT verifier for your auth provider. Use the same app UUID and a
-# valid ordinary-user JWT; do not put a backend/admin secret in JAZZ_JWT_TOKEN.
+# Use an existing Jazz server configured with this schema and its
+# permissions. Use the same app UUID and that server's backend secret.
 export JAZZ_APP_ID="<APP_UUID>"
 export JAZZ_SERVER_URL="http://localhost:1625"
-export JAZZ_JWT_TOKEN="<USER_JWT>"
+export JAZZ_BACKEND_SECRET="<BACKEND_SECRET>"
 cargo run --manifest-path examples/todo-server-rs/Cargo.toml
 
 # The documentation copy has its own excluded manifest:
 cargo run --manifest-path examples/docs/todo-server-rs/Cargo.toml
 ```
 
-Both examples remain deliberately excluded from the root Cargo workspace. Build and test them with `--manifest-path`, not `-p` from the repository root. The todo service runs as one configured user; HTTP requests do not select separate Jazz identities.
+Both examples remain deliberately excluded from the root Cargo workspace. Build and test them with `--manifest-path`, not `-p` from the repository root. The todo service runs as one configured user; HTTP requests do not select separate Jazz identities. Its HTTP API has no sign-in of its own, so serve it only where your own infrastructure authenticates callers.
 
-Configurable via env vars (`JAZZ_JWT_TOKEN` is required):
+Configurable via env vars (`JAZZ_BACKEND_SECRET` is required):
 
-| Variable          | Default                                  |
-| ----------------- | ---------------------------------------- |
-| `JAZZ_APP_ID`     | hard-coded fallback id (see `main.rs`)   |
-| `JAZZ_SERVER_URL` | `http://localhost:1625`                  |
-| `JAZZ_JWT_TOKEN`  | required ordinary-user JWT               |
-| `TODO_DATA_DIR`   | `./todo-data` (local data directory)     |
-| `TODO_PORT`       | `3000`                                   |
-| `JAZZ_TOOLS_BIN`  | `jazz-tools` (used for `schema compile`) |
+| Variable              | Default                                    |
+| --------------------- | ------------------------------------------ |
+| `JAZZ_APP_ID`         | hard-coded fallback id (see `main.rs`)     |
+| `JAZZ_SERVER_URL`     | `http://localhost:1625`                    |
+| `JAZZ_BACKEND_SECRET` | required: the sync server's backend secret |
+| `TODO_USER_ID`        | `todo-service` (the user it acts as)       |
+| `TODO_DATA_DIR`       | `./todo-data` (local data directory)       |
+| `TODO_PORT`           | `3000`                                     |
+| `JAZZ_TOOLS_BIN`      | `jazz-tools` (used for `schema compile`)   |
 
 ## API
 
@@ -84,4 +84,4 @@ cargo test --manifest-path examples/todo-server-rs/Cargo.toml --all-targets
 cargo test --manifest-path examples/docs/todo-server-rs/Cargo.toml --all-targets
 ```
 
-The focused smoke starts an isolated Jazz server, publishes the example's open policies as fixture setup, and connects two independent todo workers using the same ordinary-user JWT with `account_id: None` and no backend/admin credentials. One writes; the other retries enrolment and reads the row over native sync. This checks the worker path, not TypeScript schema export or application deployment. The full suites retain the CRUD, persistence, SSE and process-level resync assertions.
+The focused smoke starts an isolated Jazz server, publishes the example's open policies as fixture setup, and connects two independent todo workers that both act as Alice with the backend secret (no admin secret). Each resolves her one account; one writes and the other reads the row over native sync. This checks the worker path, not TypeScript schema export or application deployment. The full suites retain the CRUD, persistence, SSE and process-level resync assertions.

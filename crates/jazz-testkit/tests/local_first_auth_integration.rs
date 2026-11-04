@@ -73,8 +73,8 @@ fn local_first_context(
         *server.app_id().uuid(),
         &user_id,
     ));
+    // The guest's own proof, relayed by the app's backend with its secret.
     ctx.jwt_token = Some(token);
-    ctx.backend_secret = None;
     ctx.admin_secret = None;
     ctx.storage = storage;
     if storage == ClientStorage::Persistent {}
@@ -467,8 +467,7 @@ async fn local_first_and_jwt_clients_coexist_impl() {
 
     // Bob authenticates via the default HS256 JWT minted by JazzServer.
     let bob_subject = "bob";
-    let mut bob_ctx = server.make_client_context_for_user(test_schema(), bob_subject);
-    bob_ctx.backend_secret = None;
+    let mut bob_ctx = server.make_user_context(test_schema(), bob_subject);
     bob_ctx.admin_secret = None;
     support::enroll_test_context(&mut bob_ctx)
         .await

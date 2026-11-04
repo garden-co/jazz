@@ -5,9 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
-    "build": "env NEXT_PUBLIC_APP_ORIGIN=http://127.0.0.1:3000 NEXT_PUBLIC_JAZZ_APP_ID=00000000-0000-0000-0000-000000000301 BETTER_AUTH_SECRET=2ff8ef66a6ee1a1e551a8f0c7dfa9c8d6fd4cc683a963f04989fdd84cc9cdb53 sh -c 'node ../../packages/jazz-tools/dist/cli.js validate && next build'",
+    "build": "env NEXT_PUBLIC_APP_ORIGIN=http://127.0.0.1:3000 NEXT_PUBLIC_JAZZ_APP_ID=00000000-0000-0000-0000-000000000301 BETTER_AUTH_SECRET=2ff8ef66a6ee1a1e551a8f0c7dfa9c8d6fd4cc683a963f04989fdd84cc9cdb53 sh -c 'jazz-tools validate && next build'",
+    "start": "next start",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@astryxdesign/core": "0.6.3",
@@ -20,6 +22,7 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@types/node": "catalog:default",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
