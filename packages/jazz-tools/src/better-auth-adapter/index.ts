@@ -79,6 +79,15 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           }
         }
 
+        // Better Auth omits this index metadata; keep account identity atomic.
+        if (defaultModelName === "account") {
+          result.push({
+            storedFieldNames: ["providerId", "accountId"].map((field) =>
+              getFieldName({ model: defaultModelName, field }),
+            ),
+          });
+        }
+
         for (const index of readTableIndexes(defaultModelName, modelSchema.indexes)) {
           if (!index.unique) continue;
           result.push({

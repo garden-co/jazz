@@ -72,6 +72,8 @@ export const schema = {
       privateKey: s.string(),
       createdAt: s.timestamp(),
       expiresAt: s.timestamp().optional(),
+      alg: s.string().optional(),
+      crv: s.string().optional(),
     },
     {},
   ),

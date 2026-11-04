@@ -204,7 +204,7 @@
     "whatwg-url-without-unicode": "8.0.0-3"
   },
   "devDependencies": {
-    "@better-auth/test-utils": "^1.7.1",
+    "@better-auth/test-utils": "^1.7.16",
     "@sveltejs/package": "^2.0.0",
     "@sveltejs/vite-plugin-svelte": "catalog:default",
     "@testing-library/react": "^16.3.2",
@@ -216,7 +216,7 @@
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
     "@vue/server-renderer": "^3.5.22",
-    "better-auth": "1.7.1",
+    "better-auth": "1.7.16",
     "effect": "4.0.0-rc.118",
     "fake-indexeddb": "^5.0.2",
     "jsdom": "^26.0.0",
@@ -243,7 +243,7 @@
   "peerDependencies": {
     "@vercel/functions": ">=3.10.0",
     "@vercel/sandbox": ">=3.9.0",
-    "better-auth": "1.7.1",
+    "better-auth": "1.7.16",
     "effect": "^4.0.0-rc.118",
     "expo": ">=54",
     "expo-crypto": ">=14.0.0",

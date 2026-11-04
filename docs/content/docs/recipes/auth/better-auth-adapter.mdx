@@ -179,7 +179,15 @@ See [Migrations](/docs/schemas/migrations) for the full deploy flow and how sche
 
 ## Compatibility
 
-The adapter is currently aligned with Better Auth `1.7.1`.
+The adapter is currently aligned with Better Auth `1.7.16`.
+
+When upgrading from Better Auth 1.7.0–1.7.2, regenerate the auth schema and publish
+its migrations before accepting traffic on the new version. The account table no
+longer requires `issuer`; an existing required `issuer` column must become optional
+or be removed, otherwise new sign-ups and account links fail. Keep account identity
+unique on `(providerId, accountId)` and resolve any existing duplicates before upgrading.
+The JWT plugin also adds optional `alg` and `crv` columns to the JWKS table. See the
+[Better Auth upgrade guide](https://www.better-auth.com/docs/guides/1-7-upgrade-guide).
 
 | Plugin/Feature        | Compatibility |
 | --------------------- | :-----------: |
