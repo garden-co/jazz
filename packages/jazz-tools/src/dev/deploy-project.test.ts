@@ -55,7 +55,11 @@ ${commonjs ? "module.exports = migration;" : "export default migration;"}`;
   await writeFile(file, source);
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     if (url.endsWith("/migrations/graph"))
-      return Response.json({ activeSchemaHash: fromHash, schemas: [fromHash], migrations: [] });
+      return Response.json({
+        latestBundleSchemaHash: fromHash,
+        schemas: [fromHash],
+        migrations: [],
+      });
     expect(url.endsWith("/admin/bundles")).toBe(true);
     const body = JSON.parse(String(init?.body));
     expect(body.migrations).toHaveLength(1);
@@ -351,7 +355,7 @@ it("publishes the current schema once validate moved the legacy migrations", asy
   await validateProject({ schemaDir: root });
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     if (url.endsWith("/migrations/graph"))
-      return Response.json({ activeSchemaHash: null, schemas: [], migrations: [] });
+      return Response.json({ latestBundleSchemaHash: null, schemas: [], migrations: [] });
     expect(url.endsWith("/admin/bundles")).toBe(true);
     const body = JSON.parse(String(init?.body));
     expect(body.migrations).toEqual([]);
