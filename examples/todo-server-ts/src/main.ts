@@ -57,6 +57,11 @@ export interface TodoServerOptions {
   /** Server-only credential for durable backend writes. */
   backendSecret?: string;
   adminSecret?: string;
+  /**
+   * The published bundle (schema and permissions) this backend's users are
+   * checked by, as `deploy()` returns it. Defaults to `JAZZ_BUNDLE`.
+   */
+  bundle?: string;
 }
 interface ServerLifecycle {
   draining: boolean;
@@ -85,6 +90,7 @@ export async function createServer(
   const appId = options.appId ?? process.env.JAZZ_APP_ID ?? "019d4349-244c-74d4-8573-8e1b24cf21e2";
   const serverUrl = options.serverUrl ?? process.env.JAZZ_SERVER_URL;
   const backendSecret = options.backendSecret ?? process.env.JAZZ_BACKEND_SECRET;
+  const bundle = options.bundle ?? process.env.JAZZ_BUNDLE;
   const driver =
     storage.type === "persistent"
       ? { type: "persistent" as const, dataPath: storage.dataPath }
@@ -105,6 +111,7 @@ export async function createServer(
     driver,
     serverUrl,
     initial: { backendSecret },
+    bundle,
     env: "dev",
     jwksUrl: options.jwksUrl ?? process.env.JAZZ_JWKS_URL,
     jwtPublicKey: process.env.JAZZ_JWT_PUBLIC_KEY,

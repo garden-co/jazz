@@ -110,7 +110,7 @@ describe("Todo Server request authentication", () => {
   beforeAll(async () => {
     jwtIssuer = await startTestJwtIssuer();
     upstream = await startLocalJazzServer();
-    await deploy({
+    const { bundle } = await deploy({
       serverUrl: upstream.url,
       appId: upstream.appId,
       adminSecret: upstream.adminSecret,
@@ -129,6 +129,7 @@ describe("Todo Server request authentication", () => {
           serverUrl: upstream.url,
           backendSecret: upstream.backendSecret,
           adminSecret: upstream.adminSecret,
+          bundle,
         },
       ),
       0,
