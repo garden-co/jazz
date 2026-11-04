@@ -244,6 +244,9 @@ pub struct SubscriptionStream {
     /// the public stream is dropped. Closing `receiver` alone cannot do that
     /// for an otherwise idle core subscription.
     cancellation: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Drops the core subscription now, after `cancellation` marked it,
+    /// so its unsubscription is queued before whatever the caller does next.
+    on_drop: Option<Box<dyn FnOnce()>>,
 }
 
 #[cfg(feature = "runtime")]
@@ -253,10 +256,12 @@ impl SubscriptionStream {
     pub(crate) fn new(
         receiver: tokio::sync::mpsc::UnboundedReceiver<SubscriptionStreamItem>,
         cancellation: tokio::sync::oneshot::Sender<()>,
+        on_drop: Box<dyn FnOnce()>,
     ) -> Self {
         Self {
             receiver,
             cancellation: Some(cancellation),
+            on_drop: Some(on_drop),
         }
     }
 
@@ -273,6 +278,9 @@ impl Drop for SubscriptionStream {
         // dropping its core stream then runs subscription cleanup.
         if let Some(cancellation) = self.cancellation.take() {
             let _ = cancellation.send(());
+        }
+        if let Some(on_drop) = self.on_drop.take() {
+            on_drop();
         }
     }
 }
