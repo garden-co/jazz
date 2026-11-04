@@ -4,7 +4,6 @@ import { schema as s } from "../index.js";
 import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import { createJazzSession } from "./index.js";
-import { publishTestBundle } from "../testing/publish-test-bundle.js";
 
 const app = s.defineApp(
   {
@@ -48,13 +47,15 @@ describe("deployed permissions with claims in referenced read policies", () => {
   it("authorizes inserts that check a row whose read policy compares a session claim", async () => {
     const issuer = await startTestJwtIssuer();
     const appId = randomUUID();
-    // Published as createJazz publishes it; the backend link is pinned to it.
     const server = await startLocalJazzServer({ appId });
-    const bundle = await publishTestBundle(
-      { appId, serverUrl: server.url, adminSecret: server.adminSecret },
-      app,
+    // Published as createJazz publishes it; the backend link is pinned to it.
+    const { bundle } = await deploy({
+      serverUrl: server.url,
+      appId,
+      adminSecret: server.adminSecret,
+      schema: resolveSchemaSource(app),
       permissions,
-    );
+    });
     const owner = await createJazzSession({
       appId,
       app,
@@ -87,13 +88,6 @@ describe("deployed permissions with claims in referenced read policies", () => {
       return { db, userId: user.value.id };
     };
     try {
-      await deploy({
-        serverUrl: server.url,
-        appId,
-        adminSecret: server.adminSecret,
-        schema: resolveSchemaSource(app),
-        permissions,
-      });
       const viewer = await connect("viewer", { role: "viewer" });
       const topic = viewer.db.insert(app.topics, { title: "topic" });
       expect(await outcome(topic)).toBe("accepted");

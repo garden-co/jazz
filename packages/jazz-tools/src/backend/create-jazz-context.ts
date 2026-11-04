@@ -101,8 +101,10 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver"> & {
   /** @internal How the runtime opens its server socket (a backend client's credentialed one). */
   webSocket?: WebSocketConstructor;
   /**
-   * @internal The published permissions bundle the backend link is pinned
-   * to, as createJazz pins its own: users it acts for are checked by it.
+   * The id of the published permissions bundle this backend's link is
+   * pinned to (what `deploy()` returned), as createJazz pins its own. The
+   * users it acts for are checked by that bundle's permissions; an unpinned
+   * link can only act as itself.
    */
   bundle?: string;
 } & BackendContextSchemaConfig;

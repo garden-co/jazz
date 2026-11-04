@@ -284,9 +284,10 @@ If the note is forbidden, none of the otherwise permitted siblings is admitted.
 
 A Core serves a user's session only pinned to a published bundle, which
 selects its write schema and policies (`INV-EDGE-19`): the app's backend
-(`createJazz`) publishes its bundle and pins every session it opens to it.
-An unpinned user session is refused with an actionable error rather than
-checked by permissions no deployment chose. Schema and bundle
+(`createJazz`) publishes its bundle and pins every session it opens to it,
+including the users a trusted link acts for. An unpinned user session, or an
+unpinned trusted link acting for a user, is refused with an actionable error
+rather than checked by permissions no deployment chose. Schema and bundle
 publication, account registry operations, and query authorization all
 terminate at Core.
 

@@ -562,7 +562,7 @@ async fn seed_schema_catalogue(server: &JazzServer, schema: &jazz::tools::Schema
 async fn publish_v1_to_v2_catalogue_migration(server: &JazzServer) {
     let response = reqwest::Client::new()
         .post(format!(
-            "{}/apps/{}/admin/deploy",
+            "{}/apps/{}/admin/bundles",
             server.base_url(),
             server.app_id()
         ))

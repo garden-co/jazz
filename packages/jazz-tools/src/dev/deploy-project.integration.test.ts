@@ -83,7 +83,7 @@ it("validates all branches before writing, deploys the converged history, and se
   const add = (column: string) => `${column}: m.add.string({ default: "" })`;
   await writeMigration(0, 1, add("a"));
   await writeMigration(1, 2, add("tmp"));
-  await expect(deploy(options)).rejects.toThrow("migrations create");
+  await expect(deploy(options)).rejects.toThrow("disconnected roots");
   expect(await fetchMigrationGraph(options)).toEqual(initial);
   await writeMigration(1, 3, add("b"));
   await writeMigration(2, 3, `tmp: m.drop.string({ backwardsDefault: "" }), ${add("b")}`);
@@ -92,7 +92,7 @@ it("validates all branches before writing, deploys the converged history, and se
   const fetch = globalThis.fetch;
   vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
     if (init?.method === "POST") {
-      expect(String(input).endsWith("/admin/deploy")).toBe(true);
+      expect(String(input).endsWith("/admin/bundles")).toBe(true);
       requests.push(JSON.parse(String(init.body)));
     }
     return fetch(input, init);
@@ -109,7 +109,7 @@ it("validates all branches before writing, deploys the converged history, and se
   expect(requests[0]!.schemas).toHaveLength(3);
   expect(requests[0]!.migrations).toHaveLength(4);
   const graph = await fetchMigrationGraph(options);
-  expect(graph.activeSchemaHash).toBe(versions[3]!.hash);
+  expect(graph.schemas).toContain(versions[3]!.hash);
   expect(graph.migrations).toHaveLength(4);
 
   await writeFile(
