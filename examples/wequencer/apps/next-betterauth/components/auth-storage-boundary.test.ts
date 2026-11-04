@@ -1,17 +1,26 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { createAccountManager, createDb, type Db } from "jazz-tools";
 import { createJazzSession } from "jazz-tools/backend";
-import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
+import {
+  deploy,
+  startLocalJazzServer,
+  startTestJazz,
+  type LocalJazzServerHandle,
+  type TestJazz,
+} from "jazz-tools/testing";
 import permissions from "../permissions";
 import { app } from "../schema";
 
 describe("Better Auth storage boundary", () => {
   let server: LocalJazzServerHandle | undefined;
   let session: Awaited<ReturnType<typeof createJazzSession>> | undefined;
-  let ordinarySession: Awaited<ReturnType<typeof createJazzSession>> | undefined;
+  let front: TestJazz | undefined;
+  let client: Db | undefined;
 
   afterEach(async () => {
     await session?.close();
-    await ordinarySession?.close();
+    await client?.shutdown();
+    await front?.stop();
     await server?.stop();
   });
 
@@ -48,16 +57,26 @@ describe("Better Auth storage boundary", () => {
       })
       .wait({ tier: "global" });
 
-    ordinarySession = await createJazzSession({
+    // An ordinary client is a local-first guest, syncing through the app's
+    // backend: a core admits only its app's backend.
+    front = await startTestJazz({ core: server, app, permissions });
+    let storedAccount: string | null = null;
+    const accounts = await createAccountManager({
       appId: server.appId,
-      app,
-      permissions,
-      driver: { type: "memory" },
-      serverUrl: server.url,
-      env: "test-client",
-      initial: "local-first",
+      serverUrl: front.url,
+      store: {
+        read: async () => storedAccount,
+        update: async (transform) => {
+          storedAccount = transform(storedAccount);
+        },
+      },
     });
-    const client = ordinarySession.getSnapshot().client!.db;
+    client = await createDb({
+      appId: server.appId,
+      serverUrl: front.url,
+      account: accounts.createLocalFirst(),
+      driver: { type: "memory" },
+    });
     await expect(client.all(app.better_auth_user, { tier: "remote" })).resolves.toEqual([]);
     await expect(
       client

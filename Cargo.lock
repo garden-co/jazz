@@ -2171,7 +2171,6 @@ dependencies = [
  "jazz-text",
  "libc",
  "postcard",
- "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

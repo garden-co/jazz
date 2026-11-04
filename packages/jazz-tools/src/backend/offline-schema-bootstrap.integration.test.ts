@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { defineMigration, exportLocalFirstSecret, schema as s } from "../index.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { deploy, startLocalJazzServer, startTestJazz, type TestJazz } from "../testing/index.js";
 import { appMigrations } from "../testing/client-migrations.js";
 import { createJazzSession } from "./index.js";
 
@@ -44,6 +44,22 @@ describe("offline persistent schema bootstrap", () => {
         type Session = Awaited<ReturnType<typeof createJazzSession>>;
         const sessions = new Set<Session>();
         let readerSecret: string | undefined;
+        // Local-first readers reach the core through the app's backend, which
+        // runs the latest deploy; a redeploy keeps the backend's origin.
+        let front: TestJazz | undefined;
+        async function redeployFront(
+          frontApp: typeof oldApp | typeof newApp,
+          frontPermissions: typeof oldPermissions | typeof newPermissions,
+        ) {
+          const port = front ? Number(new URL(front.url).port) : undefined;
+          await front?.stop();
+          front = await startTestJazz({
+            app: frontApp,
+            permissions: frontPermissions,
+            core: server,
+            port,
+          });
+        }
         async function open(
           clientApp: Parameters<typeof createJazzSession>[0]["app"],
           name: string,
@@ -51,7 +67,7 @@ describe("offline persistent schema bootstrap", () => {
         ) {
           const session = await createJazzSession({
             appId: settings.appId,
-            serverUrl: server.url,
+            serverUrl: asReader ? front!.url : server.url,
             app: clientApp,
             permissions: clientApp === newApp ? newPermissions : oldPermissions,
             driver: { type: "persistent", dataPath: join(directory, name) },
@@ -78,6 +94,7 @@ describe("offline persistent schema bootstrap", () => {
             schema: oldApp,
             permissions: oldPermissions,
           });
+          await redeployFront(oldApp, oldPermissions);
           const seed = await open(oldApp, "seed", false);
           await seed.db
             .upsert(oldApp.entries, randomUUID(), { text: "retained row" })
@@ -98,6 +115,7 @@ describe("offline persistent schema bootstrap", () => {
             await server.stop();
             server = await startLocalJazzServer({ ...settings, port });
           }
+          await redeployFront(newApp, newPermissions);
           const upgraded = await open(newApp, "reader");
           expect(await upgraded.db.all(newApp.entries, { tier: "remote" })).toMatchObject([
             { text: "retained row" },
@@ -141,6 +159,7 @@ describe("offline persistent schema bootstrap", () => {
           await close(retained.session);
         } finally {
           for (const session of sessions) await close(session);
+          await front?.stop();
           await server.stop();
           await rm(directory, { recursive: true, force: true });
         }

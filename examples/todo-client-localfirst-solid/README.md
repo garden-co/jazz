@@ -8,8 +8,8 @@ Local-first todo app on Solid + Vite, anonymous auth via `useLocalFirstAuth`, In
 - `useAll` reactive queries with composable `where()` filters.
 - `useDb` synchronous local writes (`db.insert`, `db.update`, `db.delete`).
 - Row-level permissions — `owner_id` enforced by `definePermissions`; invalid mutations surface as toast errors via `solid-sonner`.
-- IndexedDB-backed persistence across reload, plus optional server sync when `VITE_JAZZ_SERVER_URL` is set.
-- `pnpm dev` starts a local Jazz core next to Vite (`dev/examples/with-local-core.mjs`) and passes its URL in `VITE_JAZZ_SERVER_URL`.
+- IndexedDB-backed persistence across reload, synced through the app's own backend.
+- Jazz inside the app's backend: `jazz.server.ts` runs `createJazz` in the Vite server, so pages sync on their own origin under `/jazz`. In production, run the same `createJazz` in your server.
 
 ## Schema
 
@@ -22,7 +22,7 @@ Local-first todo app on Solid + Vite, anonymous auth via `useLocalFirstAuth`, In
 pnpm dev
 ```
 
-`pnpm dev` starts a local Jazz core and the Vite dev server together (`dev/examples/with-local-core.mjs`), which passes `VITE_JAZZ_APP_ID` / `VITE_JAZZ_SERVER_URL` to the dev environment.
+`pnpm dev` starts Vite with Jazz inside it (`jazz.server.ts`); data stays in `.jazz/`.
 
 ## Tests
 

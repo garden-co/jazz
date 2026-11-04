@@ -782,6 +782,7 @@ export class JazzContext {
       {
         appId: this.config.appId,
         accountRegistry: accountRegistryUrl(this.config.serverUrl, this.config.appId),
+        backendSecret: this.config.backendSecret,
         jwksUrl: this.config.jwksUrl,
         jwtPublicKey: this.config.jwtPublicKey,
         jwtIssuer: this.config.jwtIssuer,

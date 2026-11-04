@@ -8,9 +8,6 @@ use jazz::schema::JazzSchema;
 use tracing::info;
 
 use crate::middleware::AuthConfig;
-use crate::middleware::auth::{
-    JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
-};
 use crate::profiling::{self, HeapProfileDump};
 use crate::server::routes;
 use crate::server::{ServerState, StoredCatalogue};
@@ -223,7 +220,6 @@ impl ServerBuilder {
         if let StorageBackend::Persistent { path } = &self.storage_backend {
             refuse_pre_sqlite_data_dir(path)?;
         }
-        let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config);
 
         // One store per app: the catalogue and the account registry are host
@@ -248,7 +244,6 @@ impl ServerBuilder {
             catalogue: crate::server::ServerCatalogue,
             app_id: self.app_id,
             auth_config,
-            jwt_verifier,
             backend_credential,
             workload_secrets,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
@@ -730,113 +725,7 @@ fn test_schema_branches(schema: Option<&Schema>) -> Vec<String> {
     schema.map(|_| "main".to_string()).into_iter().collect()
 }
 
-async fn build_jwt_verifier(auth_config: &AuthConfig) -> Result<Option<Arc<JwtVerifier>>, String> {
-    match (
-        auth_config.jwks_url.as_ref(),
-        auth_config.jwt_public_key.as_ref(),
-    ) {
-        (Some(_), Some(_)) => Err(
-            "configure either --jwks-url / JAZZ_JWKS_URL or --jwt-public-key / JAZZ_JWT_PUBLIC_KEY, not both"
-                .to_string(),
-        ),
-        (None, None) => Ok(None),
-        (None, Some(public_key)) => {
-            let verifier = StaticJwtVerifier::from_public_key(public_key)?;
-            Ok(Some(Arc::new(JwtVerifier::Static(verifier))))
-        }
-        (Some(jwks_url), None) => {
-            let jwks_ttl = std::env::var("JAZZ_JWKS_CACHE_TTL_SECS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(Duration::from_secs)
-                .unwrap_or(JWKS_CACHE_TTL);
-            let jwks_max_stale = std::env::var("JAZZ_JWKS_MAX_STALE_SECS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(Duration::from_secs)
-                .unwrap_or(JWKS_MAX_STALE);
-
-            let http_client = reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(10))
-                .build()
-                .map_err(|e| format!("failed to build JWKS HTTP client: {e}"))?;
-
-            let verifier = Arc::new(JwtVerifier::Jwks(JwksCache::new(
-                jwks_url.clone(),
-                http_client,
-                jwks_ttl,
-                jwks_max_stale,
-            )));
-
-            // Warm the cache in the background. The JWKS endpoint may not be
-            // available yet (e.g. Jazz server starts during Next.js config resolution,
-            // before the app is listening). First auth request will block on fetch
-            // if the background warm hasn't completed.
-            {
-                let verifier = Arc::clone(&verifier);
-                tokio::spawn(async move {
-                    if let JwtVerifier::Jwks(cache) = verifier.as_ref()
-                        && let Err(e) = cache.load(false).await
-                    {
-                        tracing::warn!(
-                            "Background JWKS warm failed (will retry on first auth request): {e}"
-                        );
-                    }
-                });
-            }
-
-            Ok(Some(verifier))
-        }
-    }
-}
-
 fn validate_server_config(auth_config: &AuthConfig) -> Result<(), String> {
-    let has_jwt_key = auth_config.jwks_url.is_some() || auth_config.jwt_public_key.is_some();
-    if auth_config
-        .jwt_issuer
-        .as_deref()
-        .is_some_and(|value| value.trim().is_empty())
-    {
-        return Err("external JWT issuer cannot be empty".to_owned());
-    }
-    if auth_config
-        .jwt_audience
-        .as_deref()
-        .is_some_and(|value| value.trim().is_empty())
-    {
-        return Err("external JWT audience cannot be empty".to_owned());
-    }
-
-    match (
-        auth_config.jwt_issuer.as_ref(),
-        auth_config.jwt_audience.as_ref(),
-    ) {
-        (Some(_), Some(_)) if !has_jwt_key => {
-            return Err(
-                "external JWT issuer/audience require --jwks-url / JAZZ_JWKS_URL or --jwt-public-key / JAZZ_JWT_PUBLIC_KEY"
-                    .to_owned(),
-            );
-        }
-        (Some(_), None) => {
-            return Err(
-                "external JWT verification requires --jwt-audience / JAZZ_JWT_AUDIENCE".to_owned(),
-            );
-        }
-        (None, Some(_)) => {
-            return Err(
-                "external JWT verification requires --jwt-issuer / JAZZ_JWT_ISSUER".to_owned(),
-            );
-        }
-        (None, None) if has_jwt_key && !auth_config.allow_local_first_auth => {
-            return Err(
-                "external JWT verification requires --jwt-issuer / JAZZ_JWT_ISSUER and --jwt-audience / JAZZ_JWT_AUDIENCE"
-                    .to_owned(),
-            );
-        }
-        _ => {}
-    }
-
     if let Some(workload) = &auth_config.trusted_workload {
         if auth_config.admin_secret.is_some() || auth_config.backend_secret.is_some() {
             return Err(
@@ -874,14 +763,8 @@ fn validate_server_config(auth_config: &AuthConfig) -> Result<(), String> {
 
 fn log_auth_config(auth_config: &AuthConfig) {
     info!(
-        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, jwt_issuer={}, jwt_audience={}, cookie={}, trust_forwarded_host={}, backend={}, admin={}",
+        "Auth configured: local_first={}, backend={}, admin={}",
         auth_config.allow_local_first_auth,
-        auth_config.jwks_url.is_some(),
-        auth_config.jwt_public_key.is_some(),
-        auth_config.jwt_issuer.is_some(),
-        auth_config.jwt_audience.is_some(),
-        auth_config.auth_cookie_name.is_some(),
-        auth_config.trust_forwarded_host,
         auth_config.backend_secret.is_some(),
         auth_config.admin_secret.is_some()
     );
@@ -902,26 +785,6 @@ mod tests {
                     .column("body", jazz::tools::public_schema::ColumnType::Text),
             )
             .build()
-    }
-
-    #[test]
-    fn local_first_server_may_start_with_unbound_jwks_but_external_only_may_not() {
-        let local_first = AuthConfig {
-            jwks_url: Some("http://127.0.0.1:9/jwks".to_owned()),
-            allow_local_first_auth: true,
-            ..Default::default()
-        };
-        validate_server_config(&local_first)
-            .expect("local-first admission does not require external JWT bindings");
-
-        let external_only = AuthConfig {
-            allow_local_first_auth: false,
-            ..local_first
-        };
-        let error = validate_server_config(&external_only)
-            .expect_err("an external-only verifier must be explicitly bound");
-        assert!(error.contains("--jwt-issuer"), "{error}");
-        assert!(error.contains("--jwt-audience"), "{error}");
     }
 
     #[tokio::test]

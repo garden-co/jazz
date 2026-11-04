@@ -48,6 +48,8 @@ self-hosted production server, set `JAZZ_ALLOW_LOCAL_FIRST_AUTH=true` or pass
 
 For an external auth provider, set either `JAZZ_JWKS_URL` or `JAZZ_JWT_PUBLIC_KEY` before
 starting the server. The JWT's verified `sub` claim becomes the Jazz session's `user_id`.
+A new identity signs in once with `POST /sign-in`, which provisions its Jazz account for
+this app; the `/todos` routes only admit identities that have signed in.
 Clients never send `owner_id`; `POST /todos` always assigns the authenticated session owner.
 The `/health` endpoint remains public.
 

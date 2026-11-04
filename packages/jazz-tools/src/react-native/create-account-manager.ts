@@ -2,6 +2,7 @@ import { installNativeRuntimeEntropy } from "../runtime/runtime-entropy.js";
 import { accountRegistryUrl } from "../accounts/context.js";
 import { clientScope } from "../runtime/client-scope.js";
 import { prepareAccountManager, type AccountStore } from "../accounts/persistence.js";
+import type { AppBearer } from "../accounts/enrollment.js";
 import { formatAuthSecret, parseAuthSecret } from "../runtime/auth-secret-codec.js";
 
 export interface AccountManagerConfig {
@@ -15,6 +16,13 @@ export interface AccountManagerConfig {
   serverUrl: string;
   /** Atomic OS-protected storage scoped to this application, registry, and profile. */
   store: AccountStore;
+  /**
+   * The app's own token for its backend (an app has no cookie to send), read
+   * whenever it is needed: sent as `Authorization: Bearer` when signing in
+   * through the backend (`loginWithBackend`) and on the device's sync
+   * connection, where the backend's `authenticate` reads who the user is.
+   */
+  bearer?: AppBearer;
 }
 
 /** Prepare native crypto and retained selection without opening a Jazz context. */
@@ -36,6 +44,7 @@ export async function createAccountManager(config: AccountManagerConfig) {
     appId: clientScope(config),
     registry,
     store: config.store,
+    bearer: config.bearer,
     generateSecret: () => formatAuthSecret(generateSecret()),
     mintToken: (secret, audience) =>
       mintToken(parseAuthSecret(secret), audience, 3600, Math.floor(Date.now() / 1000)),
