@@ -126,7 +126,7 @@ app's core is refused.
   yet.
 - The first request in an environment takes longer: it creates the Sandbox and downloads the Jazz
   server onto the Drive.
-- The Sandbox stops after 5 minutes without traffic or open sockets. The next request wakes it,
-  which takes about a second.
+- The Sandbox stops after 5 minutes with no requests and no connected clients; a connected
+  client keeps it awake, even when idle. The next request wakes it, which takes about a second.
 - Deploying a newer `jazz-tools` restarts the core on that version, which briefly drops open
   sockets; clients reconnect. An older deployment that is still running never moves the core back.
