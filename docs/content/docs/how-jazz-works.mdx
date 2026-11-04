@@ -12,8 +12,7 @@ description: "Learn the mental model behind Jazz, how backends and clients talk 
 
 - Each Jazz server stores its data in plain SQLite: tables, rows, indexes
 - Large values (files, blobs, streams) live in S3-compatible object storage
-- Works on local disk (Turso is not supported yet)
-- Why SQLite: fast, embeddable, simple to back up and inspect
+- Works with local disk and compatible cloud storage
 
 ## What Jazz adds on top
 
@@ -117,6 +116,12 @@ Use `db.onMutationError()` as a fallback for rejected writes that do not have an
 call. The callback receives the rejection `code`, `reason`, and local transaction record. See
 [Writing data](/docs/writing/writing-data#write-durability-tiers) for an example and
 [Permissions](/docs/schemas/policies) for how the server decides whether to accept a write.
+
+</Accordion>
+
+<Accordion id="why-sqlite" title="Why SQLite?">
+
+It's fast, embeddable, and simple to back up and inspect.
 
 </Accordion>
 
