@@ -1,6 +1,6 @@
 ---
 title: Testing
-description: "Learn how to test your Jazz app, with and without a sync server."
+description: "Learn how to test your Jazz app, on its own and through your app's backend."
 ---
 
 As you develop your Jazz application, you might find yourself needing to test functionality relating to the database, including sync and offline behaviour.
@@ -15,8 +15,8 @@ so that results do not persist across test runs.
 
 Keep in mind this approach is limited, though. Db instances that are not connected to a server cannot enforce permissions.
 
-For UI tests you can also use a simple in-memory DB configuration without a server, but it's generally more useful to spin up
-a test server for your app (see the [next section](/docs/tooling/testing#testing-jazz-dbs-connected-to-a-sync-server)).
+For UI tests you can also use a simple in-memory DB configuration without a server, but it's generally more useful to run
+your app's backend in the test (see [Testing with your app's backend](/docs/tooling/testing#testing-with-your-apps-backend)).
 
 ### Testing permissions
 
@@ -128,18 +128,53 @@ const invitedUser = testApp.as({
 });
 ```
 
-## Testing Jazz DBs connected to a sync server
+## Testing with your app's backend
 
-In many cases, it's more useful to test a Jazz database that's connected to a sync server. Jazz provides
-utilities to set up a local sync server for tests, available in `jazz-tools/testing`:
+Clients never talk to a Jazz core directly: a core admits only its app's backend. So tests that
+sync go through your app's own `createJazz`, the way production does. `startTestJazz` from
+`jazz-tools/testing` starts an in-memory core and your app's Jazz in front of it, with `remote()`
+as its store and a stand-in `authenticate`:
 
-- use `startLocalJazzServer` to create a test sync server
-- use `deploy` to publish your app's schema and permissions to the server
+```typescript
+import { startTestJazz, type TestJazz } from "jazz-tools/testing";
+import permissions from "../permissions.js";
+import { app } from "../schema.js";
 
-Once the server is created, you can connect client databases to it using `createDb` with the server's URL and appId.
+const testJazz: TestJazz = await startTestJazz({ app, permissions });
+```
 
-To test sign-in end to end, run `createJazz` with a `memory()` store and a stand-in for your auth,
-then sign in through it the way the browser does:
+- **Guests** (anonymous or local-first clients) connect to `testJazz.url`.
+- **Signed-in users** call `await testJazz.as(userId, claims)`. Each user gets their own origin,
+  which stands in for their browser's session cookie, and your permissions see `userId` and
+  `claims` as the signed-in user. Spread the result into the client's config.
+- **Native clients** that send `Authorization: Bearer` use `testJazz.bearer(userId, claims)` as
+  their token against `testJazz.url`.
+- `testJazz.jazz` is the app's `Jazz` handle, for `forRequest`, `db` and the rest of your backend
+  code.
+- `await testJazz.stop()` stops everything it started.
+
+```typescript
+import { createDb } from "jazz-tools";
+
+const alice = await createDb({
+  ...(await testJazz.as("alice")),
+  driver: { type: "memory" },
+});
+const bob = await createDb({
+  ...(await testJazz.as("bob")),
+  driver: { type: "memory" },
+});
+
+await alice.insert(app.todos, { title: "Buy milk", done: false }).wait({ tier: "global" });
+```
+
+To share one core between suites, start it yourself with `startLocalJazzServer` and pass it as
+`startTestJazz({ core, app, permissions })`, or tune the core it starts with `coreOptions`.
+
+### Testing sign-in
+
+To test your real `authenticate` instead of the stand-in, run `createJazz` with a `memory()`
+store and sign in through it the way the browser does:
 
 ```typescript custom="noscroll"
 import { randomUUID } from "node:crypto";
@@ -184,105 +219,40 @@ it("signs in the user authenticate names", async () => {
 
 ### UI tests
 
-For browser or framework tests, start one local sync server for the test project and mount your app against it.
-This lets your framework's bindings create their own Jazz clients connected to the server.
+For browser or framework tests, start one `startTestJazz` for the test project (for example in
+Vitest's [globalSetup](https://vitest.dev/config/globalsetup)) and point your app's Jazz client
+at it: `testJazz.url` for guests, or the `serverUrl` from `testJazz.as(userId)` for a signed-in
+user. Your framework's bindings then create their own clients against it.
 
-You can often do this in a single place (e.g. using Vitest's [globalsetup](https://vitest.dev/config/globalsetup)).
-
-```typescript title="tests/browser/global-setup.ts"
-import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
-import permissions from "../../permissions.js";
-import { app } from "../../schema.js";
-import { ADMIN_SECRET, APP_ID, TEST_PORT } from "./test-constants.js";
-
-let server: LocalJazzServerHandle;
-
-export async function setup(): Promise<void> {
-  server = await startLocalJazzServer({
-    appId: APP_ID,
-    port: TEST_PORT,
-    adminSecret: ADMIN_SECRET,
-  });
-
-  await deploy({
-    serverUrl: server.url,
-    appId: server.appId,
-    adminSecret: server.adminSecret,
-    schema: app,
-    permissions,
-  });
-}
-
-export async function teardown(): Promise<void> {
-  await server.stop();
-}
-```
-
-If you need to isolate data across tests, you can use different `dbName`s when creating the client database.
-For local-first auth in browser tests, create one account handle per logical user and reuse that handle when testing reloads. Prepare accounts before mounting the UI, outside any Jazz context:
-
-```tsx
-import { createAccountManager } from "jazz-tools";
-import { JazzProvider } from "jazz-tools/react";
-import type { ReactNode } from "react";
-
-const accounts = await createAccountManager({
-  appId: APP_ID,
-  serverUrl: `http://127.0.0.1:${TEST_PORT}`,
-});
-const account = accounts.createLocalFirst();
-const dbName = crypto.randomUUID();
-
-function TestApp({ children }: { children: ReactNode }) {
-  return (
-    <JazzProvider
-      config={{
-        appId: APP_ID,
-        serverUrl: `http://127.0.0.1:${TEST_PORT}`,
-        account,
-        driver: { type: "persistent", dbName },
-      }}
-    >
-      {children}
-    </JazzProvider>
-  );
-}
-```
+If you need to isolate data across tests, give each client its own `dbName`.
 
 ### Testing sync
 
-Having multiple client databases connected to the same sync server also lets you test scenarios that require data
-to be synced across client databases, such as sharing content across users. The utilities presented until now are
-usually enough for this type of tests, but we also provide a few additional utilities for advanced scenarios.
+Several clients on the same `startTestJazz` let you test anything that crosses clients, such as
+sharing between users.
 
 #### Testing offline behavior
 
-Simulating offline clients can be useful to test conflict resolution works correctly when multiple users make changes while being offline.
-Call `db.disconnect()` to temporarily stop syncing that client with its configured Jazz server, and `db.reconnect()` to resume syncing.
-
-While disconnected, writes will only be performed locally and reads can only retrieve local data.
-After `reconnect()`, pending writes are sent to the server and writes missed from other clients are received.
+Call `db.disconnect()` to stop syncing a client, and `db.reconnect()` to resume. While
+disconnected, writes only happen locally and reads only see local data. After `reconnect()`,
+pending writes are sent and writes missed from other clients arrive. This is how you test that
+concurrent offline edits merge the way you expect.
 
 #### Testing migrations
 
-`deploy` can also be used to publish [migrations](/docs/schemas/migrations). When the server already has a schema, `deploy` can push
-a migration between the current server schema and the new schema. This makes it possible to test clients with different schemas.
+`testJazz.redeploy({ app, permissions, migration })` deploys a new version of your app the way a
+real redeploy does: it publishes the new bundle with its migration and restarts your app's Jazz on
+it. Every origin keeps its port, so clients reconnect where they were. A client still using the
+old schema keeps reading and writing through the migration's lens:
 
 ```typescript custom="noscroll"
-import { createDb, schema as s, migration as m, type Db } from "jazz-tools";
-import { appMigrations, deploy, startLocalJazzServer } from "jazz-tools/testing";
-import { describe, expect, it, vi } from "vitest";
+import { createDb, schema as s, migration as m } from "jazz-tools";
+import { appMigrations, startTestJazz } from "jazz-tools/testing";
+import { expect, it, vi } from "vitest";
 
 const oldSchema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-    },
-    {},
-  ),
+  todos: s.table({ title: s.string(), done: s.boolean() }, {}),
 };
-
 const newSchema = {
   todos: s.table(
     {
@@ -293,94 +263,65 @@ const newSchema = {
     {},
   ),
 };
-
 const migration = m.defineMigration({
   from: oldSchema,
   to: newSchema,
-  migrate: {
-    todos: {
-      tags: m.add.array({ of: s.string(), default: [] }),
-    },
-  },
+  migrate: { todos: { tags: m.add.array({ of: s.string(), default: [] }) } },
 });
 
 // In an app these come from the generated `migrations/index.ts`. A test that
 // defines its schemas in code builds the same bundle with `appMigrations`.
-const oldApp = s.defineApp(oldSchema, { migrations: await appMigrations(oldSchema) });
+const oldApp = s.defineApp(oldSchema, {
+  migrations: await appMigrations(oldSchema),
+});
 const newApp = s.defineApp(newSchema, {
   migrations: await appMigrations(oldSchema, { to: newSchema, migration }),
 });
+const allowAll = (app: typeof oldApp | typeof newApp) =>
+  s.definePermissions(app, ({ policy }) => [
+    policy.todos.allowRead.always(),
+    policy.todos.allowInsert.always(),
+  ]);
 
-const oldPermissions = s.definePermissions(oldApp, ({ policy }) => [
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-]);
+it("lets old-schema clients write rows new-schema clients can read", async () => {
+  const testJazz = await startTestJazz({
+    app: oldApp,
+    permissions: allowAll(oldApp),
+  });
+  const oldDb = await createDb({
+    ...(await testJazz.as("alice")),
+    driver: { type: "memory" },
+  });
 
-const newPermissions = s.definePermissions(newApp, ({ policy }) => [
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-]);
+  await testJazz.redeploy({
+    app: newApp,
+    permissions: allowAll(newApp),
+    migration,
+  });
+  const newDb = await createDb({
+    ...(await testJazz.as("bob")),
+    driver: { type: "memory" },
+  });
 
-describe("migrations", () => {
-  it("lets old-schema clients write rows new-schema clients can read", async () => {
-    const server = await startLocalJazzServer({
-      inMemory: true,
+  const created = await oldDb
+    .insert(oldApp.todos, { title: "written through old schema", done: false })
+    .wait({ tier: "global" });
+
+  await vi.waitFor(async () => {
+    const rows = await newDb.all(newApp.todos.where({ id: { eq: created.id } }), {
+      tier: "remote",
     });
-    const { appId, adminSecret, url: serverUrl } = server;
-    let oldDb: Db | undefined;
-    let newDb: Db | undefined;
-
-    await deploy({
-      serverUrl,
-      appId,
-      adminSecret,
-      schema: oldApp,
-      permissions: oldPermissions,
-    });
-
-    await deploy({
-      serverUrl,
-      appId,
-      adminSecret,
-      schema: newApp,
-      permissions: newPermissions,
-      migration,
-    });
-
-    oldDb = await createDb({
-      appId,
-      serverUrl,
-      adminSecret,
-      driver: { type: "memory" },
-    });
-    newDb = await createDb({
-      appId,
-      serverUrl,
-      adminSecret,
-      driver: { type: "memory" },
-    });
-
-    const created = await oldDb
-      .insert(oldApp.todos, {
+    expect(rows).toEqual([
+      {
+        id: created.id,
         title: "written through old schema",
         done: false,
-      })
-      .wait({ tier: "global" });
-
-    await vi.waitFor(async () => {
-      const rows = await newDb.all(newApp.todos.where({ id: { eq: created.id } }), {
-        tier: "remote",
-      });
-
-      expect(rows).toEqual([
-        {
-          id: created.id,
-          title: "written through old schema",
-          done: false,
-          tags: [],
-        },
-      ]);
-    });
+        tags: [],
+      },
+    ]);
   });
+
+  await Promise.all([oldDb.shutdown(), newDb.shutdown()]);
+  await testJazz.stop();
 });
 ```
