@@ -1276,11 +1276,12 @@ pub enum SyncMessage {
         nodes: Vec<WireChunk>,
         missing: Vec<WireChunkRef>,
     },
-    /// Row images. `tx_ids` names the transactions behind the history
+    /// Row images. `tx_ids` names the transactions behind the shipped
     /// versions among them, as [`TxName`]s: a replica lists a history
     /// version only once it knows its `$transactionId`, and a one-shot
     /// read frozen at a snapshot names the commits that snapshot holds.
-    /// Empty for current rows.
+    /// They also prevent replaying an accepted write over its own result;
+    /// only `Fate` settles a pending write.
     Rows {
         images: Vec<Image>,
         tx_ids: Vec<TxName>,
@@ -8649,6 +8650,7 @@ impl Db {
             return Ok(());
         };
         let baseline = std::mem::take(&mut client.baselines);
+        let node = client.node;
         // Unsettled versions order last-writer-wins by their commits'
         // `Order` (SPEC 8 §8.13): the pending commits replay in it, and one
         // replays on a row only over an upstream's unsettled version that
@@ -8687,6 +8689,22 @@ impl Db {
         let view = inner.stored_view();
         let active = std::mem::replace(&mut inner.schema, view);
         let replayed = pending.into_iter().try_for_each(|(order, tx, ops, rows)| {
+            // Transaction IDs identify accepted versions, not the write's
+            // receipt. If every coordinate has reached this commit or later,
+            // replay would apply it twice. Keep the pending upload and its
+            // waiters until the actual Fate arrives.
+            if let Some(Some(accepted)) = inner.settled(node, tx)?
+                && !rows.is_empty()
+                && rows.iter().all(|row| {
+                    baseline
+                        .get(row)
+                        .and_then(Option::as_ref)
+                        .is_some_and(|image| image.at.accepted() && image.at >= accepted)
+                })
+            {
+                return Ok(());
+            }
+
             begin_savepoint(&inner.conn, "replay")?;
             inner.merging = true;
             // The branches this commit wrote that an upstream's later
@@ -10724,11 +10742,6 @@ impl Db {
                     SyncMessage::Catalogue(catalogue)
                 });
             }
-            let tx_ids = if history_seqs.is_empty() {
-                Vec::new()
-            } else {
-                inner.tx_ids(&history_seqs)?
-            };
             let session = &mut inner.sessions[index];
             session.watch = watch;
             session.held = held_rows;
@@ -10785,6 +10798,16 @@ impl Db {
                     }
                 }
             }
+            // Rows may precede their receipt. Name accepted versions after
+            // echo suppression so the writer does not replay them twice.
+            history_seqs.extend(
+                images
+                    .iter()
+                    .filter(|image| image.at.accepted())
+                    .map(|image| image.at.seq),
+            );
+            let tx_ids = inner.tx_ids(&history_seqs)?;
+            let session = &mut inner.sessions[index];
             out.extend(rows_messages(images, tx_ids, ROWS_MESSAGE_BYTES));
             out.extend(evictions);
             out.extend(std::mem::take(&mut session.outbox));
@@ -11726,6 +11749,14 @@ impl Db {
                         }
                     }
                 }
+                // A one-shot read can also deliver an accepted version before
+                // its receipt, including a tombstone alongside its history.
+                seqs.extend(
+                    images
+                        .iter()
+                        .filter(|image| image.at.accepted())
+                        .map(|image| image.at.seq),
+                );
                 let mut tx_ids = inner.tx_ids(&seqs)?;
                 tx_ids.extend(named);
                 let through = at.unwrap_or_else(|| inner.served_through());
