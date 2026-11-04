@@ -392,3 +392,98 @@ fn equal_sql_groups_keep_current_owner_and_distinct_admitted_bundles() {
         );
     }
 }
+
+/// Alice's observation request must use her actual admitted Selected handle
+/// and fixed claims while Bob changes the owner/registry. This lower-crate
+/// test uses real private admission because no public pin selector exists.
+#[test]
+fn local_observation_context_keeps_admitted_policy_claims_and_generation() {
+    for allowed in [false, true] {
+        let owner = open(boolean_schema(!allowed));
+        block_on(owner.insert(
+            "notes",
+            BTreeMap::from([("body".into(), Value::String("held".into()))]),
+            Default::default(),
+        ))
+        .unwrap();
+        let schema = boolean_schema(allowed);
+        let bundle = block_on(owner.publish_bundle(schema.public_schema())).unwrap();
+        let (_peer, transport) = super::duplex();
+        let fixed = BTreeMap::from([("scope".into(), Value::String("admitted".into()))]);
+        let slot = owner
+            .accept_pinned_subscriber(transport, alice(), Some(fixed.clone()), Some(bundle))
+            .unwrap();
+        owner.set_identity_claims(
+            alice(),
+            BTreeMap::from([("scope".into(), Value::String("registry".into()))]),
+        );
+        let (handle, subject, claims, policy) = owner.admitted_observation_context(slot).unwrap();
+        assert_eq!(
+            policy,
+            Some(alice()),
+            "foreign authority session keeps policy enforcement"
+        );
+        assert_eq!(subject, alice());
+        assert_eq!(claims, fixed.clone());
+        let query = handle
+            .prepare_query(&Query::from("notes"))
+            .unwrap()
+            .with_identity_claims(subject, claims);
+        assert_eq!(
+            block_on(handle.all_for_identity(&query, ReadOpts::default(), subject))
+                .unwrap()
+                .len(),
+            usize::from(allowed)
+        );
+        let retained = handle
+            .retain_local_authority_read(&query, false, Some(subject))
+            .unwrap();
+        assert_eq!(retained.rows.len(), usize::from(allowed));
+        let cut = handle
+            .local_observation_cut_for_admitted_session(&query, slot)
+            .unwrap();
+        let observed = handle.observe_local(&cut, &query, false).unwrap();
+        assert_eq!(observed.rows.len(), usize::from(allowed));
+        assert_eq!(observed.evidence.len(), observed.rows.len());
+        owner.disconnect_subscriber(slot);
+        assert!(owner.admitted_observation_context(slot).is_err());
+        assert!(handle.observe_local(&cut, &query, false).is_err());
+    }
+}
+
+/// A non-SYSTEM store refuses SYSTEM admission. A legally SYSTEM-owned
+/// store serves that identity with owner-registry claims, not supplied fixed
+/// claims. The unreachable foreign-SYSTEM path gets no runtime claim here.
+#[test]
+fn local_observation_system_session_uses_actual_owner_operands() {
+    let non_system = block_on(Db::open(DbConfig::new(
+        boolean_schema(true),
+        DbIdentity {
+            node: NodeUuid::from_bytes([93; 16]),
+            author: alice(),
+        },
+    )))
+    .unwrap();
+    non_system.set_authority();
+    let claims = BTreeMap::from([("scope".into(), Value::String("owner".into()))]);
+    let wrong = BTreeMap::from([("scope".into(), Value::String("fixed".into()))]);
+    let (_peer, transport) = super::duplex();
+    let error = non_system
+        .accept_pinned_subscriber(transport, AuthorSubject::SYSTEM, Some(wrong.clone()), None)
+        .unwrap_err();
+    assert_eq!(error.reason, Some(crate::db::Reason::IdentityMismatch));
+
+    let owner = open(boolean_schema(true));
+    owner.set_identity_claims(AuthorSubject::SYSTEM, claims.clone());
+    owner.set_identity_claims(alice(), wrong.clone());
+    let (_peer, transport) = super::duplex();
+    let slot = owner
+        .accept_pinned_subscriber(transport, AuthorSubject::SYSTEM, Some(wrong), None)
+        .unwrap();
+    let (_handle, author, actual, policy) = owner.admitted_observation_context(slot).unwrap();
+    assert_eq!(author, AuthorSubject::SYSTEM);
+    assert_eq!(actual, claims);
+    assert_eq!(policy, None);
+    owner.disconnect_subscriber(slot);
+    assert!(owner.admitted_observation_context(slot).is_err());
+}

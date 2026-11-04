@@ -66,6 +66,7 @@ type TabPeer = {
   pump: BrowserWorkerTransportPump | null;
   subscriber: Transport | null;
   pendingFrames: Uint8Array[];
+  pendingLocalCompanions: Uint8Array[];
   flushedLocal: boolean;
   flushRequestId: number | null;
   flushPumpComplete: boolean;
@@ -1435,6 +1436,7 @@ function attachTab(
     pump: null,
     subscriber: null,
     pendingFrames: [],
+    pendingLocalCompanions: [],
     flushedLocal: false,
     flushRequestId: null,
     flushPumpComplete: false,
@@ -1469,6 +1471,15 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     return;
   }
   if (message.type === "frames") {
+    // Optional host metadata is bounded and shape-checked independently. A
+    // malformed companion never prevents delivery of otherwise-valid frames.
+    const companions =
+      Array.isArray(message.localCompanions) && message.localCompanions.length <= 64
+        ? message.localCompanions.filter(
+            (value): value is Uint8Array =>
+              value instanceof Uint8Array && value.byteLength <= 4 * 1024 * 1024,
+          )
+        : [];
     if (peer.context.options.logLevel === "trace") {
       recordWorkerLifecycle(
         "peer-frames",
@@ -1483,7 +1494,15 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       // delivery continues. Preserve ordering instead of treating those
       // already-staged follower frames as a protocol violation.
       peer.pendingFrames.push(...message.frames);
+      // Legitimate foreground frames follow init's response; retain a bounded
+      // optional lane if delivery raced admission. Overflow drops evidence.
+      if (peer.pendingLocalCompanions.length + companions.length <= 64) {
+        peer.pendingLocalCompanions.push(...companions);
+      } else peer.pendingLocalCompanions.length = 0;
       return;
+    }
+    for (const companion of companions) {
+      peer.subscriber?.attachLocalSubmissionCompanion?.(companion);
     }
     peer.pump.receive(message.frames);
     return;
@@ -1674,6 +1693,46 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       post(peer.port, { type: "inspector-binding", id: message.id, binding: message.binding });
       return;
     }
+    if (message.type === "observe-local") {
+      // Use the normal admission/auth queue so a rebind cannot overtake result
+      // publication. Raw provider claims differ from the foreground's added
+      // iss/sub operands; only core can compare their canonical admitted scope.
+      await enqueueTransportTransition(peer.context, async () => {
+        if (
+          !peer.subscriber ||
+          !peer.pump ||
+          peer.context.storageInvalidated ||
+          peer.context.closing
+        )
+          throw new Error("Local observation owner/session is unavailable");
+        const subscriber = peer.subscriber;
+        await peer.pump.flush();
+        if (
+          peer.subscriber !== subscriber ||
+          peer.context.runtime !== activeRuntime ||
+          peer.context.closing ||
+          peer.context.storageInvalidated
+        )
+          throw new Error("Local observation owner/session was replaced");
+        // Equality operands only: the actual Link supplies identity, fixed
+        // claims and governance and rejects any canonical scope mismatch.
+        const observations = await activeRuntime.observeLocalBatchForPeer(
+          subscriber,
+          message.queries,
+          message.sessionClaims,
+          message.schema,
+        );
+        if (
+          peer.context.peers.get(peer.tabId) !== peer ||
+          peer.context.runtime !== activeRuntime ||
+          peer.context.storageInvalidated ||
+          peer.context.closing
+        )
+          throw new Error("Local observation owner was replaced");
+        result(peer, message.id, undefined, { observations });
+      });
+      return;
+    }
     if (message.type === "init") {
       await enqueueTransportTransition(peer.context, async () => {
         const canPublishAdmission = () =>
@@ -1699,13 +1758,17 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           // Close and storage invalidation revoke publication synchronously,
           // without waiting for recovery to finish.
           if (!canPublishAdmission()) return;
-          const pump = attachPeerTransport(peer, activeRuntime, unownedSubscriber);
+          const subscriber = unownedSubscriber;
+          const pump = attachPeerTransport(peer, activeRuntime, subscriber);
           unownedSubscriber = null;
           recordWorkerLifecycle(
             "peer-attached",
             peer.context.options.dbName,
             peer.context.options.authSessionKey,
           );
+          for (const companion of peer.pendingLocalCompanions.splice(0)) {
+            subscriber.attachLocalSubmissionCompanion?.(companion);
+          }
           if (peer.pendingFrames.length > 0) {
             const pending = peer.pendingFrames.splice(0);
             pump.receive(pending);
@@ -1985,6 +2048,7 @@ function result(
   id: number,
   error?: Error,
   receipt?: {
+    observations?: import("../runtime/client.js").LocalObservationSnapshot[];
     inspectorAttachmentPhysicalDbName?: string;
     peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
     workerRealmId?: string;

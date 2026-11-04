@@ -409,6 +409,7 @@ fn not_supported(what: &str) -> JsValue {
 /// The browser's half of the hooks: callbacks and the durable store.
 #[derive(Default)]
 struct Host {
+    closed: std::cell::Cell<bool>,
     tick_scheduler: RefCell<Option<js_sys::Function>>,
     /// Told of a write rejected at apply time that no wait claimed.
     mutation_errors: RefCell<Option<js_sys::Function>>,
@@ -422,6 +423,23 @@ impl Host {
         if let Some(scheduler) = scheduler {
             let _ = scheduler.call1(&JsValue::NULL, &JsValue::from_str(wake));
         }
+    }
+
+    fn is_flushed(&self) -> Result<bool, JsValue> {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(store) = self.store.borrow().as_ref() {
+            return store.is_flushed();
+        }
+        Ok(true)
+    }
+
+    fn has_store(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.store.borrow().is_some()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        false
     }
 
     /// Resolve once every commit so far is in the browser store's backing
@@ -795,9 +813,9 @@ impl WasmWrite {
         Err(not_supported("write state snapshots"))
     }
 
-    /// Resolve once the write reached `tier`: at once for `none` and
-    /// `local` (the commit is in the store when the write call returns), on
-    /// the server's acceptance for `global`, rejecting if it refused.
+    /// Resolve once the write reached `tier`: immediately for `none`, after
+    /// the backing-store flush for `local`, or on authority acceptance for
+    /// `global`. A known rejection fails the wait at every tier.
     #[wasm_bindgen(js_name = wait)]
     pub fn wait(
         &self,
@@ -814,7 +832,15 @@ impl WasmWrite {
         if !observe_only.unwrap_or(false) {
             self.claimed.set(true);
         }
-        Ok(host_promise(fate, |()| JsValue::UNDEFINED))
+        let db = db.clone();
+        let local = durability_tier_from_str(&tier)? == DurabilityTier::Local;
+        Ok(future_to_promise(async move {
+            fate.await.map_err(host_error)?;
+            if local {
+                db.host.flush().await?;
+            }
+            Ok(JsValue::UNDEFINED)
+        }))
     }
 
     #[wasm_bindgen]
@@ -880,6 +906,7 @@ impl WasmDb {
         self.inner
             .borrow()
             .clone()
+            .filter(|inner| !inner.host.closed.get())
             .ok_or_else(|| JsValue::from_str("WasmDb is closed"))
     }
 
@@ -1172,7 +1199,7 @@ impl WasmDb {
     }
 
     /// Open the durable store a browser worker owns. `storage` selects the
-    /// SQLite VFS: `{ backend: "indexeddb" | "opfs", path?: string }`
+    /// SQLite VFS: `{ backend: "indexeddb" | "opfs", path?: string, requireExisting?: boolean }`
     /// (IndexedDB when omitted; see [`browser`]). The default file is named
     /// after `database`, the physical database name the worker admitted.
     #[cfg(target_arch = "wasm32")]
@@ -1399,6 +1426,24 @@ impl WasmDb {
             )
             .map_err(host_error)?;
         wasm_read_or_pending(Box::pin(async move { read.await.map_err(host_error) }))
+    }
+
+    #[wasm_bindgen(js_name = observeLocalBatch)]
+    pub fn observe_local_batch(
+        &self,
+        queries: js_sys::Array,
+        author: Option<Vec<u8>>,
+        claims: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let queries = queries
+            .iter()
+            .map(|value| js_sys::Uint8Array::new(&value).to_vec())
+            .collect();
+        let value = self
+            .binding()?
+            .observe_local_batch(queries, author.as_deref(), json(claims)?)
+            .map_err(host_error)?;
+        js_sys::JSON::parse(&value.to_string())
     }
 
     /// Bind correlation claims to this already-open client's own identity.
@@ -1709,7 +1754,7 @@ impl WasmDb {
     pub fn connect_upstream(&self) -> Result<js_sys::Promise, JsValue> {
         let link = self.binding()?.connect_upstream();
         Ok(js_sys::Promise::resolve(&JsValue::from(
-            WasmTransport::new(link),
+            WasmTransport::new(link, None),
         )))
     }
 
@@ -1780,12 +1825,13 @@ impl WasmDb {
         claims: JsValue,
     ) -> Result<js_sys::Promise, JsValue> {
         let claims = binding_host::claims(identity, json_or_null(claims)?).map_err(host_error)?;
-        let link = self
-            .binding()?
+        let inner = self.open_inner()?;
+        let link = inner
+            .binding
             .accept_subscriber(identity, claims)
             .map_err(host_error)?;
         Ok(js_sys::Promise::resolve(&JsValue::from(
-            WasmTransport::new(link),
+            WasmTransport::new(link, Some(inner.host)),
         )))
     }
 
@@ -1797,14 +1843,23 @@ impl WasmDb {
             return js_sys::Promise::resolve(&JsValue::from_bool(false));
         };
         let owns_runtime = self.owns_runtime;
+        if owns_runtime {
+            inner.host.closed.set(true);
+            inner.binding.hooks.progress.wake_all();
+        }
         future_to_promise(async move {
             if owns_runtime {
                 inner.binding.db.set_tick_scheduler(None);
                 inner.host.tick_scheduler.borrow_mut().take();
-                inner.binding.close().await.map_err(host_error)?;
-                inner.host.flush().await?;
+                let closed = inner.binding.close().await;
+                let retired = inner.binding.db.retire_storage_owner();
+                inner.binding.hooks.progress.wake_all();
+                let flushed = inner.host.flush().await;
                 #[cfg(target_arch = "wasm32")]
                 inner.host.store.borrow_mut().take();
+                closed.map_err(host_error)?;
+                retired.map_err(|error| core_error_to_js(&error))?;
+                flushed?;
             }
             Ok(JsValue::TRUE)
         })
@@ -1818,11 +1873,83 @@ impl WasmDb {
 #[wasm_bindgen]
 pub struct WasmTransport {
     link: binding_host::Link,
+    // Only a durable worker's downstream publication needs this barrier.
+    // Upstream chunk requests must remain able to drive a pending core tick.
+    persistence: Option<Rc<Host>>,
+    outbound: Rc<RefCell<DurableOutbound>>,
+}
+
+#[derive(Default)]
+struct DurableOutbound {
+    ready: Vec<Vec<u8>>,
+    in_flight: usize,
+    failed: Option<JsValue>,
+    scheduler: Option<js_sys::Function>,
+    closed: bool,
 }
 
 impl WasmTransport {
-    fn new(link: binding_host::Link) -> Self {
-        Self { link }
+    fn new(link: binding_host::Link, persistence: Option<Rc<Host>>) -> Self {
+        Self {
+            link,
+            persistence: persistence.filter(|host| host.has_store()),
+            outbound: Rc::default(),
+        }
+    }
+
+    /// Keep each downstream batch in order until its writes have reached the
+    /// backing store. In particular, Stored/Fate must not acknowledge a tab's
+    /// Local wait while IndexedDB still owns an uncommitted transaction.
+    fn take_durable_outbound(&self) -> Result<Vec<Vec<u8>>, JsValue> {
+        let Some(host) = self.persistence.as_ref() else {
+            return Ok(self.link.take_outbound());
+        };
+        let mut outbound = self.outbound.borrow_mut();
+        if outbound.closed {
+            return Ok(Vec::new());
+        }
+        if let Some(error) = &outbound.failed {
+            return Err(error.clone());
+        }
+        let mut ready = std::mem::take(&mut outbound.ready);
+        if outbound.in_flight == 0 && self.link.outbound_len() != 0 {
+            match host.is_flushed() {
+                Ok(true) => {
+                    ready.extend(self.link.take_outbound());
+                    return Ok(ready);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    outbound.failed = Some(error.clone());
+                    return Err(error);
+                }
+            }
+            let frames = self.link.take_outbound();
+            outbound.in_flight = frames.len();
+            let host = Rc::clone(host);
+            let state = Rc::clone(&self.outbound);
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = host.flush().await;
+                let scheduler = {
+                    let mut outbound = state.borrow_mut();
+                    outbound.in_flight = 0;
+                    if outbound.closed {
+                        return;
+                    }
+                    match result {
+                        Ok(()) => outbound.ready.extend(frames),
+                        Err(error) => outbound.failed = Some(error),
+                    }
+                    outbound.scheduler.clone()
+                };
+                // The host must drain again on both success and failure. A
+                // failed flush terminates the peer transport, never write Fate.
+                if let Some(scheduler) = scheduler {
+                    let _ = scheduler.call0(&JsValue::NULL);
+                }
+            });
+        }
+        Ok(ready)
     }
 }
 
@@ -1874,6 +2001,52 @@ impl WasmTransport {
     #[wasm_bindgen(js_name = setAuxiliaryTraceEnabled)]
     pub fn set_auxiliary_trace_enabled(&self, _enabled: bool) {}
 
+    #[wasm_bindgen(js_name = observeLocalBatch)]
+    pub fn observe_local_batch(
+        &self,
+        queries: js_sys::Array,
+        claims: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let queries = queries
+            .iter()
+            .map(|value| js_sys::Uint8Array::new(&value).to_vec())
+            .collect();
+        let value = self
+            .link
+            .observe_local_batch(queries, Some(json_or_null(claims)?))
+            .map_err(host_error)?;
+        js_sys::JSON::parse(&value.to_string())
+    }
+
+    /// Private trusted local-host channel, never call for network transports.
+    #[wasm_bindgen(js_name = enableLocalSubmissionSource)]
+    pub fn enable_local_submission_source(&self) -> Result<(), JsValue> {
+        self.link
+            .enable_local_submission_source()
+            .map_err(host_error)
+    }
+
+    #[wasm_bindgen(js_name = retireLocalSubmissionPort)]
+    pub fn retire_local_submission_port(&self) {
+        self.link.retire_local_submission_port();
+    }
+
+    #[wasm_bindgen(js_name = takeLocalSubmissionCompanions)]
+    pub fn take_local_submission_companions(&self) -> js_sys::Array {
+        self.link
+            .take_local_submission_companions()
+            .into_iter()
+            .map(|bytes| JsValue::from(js_sys::Uint8Array::from(bytes.as_slice())))
+            .collect()
+    }
+
+    #[wasm_bindgen(js_name = attachLocalSubmissionCompanion)]
+    pub fn attach_local_submission_companion(&self, bytes: Vec<u8>) -> Result<bool, JsValue> {
+        self.link
+            .attach_local_submission_companion(&bytes)
+            .map_err(host_error)
+    }
+
     #[wasm_bindgen(js_name = sendWireFrame)]
     pub fn send_wire_frame(&self, frame: Vec<u8>) {
         self.link.receive([frame]);
@@ -1889,16 +2062,17 @@ impl WasmTransport {
     }
 
     #[wasm_bindgen(js_name = recvWireFrames)]
-    pub fn recv_wire_frames(&self) -> js_sys::Array {
+    pub fn recv_wire_frames(&self) -> Result<js_sys::Array, JsValue> {
         let frames = js_sys::Array::new();
-        for frame in self.link.take_outbound() {
+        for frame in self.take_durable_outbound()? {
             frames.push(&js_sys::Uint8Array::from(frame.as_slice()).into());
         }
-        frames
+        Ok(frames)
     }
 
     #[wasm_bindgen(js_name = setOutboundScheduler)]
     pub fn set_outbound_scheduler(&self, callback: js_sys::Function) {
+        self.outbound.borrow_mut().scheduler = Some(callback.clone());
         self.link.set_outbound_ready(Some(Box::new(move || {
             let _ = callback.call0(&JsValue::NULL);
         })));
@@ -1906,6 +2080,7 @@ impl WasmTransport {
 
     #[wasm_bindgen(js_name = clearOutboundScheduler)]
     pub fn clear_outbound_scheduler(&self) {
+        self.outbound.borrow_mut().scheduler = None;
         self.link.set_outbound_ready(None);
     }
 
@@ -1915,14 +2090,24 @@ impl WasmTransport {
     pub fn tick(&self) -> js_sys::Promise {
         let binding = self.link.binding().clone();
         let pending = self.link.outbound_counter();
+        let outbound = Rc::clone(&self.outbound);
         future_to_promise(async move {
             binding.tick().await.map_err(host_error)?;
-            Ok(JsValue::from_f64(pending() as f64))
+            let outbound = outbound.borrow();
+            Ok(JsValue::from_f64(
+                (pending() + outbound.ready.len() + outbound.in_flight) as f64,
+            ))
         })
     }
 
     #[wasm_bindgen(js_name = close)]
     pub fn close(&mut self) -> bool {
+        let mut outbound = self.outbound.borrow_mut();
+        outbound.closed = true;
+        outbound.ready.clear();
+        outbound.scheduler = None;
+        drop(outbound);
+        self.link.set_outbound_ready(None);
         self.link.close()
     }
 }

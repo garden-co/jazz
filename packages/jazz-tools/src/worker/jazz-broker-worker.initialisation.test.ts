@@ -831,6 +831,109 @@ describe("broker worker context initialization", () => {
     }
   });
 
+  it("attaches private local companions before ordinary frames and reads one durable-owner batch", async () => {
+    const first = await bounded(connect(options("local-observation-bridge"), "alice"));
+    const runtime = mocks.runtimes[0]!;
+    const order: string[] = [];
+    const subscriber = Object.assign(createAdmissionTransport(), {
+      attachLocalSubmissionCompanion: vi.fn(() => {
+        order.push("companion");
+        return false;
+      }),
+    });
+    subscriber.sendWireFrame = vi.fn(() => {
+      order.push("frame");
+    });
+    runtime.acceptPeer.mockResolvedValueOnce(subscriber);
+    const observations = [{ rows: [], evidence: [], provenance: [], through: "7" }];
+    runtime.observeLocalBatchForPeer = vi.fn(async () => observations);
+    try {
+      await initializeFollower(first.port, 1);
+      first.port.emitMessage({
+        type: "frames",
+        frames: [Uint8Array.of(1)],
+        localCompanions: [Uint8Array.of(2)],
+      });
+      await nextTask();
+      expect(order).toEqual(["companion", "frame"]);
+      // A refused optional companion did not discard the normal frame.
+      const reply = await bounded(
+        followerResult(first.port, {
+          type: "observe-local",
+          id: 2,
+          queries: ["roots", "refs"],
+          sessionClaims: { iss: "urn:jazz:local-first", sub: "alice" },
+          schema: Uint8Array.of(3),
+        }),
+      );
+      expect(reply).toMatchObject({ observations });
+      expect(runtime.observeLocalBatchForPeer).toHaveBeenCalledExactlyOnceWith(
+        subscriber,
+        ["roots", "refs"],
+        { iss: "urn:jazz:local-first", sub: "alice" },
+        Uint8Array.of(3),
+      );
+      // Native binding canonicalizes identity operands and refuses a genuine
+      // provider-scope mismatch; the worker must propagate that refusal.
+      runtime.observeLocalBatchForPeer.mockRejectedValueOnce(
+        new Error("local observation admission claims changed"),
+      );
+      const refused = await bounded(
+        followerResult(first.port, {
+          type: "observe-local",
+          id: 3,
+          queries: ["roots"],
+          sessionClaims: { scope: "unadmitted" },
+          schema: Uint8Array.of(3),
+        }),
+      );
+      expect(refused).toHaveProperty("error.message", "local observation admission claims changed");
+      expect(runtime.observeLocalBatchForPeer).toHaveBeenCalledTimes(2);
+    } finally {
+      first.port.emitMessage({ type: "close" });
+    }
+  });
+
+  it("publishes an admitted observation before a queued auth rebind", async () => {
+    const first = await bounded(connect(options("local-observation-auth-order"), "alice"));
+    const runtime = mocks.runtimes[0]!;
+    const subscriber = Object.assign(createAdmissionTransport(), {
+      updateAuthenticatedClaims: vi.fn(async () => undefined),
+    });
+    runtime.acceptPeer.mockResolvedValueOnce(subscriber);
+    const held = deferred<unknown[]>();
+    runtime.observeLocalBatchForPeer = vi.fn(() => held.promise);
+    const observations = [{ rows: [], evidence: [], provenance: [], through: "7" }];
+    try {
+      await initializeFollower(first.port, 1);
+      const reading = followerResult(first.port, {
+        type: "observe-local",
+        id: 2,
+        queries: ["roots"],
+        sessionClaims: {},
+        schema: Uint8Array.of(3),
+      });
+      await vi.waitFor(() => expect(runtime.observeLocalBatchForPeer).toHaveBeenCalledOnce());
+      first.port.emitMessage({
+        type: "update-auth",
+        authJson: TAB_AUTH,
+        sessionClaims: { scope: "next" },
+      });
+      await nextTask();
+      expect(subscriber.updateAuthenticatedClaims).not.toHaveBeenCalled();
+      held.resolve(observations);
+      await expect(bounded(reading)).resolves.toMatchObject({ observations });
+      await vi.waitFor(() =>
+        expect(subscriber.updateAuthenticatedClaims).toHaveBeenCalledExactlyOnceWith({
+          scope: "next",
+        }),
+      );
+    } finally {
+      held.resolve(observations);
+      first.port.emitMessage({ type: "close" });
+    }
+  });
+
   it("revokes pending admission publication synchronously on storage invalidation", async () => {
     const first = await bounded(connect(options("invalidated-pending-admission"), "first"));
     const runtime = mocks.runtimes[0]!;

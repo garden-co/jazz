@@ -336,6 +336,113 @@ fn drive_local(owners: &[&Db]) {
         }
     }
 }
+
+/// Alice's missing, altered, wrong-owner or retired companion never changes
+/// the valid ordinary Commit; Bob's receiver must refuse observation evidence.
+#[test]
+fn host_local_port_refusals_preserve_ordinary_commit_without_evidence() {
+    for mode in [
+        "missing",
+        "fingerprint",
+        "wrong-owner",
+        "retired",
+        "generation",
+    ] {
+        let schema = schema("notes", "body");
+        let authority = block_on(Db::open_history_complete(observation_config(
+            schema.clone(),
+            1,
+        )))
+        .unwrap();
+        let durable = block_on(Db::open(observation_config(schema.clone(), 7))).unwrap();
+        let foreground = block_on(Db::open(observation_config(schema, 9))).unwrap();
+        connect_local(&authority, &durable);
+        let (session, _) = connect_local(&durable, &foreground);
+        drive_local(&[&authority, &durable, &foreground]);
+        let source = foreground.local_submission_source().unwrap();
+        let port = durable
+            .trusted_local_submission_port(session, source.descriptor())
+            .unwrap();
+        let write =
+            block_on(foreground.insert("notes", body("body", mode), Default::default())).unwrap();
+        let mut bytes = source
+            .export(jazz::db::TxReceipt(write.mergeable_tx_id()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes.len(), 88 + 52 + 49, "v1 one-operation encoding");
+        assert_eq!(
+            u64::from_le_bytes(bytes[96..104].try_into().unwrap()),
+            write.mergeable_tx_id()
+        );
+        assert_eq!(bytes[140], 1);
+        assert_eq!(
+            &bytes[141..157],
+            foreground.current_schema().version_id().as_bytes()
+        );
+        match mode {
+            "missing" => {}
+            "fingerprint" => {
+                bytes[104] ^= 1;
+                assert!(durable.attach_host_local_submission(&port, &bytes).unwrap());
+            }
+            "wrong-owner" => assert!(
+                !authority
+                    .attach_host_local_submission(&port, &bytes)
+                    .unwrap()
+            ),
+            "retired" => {
+                port.retire();
+                assert!(!durable.attach_host_local_submission(&port, &bytes).unwrap());
+            }
+            "generation" => {
+                durable.disconnect_subscriber(session);
+                let (replacement, _) = connect_local(&durable, &foreground);
+                assert_ne!(replacement, session);
+                assert!(!durable.attach_host_local_submission(&port, &bytes).unwrap());
+            }
+            _ => unreachable!(),
+        }
+        drive_local(&[&authority, &durable, &foreground]);
+        block_on(
+            foreground
+                .wait_for_transaction(write.mergeable_tx_id(), jazz::tx::DurabilityTier::Global),
+        )
+        .unwrap();
+        let query = durable.prepare_query(&Query::from("notes")).unwrap();
+        assert_eq!(
+            durable.read(&query).unwrap()[0].cell("body"),
+            Some(Value::String(mode.into()))
+        );
+        let cut = durable.local_observation_cut(&query, None).unwrap();
+        assert_eq!(
+            durable.observe_local(&cut, &query, false).unwrap_err().code,
+            jazz::db::ErrorCode::NotObserved,
+            "{mode}"
+        );
+    }
+}
+
+/// Alice's direct physical-owner retirement revokes an escaped C cut before
+/// SQLite's authorizer fence; no retained local capability survives it.
+#[test]
+fn direct_storage_retirement_invalidates_local_observation_cut() {
+    let db = block_on(Db::open_history_complete(observation_config(
+        schema("notes", "body"),
+        1,
+    )))
+    .unwrap();
+    block_on(db.insert("notes", body("body", "accepted"), Default::default())).unwrap();
+    let query = db.prepare_query(&Query::from("notes")).unwrap();
+    db.retain_local_authority_read(&query, false, None).unwrap();
+    let cut = db.local_observation_cut(&query, None).unwrap();
+    assert_eq!(db.observe_local(&cut, &query, false).unwrap().rows.len(), 1);
+    db.retire_storage_owner().unwrap();
+    assert_eq!(
+        db.observe_local(&cut, &query, false).unwrap_err().code,
+        jazz::db::ErrorCode::NotObserved
+    );
+    assert!(db.local_submission_source().is_err());
+}
 fn observation_config(schema: JazzSchema, node: u8) -> DbConfig {
     DbConfig::new(
         schema,
@@ -369,6 +476,18 @@ fn roots_schema() -> JazzSchema {
 /// This is a native SQLite persistence test, not a browser/worker claim.
 #[test]
 fn trusted_local_root_ref_global_reopen_uses_one_accepted_cut() {
+    root_ref_reopen(false);
+}
+
+/// Alice's separately hosted foreground exports only core-generated local
+/// companions; her durable owner admits the ordinary lowered Commit and
+/// reopens offline with root/reference evidence under one shared cut.
+#[test]
+fn host_local_port_root_ref_global_reopen_uses_one_accepted_cut() {
+    root_ref_reopen(true);
+}
+
+fn root_ref_reopen(host_port: bool) {
     use jazz::db::{LocalEvidenceProvenance, TxReceipt};
     let schema = roots_schema();
     let directory = tempfile::tempdir().unwrap();
@@ -449,11 +568,37 @@ fn trusted_local_root_ref_global_reopen_uses_one_accepted_cut() {
     ))
     .unwrap();
     let receipt = block_on(foreground.commit_serializable_handle(tx)).unwrap();
-    let export = foreground
-        .export_local_submission(&route, receipt)
-        .unwrap()
-        .unwrap();
-    assert!(durable.attach_local_submission(&route, export).unwrap());
+    if host_port {
+        let source = foreground.local_submission_source().unwrap();
+        let port = durable
+            .trusted_local_submission_port(session, source.descriptor())
+            .unwrap();
+        let companion = source.export(receipt).unwrap().unwrap();
+        assert_eq!(&companion[..8], b"JZLCAP01");
+        let mut malformed = companion.clone();
+        malformed.push(0);
+        assert!(
+            !durable
+                .attach_host_local_submission(&port, &malformed)
+                .unwrap()
+        );
+        assert!(
+            durable
+                .attach_host_local_submission(&port, &companion)
+                .unwrap()
+        );
+        assert!(
+            !durable
+                .attach_host_local_submission(&port, &companion)
+                .unwrap()
+        );
+    } else {
+        let export = foreground
+            .export_local_submission(&route, receipt)
+            .unwrap()
+            .unwrap();
+        assert!(durable.attach_local_submission(&route, export).unwrap());
+    }
     // Local durability includes both pending content and its original schemas.
     block_on(foreground.tick()).unwrap();
     block_on(durable.tick()).unwrap();

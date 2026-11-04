@@ -39,7 +39,7 @@ fn publish_body(schema: Schema) -> Value {
 async fn admin_deploy_requires_secret_and_explicit_permissions() {
     let server = start_server().await;
     let client = reqwest::Client::new();
-    let url = app_url(&server, "/admin/deploy");
+    let url = app_url(&server, "/admin/bundles");
     let body = publish_body(SchemaBuilder::new().build());
 
     assert_eq!(
@@ -77,7 +77,7 @@ async fn admin_deploy_requires_secret_and_explicit_permissions() {
 async fn admin_schema_api_rejects_oversized_bodies_before_the_handler_runs() {
     let server = start_server().await;
     let client = reqwest::Client::new();
-    let response = admin_request(client.post(app_url(&server, "/admin/deploy")))
+    let response = admin_request(client.post(app_url(&server, "/admin/bundles")))
         .header("content-type", "application/json")
         .body(vec![b' '; MAX_ADMIN_REQUEST_BODY_BYTES + 1])
         .send()
@@ -93,7 +93,7 @@ async fn admin_schema_api_rejects_oversized_bodies_before_the_handler_runs() {
 async fn admin_schema_api_publishes_lists_and_gets_schema_json() {
     let server = start_server().await;
     let client = reqwest::Client::new();
-    let publish_url = app_url(&server, "/admin/deploy");
+    let publish_url = app_url(&server, "/admin/bundles");
     let published = admin_request(client.post(&publish_url))
         .json(&publish_body(schema_with_column(
             "todos",
@@ -146,7 +146,7 @@ async fn admin_schema_api_publishes_lists_and_gets_schema_json() {
 async fn admin_schema_api_rejects_noncanonical_schema_payloads() {
     let server = start_server().await;
     let client = reqwest::Client::new();
-    let url = app_url(&server, "/admin/deploy");
+    let url = app_url(&server, "/admin/bundles");
 
     // These intentionally bypass the schema builders: the HTTP boundary must
     // reject old/noncanonical JSON that no public Rust schema API can create.
@@ -183,7 +183,7 @@ async fn admin_schema_api_rejects_noncanonical_schema_payloads() {
 async fn admin_schema_api_accepts_public_schema_tables_wrapper() {
     let server = start_server().await;
     let client = reqwest::Client::new();
-    let response = admin_request(client.post(app_url(&server, "/admin/deploy")))
+    let response = admin_request(client.post(app_url(&server, "/admin/bundles")))
         .json(&publish_body(
             SchemaBuilder::new()
                 .table(
@@ -214,7 +214,7 @@ async fn admin_schema_api_persists_catalogue_in_the_production_storage_backend()
         .await
         .expect("start test server");
     let client = reqwest::Client::new();
-    let published = admin_request(client.post(app_url(&server, "/admin/deploy")))
+    let published = admin_request(client.post(app_url(&server, "/admin/bundles")))
         .json(&publish_body(schema_with_column(
             "notes",
             "body",

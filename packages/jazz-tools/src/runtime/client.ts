@@ -162,7 +162,25 @@ export type AuthUpdate =
 /**
  * Common interface for the runtime backing `JazzClient`.
  */
+/** @internal Partial accepted local candidates; never SELECT or completeness proof. */
+export type LocalObservationSnapshot = {
+  rows: Row[];
+  through: string;
+  evidence: {
+    rowId: string;
+    state: { transactionId: string; position: string };
+    content: { transactionId: string; position: string };
+  }[];
+  provenance: ("local-submission" | "authority-read")[];
+};
+
 export interface Runtime {
+  /** @internal One shared cut on the actual durable owner, excluding pending prefixes. */
+  observeLocalBatch?(
+    queries: readonly string[],
+    sessionJson?: string | null,
+  ): Promise<LocalObservationSnapshot[]>;
+
   /**
    * Wait until every write committed so far reaches `tier`. `throughOutage`
    * keeps the wait pending through outages until a terminal failure.
@@ -379,6 +397,8 @@ export interface AuthConfig {
   admin_secret?: string;
   /** Opaque session payload forwarded by a backend proxy. */
   backend_session?: unknown;
+  /** The published permissions bundle the session is pinned to. */
+  bundle?: string;
 }
 
 /**
@@ -1898,6 +1918,20 @@ export class JazzClient {
       : undefined;
     if (preparation) await preparation;
     return this.queryWithoutPreparation(query, options, session);
+  }
+
+  /** @internal Keep the same effective session selection as ordinary queries. */
+  async observeLocalBatch(
+    queries: readonly string[],
+    session?: Session,
+  ): Promise<LocalObservationSnapshot[]> {
+    if (!this.runtime.observeLocalBatch)
+      throw new Error("Runtime does not expose local accepted observations");
+    const effective = session ?? this.resolvedSession;
+    return this.runtime.observeLocalBatch(
+      queries,
+      effective ? JSON.stringify(serializeRuntimeSession(effective)) : undefined,
+    );
   }
 
   private async queryWithoutPreparation(

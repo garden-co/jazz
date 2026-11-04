@@ -166,3 +166,19 @@ creation-provenance cell to the exact named content image, while allowing those
 two state stamps to change. Equal state/content coordinates compare all cells;
 a content-bearing state cannot substitute an earlier content image. Ordinary
 reads continue to project the state metadata through the existing read machinery.
+
+## Canonical author operands in the scope digest
+
+The v1 scope preimage now accepts an exact identity-derived author record under
+its canonical policy key. Tag `17` identifies this case; the already-encoded
+bound author and key determine the whole value. A record for another author or
+under a provider-supplied key remains unsupported. This recognises a canonical
+operand; it does not authenticate a requested identity or select its policies.
+
+Previously supported scope values retain exactly the same bytes and digest.
+These record operands were previously unsupported, so no old accepted encoding
+is reinterpreted. The unchanged v1 JSON fixtures cover the existing encodings;
+the canonical-author unit pins the new marker bytes and inverse cases. An older
+implementation refuses observation for this scope rather than interpreting a
+new record encoding. Ordinary commits and their wire/storage layout are
+unchanged, and missing prior capture is never filled retrospectively.

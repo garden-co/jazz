@@ -880,3 +880,100 @@ fn fetched_chunks_are_served_even_when_the_puts_beside_them_fail() {
         );
     }
 }
+
+/// Alice retires an in-memory owner with no external chunk store before the
+/// host asks for a no-work batch. Bob's separate live owner remains usable.
+#[test]
+fn retired_owner_refuses_new_host_chunk_io() {
+    let (_dir, path) = scratch();
+    let store: Arc<dyn ChunkStore> = Arc::new(Remote::default());
+    let alice = block_on(Db::open(
+        config(74, AuthorSubject::SYSTEM).with_host_chunk_io(),
+    ))
+    .unwrap();
+    alice.retire_storage_owner().unwrap();
+    let refused = alice
+        .take_chunk_io()
+        .expect_err("retired owner admitted a no-work result");
+    assert_eq!(refused.code, ErrorCode::Storage);
+    let bob = open_host_io(&path, store);
+    assert!(bob.take_chunk_io().unwrap().is_some());
+}
+
+/// Alice's host fetch starts before retirement and completes afterwards.
+/// The retired owner refuses the result and sends no fetched bytes to Bob.
+///
+/// ```text
+/// Bob requests -> Alice takes fetch -> retire Alice -> finish refused
+/// ```
+#[test]
+fn retired_owner_refuses_completed_host_chunk_fetch() {
+    let (_dir, path) = scratch();
+    let remote = Remote::default();
+    let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
+    moved_to(&path, &store, &text(71, LARGE));
+    let alice = open_host_io(&path, store.clone());
+    let bob = subscribe_to(&alice);
+    let io = (0..32)
+        .find_map(|_| {
+            block_on(bob.alice.tick()).unwrap();
+            block_on(alice.tick()).unwrap();
+            let io = alice.take_chunk_io().unwrap()?;
+            (io.counts().0 > 0).then_some(io)
+        })
+        .expect("Bob requested an offloaded chunk");
+    let done = run_elsewhere(io, store.clone());
+    assert!(remote.objects().gets > 0);
+    alice.retire_storage_owner().unwrap();
+    let queued = bob.down.borrow().len();
+    let refused = alice
+        .finish_chunk_io(done)
+        .expect_err("retired owner accepted completion");
+    assert_eq!(refused.code, ErrorCode::Storage);
+    assert_eq!(
+        bob.down.borrow().len(),
+        queued,
+        "no fetched-byte publication"
+    );
+    let fresh = open_host_io(&path, store);
+    assert_eq!(body(&fresh, 1), text(71, LARGE));
+}
+
+/// Alice retires while her ordinary tick awaits a chunk-store fetch. That
+/// completed fetch must not be served, nor start a following put batch.
+#[test]
+fn retired_owner_refuses_inflight_tick_chunk_fetch() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    let (_dir, path) = scratch();
+    let remote = Remote::default();
+    let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
+    moved_to(&path, &store, &text(73, LARGE));
+    let alice = open(&path, Some(store)).unwrap();
+    let bob = subscribe_to(&alice);
+    let mut cx = Context::from_waker(Waker::noop());
+    let tick = (0..32)
+        .find_map(|_| {
+            block_on(bob.alice.tick()).unwrap();
+            let mut tick = Box::pin(alice.tick());
+            match tick.as_mut().poll(&mut cx) {
+                Poll::Pending => Some(tick),
+                Poll::Ready(result) => {
+                    result.unwrap();
+                    None
+                }
+            }
+        })
+        .expect("Alice's tick awaits Bob's cold chunk fetch");
+    alice.retire_storage_owner().unwrap();
+    let queued = bob.down.borrow().len();
+    let puts = remote.objects().puts;
+    let result = block_on(tick);
+    assert_eq!(result.unwrap_err().code, ErrorCode::Storage);
+    assert_eq!(
+        bob.down.borrow().len(),
+        queued,
+        "no fetched-byte publication"
+    );
+    assert_eq!(remote.objects().puts, puts, "no next put dispatch");
+}

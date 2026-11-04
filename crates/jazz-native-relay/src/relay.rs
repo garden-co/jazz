@@ -2148,6 +2148,7 @@ async fn connect_and_bridge(
         peer_identity: config.peer_identity,
         auth: config.auth.clone(),
         authorization: config.authorization.clone(),
+        bundle: None,
         wake: Arc::new(move || inbound_wake.notify_one()),
     };
     let connecting = connector.connect(request);
