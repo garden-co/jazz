@@ -49,6 +49,12 @@ fn schema() -> JazzSchema {
                         vec![outer_eq("room", "room"), session_eq("member", &ME)],
                     ))),
             )
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .fk_column("room", "rooms")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
             .build(),
     )
 }
@@ -1223,4 +1229,128 @@ fn a_row_one_subscription_lost_stays_when_the_losing_one_reopens_first() {
 #[test]
 fn a_row_one_subscription_lost_stays_when_the_holding_one_reopens_first() {
     a_row_one_subscription_lost_stays_for_the_other(false);
+}
+
+/// The rooms `db` holds, read locally.
+fn local_rooms(db: &Db) -> Vec<RowUuid> {
+    let prepared = db.prepare_query(&Query::from("rooms")).unwrap();
+    let opts = ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let mut rows: Vec<RowUuid> = block_on(db.all(&prepared, opts))
+        .unwrap()
+        .iter()
+        .map(|row| row.row_uuid())
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// A row one subscription lost while the client was away, which another
+/// holds only as an included row (a note's room), stays on the replica for
+/// it: the server holds it for that one and would not ship it again.
+fn an_included_row_one_subscription_lost_stays_for_the_other(lost_first: bool) {
+    let server = seeded(1);
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "notes",
+            id(4, 0),
+            AuthorSubject::SYSTEM,
+            cells(&[
+                ("room", Value::Uuid(id(1, 0).0)),
+                ("body", Value::String("n0".into())),
+            ]),
+        )
+        .unwrap();
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    // Rooms alice is a member of, and every note with its room.
+    let member_of = client
+        .prepare_query(&Query::from("rooms").join_via("memberships", "room", []))
+        .unwrap();
+    let notes = client
+        .prepare_query(&Query::from("notes").include("room"))
+        .unwrap();
+    let (first, second) = if lost_first {
+        (&member_of, &notes)
+    } else {
+        (&notes, &member_of)
+    };
+    let _first = block_on(client.subscribe(first, ReadOpts::default())).unwrap();
+    let _second = block_on(client.subscribe(second, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(local_rooms(&client), [id(1, 0)]);
+
+    // Away, alice leaves room 0: the note still includes it, unchanged.
+    assert!(client.detach_connection(&upstream));
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        local_rooms(&client),
+        [id(1, 0)],
+        "room 0 is still the note's included room"
+    );
+}
+
+#[test]
+fn an_included_row_one_subscription_lost_stays_when_the_losing_one_reopens_first() {
+    an_included_row_one_subscription_lost_stays_for_the_other(true);
+}
+
+#[test]
+fn an_included_row_one_subscription_lost_stays_when_the_including_one_reopens_first() {
+    an_included_row_one_subscription_lost_stays_for_the_other(false);
+}
+
+/// A row that left the other subscription through a live delta is no
+/// longer that one's to keep, though its last listing still names it: the
+/// first subscription's listing evicts it.
+#[test]
+fn a_row_that_left_the_other_subscription_live_is_evicted_by_a_listing() {
+    use jazz::query::{col, eq, lit};
+    let server = seeded(1);
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    // Rooms alice is a member of (reopens first), and room 0 by name.
+    let member_of = client
+        .prepare_query(&Query::from("rooms").join_via("memberships", "room", []))
+        .unwrap();
+    let named = client
+        .prepare_query(
+            &Query::from("rooms").filter(eq(col("name"), lit(Value::String("room 0".into())))),
+        )
+        .unwrap();
+    let _member_of = block_on(client.subscribe(&member_of, ReadOpts::default())).unwrap();
+    let _named = block_on(client.subscribe(&named, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(local_rooms(&client), [id(1, 0)]);
+
+    // Room 0 is renamed while connected: it leaves the named query live.
+    block_on(server.update(
+        "rooms",
+        id(1, 0),
+        cells(&[("name", Value::String("renamed".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &client);
+    // Away, alice leaves room 0.
+    assert!(client.detach_connection(&upstream));
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    pump(&server, &client);
+    assert!(
+        local_rooms(&client).is_empty(),
+        "no live read holds room 0 any more"
+    );
 }

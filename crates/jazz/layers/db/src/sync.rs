@@ -6907,6 +6907,114 @@ impl Db {
         Ok(Some((prepared, read)))
     }
 
+    /// The rows of stored `table` that live reads other than this one
+    /// (`query` with `binding`, `include_deleted` and `view`) hold, as the
+    /// server holds them for each: the rows it last listed for the read that
+    /// its settled view still holds, and the rows those reach as support
+    /// (includes, relations, joins, policy inputs), followed as the server
+    /// follows them. A row that left a read through a live delta is no
+    /// longer in its view, so its last listing does not keep it.
+    fn held_by_other_reads(
+        &self,
+        table: &str,
+        query: &Query,
+        binding: &BTreeMap<String, Value>,
+        include_deleted: bool,
+        view: &ReadViewSourceSpec,
+    ) -> Result<HashSet<[u8; 16]>, Error> {
+        let reads: Vec<_> = {
+            let inner = self.inner.borrow();
+            let Some(client) = inner.client.as_ref() else {
+                return Ok(HashSet::new());
+            };
+            client
+                .reads
+                .values()
+                .filter(|other| {
+                    !(other.query == *query
+                        && other.binding == *binding
+                        && other.include_deleted == include_deleted
+                        && other.view == *view)
+                })
+                .filter_map(|other| {
+                    let live = other.live()?;
+                    let through = other.through?;
+                    Some((
+                        other.query.clone(),
+                        other.binding.clone(),
+                        other.include_deleted,
+                        other.view.clone(),
+                        through,
+                        live.listed.clone(),
+                    ))
+                })
+                .collect()
+        };
+        let mut held = HashSet::new();
+        for (other, binding, include_deleted, view, through, listed) in reads {
+            if listed.is_empty() {
+                continue;
+            }
+            let Some((prepared, read)) =
+                self.listed_view(&other, &binding, include_deleted, &view, through)?
+            else {
+                continue;
+            };
+            let inner = self.inner.borrow();
+            let rows: Vec<RowUuid> = match inner.run(&prepared, None, &read) {
+                // Its view cannot be read yet: keep all it was listed with.
+                Err(error) if crate::large::is_missing(&error) => {
+                    listed.iter().map(|id| RowUuid::from_bytes(*id)).collect()
+                }
+                rows => rows?
+                    .into_iter()
+                    .filter(|row| row.union_arm.is_none() && listed.contains(row.id.0.as_bytes()))
+                    .map(|row| row.id)
+                    .collect(),
+            };
+            if rows.is_empty() {
+                continue;
+            }
+            let root = inner.schema.table(&prepared.query.table)?.stored.clone();
+            if root == table {
+                held.extend(rows.iter().map(|row| *row.0.as_bytes()));
+            }
+            // The read's own includes and relations, which its listing view drops.
+            let support = inner.support_of(&remote_query(&other))?;
+            let mut support_tables_read = Vec::new();
+            support_tables(&support, &mut support_tables_read);
+            if !support_tables_read.iter().any(|read| read == table) {
+                continue;
+            }
+            let mut out = Vec::new();
+            let (mut watch, mut kept, mut gone, mut followed) = (
+                Watches::default(),
+                Kept::default(),
+                Vec::new(),
+                HashSet::new(),
+            );
+            let mut follow = Follow {
+                owner: 0,
+                identity: None,
+                policies: inner.owner.clone(),
+                out: &mut out,
+                watch: &mut watch,
+                held: &mut kept,
+                gone: &mut gone,
+                followed: &mut followed,
+            };
+            for image in inner.images_of(&root, false, rows)? {
+                inner.follow_support(&support, &image, None, &mut follow)?;
+            }
+            held.extend(
+                out.into_iter()
+                    .filter(|image| image.table == table)
+                    .map(|image| image.id),
+            );
+        }
+        Ok(held)
+    }
+
     /// Evict the cached rows of a remote query's settled view that its
     /// answer, listing `listed`, left out: the server's result no longer
     /// holds them for this reader. The answer judges only the rows its read
@@ -6929,30 +7037,10 @@ impl Db {
             return Ok(());
         };
         let listed: HashSet<[u8; 16]> = listed.iter().copied().collect();
-        // Rows another live read of the same table was last listed with:
-        // that read's own listing judges them. Evicted here, a resumed one
-        // would count them as held and never ship them.
-        let others: HashSet<[u8; 16]> = self
-            .inner
-            .borrow()
-            .client
-            .as_ref()
-            .map(|client| {
-                client
-                    .reads
-                    .values()
-                    .filter(|other| {
-                        other.query.table == query.table
-                            && !(other.query == query
-                                && other.binding == binding
-                                && other.include_deleted == include_deleted
-                                && other.view == *view)
-                    })
-                    .filter_map(|other| other.live())
-                    .flat_map(|live| live.listed.iter().copied())
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Rows another live read holds are that read's to judge: evicted
+        // here, the server (which still holds them for it) never ships them
+        // again. Read once, and only when a pass finds a stale row.
+        let mut others: Option<HashSet<[u8; 16]>> = None;
         let (table, head, base) = {
             let inner = self.inner.borrow();
             let schema = inner.schema.clone();
@@ -6983,7 +7071,19 @@ impl Db {
                 .filter(|row| row.union_arm.is_none() && !listed.contains(row.id.0.as_bytes()))
                 .map(|row| row.id)
                 .collect();
-            stale.retain(|row| !others.contains(row.0.as_bytes()));
+            if !stale.is_empty() {
+                let others = match &mut others {
+                    Some(others) => others,
+                    None => others.insert(self.held_by_other_reads(
+                        &table,
+                        &query,
+                        &binding,
+                        include_deleted,
+                        view,
+                    )?),
+                };
+                stale.retain(|row| !others.contains(row.0.as_bytes()));
+            }
             if stale.is_empty() || stale == previous {
                 return Ok(());
             }
