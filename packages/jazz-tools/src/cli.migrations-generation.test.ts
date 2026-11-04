@@ -34,7 +34,7 @@ describe("cli migrations", () => {
       const fetchMock = vi.fn(async () =>
         kind === "failed-server"
           ? new Response("unavailable", { status: 503 })
-          : Response.json({ activeSchemaHash: null, schemas: [], migrations: [] }),
+          : Response.json({ latestBundleSchemaHash: null, schemas: [], migrations: [] }),
       );
       vi.stubGlobal("fetch", fetchMock);
       await expect(
@@ -69,7 +69,7 @@ describe("cli migrations", () => {
       const fetchMock = vi.fn(async (url: string) => {
         if (url.endsWith("/migrations/graph"))
           return Response.json({
-            activeSchemaHash: baseline.hash,
+            latestBundleSchemaHash: baseline.hash,
             schemas: [baseline.hash],
             migrations: [],
           });

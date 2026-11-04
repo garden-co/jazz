@@ -68,7 +68,6 @@ fn pinned_reason(reason: Reason) -> &'static str {
         Reason::MissingRequired => "missing_required",
         Reason::BranchMove => "branch_move",
         Reason::MissingChunks => "missing_chunks",
-        Reason::PermissionsHeadMissing => "permissions_head_missing",
         Reason::PredecessorRejected => "predecessor_rejected",
         Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
         Reason::IdentityMismatch => "identity_mismatch",

@@ -51,6 +51,14 @@
       "types": "./dist/client/index.d.ts",
       "default": "./dist/client/index.js"
     },
+    "./thin": {
+      "types": "./dist/thin/index.d.ts",
+      "default": "./dist/thin/index.js"
+    },
+    "./local-first": {
+      "types": "./dist/local-first/index.d.ts",
+      "default": "./dist/local-first/index.js"
+    },
     "./react": {
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
@@ -106,29 +114,9 @@
       "types": "./dist/_dev/inspector-client.d.ts",
       "default": "./dist/_dev/inspector-client.js"
     },
-    "./_dev/schema-hash": {
-      "types": "./dist/_dev/schema-hash.d.ts",
-      "default": "./dist/_dev/schema-hash.js"
-    },
     "./_dev/native-binding-codec": {
       "types": "./dist/_dev/native-binding-codec.d.ts",
       "default": "./dist/_dev/native-binding-codec.js"
-    },
-    "./dev/next": {
-      "types": "./dist/dev/next.d.ts",
-      "default": "./dist/dev/next.js"
-    },
-    "./dev/vite": {
-      "types": "./dist/dev/vite.d.ts",
-      "default": "./dist/dev/vite.js"
-    },
-    "./dev/expo": {
-      "types": "./dist/dev/expo.d.ts",
-      "default": "./dist/dev/expo.js"
-    },
-    "./dev/sveltekit": {
-      "types": "./dist/dev/sveltekit.d.ts",
-      "default": "./dist/dev/sveltekit.js"
     },
     "./svelte": {
       "types": "./dist/svelte/index.d.ts",

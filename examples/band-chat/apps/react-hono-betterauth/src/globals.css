@@ -1,0 +1,70 @@
+/* Layout glue only. Colour, type, spacing and radii come from design tokens. */
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-background-body);
+  color: var(--color-text-primary);
+}
+
+.page-fill {
+  min-height: 100dvh;
+}
+
+.room-view {
+  min-height: 0;
+}
+
+.room-chat {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.room-chat > * {
+  flex: 1;
+  min-height: 0;
+}
+
+.message-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.attachment-audio {
+  max-inline-size: 100%;
+}
+
+.sketch-surface {
+  display: block;
+  inline-size: 100%;
+  block-size: auto;
+  aspect-ratio: 8 / 5;
+  touch-action: none;
+  cursor: crosshair;
+  background: var(--color-background-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-container);
+}
+
+.sketch-surface path {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Message actions stay reachable on touch; with a pointer they appear on hover. */
+@media (hover: hover) {
+  .message-bubble .message-actions > :not([aria-pressed]) {
+    opacity: 0;
+    transition: opacity 120ms;
+  }
+
+  .message-bubble:hover .message-actions > *,
+  .message-bubble:focus-within .message-actions > * {
+    opacity: 1;
+  }
+}

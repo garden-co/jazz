@@ -8,11 +8,9 @@ use jazz::tools::deployment::{DeploymentCatalogue, PreparedDeployment};
 pub(crate) struct DeploymentResponse {
     pub changed: bool,
     pub published: PublishedArtifacts,
-    /// The published permissions bundle a deployment that activates
-    /// nothing made (see [`jazz::catalogue`]): what the backend pins its
-    /// sessions to.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bundle: Option<String>,
+    /// The published permissions bundle (see [`jazz::catalogue`]): what
+    /// the backend pins its sessions to.
+    pub bundle: String,
 }
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub(crate) struct PublishedArtifacts {
@@ -39,19 +37,14 @@ impl StoredCatalogue {
         Ok(DeploymentCatalogue {
             schemas: index.schemas.values().cloned().collect(),
             migrations: index.lenses.values().cloned().collect(),
-            active_schema_hash: index
-                .active_schema_summary()
-                .map(|active| active.schema_hash),
         })
     }
 
-    /// Stage `prepared`: as permissions revision `version`, made current,
-    /// or (`activate` false) as a published bundle, activating nothing.
+    /// Stage `prepared` as a published bundle: its schemas, lenses and
+    /// permissions, activating nothing.
     pub(crate) fn stage_deployment(
         &self,
         prepared: &PreparedDeployment,
-        version: u64,
-        activate: bool,
     ) -> Result<StagedDeployment, CatalogueError> {
         let expected = self
             .index
@@ -105,47 +98,14 @@ impl StoredCatalogue {
             .map(|(name, table)| (*name, table.policies.clone()))
             .collect::<HashMap<_, _>>();
         validate_permissions_relations(&permissions).map_err(CatalogueError::WriteError)?;
-        if !activate {
-            let permissions: jazz::catalogue::Permissions = permissions.into_iter().collect();
-            let bundle = jazz::catalogue::bundle_id(&schema_hash, &permissions)
-                .map_err(|error| CatalogueError::WriteError(error.to_string()))?;
-            let new = !expected.bundles.contains(&bundle);
-            if new {
-                put.bundles.push((schema_hash, permissions, now));
-            }
-            let changed = new || !published.schemas.is_empty() || !published.migrations.is_empty();
-            published.schemas.sort();
-            published
-                .migrations
-                .sort_by(|a, b| (&a.from_hash, &a.to_hash).cmp(&(&b.from_hash, &b.to_hash)));
-            return Ok(StagedDeployment {
-                expected,
-                put,
-                response: DeploymentResponse {
-                    changed,
-                    published,
-                    bundle: Some(bundle.to_hex()),
-                },
-            });
+        let permissions: jazz::catalogue::Permissions = permissions.into_iter().collect();
+        let bundle = jazz::catalogue::bundle_id(&schema_hash, &permissions)
+            .map_err(|error| CatalogueError::WriteError(error.to_string()))?;
+        let new = !expected.bundles.iter().any(|known| known.id == bundle);
+        if new {
+            put.bundles.push((schema_hash, permissions, now));
         }
-        let current = expected.active_schema();
-        let same_active = current.as_ref().is_some_and(|active| {
-            active.summary.schema_hash == schema_hash && active.permissions == permissions
-        });
-        let changed =
-            !same_active || !published.schemas.is_empty() || !published.migrations.is_empty();
-        if changed {
-            if current
-                .as_ref()
-                .is_some_and(|active| active.summary.version >= version)
-            {
-                return Err(CatalogueError::WriteError(
-                    "deployment revision must advance".into(),
-                ));
-            }
-            put.permissions
-                .push((version, schema_hash, permissions.into_iter().collect(), now));
-        }
+        let changed = new || !published.schemas.is_empty() || !published.migrations.is_empty();
         published.schemas.sort();
         published
             .migrations
@@ -156,7 +116,7 @@ impl StoredCatalogue {
             response: DeploymentResponse {
                 changed,
                 published,
-                bundle: None,
+                bundle: bundle.to_hex(),
             },
         })
     }
@@ -184,7 +144,7 @@ mod tests {
     // Internal: public reads cannot distinguish an unnecessary rewrite from
     // leaving the same durable record untouched. Inspect the actual write batch.
     #[test]
-    fn deployment_writes_only_new_artifacts_and_active_permissions() {
+    fn deployment_writes_only_new_artifacts_and_bundles() {
         let table = TableSchema::builder("notes").column("title", ColumnType::Text);
         let base = SchemaBuilder::new().table(table.clone()).build();
         let next = SchemaBuilder::new()
@@ -193,7 +153,6 @@ mod tests {
         let base_hash = SchemaHash::compute(&base);
         let next_hash = SchemaHash::compute(&next);
         let store = StoredCatalogue::new(
-            AppId::from_name("deployment-write-delta"),
             Some(base.clone()),
             crate::runtime::AppStore::memory()
                 .unwrap()
@@ -208,7 +167,7 @@ mod tests {
             let storage = store.storage.lock().unwrap();
             store.write(&storage, staged.put).unwrap();
         };
-        let stage = |target_schema_hash, schemas, migrations, permissions, revision| {
+        let stage = |target_schema_hash, schemas, migrations, permissions| {
             let prepared = prepare_deployment(
                 &store.deployment_catalogue().unwrap(),
                 DeploymentRequest {
@@ -219,13 +178,13 @@ mod tests {
                 },
             )
             .unwrap();
-            store.stage_deployment(&prepared, revision, true).unwrap()
+            store.stage_deployment(&prepared).unwrap()
         };
-        let initial = stage(base_hash, vec![], vec![], HashMap::new(), 1);
+        let initial = stage(base_hash, vec![], vec![], HashMap::new());
         assert_eq!(
-            (initial.put.schemas.len(), initial.put.permissions.len()),
+            (initial.put.schemas.len(), initial.put.bundles.len()),
             (1, 1),
-            "persist the in-memory initial schema and the permissions revision"
+            "persist the in-memory initial schema and its bundle"
         );
         assert_eq!(
             initial.response.published.schemas,
@@ -249,16 +208,15 @@ mod tests {
             schemas.clone(),
             vec![lens.clone()],
             HashMap::new(),
-            2,
         );
         assert_eq!(
             (
                 migrated.put.schemas.len(),
                 migrated.put.lenses.len(),
-                migrated.put.permissions.len()
+                migrated.put.bundles.len()
             ),
             (1, 1, 1),
-            "only the new schema, lens and permissions revision"
+            "only the new schema, lens and bundle"
         );
         assert_eq!(
             migrated.response.published.schemas,
@@ -276,22 +234,21 @@ mod tests {
             schemas.clone(),
             vec![lens.clone()],
             permissions.clone(),
-            3,
         );
         assert_eq!(
             (
                 policies.put.schemas.len(),
                 policies.put.lenses.len(),
-                policies.put.permissions.len()
+                policies.put.bundles.len()
             ),
             (0, 0, 1),
-            "permission-only deployment writes the permissions revision"
+            "a permission-only deployment writes only its bundle"
         );
         assert!(policies.response.published.schemas.is_empty());
         assert!(policies.response.published.migrations.is_empty());
         commit(policies);
 
-        let unchanged = stage(next_hash, schemas, vec![lens], permissions, 4);
+        let unchanged = stage(next_hash, schemas, vec![lens], permissions);
         assert!(!unchanged.response.changed);
         assert!(unchanged.put.is_empty());
         commit(unchanged);

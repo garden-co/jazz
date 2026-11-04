@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { schema, type Db, type RowOf } from "../../src/index.js";
 import { createBrowserTestDb as createDb, uniqueDbName } from "./support.js";
 import { deploy } from "../../src/dev/catalogue.js";
-import { getJazzServerInfo } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
 
 const app = schema.defineApp(
   {
@@ -436,20 +436,14 @@ describe("db serializable transaction reads browser integration", () => {
   });
 
   it("reads a cold remote row", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("serializable-cold-read"),
-    );
-    await deploy({
-      appId,
-      serverUrl,
-      adminSecret,
-      schema: app.wasmSchema,
-      permissions: schema.definePermissions(app, ({ policy }) => [
-        policy.todos.allowRead.always(),
-        policy.todos.allowInsert.always(),
-        policy.todos.allowUpdate.always(),
-      ]),
-    });
+    const core = await getJazzServerInfo(uniqueDbName("serializable-cold-read"));
+    const permissions = schema.definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.always(),
+      policy.todos.allowInsert.always(),
+      policy.todos.allowUpdate.always(),
+    ]);
+    await deploy({ ...core, schema: app.wasmSchema, permissions });
+    const { appId, serverUrl } = await startJazzApp(core, { schema: app.wasmSchema, permissions });
 
     const writer = await createDb({
       appId,

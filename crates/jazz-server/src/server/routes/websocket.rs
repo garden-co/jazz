@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::runtime::ServerLinkAdmission;
-use crate::runtime::{CommitUnitTrust, ConnectionSessionContext};
+use crate::runtime::{
+    CommitUnitTrust, ConnectionSessionContext, ServerRuntimeHandle, ServerSession,
+};
 use axum::{
     extract::State,
     extract::ws::{CloseFrame, Message, WebSocketUpgrade, close_code},
@@ -419,17 +421,33 @@ async fn ws_admission(
     let backend_secret = headers
         .get("X-Jazz-Backend-Secret")
         .and_then(|value| value.to_str().ok());
-    let has_authenticated_backend_session = has_session_header
-        && matches!(
-            (
-                state.auth_config.backend_secret.as_deref(),
-                backend_secret,
-            ),
-            (Some(expected), Some(provided)) if expected == provided
-        );
-    if backend_secret.is_some() && !has_jwt && !has_session_header {
-        crate::middleware::auth::validate_backend_secret(backend_secret, &state.auth_config)
-            .map_err(|(_, message)| message.to_owned())?;
+    let backend_credential = matches!(
+        (
+            state.auth_config.backend_secret.as_deref(),
+            backend_secret,
+        ),
+        (Some(expected), Some(provided))
+            if crate::middleware::workload::constant_time_eq(expected, provided)
+    );
+    // A core admits its own backend only: the app's backend (`createJazz`)
+    // decides who a user is and opens their sessions with its credential,
+    // and relays a local-first guest's proof with it (or on an upgrade its
+    // trusted workload vouched for).
+    if !backend_credential && !vouched_upgrade {
+        return Err(match backend_secret {
+            Some(_) => "Invalid backend secret",
+            None => {
+                "this core admits only its app's backend: connect through the app's createJazz handler"
+            }
+        }
+        .into());
+    }
+    if !has_jwt && !has_session_header {
+        if !backend_credential {
+            return Err(
+                "Session required. Provide a backend session or a local-first proof.".into(),
+            );
+        }
         return Ok(WebSocketAdmission {
             identity: peer_identity,
             claims: BTreeMap::new(),
@@ -441,42 +459,23 @@ async fn ws_admission(
             bundle,
         });
     }
-    let backend_vouched = vouched_upgrade
-        || matches!(
-            (
-                state.auth_config.backend_secret.as_deref(),
-                backend_secret,
-            ),
-            (Some(expected), Some(provided))
-                if crate::middleware::workload::constant_time_eq(expected, provided)
-        );
-    if bundle.is_some() && !backend_vouched {
-        return Err("a permissions bundle pin needs the backend's credential".into());
-    }
 
-    if !has_jwt
-        && !has_authenticated_backend_session
-        && ws_has_auth_cookie(&headers, state.auth_config.auth_cookie_name.as_deref())
-    {
-        validate_ws_cookie_origin(&headers, state.auth_config.trust_forwarded_host)?;
-    }
-
-    let session = crate::middleware::auth::extract_session(
-        &headers,
-        state.app_id,
-        &state.auth_config,
-        state.jwt_verifier.as_deref(),
-    )
-    .await
-    .map_err(super::accounts::AdmissionError::from)?;
+    let session =
+        crate::middleware::auth::extract_session(&headers, state.app_id, &state.auth_config)
+            .await
+            .map_err(super::accounts::AdmissionError::from)?;
 
     let Some(mut session) = session else {
-        return Err("Session required. Provide JWT, backend secret, or admin secret.".into());
+        return Err("Session required. Provide a backend session or a local-first proof.".into());
     };
 
-    // A backend-authenticated impersonation remains policy-scoped, but its
-    // authority is the backend credential, not a public account bearer.
-    if !has_authenticated_backend_session {
+    // A session the backend states is policy-scoped, and its authority is the
+    // backend credential. A guest's own proof decides who it is: its key
+    // must hold the account the registry assigned it. (Session extraction
+    // already refuses a stated session without the backend secret; this keys
+    // off both so the skip never rests on the header alone.)
+    let backend_stated = backend_credential && has_session_header;
+    if !backend_stated {
         let account = peer_identity
             .account_id()
             .ok_or("public sessions require an enrolled account identity")?;
@@ -498,7 +497,7 @@ async fn ws_admission(
         identity: peer_identity,
         claims: session_claims(session)?,
         trust: CommitUnitTrust::Session,
-        credential: if has_authenticated_backend_session {
+        credential: if backend_stated {
             WebSocketCredential::Backend
         } else {
             WebSocketCredential::Session
@@ -606,103 +605,6 @@ fn ws_validate_session_identity(
         return Err("websocket peer_identity must match authenticated session author".to_owned());
     }
     Ok(())
-}
-
-fn ws_has_auth_cookie(headers: &HeaderMap, cookie_name: Option<&str>) -> bool {
-    let Some(cookie_name) = cookie_name else {
-        return false;
-    };
-    headers
-        .get(axum::http::header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|cookie| {
-            cookie.split(';').any(|segment| {
-                let Some((name, value)) = segment.trim().split_once('=') else {
-                    return false;
-                };
-                name == cookie_name && !value.trim().is_empty()
-            })
-        })
-}
-
-fn validate_ws_cookie_origin(
-    headers: &HeaderMap,
-    trust_forwarded_host: bool,
-) -> Result<(), String> {
-    let origin = headers
-        .get(axum::http::header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| "cookie websocket auth requires Origin header".to_owned())?;
-    let host = ws_cookie_origin_host(headers, trust_forwarded_host)
-        .ok_or_else(|| "cookie websocket auth requires Host header".to_owned())?;
-
-    if ws_origin_matches_host(origin, host) {
-        return Ok(());
-    }
-    Err("cookie websocket auth Origin does not match Host".to_owned())
-}
-
-fn ws_cookie_origin_host(headers: &HeaderMap, trust_forwarded_host: bool) -> Option<&str> {
-    let forwarded_host = trust_forwarded_host
-        .then(|| {
-            headers
-                .get("X-Forwarded-Host")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.split(',').next())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-        })
-        .flatten();
-    forwarded_host.or_else(|| {
-        headers
-            .get(axum::http::header::HOST)
-            .and_then(|value| value.to_str().ok())
-    })
-}
-
-fn ws_origin_matches_host(origin: &str, host: &str) -> bool {
-    let Ok(origin) = reqwest::Url::parse(origin) else {
-        return false;
-    };
-    let Some(origin_host) = origin.host_str() else {
-        return false;
-    };
-    let origin_port = origin
-        .port_or_known_default()
-        .unwrap_or_else(|| match origin.scheme() {
-            "https" | "wss" => 443,
-            _ => 80,
-        });
-    let Ok(request_authority) = ws_parse_authority(host, origin_port) else {
-        return false;
-    };
-    if origin_host.eq_ignore_ascii_case(&request_authority.host)
-        && origin_port == request_authority.port
-    {
-        return true;
-    }
-
-    is_loopback_host(origin_host) && is_loopback_host(&request_authority.host)
-}
-
-struct WebSocketAuthority {
-    host: String,
-    port: u16,
-}
-
-fn ws_parse_authority(authority: &str, default_port: u16) -> Result<WebSocketAuthority, ()> {
-    let parsed = reqwest::Url::parse(&format!("ws://{authority}")).map_err(|_| ())?;
-    let host = parsed.host_str().ok_or(())?.to_owned();
-    let port = parsed.port().unwrap_or(default_port);
-    Ok(WebSocketAuthority { host, port })
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost")
-        || host.eq_ignore_ascii_case("::1")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|addr| addr.is_loopback())
 }
 
 async fn read_ws_auth_prelude<S: SyncSocket>(
@@ -814,7 +716,12 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         }
     };
 
-    let negotiated = match negotiate_wire(&remote_hello, current_wire_features()) {
+    // Thin clients (SPEC 8.14) are served on the same route: a client that
+    // advertises thin results is answered with results, not sync.
+    let negotiated = match negotiate_wire(
+        &remote_hello,
+        current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS,
+    ) {
         Ok(negotiated) => negotiated,
         Err(error) => {
             send_ws_error(&mut socket, error).await;
@@ -888,25 +795,55 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 return;
             }
         };
-    let session = match core_server_shell
-        .open_with_session_context(
-            admission.identity,
-            admission.claims,
-            admission.bundle,
-            admission.trust,
-            negotiated.features,
-            session_context,
+    let thin = negotiated.features & jazz::wire::FEATURE_THIN_RESULTS != 0;
+    // A thin connection is one session reading finished results: it holds
+    // no replica to relay for tabs, so it is never a client relay. An admin
+    // link is served as SYSTEM either way. `session_context` is for sync
+    // links alone.
+    if thin
+        && matches!(
             link_admission,
+            ServerLinkAdmission::ScopeIsolatedClientRelay { .. }
         )
-        .await
     {
+        send_ws_error(
+            &mut socket,
+            WireError::new(
+                WireErrorCode::UnsupportedFeature,
+                WireRetry::Never,
+                "a thin connection serves one session: it cannot relay for other tabs",
+            ),
+        )
+        .await;
+        let _ = socket.close().await;
+        return;
+    }
+    let opened = if thin {
+        core_server_shell
+            .open_thin_session(
+                admission.identity,
+                admission.claims,
+                admission.bundle,
+                admission.trust,
+            )
+            .await
+    } else {
+        core_server_shell
+            .open_with_session_context(
+                admission.identity,
+                admission.claims,
+                admission.bundle,
+                admission.trust,
+                negotiated.features,
+                session_context,
+                link_admission,
+            )
+            .await
+    };
+    let session = match opened {
         Ok(session) => session,
         Err(error) => {
-            send_ws_error(
-                &mut socket,
-                WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
-            )
-            .await;
+            send_ws_error(&mut socket, session_open_wire_error(&error)).await;
             let _ = socket.close().await;
             return;
         }
@@ -1097,6 +1034,13 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                             break;
                         }
                     };
+                    if thin {
+                        if let Err(error) = receive_thin_frames(&core_server_shell, session, frames) {
+                            queue_ws_error(&writer_tx, error);
+                            break 'connection;
+                        }
+                        continue;
+                    }
                     if let Err(error) = core_server_shell.receive_wire_frames(session, frames) {
                         queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
                         break 'connection;
@@ -1125,6 +1069,32 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         writer.abort();
         let _ = writer.await;
     }
+}
+
+/// Hand a thin client's requests to the runtime. A thin connection carries
+/// nothing else after its `Hello`.
+fn receive_thin_frames(
+    runtime: &ServerRuntimeHandle,
+    session: ServerSession,
+    frames: Vec<Vec<u8>>,
+) -> Result<(), WireError> {
+    for frame in frames {
+        match jazz::wire::decode_frame(&frame) {
+            Ok(WireFrame::ThinRequest(request)) => runtime
+                .receive_thin_request(session, request, frame.len())
+                .map_err(|error| {
+                    WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error)
+                })?,
+            _ => {
+                return Err(WireError::new(
+                    WireErrorCode::MalformedFrame,
+                    WireRetry::Never,
+                    "a thin connection sends only thin requests",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 // A cancelled socket task must not leave its writer owning the socket or queued catalogue.
@@ -1242,6 +1212,32 @@ async fn close_ws_for_shutdown<S: SyncSocket>(socket: &mut S) {
             reason: "server shutting down".into(),
         })))
         .await;
+}
+
+/// What a client is told when its session was not opened. A session this
+/// core refuses for who it is or how it connects (unpinned, another
+/// identity: [`jazz::db::ErrorCode::Protocol`]) stays refused, so the
+/// client must not retry it. One refused for the catalogue's state (a
+/// bundle not published or admitted here yet:
+/// [`jazz::db::ErrorCode::Schema`]) may open after a publish, and so may
+/// anything else.
+fn session_open_wire_error(error: &crate::runtime::SessionOpenError) -> WireError {
+    use crate::runtime::SessionOpenError;
+    match error {
+        // The store refused this session as asked: unpinned, pinned to a
+        // bundle it never published (a mistyped id, another app's), or to
+        // one whose schema it never admitted. A backend publishes its
+        // bundle before it opens sessions, so none of these clears by
+        // retrying, and the client reports it instead of backing off.
+        SessionOpenError::Refused(refusal) => WireError::new(
+            WireErrorCode::AuthFailed,
+            WireRetry::Never,
+            refusal.to_string(),
+        ),
+        SessionOpenError::Runtime(message) => {
+            WireError::new(WireErrorCode::Internal, WireRetry::Later, message.clone())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1388,19 +1384,6 @@ mod tests {
     }
 
     #[test]
-    fn ws_cookie_auth_detects_configured_cookie() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            axum::http::header::COOKIE,
-            "other=value; jazz-auth=token".parse().unwrap(),
-        );
-
-        assert!(ws_has_auth_cookie(&headers, Some("jazz-auth")));
-        assert!(!ws_has_auth_cookie(&headers, Some("missing")));
-        assert!(!ws_has_auth_cookie(&headers, None));
-    }
-
-    #[test]
     fn websocket_session_claims_use_canonical_and_collision_proof_namespaces() {
         let mut session = Session::new("https://issuer.example", "verified-subject").with_claims(
             serde_json::json!({
@@ -1471,128 +1454,6 @@ mod tests {
                 "raw alias leaked: {forbidden}"
             );
         }
-    }
-
-    #[test]
-    fn ws_cookie_origin_accepts_same_origin_and_loopback() {
-        assert!(ws_origin_matches_host(
-            "https://app.example:8443",
-            "app.example:8443"
-        ));
-        assert!(ws_origin_matches_host(
-            "http://localhost:5173",
-            "127.0.0.1:4200"
-        ));
-    }
-
-    #[test]
-    fn bug_302_cookie_origin_ignores_forwarded_host_without_trusted_proxy() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            axum::http::header::ORIGIN,
-            "https://evil.example".parse().unwrap(),
-        );
-        headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
-        headers.insert("X-Forwarded-Host", "evil.example".parse().unwrap());
-
-        assert!(
-            validate_ws_cookie_origin(&headers, false).is_err(),
-            "an untrusted forwarded host must not bypass the cookie origin guard"
-        );
-    }
-
-    #[test]
-    fn ws_cookie_origin_uses_first_forwarded_host_when_trusted_proxy_enabled() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            axum::http::header::ORIGIN,
-            "https://app.example".parse().unwrap(),
-        );
-        headers.insert(axum::http::header::HOST, "internal.local".parse().unwrap());
-        headers.insert(
-            "X-Forwarded-Host",
-            "app.example, proxy.local".parse().unwrap(),
-        );
-
-        assert!(validate_ws_cookie_origin(&headers, true).is_ok());
-    }
-
-    #[test]
-    fn ws_cookie_origin_rejects_missing_or_cross_origin() {
-        assert!(!ws_origin_matches_host(
-            "https://evil.example",
-            "app.example"
-        ));
-
-        let mut headers = HeaderMap::new();
-        headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
-        assert!(validate_ws_cookie_origin(&headers, false).is_err());
-
-        headers.insert(
-            axum::http::header::ORIGIN,
-            "https://evil.example".parse().unwrap(),
-        );
-        assert!(validate_ws_cookie_origin(&headers, false).is_err());
-    }
-
-    #[tokio::test]
-    async fn bug_302_orphan_backend_session_cannot_bypass_cookie_origin_check() {
-        let app_id = AppId::random();
-        let state = ServerBuilder::new(app_id)
-            .with_auth_config(AuthConfig {
-                auth_cookie_name: Some("jazz-auth".to_owned()),
-                allow_local_first_auth: true,
-                ..Default::default()
-            })
-            .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .build()
-            .await
-            .expect("build cookie auth websocket state")
-            .state;
-        let seed = [0x42; 32];
-        let token = jazz::tools::identity::mint_jazz_self_signed_token(
-            &seed,
-            jazz::tools::identity::LOCAL_FIRST_ISSUER,
-            &app_id.to_string(),
-            3_600,
-        )
-        .expect("mint local-first cookie token");
-        let user_id = jazz::tools::identity::derive_user_id(&seed).to_string();
-        let peer_identity = AuthorSubject::from_canonical(
-            &serde_json::to_string(&(jazz::tools::identity::LOCAL_FIRST_ISSUER, user_id))
-                .expect("encode local-first author"),
-        )
-        .expect("local-first peer identity");
-        let prelude = WebSocketPrelude {
-            peer_identity: peer_identity.canonical().to_owned(),
-            bootstrap_catalogue: false,
-            requested_link: RequestedWebSocketLink::OrdinarySession,
-            auth: jazz::tools::websocket_prelude_auth::AuthConfig {
-                backend_session: Some(serde_json::json!({ "attacker": true })),
-                ..Default::default()
-            },
-            local_first_audience: None,
-            bundle: None,
-        };
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            axum::http::header::COOKIE,
-            format!("jazz-auth={token}").parse().unwrap(),
-        );
-        headers.insert(
-            axum::http::header::ORIGIN,
-            "https://evil.example".parse().unwrap(),
-        );
-        headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
-
-        let error = ws_admission(prelude, &headers, &state)
-            .await
-            .expect_err("orphan backend session must not suppress cookie origin enforcement");
-        assert!(
-            error.to_string().contains("Origin does not match Host"),
-            "{error}"
-        );
     }
 
     #[test]
@@ -1678,20 +1539,20 @@ mod tests {
     }
 
     async fn make_ws_convergence_test_state() -> Arc<ServerState> {
-        let schema = ws_public_schema_convert();
-        ServerBuilder::new(AppId::random())
+        let source = ws_public_schema_convert().public_schema().clone();
+        let state = ServerBuilder::new(AppId::random())
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
                 backend_secret: Some("backend-secret".to_owned()),
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .with_core_server_shell_schema(schema)
             .build()
             .await
             .expect("build websocket convergence test state")
-            .state
+            .state;
+        publish_source_bundle(&state, &source).await;
+        state
     }
 
     // Internal admission-boundary test: scoped-link selection is made before
@@ -1975,9 +1836,127 @@ mod tests {
             panic!("a forged vouch may not pin a session");
         };
         assert!(
-            format!("{error:?}").contains("bundle pin needs"),
+            format!("{error:?}").contains("admits only its app's backend"),
             "{error:?}"
         );
+    }
+
+    /// A vouched upgrade whose access grants no backend secret (a guest's
+    /// socket) may not state a session: it never skips the guest's own
+    /// account check, and is never labelled the backend's.
+    #[tokio::test]
+    async fn ws_a_session_access_vouch_may_not_state_a_session() {
+        use crate::middleware::workload::{BackendAccess, VOUCHED_HEADER, vouched_value};
+        let state = make_ws_test_state().await;
+        let secrets = state.workload_secrets.as_ref().expect("internal secrets");
+        let identity = AuthorSubject::for_test_bytes([0x65; 16]);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            VOUCHED_HEADER,
+            vouched_value(secrets, BackendAccess::Session)
+                .parse()
+                .unwrap(),
+        );
+        let Err(error) = ws_admission(pinned_prelude(identity, None), &headers, &state).await
+        else {
+            panic!("a session-access vouch may not state a session");
+        };
+        assert!(
+            format!("{error:?}").contains("Backend secret required"),
+            "{error:?}"
+        );
+    }
+
+    /// A core admits only its app's backend. A client's own proof, a
+    /// backend session without the secret, or an external JWT reaches it
+    /// only through the backend (`createJazz`), never directly.
+    #[tokio::test]
+    async fn ws_a_client_connecting_directly_to_the_core_is_refused() {
+        let state = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                allow_local_first_auth: true,
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(Schema::new())
+            .build()
+            .await
+            .expect("build websocket test state")
+            .state;
+        let seed = [0x71; 32];
+        let proof = jazz::tools::identity::mint_jazz_self_signed_token(
+            &seed,
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            &state.app_id.to_string(),
+            3_600,
+        )
+        .expect("mint local-first proof");
+        let subject = jazz::tools::identity::derive_user_id(&seed).to_string();
+        let guest = AuthorSubject::reserved(jazz::tools::identity::LOCAL_FIRST_ISSUER, &subject)
+            .expect("local-first author")
+            .with_account(jazz::account_registry::local_first_account_id(
+                *state.app_id.uuid(),
+                &subject,
+            ));
+        let prelude = |auth: jazz::tools::websocket_prelude_auth::AuthConfig| WebSocketPrelude {
+            peer_identity: guest.canonical().to_owned(),
+            bootstrap_catalogue: false,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
+            auth,
+            local_first_audience: None,
+            bundle: None,
+        };
+        for auth in [
+            jazz::tools::websocket_prelude_auth::AuthConfig {
+                jwt_token: Some(proof.clone()),
+                ..Default::default()
+            },
+            jazz::tools::websocket_prelude_auth::AuthConfig {
+                backend_session: Some(serde_json::json!({
+                    "issuer": "https://issuer.example",
+                    "user_id": "alice",
+                    "claims": {},
+                })),
+                ..Default::default()
+            },
+            jazz::tools::websocket_prelude_auth::AuthConfig::default(),
+        ] {
+            let Err(error) = ws_admission(prelude(auth), &HeaderMap::new(), &state).await else {
+                panic!("a direct client must be refused");
+            };
+            assert!(
+                error.to_string().contains("admits only its app's backend"),
+                "{error}"
+            );
+        }
+
+        // An external JWT is refused even with the backend's secret: the
+        // backend verifies its users' tokens itself.
+        let external = prelude(jazz::tools::websocket_prelude_auth::AuthConfig {
+            jwt_token: Some("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2ln".to_owned()),
+            backend_secret: Some("backend-secret".to_owned()),
+            ..Default::default()
+        });
+        let Err(error) = ws_admission(external, &HeaderMap::new(), &state).await else {
+            panic!("an external JWT must be refused");
+        };
+        assert!(
+            error.to_string().contains("verifies no external JWTs"),
+            "{error}"
+        );
+
+        // The same proof, relayed by the backend, admits the guest.
+        let relayed = prelude(jazz::tools::websocket_prelude_auth::AuthConfig {
+            jwt_token: Some(proof),
+            backend_secret: Some("backend-secret".to_owned()),
+            ..Default::default()
+        });
+        let admission = ws_admission(relayed, &HeaderMap::new(), &state)
+            .await
+            .expect("a relayed guest is admitted");
+        assert_eq!(admission.trust, CommitUnitTrust::Session);
     }
 
     #[tokio::test]
@@ -1991,7 +1970,11 @@ mod tests {
                 panic!("a client may not pick its own bundle");
             };
             let message = format!("{error:?}");
-            assert!(message.contains("bundle pin needs"), "{message}");
+            assert!(
+                message.contains("admits only its app's backend")
+                    || message.contains("Invalid backend secret"),
+                "{message}"
+            );
         }
         let mut malformed = pinned_prelude(identity, Some("backend-secret"));
         malformed.bundle = Some("nope".to_owned());
@@ -2459,7 +2442,13 @@ mod tests {
             let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
                 .await
                 .expect("connect websocket");
-            let json = entry["json"].as_str().expect("fixture JSON").to_owned();
+            let mut json = entry["json"].as_str().expect("fixture JSON").to_owned();
+            // The backend pins every session it states to its bundle.
+            let mut parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            if !parsed["auth"]["backend_session"].is_null() {
+                parsed["bundle"] = serde_json::json!(current_bundle(addr, &state).await);
+                json = parsed.to_string();
+            }
             let message = if entry["writer"] == "typescript-native-runtime" {
                 WsMessage::Text(json.into())
             } else {
@@ -2567,31 +2556,17 @@ mod tests {
             features,
         )
         .await;
-        let chunk_len = jazz::wire::channels::CHANNEL_CHUNK_BYTES;
+        // Leading parts of one split sync message (part marker 0xFF): the
+        // owner buffers them and waits for the rest, so the link stays open
+        // whenever the owner gets to the batch. Each part is well under the
+        // frame limit and all of them under the untrusted message ceiling;
+        // only the batch as a whole is above the legacy 1 MiB cap.
+        let part_len = 64 * 1024;
         let encoded = (0..24)
-            .map(|index| {
-                let envelope = jazz::wire::WireChannelEnvelope {
-                    protocol_version: WIRE_PROTOCOL_VERSION,
-                    features,
-                    session: None,
-                    extent: jazz::wire::channels::ChannelFrame {
-                        channel: 1,
-                        generation: 0,
-                        sequence: index,
-                        class: jazz::wire::channels::ChannelClass::Writes,
-                        first: index == 0,
-                        last: false,
-                        message_len: if index == 0 {
-                            (chunk_len * 32) as u32
-                        } else {
-                            0
-                        },
-                        decoded_len: chunk_len as u32,
-                        payload: vec![0x42; chunk_len],
-                    },
-                };
-                encode_frame(&WireFrame::Channel(envelope))
-                    .expect("encode large websocket channel batch")
+            .map(|_| {
+                let mut frame = vec![0xFF_u8];
+                frame.resize(part_len + 1, 0x42);
+                frame
             })
             .collect::<Vec<_>>();
         let batch = postcard::to_allocvec(&encoded).expect("encode large websocket batch");
@@ -2856,7 +2831,68 @@ mod tests {
         identity: AuthorSubject,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
-        open_negotiated_ws_with_prelude(addr, state, ws_session_prelude(identity)).await
+        let bundle = current_bundle(addr, state).await;
+        open_negotiated_ws_with_prelude(addr, state, ws_pinned_session_prelude(identity, &bundle))
+            .await
+    }
+
+    /// Publish `source` with its own policies as a bundle, as createJazz
+    /// does on boot (`/bundles`, activating nothing); its hex id.
+    async fn publish_source_bundle(state: &Arc<ServerState>, source: &Schema) -> String {
+        use crate::server::deployment::{DeployRequest, DeploySchema, deploy};
+        let mut structural = source.clone();
+        for table in structural.values_mut() {
+            table.policies = TablePolicies::default();
+        }
+        let hash = jazz::tools::public_schema::SchemaHash::compute(&structural).to_string();
+        let permissions = source
+            .iter()
+            .map(|(name, table)| (name.clone(), table.policies.clone()))
+            .collect();
+        let response = deploy(
+            state.clone(),
+            DeployRequest {
+                target_schema_hash: hash.clone(),
+                schemas: vec![DeploySchema {
+                    hash,
+                    schema: structural,
+                }],
+                migrations: Vec::new(),
+                permissions,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("publish bundle: {}", error.body));
+        response.bundle
+    }
+
+    /// The bundle the store published last, which the backend pins its
+    /// sessions to (an empty schema's, when none was): every policy
+    /// session a core serves is pinned to one.
+    async fn current_bundle(_addr: std::net::SocketAddr, state: &Arc<ServerState>) -> String {
+        let latest = match state.runtime() {
+            Some(runtime) => runtime
+                .catalogue()
+                .await
+                .expect("catalogue rows")
+                .bundles
+                .into_iter()
+                .max_by_key(|bundle| bundle.published_at)
+                .map(|bundle| bundle.id.to_hex()),
+            None => None,
+        };
+        if let Some(bundle) = latest {
+            return bundle;
+        }
+        publish_source_bundle(state, &Schema::new()).await
+    }
+
+    /// A backend session prelude for `identity`, pinned to `bundle`.
+    fn ws_pinned_session_prelude(identity: AuthorSubject, bundle: &str) -> Vec<u8> {
+        let mut prelude: serde_json::Value =
+            serde_json::from_slice(&ws_session_prelude(identity)).unwrap();
+        prelude["bundle"] = serde_json::json!(bundle);
+        prelude.to_string().into_bytes()
     }
 
     async fn open_negotiated_ws_with_prelude(
@@ -3445,6 +3481,88 @@ mod tests {
         ));
     }
 
+    /// The app's backend's word on the account registry (its admin calls).
+    #[cfg(feature = "embedded-server")]
+    async fn admin_accounts(
+        core: &crate::server::testing::JazzServer,
+        operation: &str,
+        body: serde_json::Value,
+    ) -> reqwest::Response {
+        reqwest::Client::new()
+            .post(format!(
+                "{}/apps/{}/admin/accounts/{operation}",
+                core.base_url(),
+                core.app_id()
+            ))
+            .header("x-jazz-admin-secret", core.admin_secret())
+            .json(&body)
+            .send()
+            .await
+            .expect("admin account call")
+    }
+
+    /// Enroll an identity the backend authenticated, returning its account.
+    #[cfg(feature = "embedded-server")]
+    async fn enroll(
+        core: &crate::server::testing::JazzServer,
+        subject: &str,
+    ) -> jazz::account_registry::AccountId {
+        let response = admin_accounts(
+            core,
+            "login-or-register",
+            serde_json::json!({ "identity": {
+                "issuer": crate::server::testing::TEST_JWT_ISSUER,
+                "subject": subject,
+            } }),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body: serde_json::Value = response.json().await.expect("account response");
+        jazz::account_registry::AccountId(
+            uuid::Uuid::parse_str(body["account"].as_str().expect("account")).expect("uuid"),
+        )
+    }
+
+    /// Revoke an identity, as its own account approves.
+    #[cfg(feature = "embedded-server")]
+    async fn revoke(
+        core: &crate::server::testing::JazzServer,
+        issuer: &str,
+        subject: &str,
+    ) -> reqwest::Response {
+        let identity = serde_json::json!({ "issuer": issuer, "subject": subject });
+        admin_accounts(
+            core,
+            "revoke",
+            serde_json::json!({ "approver": identity, "target": identity }),
+        )
+        .await
+    }
+
+    /// A local-first guest of `core`: its proof, its founding author (with the
+    /// account the core assigns it) and its subject. The only public session
+    /// a core admits, relayed by the backend with its secret.
+    #[cfg(feature = "embedded-server")]
+    fn guest(
+        core: &crate::server::testing::JazzServer,
+        seed: [u8; 32],
+    ) -> (String, AuthorSubject, String) {
+        let token = jazz::tools::identity::mint_jazz_self_signed_token(
+            &seed,
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            &core.app_id().to_string(),
+            3600,
+        )
+        .expect("mint guest proof");
+        let subject = jazz::tools::identity::derive_user_id(&seed).to_string();
+        let account =
+            jazz::account_registry::local_first_account_id(*core.app_id().uuid(), &subject);
+        let identity = AuthorSubject::reserved(jazz::tools::identity::LOCAL_FIRST_ISSUER, &subject)
+            .expect("local-first author")
+            .with_account(account);
+        (token, identity, subject)
+    }
+
     /// Alice holds a live account websocket. An unrelated registry change
     /// (Bob enrolling) must not disconnect her, while revoking Alice's
     /// identity must still close her socket promptly with an auth failure.
@@ -3453,7 +3571,7 @@ mod tests {
     #[cfg(feature = "embedded-server")]
     #[tokio::test]
     async fn revoking_an_account_closes_its_live_websocket_promptly() {
-        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER, TestJwtIssuer};
+        use crate::server::testing::JazzServer;
 
         let schema = SchemaBuilder::new()
             .table(
@@ -3465,27 +3583,7 @@ mod tests {
         let core = JazzServer::start_with_schema(schema)
             .await
             .expect("start test server");
-        let client = reqwest::Client::new();
-        let accounts = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
-        let alice = TestJwtIssuer::jwt_for_user("alice");
-        let registered: serde_json::Value = client
-            .post(format!("{accounts}/register"))
-            .bearer_auth(&alice)
-            .send()
-            .await
-            .expect("register Alice")
-            .json()
-            .await
-            .expect("Alice's account");
-        let account = jazz::account_registry::AccountId(
-            registered["account"]
-                .as_str()
-                .and_then(|value| uuid::Uuid::parse_str(value).ok())
-                .expect("account uuid"),
-        );
-        let identity = AuthorSubject::authenticated(TEST_JWT_ISSUER, "alice")
-            .expect("Alice's principal")
-            .with_account(account);
+        let (alice, identity, alice_subject) = guest(&core, [0xa1; 32]);
 
         let (mut ws, _) = connect_async(format!(
             "ws://127.0.0.1:{}/apps/{}/ws",
@@ -3496,7 +3594,8 @@ mod tests {
         .expect("connect Alice");
         let prelude = serde_json::json!({
             "peer_identity": identity.canonical(),
-            "auth": { "jwt_token": alice },
+            "auth": { "jwt_token": alice, "backend_secret": JazzServer::BACKEND_SECRET },
+            "bundle": core.latest_bundle(),
         });
         ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
             .await
@@ -3519,13 +3618,7 @@ mod tests {
             "Alice's account session must be admitted"
         );
 
-        let bob = client
-            .post(format!("{accounts}/register"))
-            .bearer_auth(TestJwtIssuer::jwt_for_user("bob"))
-            .send()
-            .await
-            .expect("register Bob");
-        assert_eq!(bob.status(), axum::http::StatusCode::OK);
+        enroll(&core, "bob").await;
         let quiet_until = tokio::time::Instant::now() + Duration::from_millis(300);
         while let Ok(message) = tokio::time::timeout_at(quiet_until, ws.next()).await {
             let message = message
@@ -3539,15 +3632,12 @@ mod tests {
             );
         }
 
-        let revoked = client
-            .post(format!("{accounts}/revoke"))
-            .bearer_auth(&alice)
-            .json(&serde_json::json!({
-                "identity": { "issuer": TEST_JWT_ISSUER, "subject": "alice" }
-            }))
-            .send()
-            .await
-            .expect("revoke Alice");
+        let revoked = revoke(
+            &core,
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            &alice_subject,
+        )
+        .await;
         assert_eq!(revoked.status(), axum::http::StatusCode::NO_CONTENT);
         // No client traffic is needed: the registry change alone must close
         // the socket. The per-message gate is pinned separately by
@@ -3653,6 +3743,7 @@ mod tests {
             &core,
             serde_json::json!({
                 "peer_identity": identity.canonical(),
+                "bundle": core.latest_bundle(),
                 "auth": { "jwt_token": token },
             }),
         )
@@ -3663,6 +3754,7 @@ mod tests {
             &core,
             serde_json::json!({
                 "peer_identity": identity.canonical(),
+                "bundle": core.latest_bundle(),
                 "auth": { "jwt_token": token },
                 "local_first_audience": endpoint,
             }),
@@ -3677,6 +3769,7 @@ mod tests {
             &core,
             serde_json::json!({
                 "peer_identity": identity.canonical(),
+                "bundle": core.latest_bundle(),
                 "auth": { "jwt_token": token, "backend_secret": JazzServer::BACKEND_SECRET },
                 "local_first_audience": endpoint,
             }),
@@ -3688,6 +3781,7 @@ mod tests {
             &core,
             serde_json::json!({
                 "peer_identity": identity.canonical(),
+                "bundle": core.latest_bundle(),
                 "auth": { "jwt_token": token, "backend_secret": JazzServer::BACKEND_SECRET },
                 "local_first_audience": "https://other.example.com/jazz",
             }),
@@ -3708,7 +3802,7 @@ mod tests {
     #[cfg(feature = "embedded-server")]
     #[tokio::test]
     async fn failed_revoke_flush_still_closes_the_per_message_account_gate() {
-        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER, TestJwtIssuer};
+        use crate::server::testing::JazzServer;
 
         let schema = SchemaBuilder::new()
             .table(
@@ -3723,24 +3817,7 @@ mod tests {
             .start()
             .await
             .expect("start test server");
-        let client = reqwest::Client::new();
-        let accounts = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
-        let alice = TestJwtIssuer::jwt_for_user("alice");
-        let registered: serde_json::Value = client
-            .post(format!("{accounts}/register"))
-            .bearer_auth(&alice)
-            .send()
-            .await
-            .expect("register Alice")
-            .json()
-            .await
-            .expect("Alice's account");
-        let account = jazz::account_registry::AccountId(
-            uuid::Uuid::parse_str(registered["account"].as_str().expect("account")).expect("uuid"),
-        );
-        let identity = AuthorSubject::authenticated(TEST_JWT_ISSUER, "alice")
-            .expect("principal")
-            .with_account(account);
+        let (alice, identity, alice_subject) = guest(&core, [0xa2; 32]);
         let (mut ws, _) = connect_async(format!(
             "ws://127.0.0.1:{}/apps/{}/ws",
             core.port(),
@@ -3748,7 +3825,11 @@ mod tests {
         ))
         .await
         .expect("connect Alice");
-        let prelude = serde_json::json!({ "peer_identity": identity.canonical(), "auth": { "jwt_token": alice } });
+        let prelude = serde_json::json!({
+            "peer_identity": identity.canonical(),
+            "auth": { "jwt_token": alice, "backend_secret": JazzServer::BACKEND_SECRET },
+            "bundle": core.latest_bundle(),
+        });
         ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
             .await
             .expect("prelude");
@@ -3772,11 +3853,12 @@ mod tests {
         let mut changes = state.accounts.as_ref().map(|registry| registry.subscribe());
         let registry = state.accounts.as_ref().expect("account registry");
         registry.fail_next_write_for_test();
-        let revoked = client
-            .post(format!("{accounts}/revoke"))
-            .bearer_auth(&alice)
-            .json(&serde_json::json!({ "identity": { "issuer": TEST_JWT_ISSUER, "subject": "alice" } }))
-            .send().await.expect("revoke Alice");
+        let revoked = revoke(
+            &core,
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            &alice_subject,
+        )
+        .await;
         assert!(
             !revoked.status().is_success(),
             "the injected flush failure surfaces as a failed revoke"
@@ -3791,8 +3873,8 @@ mod tests {
         let lookup = super::super::accounts::resolve_assignment(
             &core.server_state(),
             jazz::account_registry::Principal {
-                issuer: TEST_JWT_ISSUER.into(),
-                subject: "alice".into(),
+                issuer: jazz::tools::identity::LOCAL_FIRST_ISSUER.into(),
+                subject: alice_subject.clone(),
             },
         )
         .await;
@@ -3822,24 +3904,10 @@ mod tests {
     #[cfg(feature = "embedded-server")]
     #[tokio::test]
     async fn per_message_account_gate_refuses_the_first_frame_after_revocation() {
-        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER, TestJwtIssuer};
+        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER};
 
         let core = JazzServer::start().await.expect("start test server");
-        let client = reqwest::Client::new();
-        let accounts = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
-        let alice = TestJwtIssuer::jwt_for_user("alice");
-        let registered: serde_json::Value = client
-            .post(format!("{accounts}/register"))
-            .bearer_auth(&alice)
-            .send()
-            .await
-            .expect("register Alice")
-            .json()
-            .await
-            .expect("Alice's account");
-        let account = jazz::account_registry::AccountId(
-            uuid::Uuid::parse_str(registered["account"].as_str().expect("account")).expect("uuid"),
-        );
+        let account = enroll(&core, "alice").await;
         let identity = Some(
             AuthorSubject::authenticated(TEST_JWT_ISSUER, "alice")
                 .expect("principal")
@@ -3851,22 +3919,12 @@ mod tests {
             .await
             .expect("admitted");
 
-        let bob = client
-            .post(format!("{accounts}/register"))
-            .bearer_auth(TestJwtIssuer::jwt_for_user("bob"))
-            .send()
-            .await
-            .expect("register Bob");
-        assert_eq!(bob.status(), axum::http::StatusCode::OK);
+        enroll(&core, "bob").await;
         account_admission_current(&state, identity, &mut changes)
             .await
             .expect("an unrelated enrollment keeps Alice admitted");
 
-        let revoked = client
-            .post(format!("{accounts}/revoke"))
-            .bearer_auth(&alice)
-            .json(&serde_json::json!({ "identity": { "issuer": TEST_JWT_ISSUER, "subject": "alice" } }))
-            .send().await.expect("revoke Alice");
+        let revoked = revoke(&core, TEST_JWT_ISSUER, "alice").await;
         assert_eq!(revoked.status(), axum::http::StatusCode::NO_CONTENT);
         assert!(
             account_admission_current(&state, identity, &mut changes)
@@ -3884,7 +3942,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     #[ignore = "#3387: timing probe, run manually with --ignored"]
     async fn probe_3387_per_message_admission_cost() {
-        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER, TestJwtIssuer};
+        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER};
 
         const CHECKS_PER_SOCKET: usize = 2_000;
         let core = JazzServer::builder()
@@ -3892,21 +3950,7 @@ mod tests {
             .start()
             .await
             .expect("start test server");
-        let client = reqwest::Client::new();
-        let accounts = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
-        let registered: serde_json::Value = client
-            .post(format!("{accounts}/register"))
-            .bearer_auth(TestJwtIssuer::jwt_for_user("alice"))
-            .send()
-            .await
-            .expect("register Alice")
-            .json()
-            .await
-            .expect("Alice's account");
-        let account = jazz::account_registry::AccountId(
-            uuid::Uuid::parse_str(registered["account"].as_str().expect("account"))
-                .expect("account uuid"),
-        );
+        let account = enroll(&core, "alice").await;
         let identity = Some(
             AuthorSubject::authenticated(TEST_JWT_ISSUER, "alice")
                 .expect("Alice's principal")
@@ -4440,7 +4484,7 @@ mod tests {
             ],
         ));
         let response = reqwest::Client::new()
-            .post(format!("http://{addr}/apps/{}/admin/deploy", state.app_id))
+            .post(format!("http://{addr}/apps/{}/admin/bundles", state.app_id))
             .header("X-Jazz-Admin-Secret", "admin-secret")
             .header("Content-Type", "application/json")
             .body(
@@ -4497,12 +4541,11 @@ mod tests {
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .with_core_server_shell_schema(schema.clone())
             .build()
             .await
             .expect("build websocket private docs test state")
             .state;
+        publish_source_bundle(&state, &schema.public_schema().clone()).await;
         let addr = start_ws_test_server(state.clone()).await;
         let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
         let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
@@ -4634,13 +4677,12 @@ mod tests {
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .with_core_server_shell_schema(ws_public_schema_convert())
             .with_max_websocket_connections(2)
             .build()
             .await
             .expect("build capped websocket server state")
             .state;
+        publish_source_bundle(&state, &ws_public_schema_convert().public_schema().clone()).await;
         let addr = start_ws_test_server(state.clone()).await;
 
         let first =
@@ -4691,12 +4733,15 @@ mod tests {
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .with_core_server_shell_schema(ws_public_schema_convert())
             .build()
             .await
             .expect("build first websocket server state")
             .state;
+        publish_source_bundle(
+            &state_a,
+            &ws_public_schema_convert().public_schema().clone(),
+        )
+        .await;
         let state_b = ServerBuilder::new(app_id)
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
@@ -4704,12 +4749,15 @@ mod tests {
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .with_core_server_shell_schema(ws_public_schema_convert())
             .build()
             .await
             .expect("build second websocket server state")
             .state;
+        publish_source_bundle(
+            &state_b,
+            &ws_public_schema_convert().public_schema().clone(),
+        )
+        .await;
         let addr_a = start_ws_test_server(state_a.clone()).await;
         let addr_b = start_ws_test_server(state_b.clone()).await;
         let identity = AuthorSubject::for_test_bytes([0x4a; 16]);
@@ -4952,5 +5000,934 @@ mod tests {
             ),
             "idle websocket upgrade must close cleanly under shutdown; observed {outcome:?}"
         );
+    }
+
+    // ---- thin clients (SPEC 8.14) ----------------------------------------
+
+    type TestWs = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    fn private_docs_public_schema() -> Schema {
+        SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("docs")
+                    .column("title", ColumnType::Text)
+                    .column("owner", ColumnType::Text)
+                    .policies(public_table_policies().with_select(PolicyExpr::eq_session(
+                        "owner",
+                        vec![
+                            "user".to_owned(),
+                            "identity".to_owned(),
+                            "subject".to_owned(),
+                        ],
+                    ))),
+            )
+            .build()
+    }
+
+    async fn private_docs_state() -> (Arc<ServerState>, Schema) {
+        let source = private_docs_public_schema();
+        let schema = jazz::schema::JazzSchema::new(&source).expect("thin docs schema compiles");
+        let state = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build thin test state")
+            .state;
+        // A createJazz app's store: its backend publishes the deployment
+        // as a bundle and pins its sessions to it.
+        drop(schema);
+        publish_source_bundle(&state, &source).await;
+        (state, source)
+    }
+
+    async fn open_thin_ws(
+        addr: std::net::SocketAddr,
+        state: &Arc<ServerState>,
+        identity: AuthorSubject,
+    ) -> TestWs {
+        let bundle = current_bundle(addr, state).await;
+        open_negotiated_ws_with_prelude_and_features(
+            addr,
+            state,
+            ws_pinned_session_prelude(identity, &bundle),
+            jazz::wire::FEATURE_THIN_RESULTS,
+        )
+        .await
+    }
+
+    async fn send_thin(ws: &mut TestWs, id: u64, op: jazz::thin::ThinOp) {
+        let frame = encode_frame(&WireFrame::ThinRequest(jazz::thin::ThinRequest { id, op }))
+            .expect("encode thin request");
+        let batch = postcard::to_allocvec(&vec![frame]).expect("encode thin batch");
+        ws.send(WsMessage::Binary(batch.into()))
+            .await
+            .expect("send thin request");
+    }
+
+    /// Thin responses until `done` holds for the ones so far.
+    async fn thin_responses_until(
+        ws: &mut TestWs,
+        done: impl Fn(&[jazz::thin::ThinResponse]) -> bool,
+    ) -> Vec<jazz::thin::ThinResponse> {
+        let mut responses = Vec::new();
+        let start = tokio::time::Instant::now();
+        while !done(&responses) {
+            let remaining = WS_PUMP_DEADLINE.saturating_sub(start.elapsed());
+            let message = tokio::time::timeout(remaining, ws.next())
+                .await
+                .unwrap_or_else(|_| panic!("thin responses so far: {responses:?}"))
+                .expect("websocket open")
+                .expect("websocket message");
+            for frame in decode_ws_message(&message) {
+                match frame {
+                    WireFrame::ThinResponse(response) => responses.push(response),
+                    other => panic!("a thin connection received {other:?}"),
+                }
+            }
+        }
+        responses
+    }
+
+    async fn thin_answer(ws: &mut TestWs, id: u64) -> jazz::thin::ThinBody {
+        let responses =
+            thin_responses_until(ws, |responses| responses.iter().any(|r| r.id == id)).await;
+        responses
+            .into_iter()
+            .find(|response| response.id == id)
+            .expect("answer")
+            .body
+    }
+
+    fn doc_cells(title: &str, owner: AuthorSubject) -> Vec<u8> {
+        let (_, owner) = issuer_and_subject(owner);
+        let descriptor = jazz::records::RecordDescriptor::new([
+            ("title", jazz::records::ValueType::String),
+            ("owner", jazz::records::ValueType::String),
+        ]);
+        let record = jazz::records::OwnedRecord::new(
+            descriptor
+                .create(&[
+                    CoreValue::String(title.to_owned()),
+                    CoreValue::String(owner),
+                ])
+                .expect("doc record"),
+            descriptor,
+        );
+        jazz::binding_codec::encode_named_cells(&record).expect("encode doc cells")
+    }
+
+    fn docs_query() -> Vec<u8> {
+        postcard::to_allocvec(&jazz::query::Query::from("docs")).expect("encode docs query")
+    }
+
+    fn remote_read() -> Vec<u8> {
+        br#"{"tier":"remote"}"#.to_vec()
+    }
+
+    async fn thin_titles(ws: &mut TestWs, id: u64, transaction: Option<&str>) -> Vec<String> {
+        send_thin(
+            ws,
+            id,
+            jazz::thin::ThinOp::Query {
+                query: docs_query(),
+                options: remote_read(),
+                transaction: transaction.map(str::to_owned),
+            },
+        )
+        .await;
+        let jazz::thin::ThinBody::Rows { rows, .. } = thin_answer(ws, id).await else {
+            panic!("the query must answer rows");
+        };
+        titles_of(jazz::binding_codec::decode_rows(&rows).unwrap())
+    }
+
+    fn titles_of(batches: Vec<jazz::binding_codec::DecodedRowBatch>) -> Vec<String> {
+        let mut titles: Vec<String> = batches
+            .into_iter()
+            .flat_map(|batch| batch.rows)
+            .filter_map(|row| match row.cells.get("title") {
+                Some(CoreValue::String(title)) => Some(title.clone()),
+                _ => None,
+            })
+            .collect();
+        titles.sort();
+        titles
+    }
+
+    async fn bind_thin_schema(ws: &mut TestWs, schema: &Schema) {
+        send_thin(
+            ws,
+            0,
+            jazz::thin::ThinOp::Schema {
+                schema: serde_json::to_vec(schema).expect("encode public schema"),
+            },
+        )
+        .await;
+        assert_eq!(thin_answer(ws, 0).await, jazz::thin::ThinBody::Ok);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_client_reads_results_under_its_own_policies() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+
+        let mut alice_ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut alice_ws, &schema).await;
+        send_thin(
+            &mut alice_ws,
+            1,
+            ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells("alice private", alice),
+                options: Vec::new(),
+                transaction: None,
+            },
+        )
+        .await;
+        let ThinBody::Written { seq, .. } = thin_answer(&mut alice_ws, 1).await else {
+            panic!("alice's insert must commit");
+        };
+        assert!(seq > 0);
+
+        send_thin(
+            &mut alice_ws,
+            2,
+            ThinOp::Query {
+                query: docs_query(),
+                options: remote_read(),
+                transaction: None,
+            },
+        )
+        .await;
+        let ThinBody::Rows { rows, relation } = thin_answer(&mut alice_ws, 2).await else {
+            panic!("alice's query must answer rows");
+        };
+        assert!(!relation);
+        assert_eq!(
+            titles_of(jazz::binding_codec::decode_rows(&rows).unwrap()),
+            vec!["alice private".to_owned()]
+        );
+
+        let mut bob_ws = open_thin_ws(addr, &state, bob).await;
+        bind_thin_schema(&mut bob_ws, &schema).await;
+        send_thin(
+            &mut bob_ws,
+            1,
+            ThinOp::Query {
+                query: docs_query(),
+                options: remote_read(),
+                transaction: None,
+            },
+        )
+        .await;
+        let ThinBody::Rows { rows, .. } = thin_answer(&mut bob_ws, 1).await else {
+            panic!("bob's query must answer rows");
+        };
+        assert!(
+            titles_of(jazz::binding_codec::decode_rows(&rows).unwrap()).is_empty(),
+            "bob must not see alice's private doc"
+        );
+    }
+
+    /// Publish the docs schema as a bundle whose docs read by `select`
+    /// (createJazz's `/bundles`); its hex id.
+    async fn publish_docs_bundle(
+        addr: std::net::SocketAddr,
+        state: &Arc<ServerState>,
+        schema: &Schema,
+        select: PolicyExpr,
+    ) -> String {
+        let hash = jazz::tools::public_schema::SchemaHash::compute(schema).to_string();
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}/apps/{}/admin/bundles", state.app_id))
+            .header("X-Jazz-Admin-Secret", "admin-secret")
+            .header("Content-Type", "application/json")
+            .body(
+                serde_json::json!({
+                    "targetSchemaHash": hash,
+                    "schemas": [{ "hash": hash, "schema": schema }],
+                    "migrations": [],
+                    "permissions": { "docs": public_table_policies().with_select(select) },
+                })
+                .to_string(),
+            )
+            .send()
+            .await
+            .expect("publish bundle");
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.expect("bundle response");
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        body["bundle"].as_str().expect("bundle id").to_owned()
+    }
+
+    fn pinned_thin_prelude(identity: AuthorSubject, bundle: Option<&str>) -> Vec<u8> {
+        let mut prelude: serde_json::Value =
+            serde_json::from_slice(&ws_session_prelude(identity)).unwrap();
+        if let Some(bundle) = bundle {
+            prelude["bundle"] = serde_json::json!(bundle);
+        }
+        prelude.to_string().into_bytes()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_sessions_pinned_to_a_bundle_are_governed_by_its_policies() {
+        // A createJazz app's store: its backend publishes every deployment
+        // as a bundle, starting from no schema.
+        let schema = private_docs_public_schema();
+        let state = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build bundle test state")
+            .state;
+        let addr = start_ws_test_server(state.clone()).await;
+        // Two deployments publish their own policies: one reads every doc,
+        // one none.
+        let open = publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await;
+        let closed = publish_docs_bundle(addr, &state, &schema, PolicyExpr::False).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+        let features = jazz::wire::FEATURE_THIN_RESULTS;
+
+        let mut alice_ws = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(alice, Some(&closed)),
+            features,
+        )
+        .await;
+        bind_thin_schema(&mut alice_ws, &schema).await;
+        send_thin(
+            &mut alice_ws,
+            1,
+            jazz::thin::ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells("alice's", alice),
+                options: Vec::new(),
+                transaction: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut alice_ws, 1).await,
+            jazz::thin::ThinBody::Written { .. }
+        ));
+        assert!(
+            thin_titles(&mut alice_ws, 2, None).await.is_empty(),
+            "the closed bundle reads nothing, not even alice's own doc"
+        );
+
+        let mut bob_ws = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(bob, Some(&open)),
+            features,
+        )
+        .await;
+        bind_thin_schema(&mut bob_ws, &schema).await;
+        assert_eq!(
+            thin_titles(&mut bob_ws, 1, None).await,
+            vec!["alice's".to_owned()],
+            "the open bundle reads alice's doc"
+        );
+
+        // Once bundles are published, an unpinned user session is refused,
+        // as a sync session is, and so is a pin to a bundle never published.
+        // Both are refused for good, so the client reports them.
+        let thin = jazz::wire::FEATURE_THIN_RESULTS;
+        let refused = thin_refusal(addr, &state, pinned_thin_prelude(bob, None), thin).await;
+        assert!(
+            refused.message.contains("served through createJazz"),
+            "{refused:?}"
+        );
+        assert_eq!(
+            (refused.code, refused.retry),
+            (WireErrorCode::AuthFailed, WireRetry::Never)
+        );
+        let unknown = "cd".repeat(32);
+        let unknown_pin = || pinned_thin_prelude(bob, Some(&unknown));
+        // A sync session pinned to it is refused the same way.
+        for features in [thin, 0] {
+            let refused = thin_refusal(addr, &state, unknown_pin(), features).await;
+            assert!(
+                refused.message.contains("is not published on this store"),
+                "{refused:?}"
+            );
+            assert_eq!(
+                (refused.code, refused.retry),
+                (WireErrorCode::AuthFailed, WireRetry::Never),
+                "a pin to an unknown bundle is refused for good (features {features})"
+            );
+        }
+    }
+
+    /// The error a connection opening with `prelude` and negotiating
+    /// `features` (thin or sync) is refused with.
+    async fn thin_refusal(
+        addr: std::net::SocketAddr,
+        state: &Arc<ServerState>,
+        prelude: Vec<u8>,
+        features: u64,
+    ) -> WireError {
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+            .await
+            .expect("connect websocket");
+        ws.send(WsMessage::Binary(prelude.into())).await.unwrap();
+        ws.send(WsMessage::Binary(
+            ws_client_hello_batch_with_features(features).into(),
+        ))
+        .await
+        .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("an answer")
+            .expect("a frame")
+            .expect("a message");
+        match decode_ws_message(&message).as_slice() {
+            [WireFrame::Error(error)] => error.clone(),
+            frames => panic!("expected a refusal, got {frames:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_user_sessions_need_a_pin_while_trusted_links_are_served() {
+        use crate::runtime::{ServerRuntimeHandle, StorageConfig};
+        use jazz::thin::{ThinBody, ThinOp, ThinRequest};
+        // A trusted link is served as SYSTEM, which no permissions govern.
+        let source = private_docs_public_schema();
+        let runtime = ServerRuntimeHandle::start_with_storage(
+            JazzSchema::new(&source).unwrap(),
+            StorageConfig::InMemory,
+        )
+        .unwrap();
+        let schema = || ThinRequest {
+            id: 0,
+            op: ThinOp::Schema {
+                schema: serde_json::to_vec(&source).unwrap(),
+            },
+        };
+        let answer = |trust| {
+            let runtime = runtime.clone();
+            async move {
+                let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+                let session = runtime
+                    .open_thin_session(alice, BTreeMap::new(), None, trust)
+                    .await
+                    .unwrap();
+                let mut stream = runtime.open_wire_stream(session).unwrap();
+                runtime.receive_thin_request(session, schema(), 16).unwrap();
+                runtime.request_wire_tick(session).unwrap();
+                let frames = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+                    .await
+                    .expect("an answer")
+                    .expect("open")
+                    .expect("frames");
+                match decode_frame(&frames[0]).unwrap() {
+                    WireFrame::ThinResponse(response) => response.body,
+                    other => panic!("expected a thin response, got {other:?}"),
+                }
+            }
+        };
+        // A user's session is never governed by the store's own
+        // permissions: unpinned, it is refused outright.
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let refused = runtime
+            .open_thin_session(alice, BTreeMap::new(), None, CommitUnitTrust::Session)
+            .await
+            .expect_err("an unpinned user session is refused");
+        assert!(refused.contains("served through createJazz"), "{refused}");
+        let wire = session_open_wire_error(&refused);
+        assert_eq!(
+            (wire.code, wire.retry),
+            (WireErrorCode::AuthFailed, WireRetry::Never),
+            "an unpinned user session is refused for good"
+        );
+        assert_eq!(answer(CommitUnitTrust::TrustedBackend).await, ThinBody::Ok);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_output_held_at_the_egress_budget_drains_as_the_client_reads() {
+        // Answers and live-query events pile up while the session's egress
+        // budget is spent, then the client reads it back to `room` short of
+        // the budget. Everything held must then reach the client by its
+        // reading alone, before the idle tick, whatever the room is
+        // relative to the frames' sizes.
+        for room in [
+            1, 8, 16, 24, 32, 48, 64, 80, 96, 128, 160, 192, 256, 512, 4096,
+        ] {
+            drain_with_room(room).await;
+        }
+    }
+
+    async fn drain_with_room(room: usize) {
+        use crate::runtime::{IDLE_TICK, SESSION_QUEUE_BUDGET, ServerRuntimeHandle, StorageConfig};
+        use jazz::thin::{ThinBody, ThinOp, ThinRequest};
+        let source = private_docs_public_schema();
+        let runtime = ServerRuntimeHandle::start_with_storage(
+            JazzSchema::new(&source).unwrap(),
+            StorageConfig::InMemory,
+        )
+        .unwrap();
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let session = runtime
+            .open_thin_session(
+                alice,
+                BTreeMap::new(),
+                None,
+                CommitUnitTrust::TrustedBackend,
+            )
+            .await
+            .unwrap();
+        let mut stream = runtime.open_wire_stream(session).unwrap();
+        runtime.hold_egress_for_test(session, SESSION_QUEUE_BUDGET);
+        let mut requests = vec![
+            ThinOp::Schema {
+                schema: serde_json::to_vec(&source).unwrap(),
+            },
+            ThinOp::Subscribe {
+                query: docs_query(),
+                options: br#"{"tier":"local-first"}"#.to_vec(),
+            },
+        ];
+        for title in ["one", "two", "three"] {
+            requests.push(ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells(title, alice),
+                options: Vec::new(),
+                transaction: None,
+            });
+        }
+        for (id, op) in requests.into_iter().enumerate() {
+            runtime
+                .receive_thin_request(session, ThinRequest { id: id as u64, op }, 16)
+                .unwrap();
+            runtime.request_wire_tick(session).unwrap();
+            runtime.settle_for_test().await;
+        }
+        runtime.release_egress_for_test(session, room);
+        // Well before the idle tick, which would move a stalled session on
+        // regardless of the client's reading.
+        let deadline = tokio::time::Instant::now() + IDLE_TICK / 2;
+
+        let (mut answered, mut seen) = (Vec::new(), 0usize);
+        while answered.len() < 4 || seen < 3 {
+            let frames = tokio::time::timeout_at(deadline, stream.recv())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "output stalled with {room} bytes of room: answered {answered:?}, saw {seen} rows"
+                    )
+                })
+                .expect("open")
+                .expect("frames");
+            for frame in frames {
+                let WireFrame::ThinResponse(response) = decode_frame(&frame).unwrap() else {
+                    panic!("expected a thin response");
+                };
+                match response.body {
+                    ThinBody::Event { delta, .. } => {
+                        let (added, _) =
+                            jazz::binding_codec::decode_subscription_delta_rows(&delta).unwrap();
+                        seen += titles_of(added).len();
+                    }
+                    ThinBody::Ok | ThinBody::Written { .. } => answered.push(response.id),
+                    other => panic!("unexpected answer to {}: {other:?}", response.id),
+                }
+            }
+        }
+        answered.sort();
+        assert_eq!(answered, [0, 2, 3, 4], "with {room} bytes of room");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn trusted_backend_thin_connection_reads_as_system() {
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut alice_ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut alice_ws, &schema).await;
+        send_thin(
+            &mut alice_ws,
+            1,
+            jazz::thin::ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells("alice private", alice),
+                options: Vec::new(),
+                transaction: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut alice_ws, 1).await,
+            jazz::thin::ThinBody::Written { .. }
+        ));
+
+        // The backend's own link, with no user session, is served as SYSTEM.
+        let backend_prelude = serde_json::json!({
+            "peer_identity": AuthorSubject::SYSTEM.canonical(),
+            "auth": { "backend_secret": "backend-secret" },
+        })
+        .to_string()
+        .into_bytes();
+        let mut backend = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            backend_prelude,
+            jazz::wire::FEATURE_THIN_RESULTS,
+        )
+        .await;
+        bind_thin_schema(&mut backend, &schema).await;
+        assert_eq!(
+            thin_titles(&mut backend, 1, None).await,
+            vec!["alice private".to_owned()]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_requests_past_the_ingress_budget_are_refused() {
+        let (state, _) = private_docs_state().await;
+        let runtime = state.runtime_for_client().expect("runtime");
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bundle = jazz::catalogue::BundleId::from_hex(
+            &current_bundle(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), &state).await,
+        )
+        .expect("bundle id");
+        let session = runtime
+            .open_thin_session(
+                alice,
+                BTreeMap::new(),
+                Some(bundle),
+                CommitUnitTrust::Session,
+            )
+            .await
+            .expect("open thin session");
+        let request = |id| jazz::thin::ThinRequest {
+            id,
+            op: jazz::thin::ThinOp::CaptureSnapshot,
+        };
+        let budget = crate::runtime::SESSION_QUEUE_BUDGET;
+        let error = runtime
+            .receive_thin_request(session, request(1), budget + 1)
+            .expect_err("a request past the budget is refused");
+        assert!(error.contains("ingress budget"), "{error}");
+        runtime
+            .receive_thin_request(session, request(2), 16)
+            .expect("a request within the budget is queued");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_subscription_receives_results_for_writes_from_other_sessions() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+
+        let mut reader = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut reader, &schema).await;
+        send_thin(
+            &mut reader,
+            7,
+            ThinOp::Subscribe {
+                query: docs_query(),
+                options: br#"{"tier":"local-first"}"#.to_vec(),
+            },
+        )
+        .await;
+        let opening = thin_responses_until(&mut reader, |responses| {
+            responses
+                .iter()
+                .any(|r| r.id == 7 && matches!(r.body, ThinBody::Event { settled: true, .. }))
+        })
+        .await;
+        for response in &opening {
+            let ThinBody::Event { delta, .. } = &response.body else {
+                panic!("unexpected opening answer {response:?}");
+            };
+            let (added, _) = jazz::binding_codec::decode_subscription_delta_rows(delta).unwrap();
+            assert!(titles_of(added).is_empty());
+        }
+
+        // A second connection for the same user writes; the first one's
+        // live query hears of it.
+        let mut writer = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut writer, &schema).await;
+        send_thin(
+            &mut writer,
+            1,
+            ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells("from elsewhere", alice),
+                options: serde_json::to_vec(&serde_json::json!({ "rowId": vec![0x42_u8; 16] }))
+                    .unwrap(),
+                transaction: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut writer, 1).await,
+            ThinBody::Written { row, .. } if row == [0x42; 16]
+        ));
+
+        let update = thin_responses_until(&mut reader, |responses| {
+            responses.iter().any(|r| match &r.body {
+                ThinBody::Event { delta, .. } => {
+                    let (added, _) =
+                        jazz::binding_codec::decode_subscription_delta_rows(delta).unwrap();
+                    titles_of(added) == vec!["from elsewhere".to_owned()]
+                }
+                _ => false,
+            })
+        })
+        .await;
+        assert!(update.iter().all(|r| r.id == 7));
+
+        send_thin(&mut reader, 8, ThinOp::Unsubscribe { subscription: 7 }).await;
+        let closed =
+            thin_responses_until(&mut reader, |responses| responses.iter().any(|r| r.id == 8))
+                .await;
+        assert!(
+            closed
+                .iter()
+                .any(|r| r.id == 7 && r.body == ThinBody::Closed)
+        );
+        assert!(closed.iter().any(|r| r.id == 8 && r.body == ThinBody::Ok));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_client_must_declare_a_deployed_schema_first() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, _) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+
+        send_thin(
+            &mut ws,
+            1,
+            ThinOp::Query {
+                query: docs_query(),
+                options: remote_read(),
+                transaction: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut ws, 1).await,
+            ThinBody::Error { code, .. } if code == "Argument"
+        ));
+
+        send_thin(
+            &mut ws,
+            2,
+            // A schema this server never admitted.
+            ThinOp::Schema {
+                schema: serde_json::to_vec(
+                    &SchemaBuilder::new()
+                        .table(
+                            PublicTableSchema::builder("notes")
+                                .column("body", ColumnType::Text)
+                                .policies(public_table_policies()),
+                        )
+                        .build(),
+                )
+                .expect("encode public schema"),
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut ws, 2).await,
+            ThinBody::Error { code, .. } if code == "SchemaNotDeployed"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_transactions_commit_or_roll_back_as_one() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &schema).await;
+
+        for (kind, tx, title) in [
+            ("serializable", "0190f3e4000070008000000000000001", "kept"),
+            ("mergeable", "0190f3e4000070008000000000000002", "dropped"),
+        ] {
+            send_thin(
+                &mut ws,
+                1,
+                ThinOp::Begin {
+                    transaction: tx.to_owned(),
+                    kind: kind.to_owned(),
+                },
+            )
+            .await;
+            assert_eq!(thin_answer(&mut ws, 1).await, ThinBody::Ok);
+            send_thin(
+                &mut ws,
+                2,
+                ThinOp::Insert {
+                    table: "docs".to_owned(),
+                    cells: doc_cells(title, alice),
+                    options: Vec::new(),
+                    transaction: Some(tx.to_owned()),
+                },
+            )
+            .await;
+            assert!(matches!(
+                thin_answer(&mut ws, 2).await,
+                ThinBody::Staged { .. }
+            ));
+            // The transaction reads its own write; nobody else sees it yet.
+            assert!(
+                thin_titles(&mut ws, 3, Some(tx))
+                    .await
+                    .contains(&title.to_owned())
+            );
+            assert!(
+                !thin_titles(&mut ws, 4, None)
+                    .await
+                    .contains(&title.to_owned())
+            );
+            if kind == "serializable" {
+                send_thin(
+                    &mut ws,
+                    5,
+                    ThinOp::Commit {
+                        transaction: tx.to_owned(),
+                    },
+                )
+                .await;
+                assert!(matches!(
+                    thin_answer(&mut ws, 5).await,
+                    ThinBody::Written { .. }
+                ));
+            } else {
+                send_thin(
+                    &mut ws,
+                    5,
+                    ThinOp::Rollback {
+                        transaction: tx.to_owned(),
+                    },
+                )
+                .await;
+                assert_eq!(thin_answer(&mut ws, 5).await, ThinBody::Ok);
+            }
+        }
+        assert_eq!(thin_titles(&mut ws, 6, None).await, vec!["kept".to_owned()]);
+
+        // Another session cannot use a transaction it did not begin.
+        let mut other = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut other, &schema).await;
+        send_thin(
+            &mut ws,
+            7,
+            ThinOp::Begin {
+                transaction: "0190f3e4000070008000000000000003".to_owned(),
+                kind: "mergeable".to_owned(),
+            },
+        )
+        .await;
+        assert_eq!(thin_answer(&mut ws, 7).await, ThinBody::Ok);
+        send_thin(
+            &mut other,
+            1,
+            ThinOp::Commit {
+                transaction: "0190f3e4000070008000000000000003".to_owned(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut other, 1).await,
+            ThinBody::Error { code, .. } if code == "Argument"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_writes_cannot_choose_their_author() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &schema).await;
+        send_thin(
+            &mut ws,
+            1,
+            ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells("as bob", bob),
+                options: serde_json::to_vec(&serde_json::json!({
+                    "author": bob.canonical().as_bytes(),
+                }))
+                .unwrap(),
+                transaction: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut ws, 1).await,
+            ThinBody::Error { code, .. } if code == "Argument"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_client_captures_snapshots() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &schema).await;
+        send_thin(&mut ws, 1, ThinOp::CaptureSnapshot).await;
+        let ThinBody::Snapshot { snapshot } = thin_answer(&mut ws, 1).await else {
+            panic!("a snapshot must be captured");
+        };
+        assert!(!snapshot.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_connection_refuses_sync_frames() {
+        let (state, _) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        let hello = encode_frame(&WireFrame::Hello(WireHello::current(
+            WirePeerRole::Client,
+            0,
+        )))
+        .expect("encode hello");
+        let batch = postcard::to_allocvec(&vec![hello]).expect("encode batch");
+        ws.send(WsMessage::Binary(batch.into()))
+            .await
+            .expect("send");
+        let message = tokio::time::timeout(WS_PUMP_DEADLINE, ws.next())
+            .await
+            .expect("an answer")
+            .expect("open")
+            .expect("message");
+        assert!(matches!(
+            decode_ws_message(&message).as_slice(),
+            [WireFrame::Error(WireError {
+                code: WireErrorCode::MalformedFrame,
+                ..
+            })]
+        ));
     }
 }

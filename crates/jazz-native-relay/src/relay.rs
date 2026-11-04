@@ -1331,6 +1331,8 @@ struct StreamingOptions {
     updated_at_ms: Option<f64>,
     head: Option<jazz::protocol::BranchSelector>,
     base: Option<jazz::protocol::BranchViewBase>,
+    /// The open transaction the finished value is staged in.
+    transaction: Option<String>,
 }
 
 fn foreground_command(
@@ -1660,6 +1662,7 @@ fn foreground_command(
                 options.updated_at_ms,
                 options.head,
                 options.base,
+                options.transaction.as_deref(),
             )?;
             let handle = client.handle();
             client.uploads.insert(handle, upload);
@@ -1679,9 +1682,14 @@ fn foreground_command(
             let mut mutation = client.uploads.remove(&upload).ok_or_else(|| {
                 HostError::Argument(format!("unknown streaming mutation {upload}"))
             })?;
-            let (tx_id, _) = client.track(mutation.finish()?);
-            Response::TransactionCommitted {
-                tx_id: *tx_id.as_bytes(),
+            if mutation.in_transaction() {
+                mutation.finish_in_transaction()?;
+                Response::MutationStaged
+            } else {
+                let (tx_id, _) = client.track(mutation.finish()?);
+                Response::TransactionCommitted {
+                    tx_id: *tx_id.as_bytes(),
+                }
             }
         }
         Request::AbortStreamingMutation { upload } => Response::StreamingMutationAborted {
@@ -1873,6 +1881,9 @@ pub struct NativeRelaySocketConfig {
     pub app_id: AppId,
     pub peer_identity: AuthorSubject,
     pub auth: AuthConfig,
+    /// The upgrade request's `Authorization` header (see
+    /// [`NativeTransportRequest::authorization`]).
+    pub authorization: Option<String>,
     /// Every event of the worker's [`UpstreamLink`], in order.
     pub on_event: Arc<dyn Fn(LinkEvent) + Send + Sync>,
 }
@@ -1926,14 +1937,27 @@ impl NativeRelaySocketWorker {
         config: NativeRelaySocketConfig,
         connector: Arc<dyn NativeTransportConnector>,
     ) -> Result<Self, RelayError> {
+        // A socket presents exactly one user credential: a local-first
+        // account's own token, or a session stated to the app's backend with
+        // the app's bearer on the upgrade. Never a backend or admin secret.
+        let token = config
+            .auth
+            .jwt_token
+            .as_deref()
+            .is_some_and(|t| !t.is_empty());
+        let stated = config.auth.backend_session.is_some()
+            && config
+                .authorization
+                .as_deref()
+                .is_some_and(|a| !a.is_empty());
         if config.peer_identity == AuthorSubject::SYSTEM
-            || config.auth.jwt_token.as_deref().is_none_or(str::is_empty)
+            || token == stated
+            || (token && config.authorization.is_some())
             || config.auth.backend_secret.is_some()
             || config.auth.admin_secret.is_some()
-            || config.auth.backend_session.is_some()
         {
             return Err(RelayError::Socket(
-                "native relay sockets require an ordinary non-SYSTEM bearer session".to_owned(),
+                "native relay sockets require an ordinary non-SYSTEM user session".to_owned(),
             ));
         }
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -2123,6 +2147,8 @@ async fn connect_and_bridge(
         app_id: config.app_id,
         peer_identity: config.peer_identity,
         auth: config.auth.clone(),
+        authorization: config.authorization.clone(),
+        bundle: None,
         wake: Arc::new(move || inbound_wake.notify_one()),
     };
     let connecting = connector.connect(request);

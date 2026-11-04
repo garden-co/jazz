@@ -8,9 +8,6 @@ use jazz::schema::JazzSchema;
 use tracing::info;
 
 use crate::middleware::AuthConfig;
-use crate::middleware::auth::{
-    JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
-};
 use crate::profiling::{self, HeapProfileDump};
 use crate::server::routes;
 use crate::server::{ServerState, StoredCatalogue};
@@ -223,7 +220,6 @@ impl ServerBuilder {
         if let StorageBackend::Persistent { path } = &self.storage_backend {
             refuse_pre_sqlite_data_dir(path)?;
         }
-        let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config);
 
         // One store per app: the catalogue and the account registry are host
@@ -248,7 +244,6 @@ impl ServerBuilder {
             catalogue: crate::server::ServerCatalogue,
             app_id: self.app_id,
             auth_config,
-            jwt_verifier,
             backend_credential,
             workload_secrets,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
@@ -259,18 +254,9 @@ impl ServerBuilder {
             store: Some(store),
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),
             #[cfg(test)]
-            runtime_catalogue_before_publication_hook: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            runtime_catalogue_after_permissions_read_hook: std::sync::Mutex::new(None),
-            #[cfg(test)]
             panic_during_shutdown_for_test: Default::default(),
             shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
         });
-
-        // Restore the durable administrative selection before serving snapshots.
-        super::runtime_catalogue::publish_runtime_catalogue(&state, &[], &[])
-            .await
-            .map_err(|error| format!("restore active schema before serving: {error}"))?;
 
         let app = routes::create_router(state.clone()).merge(profiling::admin_router(
             self.heap_profiler,
@@ -297,7 +283,6 @@ impl ServerBuilder {
             let local_durability_tiers =
                 std::collections::HashSet::from([self.local_durability_tier()]);
             StoredCatalogue::with_test_observability(
-                self.app_id,
                 initial_schema,
                 storage,
                 schema_branches,
@@ -306,7 +291,7 @@ impl ServerBuilder {
             .map_err(|error| format!("failed to read durable catalogue: {error}"))?
         };
         #[cfg(not(test))]
-        let store = StoredCatalogue::new(self.app_id, initial_schema, storage)
+        let store = StoredCatalogue::new(initial_schema, storage)
             .map_err(|error| format!("failed to read durable catalogue: {error}"))?;
 
         let latest_catalogue_schema = store
@@ -322,12 +307,7 @@ impl ServerBuilder {
     ) -> Result<Option<crate::server::ServerRuntimeHandle>, String> {
         let role = NodeRole::Core;
         if let Some(schema) = &self.core_server_shell_schema {
-            return Ok(Some(store.start_runtime(
-                schema.clone(),
-                role,
-                false,
-                false,
-            )?));
+            return Ok(Some(store.start_runtime(schema.clone(), role, false)?));
         }
 
         let (schema, dynamic) = match &self.schema_mode {
@@ -341,9 +321,8 @@ impl ServerBuilder {
             .map_err(|error| format!("failed to build server shell schema: {error}"))?;
         // The newest published schema may never have reached the shell store
         // (published without a lens, or its lens bridge failed). A dynamic
-        // server then reopens with the store's own current schema; startup
-        // re-applies the durable permissions head right after.
-        Ok(Some(store.start_runtime(schema, role, dynamic, dynamic)?))
+        // server then reopens with the store's own current schema.
+        Ok(Some(store.start_runtime(schema, role, dynamic)?))
     }
 
     /// The storage to open, and the blob-store record to write once it has
@@ -730,113 +709,7 @@ fn test_schema_branches(schema: Option<&Schema>) -> Vec<String> {
     schema.map(|_| "main".to_string()).into_iter().collect()
 }
 
-async fn build_jwt_verifier(auth_config: &AuthConfig) -> Result<Option<Arc<JwtVerifier>>, String> {
-    match (
-        auth_config.jwks_url.as_ref(),
-        auth_config.jwt_public_key.as_ref(),
-    ) {
-        (Some(_), Some(_)) => Err(
-            "configure either --jwks-url / JAZZ_JWKS_URL or --jwt-public-key / JAZZ_JWT_PUBLIC_KEY, not both"
-                .to_string(),
-        ),
-        (None, None) => Ok(None),
-        (None, Some(public_key)) => {
-            let verifier = StaticJwtVerifier::from_public_key(public_key)?;
-            Ok(Some(Arc::new(JwtVerifier::Static(verifier))))
-        }
-        (Some(jwks_url), None) => {
-            let jwks_ttl = std::env::var("JAZZ_JWKS_CACHE_TTL_SECS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(Duration::from_secs)
-                .unwrap_or(JWKS_CACHE_TTL);
-            let jwks_max_stale = std::env::var("JAZZ_JWKS_MAX_STALE_SECS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(Duration::from_secs)
-                .unwrap_or(JWKS_MAX_STALE);
-
-            let http_client = reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(10))
-                .build()
-                .map_err(|e| format!("failed to build JWKS HTTP client: {e}"))?;
-
-            let verifier = Arc::new(JwtVerifier::Jwks(JwksCache::new(
-                jwks_url.clone(),
-                http_client,
-                jwks_ttl,
-                jwks_max_stale,
-            )));
-
-            // Warm the cache in the background. The JWKS endpoint may not be
-            // available yet (e.g. Jazz server starts during Next.js config resolution,
-            // before the app is listening). First auth request will block on fetch
-            // if the background warm hasn't completed.
-            {
-                let verifier = Arc::clone(&verifier);
-                tokio::spawn(async move {
-                    if let JwtVerifier::Jwks(cache) = verifier.as_ref()
-                        && let Err(e) = cache.load(false).await
-                    {
-                        tracing::warn!(
-                            "Background JWKS warm failed (will retry on first auth request): {e}"
-                        );
-                    }
-                });
-            }
-
-            Ok(Some(verifier))
-        }
-    }
-}
-
 fn validate_server_config(auth_config: &AuthConfig) -> Result<(), String> {
-    let has_jwt_key = auth_config.jwks_url.is_some() || auth_config.jwt_public_key.is_some();
-    if auth_config
-        .jwt_issuer
-        .as_deref()
-        .is_some_and(|value| value.trim().is_empty())
-    {
-        return Err("external JWT issuer cannot be empty".to_owned());
-    }
-    if auth_config
-        .jwt_audience
-        .as_deref()
-        .is_some_and(|value| value.trim().is_empty())
-    {
-        return Err("external JWT audience cannot be empty".to_owned());
-    }
-
-    match (
-        auth_config.jwt_issuer.as_ref(),
-        auth_config.jwt_audience.as_ref(),
-    ) {
-        (Some(_), Some(_)) if !has_jwt_key => {
-            return Err(
-                "external JWT issuer/audience require --jwks-url / JAZZ_JWKS_URL or --jwt-public-key / JAZZ_JWT_PUBLIC_KEY"
-                    .to_owned(),
-            );
-        }
-        (Some(_), None) => {
-            return Err(
-                "external JWT verification requires --jwt-audience / JAZZ_JWT_AUDIENCE".to_owned(),
-            );
-        }
-        (None, Some(_)) => {
-            return Err(
-                "external JWT verification requires --jwt-issuer / JAZZ_JWT_ISSUER".to_owned(),
-            );
-        }
-        (None, None) if has_jwt_key && !auth_config.allow_local_first_auth => {
-            return Err(
-                "external JWT verification requires --jwt-issuer / JAZZ_JWT_ISSUER and --jwt-audience / JAZZ_JWT_AUDIENCE"
-                    .to_owned(),
-            );
-        }
-        _ => {}
-    }
-
     if let Some(workload) = &auth_config.trusted_workload {
         if auth_config.admin_secret.is_some() || auth_config.backend_secret.is_some() {
             return Err(
@@ -874,14 +747,8 @@ fn validate_server_config(auth_config: &AuthConfig) -> Result<(), String> {
 
 fn log_auth_config(auth_config: &AuthConfig) {
     info!(
-        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, jwt_issuer={}, jwt_audience={}, cookie={}, trust_forwarded_host={}, backend={}, admin={}",
+        "Auth configured: local_first={}, backend={}, admin={}",
         auth_config.allow_local_first_auth,
-        auth_config.jwks_url.is_some(),
-        auth_config.jwt_public_key.is_some(),
-        auth_config.jwt_issuer.is_some(),
-        auth_config.jwt_audience.is_some(),
-        auth_config.auth_cookie_name.is_some(),
-        auth_config.trust_forwarded_host,
         auth_config.backend_secret.is_some(),
         auth_config.admin_secret.is_some()
     );
@@ -892,8 +759,6 @@ mod tests {
     use super::*;
     use crate::server::catalogue::CatalogueStore;
     use jazz::tools::AppId;
-    use jazz::tools::public_schema::SchemaHash;
-    use jazz::tools::schema_lens::LensTransform;
 
     fn dynamic_bootstrap_schema() -> jazz::tools::public_schema::Schema {
         jazz::tools::public_schema::SchemaBuilder::new()
@@ -902,26 +767,6 @@ mod tests {
                     .column("body", jazz::tools::public_schema::ColumnType::Text),
             )
             .build()
-    }
-
-    #[test]
-    fn local_first_server_may_start_with_unbound_jwks_but_external_only_may_not() {
-        let local_first = AuthConfig {
-            jwks_url: Some("http://127.0.0.1:9/jwks".to_owned()),
-            allow_local_first_auth: true,
-            ..Default::default()
-        };
-        validate_server_config(&local_first)
-            .expect("local-first admission does not require external JWT bindings");
-
-        let external_only = AuthConfig {
-            allow_local_first_auth: false,
-            ..local_first
-        };
-        let error = validate_server_config(&external_only)
-            .expect_err("an external-only verifier must be explicitly bound");
-        assert!(error.contains("--jwt-issuer"), "{error}");
-        assert!(error.contains("--jwt-audience"), "{error}");
     }
 
     #[tokio::test]
@@ -1441,87 +1286,6 @@ mod tests {
             restored_todos.branch_by,
             vec![jazz::tools::public_schema::ColumnName::new("workspace_id")]
         );
-    }
-
-    /// Alice activates a descendant schema and permissions, then restarts.
-    /// Startup must retain the selection and revision before serving snapshots.
-    #[tokio::test]
-    async fn authority_reopens_active_descendant_before_serving_snapshots() {
-        use jazz::tools::schema_lens::{Lens, LensOp};
-        use jazz::tools::{
-            ColumnType, PolicyExpr, SchemaBuilder, TableName, TablePolicies, TableSchema,
-        };
-
-        let dir = tempfile::tempdir().unwrap();
-        let app_id = AppId::from_name("authority-active-descendant");
-        let base = dynamic_bootstrap_schema();
-        let target = SchemaBuilder::new()
-            .table(TableSchema::builder("notes").column("content", ColumnType::Text))
-            .build();
-        let target_runtime = jazz::schema::JazzSchema::new(&target).unwrap();
-        let lens = Lens::new(
-            SchemaHash::compute(&base),
-            SchemaHash::compute(&target),
-            LensTransform::with_ops(vec![LensOp::RenameColumn {
-                table: "notes".into(),
-                old_name: "body".into(),
-                new_name: "content".into(),
-            }]),
-        );
-        let builder = || {
-            ServerBuilder::new(app_id).with_storage(StorageBackend::Persistent {
-                path: dir.path().to_path_buf(),
-            })
-        };
-        let core = builder().with_schema(base).build().await.unwrap();
-        core.state
-            .catalogue
-            .publish_schema(&core.state.catalogue_store, target.clone())
-            .unwrap();
-        core.state
-            .catalogue
-            .publish_lens(&core.state.catalogue_store, &lens)
-            .unwrap();
-        super::super::runtime_catalogue::publish_runtime_catalogue(
-            &core.state,
-            &[target.clone()],
-            &[lens],
-        )
-        .await
-        .unwrap();
-        let permissions = std::collections::HashMap::from([(
-            TableName::new("notes"),
-            TablePolicies::new().with_select(PolicyExpr::True),
-        )]);
-        let selection = super::super::runtime_catalogue::publish_permissions_and_runtime(
-            &core.state,
-            SchemaHash::compute(&target),
-            permissions.clone(),
-            None,
-        )
-        .await
-        .ok()
-        .expect("activate descendant");
-        core.shutdown().await;
-        drop(core);
-
-        // No HTTP publication or test-side activation after reopen.
-        let reopened = builder().build().await.unwrap();
-        let catalogue = reopened.state.runtime().unwrap().catalogue().await.unwrap();
-        let head = catalogue.head().unwrap();
-        assert_eq!(head.schema, SchemaHash::compute(&target));
-        assert_eq!(
-            catalogue.schema(&head.schema).unwrap().version,
-            Some(target_runtime.version_id())
-        );
-        assert_eq!(head.revision, selection.version);
-        assert!(selection.version > 0);
-        assert_eq!(
-            head.permissions[&TableName::new("notes")],
-            permissions[&TableName::new("notes")]
-        );
-        assert!(head.activated_seq.is_some());
-        reopened.shutdown().await;
     }
 
     #[tokio::test]

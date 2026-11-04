@@ -20,7 +20,7 @@ import {
   setTrustedReservedSession,
 } from "../runtime/db-internal-session.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
-import { assertAccountConfig } from "../accounts/config-capability.js";
+import { accountConfigBearer, assertAccountConfig } from "../accounts/config-capability.js";
 import {
   beginNativeAccountSession,
   attachNativeAccountSchema,
@@ -93,7 +93,10 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         const module = await import("jazz-rn/relay");
         const factory = module.installNativeForegroundRuntime();
         if (factory.accountSecret) installNativeRuntimeEntropy(factory.accountSecret);
-        this.pendingCapability = beginNativeAccountSession(factory, config, session);
+        const bearer = config.cookieSession
+          ? ((await accountConfigBearer(config)?.()) ?? undefined)
+          : undefined;
+        this.pendingCapability = beginNativeAccountSession(factory, config, session, bearer);
         this.foregroundFactory = factory;
         this.foregroundModule = module;
         this.ownsAdmission = true;

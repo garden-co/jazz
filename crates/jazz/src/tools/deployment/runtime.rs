@@ -5,15 +5,15 @@ use crate::ids::SchemaVersionId;
 use crate::protocol::MigrationLens;
 
 /// The change that applies `prepared` to a store holding `stored`: `put`
-/// (the deployment's new rows), every version the store has not admitted
-/// yet in lineage order with the lenses into it, then the write schema
-/// made current at `revision`. Admitted versions are immutable: a new lens
-/// into one needs a new convergent target instead.
+/// (the deployment's new rows) and every version the store has not
+/// admitted yet in lineage order with the lenses into it, the target among
+/// them so sessions pinned to its bundle can write by it. Nothing becomes
+/// current. Admitted versions are immutable: a new lens into one needs a
+/// new convergent target instead.
 pub fn prepare_catalogue_change(
     prepared: &PreparedDeployment,
     stored: &CatalogueRows,
     put: CataloguePut,
-    revision: u64,
 ) -> Result<CatalogueChange, String> {
     let compiled = prepared
         .schemas
@@ -158,12 +158,23 @@ pub fn prepare_catalogue_change(
         }
         admit.push(((*schema).clone(), lenses_into(id)));
     }
-    let active = prepared.active_schema.clone();
-    let lenses = lenses_into(active.version_id());
+    // The loop skips the genesis: a target that is the genesis of a store
+    // that has not admitted it yet is admitted here.
+    let target = &prepared.active_schema;
+    if !stored
+        .schemas
+        .iter()
+        .any(|schema| schema.version == Some(target.version_id()))
+        && admit
+            .iter()
+            .all(|(schema, _)| schema.version_id() != target.version_id())
+    {
+        admit.push((target.clone(), lenses_into(target.version_id())));
+    }
     Ok(CatalogueChange {
         put,
         admit,
-        activate: Some((revision, active, lenses)),
+        activate: None,
     })
 }
 
@@ -230,7 +241,7 @@ mod tests {
             ],
             active_schema: JazzSchema::new(&b).unwrap(),
         };
-        prepare_catalogue_change(&prepared, &stored, CataloguePut::default(), 2)
+        prepare_catalogue_change(&prepared, &stored, CataloguePut::default())
     }
 
     #[test]

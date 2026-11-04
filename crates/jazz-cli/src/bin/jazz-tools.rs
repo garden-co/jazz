@@ -55,29 +55,6 @@ fn resolve_dev_default_flag(mode: NodeEnvMode, enabled_in_production: bool) -> b
     }
 }
 
-fn resolve_jwt_public_key_input(value: String) -> Result<String, String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err("JWT public key cannot be empty".to_string());
-    }
-
-    if trimmed.starts_with('{') || trimmed.starts_with("-----BEGIN") {
-        return Ok(trimmed.to_string());
-    }
-
-    let path = std::path::Path::new(trimmed);
-    if path.exists() {
-        return std::fs::read_to_string(path).map_err(|error| {
-            format!(
-                "failed to read JWT public key file '{}': {error}",
-                path.display()
-            )
-        });
-    }
-
-    Ok(trimmed.to_string())
-}
-
 fn parse_app_id(value: &str) -> Result<String, String> {
     jazz::tools::AppId::from_string(value).map_err(|_| {
         "Application ID must be a UUID, not an app name. Generate one with `jazz-tools create app` and reuse it for the server and client.".to_owned()
@@ -186,35 +163,6 @@ enum Commands {
         /// token (as a `vercel()` core does), not VERCEL_OIDC_TOKEN.
         #[arg(long)]
         vercel_blob_token_from_workload: bool,
-
-        /// URL to fetch JWKS keys for JWT validation (production)
-        #[arg(long, env = "JAZZ_JWKS_URL")]
-        jwks_url: Option<String>,
-
-        /// Single JWK JSON object or PEM public key for JWT validation.
-        ///
-        /// Accepts inline contents or a path to a file containing the key.
-        #[arg(long, env = "JAZZ_JWT_PUBLIC_KEY", conflicts_with = "jwks_url")]
-        jwt_public_key: Option<String>,
-
-        /// Required issuer for externally verified JWTs.
-        #[arg(long, env = "JAZZ_JWT_ISSUER")]
-        jwt_issuer: Option<String>,
-
-        /// Required audience for externally verified JWTs.
-        #[arg(long, env = "JAZZ_JWT_AUDIENCE")]
-        jwt_audience: Option<String>,
-
-        /// Cookie name used for browser auth on the `/ws` upgrade.
-        #[arg(long, env = "JAZZ_AUTH_COOKIE_NAME")]
-        auth_cookie_name: Option<String>,
-
-        /// Trust X-Forwarded-Host for cookie WebSocket origin checks.
-        ///
-        /// Enable only when Jazz is reachable exclusively through a trusted
-        /// proxy that removes client-supplied forwarded headers.
-        #[arg(long = "trust-proxy", env = "JAZZ_TRUST_PROXY")]
-        trust_forwarded_host: bool,
 
         /// Enable local-first auth (Authorization: Bearer <self-signed Jazz JWT>).
         ///
@@ -378,12 +326,6 @@ async fn run() {
             vercel_blob_store_id,
             vercel_blob_prefix,
             vercel_blob_token_from_workload,
-            jwks_url,
-            jwt_public_key,
-            jwt_issuer,
-            jwt_audience,
-            auth_cookie_name,
-            trust_forwarded_host,
             allow_local_first_auth,
             backend_secret,
             admin_secret,
@@ -412,25 +354,7 @@ async fn run() {
                      acknowledge this explicitly."
                 );
             }
-            let jwt_public_key = match jwt_public_key {
-                Some(value) => match resolve_jwt_public_key_input(value) {
-                    Ok(value) => Some(value),
-                    Err(error) => {
-                        eprintln!("Server error: {error}");
-                        shutdown_tracing();
-                        std::process::exit(1);
-                    }
-                },
-                None => None,
-            };
-
             let auth_config = AuthConfig {
-                jwks_url,
-                jwt_public_key,
-                jwt_issuer,
-                jwt_audience,
-                auth_cookie_name,
-                trust_forwarded_host,
                 allow_local_first_auth,
                 backend_secret,
                 admin_secret,
@@ -539,15 +463,19 @@ fn validate_removed_edge_environment(
     Ok(())
 }
 
+/// User-auth settings a core no longer reads: the app's backend verifies its
+/// users itself and opens their sessions with its backend secret.
+const REMOVED_USER_AUTH_ENV: [&str; 6] = [
+    "JAZZ_JWKS_URL",
+    "JAZZ_JWT_PUBLIC_KEY",
+    "JAZZ_JWT_ISSUER",
+    "JAZZ_JWT_AUDIENCE",
+    "JAZZ_AUTH_COOKIE_NAME",
+    "JAZZ_TRUST_PROXY",
+];
+
 fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
-    let Commands::Server {
-        jwks_url,
-        jwt_public_key,
-        jwt_issuer,
-        jwt_audience,
-        ..
-    } = command
-    else {
+    let Commands::Server { .. } = command else {
         return Ok(());
     };
 
@@ -555,35 +483,26 @@ fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
         std::env::var_os("JAZZ_UPSTREAM_URL").is_some(),
         std::env::var_os("JAZZ_EDGE_CACHE_BUDGET_BYTES").is_some(),
     )?;
+    validate_removed_user_auth_environment(
+        REMOVED_USER_AUTH_ENV
+            .iter()
+            .copied()
+            .filter(|name| std::env::var_os(name).is_some()),
+    )
+}
 
-    let external_jwt_key_configured = jwks_url.is_some() || jwt_public_key.is_some();
-    if external_jwt_key_configured {
-        if jwt_issuer
-            .as_deref()
-            .is_none_or(|value| value.trim().is_empty())
-        {
-            return Err(
-                "--jwt-issuer / JAZZ_JWT_ISSUER is required with --jwks-url or --jwt-public-key"
-                    .to_owned(),
-            );
-        }
-        if jwt_audience
-            .as_deref()
-            .is_none_or(|value| value.trim().is_empty())
-        {
-            return Err(
-                "--jwt-audience / JAZZ_JWT_AUDIENCE is required with --jwks-url or --jwt-public-key"
-                    .to_owned(),
-            );
-        }
-    } else if jwt_issuer.is_some() || jwt_audience.is_some() {
-        return Err(
-            "--jwt-issuer and --jwt-audience require --jwks-url / JAZZ_JWKS_URL or --jwt-public-key / JAZZ_JWT_PUBLIC_KEY"
-                .to_owned(),
-        );
+fn validate_removed_user_auth_environment<'a>(
+    set: impl Iterator<Item = &'a str>,
+) -> Result<(), String> {
+    let set: Vec<&str> = set.collect();
+    if set.is_empty() {
+        return Ok(());
     }
-
-    Ok(())
+    Err(format!(
+        "{} {} not supported: a core verifies no user tokens or cookies. Authenticate users in your app's backend (createJazz), which syncs for them with its backend secret.",
+        set.join(", "),
+        if set.len() == 1 { "is" } else { "are" },
+    ))
 }
 
 fn make_env_filter() -> tracing_subscriber::EnvFilter {
@@ -756,70 +675,27 @@ mod tests {
     }
 
     #[test]
-    fn server_command_accepts_fully_bound_external_jwt_config() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
-        let cli = Cli::try_parse_from([
-            "jazz-tools",
-            "server",
-            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
-            "--jwt-public-key",
-            r#"{"kty":"oct","kid":"test-kid","alg":"HS256","k":"c2VjcmV0"}"#,
-            "--jwt-issuer",
-            "https://issuer.example",
-            "--jwt-audience",
-            "test-app",
-            "--trust-proxy",
-        ])
-        .expect("server command should parse");
-
-        validate_server_cli_options(&cli.command)
-            .expect("bound external JWT configuration should be valid");
-        match cli.command {
-            Commands::Server {
-                jwt_issuer,
-                jwt_audience,
-                trust_forwarded_host,
-                ..
-            } => {
-                assert_eq!(jwt_issuer.as_deref(), Some("https://issuer.example"));
-                assert_eq!(jwt_audience.as_deref(), Some("test-app"));
-                assert!(trust_forwarded_host);
-            }
-            _ => panic!("expected server command"),
-        }
-    }
-
-    #[test]
-    fn server_cli_validation_requires_external_jwt_issuer_and_audience() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
-        let _issuer = EnvVarGuard::remove("JAZZ_JWT_ISSUER");
-        let _audience = EnvVarGuard::remove("JAZZ_JWT_AUDIENCE");
-        let cli = Cli::try_parse_from([
-            "jazz-tools",
-            "server",
-            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
-            "--jwks-url",
-            "https://issuer.example/.well-known/jwks.json",
-        ])
-        .expect("server command should parse");
-
-        let error = validate_server_cli_options(&cli.command)
-            .expect_err("external JWT verifier without issuer must fail");
-        assert!(error.contains("--jwt-issuer"), "{error}");
-
-        let cli = Cli::try_parse_from([
-            "jazz-tools",
-            "server",
-            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
-            "--jwks-url",
-            "https://issuer.example/.well-known/jwks.json",
-            "--jwt-issuer",
-            "https://issuer.example",
-        ])
-        .expect("server command should parse");
-        let error = validate_server_cli_options(&cli.command)
-            .expect_err("external JWT verifier without audience must fail");
-        assert!(error.contains("--jwt-audience"), "{error}");
+    fn removed_user_auth_settings_are_refused() {
+        assert!(validate_removed_user_auth_environment(std::iter::empty()).is_ok());
+        let error = validate_removed_user_auth_environment(
+            ["JAZZ_JWKS_URL", "JAZZ_AUTH_COOKIE_NAME"].into_iter(),
+        )
+        .expect_err("a core no longer reads user-auth settings");
+        assert!(
+            error.starts_with("JAZZ_JWKS_URL, JAZZ_AUTH_COOKIE_NAME are not supported"),
+            "{error}"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jazz-tools",
+                "server",
+                "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
+                "--jwks-url",
+                "https://issuer.example/.well-known/jwks.json",
+            ])
+            .is_err(),
+            "the flag is gone"
+        );
     }
 
     #[test]

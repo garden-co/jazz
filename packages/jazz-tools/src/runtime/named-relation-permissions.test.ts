@@ -74,8 +74,15 @@ it.each(["forward", "reverse"])(
     const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
     let context: ReturnType<typeof createJazzContext> | undefined;
     try {
-      await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+      const { bundle } = await deploy({
+        appId,
+        serverUrl: server.url,
+        adminSecret,
+        schema: app,
+        permissions,
+      });
       context = createJazzContext({
+        bundle,
         appId,
         app,
         permissions,

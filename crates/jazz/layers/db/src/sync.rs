@@ -9025,6 +9025,31 @@ impl Inner {
         governed
     }
 
+    /// Refuse a trusted link that acts for a user (`who` is a session it
+    /// vouches for) while unpinned on a store that serves bundles: nothing
+    /// deploys this store's own permissions any more, so that user would be
+    /// checked by permissions no deployment chose. A backend pins its link
+    /// to the bundle it deployed (createJazz does).
+    fn check_acts_pinned(
+        &self,
+        index: usize,
+        policy: Option<AuthorSubject>,
+        who: Who,
+    ) -> Result<(), Error> {
+        if policy.is_none()
+            && matches!(who, Who::Session(_))
+            && self.sessions[index].bundle.is_none()
+            && (self.pins_required || crate::catalogue::serves_bundles(&self.conn)?)
+        {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "an unpinned backend link cannot act for a user: pin the link to the \
+                 bundle the backend deployed",
+            ));
+        }
+        Ok(())
+    }
+
     /// Whether session `index` declared a schema version this store has
     /// not admitted.
     fn session_unadmitted(&self, index: usize) -> bool {
@@ -9169,9 +9194,28 @@ impl Inner {
         self.governed_by(version, self.owner.clone())
     }
 
+    /// Admitted `version` governed again by `policies`, a schema that
+    /// governed it before a reset: a published bundle's policies are kept,
+    /// any other schema's give way to the current one's.
+    pub(crate) fn regoverned(
+        &self,
+        version: crate::ids::SchemaVersionId,
+        policies: &Rc<Schema>,
+    ) -> Option<Rc<Schema>> {
+        let bundled = self
+            .bundles
+            .values()
+            .any(|(_, governing)| Rc::ptr_eq(governing, policies));
+        if bundled {
+            self.governed_by(version, policies.clone())
+        } else {
+            self.governed(version)
+        }
+    }
+
     /// Admitted `version` under its stored names, governed by `policies`'
     /// policies.
-    fn governed_by(
+    pub(crate) fn governed_by(
         &self,
         version: crate::ids::SchemaVersionId,
         policies: Rc<Schema>,
@@ -9476,6 +9520,50 @@ impl Db {
         Ok(())
     }
 
+    /// Whether this store may serve a session of `identity` pinned to
+    /// `bundle` ([`Self::check_serves`] first). A bundle this store has not
+    /// published, or whose write schema it has not admitted, is refused, and
+    /// so is an unpinned session of a user once createJazz publishes
+    /// bundles here.
+    pub fn check_session_pin(
+        &self,
+        identity: AuthorSubject,
+        bundle: Option<&crate::catalogue::BundleId>,
+    ) -> Result<(), Error> {
+        self.check_serves(identity)?;
+        let mut inner = self.inner.borrow_mut();
+        if let Some(bundle) = bundle
+            && inner.bundle(bundle)?.is_none()
+        {
+            let published = crate::catalogue::bundle(&inner.conn, bundle)?.is_some();
+            return Err(Error::new(
+                ErrorCode::Schema,
+                if published {
+                    format!(
+                        "permissions bundle {bundle} is published, but this store never admitted its write schema"
+                    )
+                } else {
+                    format!("permissions bundle {bundle} is not published on this store")
+                },
+            ));
+        }
+        // A core's backend (createJazz) pins every session it opens. An
+        // unpinned policy session would be governed by this store's own
+        // permissions, which nothing deploys, so a tightening or rollback
+        // would never reach it.
+        if bundle.is_none()
+            && identity != AuthorSubject::SYSTEM
+            && (inner.pins_required || crate::catalogue::serves_bundles(&inner.conn)?)
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "this app is served through createJazz: connect through its backend, \
+                 which pins each session to the permissions it deployed",
+            ));
+        }
+        Ok(())
+    }
+
     /// Serve a client over `transport` as `identity`, once
     /// [`Self::check_serves`] allows it.
     pub fn accept_subscriber(
@@ -9509,37 +9597,8 @@ impl Db {
         claims: Option<BTreeMap<String, Value>>,
         bundle: Option<crate::catalogue::BundleId>,
     ) -> Result<SubscriberId, Error> {
-        self.check_serves(identity)?;
+        self.check_session_pin(identity, bundle.as_ref())?;
         let mut inner = self.inner.borrow_mut();
-        if let Some(bundle) = &bundle
-            && inner.bundle(bundle)?.is_none()
-        {
-            let published = crate::catalogue::bundle(&inner.conn, bundle)?.is_some();
-            return Err(Error::new(
-                ErrorCode::Schema,
-                if published {
-                    format!(
-                        "permissions bundle {bundle} is published, but this store never admitted its write schema"
-                    )
-                } else {
-                    format!("permissions bundle {bundle} is not published on this store")
-                },
-            ));
-        }
-        // Once createJazz publishes bundles here, its backend pins every
-        // session it opens. An unpinned policy session would be governed by
-        // the current permissions, which createJazz no longer advances, so
-        // a later tightening or rollback would never reach it.
-        if bundle.is_none()
-            && identity != AuthorSubject::SYSTEM
-            && crate::catalogue::serves_bundles(&inner.conn)?
-        {
-            return Err(Error::new(
-                ErrorCode::Protocol,
-                "this app is served through createJazz: connect through its backend, \
-                 which pins each session to the permissions it deployed",
-            ));
-        }
         // One relay tier only (SPEC 9 §9.5).
         debug_assert!(
             !inner.non_durable,
@@ -11324,7 +11383,12 @@ impl Db {
             SyncMessage::CheckAllowed { id, action, acting } => {
                 // As for a commit: a trusted link may ask for a session it
                 // vouches for; a session link only for its own.
-                let result = match commit_who(policy, &acting) {
+                let result = match commit_who(policy, &acting).and_then(|who| {
+                    self.inner
+                        .borrow()
+                        .check_acts_pinned(index, policy, who)
+                        .map(|()| who)
+                }) {
                     Ok(who) => {
                         let identity = match who {
                             Who::Session(author) => Some(author),
@@ -11767,6 +11831,10 @@ impl Db {
                     None => match commit_who(policy, &acting)
                         .map_err(|error| (error, Vec::new()))
                         .and_then(|who| {
+                            self.inner
+                                .borrow()
+                                .check_acts_pinned(index, policy, who)
+                                .map_err(|error| (error, Vec::new()))?;
                             let (ops, mut roots) = db
                                 .resolve_deltas(policy, ops)
                                 .map_err(|error| (error, Vec::new()))?;

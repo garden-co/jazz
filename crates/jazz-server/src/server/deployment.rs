@@ -18,16 +18,6 @@ pub(crate) struct DeployRequest {
     pub schemas: Vec<DeploySchema>,
     pub migrations: Vec<PublishMigrationRequest>,
     pub permissions: HashMap<TableName, TablePolicies>,
-    /// Make the target and its permissions current (`/deploy`), or only
-    /// publish them as a bundle sessions are pinned to (`/bundles`). Set by
-    /// the route, never by the body: an older server that ignored such a
-    /// field would activate a bundle meant only to be published.
-    #[serde(skip, default = "activates")]
-    pub activate: bool,
-}
-
-fn activates() -> bool {
-    true
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,10 +86,6 @@ impl From<DeploymentError> for DeployError {
             Cycle { schemas } => (
                 "migration_cycle",
                 serde_json::json!({"schemas":schemas.iter().map(ToString::to_string).collect::<Vec<_>>()}),
-            ),
-            UnreachableTarget { active, target } => (
-                "unreachable_deployment_target",
-                serde_json::json!({"active":active.to_string(),"target":target.to_string()}),
             ),
             DisconnectedGraph { roots } => (
                 "disconnected_migration_graph",
@@ -183,19 +169,9 @@ pub(crate) async fn deploy(
             permissions: request.permissions,
         },
     )?;
-    let active = state
-        .catalogue
-        .active_schema_summary(&state.catalogue_store)
-        .map_err(DeployError::internal)?;
-    let revision = active
-        .map(|head| head.version)
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or_else(|| DeployError::invalid("deployment revision overflow"))?;
-    let activate = request.activate;
     let staged = state
         .catalogue_store
-        .stage_deployment(&prepared, revision, activate)
+        .stage_deployment(&prepared)
         .map_err(DeployError::invalid)?;
     if !staged.response.changed {
         return Ok(staged.response);
@@ -212,14 +188,13 @@ pub(crate) async fn deploy(
             let probe =
                 ServerRuntimeHandle::start_with_storage(genesis.clone(), StorageConfig::InMemory)
                     .map_err(DeployError::internal)?;
-            let applied =
-                match change(&probe, &prepared, staged.put.clone(), revision, activate).await {
-                    Ok(change) => probe
-                        .apply_catalogue(change)
-                        .await
-                        .map_err(DeployError::from),
-                    Err(error) => Err(error),
-                };
+            let applied = match change(&probe, &prepared, staged.put.clone()).await {
+                Ok(change) => probe
+                    .apply_catalogue(change)
+                    .await
+                    .map_err(DeployError::from),
+                Err(error) => Err(error),
+            };
             probe.shutdown().await.map_err(DeployError::internal)?;
             applied?;
             state
@@ -231,8 +206,8 @@ pub(crate) async fn deploy(
         .catalogue_store
         .check_unchanged(&staged)
         .map_err(DeployError::invalid)?;
-    let change = change(&runtime, &prepared, staged.put, revision, activate).await?;
-    // The deployment's rows, admissions and activation commit together on
+    let change = change(&runtime, &prepared, staged.put).await?;
+    // The deployment's rows and admissions commit together on
     // the store's thread, or not at all.
     let applied = runtime.apply_catalogue(change).await;
     state
@@ -243,34 +218,49 @@ pub(crate) async fn deploy(
     Ok(staged.response)
 }
 
-/// What applying `prepared` to `runtime`'s catalogue changes.
+/// Publish `source` (a schema carrying its permissions as table policies)
+/// as a permissions bundle, as `createJazz` does on boot: no permissions
+/// become current. Its hex bundle id.
+#[cfg(any(test, feature = "embedded-server"))]
+pub(crate) async fn publish_source_bundle(
+    state: Arc<ServerState>,
+    source: &Schema,
+) -> Result<String, String> {
+    let mut structural = source.clone();
+    for table in structural.values_mut() {
+        table.policies = TablePolicies::default();
+    }
+    let hash = jazz::tools::public_schema::SchemaHash::compute(&structural).to_string();
+    let permissions = source
+        .iter()
+        .map(|(name, table)| (*name, table.policies.clone()))
+        .collect();
+    let response = deploy(
+        state,
+        DeployRequest {
+            target_schema_hash: hash.clone(),
+            schemas: vec![DeploySchema {
+                hash,
+                schema: structural,
+            }],
+            migrations: Vec::new(),
+            permissions,
+        },
+    )
+    .await
+    .map_err(|error| error.body.to_string())?;
+    Ok(response.bundle)
+}
+
+/// What applying `prepared` to `runtime`'s catalogue changes: its rows,
+/// and the admission of its schemas. Nothing becomes current.
 async fn change(
     runtime: &ServerRuntimeHandle,
     prepared: &deployment::PreparedDeployment,
     put: jazz::catalogue::CataloguePut,
-    revision: u64,
-    activate: bool,
 ) -> Result<jazz::catalogue::CatalogueChange, DeployError> {
     let stored = runtime.catalogue().await.map_err(DeployError::internal)?;
-    let mut change = deployment::prepare_catalogue_change(prepared, &stored, put, revision)
-        .map_err(DeployError::invalid)?;
-    if !activate {
-        // Admit the target with the rest, so sessions can write by it,
-        // and make nothing current.
-        if let Some((_, target, lenses)) = change.activate.take()
-            && !stored
-                .schemas
-                .iter()
-                .any(|schema| schema.version == Some(target.version_id()))
-            && change
-                .admit
-                .iter()
-                .all(|(schema, _)| schema.version_id() != target.version_id())
-        {
-            change.admit.push((target, lenses));
-        }
-    }
-    Ok(change)
+    deployment::prepare_catalogue_change(prepared, &stored, put).map_err(DeployError::invalid)
 }
 
 impl From<CatalogueApplyError> for DeployError {

@@ -13,6 +13,7 @@
 //! runtime's [`Db`] opens on the same connection once a schema is known.
 
 pub mod auth_admission;
+mod thin;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -29,8 +30,8 @@ use crate::kv::HostKv;
 use crate::kv::HostSql;
 use jazz::catalogue::{CatalogueChange, CatalogueRows};
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, LensEffects, Outcome, Reason, SubscriberId, SyncMessage,
-    Transport, TransportError, WireError, block_on,
+    Db, DbConfig, DbIdentity, FileOptions, LensEffects, SubscriberId, SyncMessage, Transport,
+    TransportError, block_on,
 };
 use jazz::host::{HostReader, HostTable, HostTables, StoreFile};
 use jazz::ids::{AuthorSubject, MigrationLensId, NodeUuid, SchemaVersionId};
@@ -180,7 +181,7 @@ pub struct ServerSession(u64);
 /// Bytes a session may have queued in each direction. Inbound frames past
 /// it are refused (the peer ignored flow control); outbound messages past it
 /// wait in the engine until the socket catches up.
-const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
+pub(crate) const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
 /// The slow-query threshold: `JAZZ_SLOW_QUERY_MS` (0 turns the log off),
 /// else jazz-db's default.
 fn slow_query_threshold() -> Option<Duration> {
@@ -196,7 +197,7 @@ fn slow_query_threshold() -> Option<Duration> {
 
 /// How often the owner ticks with no traffic, for time-based engine work
 /// such as expiring staged large-value chunks.
-const IDLE_TICK: Duration = Duration::from_secs(1);
+pub(crate) const IDLE_TICK: Duration = Duration::from_secs(1);
 
 /// Inbound messages one session may have applied per round of ticks.
 const INBOUND_MESSAGES_PER_TICK: usize = 16;
@@ -239,7 +240,6 @@ enum Work {
 struct Runtime {
     schema: JazzSchema,
     any_stored_catalogue: bool,
-    awaiting_permissions: bool,
 }
 
 /// Open the runtime on the store.
@@ -625,23 +625,14 @@ impl AppStore {
 
     /// Open the runtime on this store. `any_stored_catalogue`: reopen with
     /// whatever catalogue the store holds (a catalogue-driven server), not
-    /// only one that admits `schema`. `awaiting_permissions`: until the
-    /// first schema activation, session reads wait and session writes are
-    /// rejected.
+    /// only one that admits `schema`.
     pub fn start_runtime(
         &self,
         schema: JazzSchema,
         role: NodeRole,
         any_stored_catalogue: bool,
-        awaiting_permissions: bool,
     ) -> Result<ServerRuntimeHandle, String> {
-        self.start(
-            schema,
-            role,
-            any_stored_catalogue,
-            awaiting_permissions,
-            false,
-        )
+        self.start(schema, role, any_stored_catalogue, false)
     }
 
     fn start(
@@ -649,7 +640,6 @@ impl AppStore {
         schema: JazzSchema,
         role: NodeRole,
         any_stored_catalogue: bool,
-        awaiting_permissions: bool,
         owns_store: bool,
     ) -> Result<ServerRuntimeHandle, String> {
         if role == NodeRole::Relay {
@@ -660,7 +650,6 @@ impl AppStore {
             runtime: Runtime {
                 schema,
                 any_stored_catalogue,
-                awaiting_permissions,
             },
             reply,
         }))?;
@@ -953,7 +942,6 @@ impl StoreLoop {
                     self.source.chunk_store()?,
                     self.wake.clone(),
                     runtime.any_stored_catalogue,
-                    runtime.awaiting_permissions,
                     self.app.lock().ok().and_then(|app| app.clone()),
                 )
             }))
@@ -1001,17 +989,15 @@ impl StoreLoop {
     /// leaves it stopped and recorded in [`AppStore::fault`]; the host
     /// tables stay available either way.
     fn fault(&mut self, panic: String) {
-        let awaiting_permissions = self.owner().map(|owner| owner.awaiting_permissions);
         let started = self.started.take();
         self.stop();
         tracing::error!(%panic, "server runtime failed");
-        let restart = match (started, awaiting_permissions) {
-            (Some(mut runtime), Some(awaiting_permissions))
+        let restart = match started {
+            Some(runtime)
                 if self
                     .restarted
                     .is_none_or(|restarted| restarted.elapsed() >= RESTART_INTERVAL) =>
             {
-                runtime.awaiting_permissions = awaiting_permissions;
                 self.restarted = Some(Instant::now());
                 self.open_runtime(runtime)
             }
@@ -1110,6 +1096,18 @@ fn session_closed_error(error: &jazz::db::Error) -> jazz::wire::WireError {
     jazz::wire::WireError::new(code, retry, format!("sync session closed: {error}"))
 }
 
+/// Take `bytes` the client read off `egress`. Crossing back under the
+/// budget queues a tick: output the owner held back can move again.
+fn release_egress(egress: &AtomicUsize, bytes: usize, runtime: &Weak<Inner>) {
+    let before = egress.fetch_sub(bytes, Ordering::AcqRel);
+    if before >= SESSION_QUEUE_BUDGET
+        && before - bytes < SESSION_QUEUE_BUDGET
+        && let Some(inner) = runtime.upgrade()
+    {
+        let _ = ServerRuntimeHandle { inner }.queue_tick();
+    }
+}
+
 /// One session's ordered outbound frame batches.
 pub struct ServerRuntimeFrameStream {
     receiver: tokio_mpsc::UnboundedReceiver<Outbound>,
@@ -1121,14 +1119,7 @@ impl ServerRuntimeFrameStream {
     /// Receive the next batch of outbound frames.
     pub async fn recv(&mut self) -> Option<Result<Vec<AbiBytes>, jazz::wire::WireError>> {
         let (result, bytes) = self.receiver.recv().await?;
-        let before = self.egress.fetch_sub(bytes, Ordering::AcqRel);
-        if before >= SESSION_QUEUE_BUDGET
-            && before - bytes < SESSION_QUEUE_BUDGET
-            && let Some(inner) = self.runtime.upgrade()
-        {
-            // Output the owner held back for this session can move again.
-            let _ = ServerRuntimeHandle { inner }.queue_tick();
-        }
+        release_egress(&self.egress, bytes, &self.runtime);
         Some(result)
     }
 }
@@ -1145,17 +1136,7 @@ impl ServerRuntimeHandle {
         storage: StorageConfig,
         role: NodeRole,
     ) -> Result<Self, String> {
-        Self::start(schema, storage, role, false, false)
-    }
-
-    /// Start a core runtime for a catalogue-driven server whose permissions
-    /// head is not published yet: until the first schema activation,
-    /// session reads wait and session writes are rejected.
-    pub fn start_awaiting_permissions(
-        schema: JazzSchema,
-        storage: StorageConfig,
-    ) -> Result<Self, String> {
-        Self::start(schema, storage, NodeRole::Core, false, true)
+        Self::start(schema, storage, role, false)
     }
 
     fn start(
@@ -1163,18 +1144,11 @@ impl ServerRuntimeHandle {
         storage: StorageConfig,
         role: NodeRole,
         any_stored_catalogue: bool,
-        awaiting_permissions: bool,
     ) -> Result<Self, String> {
         if role == NodeRole::Relay {
             return Err("relay nodes are not supported yet on SQLite".to_owned());
         }
-        AppStore::open(&storage)?.start(
-            schema,
-            role,
-            any_stored_catalogue,
-            awaiting_permissions,
-            true,
-        )
+        AppStore::open(&storage)?.start(schema, role, any_stored_catalogue, true)
     }
 
     /// Start a runtime whose schema comes from the administrative catalogue.
@@ -1185,7 +1159,7 @@ impl ServerRuntimeHandle {
         storage: StorageConfig,
         role: NodeRole,
     ) -> Result<Self, String> {
-        Self::start(schema, storage, role, true, true)
+        Self::start(schema, storage, role, true)
     }
 
     /// Subscribe to activity notices.
@@ -1212,7 +1186,7 @@ impl ServerRuntimeHandle {
         _negotiated_features: WireFeatures,
         _session_context: Option<ConnectionSessionContext>,
         link_admission: ServerLinkAdmission,
-    ) -> Result<ServerSession, String> {
+    ) -> Result<ServerSession, SessionOpenError> {
         // The SQLite sync protocol has no per-query delegated scope yet, so
         // an authority link is served as the trusted SYSTEM link it is. A
         // client relay (a browser worker relaying for its tabs) is served as
@@ -1235,23 +1209,47 @@ impl ServerRuntimeHandle {
         let session = ServerSession(self.inner.next_session.fetch_add(1, Ordering::Relaxed));
         let (output, receiver) = tokio_mpsc::unbounded_channel();
         let egress = Arc::new(AtomicUsize::new(0));
-        self.edges()?.insert(
+        self.insert_edge(session, receiver, Arc::clone(&egress))?;
+        let opened = self
+            .run(move |owner| {
+                Ok(owner.open_session(session, served_as, claims, bundle, output, egress))
+            })
+            .await;
+        self.settle_open(session, opened)
+    }
+
+    fn insert_edge(
+        &self,
+        session: ServerSession,
+        receiver: tokio_mpsc::UnboundedReceiver<Outbound>,
+        egress: Arc<AtomicUsize>,
+    ) -> Result<(), SessionOpenError> {
+        self.edges().map_err(SessionOpenError::Runtime)?.insert(
             session,
             Edge {
                 output: Some(receiver),
                 ingress: Arc::new(AtomicUsize::new(0)),
-                egress: Arc::clone(&egress),
+                egress,
             },
         );
-        let opened = self
-            .run(move |owner| {
-                owner.open_session(session, served_as, claims, bundle, output, egress)
-            })
-            .await;
-        if opened.is_err() {
-            self.edges()?.remove(&session);
-        }
-        opened.map(|()| session)
+        Ok(())
+    }
+
+    /// The opened `session`, or why not (its edge then goes).
+    fn settle_open(
+        &self,
+        session: ServerSession,
+        opened: Result<Result<(), jazz::db::Error>, String>,
+    ) -> Result<ServerSession, SessionOpenError> {
+        let opened = match opened {
+            Ok(Ok(())) => return Ok(session),
+            Ok(Err(error)) => SessionOpenError::Refused(error),
+            Err(message) => SessionOpenError::Runtime(message),
+        };
+        self.edges()
+            .map_err(SessionOpenError::Runtime)?
+            .remove(&session);
+        Err(opened)
     }
 
     /// Take the session's ordered output stream. Output produced before
@@ -1299,6 +1297,81 @@ impl ServerRuntimeHandle {
             owner.receive(session, frames);
             ingress.fetch_sub(bytes, Ordering::AcqRel);
         }))
+    }
+
+    /// Admit an authenticated thin client connection (SPEC 8.14). It is
+    /// served as its session, or as SYSTEM for a trusted link, like a sync
+    /// session, pinned to `bundle` when its backend pinned it, and takes
+    /// its output from [`Self::open_wire_stream`].
+    pub async fn open_thin_session(
+        &self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        bundle: Option<jazz::catalogue::BundleId>,
+        trust: CommitUnitTrust,
+    ) -> Result<ServerSession, SessionOpenError> {
+        let served_as = match trust {
+            CommitUnitTrust::Session => identity,
+            CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => {
+                AuthorSubject::SYSTEM
+            }
+        };
+        let session = ServerSession(self.inner.next_session.fetch_add(1, Ordering::Relaxed));
+        let (output, receiver) = tokio_mpsc::unbounded_channel();
+        let egress = Arc::new(AtomicUsize::new(0));
+        self.insert_edge(session, receiver, Arc::clone(&egress))?;
+        let opened = self
+            .run(move |owner| {
+                Ok(owner.open_thin_session(session, served_as, claims, bundle, output, egress))
+            })
+            .await;
+        self.settle_open(session, opened)
+    }
+
+    /// Queue a thin client's request, `bytes` long on the wire, for the
+    /// owner. Refused when the session already has its budget queued, as
+    /// [`Self::receive_wire_frames`] refuses sync frames.
+    pub fn receive_thin_request(
+        &self,
+        session: ServerSession,
+        request: jazz::thin::ThinRequest,
+        bytes: usize,
+    ) -> Result<(), String> {
+        let ingress = self
+            .edges()?
+            .get(&session)
+            .map(|edge| Arc::clone(&edge.ingress))
+            .ok_or_else(|| "unknown server session".to_owned())?;
+        if ingress.fetch_add(bytes, Ordering::AcqRel) + bytes > SESSION_QUEUE_BUDGET {
+            ingress.fetch_sub(bytes, Ordering::AcqRel);
+            return Err("session ingress budget exceeded".to_owned());
+        }
+        self.send(Box::new(move |owner| {
+            owner.thin_request(session, request);
+            ingress.fetch_sub(bytes, Ordering::AcqRel);
+        }))
+    }
+
+    /// Count `bytes` against `session`'s egress budget as if they were
+    /// queued and never drained, to test output near the budget.
+    #[cfg(test)]
+    pub(crate) fn hold_egress_for_test(&self, session: ServerSession, bytes: usize) {
+        let edges = self.edges().expect("edges");
+        edges[&session].egress.fetch_add(bytes, Ordering::AcqRel);
+    }
+
+    /// Release `bytes` held by [`Self::hold_egress_for_test`], as the
+    /// client reading them would.
+    #[cfg(test)]
+    pub(crate) fn release_egress_for_test(&self, session: ServerSession, bytes: usize) {
+        let egress = Arc::clone(&self.edges().expect("edges")[&session].egress);
+        release_egress(&egress, bytes, &Arc::downgrade(&self.inner));
+    }
+
+    /// Wait until the owner has run everything queued before this call.
+    #[cfg(test)]
+    pub(crate) async fn settle_for_test(&self) {
+        self.run(|_| Ok(())).await.expect("owner");
     }
 
     /// Ask the owner for a tick; requests coalesce. Output reaches every
@@ -1409,22 +1482,6 @@ impl ServerRuntimeHandle {
         .await
     }
 
-    /// Make `schema` current with `permissions` at catalogue `revision`.
-    pub async fn activate_schema(
-        &self,
-        revision: u64,
-        schema: JazzSchema,
-        permissions: HashMap<TableName, TablePolicies>,
-    ) -> Result<SchemaVersionId, String> {
-        let result = self
-            .run(move |owner| owner.activate(revision, schema, &permissions))
-            .await;
-        if result.is_ok() {
-            self.notify_activity();
-        }
-        result
-    }
-
     /// The store's catalogue: every schema, lens and permissions revision.
     pub async fn catalogue(&self) -> Result<CatalogueRows, String> {
         self.run(|owner| owner.db.catalogue().map_err(|error| error.to_string()))
@@ -1446,10 +1503,11 @@ impl ServerRuntimeHandle {
         let result = self
             .run(move |owner| {
                 Ok((|| {
-                    if let Some((revision, ..)) = &change.activate {
-                        owner
-                            .check_revision(*revision)
-                            .map_err(CatalogueApplyError::Rejected)?;
+                    if change.activate.is_some() {
+                        return Err(CatalogueApplyError::Rejected(
+                            "a server never makes a schema current: sessions pin bundles"
+                                .to_owned(),
+                        ));
                     }
                     block_on(owner.db.apply_catalogue(change)).map_err(|error| {
                         if error.code == jazz::db::ErrorCode::Storage {
@@ -1461,7 +1519,6 @@ impl ServerRuntimeHandle {
                     owner
                         .reload_catalogue()
                         .map_err(CatalogueApplyError::Failed)?;
-                    owner.release_held_reads();
                     Ok(())
                 })())
             })
@@ -1507,10 +1564,37 @@ impl ServerRuntimeHandle {
     }
 }
 
+/// Why a session was not opened.
+#[derive(Debug, Clone)]
+pub enum SessionOpenError {
+    /// The store refused to serve the session (see
+    /// [`jazz::db::Db::check_session_pin`]), with its typed error.
+    Refused(jazz::db::Error),
+    /// The runtime could not open it (its thread is gone, its state is
+    /// poisoned).
+    Runtime(String),
+}
+
+impl std::fmt::Display for SessionOpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(error) => write!(f, "{error}"),
+            Self::Runtime(message) => f.write_str(message),
+        }
+    }
+}
+
+impl SessionOpenError {
+    /// Whether `self` contains `needle` (as its message shows it).
+    pub fn contains(&self, needle: &str) -> bool {
+        self.to_string().contains(needle)
+    }
+}
+
 /// Why a catalogue change was not applied. Either way nothing of it was.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CatalogueApplyError {
-    /// The change does not fit this catalogue: a stale revision, or a
+    /// The change does not fit this catalogue: an activation, or a
     /// schema or lens the store refuses to admit.
     Rejected(String),
     /// Storage or the runtime failed.
@@ -1536,12 +1620,11 @@ impl From<CatalogueApplyError> for String {
 struct Owner {
     db: Db,
     sessions: HashMap<ServerSession, OwnerSession>,
+    /// Thin client connections (SPEC 8.14), which are not sync sessions.
+    thin: HashMap<ServerSession, thin::ThinSession>,
     /// The tick in progress's time slice, shared with every session's queues.
     slice: Rc<TickSlice>,
     catalogue: Catalogue,
-    /// No permissions head is published yet: session reads wait in
-    /// `OwnerSession::held` and session commits are rejected.
-    awaiting_permissions: bool,
     /// The app this store serves, named in slow-query reports.
     app: Option<String>,
     /// Runs a network chunk store's I/O beside this thread.
@@ -1550,12 +1633,6 @@ struct Owner {
 
 struct OwnerSession {
     subscriber: SubscriberId,
-    /// A session under its own identity (not a trusted backend or
-    /// authority link) and not pinned to a bundle: its reads wait for the
-    /// permissions head.
-    awaits_permissions: bool,
-    /// Reads held until the permissions head is published, in order.
-    held: VecDeque<SyncMessage>,
     /// The parts of a message split across frames, until its last part.
     joiner: jazz::db::FrameJoiner,
     queues: Rc<SessionQueues>,
@@ -1678,8 +1755,6 @@ struct Catalogue {
     schemas: BTreeMap<SchemaVersionId, JazzSchema>,
     /// Every admitted lens, keyed by target schema.
     incoming: BTreeMap<SchemaVersionId, Vec<MigrationLens>>,
-    /// The current permissions revision (0 before the first).
-    revision: u64,
 }
 
 impl Catalogue {
@@ -1687,10 +1762,7 @@ impl Catalogue {
         let compile = |schema: &jazz::tools::public_schema::Schema| {
             JazzSchema::new(schema).map_err(|error| format!("catalogue schema: {error}"))
         };
-        let mut catalogue = Self {
-            revision: rows.head().map_or(0, |head| head.revision),
-            ..Self::default()
-        };
+        let mut catalogue = Self::default();
         for schema in &rows.schemas {
             if let Some(version) = schema.version {
                 catalogue.schemas.insert(version, compile(&schema.schema)?);
@@ -1773,7 +1845,6 @@ impl Owner {
         chunk_store: Option<ChunkStoreChoice>,
         wake: std_mpsc::Sender<Work>,
         any_stored_catalogue: bool,
-        awaiting_permissions: bool,
         app: Option<String>,
     ) -> Result<Self, String> {
         let rows = file
@@ -1816,15 +1887,16 @@ impl Owner {
         let db = block_on(Db::open_file(config, file))
             .map_err(|error| format!("open server store: {error}"))?;
         db.set_authority();
+        db.require_session_pins();
         db.track_closed_subscribers();
         db.set_slow_query_threshold(slow_query_threshold());
         let catalogue = Catalogue::load(&db.catalogue().map_err(|error| error.to_string())?)?;
         Ok(Self {
             db,
             sessions: HashMap::new(),
+            thin: HashMap::new(),
             slice: Rc::default(),
             catalogue,
-            awaiting_permissions: awaiting_permissions && head.is_none(),
             app,
             chunk_io,
         })
@@ -1871,6 +1943,7 @@ impl Owner {
         for (_, session) in self.sessions.drain() {
             self.db.disconnect_subscriber(session.subscriber);
         }
+        self.thin.clear();
     }
 
     fn open_session(
@@ -1881,7 +1954,7 @@ impl Owner {
         bundle: Option<jazz::catalogue::BundleId>,
         output: tokio_mpsc::UnboundedSender<Outbound>,
         egress: Arc<AtomicUsize>,
-    ) -> Result<(), String> {
+    ) -> Result<(), jazz::db::Error> {
         let claims = (identity != AuthorSubject::SYSTEM).then(|| {
             self.db.set_identity_claims(identity, claims.clone());
             claims
@@ -1894,23 +1967,16 @@ impl Owner {
             done: std::cell::Cell::new(false),
             slice: Rc::clone(&self.slice),
         });
-        let subscriber = self
-            .db
-            .accept_pinned_subscriber(
-                Box::new(SessionTransport(Rc::clone(&queues))),
-                identity,
-                claims,
-                bundle,
-            )
-            .map_err(|error| error.to_string())?;
+        let subscriber = self.db.accept_pinned_subscriber(
+            Box::new(SessionTransport(Rc::clone(&queues))),
+            identity,
+            claims,
+            bundle,
+        )?;
         self.sessions.insert(
             session,
             OwnerSession {
                 subscriber,
-                // A pinned session's bundle is published already: it does
-                // not wait for the current permissions.
-                awaits_permissions: identity != AuthorSubject::SYSTEM && bundle.is_none(),
-                held: VecDeque::new(),
                 // An untrusted peer's split message must fit the budget
                 // its frames are admitted against (SPEC 8.1).
                 joiner: if identity != AuthorSubject::SYSTEM {
@@ -1929,10 +1995,6 @@ impl Owner {
     }
 
     fn receive(&mut self, session: ServerSession, frames: Vec<AbiBytes>) {
-        let Some(owner_session) = self.sessions.get(&session) else {
-            return;
-        };
-        let gated = self.awaiting_permissions && owner_session.awaits_permissions;
         let Some(owner_session) = self.sessions.get_mut(&session) else {
             return;
         };
@@ -1940,32 +2002,6 @@ impl Owner {
         for frame in frames {
             match owner_session.joiner.push(&frame) {
                 Ok(None) => {}
-                Ok(Some(SyncMessage::Commit { id, .. })) if gated => {
-                    owner_session
-                        .queues
-                        .outbound
-                        .borrow_mut()
-                        .push_back(SyncMessage::Fate {
-                            id,
-                            outcome: Outcome::Refused {
-                                through: self.db.seq_high_water(),
-                                error: WireError::Rejected {
-                                    reason: Some(
-                                        Reason::PermissionsHeadMissing.as_str().to_owned(),
-                                    ),
-                                    message:
-                                        "permissions_head_missing: no published permissions head"
-                                            .to_owned(),
-                                },
-                            },
-                            global: true,
-                        });
-                }
-                Ok(Some(
-                    message @ (SyncMessage::Read { .. }
-                    | SyncMessage::Unsubscribe { .. }
-                    | SyncMessage::ResendWhole { .. }),
-                )) if gated => owner_session.held.push_back(message),
                 Ok(Some(message)) => inbound.push_back(message),
                 Err(error) => {
                     drop(inbound);
@@ -1984,22 +2020,11 @@ impl Owner {
         }
     }
 
-    /// The permissions head is published: reads held meanwhile are served,
-    /// ahead of anything that arrived after them.
-    fn release_held_reads(&mut self) {
-        self.awaiting_permissions = false;
-        for session in self.sessions.values_mut() {
-            let mut inbound = session.queues.inbound.borrow_mut();
-            for message in std::mem::take(&mut session.held).into_iter().rev() {
-                inbound.push_front(message);
-            }
-        }
-    }
-
     fn close_session(&mut self, session: ServerSession) {
         if let Some(session) = self.sessions.remove(&session) {
             self.db.disconnect_subscriber(session.subscriber);
         }
+        self.close_thin_session(session);
     }
 
     fn inbound_pending(&self) -> bool {
@@ -2100,38 +2125,7 @@ impl Owner {
         for id in gone {
             self.close_session(id);
         }
-    }
-
-    /// An activation at a revision older than the current one is stale: the
-    /// runtime is ahead of whoever proposed it.
-    fn check_revision(&self, revision: u64) -> Result<(), String> {
-        let current = self.catalogue.revision;
-        if revision < current {
-            return Err(format!(
-                "stale active schema revision {revision}: the runtime is at revision {current}"
-            ));
-        }
-        Ok(())
-    }
-
-    fn activate(
-        &mut self,
-        revision: u64,
-        schema: JazzSchema,
-        permissions: &HashMap<TableName, TablePolicies>,
-    ) -> Result<SchemaVersionId, String> {
-        self.check_revision(revision)?;
-        let id = schema.version_id();
-        let lenses = self.catalogue.lenses_for(id);
-        let selected = with_permissions(&schema, permissions)?;
-        block_on(self.db.apply_catalogue(CatalogueChange {
-            activate: Some((revision, selected, lenses)),
-            ..CatalogueChange::default()
-        }))
-        .map_err(|error| error.to_string())?;
-        self.reload_catalogue()?;
-        self.release_held_reads();
-        Ok(id)
+        self.pump_thin();
     }
 }
 
@@ -2198,7 +2192,7 @@ mod tests {
     fn host_work_runs_ahead_of_queued_runtime_work() {
         let store = AppStore::memory().unwrap();
         let runtime = store
-            .start_runtime(schema(), NodeRole::Core, false, false)
+            .start_runtime(schema(), NodeRole::Core, false)
             .unwrap();
         let kv = store.kv(PROBE).unwrap();
         kv.write_many(&[(b"before".to_vec(), b"1".to_vec())])
@@ -2249,19 +2243,21 @@ mod tests {
         const JOBS: usize = 200;
         let store = AppStore::memory().unwrap();
         let runtime = store
-            .start_runtime(schema(), NodeRole::Core, false, false)
+            .start_runtime(schema(), NodeRole::Core, false)
             .unwrap();
         // A session with more inbound messages than the window's ticks take.
         block_on(runtime.run(|owner| {
             let (output, _) = tokio_mpsc::unbounded_channel();
-            owner.open_session(
-                ServerSession(1),
-                AuthorSubject::SYSTEM,
-                BTreeMap::new(),
-                None,
-                output,
-                Arc::default(),
-            )?;
+            owner
+                .open_session(
+                    ServerSession(1),
+                    AuthorSubject::SYSTEM,
+                    BTreeMap::new(),
+                    None,
+                    output,
+                    Arc::default(),
+                )
+                .map_err(|error| error.to_string())?;
             let mut inbound = owner.sessions[&ServerSession(1)]
                 .queues
                 .inbound
@@ -2304,7 +2300,7 @@ mod tests {
         let kv = store.kv(PROBE).unwrap();
         kv.write_many(&[(b"a".to_vec(), b"1".to_vec())]).unwrap();
         let runtime = store
-            .start_runtime(schema(), NodeRole::Core, false, false)
+            .start_runtime(schema(), NodeRole::Core, false)
             .unwrap();
         let panicked = block_on(runtime.with_db_for_test(|db| {
             db.host_put_many_then_panic_for_test(
@@ -2359,7 +2355,7 @@ mod tests {
         let kv = store.kv(PROBE).unwrap();
         kv.write_many(&[(b"a".to_vec(), b"1".to_vec())]).unwrap();
         let runtime = store
-            .start_runtime(schema(), NodeRole::Core, false, false)
+            .start_runtime(schema(), NodeRole::Core, false)
             .unwrap();
         let panicked = block_on(runtime.run::<()>(|_| panic!("injected runtime failure")));
         assert!(panicked.is_err(), "the job's caller hears it failed");
@@ -2384,7 +2380,7 @@ mod tests {
         );
         // Starting a runtime again (a redeploy) clears the fault.
         let restarted = store
-            .start_runtime(schema(), NodeRole::Core, false, false)
+            .start_runtime(schema(), NodeRole::Core, false)
             .unwrap();
         assert_eq!(store.fault(), None);
         block_on(restarted.run(|_| Ok(()))).unwrap();
@@ -2399,7 +2395,7 @@ mod tests {
         let kv = store.kv(PROBE).unwrap();
         kv.write_many(&[(b"a".to_vec(), b"1".to_vec())]).unwrap();
         let error = store
-            .start_runtime(schema(), NodeRole::Relay, false, false)
+            .start_runtime(schema(), NodeRole::Relay, false)
             .err()
             .expect("a relay cannot start");
         assert!(error.contains("relay"), "{error}");
@@ -2419,7 +2415,7 @@ mod tests {
             })
             .unwrap();
         let error = store
-            .start_runtime(schema(), NodeRole::Core, true, false)
+            .start_runtime(schema(), NodeRole::Core, true)
             .err()
             .expect("a revision of a missing schema fails the start");
         assert!(error.contains("schema is missing"), "{error}");
@@ -2560,9 +2556,7 @@ mod tests {
             .collect();
         {
             let store = AppStore::open(&storage()).unwrap();
-            let runtime = store
-                .start_runtime(docs(), NodeRole::Core, false, false)
-                .unwrap();
+            let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
             let written = value.clone();
             block_on(runtime.run(move |owner| {
                 block_on(owner.db.insert(
@@ -2595,9 +2589,7 @@ mod tests {
             store.close().unwrap();
         }
         let store = AppStore::open(&storage()).unwrap();
-        let runtime = store
-            .start_runtime(docs(), NodeRole::Core, false, false)
-            .unwrap();
+        let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
         let read = block_on(runtime.run(|owner| Ok(read_body(&owner.db)))).unwrap();
         assert_eq!(read.as_deref(), Some(value.as_slice()));
         assert!(
@@ -2618,9 +2610,7 @@ mod tests {
             &StorageConfig::data_dir(dir.path()).with_blobs(bucket_blobs(&bucket, "app/", "me")),
         )
         .unwrap();
-        let runtime = store
-            .start_runtime(docs(), NodeRole::Core, false, false)
-            .unwrap();
+        let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
         let value: Vec<u8> = (0..400 * 1024u32)
             .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
             .collect();
@@ -2677,9 +2667,7 @@ mod tests {
             .collect();
         {
             let store = AppStore::open(&storage()).unwrap();
-            let runtime = store
-                .start_runtime(docs(), NodeRole::Core, false, false)
-                .unwrap();
+            let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
             let written = value.clone();
             block_on(runtime.run(move |owner| {
                 block_on(owner.db.insert(
@@ -2700,15 +2688,36 @@ mod tests {
             store.close().unwrap();
         }
         let store = AppStore::open(&storage()).unwrap();
-        let runtime = store
-            .start_runtime(docs(), NodeRole::Core, false, false)
-            .unwrap();
+        let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
         let read = block_on(runtime.run(|owner| Ok(read_body(&owner.db)))).unwrap();
         assert_eq!(read.as_deref(), Some(value.as_slice()));
         assert!(
             blob.state.calls.gets.load(Ordering::Relaxed) > 0,
             "read from the store"
         );
+        store.close().unwrap();
+    }
+
+    /// A server's sessions are governed by the bundle they pin: a catalogue
+    /// change that would make a schema current is refused, and the store
+    /// keeps no permissions revision.
+    #[test]
+    fn a_server_refuses_to_make_a_schema_current() {
+        let store = AppStore::memory().unwrap();
+        let runtime = store
+            .start_runtime(schema(), NodeRole::Core, false)
+            .unwrap();
+        let refused = block_on(runtime.apply_catalogue(CatalogueChange {
+            activate: Some((1, schema(), Vec::new())),
+            ..CatalogueChange::default()
+        }))
+        .unwrap_err();
+        assert!(
+            matches!(&refused, CatalogueApplyError::Rejected(message) if message.contains("never makes a schema current")),
+            "{refused:?}"
+        );
+        let rows = block_on(runtime.catalogue()).unwrap();
+        assert!(rows.head().is_none(), "no permissions revision was written");
         store.close().unwrap();
     }
 

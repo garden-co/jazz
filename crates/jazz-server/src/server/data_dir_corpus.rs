@@ -240,9 +240,9 @@ async fn produce_server_data_dir_corpus_v1() {
     let dir = tempfile::tempdir().unwrap();
     {
         let server = open(dir.path()).await;
-        admin(&server, "POST", "/deploy", deploy_v1()).await;
+        admin(&server, "POST", "/bundles", deploy_v1()).await;
         insert_note(&server, "before the migration", None).await;
-        admin(&server, "POST", "/deploy", deploy_v2()).await;
+        admin(&server, "POST", "/bundles", deploy_v2()).await;
         insert_note(&server, "after the migration", Some("written with v2")).await;
         let alice = login(&server, alice()).await;
         println!("ALICE_ACCOUNT: {}", alice.account.0);
@@ -283,22 +283,32 @@ async fn pinned_server_data_dir_reopens_and_accepts_current_writes() {
         assert_eq!(
             graph,
             json!({
-                "activeSchemaHash": hash(&v2()),
+                "latestBundleSchemaHash": null,
                 "migrations": [{"fromHash": hash(&v1()), "toHash": hash(&v2())}],
                 "schemas": schemas,
             })
         );
-        let permissions = admin(&server, "GET", "/permissions", Json::Null).await;
-        assert!(
-            permissions["permissions"]["notes"].is_object(),
-            "{permissions}"
-        );
         assert_eq!(login(&server, alice()).await.account, pinned);
         assert_eq!(notes(&server).await, before);
 
-        // Unchanged deployments stay unchanged; current writes are accepted.
+        // The pinned store admitted v2; publishing it now adds only its
+        // bundle, and again changes nothing. Current writes are accepted.
+        let published = admin(&server, "POST", "/bundles", deploy_v2()).await;
         assert_eq!(
-            admin(&server, "POST", "/deploy", deploy_v2()).await["changed"],
+            published["published"],
+            json!({"schemas": [], "migrations": []}),
+            "{published}"
+        );
+        let bundles = admin(&server, "GET", "/bundles", Json::Null).await;
+        assert!(
+            bundles["bundles"]
+                .as_array()
+                .and_then(|bundles| bundles.last())
+                .is_some_and(|bundle| bundle["permissions"]["notes"].is_object()),
+            "{bundles}"
+        );
+        assert_eq!(
+            admin(&server, "POST", "/bundles", deploy_v2()).await["changed"],
             false
         );
         insert_note(&server, "after reopening", Some("current")).await;
