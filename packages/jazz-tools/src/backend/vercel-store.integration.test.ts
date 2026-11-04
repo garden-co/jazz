@@ -194,9 +194,9 @@ describe("vercel() store", () => {
     expect(script).toContain("app_id=$(cat /proc/sys/kernel/random/uuid)");
     expect(jazz.appId).toBe(appId);
     // The core trusts exactly the workload the function's own token names.
-    expect(script).toContain(`--trusted-workload-issuer '${core.issuer}'`);
-    expect(script).toContain(`--trusted-workload-audience '${AUDIENCE}'`);
-    expect(script).toContain(`--trusted-workload-subject '${SUBJECT}'`);
+    expect(script).toContain(
+      JSON.stringify({ issuer: core.issuer, audience: AUDIENCE, subject: SUBJECT }),
+    );
 
     // The backend's own database reaches the core in the Sandbox.
     const row = await jazz.db.insert(app.notes, { text: "on vercel" }).wait({ tier: "global" });
@@ -408,20 +408,22 @@ describe("vercel() store", () => {
     const trust = { issuer: "https://oidc.vercel.com/t", audience: AUDIENCE, subject: SUBJECT };
     const script = startScript(undefined, "2.0.0-alpha.60", "https://example.invalid/t.tgz", trust);
     expect(script).toContain("app_id=$(cat /proc/sys/kernel/random/uuid)");
-    expect(script).toContain(`server "$app_id" --port 1625`);
+    expect(script).toContain('exec node -e \'const [addon, appId, options]');
+    expect(script).toContain('"$addon" "$app_id"');
+    expect(script).toContain('"port":1625');
     expect(script).not.toContain("SECRET");
   });
 
-  it("installs the server binary for the running version once, and the app id once", () => {
+  it("installs the core addon for the running version once, and the app id once", () => {
     const trust = { issuer: "https://oidc.vercel.com/t", audience: AUDIENCE, subject: SUBJECT };
     const script = startScript(
       "app'1",
       "2.0.0-alpha.60",
-      "https://registry.npmjs.org/jazz-tools/-/jazz-tools-2.0.0-alpha.60.tgz",
+      "https://registry.npmjs.org/@garden-co/jazz-napi-linux-x64-gnu/-/jazz-napi-linux-x64-gnu-2.0.0-alpha.60.tgz",
       trust,
     );
     expect(script).toContain("version='2.0.0-alpha.60'");
-    expect(script).toContain("bin=$data/bin/jazz-tools-$version");
+    expect(script).toContain("addon=$data/bin/jazz-napi-$version.node");
     expect(script).toContain(`if [ ! -s "$data/app-id" ]`);
     expect(script).toContain(`app_id='app'\\''1'`);
   });
