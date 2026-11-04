@@ -367,55 +367,25 @@ async fn run() {
                 }),
                 ..Default::default()
             };
-            let blobs = match blobs.as_str() {
-                "sqlite" => jazz_server::BlobStore::Sqlite,
-                "s3" => {
-                    let options = jazz_server::s3::S3Options::from_env(
-                        s3_bucket,
-                        s3_region,
-                        s3_endpoint,
-                        s3_prefix,
-                    )
-                    .and_then(|mut options| {
-                        if s3_role_from_workload {
-                            let jazz_server::s3::S3Credentials::WebIdentity { token, .. } =
-                                &mut options.credentials
-                            else {
-                                return Err("--s3-role-from-workload needs AWS_ROLE_ARN".to_owned());
-                            };
-                            *token = jazz_server::s3::WebIdentityToken::Workload;
-                        }
-                        Ok(options)
-                    });
-                    match options {
-                        Ok(options) => jazz_server::BlobStore::S3(options),
-                        Err(error) => {
-                            eprintln!("Error: {error}");
-                            std::process::exit(1);
-                        }
-                    }
+            let blobs = match (jazz_server::BlobOptions {
+                kind: blobs,
+                dir: blobs_dir,
+                s3_bucket,
+                s3_region,
+                s3_endpoint,
+                s3_prefix,
+                s3_role_from_workload,
+                vercel_blob_store_id,
+                vercel_blob_prefix,
+                vercel_blob_token_from_workload,
+            })
+            .resolve()
+            {
+                Ok(blobs) => blobs,
+                Err(error) => {
+                    eprintln!("Error: {error}");
+                    std::process::exit(1);
                 }
-                "vercel-blob" => {
-                    let options = jazz_server::vercel_blob::VercelBlobOptions::from_env(
-                        vercel_blob_store_id,
-                        vercel_blob_prefix,
-                        vercel_blob_token_from_workload.then_some(
-                            jazz_server::vercel_blob::VercelBlobCredentials::Oidc(
-                                jazz_server::s3::WebIdentityToken::Workload,
-                            ),
-                        ),
-                    );
-                    match options {
-                        Ok(options) => jazz_server::BlobStore::VercelBlob(options),
-                        Err(error) => {
-                            eprintln!("Error: {error}");
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                _ => jazz_server::BlobStore::Files {
-                    dir: blobs_dir.map(Into::into),
-                },
             };
             if let Err(e) = jazz_server::run(
                 &app_id,
