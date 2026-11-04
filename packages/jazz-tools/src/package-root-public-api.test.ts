@@ -370,6 +370,7 @@ describe("package root public API", () => {
       "PersistedWriteRejectedError",
       "Transaction",
       "createDb",
+      "fetchPublishedBundles",
       "fetchSchemaHashes",
       "fetchStoredPermissions",
       "fetchStoredWasmSchema",
