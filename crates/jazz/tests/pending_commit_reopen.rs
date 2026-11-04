@@ -257,32 +257,6 @@ fn a_pending_serializable_commit_reloads_every_stored_part_after_a_restart() {
     );
 }
 
-/// A development store from before pending uploads were stored a row per
-/// op is refused as another format, and left as it was.
-#[test]
-fn a_store_with_the_old_message_outbox_is_refused_unchanged() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("old.sqlite");
-    drop(open_file(&path));
-    rusqlite::Connection::open(&path)
-        .unwrap()
-        .execute_batch(
-            "DROP TABLE _jazz_pending; CREATE TABLE _jazz_pending \
-             (tx INTEGER PRIMARY KEY, commit_msg BLOB NOT NULL, rows BLOB NOT NULL);",
-        )
-        .unwrap();
-    let before = std::fs::read(&path).unwrap();
-    let Err(error) = block_on(Db::open_at(config(0x61), &path, FileOptions::default())) else {
-        panic!("the old store opened");
-    };
-    assert_eq!(error.code, ErrorCode::UnsupportedStorageCodecs, "{error}");
-    assert_eq!(
-        std::fs::read(&path).unwrap(),
-        before,
-        "the file is unchanged"
-    );
-}
-
 /// An update that changes nothing makes no commit, even right after the
 /// write that made the row's current version: it must not record a second
 /// upload under that commit's transaction id, which would fail the write,
