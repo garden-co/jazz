@@ -1,5 +1,6 @@
 //! `dump-show <dump>`: print a dump's records, long values shortened. It
-//! prints row data, so only run it on synthetic dumps or inside the cluster.
+//! prints cell values, string prefixes and authors: customer data. Only run
+//! it on synthetic dumps.
 
 use migrate_alpha59_dump::{Reader, Record, Value};
 
@@ -15,7 +16,9 @@ fn short(value: &Value) -> String {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: dump-show <dump>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: dump-show <dump>  (prints cell values and authors: synthetic dumps only)");
     let file = std::io::BufReader::new(std::fs::File::open(path).expect("open dump"));
     let (mut reader, header) = Reader::open(file).expect("read header");
     println!("{header:?}");
