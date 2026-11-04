@@ -48,10 +48,19 @@ describe("deployed permissions with claims in referenced read policies", () => {
     const issuer = await startTestJwtIssuer();
     const appId = randomUUID();
     const server = await startLocalJazzServer({ appId });
+    // Published as createJazz publishes it; the backend link is pinned to it.
+    const { bundle } = await deploy({
+      serverUrl: server.url,
+      appId,
+      adminSecret: server.adminSecret,
+      schema: resolveSchemaSource(app),
+      permissions,
+    });
     const owner = await createJazzSession({
       appId,
       app,
       permissions,
+      bundle,
       serverUrl: server.url,
       jwksUrl: issuer.jwksUrl,
       jwtIssuer: issuer.issuer,
@@ -79,13 +88,6 @@ describe("deployed permissions with claims in referenced read policies", () => {
       return { db, userId: user.value.id };
     };
     try {
-      await deploy({
-        serverUrl: server.url,
-        appId,
-        adminSecret: server.adminSecret,
-        schema: resolveSchemaSource(app),
-        permissions,
-      });
       const viewer = await connect("viewer", { role: "viewer" });
       const topic = viewer.db.insert(app.topics, { title: "topic" });
       expect(await outcome(topic)).toBe("accepted");

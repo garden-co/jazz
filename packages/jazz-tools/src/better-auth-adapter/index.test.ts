@@ -70,7 +70,8 @@ describe("jazzAdapter", () => {
     const server = await startLocalJazzServer({
       allowLocalFirstAuth: true,
     });
-    await deployFixture({
+    // Published as createJazz publishes it; the backend link is pinned to it.
+    const { bundle } = await deployFixture({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
@@ -87,6 +88,7 @@ describe("jazzAdapter", () => {
       jwksUrl: jwtIssuer.jwksUrl,
       jwtIssuer: jwtIssuer.issuer,
       jwtAudience: jwtIssuer.audience,
+      bundle,
     });
 
     try {
@@ -135,7 +137,8 @@ describe("jazzAdapter", () => {
   it("applies generated deny-all policies to a verified external session", async () => {
     const jwtIssuer = await startTestJwtIssuer();
     const server = await startLocalJazzServer();
-    await deployFixture({
+    // Published as createJazz publishes it; the backend link is pinned to it.
+    const { bundle } = await deployFixture({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
@@ -152,6 +155,7 @@ describe("jazzAdapter", () => {
       jwksUrl: jwtIssuer.jwksUrl,
       jwtIssuer: jwtIssuer.issuer,
       jwtAudience: jwtIssuer.audience,
+      bundle,
     });
 
     try {

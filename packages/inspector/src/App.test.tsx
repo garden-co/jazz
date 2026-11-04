@@ -55,7 +55,7 @@ async function enterStoredConnectionSecret() {
 
 const createJazzClientMock = vi.fn();
 const fetchSchemaHashesMock = vi.fn();
-const fetchStoredPermissionsMock = vi.fn();
+const fetchPublishedBundlesMock = vi.fn();
 const fetchStoredWasmSchemaMock = vi.fn();
 const devtoolsProviderMock = vi.fn();
 
@@ -69,7 +69,7 @@ vi.mock("jazz-tools/react", () => ({
 
 vi.mock("jazz-tools", () => ({
   fetchSchemaHashes: (...args: unknown[]) => fetchSchemaHashesMock(...args),
-  fetchStoredPermissions: (...args: unknown[]) => fetchStoredPermissionsMock(...args),
+  fetchPublishedBundles: (...args: unknown[]) => fetchPublishedBundlesMock(...args),
   fetchStoredWasmSchema: (...args: unknown[]) => fetchStoredWasmSchemaMock(...args),
 }));
 
@@ -79,7 +79,7 @@ vi.mock("./contexts/devtools-context.js", () => ({
     ...props
   }: {
     children: ReactNode;
-    storedPermissions?: unknown;
+    bundle?: unknown;
     runtime: string;
     wasmSchema: unknown;
   }) => {
@@ -109,7 +109,7 @@ describe("App", () => {
     window.location.hash = "";
     createJazzClientMock.mockReset();
     fetchSchemaHashesMock.mockReset();
-    fetchStoredPermissionsMock.mockReset();
+    fetchPublishedBundlesMock.mockReset();
     fetchStoredWasmSchemaMock.mockReset();
     devtoolsProviderMock.mockReset();
 
@@ -122,7 +122,7 @@ describe("App", () => {
     fetchSchemaHashesMock.mockResolvedValue({
       hashes: ["hash-a", "hash-b"],
     });
-    fetchStoredPermissionsMock.mockResolvedValue(null);
+    fetchPublishedBundlesMock.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -131,7 +131,7 @@ describe("App", () => {
     cleanup();
   });
 
-  it("migrates a v2 connection without retaining its secret and connects manually when permissions fetch fails", async () => {
+  it("migrates a v2 connection without retaining its secret and connects manually with no published bundle", async () => {
     const adminSecret = "admin-secret";
     localStorage.setItem(
       STORAGE_KEY,
@@ -166,7 +166,7 @@ describe("App", () => {
     fetchSchemaHashesMock.mockResolvedValue({
       hashes: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
     });
-    fetchStoredPermissionsMock.mockRejectedValue(new Error("Permissions fetch failed: 404"));
+    fetchPublishedBundlesMock.mockResolvedValue([]);
 
     render(<App />);
 
@@ -179,7 +179,7 @@ describe("App", () => {
     expect(createJazzClientMock).not.toHaveBeenCalled();
     expect(fetchSchemaHashesMock).not.toHaveBeenCalled();
     expect(fetchStoredWasmSchemaMock).not.toHaveBeenCalled();
-    expect(fetchStoredPermissionsMock).not.toHaveBeenCalled();
+    expect(fetchPublishedBundlesMock).not.toHaveBeenCalled();
 
     const migrated = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") as {
       version?: number;
@@ -215,10 +215,24 @@ describe("App", () => {
       expect(devtoolsProviderMock).toHaveBeenCalledWith(
         expect.objectContaining({
           runtime: "standalone",
-          storedPermissions: null,
+          bundle: null,
         }),
       );
     });
+  });
+
+  it("shows a published bundles fetch failure instead of an empty bundle", async () => {
+    storeActiveConnection();
+    const shutdown = vi.fn();
+    createJazzClientMock.mockResolvedValueOnce({ shutdown });
+    fetchPublishedBundlesMock.mockRejectedValueOnce(new Error("Bundles fetch failed: 401"));
+
+    render(<App />);
+    await enterStoredConnectionSecret();
+
+    expect((await screen.findByRole("alert")).textContent).toBe("Bundles fetch failed: 401");
+    expect(screen.queryByText("Inspector ready")).toBeNull();
+    await waitFor(() => expect(shutdown).toHaveBeenCalledTimes(1));
   });
 
   it("shuts down a client resolved before required schema setup fails", async () => {
