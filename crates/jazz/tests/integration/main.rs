@@ -13,6 +13,8 @@ mod aggregate_nullable_keys;
 mod aggregate_ordering;
 #[path = "../array_columns.rs"]
 mod array_columns;
+#[path = "../authority_accepted_content.rs"]
+mod authority_accepted_content;
 #[path = "../authorization_scope_reentry.rs"]
 mod authorization_scope_reentry;
 #[path = "../binding_host.rs"]
