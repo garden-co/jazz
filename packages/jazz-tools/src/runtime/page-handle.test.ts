@@ -41,8 +41,8 @@ it("answers the page's sync status, pending writes and every Db", () => {
   const handle = window.__jazz!;
 
   expect(handle.version).toBe(1);
-  // Not enumerable, so it stays out of serialized window state.
-  expect(Object.keys(window)).not.toContain("__jazz");
+  // The page's storage controls share it.
+  expect(handle.listLiveStorageNamespaces()).toEqual([]);
   // The Db opened last answers status().
   expect(handle.status()).toBe(second.getSyncStatus());
   expect(handle.pending()).toBe(2);

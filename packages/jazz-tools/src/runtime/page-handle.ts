@@ -41,10 +41,95 @@ export interface JazzPageHandle {
   waitForSync(options?: { timeoutMs?: number }): Promise<void>;
 }
 
+// Clearing and shutting down a page's persistent client storage, from
+// window-client-storage.ts, shares the same object.
+export type WindowJazzStorageDb = {
+  deleteClientStorage(): Promise<void>;
+  shutdown(): Promise<void>;
+};
+
+export type LiveStorageContext = {
+  db: WindowJazzStorageDb;
+  namespace: string;
+};
+
+export interface WindowJazzClientApi {
+  clearStorage(namespace?: string): Promise<void>;
+  listLiveStorageNamespaces(): string[];
+  /**
+   * Shut down live Jazz client storage contexts and await full cleanup
+   * (runtime teardown and pending IndexedDB persistence). Pass a namespace to target
+   * one context; with no argument, shuts down every live context.
+   *
+   * Resolves once all targets have completed shutdown.  Db.shutdown is
+   * idempotent, so this is safe to call alongside framework-driven cleanup
+   * (e.g. JazzProvider unmount).
+   */
+  shutdown(namespace?: string): Promise<void>;
+}
+
 declare global {
   interface Window {
-    __jazz?: JazzPageHandle;
+    /** Present once a Jazz Db opened on the page. */
+    __jazz?: WindowJazzClientApi & JazzPageHandle;
+    __jazzWindowStorageContexts__?: Set<LiveStorageContext>;
   }
+}
+
+export function getLiveStorageContexts(currentWindow: Window): Set<LiveStorageContext> {
+  if (!currentWindow.__jazzWindowStorageContexts__) {
+    currentWindow.__jazzWindowStorageContexts__ = new Set();
+  }
+
+  return currentWindow.__jazzWindowStorageContexts__;
+}
+
+function listLiveStorageNamespaces(currentWindow: Window): string[] {
+  return [
+    ...new Set([...getLiveStorageContexts(currentWindow)].map((entry) => entry.namespace)),
+  ].sort();
+}
+
+function formatAvailableNamespaces(namespaces: readonly string[]): string {
+  if (namespaces.length === 0) {
+    return "";
+  }
+
+  return ` Available namespaces: ${namespaces.join(", ")}.`;
+}
+
+function resolveStorageTarget(currentWindow: Window, namespace?: string): WindowJazzStorageDb {
+  const liveContexts = [...getLiveStorageContexts(currentWindow)];
+  const namespaces = listLiveStorageNamespaces(currentWindow);
+
+  if (liveContexts.length === 0) {
+    throw new Error("No live Jazz storage contexts are available on this page.");
+  }
+
+  const trimmedNamespace = namespace?.trim();
+  if (!trimmedNamespace) {
+    if (namespaces.length === 1) {
+      const [onlyNamespace] = namespaces;
+      return liveContexts.find((entry) => entry.namespace === onlyNamespace)!.db;
+    }
+
+    throw new Error(
+      `Multiple live Jazz storage contexts are available. Call window.__jazz.clearStorage("<namespace>").${formatAvailableNamespaces(
+        namespaces,
+      )}`,
+    );
+  }
+
+  const match = liveContexts.find((entry) => entry.namespace === trimmedNamespace);
+  if (!match) {
+    throw new Error(
+      `No live Jazz storage context matches "${trimmedNamespace}".${formatAvailableNamespaces(
+        namespaces,
+      )}`,
+    );
+  }
+
+  return match.db;
 }
 
 const open = new Map<PageDb, string | null>();
@@ -70,16 +155,34 @@ export function registerPageDb(db: PageDb, appId: string | null): () => void {
   const page = (globalThis as { window?: Window }).window;
   if (!page || typeof page.document === "undefined") return () => {};
   open.set(db, appId);
-  // With two copies of jazz-tools on one page, the first one's handle stays.
-  if (!Object.hasOwn(page, "__jazz")) {
-    Object.defineProperty(page, "__jazz", {
-      value: handle(),
-      configurable: true,
-      enumerable: false,
-      writable: false,
-    });
-  }
+  ensureWindowJazz(page);
   return () => {
     open.delete(db);
   };
+}
+
+/** Install `window.__jazz` (storage and sync status), keeping what's already on it. */
+export function ensureWindowJazz(page: Window): WindowJazzClientApi & JazzPageHandle {
+  const existing = page.__jazz;
+  const host =
+    existing && typeof existing === "object"
+      ? (existing as unknown as Record<string, unknown>)
+      : {};
+  const api = Object.assign(host, handle(), {
+    async clearStorage(namespace?: string): Promise<void> {
+      await resolveStorageTarget(page, namespace).deleteClientStorage();
+    },
+    listLiveStorageNamespaces(): string[] {
+      return listLiveStorageNamespaces(page);
+    },
+    async shutdown(namespace?: string): Promise<void> {
+      const contexts = [...getLiveStorageContexts(page)];
+      if (contexts.length === 0) return;
+      const trimmed = namespace?.trim();
+      const targets = trimmed ? contexts.filter((entry) => entry.namespace === trimmed) : contexts;
+      await Promise.all(targets.map((entry) => entry.db.shutdown()));
+    },
+  }) as WindowJazzClientApi & JazzPageHandle;
+  page.__jazz = api;
+  return api;
 }
