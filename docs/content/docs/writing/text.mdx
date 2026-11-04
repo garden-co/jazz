@@ -3,13 +3,104 @@ title: Mergeable Text
 description: "Learn how to store prose as Markdown that merges concurrent edits."
 ---
 
-<Callout type="info">
-  Preview: this page is a rough outline for the server-first docs restructure. The bullets below are
-  what it will cover.
-</Callout>
+A plain string column keeps one value: when two people edit it at the same time, one edit wins the
+whole field. For prose that several people edit, declare a mergeable text column instead. The server
+merges concurrent edits, so Alice adding a sentence at the top while Bob fixes a typo at the bottom
+keeps both changes.
 
-- Mergeable Markdown text columns as the default for prose
-- How concurrent edits merge on the server
-- Anchors and ranges for comments and cursors
-- Editor bindings (ProseMirror first)
-- Splitting big documents over rows
+## Declare a text column
+
+Opt a string column into a text merge strategy. Use Markdown for prose unless you have a reason not
+to:
+
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+const schema = {
+  notes: s.table(
+    {
+      title: s.string(), // one value: a concurrent edit replaces it whole
+      body: s.string().merge("markdown"),
+    },
+    {},
+  ),
+};
+```
+
+`merge("text")` and `merge("html")` are the other two strategies. They differ in which pieces a
+merge keeps whole: words and punctuation for all three, plus markup runs and link targets for
+Markdown, and whole tags and entities for HTML. See
+[Column types](/docs/schemas/column-types#mergeable-text-columns) for the full rules and for optional
+text columns.
+
+## Write and read it like any string
+
+There is no separate text API. Write the whole current value, and read it with a normal query:
+
+```ts
+db.update(app.notes, noteId, { body: nextBody });
+```
+
+Queries, filters and permissions see the text itself, and long documents are stored and synced as
+[large values](/docs/schemas/column-types), so a whole book can live in one column.
+
+## How edits merge
+
+Each write is merged against the version its writer had seen:
+
+- Edits to different parts of the text all survive, and an edit both people made applies once.
+- Two insertions at the same spot both stay, the earlier one first.
+- Where both people replaced the same words, the edit the server receives later wins that part. The
+  other version stays in the row's [history](/docs/reading/history).
+- A device that edits offline merges its whole session when it reconnects. Until the server's result
+  arrives, it shows its own text, then switches to the merged value.
+
+The merge keeps Markdown and HTML markup intact but is not tree-aware: it doesn't check that the
+merged result is well formed. See [how text merges work](/docs/recipes/local-first/how-sync-works#text-merges)
+for the full rules.
+
+## Connecting an editor
+
+Three habits keep an editor pleasant to use with a text column:
+
+- **Write every change**, without debouncing, so every merged value that arrives already contains
+  everything typed before it.
+- **Apply incoming values as a change, not a reset**, so the cursor and selection stay where they
+  are.
+- **Keep the serialization stable**: loading a value and saving it again without edits must give
+  back the same string, or every open editor rewrites the text.
+
+For ProseMirror, `jazz-tools/prosemirror` does all three: `markdownSync` reports the document's
+Markdown after each local edit, and `applyMarkdown` turns an incoming value into the smallest
+editor change. The [rich text editor recipe](/docs/recipes/data-patterns/rich-text-editor) walks
+through a full setup, and [Collaborative text editing](/docs/recipes/data-patterns/collaborative-text-editing)
+covers other editors.
+
+## Anchors and ranges
+
+Comments, highlights and cursors need to point into text that keeps changing. Instead of character
+offsets, Jazz describes a position as an **anchor** and a span as a **range**: the text itself plus
+a little text on either side. They're found again in a later version of the value by that text, so
+they survive edits that move the words around.
+
+```ts
+const anchors = db.textAnchors();
+
+const range = anchors.captureRange(note.body, start, end);
+// ...later, in whatever version of the text is current:
+const found = anchors.resolveRange(range, latestBody);
+// found.start, found.end, found.confidence, found.ambiguous
+```
+
+- Anchors and ranges are plain JSON, so store them in a `s.json()` column next to the text, or send
+  them as presence.
+- `confidence` falls as the text under them changes, and `ambiguous` says another place matched
+  about as well. When confidence is very low, the text is gone: show the comment as orphaned rather
+  than moving it somewhere else.
+- A server job or an LLM can create a range from the current text alone, with no `version` or
+  positions: a range with just the `matched` text, and `before` and `after` left empty, is found
+  wherever that text is.
+
+Positions count UTF-16 code units, like JavaScript strings. In ProseMirror, `captureRange`,
+`resolveRange` and `overlays` from `jazz-tools/prosemirror` work in editor positions instead; see
+[comments that stay on their words](/docs/recipes/data-patterns/rich-text-editor#comments-that-stay-on-their-words).

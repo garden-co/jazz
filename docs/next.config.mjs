@@ -82,6 +82,8 @@ const config = {
     // working. Temporary until the new structure settles.
     return [
       { source: "/perf-timeline", destination: "/examples", permanent: false },
+      // Older create-jazz builds fetch the agent brief from its old URL.
+      { source: "/agent-brief.md", destination: "/quickstart.md", permanent: false },
       {
         source: "/docs/tooling/agent-skills",
         destination: "/docs/setup/run-locally",
