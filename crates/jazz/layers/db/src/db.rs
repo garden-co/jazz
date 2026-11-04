@@ -56,10 +56,11 @@ use crate::values::{
 pub use sync::{
     ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
     FrameJoiner, Image, MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction,
-    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
-    TransportError, TxName, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError,
-    WireKind, WireOp, WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite,
-    WriteConflict, decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
+    RelationSnapshot, RemoteLinkHint, SerializedReadResult, Since, SubscriberId, SyncMessage,
+    Transport, TransportError, TxName, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta,
+    WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport, WireTransportAdapter,
+    WireWrite, WriteConflict, decode_message, duplex, encode_frames,
+    validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -1343,6 +1344,7 @@ impl Db {
         };
         names.admit(&conn, &schema)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
+        sync::forget_unbundled_watermarks(&conn)?;
         let withheld: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_jazz_withheld'",
