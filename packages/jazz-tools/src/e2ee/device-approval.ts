@@ -863,7 +863,9 @@ export class DeviceApproval {
       if (!members.has(this.deviceId) || !members.delete(deviceId))
         throw new Error("Unknown or inactive E2EE device");
       const proposal = await acceptedDeviceTransaction(this.db, async (tx) => {
-        const existing = await tx.all(this.tables.__e2ee_account_successors, { tier: "remote" });
+        // Revalidate through the same account-scoped authority reader, not the replica cache.
+        const covered = await this.readSnapshot(tx);
+        const existing = covered.successors;
         this.assertOpen();
         if (
           existing.length !== snapshot.successors.length ||
@@ -871,13 +873,13 @@ export class DeviceApproval {
         )
           throw new Error("Stale E2EE predecessor");
         // Predicate reads bind the complete immutable approval revision to acceptance.
-        const observed = await Promise.all([
-          tx.all(this.tables.__e2ee_device_requests, { tier: "remote" }),
-          tx.all(this.tables.__e2ee_device_challenges, { tier: "remote" }),
-          tx.all(this.tables.__e2ee_device_proofs, { tier: "remote" }),
-          tx.all(this.tables.__e2ee_device_approvals, { tier: "remote" }),
-          tx.all(this.tables.__e2ee_device_deliveries, { tier: "remote" }),
-        ]);
+        const observed = [
+          covered.requests,
+          covered.challenges,
+          covered.proofs,
+          covered.approvals,
+          covered.deliveries,
+        ];
         this.assertOpen();
         const expected = [
           snapshot.requests,
@@ -889,19 +891,12 @@ export class DeviceApproval {
         const ids = (rows: { id: string }[]) => JSON.stringify(rows.map((row) => row.id).sort());
         if (observed.some((rows, i) => ids(rows) !== ids(expected[i]!)))
           throw new Error("Stale E2EE membership revision");
-        const recoveryRoots = await tx.all(
-          this.tables.__e2ee_recovery_roots.where({ accountId: this.accountId }),
-          { tier: "remote" },
-        );
+        const recoveryRoots = covered.publicHistory.recovery.rows;
         this.assertOpen();
         if (ids(recoveryRoots) !== ids(snapshot.publicHistory.recovery.rows))
           throw new Error("Stale E2EE recovery revision");
-        const publicApprovals = await tx.all(
-          this.tables.__e2ee_public_device_approvals.where({
-            accountId: this.accountId,
-            epochId: snapshot.identity.epochId,
-          }),
-          { tier: "remote" },
+        const publicApprovals = covered.publicHistory.approvals.rows.filter(
+          (approval) => approval.epochId === snapshot.identity.epochId,
         );
         this.assertOpen();
         const nextSecret = runtimeRandomBytes(32);
