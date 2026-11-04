@@ -6171,14 +6171,15 @@ impl Inner {
         // Membership inputs: every table the read and its policies read
         // (its own included: a filter or policy may read other rows of
         // it), and the supporting tables with their policies' inputs.
-        let mut inputs = self.read_dependencies(prepared, identity)?;
+        let mut inputs = self.read_dependencies_in(prepared, identity, read)?;
         let mut tables = Vec::new();
         support_tables(support, &mut tables);
+        let policies = read.governance.policies(self);
         for table in tables {
             if let Some(author) = identity
-                && self.owner.by_stored(&table).is_some()
+                && policies.by_stored(&table).is_some()
             {
-                inputs.extend(self.read_policy_tables(&self.owner, &table, author)?);
+                inputs.extend(self.read_policy_tables(&policies, &table, author)?);
             }
             inputs.insert(table);
         }
@@ -6840,7 +6841,7 @@ impl Db {
             },
             ..ReadOpts::default()
         };
-        let mut read = ReadSpec::of(&opts, &self.inner.borrow())?;
+        let mut read = ReadSpec::of(&opts, &self.inner.borrow(), self.governance.clone())?;
         read.position = Position::Current;
         // A frozen view is this store's own state, not the server's to judge.
         if read.frozen() {
@@ -9005,6 +9006,21 @@ impl Inner {
             .map_or_else(|| self.owner.clone(), |(_, governing)| governing.clone())
     }
 
+    /// Admission has resolved every pinned bundle before serving a session.
+    fn session_governance(&self, index: usize) -> Governance {
+        match self.sessions[index].bundle {
+            None => Governance::CurrentOwner,
+            Some(bundle) => Governance::Selected(
+                self.bundles
+                    .get(&bundle)
+                    .expect("admitted session bundle")
+                    .1
+                    .clone(),
+                bundle,
+            ),
+        }
+    }
+
     /// `view` governed by session `index`'s policies: unchanged unless the
     /// session is pinned to a bundle, whose policies then replace its own.
     pub(crate) fn governed_view(&self, view: &Rc<Schema>, index: usize) -> Rc<Schema> {
@@ -9171,7 +9187,7 @@ impl Inner {
 
     /// Admitted `version` under its stored names, governed by `policies`'
     /// policies.
-    fn governed_by(
+    pub(crate) fn governed_by(
         &self,
         version: crate::ids::SchemaVersionId,
         policies: Rc<Schema>,
@@ -9476,6 +9492,50 @@ impl Db {
         Ok(())
     }
 
+    /// Whether this store may serve a session of `identity` pinned to
+    /// `bundle` ([`Self::check_serves`] first). A bundle this store has not
+    /// published, or whose write schema it has not admitted, is refused, and
+    /// so is an unpinned session of a user once createJazz publishes
+    /// bundles here.
+    pub fn check_session_pin(
+        &self,
+        identity: AuthorSubject,
+        bundle: Option<&crate::catalogue::BundleId>,
+    ) -> Result<(), Error> {
+        self.check_serves(identity)?;
+        let mut inner = self.inner.borrow_mut();
+        if let Some(bundle) = bundle
+            && inner.bundle(bundle)?.is_none()
+        {
+            let published = crate::catalogue::bundle(&inner.conn, bundle)?.is_some();
+            return Err(Error::new(
+                ErrorCode::Schema,
+                if published {
+                    format!(
+                        "permissions bundle {bundle} is published, but this store never admitted its write schema"
+                    )
+                } else {
+                    format!("permissions bundle {bundle} is not published on this store")
+                },
+            ));
+        }
+        // Once createJazz publishes bundles here, its backend pins every
+        // session it opens. An unpinned policy session would be governed by
+        // the current permissions, which createJazz no longer advances, so
+        // a later tightening or rollback would never reach it.
+        if bundle.is_none()
+            && identity != AuthorSubject::SYSTEM
+            && crate::catalogue::serves_bundles(&inner.conn)?
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "this app is served through createJazz: connect through its backend, \
+                 which pins each session to the permissions it deployed",
+            ));
+        }
+        Ok(())
+    }
+
     /// Serve a client over `transport` as `identity`, once
     /// [`Self::check_serves`] allows it.
     pub fn accept_subscriber(
@@ -9509,37 +9569,8 @@ impl Db {
         claims: Option<BTreeMap<String, Value>>,
         bundle: Option<crate::catalogue::BundleId>,
     ) -> Result<SubscriberId, Error> {
-        self.check_serves(identity)?;
+        self.check_session_pin(identity, bundle.as_ref())?;
         let mut inner = self.inner.borrow_mut();
-        if let Some(bundle) = &bundle
-            && inner.bundle(bundle)?.is_none()
-        {
-            let published = crate::catalogue::bundle(&inner.conn, bundle)?.is_some();
-            return Err(Error::new(
-                ErrorCode::Schema,
-                if published {
-                    format!(
-                        "permissions bundle {bundle} is published, but this store never admitted its write schema"
-                    )
-                } else {
-                    format!("permissions bundle {bundle} is not published on this store")
-                },
-            ));
-        }
-        // Once createJazz publishes bundles here, its backend pins every
-        // session it opens. An unpinned policy session would be governed by
-        // the current permissions, which createJazz no longer advances, so
-        // a later tightening or rollback would never reach it.
-        if bundle.is_none()
-            && identity != AuthorSubject::SYSTEM
-            && crate::catalogue::serves_bundles(&inner.conn)?
-        {
-            return Err(Error::new(
-                ErrorCode::Protocol,
-                "this app is served through createJazz: connect through its backend, \
-                 which pins each session to the permissions it deployed",
-            ));
-        }
         // One relay tier only (SPEC 9 §9.5).
         debug_assert!(
             !inner.non_durable,
@@ -9942,13 +9973,11 @@ impl Db {
             .filter(|_| identity != AuthorSubject::SYSTEM)
             .map(|claims| (identity, claims));
         let tables = self.with_claims(vouched, || {
-            let prepared = self
-                .session_db(index)
-                .prepare_query_bound(query, binding.clone())
-                .ok()?;
+            let db = self.session_db(index);
+            let prepared = db.prepare_query_bound(query, binding.clone()).ok()?;
             self.inner
                 .borrow()
-                .read_dependencies(&prepared, policy)
+                .read_dependencies_in(&prepared, policy, &ReadSpec::new(db.governance.clone()))
                 .ok()
         });
         // An unadmitted version may be admitted without the owner schema
@@ -10986,7 +11015,10 @@ impl Db {
             let (queue, group) = inner.subscribe_member(
                 &wait.prepared,
                 policy,
-                wait.read,
+                ReadSpec {
+                    governance: db.governance.clone(),
+                    ..wait.read
+                },
                 SettledBy::Always(authority),
             )?;
             let session = &mut inner.sessions[index];
@@ -11005,27 +11037,29 @@ impl Db {
     fn stored_db_for(&self, index: usize) -> Db {
         let inner = self.inner.borrow();
         let view = inner.governed_view(&inner.stored_view(), index);
+        let governance = inner.session_governance(index);
         drop(inner);
         Db {
             inner: self.inner.clone(),
             view: Some(view),
+            governance,
         }
     }
 
-    /// The schema whose policies this handle's reads and writes are
-    /// governed by: its view's, else the current schema's.
-    fn view_policies(&self) -> Rc<Schema> {
-        self.view
-            .as_ref()
-            .and_then(|view| view.policies_from.clone())
-            .unwrap_or_else(|| self.inner.borrow().owner.clone())
+    /// Resolve the policy source chosen by trusted handle construction.
+    /// Named-view policy snapshots do not establish an authenticated pin.
+    pub(super) fn view_policies(&self) -> Rc<Schema> {
+        self.governance.policies(&self.inner.borrow())
     }
 
     fn session_db(&self, index: usize) -> Db {
-        let view = self.inner.borrow_mut().session_schema(index);
+        let mut inner = self.inner.borrow_mut();
+        let view = inner.session_schema(index);
+        let governance = inner.session_governance(index);
         Db {
             inner: self.inner.clone(),
             view,
+            governance,
         }
     }
 
@@ -11117,7 +11151,7 @@ impl Db {
                     // A session's read is served as this store holds it.
                     ReadSpec {
                         position: Position::Current,
-                        ..ReadSpec::of(&opts, &db.inner())?
+                        ..ReadSpec::of(&opts, &db.inner(), db.governance.clone())?
                     }
                 };
                 let resume_read = viewed.clone();
@@ -11483,7 +11517,7 @@ impl Db {
                     },
                     ..ReadOpts::default()
                 };
-                let viewed = match ReadSpec::of(&opts, &inner) {
+                let viewed = match ReadSpec::of(&opts, &inner, db.governance.clone()) {
                     // A session's read is served as this store holds it.
                     Ok(viewed) => ReadSpec {
                         position: Position::Current,
@@ -11499,6 +11533,7 @@ impl Db {
                     }
                 };
                 let read = ReadSpec {
+                    governance: viewed.governance,
                     position: Position::Current,
                     cut: viewed.cut.or(pinned.map(Cut::at)),
                     include_deleted,
@@ -12293,6 +12328,9 @@ impl Db {
             own,
         } = &kind
         {
+            // Reads are validated by the policies the session read by: its
+            // bundle's when it is pinned to one, not the store's current ones.
+            let policies = self.view_policies();
             let inner = self.inner();
             // The sender's own commits its snapshot included, by local seq
             // and where each settled here (earlier on this connection, so
@@ -12326,9 +12364,10 @@ impl Db {
             }
             for read in reads {
                 // A read is evaluated in the version it was made in.
-                let Some(schema) =
-                    inner.governed(crate::ids::SchemaVersionId::from_bytes(read.version))
-                else {
+                let Some(schema) = inner.governed_by(
+                    crate::ids::SchemaVersionId::from_bytes(read.version),
+                    policies.clone(),
+                ) else {
                     return Err((schema_version_not_deployed(), mentioned(&inner)));
                 };
                 let prepared = PreparedQuery {
@@ -12341,7 +12380,7 @@ impl Db {
                 };
                 let spec = ReadSpec {
                     include_deleted: read.include_deleted,
-                    ..ReadSpec::default()
+                    ..ReadSpec::new(self.governance.clone())
                 };
                 let now: Vec<([u8; 16], Option<Pos>)> = inner
                     .read_versions(&prepared, identity, &spec)
@@ -12919,7 +12958,7 @@ impl Db {
         poll_fn(|_| {
             let read = {
                 let inner = self.inner();
-                ReadSpec::of(&opts, &inner).and_then(|mut spec| {
+                ReadSpec::of(&opts, &inner, self.governance.clone()).and_then(|mut spec| {
                     // It reads as far as the answer it fetched settled.
                     if let Some(at) = fetched
                         && spec.position == Position::Known
@@ -13234,3 +13273,15 @@ mod tests {
         assert!(joiner.push(&parts[1]).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "nested_policy_dependencies_tests.rs"]
+mod nested_policy_dependencies_tests;
+
+#[cfg(test)]
+#[path = "executing_handle_policy_context_tests.rs"]
+mod executing_handle_policy_context_tests;
+
+#[cfg(test)]
+#[path = "governance_composition_tests.rs"]
+mod governance_composition_tests;

@@ -87,3 +87,11 @@ export {
   AuthSecretFormatError,
 } from "./auth-secret-store.js";
 export type { AuthSecretStore, BrowserAuthSecretStoreOptions } from "./auth-secret-store.js";
+export type {
+  ResolvedTextAnchor,
+  ResolvedTextRange,
+  TextAnchor,
+  TextAnchors,
+  TextRange,
+  TextSide,
+} from "./text-anchors.js";

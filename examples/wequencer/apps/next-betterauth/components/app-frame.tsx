@@ -37,7 +37,7 @@ function AccountMenu({ name }: { name: string }) {
       await gracefulSignOut();
       window.location.assign("/");
     } catch {
-      // Jazz keeps the account open and shows the error with a retry.
+      // Sign-out failed: the account stays open.
     }
   }
 

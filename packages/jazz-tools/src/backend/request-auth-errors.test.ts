@@ -157,23 +157,33 @@ describe("client-caused request auth failures are RequestAuthenticationErrors", 
   });
 
   it.each([
-    [401, "account_request_failed"],
     [403, "identity_not_authorized"],
     [404, "identity_not_assigned"],
     [409, "identity_already_assigned"],
-    [400, "use_local_first_founding"],
-    [400, "local_first_proof_required"],
+    [400, "invalid_external_identity"],
   ])("rejects an identity the account registry refuses with %i %s", async (status, code) => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(status === 401 ? "invalid account credential" : code, { status }),
-    );
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(code, { status }));
     const error = await authFailure(
       resolveRequestSession(bearer(valid()), {
         ...staticConfig,
         accountRegistry: "https://core.example/apps/app/accounts",
+        backendSecret: "backend-secret",
       }),
     );
     expect(error.code).toBe(code);
+  });
+
+  it("treats a refused backend secret as the server's failure", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("invalid backend secret", { status: 401 }),
+    );
+    await serverFailure(
+      resolveRequestSession(bearer(valid()), {
+        ...staticConfig,
+        accountRegistry: "https://core.example/apps/app/accounts",
+        backendSecret: "wrong-backend-secret",
+      }),
+    );
   });
 
   describe("with a static asymmetric key", () => {
@@ -306,7 +316,11 @@ describe("server-side request auth failures stay plain errors", () => {
   });
 
   it("fails when the account registry is down or answers garbage", async () => {
-    const config = { ...staticConfig, accountRegistry: "https://core.example/apps/app/accounts" };
+    const config = {
+      ...staticConfig,
+      accountRegistry: "https://core.example/apps/app/accounts",
+      backendSecret: "backend-secret",
+    };
     const fetcher = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(new Response("account_registry_unavailable", { status: 503 }));
@@ -320,7 +334,11 @@ describe("server-side request auth failures stay plain errors", () => {
   it("fails when the registry answers 403 or 404 without a rejection code", async () => {
     // Core's app gate answers a wrong app id or registry path with a bare 404:
     // a misconfiguration must not sign every user out.
-    const config = { ...staticConfig, accountRegistry: "https://core.example/apps/app/accounts" };
+    const config = {
+      ...staticConfig,
+      accountRegistry: "https://core.example/apps/app/accounts",
+      backendSecret: "backend-secret",
+    };
     const fetcher = vi.spyOn(globalThis, "fetch");
     for (const response of [
       new Response(null, { status: 404 }),

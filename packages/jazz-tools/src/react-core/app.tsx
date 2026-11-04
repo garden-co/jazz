@@ -9,18 +9,19 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import {
-  createJazzAppOwner,
-  type JazzApp,
-  type JazzAppSnapshot,
-  type JazzAuth,
-} from "../session/app.js";
+import { createJazzAppOwner, type JazzApp, type JazzAppSnapshot } from "../session/app.js";
 import type { JazzSessionActions, JazzSession } from "../session/state.js";
 import { JazzClientProvider, type CoreJazzClient } from "./provider.js";
 
 export type JazzAuthState<Client = CoreJazzClient> = JazzAppSnapshot<Client> & {
-  /** Manual account operations reject on failure and require a provider without managed auth. */
+  /** Manual account operations reject on failure. */
   sessionActions: JazzSessionActions;
+  /**
+   * Your auth changed: call this after your own sign-in, sign-out or account
+   * switch. Jazz asks your backend who is signed in now and follows its
+   * answer. Failures are represented in state.
+   */
+  reauthenticate(): Promise<void>;
   /** Failures are represented in state, so event handlers may safely ignore the promise. */
   logout(): Promise<void>;
   retry(): Promise<void>;
@@ -41,64 +42,17 @@ export type JazzAppViewProps<Client = CoreJazzClient> = {
   error?: ReactNode | ((state: JazzAuthState<Client>) => ReactNode);
 };
 
-type AuthAdmission =
-  | { kind: "manual" }
-  | { kind: "better-auth"; client: Extract<JazzAuth, { kind: "better-auth" }>["client"] }
-  | {
-      kind: "backend";
-      key: string | null;
-      isPending: boolean;
-      error: Error | undefined;
-    };
-
-function authAdmission(auth: JazzAuth | undefined): AuthAdmission {
-  if (!auth) return { kind: "manual" };
-  if (auth.kind === "better-auth") return { kind: auth.kind, client: auth.client };
-  return { kind: auth.kind, key: auth.key, isPending: !!auth.isPending, error: auth.error };
-}
-function sameAdmission(left: AuthAdmission, right: AuthAdmission): boolean {
-  if (left.kind !== right.kind) return false;
-  if (left.kind === "manual") return true;
-  if (left.kind === "better-auth")
-    return right.kind === "better-auth" && left.client === right.client;
-  return (
-    right.kind === left.kind &&
-    left.key === right.key &&
-    left.isPending === right.isPending &&
-    left.error === right.error
-  );
-}
-
-/** Framework shell only: the shared owner reconciles authentication and owns resources. */
+/** Framework shell only: the shared owner follows the backend's user and owns resources. */
 export function ConfiguredJazzAppProvider<Config, Client extends CoreJazzClient>({
   config,
-  auth,
   createJazzSession,
   ...view
 }: JazzAppViewProps<Client> & {
   config: Config;
-  auth?: JazzAuth;
   createJazzSession: (config: Config) => Promise<JazzSession<Client>>;
 }) {
-  // This creates an inert store. No host or auth subscription starts during render.
-  const [app] = useState(() =>
-    createJazzAppOwner({ ...config, auth }, createJazzSession, { start: false }),
-  );
-  const backend = auth?.kind === "backend" ? auth : undefined;
-  const betterAuthClient = auth?.kind === "better-auth" ? auth.client : undefined;
-  const requestedAdmission = useMemo(
-    () => authAdmission(auth),
-    [auth?.kind, backend?.key, backend?.isPending, backend?.error, betterAuthClient],
-  );
-  const [appliedAdmission, setAppliedAdmission] = useState(() => requestedAdmission);
-  useEffect(() => {
-    app.updateAuth(auth);
-    // Only admit the descriptor after the shared owner has observed its state.
-    // This update is after commit; speculative renders cannot mutate the owner.
-    setAppliedAdmission((previous) =>
-      sameAdmission(previous, requestedAdmission) ? previous : requestedAdmission,
-    );
-  }, [app, auth, requestedAdmission]);
+  // This creates an inert store. No host subscription starts during render.
+  const [app] = useState(() => createJazzAppOwner(config, createJazzSession, { start: false }));
   const disposal = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => {
     clearTimeout(disposal.current);
@@ -111,28 +65,17 @@ export function ConfiguredJazzAppProvider<Config, Client extends CoreJazzClient>
       }, 0);
     };
   }, [app]);
-  return (
-    <JazzAppView
-      app={app}
-      admissionPending={!sameAdmission(appliedAdmission, requestedAdmission)}
-      admissionError={auth?.kind === "backend" ? auth.error : undefined}
-      {...view}
-    />
-  );
+  return <JazzAppView app={app} {...view} />;
 }
 
 function JazzAppView<Client extends CoreJazzClient>({
   app,
-  admissionPending,
-  admissionError,
   children,
   signedOut = null,
   loading = null,
   error = null,
 }: JazzAppViewProps<Client> & {
   app: JazzApp<Client>;
-  admissionPending: boolean;
-  admissionError?: Error;
 }) {
   const snapshot = useSyncExternalStore(app.subscribe, app.getSnapshot, app.getSnapshot);
   const consumer = useMemo(
@@ -157,28 +100,19 @@ function JazzAppView<Client extends CoreJazzClient>({
   useEffect(() => {
     // Keep this consumer mounted in every fallback, acknowledging after query cleanup.
     consumer.lease?.acknowledge(snapshot);
-  }, [consumer, snapshot, admissionPending]);
+  }, [consumer, snapshot]);
   const actions = useMemo(
     () => ({
       sessionActions: app.sessionActions,
+      reauthenticate: () => app.reauthenticate().catch(() => {}),
       logout: () => app.logout().catch(() => {}),
       retry: () => app.retry().catch(() => {}),
     }),
     [app],
   );
   const state = useMemo<JazzAuthState<Client>>(
-    () => ({
-      // New auth props must hide the old client in this render, before any child
-      // layout effect can commit. The raw snapshot remains the consumer receipt.
-      ...(admissionPending
-        ? {
-            status: admissionError ? ("error" as const) : ("transitioning" as const),
-            error: admissionError,
-          }
-        : snapshot),
-      ...actions,
-    }),
-    [snapshot, actions, admissionPending, admissionError],
+    () => ({ ...snapshot, ...actions }),
+    [snapshot, actions],
   );
   const render = (view: JazzAppViewProps<Client>["loading"]) =>
     typeof view === "function" ? view(state) : view;
