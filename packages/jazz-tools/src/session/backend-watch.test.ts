@@ -309,6 +309,17 @@ it("stops when there is no backend to ask", async () => {
   await t.session.close();
 });
 
+it("fails running and queued reauthenticates alike when there is no backend", async () => {
+  const t = await setup(undefined, { noBackend: true });
+  const running = t.watch.reauthenticate();
+  const queued = t.watch.reauthenticate();
+  await expect(running).rejects.toThrow("Jazz could not ask your backend who is signed in");
+  await expect(queued).rejects.toThrow("Jazz found no backend to ask who is signed in");
+  // A stopped watch answers later ones at once.
+  await t.watch.reauthenticate();
+  await t.session.close();
+});
+
 it("reauthenticate signs users in and out, and clearOnSignOut wipes on a direct switch", async () => {
   let backendUser: AccountHandle | null = null;
   const events: string[] = [];

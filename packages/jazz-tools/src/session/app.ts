@@ -86,6 +86,10 @@ export function createJazzAppOwner<Config, Client>(
   let disposed = false;
   let failure: Error | undefined;
   let manualRetry: (() => Promise<void>) | undefined;
+  // The session as a failed reauthenticate left it. Its failure (and its
+  // retry, which asks the backend again) stands until the session moves on,
+  // say a later check follows the backend.
+  let reauthFailedAt: JazzSessionSnapshot<Client> | undefined;
   let actionGeneration = 0;
   let manualActionPending = false;
   let pendingLogouts = 0;
@@ -100,6 +104,11 @@ export function createJazzAppOwner<Config, Client>(
   function publish(force = false) {
     if (disposed && !force) return;
     const current = session?.getSnapshot();
+    if (reauthFailedAt && current !== reauthFailedAt) {
+      reauthFailedAt = undefined;
+      failure = undefined;
+      if (manualRetry === app.reauthenticate) manualRetry = undefined;
+    }
     const error = failure ?? current?.error;
     const status: JazzAppSnapshot<Client>["status"] = error
       ? "error"
@@ -220,6 +229,8 @@ export function createJazzAppOwner<Config, Client>(
     },
     async reauthenticate() {
       failure = undefined;
+      reauthFailedAt = undefined;
+      if (manualRetry === app.reauthenticate) manualRetry = undefined;
       try {
         // Asked while starting: follow the backend once the session exists.
         if (!session && pending) await pending;
@@ -230,7 +241,18 @@ export function createJazzAppOwner<Config, Client>(
           );
         await current.reauthenticate();
       } catch (cause) {
-        failure = toError(cause);
+        const after = session?.getSnapshot();
+        // A ready client stays: the backend couldn't be asked, so nothing
+        // says its user changed. Otherwise the app shows the failure (or the
+        // session's own, when following the backend failed), and retrying
+        // asks the backend again rather than reopening the old account.
+        if (after?.status !== "ready") {
+          failure = after?.error ? undefined : toError(cause);
+          if (after) {
+            manualRetry = app.reauthenticate;
+            reauthFailedAt = after;
+          }
+        }
         throw cause;
       } finally {
         publish();
@@ -247,7 +269,11 @@ export function createJazzAppOwner<Config, Client>(
         .then(async () => {
           if (disposed || generation !== actionGeneration) return;
           try {
-            if (manualRetry && snapshot.recovery === "action") await manualRetry();
+            if (
+              manualRetry &&
+              (snapshot.recovery === "action" || manualRetry === app.reauthenticate)
+            )
+              await manualRetry();
             else {
               await current.retry();
               manualRetry = undefined;

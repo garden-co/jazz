@@ -26,6 +26,8 @@ async function setup() {
   let admissionFailure = false;
   let linkFailure = false;
   let openFailure = false;
+  let probeFailure = false;
+  let focus: (() => void) | undefined;
   const handles = new Map<string, AccountHandle>();
   const account = (id: string) => {
     let result = handles.get(id);
@@ -78,8 +80,16 @@ async function setup() {
     decorate: (owned) => {
       const watch = watchBackendUser(
         owned,
-        async () => (backend.user === null ? null : { issuer: "provider", subject: backend.user }),
-        { onFocus: () => () => {} },
+        async () => {
+          if (probeFailure) throw new Error("backend unavailable");
+          return backend.user === null ? null : { issuer: "provider", subject: backend.user };
+        },
+        {
+          onFocus(check) {
+            focus = check;
+            return () => (focus = undefined);
+          },
+        },
         { confirmMs: 0 },
       );
       const close = owned.close;
@@ -108,6 +118,10 @@ async function setup() {
     failOpen(value: boolean) {
       openFailure = value;
     },
+    failProbe(value: boolean) {
+      probeFailure = value;
+    },
+    focus: () => focus?.(),
     failAdmission(value: boolean) {
       admissionFailure = value;
     },
@@ -261,6 +275,68 @@ describe("shared Jazz application lifecycle", () => {
     f.failAdmission(false);
     await app.reauthenticate();
     expect(app.getSnapshot()).toMatchObject({ status: "ready", user: { id: "three" } });
+    await app.dispose();
+  });
+  it("keeps a ready client when the backend can't be asked on reauthenticate", async () => {
+    const f = await setup();
+    f.backend.user = "one";
+    const app = createJazzAppOwner({}, async () => f.session);
+    await settle();
+    expect(app.getSnapshot()).toMatchObject({ status: "ready", user: { id: "one" } });
+    const client = app.getSnapshot().client;
+    f.failProbe(true);
+    await expect(app.reauthenticate()).rejects.toThrow(
+      "Jazz could not ask your backend who is signed in",
+    );
+    expect(app.getSnapshot()).toMatchObject({ status: "ready", client, user: { id: "one" } });
+    await app.dispose();
+  });
+  it("retries a failed reauthenticate by asking the backend, and clears it once a check follows", async () => {
+    const f = await setup();
+    const app = createJazzAppOwner({}, async () => f.session);
+    await settle();
+    expect(app.getSnapshot().status).toBe("signed-out");
+    // The app signed in, but the backend can't be asked: show the failure.
+    f.backend.user = "one";
+    f.failProbe(true);
+    await expect(app.reauthenticate()).rejects.toThrow();
+    expect(app.getSnapshot()).toMatchObject({ status: "error", recovery: "action" });
+    // Retrying asks the backend again, which now answers.
+    f.failProbe(false);
+    await app.retry();
+    expect(app.getSnapshot()).toMatchObject({ status: "ready", user: { id: "one" } });
+
+    // A later check that follows the backend clears a reauthenticate's failure.
+    f.backend.user = "two";
+    f.failProbe(true);
+    await expect(app.reauthenticate()).rejects.toThrow();
+    expect(app.getSnapshot().status).toBe("ready");
+    f.backend.user = null;
+    await f.session.logout();
+    f.backend.user = "two";
+    await expect(app.reauthenticate()).rejects.toThrow();
+    expect(app.getSnapshot().status).toBe("error");
+    f.failProbe(false);
+    f.focus();
+    await settle();
+    expect(app.getSnapshot()).toMatchObject({ status: "ready", user: { id: "two" } });
+    await app.dispose();
+  });
+  it("retries a reauthenticate whose sign-in failed by asking the backend, not reopening", async () => {
+    const f = await setup();
+    const app = createJazzAppOwner({}, async () => f.session);
+    await settle();
+    f.backend.user = "one";
+    f.failOpen(true);
+    await expect(app.reauthenticate()).rejects.toThrow("open unavailable");
+    expect(app.getSnapshot().status).toBe("error");
+    // Signed out meanwhile: retrying follows the backend instead of reopening "one".
+    f.failOpen(false);
+    f.backend.user = null;
+    f.events.length = 0;
+    await app.retry();
+    expect(app.getSnapshot().status).toBe("signed-out");
+    expect(f.events).not.toContain("open:one");
     await app.dispose();
   });
   it("closes late host results and exposes shutdown failures without publishing a client", async () => {

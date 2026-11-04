@@ -112,7 +112,12 @@ export function watchBackendUser<Client>(
     try {
       return await probe();
     } catch (cause) {
-      if (cause instanceof AccountAuthError && cause.status === 404) watch.stop();
+      if (cause instanceof AccountAuthError && cause.status === 404) {
+        // No backend to ask: reauthenticates still waiting fail like this one.
+        const queued = waiters.splice(0);
+        watch.stop();
+        settle(queued, new Error("Jazz found no backend to ask who is signed in", { cause }));
+      }
       return { failed: cause };
     }
   }

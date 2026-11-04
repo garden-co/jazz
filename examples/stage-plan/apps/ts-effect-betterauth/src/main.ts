@@ -35,7 +35,8 @@ function show(key: string, render: () => HTMLElement | { element: HTMLElement; d
 async function signOut() {
   // Signs out of Better Auth, then Jazz follows the backend's answer.
   await authClient.signOut();
-  await jazz.reauthenticate();
+  // A failure shows as Jazz's error state; leave the page either way.
+  await jazz.reauthenticate().catch(() => {});
   window.location.assign("/");
 }
 
