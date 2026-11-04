@@ -61,7 +61,7 @@ async function open(
   client?: LocalFirstLoader,
 ): Promise<BrowserJazzSession> {
   const session = await createJazzClient({
-    appId: server.appId,
+    scope: server.appId,
     serverUrl: server.url,
     store,
     initial: "local-first",

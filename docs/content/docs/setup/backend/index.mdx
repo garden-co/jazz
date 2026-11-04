@@ -113,7 +113,7 @@ all it needs. It never holds a Jazz credential:
 ```ts title="src/jazz.ts"
 import { createJazzClient } from "jazz-tools/client";
 
-export const session = await createJazzClient({ appId: "my-app", serverUrl: "/jazz" });
+export const session = await createJazzClient({ serverUrl: "/jazz" });
 await session.loginWithBackend();
 ```
 

@@ -7,6 +7,7 @@ members = [
   "crates/jazz/layers/model",
   "crates/jazz/layers/protocol",
   "crates/jazz/layers/types",
+  "crates/jazz-alpha59-dump",
   "crates/jazz-compression",
   "crates/jazz-text",
   "crates/wasm-tracing",
@@ -42,7 +43,8 @@ exclude = [
   "examples/todo-server-rs",
   "examples/docs/todo-server-rs",
   "vendor/ruzstd",
-  # One-time alpha.59 -> SQLite store migration; its own workspaces, never shipped.
+  # The alpha.59 exporter and its test fixture, built inside an alpha.59
+  # checkout by their prepare.sh.
   "dev/migrate-alpha59",
 ]
 

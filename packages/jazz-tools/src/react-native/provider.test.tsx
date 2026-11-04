@@ -126,7 +126,7 @@ it("uses native defaults and the native session factory for ergonomic props", as
   mocks.createJazzClient.mockRejectedValue(new Error("native offline"));
   const view = render(
     <JazzProvider
-      appId="native-app"
+      scope="native-app"
       serverUrl="https://sync.example.test"
       store={{ read: async () => null, update: async () => {} }}
     >

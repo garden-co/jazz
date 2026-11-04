@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use migrate_alpha59_dump::{Reader, Record};
+use jazz_alpha59_dump::{Reader, Record};
 
 /// Runtime lens ops alpha.59 accepted and the SQLite engine refuses.
 const UNSUPPORTED: [&str; 3] = ["CopyColumn", "TransformColumn", "RejectSourceDelta"];

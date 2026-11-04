@@ -8,7 +8,6 @@ export default function App({ account }: { account: AccountHandle }) {
   return (
     <JazzProvider
       config={{
-        appId: "<your-app-id>",
         account,
       }}
     >
@@ -25,7 +24,6 @@ export function AppWithRuntimeSources({ account }: { account: AccountHandle }) {
   return (
     <JazzProvider
       config={{
-        appId: "my-app",
         account,
         serverUrl: "https://my-jazz-server.example.com",
         runtimeSources: {
