@@ -1,5 +1,6 @@
 import {
   createAccountManagerWithRuntime,
+  type AppBearer,
   type BackendAccountHost,
   type JWTAuth,
 } from "./enrollment.js";
@@ -62,6 +63,7 @@ export async function prepareAccountManager(options: {
   mintToken(secret: string, audience: string): string;
   generateSecret?(): string;
   fetch?: typeof fetch;
+  bearer?: AppBearer;
   backend?: BackendAccountHost;
 }) {
   const stored = decode(await options.store.read());
@@ -92,6 +94,7 @@ export async function prepareAccountManager(options: {
   const manager = createAccountManagerWithRuntime({
     registry: options.registry,
     fetch: options.fetch,
+    bearer: options.bearer,
     backend: options.backend,
     restoredLocalFirstSecret: stored.selected === null ? undefined : stored.roots[stored.selected],
     selectionDurability: {

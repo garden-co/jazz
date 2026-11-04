@@ -5,19 +5,19 @@
 //! 1. **Local-first Auth** (`Authorization: Bearer <self-signed Ed25519 JWT>`):
 //!    Clients authenticate with a self-signed JWT containing an Ed25519 identity proof.
 //!
-//! 2. **External JWT Auth** (`Authorization: Bearer <JWT>`): Frontend/mobile clients
-//!    authenticate via JWT validated with JWKS or a configured static key.
+//! 2. **Backend Secret** (`X-Jazz-Backend-Secret` + `X-Jazz-Session`): the app's
+//!    backend (`createJazz`) acts for the users it authenticated.
 //!
-//! 3. **Backend Secret** (`X-Jazz-Backend-Secret` + `X-Jazz-Session`): Backend clients
-//!    can impersonate any user by providing the backend secret and a session header.
+//! 3. **Admin Secret** (`X-Jazz-Admin-Secret`): Required for schema/lens/policy sync.
 //!
-//! 4. **Admin Secret** (`X-Jazz-Admin-Secret`): Required for schema/lens/policy sync.
+//! A core verifies no external JWTs and reads no auth cookies: the app's
+//! backend decides who a user is and states it with its backend secret.
 //!
 //! # Session Resolution Priority
 //!
 //! When resolving the request session:
 //! 1. Backend impersonation (if `X-Jazz-Backend-Secret` + `X-Jazz-Session` present)
-//! 2. JWT auth (if `Authorization: Bearer` present — local-first or external JWT)
+//! 2. A Jazz self-signed proof (`Authorization: Bearer`, local-first or anonymous)
 //! 3. No session
 
 use std::fmt;
@@ -128,21 +128,6 @@ impl From<TestClock> for AuthClock {
 /// Authentication configuration for the server.
 #[derive(Debug, Clone, Default)]
 pub struct AuthConfig {
-    /// URL to fetch JWKS keys (production).
-    pub jwks_url: Option<String>,
-    /// Single JWK JSON object or PEM public key used to verify external JWTs.
-    pub jwt_public_key: Option<String>,
-    /// Issuer that every externally verified JWT must contain.
-    pub jwt_issuer: Option<String>,
-    /// Audience that every externally verified JWT must target.
-    pub jwt_audience: Option<String>,
-    /// Cookie name used to read browser auth tokens during the WS upgrade.
-    pub auth_cookie_name: Option<String>,
-    /// Trust `X-Forwarded-Host` for cookie WebSocket origin checks.
-    ///
-    /// Enable only when every request reaches Jazz through a trusted proxy
-    /// that removes client-supplied forwarded headers.
-    pub trust_forwarded_host: bool,
     /// Whether local-first Ed25519 JWT auth is allowed (default: true for new apps).
     pub allow_local_first_auth: bool,
     /// Secret for backend session impersonation.
@@ -159,13 +144,7 @@ pub struct AuthConfig {
 impl AuthConfig {
     /// Check if any auth is configured.
     pub fn is_configured(&self) -> bool {
-        self.jwks_url.is_some()
-            || self.jwt_public_key.is_some()
-            || self.jwt_issuer.is_some()
-            || self.jwt_audience.is_some()
-            || self.auth_cookie_name.is_some()
-            || self.trust_forwarded_host
-            || self.allow_local_first_auth
+        self.allow_local_first_auth
             || self.backend_secret.is_some()
             || self.admin_secret.is_some()
             || self.trusted_workload.is_some()
@@ -256,8 +235,6 @@ pub struct VerifiedJwt {
 /// JWT validation error.
 #[derive(Debug)]
 pub enum JwtError {
-    /// No JWT validation key configured.
-    NoKeyConfigured,
     /// Token signature is valid but `exp` is in the past.
     Expired,
     /// Invalid token format or signature.
@@ -269,7 +246,6 @@ pub enum JwtError {
 impl std::fmt::Display for JwtError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            JwtError::NoKeyConfigured => write!(f, "No JWT validation key configured"),
             JwtError::Expired => write!(f, "JWT has expired"),
             JwtError::Invalid(msg) => write!(f, "Invalid JWT: {}", msg),
             JwtError::Unavailable(msg) => write!(f, "JWT verification unavailable: {}", msg),
@@ -561,112 +537,6 @@ impl JwksCache {
     }
 }
 
-pub enum JwtVerifier {
-    Jwks(JwksCache),
-    Static(StaticJwtVerifier),
-}
-
-impl JwtVerifier {
-    pub async fn validate_at(
-        &self,
-        token: &str,
-        config: &AuthConfig,
-        now_seconds: u64,
-    ) -> Result<VerifiedJwt, JwtError> {
-        match self {
-            Self::Jwks(cache) => {
-                validate_jwt_with_cache_at(token, cache, config, now_seconds).await
-            }
-            Self::Static(verifier) => {
-                validate_jwt_with_static_key_at(token, verifier, config, now_seconds)
-            }
-        }
-    }
-}
-
-pub enum StaticJwtVerifier {
-    JwkSet(JwkSet),
-    Pem(PemPublicKeyVerifier),
-}
-
-impl StaticJwtVerifier {
-    pub fn from_public_key(public_key: &str) -> Result<Self, String> {
-        let trimmed = public_key.trim();
-        if trimmed.is_empty() {
-            return Err("JWT public key is empty".to_string());
-        }
-
-        if let Ok(jwk) = serde_json::from_str::<Jwk>(trimmed) {
-            return Ok(Self::JwkSet(JwkSet { keys: vec![jwk] }));
-        }
-
-        if let Ok(decoding_key) = DecodingKey::from_rsa_pem(trimmed.as_bytes()) {
-            return Ok(Self::Pem(PemPublicKeyVerifier::rsa(decoding_key)));
-        }
-        if let Ok(decoding_key) = DecodingKey::from_ec_pem(trimmed.as_bytes()) {
-            return Ok(Self::Pem(PemPublicKeyVerifier::ec(decoding_key)));
-        }
-        if let Ok(decoding_key) = DecodingKey::from_ed_pem(trimmed.as_bytes()) {
-            return Ok(Self::Pem(PemPublicKeyVerifier::ed(decoding_key)));
-        }
-
-        Err(
-            "unsupported JWT public key format; expected a single JWK JSON object or a PEM public key"
-                .to_string(),
-        )
-    }
-}
-
-pub struct PemPublicKeyVerifier {
-    decoding_key: DecodingKey,
-    kind: PemPublicKeyKind,
-}
-
-impl PemPublicKeyVerifier {
-    fn rsa(decoding_key: DecodingKey) -> Self {
-        Self {
-            decoding_key,
-            kind: PemPublicKeyKind::Rsa,
-        }
-    }
-
-    fn ec(decoding_key: DecodingKey) -> Self {
-        Self {
-            decoding_key,
-            kind: PemPublicKeyKind::Ec,
-        }
-    }
-
-    fn ed(decoding_key: DecodingKey) -> Self {
-        Self {
-            decoding_key,
-            kind: PemPublicKeyKind::Ed,
-        }
-    }
-
-    fn supports(&self, algorithm: Algorithm) -> bool {
-        match self.kind {
-            PemPublicKeyKind::Rsa => matches!(
-                algorithm,
-                Algorithm::RS256
-                    | Algorithm::RS384
-                    | Algorithm::RS512
-                    | Algorithm::PS256
-                    | Algorithm::PS384
-                    | Algorithm::PS512
-            ),
-            PemPublicKeyKind::Ec => matches!(algorithm, Algorithm::ES256 | Algorithm::ES384),
-            PemPublicKeyKind::Ed => matches!(algorithm, Algorithm::EdDSA),
-        }
-    }
-}
-
-enum PemPublicKeyKind {
-    Rsa,
-    Ec,
-    Ed,
-}
-
 async fn fetch_jwks(http_client: &reqwest::Client, endpoint: &str) -> Result<JwkSet, String> {
     let response = http_client
         .get(endpoint)
@@ -711,26 +581,6 @@ fn local_first_auth_error(message: String) -> UnauthenticatedResponse {
     } else {
         UnauthenticatedResponse::invalid(message)
     }
-}
-
-fn extract_cookie_value<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
-    cookie_header.split(';').find_map(|segment| {
-        let trimmed = segment.trim();
-        let (candidate_name, candidate_value) = trimmed.split_once('=')?;
-        if candidate_name == name && !candidate_value.is_empty() {
-            Some(candidate_value)
-        } else {
-            None
-        }
-    })
-}
-
-fn read_auth_token_from_cookie<'a>(headers: &'a HeaderMap, config: &AuthConfig) -> Option<&'a str> {
-    let cookie_name = config.auth_cookie_name.as_deref()?;
-    let cookie_header = headers
-        .get(axum::http::header::COOKIE)
-        .and_then(|value| value.to_str().ok())?;
-    extract_cookie_value(cookie_header, cookie_name).map(str::trim)
 }
 
 // ============================================================================
@@ -881,24 +731,19 @@ pub fn verify_jwt_signature_with_jwks(
     )))
 }
 
-fn ensure_external_jwt_claims_at(
+/// The issuer and audience a verified JWT must carry: a trusted workload's.
+#[derive(Debug, Clone)]
+pub struct ExpectedJwtClaims {
+    pub issuer: String,
+    pub audience: String,
+}
+
+fn ensure_jwt_claims_at(
     verified: &VerifiedJwt,
-    config: &AuthConfig,
+    expected: &ExpectedJwtClaims,
     now: u64,
 ) -> Result<(), JwtError> {
-    let expected_issuer = config.jwt_issuer.as_deref().ok_or_else(|| {
-        JwtError::Invalid(
-            "external JWT issuer is not configured; set --jwt-issuer / JAZZ_JWT_ISSUER".to_owned(),
-        )
-    })?;
-    let expected_audience = config.jwt_audience.as_deref().ok_or_else(|| {
-        JwtError::Invalid(
-            "external JWT audience is not configured; set --jwt-audience / JAZZ_JWT_AUDIENCE"
-                .to_owned(),
-        )
-    })?;
-
-    if verified.issuer.as_deref() != Some(expected_issuer) {
+    if verified.issuer.as_deref() != Some(expected.issuer.as_str()) {
         return Err(JwtError::Invalid(
             "JWT issuer does not match the configured issuer".to_owned(),
         ));
@@ -906,7 +751,7 @@ fn ensure_external_jwt_claims_at(
     if !verified
         .audiences
         .iter()
-        .any(|audience| audience == expected_audience)
+        .any(|audience| audience == &expected.audience)
     {
         return Err(JwtError::Invalid(
             "JWT audience does not include the configured audience".to_owned(),
@@ -938,15 +783,15 @@ fn ensure_external_jwt_claims_at(
 pub async fn validate_jwt_with_cache(
     token: &str,
     cache: &JwksCache,
-    config: &AuthConfig,
+    expected: &ExpectedJwtClaims,
 ) -> Result<VerifiedJwt, JwtError> {
-    validate_jwt_with_cache_at(token, cache, config, system_now_seconds()).await
+    validate_jwt_with_cache_at(token, cache, expected, system_now_seconds()).await
 }
 
 pub async fn validate_jwt_with_cache_at(
     token: &str,
     cache: &JwksCache,
-    config: &AuthConfig,
+    expected: &ExpectedJwtClaims,
     now_seconds: u64,
 ) -> Result<VerifiedJwt, JwtError> {
     // Check syntax only; these unverified claims must never establish identity.
@@ -966,7 +811,7 @@ pub async fn validate_jwt_with_cache_at(
 
     match verify_jwt_signature_with_jwks(token, &cached_jwks) {
         Ok(verified) => {
-            ensure_external_jwt_claims_at(&verified, config, now_seconds)?;
+            ensure_jwt_claims_at(&verified, expected, now_seconds)?;
             return Ok(verified);
         }
         Err(JwtVerificationError::Fatal(e)) => return Err(JwtError::Invalid(e)),
@@ -985,7 +830,7 @@ pub async fn validate_jwt_with_cache_at(
 
     match verify_jwt_signature_with_jwks(token, &refreshed_jwks.set) {
         Ok(verified) => {
-            ensure_external_jwt_claims_at(&verified, config, now_seconds)?;
+            ensure_jwt_claims_at(&verified, expected, now_seconds)?;
             Ok(verified)
         }
         Err(JwtVerificationError::Retryable(e)) if refreshed_jwks.refresh_error.is_some() => {
@@ -997,82 +842,6 @@ pub async fn validate_jwt_with_cache_at(
             Err(JwtError::Invalid(e))
         }
     }
-}
-
-fn verify_jwt_signature_with_pem_public_key(
-    token: &str,
-    verifier: &PemPublicKeyVerifier,
-) -> Result<VerifiedJwt, JwtVerificationError> {
-    let header = decode_header(token)
-        .map_err(|e| JwtVerificationError::Fatal(format!("invalid JWT header: {e}")))?;
-
-    if !verifier.supports(header.alg) {
-        return Err(JwtVerificationError::Fatal(format!(
-            "token algorithm {:?} is not compatible with the configured JWT public key",
-            header.alg
-        )));
-    }
-
-    let validation = signature_only_validation(header.alg);
-    match decode::<DecodedJwtClaims>(token, &verifier.decoding_key, &validation) {
-        Ok(data) => Ok(verified_jwt(data.claims)),
-        Err(e) => Err(JwtVerificationError::Fatal(format!(
-            "JWT signature verification failed: {e}"
-        ))),
-    }
-}
-
-pub fn validate_jwt_with_static_key_at(
-    token: &str,
-    verifier: &StaticJwtVerifier,
-    config: &AuthConfig,
-    now_seconds: u64,
-) -> Result<VerifiedJwt, JwtError> {
-    let verified = match verifier {
-        StaticJwtVerifier::JwkSet(jwks) => verify_jwt_signature_with_jwks(token, jwks),
-        StaticJwtVerifier::Pem(verifier) => {
-            verify_jwt_signature_with_pem_public_key(token, verifier)
-        }
-    }
-    .map_err(|error| match error {
-        JwtVerificationError::Retryable(message) | JwtVerificationError::Fatal(message) => {
-            JwtError::Invalid(message)
-        }
-    })?;
-
-    ensure_external_jwt_claims_at(&verified, config, now_seconds)?;
-    Ok(verified)
-}
-
-/// Resolve a session from a validated external JWT.
-///
-/// The session's `user_id` is the JWT `sub` claim verbatim. Integrations that
-/// need a different identity (e.g. mapping a stable provider id to a Jazz user
-/// id) must do that mapping upstream and mint `sub` accordingly.
-pub fn resolve_verified_jwt_session(
-    verified: VerifiedJwt,
-) -> Result<Session, UnauthenticatedResponse> {
-    let subject = verified.subject;
-    if !jazz::tools::identity::principal_is_nonempty(&subject) {
-        return Err(UnauthenticatedResponse::invalid("Invalid JWT subject"));
-    }
-
-    let issuer = verified
-        .issuer
-        .as_deref()
-        .filter(|v| jazz::tools::identity::principal_is_nonempty(v))
-        .ok_or_else(|| UnauthenticatedResponse::invalid("JWT iss claim is required"))?
-        .to_owned();
-
-    let claims = verified.claims;
-
-    Ok(Session {
-        account_id: None,
-        issuer,
-        user_id: subject,
-        claims,
-        auth_mode: jazz::tools::AuthMode::External,
-    })
 }
 
 /// Check if a JWT has a Jazz self-signed `iss` (local-first or anonymous) by
@@ -1145,16 +914,15 @@ pub fn local_first_founding_app(audience: &str) -> AppId {
 ///
 /// Priority:
 /// 1. Backend impersonation (X-Jazz-Backend-Secret + X-Jazz-Session)
-/// 2. JWT auth (`Authorization: Bearer`, or auth cookie when configured)
+/// 2. A Jazz self-signed proof (`Authorization: Bearer`)
 /// 3. No session
 ///
-/// When `jwt_verifier` is provided, external JWT validation uses the configured
-/// verifier. Without one, JWT auth returns "not configured."
+/// Any other bearer token is refused: the app's backend verifies its users'
+/// tokens and acts for them with its backend secret.
 pub async fn extract_session(
     headers: &HeaderMap,
     app_id: AppId,
     config: &AuthConfig,
-    jwt_verifier: Option<&JwtVerifier>,
 ) -> Result<Option<Session>, UnauthenticatedResponse> {
     // Priority 1: Backend impersonation
     if let Some(session_b64) = headers.get("X-Jazz-Session").and_then(|v| v.to_str().ok()) {
@@ -1203,7 +971,7 @@ pub async fn extract_session(
         }
         Some(token)
     } else {
-        read_auth_token_from_cookie(headers, config)
+        None
     };
 
     if let Some(token) = token {
@@ -1243,35 +1011,9 @@ pub async fn extract_session(
             }));
         }
 
-        // External JWT path.
-        let jwt_result = if let Some(verifier) = jwt_verifier {
-            verifier
-                .validate_at(token, config, config.clock.now_seconds())
-                .await
-        } else {
-            Err(JwtError::NoKeyConfigured)
-        };
-
-        match jwt_result {
-            Ok(verified) => {
-                let session = resolve_verified_jwt_session(verified)?;
-                return Ok(Some(session));
-            }
-            Err(JwtError::NoKeyConfigured) => {
-                return Err(UnauthenticatedResponse::disabled(
-                    "JWT auth is not enabled for this app",
-                ));
-            }
-            Err(JwtError::Expired) => {
-                return Err(UnauthenticatedResponse::expired("JWT has expired"));
-            }
-            Err(JwtError::Invalid(message)) => {
-                return Err(UnauthenticatedResponse::invalid(message));
-            }
-            Err(JwtError::Unavailable(message)) => {
-                return Err(UnauthenticatedResponse::unavailable(message));
-            }
-        }
+        return Err(UnauthenticatedResponse::disabled(
+            "A core verifies no external JWTs: sign users in through your app's backend (createJazz)",
+        ));
     }
 
     // No auth provided
@@ -1345,13 +1087,17 @@ mod tests {
 
     fn make_test_config() -> AuthConfig {
         AuthConfig {
-            jwks_url: Some("https://example.test/.well-known/jwks.json".to_string()),
-            jwt_issuer: Some("https://issuer.jazz.test".to_owned()),
-            jwt_audience: Some("jazz-audience".to_owned()),
             allow_local_first_auth: false,
             backend_secret: Some("backend-secret-12345".to_string()),
             admin_secret: Some("admin-secret-67890".to_string()),
             ..Default::default()
+        }
+    }
+
+    fn test_expected_claims() -> ExpectedJwtClaims {
+        ExpectedJwtClaims {
+            issuer: "https://issuer.jazz.test".to_owned(),
+            audience: "jazz-audience".to_owned(),
         }
     }
 
@@ -1370,9 +1116,6 @@ mod tests {
         .unwrap()
     }
 
-    fn test_jwks_cache() -> JwksCache {
-        JwksCache::from_static(make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET))
-    }
     #[derive(Clone)]
     struct JwksProbeState {
         requests: std::sync::Arc<AtomicU64>,
@@ -1696,7 +1439,7 @@ mod tests {
             iat: None,
         };
         let token = make_jwt(&claims, new_secret, "new-kid");
-        let config = make_test_config();
+        let config = test_expected_claims();
         let forced_gate = probe.gate_next_cohort().await;
         let mut validation_tasks = Vec::with_capacity(cold_callers);
         for _ in 0..cold_callers {
@@ -1828,10 +1571,6 @@ mod tests {
         );
     }
 
-    fn test_jwt_verifier() -> JwtVerifier {
-        JwtVerifier::Jwks(test_jwks_cache())
-    }
-
     fn make_jwt(claims: &JwtClaims, secret: &str, kid: &str) -> String {
         let key = EncodingKey::from_secret(secret.as_bytes());
         let mut header = Header::new(Algorithm::HS256);
@@ -1856,100 +1595,6 @@ mod tests {
             .collect()
     }
 
-    fn make_raw_jwt(claims: serde_json::Value) -> String {
-        let key = EncodingKey::from_secret(TEST_JWKS_SECRET.as_bytes());
-        let mut header = Header::new(Algorithm::HS256);
-        header.kid = Some(TEST_JWKS_KID.to_string());
-        encode(&header, &claims, &key).unwrap()
-    }
-
-    #[tokio::test]
-    async fn bug_119_external_jwt_admission_is_bound_and_time_limited() {
-        let config = make_test_config();
-        let verifier = test_jwt_verifier();
-        let now = config.clock.now_seconds();
-        let cases = [
-            (
-                "wrong issuer",
-                serde_json::json!({
-                    "iss": "https://other-issuer.jazz.test",
-                    "aud": "jazz-audience",
-                    "sub": "user-123",
-                    "exp": now + 3_600,
-                }),
-            ),
-            (
-                "wrong audience",
-                serde_json::json!({
-                    "iss": "https://issuer.jazz.test",
-                    "aud": "other-audience",
-                    "sub": "user-123",
-                    "exp": now + 3_600,
-                }),
-            ),
-            (
-                "missing expiration",
-                serde_json::json!({
-                    "iss": "https://issuer.jazz.test",
-                    "aud": "jazz-audience",
-                    "sub": "user-123",
-                }),
-            ),
-            (
-                "not yet valid",
-                serde_json::json!({
-                    "iss": "https://issuer.jazz.test",
-                    "aud": "jazz-audience",
-                    "sub": "user-123",
-                    "nbf": now + 600,
-                    "exp": now + 3_600,
-                }),
-            ),
-        ];
-
-        for (case, claims) in cases {
-            let token = make_raw_jwt(claims);
-            let mut headers = HeaderMap::new();
-            headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
-            assert!(
-                extract_session(&headers, test_app_id(), &config, Some(&verifier))
-                    .await
-                    .is_err(),
-                "{case} JWT must be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn external_jwt_subject_rejects_blank_but_preserves_exact_opaque_bytes() {
-        for subject in ["", " \t\n "] {
-            assert!(
-                resolve_verified_jwt_session(VerifiedJwt {
-                    subject: subject.to_owned(),
-                    issuer: Some("https://issuer.jazz.test".to_owned()),
-                    claims: serde_json::json!({}),
-                    exp: None,
-                    audiences: Vec::new(),
-                    not_before: None,
-                })
-                .is_err()
-            );
-        }
-
-        let subject = " WorkOS_User_01J8Y3K4M5N6P7Q8R9S0T1U2V3 ";
-        let session = resolve_verified_jwt_session(VerifiedJwt {
-            subject: subject.to_owned(),
-            issuer: Some("https://issuer.jazz.test".to_owned()),
-            claims: serde_json::json!({}),
-            exp: None,
-            audiences: Vec::new(),
-            not_before: None,
-        })
-        .unwrap();
-        assert_eq!(session.user_id, subject);
-        assert_eq!(session.claims, serde_json::json!({}));
-    }
-
     #[test]
     fn test_jwt_validation_valid() {
         let jwks = make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET);
@@ -1965,63 +1610,6 @@ mod tests {
         let verified = verify_jwt_signature_with_jwks(&token, &jwks).unwrap();
         assert_eq!(verified.subject, "user-123");
         assert_eq!(verified.claims["role"], "admin");
-    }
-
-    #[test]
-    fn flat_external_jwt_claims_preserve_the_complete_verified_payload() {
-        let token = make_raw_jwt(serde_json::json!({
-            "iss": "https://issuer.jazz.test",
-            "sub": "better-auth-user-123",
-            "aud": "jazz-audience",
-            "exp": 4_102_444_800_u64,
-            "nbf": 0,
-            "iat": 0,
-            "jti": "transport-token-id",
-            "better_auth_user_id": "better-auth-user-123",
-            "profile_id": "profile-456",
-            "issuer": "application-issuer",
-            "subject": "application-subject",
-            "roles": ["editor", "beta"],
-            "profile": {"name": "Alice"},
-            "revoked_at": null,
-            "claims": {"legacy": "not flattened"}
-        }));
-
-        let verified = verify_jwt_signature_with_jwks(
-            &token,
-            &make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET),
-        )
-        .expect("signature verifies");
-        let session = resolve_verified_jwt_session(verified).expect("session resolves");
-
-        assert_eq!(session.user_id, "better-auth-user-123");
-        assert_eq!(
-            session.claims["better_auth_user_id"],
-            "better-auth-user-123"
-        );
-        assert_eq!(session.claims["profile_id"], "profile-456");
-        assert_eq!(session.claims["issuer"], "application-issuer");
-        assert_eq!(session.claims["subject"], "application-subject");
-        assert_eq!(
-            session.claims["roles"],
-            serde_json::json!(["editor", "beta"])
-        );
-        assert_eq!(
-            session.claims["profile"],
-            serde_json::json!({"name": "Alice"})
-        );
-        assert_eq!(session.claims["revoked_at"], serde_json::Value::Null);
-        assert_eq!(
-            session.claims["claims"],
-            serde_json::json!({"legacy": "not flattened"})
-        );
-        assert_eq!(session.claims["iss"], "https://issuer.jazz.test");
-        assert_eq!(session.claims["sub"], "better-auth-user-123");
-        assert_eq!(session.claims["aud"], "jazz-audience");
-        assert_eq!(session.claims["exp"], serde_json::json!(4_102_444_800_u64));
-        assert_eq!(session.claims["nbf"], serde_json::json!(0));
-        assert_eq!(session.claims["iat"], serde_json::json!(0));
-        assert_eq!(session.claims["jti"], "transport-token-id");
     }
 
     #[test]
@@ -2089,7 +1677,7 @@ mod tests {
         );
         headers.insert("X-Jazz-Session", session_b64.parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None)
+        let result = extract_session(&headers, test_app_id(), &config)
             .await
             .unwrap();
         assert!(result.is_some());
@@ -2108,122 +1696,9 @@ mod tests {
         headers.insert("X-Jazz-Backend-Secret", "wrong-secret".parse().unwrap());
         headers.insert("X-Jazz-Session", session_b64.parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None).await;
+        let result = extract_session(&headers, test_app_id(), &config).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, UnauthenticatedCode::Invalid);
-    }
-
-    #[tokio::test]
-    async fn test_extract_session_jwt_fallback() {
-        let config = make_test_config();
-        let cache = test_jwt_verifier();
-        let mut headers = HeaderMap::new();
-
-        let claims = JwtClaims {
-            sub: "jwt-user".to_string(),
-            iss: Some("https://issuer.jazz.test".to_owned()),
-            claims: flat_claims(serde_json::json!({})),
-            exp: None,
-            iat: None,
-        };
-        let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
-
-        headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
-
-        let result = extract_session(&headers, test_app_id(), &config, Some(&cache))
-            .await
-            .unwrap();
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().user_id, "jwt-user");
-    }
-
-    #[tokio::test]
-    async fn test_extract_session_jwt_cookie_fallback() {
-        let mut config = make_test_config();
-        config.auth_cookie_name = Some("jazz-auth".to_string());
-        let cache = test_jwt_verifier();
-        let mut headers = HeaderMap::new();
-
-        let claims = JwtClaims {
-            sub: "cookie-user".to_string(),
-            iss: Some("https://issuer.jazz.test".to_string()),
-            claims: flat_claims(serde_json::json!({ "role": "editor" })),
-            exp: None,
-            iat: None,
-        };
-        let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
-
-        headers.insert(
-            axum::http::header::COOKIE,
-            format!("other=value; jazz-auth={token}").parse().unwrap(),
-        );
-
-        let result = extract_session(&headers, test_app_id(), &config, Some(&cache))
-            .await
-            .unwrap();
-        let session = result.expect("session");
-        assert_eq!(session.user_id, "cookie-user");
-        assert_eq!(session.claims["role"], "editor");
-    }
-
-    #[tokio::test]
-    async fn test_extract_session_external_jwt_uses_sub_as_user_id() {
-        let config = make_test_config();
-        let cache = test_jwt_verifier();
-        let mut headers = HeaderMap::new();
-
-        let claims = JwtClaims {
-            sub: "user-42".to_string(),
-            iss: Some("https://issuer.jazz.test".to_string()),
-            claims: flat_claims(serde_json::json!({ "role": "admin" })),
-            exp: None,
-            iat: None,
-        };
-        let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
-        headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
-
-        let session = extract_session(&headers, test_app_id(), &config, Some(&cache))
-            .await
-            .unwrap()
-            .expect("session");
-
-        assert_eq!(session.user_id, "user-42");
-        assert_eq!(session.auth_mode, jazz::tools::AuthMode::External);
-        assert_eq!(session.claims["role"], "admin");
-    }
-
-    #[test]
-    fn resolve_verified_jwt_session_rejects_blank_issuer_and_preserves_exact_bytes() {
-        for issuer in [
-            None,
-            Some("".to_owned()),
-            Some(" \t\n\x0b\x0c\r ".to_owned()),
-        ] {
-            assert!(
-                resolve_verified_jwt_session(VerifiedJwt {
-                    subject: "user".to_owned(),
-                    issuer,
-                    claims: serde_json::json!({}),
-                    exp: None,
-                    audiences: Vec::new(),
-                    not_before: None,
-                })
-                .is_err(),
-                "missing or ASCII-whitespace-only issuer must be rejected"
-            );
-        }
-
-        let session = resolve_verified_jwt_session(VerifiedJwt {
-            subject: "user".to_owned(),
-            issuer: Some(" https://issuer.example ".to_owned()),
-            claims: serde_json::json!({}),
-            exp: None,
-            audiences: Vec::new(),
-            not_before: None,
-        })
-        .expect("non-empty issuer is retained exactly");
-        assert_eq!(session.issuer, " https://issuer.example ");
-        assert_eq!(session.claims, serde_json::json!({}));
     }
 
     #[tokio::test]
@@ -2252,7 +1727,7 @@ mod tests {
         let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
         headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None)
+        let result = extract_session(&headers, test_app_id(), &config)
             .await
             .unwrap();
         assert!(result.is_some());
@@ -2264,7 +1739,7 @@ mod tests {
         let config = make_test_config();
         let headers = HeaderMap::new();
 
-        let result = extract_session(&headers, test_app_id(), &config, None)
+        let result = extract_session(&headers, test_app_id(), &config)
             .await
             .unwrap();
         assert!(result.is_none());
@@ -2328,7 +1803,7 @@ mod tests {
             ..Default::default()
         };
 
-        let session = extract_session(&headers, app_id, &config, None)
+        let session = extract_session(&headers, app_id, &config)
             .await
             .unwrap()
             .expect("session");
@@ -2350,7 +1825,6 @@ mod tests {
 
     fn make_local_first_auth_config() -> AuthConfig {
         AuthConfig {
-            jwks_url: None,
             allow_local_first_auth: true,
             backend_secret: None,
             admin_secret: None,
@@ -2372,7 +1846,7 @@ mod tests {
         let config = make_local_first_auth_config();
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
-        let session = extract_session(&headers, app_id, &config, None)
+        let session = extract_session(&headers, app_id, &config)
             .await
             .unwrap()
             .unwrap();
@@ -2391,7 +1865,7 @@ mod tests {
         let config = make_local_first_auth_config();
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
-        let result = extract_session(&headers, test_app_id(), &config, None).await;
+        let result = extract_session(&headers, test_app_id(), &config).await;
         assert!(result.is_err());
     }
 
@@ -2409,7 +1883,7 @@ mod tests {
         config.allow_local_first_auth = false;
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
-        let result = extract_session(&headers, app_id, &config, None).await;
+        let result = extract_session(&headers, app_id, &config).await;
         assert!(result.is_err());
     }
 
@@ -2435,7 +1909,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
 
-        let session = extract_session(&headers, app_id, &config, None)
+        let session = extract_session(&headers, app_id, &config)
             .await
             .unwrap()
             .unwrap();
@@ -2446,7 +1920,7 @@ mod tests {
 
         clock.advance(Duration::from_secs(6));
 
-        let result = extract_session(&headers, app_id, &config, None).await;
+        let result = extract_session(&headers, app_id, &config).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, UnauthenticatedCode::Expired);
     }
@@ -2464,8 +1938,8 @@ mod tests {
         let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
-        // Should fail because no JWKS configured in local_first_auth_config
-        let result = extract_session(&headers, test_app_id(), &config, None).await;
+        // A core verifies no external JWTs.
+        let result = extract_session(&headers, test_app_id(), &config).await;
         assert!(result.is_err());
     }
 
@@ -2493,7 +1967,7 @@ mod tests {
             ..Default::default()
         };
 
-        let session = extract_session(&headers, app_id, &config, None)
+        let session = extract_session(&headers, app_id, &config)
             .await
             .unwrap()
             .expect("session");

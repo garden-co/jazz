@@ -183,6 +183,22 @@ export async function createServer(
     res.status(503).json({ error: "Server is shutting down" });
   });
 
+  // Sign in: the first call with a verified identity provisions its Jazz
+  // account for this app. The todo routes below only log existing accounts in.
+  app.post("/sign-in", async (req: Request, res: Response) => {
+    try {
+      const db = await client.forRequest(req, { account: "login-or-register" });
+      const session = db.getAuthState().session;
+      if (!session) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      res.json({ account: session.user.account });
+    } catch {
+      res.status(401).json({ error: "Unauthorized" });
+    }
+  });
+
   // Authenticate every todo request before selecting a session-scoped database.
   app.use("/todos", async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -507,6 +523,7 @@ async function main() {
 
   console.log(`Todo server listening on ${running.baseUrl}`);
   console.log(`  GET    /health`);
+  console.log(`  POST   /sign-in`);
   console.log(`  GET    /todos`);
   console.log(`  POST   /todos`);
   console.log(`  GET    /todos/:id`);

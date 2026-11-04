@@ -7,7 +7,9 @@ import { resolve } from "node:path";
 import { topologyReceipt } from "./vitest-receipts.mjs";
 import {
   jazzServerInfo,
-  jazzServerJwtForUser,
+  jazzAppFront,
+  jazzAppRequest,
+  jazzAppUser,
   stopJazzServerByUrl,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
@@ -59,8 +61,10 @@ export default defineConfig({
         jazzBrowserTopologyLog,
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
-        jazzServerJwtForUser: async (_context, userId, claims, appId) =>
-          jazzServerJwtForUser(userId, claims, appId),
+        jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
+        jazzAppUser: async (_context, frontUrl, userId, claims) =>
+          jazzAppUser(frontUrl, userId, claims),
+        jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),
       },
     },
     setupFiles: ["tests/browser/setup-react.ts"],

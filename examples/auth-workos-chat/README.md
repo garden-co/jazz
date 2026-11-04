@@ -56,10 +56,10 @@ authenticate: async (request) => {
 
 ### Client — `src/App.tsx`
 
-`useWorkOSSession` asks `/api/auth/session` who is signed in. `JazzProvider` gets
-`auth={backendAuth({ key, isPending, logout })}`: whenever the user changes, Jazz signs in again
-through the backend, and the identity always comes from `authenticate`. Sign-out flushes Jazz,
-clears the cookie and redirects to the WorkOS logout URL.
+`useWorkOSSession` asks `/api/auth/session` who is signed in, for the UI. `JazzProvider` starts
+signed out and asks the backend itself, so the identity always comes from `authenticate`;
+the app calls `reauthenticate()` when the WorkOS user changes and after sign-out, which clears the
+cookie and redirects to the WorkOS logout URL.
 
 Ownership policies compare `$createdBy.account` with `session.user.account`. The WorkOS user id is
 available under `session.user.identity.subject`.
