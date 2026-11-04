@@ -236,7 +236,8 @@ export declare class PendingNativeRead {
 
 /**
  * A core [`serve_core`] started. The host owns the process's signals and
- * calls [`ServedCore::stop`] to drain it.
+ * calls [`ServedCore::stop`] to drain it; dropping it without a stop drains
+ * it too.
  */
 export declare class ServedCore {
   /** Start the controlled shutdown: refuse new work, drain, then close. */
@@ -426,7 +427,8 @@ export interface RestoreOptions {
 /**
  * Serve a production core (the `jazz_server::run` shell: connection and
  * memory limits, graceful drain) until [`ServedCore::stop`]. One per
- * process.
+ * process at a time: the cores would share the process's storage cache
+ * budget, so a second call fails until the first core has stopped.
  */
 export declare function serveCore(options: { appId: string; port: number; dataDir: string; blobs: { kind: "sqlite" } | { kind: "files"; dir?: string } | { kind: "s3"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: "vercel-blob"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; allowLocalFirstAuth?: boolean; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }): ServedCore
 
