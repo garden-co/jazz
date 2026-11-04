@@ -241,8 +241,10 @@ impl NativeTransportConnector for NativeWebSocketConnector {
                 request.app_id,
                 request.peer_identity,
                 request.auth,
-                request.authorization,
-                request.bundle,
+                Upgrade {
+                    authorization: request.authorization,
+                    bundle: request.bundle,
+                },
                 request.wake,
                 request.requested_link,
             )
@@ -424,8 +426,7 @@ impl WebSocketTransport {
             app_id,
             peer_identity,
             auth,
-            None,
-            None,
+            Upgrade::default(),
             wake,
             NativeTransportLink::OrdinarySession,
         )
@@ -438,11 +439,14 @@ impl WebSocketTransport {
         app_id: AppId,
         peer_identity: AuthorSubject,
         auth: AuthConfig,
-        authorization: Option<String>,
-        bundle: Option<String>,
+        upgrade: Upgrade,
         wake: Arc<dyn Fn() + Send + Sync>,
         requested_link: NativeTransportLink,
     ) -> Result<Self, NativeConnectFailure> {
+        let Upgrade {
+            authorization,
+            bundle,
+        } = upgrade;
         let deadline = tokio::time::Instant::now() + WS_CLIENT_HANDSHAKE_TIMEOUT;
         let url = ws_url(base_url.as_ref(), app_id);
         let (mut ws, _) = tokio::time::timeout_at(
@@ -587,6 +591,15 @@ struct WebSocketClientPrelude {
 
     #[serde(skip_serializing_if = "is_ordinary_link")]
     requested_link: NativeTransportLink,
+}
+
+/// What a socket carries beside its auth: the upgrade's `Authorization`
+/// header (for the app's own backend) and the bundle a stated session is
+/// pinned to.
+#[derive(Default)]
+struct Upgrade {
+    authorization: Option<String>,
+    bundle: Option<String>,
 }
 
 fn is_ordinary_link(value: &NativeTransportLink) -> bool {
