@@ -32,6 +32,12 @@ export function TableSchemaDefinition() {
     if (runtime === "overlay") {
       return null;
     }
+    if (runtime === "backend") {
+      const tablePermissions = storedPermissions?.permissions?.[table];
+      return tablePermissions
+        ? stringifyForPresentation({ [table]: tablePermissions }, 2)
+        : `No permissions for table "${table}".`;
+    }
     if (!storedPermissions?.head) {
       return "No published sync-server permissions found for this app.";
     }
@@ -60,7 +66,7 @@ export function TableSchemaDefinition() {
             <code>{formattedSchema}</code>
           </pre>
         </section>
-        {runtime === "standalone" ? (
+        {runtime === "standalone" || runtime === "backend" ? (
           <section className={styles.panel}>
             <header className={styles.sectionHeader}>
               <h2 className={styles.sectionTitle}>{table} permissions</h2>

@@ -407,7 +407,7 @@ if (isMainModule()) {
           ? rest[appIndex]!.slice("--app=".length)
           : rest[appIndex + 1];
     void import("./inspect/mcp.js").then(({ runMcpServer }) =>
-      runMcpServer((app ? { app } : {})).then(
+      runMcpServer(app ? { app } : {}).then(
         () => process.exit(0),
         (error: unknown) => {
           console.error(error);

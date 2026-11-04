@@ -30,7 +30,7 @@ import {
   InspectError,
   MAX_ANSWER_BYTES,
   buildQueryJson,
-  fromJsonValue,
+  fromJsonForColumn,
   inspectorLink,
   rowLimit,
   toJsonValue,
@@ -127,7 +127,7 @@ export interface InspectorDeps {
   tokenSecret(): Promise<string | null>;
   /** The peer address a request came from, where the host knows it. */
   remoteAddress(request: Request): string | undefined;
-  /** The Inspector UI, or null when this build has none. */
+  /** The Inspector UI's file at `path` (`/`, or below it), or null when there is none. */
   serveUi(request: Request, path: string): Promise<Response | null>;
   env?: NodeJS.ProcessEnv;
   now?: () => number;
@@ -336,9 +336,9 @@ export function createInspector(deps: InspectorDeps) {
   // ---------------------------------------------------------------- reads and writes
 
   function inspectorUrl(request: Request): string {
-    if (deps.publicUrls[0]) return `${deps.publicUrls[0]}${INSPECT_PATH}`;
+    if (deps.publicUrls[0]) return `${deps.publicUrls[0]}${INSPECT_PATH}/`;
     const url = new URL(request.url);
-    return `${url.origin}${deps.basePath}${INSPECT_PATH}`;
+    return `${url.origin}${deps.basePath}${INSPECT_PATH}/`;
   }
 
   function tableOf(name: string): {
@@ -392,34 +392,6 @@ export function createInspector(deps: InspectorDeps) {
       throw new InspectError("bad_request", "as must name a user id");
     }
     return { db: await deps.dbAs(user), as: user.userId };
-  }
-
-  /** Convert a JSON value to what a column of `type` takes. */
-  function fromJsonForColumn(type: ColumnType | undefined, value: unknown): unknown {
-    value = fromJsonValue(value);
-    if (value === null || value === undefined || !type) return value;
-    switch (type.type) {
-      case "Timestamp":
-        return typeof value === "string" ? new Date(value) : value;
-      case "BigInt":
-        return typeof value === "string" && /^-?\d+$/.test(value) ? BigInt(value) : value;
-      case "Array":
-        return Array.isArray(value)
-          ? value.map((entry) => fromJsonForColumn(type.element, entry))
-          : value;
-      case "Row": {
-        if (typeof value !== "object" || Array.isArray(value)) return value;
-        const columns = new Map(type.columns.map((column) => [column.name, column.column_type]));
-        return Object.fromEntries(
-          Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
-            key,
-            fromJsonForColumn(columns.get(key), entry),
-          ]),
-        );
-      }
-      default:
-        return value;
-    }
   }
 
   async function readRows(
@@ -785,7 +757,15 @@ export function createInspector(deps: InspectorDeps) {
         if (request.method !== "GET" && request.method !== "HEAD") {
           return new Response(null, { status: 405 });
         }
-        const served = await deps.serveUi(request, path.slice(INSPECT_PATH.length) || "/");
+        if (path === INSPECT_PATH) {
+          // The page's assets are relative to it, so it lives at `/inspect/`.
+          // A redirect keeps the fragment, which carries any deep link.
+          return new Response(null, {
+            status: 308,
+            headers: { Location: `${deps.basePath}${INSPECT_PATH}/` },
+          });
+        }
+        const served = await deps.serveUi(request, path.slice(INSPECT_PATH.length));
         return (
           served ??
           new Response(

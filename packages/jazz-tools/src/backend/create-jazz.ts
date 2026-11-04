@@ -66,6 +66,7 @@ import {
   type InspectHook,
   type InspectorOptions,
 } from "./inspect.js";
+import { createInspectorUi } from "./inspect-ui.js";
 import type { InspectSessionInfo } from "../inspect/protocol.js";
 export type { InspectEvent, InspectGrant, InspectHook, InspectorOptions } from "./inspect.js";
 export {
@@ -2097,7 +2098,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       return null;
     },
     remoteAddress: (request) => remoteAddresses.get(request),
-    serveUi: async () => null,
+    serveUi: createInspectorUi(),
   });
 
   let closing: Promise<void> | undefined;

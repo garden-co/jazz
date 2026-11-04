@@ -8,6 +8,8 @@
 // shapes, how a query is written, how values cross JSON, and the deep links
 // that open the Inspector on a query. It has no Node or browser dependency.
 
+import type { ColumnType } from "../drivers/types.js";
+
 /** The version of the request and answer shapes below. */
 export const INSPECT_PROTOCOL_VERSION = 1;
 
@@ -276,6 +278,37 @@ export function fromJsonValue(value: unknown): unknown {
   return value;
 }
 
+/**
+ * Convert a JSON value back to what a column of `type` holds: ISO strings to
+ * `Date` for timestamps, decimal strings to `bigint`, `{ $bytes }` to bytes.
+ */
+export function fromJsonForColumn(type: ColumnType | undefined, value: unknown): unknown {
+  value = fromJsonValue(value);
+  if (value === null || value === undefined || !type) return value;
+  switch (type.type) {
+    case "Timestamp":
+      return typeof value === "string" ? new Date(value) : value;
+    case "BigInt":
+      return typeof value === "string" && /^-?\d+$/.test(value) ? BigInt(value) : value;
+    case "Array":
+      return Array.isArray(value)
+        ? value.map((entry) => fromJsonForColumn(type.element, entry))
+        : value;
+    case "Row": {
+      if (typeof value !== "object" || Array.isArray(value)) return value;
+      const columns = new Map(type.columns.map((column) => [column.name, column.column_type]));
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
+          key,
+          fromJsonForColumn(columns.get(key), entry),
+        ]),
+      );
+    }
+    default:
+      return value;
+  }
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return (
     typeof value === "object" &&
@@ -362,4 +395,60 @@ export function parseInspectorLink(fragment: string): InspectorLinkTarget & { gr
   const grant = params.get("grant");
   if (grant) target.grant = grant;
   return target;
+}
+
+/** What an agent asks a person to approve: the Inspector reads it from `#grant=`. */
+export interface InspectGrantRequest {
+  write?: boolean;
+  ttlSeconds?: number;
+  tables?: string[];
+  label?: string;
+  /** Where the browser hands the token over: a loopback URL on the asking machine. */
+  callback?: string;
+  state: string;
+}
+
+/** Decode a `#grant=` value; null when it is damaged. */
+export function decodeGrant(text: string): InspectGrantRequest | null {
+  try {
+    const grant = JSON.parse(base64UrlDecode(text)) as InspectGrantRequest;
+    if (!isPlainObject(grant) || typeof grant.state !== "string" || !grant.state) return null;
+    if (grant.write !== undefined && typeof grant.write !== "boolean") return null;
+    if (grant.ttlSeconds !== undefined && !Number.isSafeInteger(grant.ttlSeconds)) return null;
+    if (
+      grant.tables !== undefined &&
+      !(Array.isArray(grant.tables) && grant.tables.every((table) => typeof table === "string"))
+    )
+      return null;
+    if (grant.label !== undefined && typeof grant.label !== "string") return null;
+    if (grant.callback !== undefined && typeof grant.callback !== "string") return null;
+    return grant;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the Inspector may hand a token to `callback` by itself: only a
+ * plain-http loopback URL ending in `/callback`, which reaches nothing but
+ * the machine the browser runs on. Anything else, and the Inspector shows the
+ * token for the person to paste instead.
+ */
+export function isLoopbackCallback(callback: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(callback);
+  } catch {
+    return false;
+  }
+  return (
+    url.protocol === "http:" &&
+    (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]") &&
+    url.port !== "" &&
+    url.username === "" &&
+    url.password === "" &&
+    url.pathname === "/callback" &&
+    url.search === "" &&
+    url.hash === ""
+  );
 }

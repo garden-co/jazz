@@ -1,7 +1,8 @@
 import type { StoredPermissionsResponse, WasmSchema } from "jazz-tools";
 import { createContext, useContext, useMemo, type PropsWithChildren } from "react";
 
-export type InspectorRuntime = "standalone" | "overlay";
+// "backend": served by an app's backend at `<basePath>/inspect/`, reading through its Inspector API.
+export type InspectorRuntime = "standalone" | "overlay" | "backend";
 
 interface DevtoolsContextValue {
   wasmSchema: WasmSchema;

@@ -22,6 +22,7 @@ import {
   INSPECT_TOKEN_PREFIX,
   InspectError,
   type InspectErrorAnswer,
+  type InspectGrantRequest,
   type InspectRequest,
 } from "./protocol.js";
 
@@ -165,21 +166,9 @@ export async function callInspector<T = unknown>(
   return body as T;
 }
 
-export interface GrantRequest {
-  write?: boolean;
-  ttlSeconds?: number;
-  tables?: string[];
-  label?: string;
-}
+export type GrantRequest = Omit<InspectGrantRequest, "callback" | "state">;
 
-/** What the Inspector's approval page reads from `#grant=`. */
-export interface GrantFragment extends GrantRequest {
-  /** Where the browser hands the token: a loopback URL on the asking machine. */
-  callback?: string;
-  state: string;
-}
-
-export function encodeGrant(grant: GrantFragment): string {
+export function encodeGrant(grant: InspectGrantRequest): string {
   return Buffer.from(JSON.stringify(grant)).toString("base64url");
 }
 
@@ -289,7 +278,7 @@ export async function requestApproval(
     state,
   });
   return {
-    url: `${endpoint}${INSPECT_PATH}#grant=${fragment}`,
+    url: `${endpoint}${INSPECT_PATH}/#grant=${fragment}`,
     token,
     cancel() {
       finish();

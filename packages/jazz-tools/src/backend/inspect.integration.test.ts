@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -12,7 +12,13 @@ import {
   type InspectGrant,
   type Jazz,
 } from "./index.js";
-import { parseInspectorLink, INSPECT_TOKEN_PREFIX } from "../inspect/protocol.js";
+import {
+  decodeGrant,
+  isLoopbackCallback,
+  parseInspectorLink,
+  INSPECT_TOKEN_PREFIX,
+} from "../inspect/protocol.js";
+import { createInspectorUi } from "./inspect-ui.js";
 import { requestApproval, tokenStore } from "../inspect/client.js";
 import { runInspectCommand } from "../inspect/cli.js";
 import { runMcpServer } from "../inspect/mcp.js";
@@ -135,7 +141,7 @@ describe("Inspector admission", () => {
     process.env.NODE_ENV = "development";
     const me = await ok(api(jazz, { op: "whoami" }));
     expect(me).toMatchObject({ via: "dev", write: true, appId: jazz.appId });
-    expect(me.inspectorUrl).toBe("http://localhost:3000/jazz/inspect");
+    expect(me.inspectorUrl).toBe("http://localhost:3000/jazz/inspect/");
 
     // A proxy in front makes every request look local.
     expect(
@@ -213,7 +219,7 @@ describe("Inspector reads", () => {
 
     // The deep link opens the Inspector on exactly this query, as alice.
     const link = new URL(asAlice.inspectorUrl);
-    expect(`${link.origin}${link.pathname}`).toBe("http://localhost:3000/jazz/inspect");
+    expect(`${link.origin}${link.pathname}`).toBe("http://localhost:3000/jazz/inspect/");
     expect(parseInspectorLink(link.hash)).toMatchObject({
       query: { table: "todos" },
       as: "alice",
@@ -339,6 +345,88 @@ describe("Inspector reads", () => {
       scope: "this backend instance",
       sessions: [],
     });
+  });
+});
+
+describe("Inspector UI", () => {
+  it("lives at <basePath>/inspect/, and a redirect keeps the deep link's fragment", async () => {
+    const { jazz } = await start();
+    const bare = await jazz.handle(new Request("http://localhost:3000/jazz/inspect"));
+    expect(bare.status).toBe(308);
+    expect(bare.headers.get("location")).toBe("/jazz/inspect/");
+    const posted = await jazz.handle(
+      new Request("http://localhost:3000/jazz/inspect/", { method: "POST" }),
+    );
+    expect(posted.status).toBe(405);
+  });
+
+  it("serves the page unframeable and only the build's assets", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-inspect-ui-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    await mkdir(join(dir, "assets"));
+    await writeFile(join(dir, "backend.html"), "<!doctype html><title>Inspector</title>");
+    await writeFile(join(dir, "embedded.html"), "overlay");
+    await writeFile(join(dir, "assets", "app-abc.js"), "console.log(1)");
+    await writeFile(join(dir, "secret.txt"), "nope");
+    const serve = createInspectorUi(dir);
+    const request = new Request("http://localhost:3000/jazz/inspect/");
+
+    const page = (await serve(request, "/"))!;
+    expect(await page.text()).toContain("Inspector");
+    expect(page.headers.get("content-type")).toMatch(/^text\/html/);
+    expect(page.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    expect(page.headers.get("x-frame-options")).toBe("DENY");
+    expect(page.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(page.headers.get("cache-control")).toBe("no-store");
+
+    const asset = (await serve(request, "/assets/app-abc.js"))!;
+    expect(asset.headers.get("content-type")).toMatch(/^text\/javascript/);
+    expect(asset.headers.get("cache-control")).toContain("immutable");
+
+    for (const path of [
+      "/embedded.html",
+      "/secret.txt",
+      "/assets/../secret.txt",
+      "/assets/%2e%2e/secret.txt",
+      "/assets/missing.js",
+      "/assets/app-abc.txt",
+      "/%E0%A4%A",
+    ]) {
+      expect(await serve(request, path), path).toBeNull();
+    }
+    expect(await createInspectorUi(null)(request, "/")).toBeNull();
+  });
+
+  it("hands tokens back by itself only to a loopback callback", () => {
+    for (const callback of [
+      "http://127.0.0.1:5123/callback",
+      "http://localhost:5123/callback",
+      "http://[::1]:5123/callback",
+    ]) {
+      expect(isLoopbackCallback(callback), callback).toBe(true);
+    }
+    for (const callback of [
+      "https://127.0.0.1:5123/callback",
+      "http://127.0.0.1/callback",
+      "http://127.0.0.1:5123/other",
+      "http://127.0.0.1:5123/callback?x=1",
+      "http://evil.example.com:5123/callback",
+      "http://127.0.0.1.evil.example.com:5123/callback",
+      "http://user@127.0.0.1:5123/callback",
+      "javascript:alert(1)",
+      "not a url",
+    ]) {
+      expect(isLoopbackCallback(callback), callback).toBe(false);
+    }
+    expect(decodeGrant("not-base64-json")).toBeNull();
+    expect(
+      decodeGrant(Buffer.from(JSON.stringify({ state: "s", write: "yes" })).toString("base64url")),
+    ).toBeNull();
+    expect(
+      decodeGrant(
+        Buffer.from(JSON.stringify({ state: "s", tables: ["todos"] })).toString("base64url"),
+      ),
+    ).toEqual({ state: "s", tables: ["todos"] });
   });
 });
 
@@ -802,13 +890,9 @@ describe("jazz-tools inspect and mcp", () => {
       { store, fetch: fetchVia(jazz) },
     );
     const approval = new URL(pending.url);
-    expect(`${approval.origin}${approval.pathname}`).toBe("http://localhost:3000/jazz/inspect");
-    const grant = JSON.parse(
-      Buffer.from(
-        new URLSearchParams(approval.hash.slice(1)).get("grant")!,
-        "base64url",
-      ).toString(),
-    );
+    expect(`${approval.origin}${approval.pathname}`).toBe("http://localhost:3000/jazz/inspect/");
+    const grant = decodeGrant(parseInspectorLink(approval.hash).grant!)!;
+    expect(isLoopbackCallback(grant.callback!)).toBe(true);
     expect(grant).toMatchObject({
       label: "debugging #123",
       callback: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/callback$/),
@@ -875,7 +959,7 @@ describe("jazz-tools inspect and mcp", () => {
     });
     const queried = JSON.parse((await answer(3)).result.content[0].text);
     expect(queried.rows).toHaveLength(2);
-    expect(queried.inspectorUrl).toMatch(/^http:\/\/localhost:3000\/jazz\/inspect#q=/);
+    expect(queried.inspectorUrl).toMatch(/^http:\/\/localhost:3000\/jazz\/inspect\/#q=/);
     send({
       jsonrpc: "2.0",
       id: 4,
@@ -893,7 +977,7 @@ describe("jazz-tools inspect and mcp", () => {
       params: { name: "request_access", arguments: { reason: "why" } },
     });
     expect(JSON.parse((await answer(5)).result.content[0].text).approveAt).toMatch(
-      /\/jazz\/inspect#grant=/,
+      /\/jazz\/inspect\/#grant=/,
     );
     input.end();
     await served;
