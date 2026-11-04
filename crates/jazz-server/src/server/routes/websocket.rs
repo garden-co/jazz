@@ -669,6 +669,18 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     let Some(auth_bytes) = read_ws_auth_prelude(&mut socket, &mut shutdown_rx, &state).await else {
         return;
     };
+    // Every client sends its Hello right behind the prelude, without waiting.
+    // Read it before answering anything: how an error frame is encoded is
+    // itself scoped to the wire version, so a client on another version is
+    // refused in its own layout before admission can reply in ours.
+    let Some(first) = read_ws_frame_batch(&mut socket, &mut shutdown_rx, &state).await else {
+        return;
+    };
+    if let Some(refusal) = ws_foreign_version_refusal(&first) {
+        let _ = send_ws_encoded_frames(&mut socket, &[refusal]).await;
+        let _ = socket.close().await;
+        return;
+    }
     let prelude = match serde_json::from_slice::<WebSocketPrelude>(&auth_bytes)
         .map_err(|error| format!("invalid websocket prelude: {error}"))
     {
@@ -702,10 +714,6 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         },
         admission.trust == CommitUnitTrust::Session,
     );
-
-    let Some(first) = read_ws_frame_batch(&mut socket, &mut shutdown_rx, &state).await else {
-        return;
-    };
 
     let remote_hello = match decode_ws_hello(&first) {
         Ok(hello) => hello,
@@ -1138,6 +1146,45 @@ fn decode_ws_hello(bytes: &[u8]) -> Result<WireHello, WireError> {
         WireErrorCode::UnsupportedProtocolVersion => error,
         _ => not_hello(),
     })
+}
+
+/// The refusal for a client whose `Hello` advertises a wire version range
+/// without this server's, encoded so that client decodes it: an alpha.59
+/// client is told to upgrade instead of failing on a frame it cannot read.
+/// `None` when the first frame is not a `Hello` or speaks this version.
+fn ws_foreign_version_refusal(bytes: &[u8]) -> Option<Vec<u8>> {
+    let frame = match decode_ws_encoded_frame_batch(bytes) {
+        Ok(mut frames) if frames.len() == 1 => frames.remove(0),
+        Ok(_) => return None,
+        Err(_) => bytes.to_vec(),
+    };
+    let (min, max) = jazz::wire::wire_hello_version_range(&frame)?;
+    let ours = jazz::wire::WIRE_PROTOCOL_VERSION;
+    let message = if max < ours {
+        format!(
+            "this Jazz client speaks wire protocol {min}..={max}, older than this server's \
+             {ours}: upgrade the client to the server's Jazz release (a client from \
+             2.0.0-alpha.59 or earlier cannot connect to 2.0.0-alpha.60 or later)"
+        )
+    } else if min > ours {
+        format!(
+            "this Jazz client speaks wire protocol {min}..={max}, newer than this server's \
+             {ours}: upgrade the server to the client's Jazz release"
+        )
+    } else if min == ours && max == ours {
+        return None;
+    } else {
+        format!(
+            "this Jazz client advertises wire protocol {min}..={max}; this server speaks \
+             exactly {ours}: use the same Jazz release on client and server"
+        )
+    };
+    let error = WireError::new(
+        WireErrorCode::UnsupportedProtocolVersion,
+        WireRetry::Never,
+        message,
+    );
+    jazz::wire::encode_error_frame_for_peer(&error, max).ok()
 }
 
 #[cfg(test)]
@@ -2413,6 +2460,11 @@ mod tests {
         ws.send(WsMessage::Text(prelude.into()))
             .await
             .expect("send prelude");
+        ws.send(WsMessage::Binary(
+            ws_client_hello_batch_with_features(current_wire_features()).into(),
+        ))
+        .await
+        .expect("send hello");
         let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
             .expect("admission resolves")
@@ -3451,6 +3503,58 @@ mod tests {
         }
     }
 
+    /// An alpha.59 client (wire v3, where `WireFrame::Error` was tag 2) sends
+    /// its old JSON prelude, with a client JWT this server no longer admits,
+    /// and its v3 `Hello`. It is refused before admission, in a frame it
+    /// decodes, with an error that tells it to upgrade, instead of reading a
+    /// v6 error as a "semantic frame before server hello".
+    #[tokio::test]
+    async fn alpha_59_client_is_told_to_upgrade_in_its_own_wire_layout() {
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id)).await.unwrap();
+        let prelude = serde_json::json!({
+            "peer_identity": AuthorSubject::for_test_bytes([0x59; 16]).canonical(),
+            "jwt_token": "alpha.59-client-jwt",
+            "auth": { "jwt_token": "alpha.59-client-jwt", "sub": "alpha59" },
+            "sub": "alpha59",
+        })
+        .to_string();
+        ws.send(WsMessage::Text(prelude.into())).await.unwrap();
+        // packages/jazz-tools alpha.59 `encodeWireClientHello`: tag 0, min 3,
+        // max 3, features, role Client, no authority.
+        let mut hello = postcard::to_allocvec(&(0u32, 3u16, 3u16, 0b1_0101u64, 0u32)).unwrap();
+        hello.push(0); // Option::None
+        let batch = postcard::to_allocvec(&vec![hello]).unwrap();
+        ws.send(WsMessage::Binary(batch.into())).await.unwrap();
+
+        let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("refusal deadline")
+            .expect("response")
+            .expect("wire response");
+        let WsMessage::Binary(bytes) = response else {
+            panic!("expected a refusal frame batch, got {response:?}");
+        };
+        let frames: Vec<Vec<u8>> = postcard::from_bytes(&bytes).expect("v3 frame batch");
+        assert_eq!(frames.len(), 1);
+        // What alpha.59's `isWireError`/`decodeWireError` read: tag 2, then
+        // code, retry and message, and nothing after.
+        let ((tag, error), rest): ((u32, WireError), _) =
+            postcard::take_from_bytes(&frames[0]).expect("v3 error frame");
+        assert!(rest.is_empty(), "trailing bytes after the v3 error frame");
+        assert_eq!(tag, 2, "WireFrame::Error is tag 2 in wire v3");
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
+        assert!(
+            error.message.contains("upgrade the client")
+                && error.message.contains("2.0.0-alpha.59"),
+            "{}",
+            error.message
+        );
+        let _ = ws.close(None).await;
+    }
+
     #[tokio::test]
     async fn accountless_anonymous_proof_cannot_open_public_websocket() {
         let state = make_ws_test_state().await;
@@ -3462,6 +3566,11 @@ mod tests {
         ws.send(WsMessage::Binary(prelude.into()))
             .await
             .expect("send proof");
+        ws.send(WsMessage::Binary(
+            ws_client_hello_batch_with_features(current_wire_features()).into(),
+        ))
+        .await
+        .expect("send hello");
         let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
             .expect("admission resolves")
@@ -4022,6 +4131,11 @@ mod tests {
             ws.send(WsMessage::Binary(prelude.into()))
                 .await
                 .expect("send forged SYSTEM claim");
+            ws.send(WsMessage::Binary(
+                ws_client_hello_batch_with_features(current_wire_features()).into(),
+            ))
+            .await
+            .expect("send hello");
             let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
                 .await
                 .expect("admission resolves")

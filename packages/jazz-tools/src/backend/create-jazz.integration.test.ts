@@ -21,6 +21,10 @@ import {
   type Jazz,
 } from "./index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
+import {
+  encodeWebSocketFrameBatch,
+  encodeWireClientHello,
+} from "../runtime/native-runtime/websocket.js";
 
 const app = s.defineApp(
   {
@@ -184,7 +188,7 @@ describe("createJazz", () => {
     const fromWorker = new NodeWebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
       headers: { "x-test-user": "alice" },
     } as never);
-    fromWorker.addEventListener("open", () =>
+    fromWorker.addEventListener("open", () => {
       fromWorker.send(
         JSON.stringify({
           peer_identity: "worker",
@@ -192,8 +196,9 @@ describe("createJazz", () => {
           backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
           auth: { jwt_token: null, backend_session: { user_id: "alice" } },
         }),
-      ),
-    );
+      );
+      fromWorker.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
+    });
     const answered = await new Promise<string>((resolve) => {
       fromWorker.addEventListener("message", () => resolve("message"));
       fromWorker.addEventListener("close", (event) => resolve(`closed ${event.code}`));
@@ -387,6 +392,7 @@ describe("createJazz", () => {
               backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
             }),
           );
+          socket.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
         });
         socket.addEventListener("message", () => {
           socket.close();

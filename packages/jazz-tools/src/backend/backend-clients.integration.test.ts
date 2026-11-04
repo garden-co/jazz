@@ -6,6 +6,10 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { createJazz, createJazzClient, memory, trustWorkload, type Jazz } from "./index.js";
 import { backendDbForSession } from "./create-jazz-session.js";
+import {
+  encodeWebSocketFrameBatch,
+  encodeWireClientHello,
+} from "../runtime/native-runtime/websocket.js";
 
 const app = s.defineApp(
   {
@@ -341,7 +345,7 @@ describe("trusted backend clients", () => {
     const socket = new WebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
       headers: { authorization: `Bearer ${await sign({ sub: "ops" })}` },
     } as never);
-    socket.addEventListener("open", () =>
+    socket.addEventListener("open", () => {
       socket.send(
         JSON.stringify({
           peer_identity: "x",
@@ -354,8 +358,9 @@ describe("trusted backend clients", () => {
             authMode: "external",
           },
         }),
-      ),
-    );
+      );
+      socket.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
+    });
     const answered = await new Promise<string>((resolve) => {
       socket.addEventListener("message", () => resolve("message"));
       socket.addEventListener("close", (event) => resolve(`closed ${event.code}`));
