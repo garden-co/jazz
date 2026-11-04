@@ -87,7 +87,6 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   const adminSecret = config.adminSecret ?? process.env.JAZZ_ADMIN_SECRET?.trim();
   const jwksUrl = config.jwksUrl ?? process.env.JAZZ_JWKS_URL?.trim();
   const jwtIssuer = config.jwtIssuer ?? process.env.JAZZ_JWT_ISSUER?.trim();
-  const writeTier = serverUrl ? "global" : "local";
 
   if (serverUrl && (!appId || !adminSecret)) {
     throw new Error("JAZZ_SERVER_URL needs JAZZ_APP_ID and JAZZ_ADMIN_SECRET");
@@ -187,7 +186,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
         done: false,
         owner_id: body.owner_id ?? "93c209ee-dbae-5071-a90d-02f8c0bbcf6a",
       });
-      await inserted.wait({ tier: writeTier });
+      await inserted.wait({ tier: "global" });
 
       res.status(201).json(inserted.value);
 
@@ -279,7 +278,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
         return;
       }
 
-      await db.update(schemaApp.todos, id, updates).wait({ tier: writeTier });
+      await db.update(schemaApp.todos, id, updates).wait({ tier: "global" });
 
       // Fetch updated todo
       const todo = await db.one(schemaApp.todos.where({ id }));
@@ -301,7 +300,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     try {
       const { id } = req.params;
 
-      await db.delete(schemaApp.todos, id).wait({ tier: writeTier });
+      await db.delete(schemaApp.todos, id).wait({ tier: "global" });
       res.status(204).send();
 
       // Notify SSE connections
