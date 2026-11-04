@@ -1,6 +1,8 @@
 import { textAnchorsFrom, type TextAnchors } from "../runtime/text-anchors.js";
 import { createHash, randomUUID } from "node:crypto";
 import { clientScope } from "../runtime/client-scope.js";
+import type { E2eeConfig } from "../e2ee/lifecycle.js";
+import { createNativeCrypto } from "../e2ee/native.js";
 import { admitBackendSecret } from "./admission.js";
 import {
   credentialedTransport,
@@ -78,6 +80,8 @@ export type JazzSessionConfig = Omit<
   serverUrl: string;
   store?: AccountStore;
   initial?: "local-first" | BackendAuth;
+  /** Dedicated device key store; kept outside native runtime config. */
+  e2ee?: E2eeConfig;
   /**
    * For a backend client (a machine that syncs through an app's main backend,
    * not a browser): its workload's OIDC token, or a function that returns a
@@ -294,6 +298,9 @@ export async function createJazzSession(
             env: config.env,
             driver: { type: config.driver.type },
             account,
+            e2ee: config.e2ee
+              ? { ...config.e2ee, crypto: await createNativeCrypto(config.e2ee.crypto) }
+              : undefined,
           },
           source,
         );
