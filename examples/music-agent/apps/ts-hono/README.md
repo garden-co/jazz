@@ -23,11 +23,11 @@ MusicAgent demonstrates; this app only differs in how it is wired.
 
 ```sh
 pnpm dev          # http://127.0.0.1:3000, scripted agent, data in .jazz/
-pnpm build        # builds dist/ (needs VITE_JAZZ_APP_ID)
+pnpm build        # builds dist/ (needs JAZZ_APP_ID)
 pnpm start        # production server on APP_ORIGIN's port (or PORT)
 pnpm test:e2e     # Playwright smoke against `pnpm dev`
 ```
 
-Production sets `APP_ORIGIN`, `VITE_JAZZ_APP_ID` and `BETTER_AUTH_SECRET`.
+Production sets `APP_ORIGIN`, `JAZZ_APP_ID` and `BETTER_AUTH_SECRET`.
 `MUSIC_AGENT_PROVIDER=anthropic` with `ANTHROPIC_API_KEY` answers with Claude
 instead of the scripted agent.

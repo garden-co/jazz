@@ -281,6 +281,12 @@ The creator condition is a plain row predicate, so it composes inside larger rul
 For more dynamic sharing or ownership models, prefer explicit tables and relations rather than
 encoding extra meaning into authorship alone.
 
+## Changing permissions in production
+
+Each deployment of your backend serves the permissions it was built with, and every client is checked by the permissions of the deployment it connected through. When a deployment with new permissions starts, every connected client reconnects, including clients of your other deployments (previews too), and each is checked again by the permissions of the deployment it now reaches. Deploying permissions that have been deployed before, such as a rollback, reconnects no one.
+
+To retire permissions that grant too much, deploy fixed ones and delete every deployment that still serves the old ones, including older production and preview deployments that are still reachable. Until it is gone, any client that connects through such a deployment is checked by its permissions.
+
 ## Testing permissions
 
 Jazz provides utilities to test permissions in isolation without testing your whole app's logic.

@@ -96,8 +96,18 @@ Svelte, Solid, Vue and React Native take the same `user` value on their provider
 ## Guests who sign up
 
 An app can start every visitor as a [local-first](/docs/setup/auth/local-first) guest
-(`initial: "local-first"`). When the guest signs up, call `linkWithBackend()` in your sign-up
-handler, before the `user` value changes:
+(`initial: "local-first"`). Its backend lets guests sync by returning `acceptLocalFirstAuth(request)`
+from `authenticate` for signed-out requests; guests are refused otherwise:
+
+```ts
+authenticate: async (request) => {
+  const user = await yourAuth.userFor(request);
+  return user ? { userId: user.id } : acceptLocalFirstAuth(request);
+},
+```
+
+When the guest signs up, call `linkWithBackend()` in your sign-up handler, before the `user` value
+changes:
 
 ```ts
 await yourAuth.signUp(email, password); // sets your session cookie

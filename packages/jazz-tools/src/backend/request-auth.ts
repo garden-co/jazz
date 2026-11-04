@@ -137,6 +137,8 @@ const JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
 const jwksDocuments = new Map<string, CachedJwksDocument>();
 const jwksFetches = new Map<string, Promise<LocalJwksDocument>>();
 const jwksRefreshNotBefore = new Map<string, number>();
+/** The last forced refresh's failure, rethrown until its cooldown ends. */
+const jwksRefreshFailures = new Map<string, unknown>();
 const JWKS_FORCED_REFRESH_COOLDOWN_MS = 30_000;
 
 function readHeader(request: RequestLike, name: string): string | undefined {
@@ -272,18 +274,36 @@ async function getRemoteJwksDocument(
     now < cached.expiresAtMs &&
     now < (jwksRefreshNotBefore.get(jwksUrl) ?? 0)
   ) {
+    // While a failed refresh cools down, the provider is presumed still
+    // down: keep failing, so a token with a new key is retried rather than
+    // refused by keys that predate it.
+    if (jwksRefreshFailures.has(jwksUrl)) {
+      throw new Error(`JWKS refresh from ${jwksUrl} failed recently; retrying after the cooldown`, {
+        cause: jwksRefreshFailures.get(jwksUrl),
+      });
+    }
     return cached.document;
   }
 
-  const fetchPromise = fetchRemoteJwks(jwksUrl).then((document) => {
-    const refreshedAtMs = Date.now();
-    jwksDocuments.set(jwksUrl, {
-      document,
-      expiresAtMs: refreshedAtMs + JWKS_CACHE_TTL_MS,
-    });
-    jwksRefreshNotBefore.set(jwksUrl, refreshedAtMs + JWKS_FORCED_REFRESH_COOLDOWN_MS);
-    return document;
-  });
+  const fetchPromise = fetchRemoteJwks(jwksUrl).then(
+    (document) => {
+      const refreshedAtMs = Date.now();
+      jwksDocuments.set(jwksUrl, {
+        document,
+        expiresAtMs: refreshedAtMs + JWKS_CACHE_TTL_MS,
+      });
+      jwksRefreshNotBefore.set(jwksUrl, refreshedAtMs + JWKS_FORCED_REFRESH_COOLDOWN_MS);
+      jwksRefreshFailures.delete(jwksUrl);
+      return document;
+    },
+    (error: unknown) => {
+      // A failed refresh also waits out the cooldown, so tokens with
+      // unknown keys can't make every request fetch during an outage.
+      jwksRefreshNotBefore.set(jwksUrl, Date.now() + JWKS_FORCED_REFRESH_COOLDOWN_MS);
+      jwksRefreshFailures.set(jwksUrl, error);
+      throw error;
+    },
+  );
   jwksFetches.set(jwksUrl, fetchPromise);
   try {
     return await fetchPromise;
@@ -540,16 +560,36 @@ function rejectReservedExternalJwtIssuer(session: Session): void {
   }
 }
 
-function ensureJwtNotExpired(payload: JwtPayload): void {
+/** @internal How `verifyExternalJwt` checks a token's lifetime. */
+export interface JwtLifetimeOptions {
+  /** Refuse a token without `exp`. */
+  requireExp?: boolean;
+  /** Refuse a token whose `nbf` is still ahead. */
+  checkNotBefore?: boolean;
+  /** Seconds of clock skew allowed on `exp` and `nbf`. */
+  clockToleranceSeconds?: number;
+}
+
+function ensureJwtNotExpired(payload: JwtPayload, lifetime: JwtLifetimeOptions = {}): void {
+  const tolerance = lifetime.clockToleranceSeconds ?? 0;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (lifetime.checkNotBefore && payload.nbf !== undefined) {
+    if (typeof payload.nbf !== "number" || !Number.isFinite(payload.nbf)) {
+      throw new RequestAuthenticationError("Invalid JWT payload");
+    }
+    if (payload.nbf > nowSeconds + tolerance) {
+      throw new RequestAuthenticationError("JWT is not yet valid");
+    }
+  }
   if (payload.exp === undefined) {
+    if (lifetime.requireExp) throw new RequestAuthenticationError("JWT has no expiry");
     return;
   }
   if (typeof payload.exp !== "number" || !Number.isInteger(payload.exp) || payload.exp < 0) {
     throw new RequestAuthenticationError("Invalid JWT payload");
   }
 
-  const nowSeconds = Math.floor(Date.now() / 1000);
-  if (payload.exp <= nowSeconds) {
+  if (payload.exp <= nowSeconds - tolerance) {
     throw new RequestAuthenticationError("JWT has expired");
   }
 }
@@ -582,15 +622,17 @@ async function verifyLocalFirstIdentityProof(token: string, appId: string): Prom
   }
 }
 
-async function verifyExternalJwt(
+/** @internal Verify `token`'s signature, expiry, issuer and audience. */
+export async function verifyExternalJwt(
   token: string,
   payload: JwtPayload,
   config: BackendRequestAuthConfig,
+  lifetime: JwtLifetimeOptions = {},
 ): Promise<void> {
   if (config.jwtPublicKey !== undefined) {
     await verifyJwtSignatureWithStaticKey(token, config.jwtPublicKey);
 
-    ensureJwtNotExpired(payload);
+    ensureJwtNotExpired(payload, lifetime);
     ensureJwtDomain(payload, config);
     return;
   }
@@ -602,6 +644,9 @@ async function verifyExternalJwt(
     try {
       await verifyJwtSignatureWithJwks(token, jwks);
     } catch {
+      // A refresh that fails throws, so the client retries, and keeps
+      // throwing through its cooldown; only a refresh that succeeds can
+      // refuse an unknown key.
       jwks = await getRemoteJwksDocument(config.jwksUrl, true);
       try {
         await verifyJwtSignatureWithJwks(token, jwks);
@@ -611,7 +656,7 @@ async function verifyExternalJwt(
       }
     }
 
-    ensureJwtNotExpired(payload);
+    ensureJwtNotExpired(payload, lifetime);
     ensureJwtDomain(payload, config);
     return;
   }

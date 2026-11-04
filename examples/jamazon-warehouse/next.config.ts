@@ -1,5 +1,5 @@
 import type { NextConfig } from "next";
-import { assertServerConfiguration, jazzAppId } from "./src/lib/config";
+import { assertServerConfiguration } from "./src/lib/config";
 
 // Fail at startup, not on the first request, when a deployment lacks its secrets.
 assertServerConfiguration();
@@ -11,6 +11,4 @@ export default {
   allowedDevOrigins: ["127.0.0.1"],
   // jazz-napi is a native addon: Node loads it at runtime, the bundler leaves it alone.
   serverExternalPackages: ["jazz-napi", "jazz-tools/backend"],
-  // The browser and the backend name the same Jazz app.
-  env: { NEXT_PUBLIC_JAZZ_APP_ID: jazzAppId },
 } satisfies NextConfig;

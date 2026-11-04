@@ -14,10 +14,17 @@ Configure a session once:
 import { createJazzSession } from "jazz-tools/client";
 
 const jazz = await createJazzSession({
-  serverUrl: "https://core.example",
+  serverUrl: "/jazz",
   initial: "local-first",
+  // Local data, so a guest works offline from its first visit.
+  client: () => import("jazz-tools/local-first"),
 });
 ```
+
+Your backend lets guests sync by returning `acceptLocalFirstAuth(request)` from `authenticate`
+for signed-out requests (an app with no sign-in passes `authenticate: acceptLocalFirstAuth`).
+Guests are refused otherwise. With `serverUrl: null`, Jazz stays on the device: no backend, one
+local-first account per browser profile.
 
 Session creation prepares crypto, restores usable saved selection, or creates a local-first account. Browser sessions retain signing roots in browser storage. Native hosts use an atomic, protected `AccountStore`. Creating a local-first account works offline once runtime assets are available.
 

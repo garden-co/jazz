@@ -15,7 +15,6 @@ import { authClient } from "../src/lib/auth-client";
 // offline writes) in its own chunk once the page has loaded.
 const loadLocalFirst = () => import("jazz-tools/local-first");
 
-const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
 // Better Auth's session drives sign-in; RecordPlayer's backend (`createJazz`
 // in src/lib/jazz.server.ts) reads it in `authenticate`. Signing up creates
 // the listener's Jazz account, signing in opens it again.
@@ -33,7 +32,6 @@ export function RecordPlayerProvider({
 }) {
   return (
     <JazzProvider
-      appId={appId}
       serverUrl="/jazz"
       client={loadLocalFirst}
       signedOut={frame(<SignIn />, false)}

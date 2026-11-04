@@ -37,6 +37,8 @@ const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 const CLAIM_FAILURE_HOLD: Duration = Duration::from_secs(5);
 /// Under the prefix: the id of the store that owns it.
 const OWNER_OBJECT: &str = ".jazz-owner";
+/// At the Blob store's root: the one environment whose cores may use it.
+pub(crate) const ENVIRONMENT_OBJECT: &str = crate::s3::ENVIRONMENT_OBJECT;
 
 /// How the store authenticates to Vercel Blob.
 #[derive(Clone)]
@@ -71,6 +73,13 @@ pub struct VercelBlobOptions {
     /// Where the store's private blobs are read; `None` is
     /// `https://<store id>.private.blob.vercel-storage.com`.
     pub blob_url: Option<String>,
+    /// The deployment environment (`production`, `preview`, …) this
+    /// store runs in. When set, the Blob store is claimed for that
+    /// environment by a marker blob at its root, and a store of any other
+    /// environment is refused: one environment's OIDC token reaches the
+    /// whole Blob store, so environments never share one (a `vercel()`
+    /// core sets it).
+    pub environment: Option<String>,
 }
 
 impl VercelBlobOptions {
@@ -110,6 +119,7 @@ impl VercelBlobOptions {
             credentials,
             api_url: env("VERCEL_BLOB_API_URL").unwrap_or_else(|| DEFAULT_API_URL.to_owned()),
             blob_url: None,
+            environment: None,
         })
     }
 
@@ -190,7 +200,28 @@ impl VercelBlobChunkStore {
                 claim_failed: Mutex::new(None),
             }),
             runtime: Some(runtime),
-        })
+        }
+        .claiming_now())
+    }
+
+    /// Check the store's claims (environment, then prefix) right away, so
+    /// a refused store says so at startup rather than at its first large
+    /// value. A core whose only credential is a workload token that has not
+    /// arrived yet checks them on first use instead.
+    fn claiming_now(self) -> Self {
+        let inner = Arc::clone(&self.inner);
+        let waits_for_token = matches!(
+            &inner.options.credentials,
+            VercelBlobCredentials::Oidc(WebIdentityToken::Workload)
+        ) && crate::middleware::workload::latest_workload_token().is_none();
+        if !waits_for_token && let Some(runtime) = &self.runtime {
+            runtime.spawn(async move {
+                if let Err(error) = inner.claim().await {
+                    tracing::error!(%error, "vercel blobs: checking the large-value store at startup failed");
+                }
+            });
+        }
+        self
     }
 
     pub fn options(&self) -> &VercelBlobOptions {
@@ -261,12 +292,21 @@ impl Inner {
         format!("{}{name}", self.options.prefix)
     }
 
+    /// `name` under the prefix, or at the store's root.
+    fn located(&self, name: &str, rooted: bool) -> String {
+        if rooted {
+            name.to_owned()
+        } else {
+            self.pathname(name)
+        }
+    }
+
     /// The blob's URL, where it is read.
-    fn blob_url(&self, name: &str) -> String {
+    fn blob_url(&self, pathname: &str) -> String {
         format!(
             "{}/{}",
             self.options.blob_base(),
-            uri_encode(&self.pathname(name), false)
+            uri_encode(pathname, false)
         )
     }
 
@@ -305,8 +345,17 @@ impl Inner {
 
     /// Store `bytes` as the private blob `name`; with `overwrite` false,
     /// only if there is none yet.
-    async fn upload(&self, name: &str, bytes: Bytes, overwrite: bool) -> Result<(), String> {
-        let path = format!("/?pathname={}", uri_encode(&self.pathname(name), true));
+    async fn upload(
+        &self,
+        name: &str,
+        rooted: bool,
+        bytes: Bytes,
+        overwrite: bool,
+    ) -> Result<(), String> {
+        let path = format!(
+            "/?pathname={}",
+            uri_encode(&self.located(name, rooted), true)
+        );
         let request = self
             .api(reqwest::Method::PUT, &path)?
             .header("x-vercel-blob-access", "private")
@@ -325,10 +374,11 @@ impl Inner {
     async fn download(
         &self,
         name: &str,
+        rooted: bool,
         limit: usize,
         uncached: bool,
     ) -> Result<Option<Bytes>, String> {
-        let mut url = self.blob_url(name);
+        let mut url = self.blob_url(&self.located(name, rooted));
         if uncached {
             url.push_str("?cache=0");
         }
@@ -365,13 +415,14 @@ impl Inner {
         let claimed = self
             .claimed
             .get_or_try_init(|| async {
+                self.claim_environment().await?;
                 match self.read_owner().await? {
                     Some(owner) => self.check_owner(&owner),
                     None => {
                         let mine = Bytes::from(format!("{}\n", self.owner));
                         // Without overwrite, a store that claimed it first
                         // keeps it; whoever's id is there afterwards owns it.
-                        let put = self.upload(OWNER_OBJECT, mine, false).await;
+                        let put = self.upload(OWNER_OBJECT, false, mine, false).await;
                         match self.read_owner().await? {
                             Some(owner) => self.check_owner(&owner),
                             None => Err(put.err().unwrap_or_else(|| {
@@ -403,22 +454,71 @@ impl Inner {
     }
 
     async fn read_owner(&self) -> Result<Option<String>, String> {
+        self.read_marker(OWNER_OBJECT, false).await
+    }
+
+    /// A small marker blob's contents, read past the cache.
+    async fn read_marker(&self, name: &str, rooted: bool) -> Result<Option<String>, String> {
         Ok(self
-            .download(OWNER_OBJECT, 1024, true)
+            .download(name, rooted, 1024, true)
             .await?
             .map(|body| String::from_utf8_lossy(&body).trim().to_owned()))
     }
 
+    /// With [`VercelBlobOptions::environment`] set, check that the Blob
+    /// store serves that environment only, claiming it if none has yet.
+    ///
+    /// The claim is a put with `x-allow-overwrite: 0`, read back. Vercel
+    /// does not document that put as an atomic create-if-absent, so cores
+    /// of two environments that start against a fresh Blob store in the
+    /// same instant might both pass. The marker then holds one of them,
+    /// and the other is refused the next time it starts (a `vercel()`
+    /// core restarts with every deployment and every idle recycle), before
+    /// it reads or writes anything. Until then it only writes under its
+    /// own prefix, which the other environment never reads or deletes.
+    async fn claim_environment(&self) -> Result<(), String> {
+        let Some(environment) = &self.options.environment else {
+            return Ok(());
+        };
+        let check = |claimed: String| {
+            if &claimed == environment {
+                Ok(())
+            } else {
+                Err(format!(
+                    "vercel blobs: Blob store {} serves the {claimed} environment, not {environment}; \
+                     connect a separate Blob store to each environment",
+                    self.options.store_id
+                ))
+            }
+        };
+        if let Some(claimed) = self.read_marker(ENVIRONMENT_OBJECT, true).await? {
+            return check(claimed);
+        }
+        let mine = Bytes::from(format!("{environment}\n"));
+        let put = self.upload(ENVIRONMENT_OBJECT, true, mine, false).await;
+        match self.read_marker(ENVIRONMENT_OBJECT, true).await? {
+            Some(claimed) => check(claimed),
+            None => Err(put.err().unwrap_or_else(|| {
+                "vercel blobs: the environment blob was written but cannot be read".to_owned()
+            })),
+        }
+    }
+
     async fn put(&self, node: &NodeKey, bytes: Bytes) -> Result<(), String> {
         self.claim().await?;
-        self.upload(&node.object_name(), bytes, true).await
+        self.upload(&node.object_name(), false, bytes, true).await
     }
 
     async fn get(&self, node: &NodeKey) -> Result<Option<Bytes>, String> {
         self.claim().await?;
         let name = node.object_name();
         let Some(bytes) = self
-            .download(&name, jazz::large_values::MAX_ENCODED_NODE_BYTES, false)
+            .download(
+                &name,
+                false,
+                jazz::large_values::MAX_ENCODED_NODE_BYTES,
+                false,
+            )
             .await?
         else {
             return Ok(None);
@@ -620,6 +720,47 @@ mod tests {
         block(beside.put(&key, &bytes)).unwrap();
     }
 
+    /// A Blob store serves one environment: the first store with an
+    /// environment claims it at the store's root, and a store of another
+    /// environment is refused under any prefix, before it touches a blob.
+    #[test]
+    fn a_blob_store_serves_one_environment() {
+        let blob = mock::MockBlob::start();
+        let (key, bytes) = node(5);
+        let in_env = |prefix: &str, environment: &str| {
+            let mut options = blob.options(prefix);
+            options.environment = Some(environment.to_owned());
+            options
+        };
+        let production =
+            VercelBlobChunkStore::new(in_env("prod/", "production"), "store-a".to_owned()).unwrap();
+        block(production.put(&key, &bytes)).unwrap();
+        assert_eq!(
+            blob.state
+                .blobs
+                .lock()
+                .unwrap()
+                .get(ENVIRONMENT_OBJECT)
+                .map(|b| b.as_slice()),
+            Some(&b"production\n"[..])
+        );
+        let preview =
+            VercelBlobChunkStore::new(in_env("preview/", "preview"), "store-b".to_owned()).unwrap();
+        let error = block(preview.put(&key, &bytes)).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("serves the production environment, not preview"),
+            "{error}"
+        );
+        assert!(blob.names("preview/").is_empty(), "nothing written");
+        assert!(blob.owner("preview/").is_none(), "no prefix claimed");
+        // Another production store shares it.
+        let other = VercelBlobChunkStore::new(in_env("other/", "production"), "store-c".to_owned())
+            .unwrap();
+        block(other.put(&key, &bytes)).unwrap();
+    }
+
     /// Of two stores claiming one prefix at once, one gets it; the owner
     /// is read past the CDN, which may still remember there was none.
     #[test]
@@ -747,6 +888,7 @@ pub(crate) mod mock {
                 ),
                 api_url: format!("{}/api/blob", self.url),
                 blob_url: Some(format!("{}/blobs", self.url)),
+                environment: None,
             }
         }
 

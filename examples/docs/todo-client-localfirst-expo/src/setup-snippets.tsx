@@ -7,8 +7,8 @@ export function App() {
   return (
     <JazzSessionProvider
       config={{
-        appId: "<your-app-id>",
-        serverUrl: "https://your-core.example",
+        // Your backend's Jazz endpoint (createJazz); the app names no app id.
+        serverUrl: "https://your-app.example/jazz",
         initial: "local-first",
       }}
     >

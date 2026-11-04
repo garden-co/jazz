@@ -14,6 +14,15 @@ export interface BackendWatchEvents {
   isVisible?(): boolean;
 }
 
+/**
+ * Who the backend says is signed in. `hasAccount: false` means the core holds
+ * no account for them yet (they just signed up, or they are an existing user
+ * of the app signing in to Jazz for the first time), so a local-first guest
+ * on this device links to them and keeps its data, unless `linkGuest` is
+ * off. Left out, the user is taken to have one.
+ */
+export type BackendUser = AccountIdentity & { hasAccount?: boolean };
+
 export interface BackendWatch {
   /** The sync server refused this client's sign-in: ask the backend whether it still holds. */
   authRefused(): void;
@@ -27,6 +36,12 @@ export interface BackendWatch {
    * session in error for the same user retries.
    */
   reauthenticate(): Promise<void>;
+  /**
+   * The guest link this watch started and that is still running, if any, and
+   * the account its last link ended on. An app that calls `linkWithBackend`
+   * itself after its sign-up can then join the link the watch already made.
+   */
+  readonly linking: { done: Promise<void>; result: unknown } | undefined;
   stop(): void;
 }
 
@@ -39,7 +54,15 @@ export interface BackendWatch {
  * - A signed-out answer signs out a backend user, once a second answer
  *   `confirmMs` later agrees, so one failed session refresh in `authenticate`
  *   doesn't sign anyone out (or, with `clearOnSignOut`, wipe their writes).
- * - A local-first guest stays a guest until someone signs in.
+ * - A local-first guest stays a guest until someone signs in. When the user
+ *   who signs in has no account yet (they just signed up), the guest links to
+ *   them (`linkWithBackend`), so everything it wrote stays theirs, however
+ *   the session found out: the app's `reauthenticate`, focus after a popup or
+ *   the first check after a sign-up redirect. A user who already has an
+ *   account is signed in instead; the guest stays on this device. So is a
+ *   user the guest's link was refused for (its key retired, or another app's
+ *   guest), and once refused the watch never links that guest to that user
+ *   again. With `linkGuest: false` the watch leaves such a guest to the app.
  *
  * The app calls `reauthenticate` after its own sign-in or sign-out, so the
  * session follows at once.
@@ -53,7 +76,7 @@ export interface BackendWatch {
  */
 export function watchBackendUser<Client>(
   session: JazzSession<Client>,
-  probe: () => Promise<AccountIdentity | null>,
+  probe: () => Promise<BackendUser | null>,
   events: BackendWatchEvents,
   options: {
     confirmMs?: number;
@@ -67,6 +90,13 @@ export function watchBackendUser<Client>(
      * revoked user in a tab that stays focused is signed out. Default 30s.
      */
     refusedConfirmMs?: number;
+    /**
+     * Link a local-first guest to a signed-in user who has no account yet
+     * (default true). Off, the watch leaves that guest as it is: the app
+     * decides, with `linkWithBackend` (keep the guest's data) or
+     * `loginWithBackend` (an account of the user's own).
+     */
+    linkGuest?: boolean;
   } = {},
 ): BackendWatch {
   const confirmMs = options.confirmMs ?? 2000;
@@ -88,6 +118,18 @@ export function watchBackendUser<Client>(
     refusedConfirm = undefined;
   };
   let stopped = false;
+  const linkGuest = options.linkGuest ?? true;
+  // The session's own link, not one a `decorate` (followUser) put over it:
+  // that one joins the link this watch runs.
+  const linkWithBackend = session.linkWithBackend;
+  let linking: { done: Promise<void>; result: unknown } | undefined;
+  // A guest whose link to a user was refused for good, so later checks sign
+  // that user in instead of reopening the guest for the same refusal.
+  let refusedLink: { account: unknown; issuer: string; subject: string } | undefined;
+  // A link the backend ended as signed out although its probe named this
+  // user: one re-check follows the newer answer, more would loop if they
+  // disagree. Kept per user, so another user gets their own re-check.
+  let signedOutLink: string | undefined;
   let checking: Promise<void> | undefined;
   // Checks asked for while one runs: a plain one (may sign out), a refused
   // one (only reconnects) and an asked one (the app's auth changed: no
@@ -108,10 +150,13 @@ export function watchBackendUser<Client>(
   // its auth changed is how it recovers.
   const askable = () => settled() || session.getSnapshot().status === "error";
   const quiet = (asked = false) => stopped || !(asked ? askable() : settled());
-  async function ask(): Promise<AccountIdentity | null | { failed: unknown }> {
+  async function ask(): Promise<BackendUser | null | { failed: unknown }> {
     try {
       return await probe();
     } catch (cause) {
+      // A backend without the backend-user route (a createJazz older than
+      // this client) answers 404 too, and stops the watch. Clients and the
+      // backend upgrade in lockstep, so that is not supported.
       if (cause instanceof AccountAuthError && cause.status === 404) {
         // No backend to ask: reauthenticates still waiting fail like this one.
         const queued = waiters.splice(0);
@@ -160,8 +205,55 @@ export function watchBackendUser<Client>(
       if (refused) return;
       if (backendUser) await attempt(session.logout());
       if (quiet(asked)) return busy();
+      // A guest of this device and a user with no account yet: link them,
+      // never sign the user in first (that would give them an account of
+      // their own, and the guest could never link to them after).
+      const guest = current?.issuer === LOCAL_FIRST_ISSUER;
+      const account = session.getSnapshot().account;
+      const refusedBefore =
+        refusedLink !== undefined &&
+        refusedLink.account === account &&
+        refusedLink.issuer === signedIn.issuer &&
+        refusedLink.subject === signedIn.subject;
+      // Not linking on its own: the app decides what becomes of this guest.
+      if (guest && !linkGuest && signedIn.hasAccount === false) return;
+      if (guest && signedIn.hasAccount === false && !refusedBefore) {
+        const link = { done: linkWithBackend(), result: undefined as unknown };
+        linking = link;
+        try {
+          await link.done;
+          link.result = session.getSnapshot().account;
+          signedOutLink = undefined;
+          return;
+        } catch (cause) {
+          if (linking === link) linking = undefined;
+          if (stopped) return;
+          const who = `${signedIn.issuer}\0${signedIn.subject}`;
+          if (signedOutMeanwhile(cause) && signedOutLink !== who) {
+            signedOutLink = who;
+            // Signed out while linking: follow the backend's new answer.
+            if (asked) return "again";
+            check();
+            return;
+          }
+          if (!linkRefused(cause)) {
+            // A network error, a 5xx, an expired challenge, or a backend
+            // whose answers keep disagreeing: a later check tries again.
+            if (asked) throw cause;
+            return;
+          }
+          signedOutLink = undefined;
+          refusedLink = { account, issuer: signedIn.issuer, subject: signedIn.subject };
+          console.warn(
+            "Jazz could not link this device's guest to the user who signed in, so it signs them in to their own account. The guest stays on this device.",
+            cause,
+          );
+        }
+        if (quiet(asked)) return busy();
+      }
       return attempt(session.loginWithBackend());
     }
+    signedOutLink = undefined;
     if (!backendUser) return;
     if (refused) {
       // Never sign out on a refusal alone (the cookie may be stale), but a
@@ -265,6 +357,9 @@ export function watchBackendUser<Client>(
       check(true);
     },
     connected: resetRefusal,
+    get linking() {
+      return linking;
+    },
     reauthenticate() {
       const done = new Promise<void>((resolve, reject) => waiters.push({ resolve, reject }));
       whenSettled(() => check(false, true));
@@ -282,6 +377,28 @@ export function watchBackendUser<Client>(
     },
   };
   return watch;
+}
+
+/** The backend says no one is signed in any more (its `authenticate` answered no user). */
+function signedOutMeanwhile(cause: unknown): boolean {
+  return cause instanceof AccountAuthError && cause.status === 401 && cause.code === "signed_out";
+}
+
+/**
+ * The backend refused the link itself, and would again: the user belongs to
+ * another account by now, or the guest's key was retired or belongs to
+ * another app (`link_refused`, `invalid_local_first_proof`), or this guest
+ * can't link here at all. Anything else (a network error, a 5xx, a timeout,
+ * a challenge that expired while the tab slept) may pass on a retry.
+ */
+function linkRefused(cause: unknown): boolean {
+  if (!(cause instanceof AccountAuthError)) return false;
+  return (
+    cause.code === "link_refused" ||
+    cause.code === "invalid_local_first_proof" ||
+    cause.code === "local_first_account_required" ||
+    cause.code === "linked_account_mismatch"
+  );
 }
 
 /** Focus, visibility and BroadcastChannel events for a browser page. */
