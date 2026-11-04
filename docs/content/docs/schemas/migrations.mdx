@@ -209,11 +209,13 @@ pnpm dlx jazz-tools@alpha migrations graph <appId> --server-url <url> --admin-se
 ```
 
 The graph includes all schemas and migrations present in the server and locally. Schemas and migrations that exist only on the server or locally are labelled accordingly.
-The graph also marks the local `schema.ts`.
+The graph also marks the local `schema.ts` and, with "(latest bundle)", the schema of the bundle your
+backends published most recently.
 
 ## Choosing migration endpoints
 
-By default, `migrations create` compares the latest local snapshot with the current `schema.ts`.
+By default, `migrations create` compares the latest local snapshot with the current `schema.ts`. With
+no local snapshot, it starts from the latest bundle's schema.
 Use explicit schema hashes to choose different endpoints, for example when connecting schemas developed on separate branches:
 
 ```bash
@@ -253,15 +255,15 @@ schema, use `migrations create --fromHash <hash>`; it fetches and saves missing 
 `migrations create` uses flags rather than positional hashes. When it needs to resolve missing
 schema hashes from a server, pass `<appId>` as the leading positional argument.
 
-| Flag                   | Default               | Description                                      |
-| ---------------------- | --------------------- | ------------------------------------------------ |
-| `--schema-dir <path>`  | current directory     | Path to app root containing `schema.ts`          |
-| `--migrations-dir <p>` | `./migrations`        | Path to migrations directory and snapshot folder |
-| `--server-url <url>`   | `JAZZ_SERVER_URL`     | Server URL used when resolving missing schema    |
-| `--admin-secret <sec>` | `JAZZ_ADMIN_SECRET`   | Admin secret used when resolving missing schema  |
-| `--fromHash <hash>`    | latest local snapshot | Optional source schema hash                      |
-| `--toHash <hash>`      | current schema        | Optional target schema hash                      |
-| `--name <name>`        | `unnamed`             | Optional migration filename label                |
+| Flag                   | Default                                                | Description                                      |
+| ---------------------- | ------------------------------------------------------ | ------------------------------------------------ |
+| `--schema-dir <path>`  | current directory                                      | Path to app root containing `schema.ts`          |
+| `--migrations-dir <p>` | `./migrations`                                         | Path to migrations directory and snapshot folder |
+| `--server-url <url>`   | `JAZZ_SERVER_URL`                                      | Server URL used when resolving missing schema    |
+| `--admin-secret <sec>` | `JAZZ_ADMIN_SECRET`                                    | Admin secret used when resolving missing schema  |
+| `--fromHash <hash>`    | latest local snapshot, else the latest bundle's schema | Optional source schema hash                      |
+| `--toHash <hash>`      | current schema                                         | Optional target schema hash                      |
+| `--name <name>`        | `unnamed`                                              | Optional migration filename label                |
 
 ## Next steps
 
