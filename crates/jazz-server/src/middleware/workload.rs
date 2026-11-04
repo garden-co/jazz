@@ -229,12 +229,20 @@ fn replaces(kept: Option<&WorkloadToken>, token: &str, exp: Option<u64>) -> bool
     })
 }
 
-/// `kept`'s token, unless there is none or it expired by `now`.
+/// How long before its `exp` a token counts as expired: clocks here and at
+/// STS may disagree, and a token handed out must outlast the request.
+const EXPIRY_MARGIN_SECONDS: u64 = 60;
+
+/// `kept`'s token, unless there is none or it expires within
+/// [`EXPIRY_MARGIN_SECONDS`] of `now`.
 fn usable(kept: Option<&WorkloadToken>, now: u64) -> Result<String, String> {
     let Some(kept) = kept else {
         return Err("no trusted workload token arrived yet".to_owned());
     };
-    if kept.exp.is_some_and(|exp| exp <= now) {
+    if kept
+        .exp
+        .is_some_and(|exp| exp <= now.saturating_add(EXPIRY_MARGIN_SECONDS))
+    {
         return Err(
             "the trusted workload's last token expired; the next request from the workload \
              renews it"
@@ -242,11 +250,6 @@ fn usable(kept: Option<&WorkloadToken>, now: u64) -> Result<String, String> {
         );
     }
     Ok(kept.token.clone())
-}
-
-#[cfg(test)]
-pub(crate) fn bump_workload_token_generation_for_test() {
-    WORKLOAD_TOKEN_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// How many different workload tokens this process has kept: a change
@@ -469,9 +472,20 @@ mod tests {
             !replaces(Some(&kept("a", Some(10))), "a", Some(10)),
             "the same token"
         );
-        assert_eq!(usable(Some(&kept("a", Some(10))), 9).unwrap(), "a");
-        let expired = usable(Some(&kept("a", Some(10))), 10).unwrap_err();
+        assert_eq!(usable(Some(&kept("a", Some(100))), 39).unwrap(), "a");
+        let expired = usable(Some(&kept("a", Some(100))), 100).unwrap_err();
         assert!(expired.contains("expired"), "{expired}");
+        // Within the margin of its exp, a token is not handed out: STS
+        // might see it expired by the time it arrives.
+        assert!(
+            usable(Some(&kept("a", Some(100))), 40).is_err(),
+            "about to expire"
+        );
+        assert_eq!(
+            usable(Some(&kept("a", None)), u64::MAX).unwrap(),
+            "a",
+            "no exp"
+        );
         assert!(usable(None, 0).unwrap_err().contains("arrived yet"));
     }
 
