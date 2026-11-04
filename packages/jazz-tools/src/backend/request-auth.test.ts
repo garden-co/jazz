@@ -1,11 +1,10 @@
-import { createHmac, randomUUID } from "node:crypto";
-import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
-import { createServer as createNetServer } from "node:net";
+import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RequestAuthenticationError, resolveRequestSession } from "./request-auth.js";
-
-const JWT_KID = "backend-request-test-kid";
-const JWT_SECRET = "backend-request-test-secret";
+import {
+  isRequestAuthenticationError,
+  RequestAuthenticationError,
+  resolveRequestSession,
+} from "./request-auth.js";
 
 const mocks = vi.hoisted(() => ({
   verifyLocalFirstIdentityProof: vi.fn(),
@@ -21,393 +20,165 @@ vi.mock("../runtime/local-first-token.js", () => ({
   },
 }));
 
-function base64Url(input: Buffer | string): string {
-  const encoded =
-    typeof input === "string"
-      ? Buffer.from(input, "utf8").toString("base64")
-      : input.toString("base64");
-  return encoded.replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-}
-
-function signHs256Jwt(payload: Record<string, unknown>, secret = JWT_SECRET): string {
-  const header = {
-    alg: "HS256",
-    typ: "JWT",
-    kid: JWT_KID,
-  };
-  const headerB64 = base64Url(JSON.stringify(header));
-  const payloadB64 = base64Url(JSON.stringify(payload));
-  const signature = createHmac("sha256", secret)
-    .update(`${headerB64}.${payloadB64}`, "utf8")
-    .digest("base64")
+function base64Url(input: string): string {
+  return Buffer.from(input, "utf8")
+    .toString("base64")
     .replace(/=/g, "")
     .replace(/\+/g, "-")
     .replace(/\//g, "_");
-  return `${headerB64}.${payloadB64}.${signature}`;
 }
 
 function makeUnsignedJwt(payload: Record<string, unknown>): string {
   return `${base64Url(JSON.stringify({ alg: "none", typ: "JWT" }))}.${base64Url(JSON.stringify(payload))}.signature`;
 }
 
-async function getAvailablePort(): Promise<number> {
-  const server = createNetServer();
-  return await new Promise<number>((resolve, reject) => {
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        reject(new Error("failed to allocate test port"));
-        return;
-      }
-      const { port } = address;
-      server.close((error) => {
-        if (error) reject(error);
-        else resolve(port);
-      });
-    });
-  });
-}
-
-class JwksServer {
-  private readonly server: HttpServer;
-  readonly url: string;
-  requests = 0;
-  private secret: string;
-  private failuresRemaining = 0;
-
-  private constructor(server: HttpServer, url: string, secret: string) {
-    this.server = server;
-    this.url = url;
-    this.secret = secret;
-  }
-
-  static async start(secret = JWT_SECRET, path = "/jwks"): Promise<JwksServer> {
-    let instance: JwksServer;
-    const server = createHttpServer((request, response) => {
-      if (request.url !== path) {
-        response.statusCode = 404;
-        response.end("not found");
-        return;
-      }
-      instance.requests += 1;
-      if (instance.failuresRemaining > 0) {
-        instance.failuresRemaining -= 1;
-        response.statusCode = 503;
-        response.end("temporarily unavailable");
-        return;
-      }
-
-      response.statusCode = 200;
-      response.setHeader("Content-Type", "application/json");
-      response.end(
-        JSON.stringify({
-          keys: [
-            {
-              kty: "oct",
-              kid: JWT_KID,
-              k: base64Url(instance.secret),
-            },
-          ],
-        }),
-      );
-    });
-
-    const port = await getAvailablePort();
-    await new Promise<void>((resolve, reject) => {
-      server.listen(port, "127.0.0.1", (error?: unknown) => {
-        if (error) reject(error);
-        else resolve();
-      });
-    });
-
-    instance = new JwksServer(server, `http://127.0.0.1:${port}${path}`, secret);
-    return instance;
-  }
-
-  rotateKey(secret: string): void {
-    this.secret = secret;
-  }
-
-  failNextFetch(): void {
-    this.failuresRemaining += 1;
-  }
-
-  async stop(): Promise<void> {
-    await new Promise<void>((resolve) => this.server.close(() => resolve()));
-  }
-}
+const GUEST = "11111111-1111-1111-1111-111111111111";
+const ACCOUNT = "00000000-0000-4000-8000-000000000012";
+const guestToken = (sub = GUEST) => makeUnsignedJwt({ iss: "urn:jazz:local-first", sub });
+const registryConfig = {
+  appId: "app",
+  accountRegistry: "https://core.example/apps/app/accounts",
+  backendSecret: "backend-secret",
+};
 
 describe("backend request auth", () => {
-  const servers = new Set<JwksServer>();
-
   beforeEach(() => {
     mocks.verifyLocalFirstIdentityProof.mockReset();
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
-    await Promise.all(
-      Array.from(servers, async (server) => {
-        servers.delete(server);
-        await server.stop();
-      }),
-    );
   });
 
-  it.each(["login", "login-or-register"] as const)(
-    "uses the once-read verified bearer for %s",
-    async (accountMode) => {
-      const identity = { issuer: "https://issuer.example", subject: "reader" };
-      const token = signHs256Jwt({
-        iss: identity.issuer,
-        sub: identity.subject,
-        account: "untrusted-jwt-account",
-      });
-      const account = "00000000-0000-4000-8000-000000000012";
-      const fetcher = vi
-        .spyOn(globalThis, "fetch")
-        .mockResolvedValue(new Response(JSON.stringify({ account, identity })));
-      const header = vi
-        .fn()
-        .mockReturnValueOnce(`Bearer ${token}`)
-        .mockImplementation(() => {
-          throw new Error("request headers read twice");
-        });
-      const session = await resolveRequestSession(
-        { header },
-        {
-          appId: "app",
-          accountRegistry: "https://core.example/apps/app/accounts",
-          backendSecret: "backend-secret",
-          jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
-        },
-        { account: accountMode },
-      );
-      expect(session.account_id).toBe(account);
-      expect(header).toHaveBeenCalledTimes(1);
-      expect(fetcher).toHaveBeenCalledWith(
-        `https://core.example/apps/app/admin/accounts/${accountMode === "login" ? "resolve" : accountMode}`,
-        expect.objectContaining({
-          credentials: "omit",
-          redirect: "error",
-          headers: expect.objectContaining({ "X-Jazz-Backend-Secret": "backend-secret" }),
-        }),
-      );
-    },
-  );
-
-  it("resolves a bearer token from a mixed-case plain-record Authorization key", async () => {
-    const token = signHs256Jwt({ iss: "https://issuer.example", sub: "mixed-case-user" });
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          account: "00000000-0000-4000-8000-000000000012",
-          identity: { issuer: "https://issuer.example", subject: "mixed-case-user" },
-        }),
-      ),
+  it("refuses an external JWT, naming createJazz's authenticate as who decides", async () => {
+    const fetcher = vi.spyOn(globalThis, "fetch");
+    const token = makeUnsignedJwt({ iss: "https://issuer.example", sub: "reader" });
+    const result = resolveRequestSession(
+      { headers: { authorization: `Bearer ${token}` } },
+      registryConfig,
     );
+    await expect(result).rejects.toBeInstanceOf(RequestAuthenticationError);
+    await expect(result).rejects.toThrow(/createJazz.*authenticate/);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
 
+  it("reads the bearer from a mixed-case plain-record Authorization key", async () => {
+    mocks.verifyLocalFirstIdentityProof.mockReturnValue({ ok: true, id: GUEST });
     await expect(
       resolveRequestSession(
-        { headers: { Authorization: `Bearer ${token}` } },
+        { headers: { Authorization: `Bearer ${guestToken()}` } },
         {
           appId: "app",
-          accountRegistry: "https://core.example/apps/app/accounts",
-          backendSecret: "backend-secret",
-          jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
         },
       ),
-    ).resolves.toMatchObject({ user_id: "mixed-case-user", authMode: "external" });
+    ).resolves.toMatchObject({ user_id: GUEST, authMode: "local-first" });
   });
 
   it("rejects conflicting case variants in plain-record authorization headers", async () => {
-    const lowerCaseToken = signHs256Jwt({
-      iss: "https://issuer.example",
-      sub: "lower-case-user",
-    });
-    const upperCaseToken = signHs256Jwt({
-      iss: "https://issuer.example",
-      sub: "upper-case-user",
-    });
-    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          account: "00000000-0000-4000-8000-000000000012",
-          identity: { issuer: "https://issuer.example", subject: "lower-case-user" },
-        }),
-      ),
-    );
-
+    mocks.verifyLocalFirstIdentityProof.mockReturnValue({ ok: true, id: GUEST });
     await expect(
       resolveRequestSession(
         {
           headers: {
-            authorization: `Bearer ${lowerCaseToken}`,
-            Authorization: `Bearer ${upperCaseToken}`,
+            authorization: `Bearer ${guestToken()}`,
+            Authorization: `Bearer ${guestToken(randomUUID())}`,
           },
         },
-        {
-          appId: "app",
-          accountRegistry: "https://core.example/apps/app/accounts",
-          backendSecret: "backend-secret",
-          jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
-        },
+        { appId: "app" },
       ),
-    ).rejects.toThrow();
-    expect(fetcher).not.toHaveBeenCalled();
+    ).rejects.toBeInstanceOf(RequestAuthenticationError);
   });
 
   it("reads the method-provided authorization before plain-record headers exactly once", async () => {
-    const methodToken = signHs256Jwt({
-      iss: "https://issuer.example",
-      sub: "method-first-user",
-    });
-    const recordToken = signHs256Jwt({
-      iss: "https://issuer.example",
-      sub: "record-user",
-    });
+    mocks.verifyLocalFirstIdentityProof.mockImplementation((token: string) => ({
+      ok: true,
+      id: JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString()).sub,
+    }));
     const header = vi
       .fn()
-      .mockReturnValueOnce(`Bearer ${methodToken}`)
+      .mockReturnValueOnce(`Bearer ${guestToken()}`)
       .mockImplementation(() => {
         throw new Error("request headers read twice");
       });
-    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          account: "00000000-0000-4000-8000-000000000012",
-          identity: { issuer: "https://issuer.example", subject: "method-first-user" },
-        }),
-      ),
-    );
-
     const session = await resolveRequestSession(
-      {
-        header,
-        headers: { authorization: `Bearer ${recordToken}` },
-      },
-      {
-        appId: "app",
-        accountRegistry: "https://core.example/apps/app/accounts",
-        backendSecret: "backend-secret",
-        jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
-      },
+      { header, headers: { authorization: `Bearer ${guestToken(randomUUID())}` } },
+      { appId: "app" },
     );
-
-    expect(session.user_id).toBe("method-first-user");
+    expect(session.user_id).toBe(GUEST);
     expect(header).toHaveBeenCalledTimes(1);
-    expect(fetcher).toHaveBeenCalledWith(
-      "https://core.example/apps/app/admin/accounts/resolve",
-      expect.objectContaining({
-        headers: expect.objectContaining({ "X-Jazz-Backend-Secret": "backend-secret" }),
-      }),
-    );
+  });
+
+  it("rejects a missing, non-bearer or empty Authorization header, and a non-JWT", async () => {
+    for (const authorization of [undefined, "Basic abc", "Bearer ", "Bearer not-a-jwt"]) {
+      await expect(
+        resolveRequestSession(
+          { headers: authorization ? { authorization } : {} },
+          { appId: "app" },
+        ),
+        String(authorization),
+      ).rejects.toBeInstanceOf(RequestAuthenticationError);
+    }
+  });
+
+  it("rejects an invalid local-first proof before asking the registry", async () => {
+    const fetcher = vi.spyOn(globalThis, "fetch");
+    mocks.verifyLocalFirstIdentityProof.mockReturnValue({ ok: false });
+    await expect(
+      resolveRequestSession(
+        { headers: { authorization: `Bearer ${guestToken()}` } },
+        registryConfig,
+      ),
+    ).rejects.toThrow(/Invalid local-first/);
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it.each([
     ["identity_not_assigned", 404],
     ["identity_not_authorized", 403],
-  ] as const)(
-    "rejects registry %s without registering the external identity",
-    async (code, status) => {
-      const token = signHs256Jwt({ iss: "https://issuer.example", sub: "reader" });
-      const fetcher = vi
-        .spyOn(globalThis, "fetch")
-        .mockResolvedValue(new Response(code, { status }));
+  ] as const)("rejects registry %s as the caller's failure", async (code, status) => {
+    mocks.verifyLocalFirstIdentityProof.mockReturnValue({ ok: true, id: GUEST });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(code, { status }));
+    const result = resolveRequestSession(
+      { headers: { authorization: `Bearer ${guestToken()}` } },
+      registryConfig,
+    );
+    await expect(result).rejects.toBeInstanceOf(RequestAuthenticationError);
+    await expect(result).rejects.toMatchObject({ code });
+  });
+
+  it("keeps a registry outage, or an answer without a rejection code, a server error", async () => {
+    mocks.verifyLocalFirstIdentityProof.mockReturnValue({ ok: true, id: GUEST });
+    for (const response of [
+      new Response("down", { status: 503 }),
+      new Response("", { status: 403 }),
+      new Response("not json"),
+    ]) {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(response);
+      const result = resolveRequestSession(
+        { headers: { authorization: `Bearer ${guestToken()}` } },
+        registryConfig,
+      );
+      await expect(result).rejects.toThrow();
+      await expect(result).rejects.not.toBeInstanceOf(RequestAuthenticationError);
+    }
+  });
+
+  it("rejects malformed registry answers and an answer for another identity", async () => {
+    mocks.verifyLocalFirstIdentityProof.mockReturnValue({ ok: true, id: GUEST });
+    for (const answer of [
+      { account: "not-an-account", identity: { issuer: "urn:jazz:local-first", subject: GUEST } },
+      { account: ACCOUNT, identity: { issuer: "urn:jazz:local-first", subject: randomUUID() } },
+    ]) {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify(answer)));
       await expect(
         resolveRequestSession(
-          { headers: { authorization: `Bearer ${token}` } },
-          {
-            appId: "app",
-            accountRegistry: "https://core.example/apps/app/accounts",
-            backendSecret: "backend-secret",
-            jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
-          },
+          { headers: { authorization: `Bearer ${guestToken()}` } },
+          registryConfig,
         ),
-      ).rejects.toMatchObject({ code });
-      expect(fetcher).toHaveBeenCalledTimes(1);
-      expect(fetcher.mock.calls[0]![0]).toBe(
-        "https://core.example/apps/app/admin/accounts/resolve",
-      );
-    },
-  );
-
-  it("rejects a registry response for a different authenticated identity", async () => {
-    const token = signHs256Jwt({ iss: "https://issuer.example", sub: "reader" });
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          account: "00000000-0000-4000-8000-000000000012",
-          identity: { issuer: "https://issuer.example", subject: "other" },
-        }),
-      ),
-    );
-    await expect(
-      resolveRequestSession(
-        { headers: { authorization: `Bearer ${token}` } },
-        {
-          appId: "app",
-          accountRegistry: "https://core.example/apps/app/accounts",
-          backendSecret: "backend-secret",
-          jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
-        },
-      ),
-    ).rejects.toMatchObject({ code: "invalid_account_response" });
+      ).rejects.toMatchObject({ code: "invalid_account_response" });
+    }
   });
-
-  it("does not fall back after explicit enrollment rejects a revoked identity", async () => {
-    const token = signHs256Jwt({ iss: "https://issuer.example", sub: "revoked" });
-    const fetcher = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(new Response("identity_not_authorized", { status: 403 }));
-    await expect(
-      resolveRequestSession(
-        { headers: { authorization: `Bearer ${token}` } },
-        {
-          appId: "app",
-          accountRegistry: "https://core.example/apps/app/accounts",
-          backendSecret: "backend-secret",
-          jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
-        },
-        { account: "login-or-register" },
-      ),
-    ).rejects.toMatchObject({ code: "identity_not_authorized" });
-    expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(fetcher.mock.calls[0]![0]).toBe(
-      "https://core.example/apps/app/admin/accounts/login-or-register",
-    );
-  });
-
-  it.each(["login", "login-or-register"] as const)(
-    "rejects invalid credentials before %s",
-    async (accountMode) => {
-      const fetcher = vi.spyOn(globalThis, "fetch");
-      const config = {
-        appId: "app",
-        accountRegistry: "https://core.example/apps/app/accounts",
-        backendSecret: "backend-secret",
-        jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
-      };
-      const badExternal = signHs256Jwt(
-        { iss: "https://issuer.example", sub: "reader" },
-        "wrong-key",
-      );
-      await expect(
-        resolveRequestSession({ headers: { authorization: `Bearer ${badExternal}` } }, config, {
-          account: accountMode,
-        }),
-      ).rejects.toThrow(/Invalid JWT/);
-      mocks.verifyLocalFirstIdentityProof.mockReturnValue({ ok: false });
-      const badLocal = makeUnsignedJwt({ iss: "urn:jazz:local-first", sub: "local" });
-      await expect(
-        resolveRequestSession({ headers: { authorization: `Bearer ${badLocal}` } }, config, {
-          account: accountMode,
-        }),
-      ).rejects.toThrow(/Invalid local-first/);
-      expect(fetcher).not.toHaveBeenCalled();
-    },
-  );
 
   it("founds a verified local-first account under its proven identity", async () => {
     const identity = {
@@ -437,47 +208,7 @@ describe("backend request auth", () => {
     );
   });
 
-  it("rejects malformed registry account UUIDs", async () => {
-    const identity = { issuer: "https://issuer.example", subject: "reader" };
-    const token = signHs256Jwt({ iss: identity.issuer, sub: identity.subject });
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ account: "not-an-account", identity })),
-    );
-    await expect(
-      resolveRequestSession(
-        { headers: { authorization: `Bearer ${token}` } },
-        {
-          appId: "app",
-          accountRegistry: "https://core.example/apps/app/accounts",
-          backendSecret: "backend-secret",
-          jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
-        },
-      ),
-    ).rejects.toMatchObject({ code: "invalid_account_response" });
-  });
-
-  it("rejects external JWTs when jwksUrl is not configured", async () => {
-    const token = signHs256Jwt({
-      sub: "user-subject",
-      iss: "https://issuer.example",
-      role: "editor",
-    });
-
-    await expect(
-      resolveRequestSession(
-        {
-          headers: {
-            authorization: `Bearer ${token}`,
-          },
-        },
-        {
-          appId: "app-without-jwks",
-        },
-      ),
-    ).rejects.toThrow(/jwksUrl|jwtPublicKey/i);
-  });
-
-  it("accepts local-first JWTs without jwksUrl and uses the shared session mapping", async () => {
+  it("accepts local-first JWTs without a registry and uses the shared session mapping", async () => {
     const fetcher = vi.spyOn(globalThis, "fetch");
     const appId = "local-first-backend-app";
     const userId = "11111111-1111-1111-1111-111111111111";
@@ -562,7 +293,7 @@ describe("backend request auth", () => {
           }),
         );
       } else {
-        await expect(result).rejects.toThrow(/allowLocalFirstAuth disabled/);
+        await expect(result).rejects.toThrow(/local-first authentication is disabled/);
         expect(mocks.verifyLocalFirstIdentityProof).not.toHaveBeenCalled();
         expect(fetcher).not.toHaveBeenCalled();
       }
@@ -622,716 +353,12 @@ describe("backend request auth", () => {
     ).rejects.toThrow(/local-first/i);
   });
 
-  it("verifies external JWTs via JWKS and returns a session keyed by sub", async () => {
-    const jwks = await JwksServer.start();
-    servers.add(jwks);
-    const token = signHs256Jwt({
-      sub: "user-subject",
-      iss: "https://issuer.example",
-      role: "editor",
+  it("recognises the error from another copy of jazz-tools by name", () => {
+    const foreign = Object.assign(new Error("Missing or invalid Authorization header"), {
+      name: "RequestAuthenticationError",
     });
-
-    await expect(
-      resolveRequestSession(
-        {
-          headers: {
-            authorization: `Bearer ${token}`,
-          },
-        },
-        {
-          appId: "app-with-jwks",
-          jwksUrl: jwks.url,
-        },
-      ),
-    ).resolves.toEqual({
-      issuer: "https://issuer.example",
-      user_id: "user-subject",
-      claims: { role: "editor" },
-      authMode: "external",
-    });
+    expect(isRequestAuthenticationError(foreign)).toBe(true);
+    expect(isRequestAuthenticationError(new Error("registry down"))).toBe(false);
+    expect(isRequestAuthenticationError("RequestAuthenticationError")).toBe(false);
   });
-
-  it("rejects remote plaintext JWKS before fetching valid signing keys", async () => {
-    const secret = randomUUID();
-    const path = `/jwks/${randomUUID()}`;
-    const token = signHs256Jwt({ iss: "https://issuer.example", sub: "transport-user" }, secret);
-    const request = { headers: { authorization: `Bearer ${token}` } };
-    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-      return new Response(
-        JSON.stringify({
-          keys: [{ kty: "oct", kid: JWT_KID, k: base64Url(secret) }],
-        }),
-        { headers: { "Content-Type": "application/json" } },
-      );
-    });
-
-    try {
-      await expect(
-        resolveRequestSession(request, {
-          appId: "app-with-secure-jwks",
-          jwksUrl: `https://keys.example${path}`,
-        }),
-      ).resolves.toMatchObject({
-        issuer: "https://issuer.example",
-        user_id: "transport-user",
-        authMode: "external",
-      });
-      expect(fetcher).toHaveBeenCalledTimes(1);
-      fetcher.mockClear();
-
-      const [attempt] = await Promise.allSettled([
-        resolveRequestSession(request, {
-          appId: "app-with-plaintext-jwks",
-          jwksUrl: `http://keys.example${path}`,
-        }),
-      ]);
-
-      expect({
-        status: attempt!.status,
-        fetches: fetcher.mock.calls.length,
-      }).toEqual({ status: "rejected", fetches: 0 });
-    } finally {
-      fetcher.mockRestore();
-    }
-  });
-
-  it("rejects redirected JWKS without contacting the valid-key destination", async () => {
-    const secret = randomUUID();
-    const destination = await JwksServer.start(secret, `/jwks/${randomUUID()}`);
-    const redirectPath = `/redirect/${randomUUID()}`;
-    let redirectRequests = 0;
-    const redirectServer = createHttpServer((request, response) => {
-      if (request.url !== redirectPath) {
-        response.writeHead(404).end();
-        return;
-      }
-      redirectRequests += 1;
-      response.writeHead(302, { Location: destination.url }).end();
-    });
-
-    try {
-      await new Promise<void>((resolve, reject) => {
-        redirectServer.once("error", reject);
-        redirectServer.listen(0, "127.0.0.1", () => resolve());
-      });
-      const address = redirectServer.address();
-      if (!address || typeof address === "string") {
-        throw new Error("failed to allocate redirect test port");
-      }
-      const token = signHs256Jwt(
-        { iss: "https://issuer.example", sub: "redirect-key-user" },
-        secret,
-      );
-      const request = { headers: { authorization: `Bearer ${token}` } };
-
-      await expect(
-        resolveRequestSession(request, {
-          appId: "app-with-direct-jwks",
-          jwksUrl: destination.url,
-        }),
-      ).resolves.toMatchObject({
-        issuer: "https://issuer.example",
-        user_id: "redirect-key-user",
-        authMode: "external",
-      });
-      expect(destination.requests).toBe(1);
-      // Count only destination traffic caused by the redirected authentication attempt.
-      destination.requests = 0;
-
-      const [attempt] = await Promise.allSettled([
-        resolveRequestSession(request, {
-          appId: "app-with-redirected-jwks",
-          jwksUrl: `http://127.0.0.1:${address.port}${redirectPath}`,
-        }),
-      ]);
-
-      expect(redirectRequests).toBe(1);
-      expect({
-        status: attempt!.status,
-        destinationRequests: destination.requests,
-      }).toEqual({ status: "rejected", destinationRequests: 0 });
-    } finally {
-      await Promise.all([
-        destination.stop(),
-        new Promise<void>((resolve) => redirectServer.close(() => resolve())),
-      ]);
-    }
-  });
-
-  it.each([
-    "http://localhost.",
-    "http://localhost.example",
-    "http://dev.localhost",
-    "http://127.attacker.example",
-    "http://126.255.255.255",
-    "http://128.0.0.1",
-    "http://0.0.0.0",
-    "http://192.168.1.1",
-    "http://[::ffff:127.0.0.1]",
-    "http://[::2]",
-    "ftp://localhost",
-    "file://localhost",
-    "data:application/json,",
-  ])("rejects JWKS at %s before fetching signing keys", async (origin) => {
-    const secret = randomUUID();
-    const token = signHs256Jwt({ iss: "https://issuer.example", sub: "url-policy-user" }, secret);
-    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-      return new Response(
-        JSON.stringify({
-          keys: [{ kty: "oct", kid: JWT_KID, k: base64Url(secret) }],
-        }),
-        { headers: { "Content-Type": "application/json" } },
-      );
-    });
-
-    const [attempt] = await Promise.allSettled([
-      resolveRequestSession(
-        { headers: { authorization: `Bearer ${token}` } },
-        { appId: "app-with-url-policy", jwksUrl: `${origin}/jwks/${randomUUID()}` },
-      ),
-    ]);
-
-    expect({
-      status: attempt!.status,
-      fetches: fetcher.mock.calls.length,
-    }).toEqual({ status: "rejected", fetches: 0 });
-  });
-
-  it.each([
-    // Bind both loopback families: localhost resolution differs across hosts.
-    ["LOCALHOST", "::"],
-    ["[0:0:0:0:0:0:0:1]", "::1"],
-    ["127.1", "127.0.0.1"],
-    ["2130706433", "127.0.0.1"],
-    ["127.255.255.254", "127.255.255.254"],
-  ])("verifies signing keys over HTTP at canonical loopback %s", async (hostname, listenHost) => {
-    const secret = randomUUID();
-    const path = `/jwks/${randomUUID()}`;
-    const remapLoopback = process.platform === "darwin" && listenHost === "127.255.255.254";
-    let restoreFetch = () => {};
-    let requests = 0;
-    const server = createHttpServer((request, response) => {
-      if (request.url !== path) {
-        response.writeHead(404).end();
-        return;
-      }
-      requests += 1;
-      response.writeHead(200, { "Content-Type": "application/json" }).end(
-        JSON.stringify({
-          keys: [{ kty: "oct", kid: JWT_KID, k: base64Url(secret) }],
-        }),
-      );
-    });
-
-    try {
-      await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(0, remapLoopback ? "127.0.0.1" : listenHost, () => resolve());
-      });
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        throw new Error("failed to allocate loopback test port");
-      }
-      const jwksUrl = `http://${hostname}:${address.port}${path}`;
-      if (remapLoopback) {
-        // macOS lacks this 127/8 socket route; keep URL policy and real HTTP verification.
-        const fetch = globalThis.fetch;
-        const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation((input, options) => {
-          const url = new URL(input instanceof Request ? input.url : input.toString());
-          expect(url.href).toBe(jwksUrl);
-          url.hostname = "127.0.0.1";
-          return fetch(url, options);
-        });
-        restoreFetch = () => fetcher.mockRestore();
-      }
-      const token = signHs256Jwt({ iss: "https://issuer.example", sub: "loopback-user" }, secret);
-
-      await expect(
-        resolveRequestSession(
-          { headers: { authorization: `Bearer ${token}` } },
-          {
-            appId: "app-with-loopback-jwks",
-            jwksUrl,
-          },
-        ),
-      ).resolves.toMatchObject({
-        issuer: "https://issuer.example",
-        user_id: "loopback-user",
-        authMode: "external",
-      });
-      expect(requests).toBe(1);
-    } finally {
-      restoreFetch();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
-  });
-
-  it("shares one cold JWKS fetch and rejects invalid JWTs without an immediate refresh", async () => {
-    const jwks = await JwksServer.start();
-    servers.add(jwks);
-    const config = {
-      appId: "app-with-cold-jwks",
-      jwksUrl: jwks.url,
-    };
-    const invalidToken = signHs256Jwt(
-      {
-        sub: "invalid-user",
-        iss: "https://issuer.example",
-      },
-      "different-secret",
-    );
-    const request = {
-      headers: { authorization: `Bearer ${invalidToken}` },
-    };
-
-    const attempts = await Promise.allSettled(
-      Array.from({ length: 20 }, () => resolveRequestSession(request, config)),
-    );
-
-    expect(attempts.every((attempt) => attempt.status === "rejected")).toBe(true);
-    expect(jwks.requests).toBe(1);
-  });
-
-  it("refreshes a stale JWKS once after provider key rotation and validates the token", async () => {
-    let now = 1_000_000;
-    vi.spyOn(Date, "now").mockImplementation(() => now);
-    const jwks = await JwksServer.start();
-    servers.add(jwks);
-    const config = {
-      appId: "app-with-rotating-jwks",
-      jwksUrl: jwks.url,
-    };
-    const oldToken = signHs256Jwt({
-      sub: "old-key-user",
-      iss: "https://issuer.example",
-    });
-    const newSecret = "rotated-backend-request-test-secret";
-    const newToken = signHs256Jwt(
-      {
-        sub: "rotated-key-user",
-        iss: "https://issuer.example",
-      },
-      newSecret,
-    );
-    const requestFor = (token: string) => ({
-      headers: { authorization: `Bearer ${token}` },
-    });
-
-    await resolveRequestSession(requestFor(oldToken), config);
-    expect(jwks.requests).toBe(1);
-
-    jwks.rotateKey(newSecret);
-    now += 30_001;
-
-    await expect(resolveRequestSession(requestFor(newToken), config)).resolves.toMatchObject({
-      issuer: "https://issuer.example",
-      user_id: "rotated-key-user",
-      authMode: "external",
-    });
-    expect(jwks.requests).toBe(2);
-  });
-
-  it("shares a failed cold JWKS fetch and retries after in-flight cleanup", async () => {
-    const jwks = await JwksServer.start();
-    servers.add(jwks);
-    jwks.failNextFetch();
-    const config = {
-      appId: "app-with-retrying-jwks",
-      jwksUrl: jwks.url,
-    };
-    const token = signHs256Jwt({
-      sub: "retry-user",
-      iss: "https://issuer.example",
-    });
-    const request = {
-      headers: { authorization: `Bearer ${token}` },
-    };
-
-    const attempts = await Promise.allSettled(
-      Array.from({ length: 20 }, () => resolveRequestSession(request, config)),
-    );
-
-    expect(
-      attempts.every(
-        (attempt) => attempt.status === "rejected" && String(attempt.reason).includes("HTTP 503"),
-      ),
-    ).toBe(true);
-    expect(jwks.requests).toBe(1);
-
-    await expect(resolveRequestSession(request, config)).resolves.toMatchObject({
-      user_id: "retry-user",
-      authMode: "external",
-    });
-    expect(jwks.requests).toBe(2);
-  });
-
-  it("coalesces and rate-limits forced JWKS refreshes after bad signatures", async () => {
-    const jwks = await JwksServer.start();
-    servers.add(jwks);
-    let now = 1_000_000;
-    vi.spyOn(Date, "now").mockImplementation(() => now);
-    const config = {
-      appId: "app-with-jwks-refresh-control",
-      jwksUrl: jwks.url,
-    };
-    const validToken = signHs256Jwt({
-      sub: "valid-user",
-      iss: "https://issuer.example",
-    });
-    const invalidToken = signHs256Jwt(
-      {
-        sub: "invalid-user",
-        iss: "https://issuer.example",
-      },
-      "different-secret",
-    );
-    const requestFor = (token: string) => ({
-      headers: { authorization: `Bearer ${token}` },
-    });
-
-    await resolveRequestSession(requestFor(validToken), config);
-    expect(jwks.requests).toBe(1);
-    now += 30_001;
-
-    const attempts = await Promise.allSettled(
-      Array.from({ length: 20 }, () => resolveRequestSession(requestFor(invalidToken), config)),
-    );
-    expect(attempts.every((attempt) => attempt.status === "rejected")).toBe(true);
-    expect(jwks.requests).toBe(2);
-
-    await expect(resolveRequestSession(requestFor(invalidToken), config)).rejects.toThrow(
-      /Invalid JWT/,
-    );
-    expect(jwks.requests).toBe(2);
-  });
-
-  it("uses a cached JWKS document until its five-minute TTL expires", async () => {
-    let now = 1_000_000;
-    vi.spyOn(Date, "now").mockImplementation(() => now);
-    const jwks = await JwksServer.start();
-    servers.add(jwks);
-    const config = {
-      appId: "app-with-fresh-jwks",
-      jwksUrl: jwks.url,
-    };
-    const token = signHs256Jwt({
-      sub: "fresh-cache-user",
-      iss: "https://issuer.example",
-    });
-    const request = {
-      headers: { authorization: `Bearer ${token}` },
-    };
-
-    await expect(resolveRequestSession(request, config)).resolves.toMatchObject({
-      user_id: "fresh-cache-user",
-    });
-    expect(jwks.requests).toBe(1);
-
-    jwks.rotateKey("replacement-backend-request-test-secret");
-    now += 5 * 60 * 1000 - 1;
-
-    await expect(resolveRequestSession(request, config)).resolves.toMatchObject({
-      user_id: "fresh-cache-user",
-    });
-    expect(jwks.requests).toBe(1);
-  });
-
-  it("coalesces expiry refreshes and retires the old key without a forced refetch", async () => {
-    let now = 1_000_000;
-    vi.spyOn(Date, "now").mockImplementation(() => now);
-    const jwks = await JwksServer.start();
-    servers.add(jwks);
-    const config = {
-      appId: "app-with-expiring-jwks",
-      jwksUrl: jwks.url,
-    };
-    const oldToken = signHs256Jwt({
-      sub: "retired-key-user",
-      iss: "https://issuer.example",
-    });
-    const replacementSecret = "replacement-backend-request-test-secret";
-    const replacementToken = signHs256Jwt(
-      {
-        sub: "replacement-key-user",
-        iss: "https://issuer.example",
-      },
-      replacementSecret,
-    );
-    const requestFor = (token: string) => ({
-      headers: { authorization: `Bearer ${token}` },
-    });
-
-    await resolveRequestSession(requestFor(oldToken), config);
-    expect(jwks.requests).toBe(1);
-
-    jwks.rotateKey(replacementSecret);
-    now += 5 * 60 * 1000;
-
-    const refreshes = await Promise.all(
-      Array.from({ length: 20 }, () => resolveRequestSession(requestFor(replacementToken), config)),
-    );
-    expect(refreshes.every((session) => session.user_id === "replacement-key-user")).toBe(true);
-    expect(jwks.requests).toBe(2);
-
-    await expect(resolveRequestSession(requestFor(oldToken), config)).rejects.toThrow(
-      /Invalid JWT/,
-    );
-    expect(jwks.requests).toBe(2);
-  });
-
-  it("fails closed on provider outage after the JWKS TTL and retries immediately", async () => {
-    let now = 1_000_000;
-    vi.spyOn(Date, "now").mockImplementation(() => now);
-    const jwks = await JwksServer.start();
-    servers.add(jwks);
-    const config = {
-      appId: "app-with-expired-jwks",
-      jwksUrl: jwks.url,
-    };
-    const token = signHs256Jwt({
-      sub: "expired-cache-user",
-      iss: "https://issuer.example",
-    });
-    const request = {
-      headers: { authorization: `Bearer ${token}` },
-    };
-
-    await expect(resolveRequestSession(request, config)).resolves.toMatchObject({
-      user_id: "expired-cache-user",
-    });
-    expect(jwks.requests).toBe(1);
-
-    now += 5 * 60 * 1000;
-    jwks.failNextFetch();
-
-    await expect(resolveRequestSession(request, config)).rejects.toThrow(/HTTP 503/);
-    expect(jwks.requests).toBe(2);
-
-    await expect(resolveRequestSession(request, config)).resolves.toMatchObject({
-      user_id: "expired-cache-user",
-    });
-    expect(jwks.requests).toBe(3);
-  });
-
-  it("verifies external JWTs via a static JWK and uses JWT sub as the session user", async () => {
-    const fetcher = vi.spyOn(globalThis, "fetch");
-    const token = signHs256Jwt({
-      sub: "user-subject",
-      iss: "https://issuer.example",
-      role: "editor",
-    });
-
-    await expect(
-      resolveRequestSession(
-        {
-          headers: {
-            authorization: `Bearer ${token}`,
-          },
-        },
-        {
-          appId: "app-with-static-key",
-          jwtPublicKey: {
-            kty: "oct",
-            kid: JWT_KID,
-            alg: "HS256",
-            k: base64Url(JWT_SECRET),
-          },
-        },
-      ),
-    ).resolves.toEqual({
-      issuer: "https://issuer.example",
-      user_id: "user-subject",
-      claims: { role: "editor" },
-      authMode: "external",
-    });
-    expect(fetcher).not.toHaveBeenCalled();
-  });
-
-  it("rejects a signed external JWT from a different configured issuer", async () => {
-    const token = signHs256Jwt({
-      sub: "user-subject",
-      iss: "https://other-issuer.example",
-      aud: "jazz-api",
-    });
-
-    await expect(
-      resolveRequestSession(
-        {
-          headers: {
-            authorization: `Bearer ${token}`,
-          },
-        },
-        {
-          appId: "issuer-bound-app",
-          jwtPublicKey: {
-            kty: "oct",
-            kid: JWT_KID,
-            alg: "HS256",
-            k: base64Url(JWT_SECRET),
-          },
-          jwtIssuer: "https://issuer.example",
-          jwtAudience: "jazz-api",
-        },
-      ),
-    ).rejects.toThrow(/issuer/i);
-  });
-
-  it("rejects a signed external JWT for a different configured audience", async () => {
-    const token = signHs256Jwt({
-      sub: "user-subject",
-      iss: "https://issuer.example",
-      aud: "other-service",
-    });
-
-    await expect(
-      resolveRequestSession(
-        {
-          headers: {
-            authorization: `Bearer ${token}`,
-          },
-        },
-        {
-          appId: "audience-bound-app",
-          jwtPublicKey: {
-            kty: "oct",
-            kid: JWT_KID,
-            alg: "HS256",
-            k: base64Url(JWT_SECRET),
-          },
-          jwtIssuer: "https://issuer.example",
-          jwtAudience: "jazz-api",
-        },
-      ),
-    ).rejects.toThrow(/audience/i);
-  });
-
-  it("preserves exact signed external JWT issuer spelling after validation", async () => {
-    const token = signHs256Jwt({
-      sub: " user-subject ",
-      iss: " https://issuer.example ",
-      role: "editor",
-    });
-
-    await expect(
-      resolveRequestSession(
-        {
-          headers: {
-            authorization: `Bearer ${token}`,
-          },
-        },
-        {
-          appId: "app-with-static-key-spaced-issuer",
-          jwtPublicKey: {
-            kty: "oct",
-            kid: JWT_KID,
-            alg: "HS256",
-            k: base64Url(JWT_SECRET),
-          },
-        },
-      ),
-    ).resolves.toEqual({
-      issuer: " https://issuer.example ",
-      user_id: " user-subject ",
-      claims: { role: "editor" },
-      authMode: "external",
-    });
-  });
-
-  it("rejects Jazz-reserved issuers on signed external JWTs", async () => {
-    for (const issuer of ["urn:jazz:system", "urn:jazz:anonymous", "urn:jazz:static-bearer"]) {
-      const token = signHs256Jwt({
-        sub: "user-subject",
-        iss: issuer,
-      });
-
-      await expect(
-        resolveRequestSession(
-          {
-            headers: {
-              authorization: `Bearer ${token}`,
-            },
-          },
-          {
-            appId: `app-rejects-${issuer}`,
-            jwtPublicKey: {
-              kty: "oct",
-              kid: JWT_KID,
-              alg: "HS256",
-              k: base64Url(JWT_SECRET),
-            },
-          },
-        ),
-      ).rejects.toThrow(/Invalid JWT payload/);
-    }
-
-    await expect(
-      resolveRequestSession(
-        {
-          headers: {
-            authorization: `Bearer ${signHs256Jwt({
-              sub: "user-subject",
-              iss: "urn:jazz:local-first",
-            })}`,
-          },
-        },
-        {
-          appId: "app-rejects-local-first-without-local-first-auth",
-          allowLocalFirstAuth: false,
-          jwtPublicKey: {
-            kty: "oct",
-            kid: JWT_KID,
-            alg: "HS256",
-            k: base64Url(JWT_SECRET),
-          },
-        },
-      ),
-    ).rejects.toThrow(/local-first/i);
-  });
-});
-
-describe("JWKS HTTP deadlines", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    vi.useRealTimers();
-  });
-  it.each(["headers", "body"])(
-    "bounds stalled %s for all waiters and retries immediately",
-    async (phase) => {
-      vi.useFakeTimers();
-      const never = () => new Promise<never>(() => {});
-      const fetcher = vi
-        .fn<typeof fetch>()
-        .mockImplementationOnce(async () => {
-          if (phase === "headers") return never();
-          return { ok: true, json: never } as unknown as Response;
-        })
-        .mockResolvedValueOnce(
-          new Response(
-            JSON.stringify({ keys: [{ kty: "oct", kid: JWT_KID, k: base64Url(JWT_SECRET) }] }),
-          ),
-        );
-      vi.stubGlobal("fetch", fetcher);
-      const config = { appId: "test", jwksUrl: `https://issuer.example/${randomUUID()}` };
-      const request = {
-        headers: {
-          authorization: `Bearer ${signHs256Jwt({ iss: "https://issuer.example", sub: "test-user" })}`,
-        },
-      };
-      const first = expect(resolveRequestSession(request, config)).rejects.toThrow(
-        "request timed out",
-      );
-      const second = expect(resolveRequestSession(request, config)).rejects.toThrow(
-        "request timed out",
-      );
-      await vi.advanceTimersByTimeAsync(30_000);
-      await Promise.all([first, second]);
-      expect(fetcher).toHaveBeenCalledTimes(1);
-      expect(fetcher.mock.calls[0]![1]!.signal!.aborted).toBe(true);
-      await expect(resolveRequestSession(request, config)).resolves.toMatchObject({
-        user_id: "test-user",
-      });
-      expect(fetcher).toHaveBeenCalledTimes(2);
-      expect(vi.getTimerCount()).toBe(0);
-    },
-  );
 });

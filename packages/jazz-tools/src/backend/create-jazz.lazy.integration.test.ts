@@ -202,10 +202,14 @@ describe("createJazz, opened on first use", () => {
     await closing;
     await expect(jazz.ready()).rejects.toThrow(/was closed/);
     // The close applied it to the backend's db before closing the store,
-    // rather than dropping it: it has its transaction. (That it then reaches
-    // the core before the close finishes is the backend's shutdown, waiting
-    // for sync.)
+    // rather than dropping it, and waited for it to reach the core.
     await expect(write.txId).resolves.toBeTruthy();
+    // Reopened, the store has it.
+    const again = createJazz({ app, permissions, store: sqlite({ path }) });
+    cleanups.push(() => again.close());
+    expect((await again.db.all(app.todos.where({ owner }))).map((todo) => todo.title)).toEqual([
+      "kept",
+    ]);
   }, 60_000);
 
   it("opens the store once for concurrent first uses, and once more after a close", async () => {

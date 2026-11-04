@@ -1,46 +1,36 @@
 // #region quickstart-server-setup-ts
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
-import { createJazzSession } from "jazz-tools/backend";
+import { createJazz, sqlite } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
-const session = await createJazzSession({
-  appId: process.env.JAZZ_APP_ID ?? "todo-server-ts",
+// Your own auth decides who a request is (a session cookie, a header).
+declare function currentUser(request: Request): Promise<{ id: string } | null>;
+
+const jazz = createJazz({
   app: schemaApp,
   permissions,
-  driver: { type: "persistent", dataPath: "./data/jazz.db" },
-  serverUrl: process.env.JAZZ_SERVER_URL!,
-  initial: { backendSecret: process.env.JAZZ_BACKEND_SECRET! },
-  jwksUrl: process.env.JAZZ_JWKS_URL,
-  jwtPublicKey: process.env.JAZZ_JWT_PUBLIC_KEY,
-  allowLocalFirstAuth:
-    process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH === undefined
-      ? undefined
-      : ["true", "1", "yes", "on", "y"].includes(
-          process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH.trim().toLowerCase(),
-        ),
+  store: sqlite({ path: "./data/jazz" }),
+  async authenticate(request) {
+    const user = await currentUser(request);
+    return user ? { userId: user.id } : null;
+  },
 });
-
-const snapshot = session.getSnapshot();
-if (snapshot.status !== "ready" || !snapshot.client) {
-  throw snapshot.error ?? new Error("Backend session is not ready");
-}
-const client = snapshot.client;
 const api = new Hono();
 // #endregion quickstart-server-setup-ts
 
 // #region quickstart-server-write-ts
 api.post("/api/todos", async (c) => {
-  const db = await client.forRequest(c.req);
-  const session = db.getAuthState().session;
-  if (!session?.user.account) return c.json({ error: "Account required" }, 401);
+  const account = await jazz.accountFor(c.req.raw);
+  if (!account) return c.json({ error: "Account required" }, 401);
+  const db = await jazz.forRequest(c.req.raw);
   const { title } = await c.req.json();
 
   const { value: todo } = db.insert(schemaApp.todos, {
     title,
     done: false,
-    owner_id: session.user.account,
+    owner_id: account,
   });
 
   return c.json(todo, 201);
@@ -49,7 +39,7 @@ api.post("/api/todos", async (c) => {
 
 // #region quickstart-server-read-ts
 api.get("/api/todos", async (c) => {
-  const db = await client.forRequest(c.req);
+  const db = await jazz.forRequest(c.req.raw);
   const todos = await db.all(
     schemaApp.todos.where({ done: false }).orderBy("title", "asc").limit(100),
   );
@@ -59,7 +49,7 @@ api.get("/api/todos", async (c) => {
 
 // #region quickstart-server-update-ts
 api.patch("/api/todos/:id", async (c) => {
-  const db = await client.forRequest(c.req);
+  const db = await jazz.forRequest(c.req.raw);
   const { id } = c.req.param();
   const { done } = await c.req.json();
   db.update(schemaApp.todos, id, { done });
@@ -67,7 +57,7 @@ api.patch("/api/todos/:id", async (c) => {
 });
 
 api.delete("/api/todos/:id", async (c) => {
-  const db = await client.forRequest(c.req);
+  const db = await jazz.forRequest(c.req.raw);
   const { id } = c.req.param();
   db.delete(schemaApp.todos, id);
   return c.json({ ok: true });

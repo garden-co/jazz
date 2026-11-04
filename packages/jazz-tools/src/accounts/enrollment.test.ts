@@ -1,5 +1,6 @@
 import { generateSecret, identityOf, verifyChallenge } from "../local-first-auth/index.js";
 import { generateAuthSecret } from "../runtime/auth-secret-store.js";
+import { admitBackendAccount } from "./state.js";
 import { describe, expect, it, vi } from "vitest";
 import {
   accountToken,
@@ -181,7 +182,9 @@ it("keeps backend authority opaque, scoped, and revocable", async () => {
     localFirst: { create: () => ({ accountId: id, identity, auth: token() }) },
     backend: { admitBackend: async () => ({ nodeId: id }) },
   });
-  const backend = await manager.becomeBackend({ backendSecret: "private-backend-credential" });
+  const backend = await admitBackendAccount(manager, {
+    backendSecret: "private-backend-credential",
+  });
   expect(backend.id).toBe("00000000-0000-0000-0000-000000000000");
   expect(backend.identity).toEqual({ issuer: "urn:jazz:system", subject: id });
   expect(JSON.stringify(manager.getSnapshot())).not.toContain("private-backend-credential");
@@ -204,7 +207,7 @@ it("keeps backend authority opaque, scoped, and revocable", async () => {
 });
 
 it("rejects unsupported backend hosts and fences late backend admission on logout", async () => {
-  await expect(setup().becomeBackend({ backendSecret: "secret" })).rejects.toThrow(
+  await expect(admitBackendAccount(setup(), { backendSecret: "secret" })).rejects.toThrow(
     /backend_host_unavailable/,
   );
   let finish!: (value: { nodeId: string }) => void;
@@ -218,7 +221,7 @@ it("rejects unsupported backend hosts and fences late backend admission on logou
         }),
     },
   });
-  const pending = manager.becomeBackend({ backendSecret: "secret" });
+  const pending = admitBackendAccount(manager, { backendSecret: "secret" });
   manager.logout();
   finish({ nodeId: id });
   await expect(pending).rejects.toThrow(/account_logged_out/);
