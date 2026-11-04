@@ -5,7 +5,7 @@ export {
   useJazzContext,
   useAcceptInvite,
 } from "../classic-api.js";
-export { createJazzClient, type JazzClient } from "./create-jazz-client.js";
+export type { JazzClient } from "./create-jazz-client.js";
 export {
   JazzClientProvider,
   useDb,
@@ -27,7 +27,7 @@ export { useAccountState } from "./use-account-state.js";
 export { useSyncStatus } from "./use-sync-status.js";
 export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 
-export { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
+export { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
 export type {
   JazzSession,
   JazzSessionActions,

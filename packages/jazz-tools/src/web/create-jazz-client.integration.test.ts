@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { schema } from "../index.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
-import { createJazzClient as createReactJazzClient } from "../react/create-jazz-client.js";
-import { createJazzClient as createSvelteJazzClient } from "../svelte/create-jazz-client.js";
-import { createJazzClient as createVueJazzClient } from "../vue/create-jazz-client.js";
-import { createJazzClient } from "./create-jazz-client.js";
-import { createJazzClient as createLazyJazzClient } from "./lazy-local-first.js";
+import { openJazzClient as createReactJazzClient } from "../react/create-jazz-client.js";
+import { openJazzClient as createSvelteJazzClient } from "../svelte/create-jazz-client.js";
+import { openJazzClient as createVueJazzClient } from "../vue/create-jazz-client.js";
+import { openJazzClient } from "./create-jazz-client.js";
+import { openJazzClient as createLazyJazzClient } from "./lazy-local-first.js";
 
 const app = schema.defineApp(
   {
@@ -26,7 +26,7 @@ describe("web/create-jazz-client public API", () => {
 
   it("opens the same shared client lazily as directly", async () => {
     const config = await localAccountConfig(`web-create-jazz-client-${randomUUID()}`);
-    const direct = await createJazzClient(config);
+    const direct = await openJazzClient(config);
     const lazy = await createLazyJazzClient(config);
     try {
       expect(lazy.db).toBe(direct.db);
@@ -37,7 +37,7 @@ describe("web/create-jazz-client public API", () => {
   });
 
   it("inserts with generated and supplied IDs, queries, and shuts down after activity", async () => {
-    const client = await createJazzClient(
+    const client = await openJazzClient(
       await localAccountConfig(`web-create-jazz-client-${randomUUID()}`),
     );
     try {

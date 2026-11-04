@@ -2,11 +2,11 @@ import { exportLocalFirstSecret, type AccountHandle } from "jazz-tools";
 import { RecoveryPhrase } from "jazz-tools/passphrase";
 import { BrowserPasskeyBackup } from "jazz-tools/passkey-backup";
 
-import { createJazzSession, type JazzSessionActions } from "jazz-tools/client";
+import { createJazzClient, type JazzSessionActions } from "jazz-tools/client";
 
 // #region auth-localfirst-ts
 export async function createLocalFirstSession() {
-  return createJazzSession({
+  return createJazzClient({
     serverUrl: "/jazz",
     initial: "local-first",
     // Local data, so the guest works offline from its first visit.
@@ -18,7 +18,7 @@ export async function createLocalFirstSession() {
 // #region auth-backend-ts
 export async function createBackendSession() {
   // Jazz runs in your backend under /jazz; your session cookie is the only credential.
-  const session = await createJazzSession({ serverUrl: "/jazz" });
+  const session = await createJazzClient({ serverUrl: "/jazz" });
   try {
     await session.loginWithBackend();
     return session;
