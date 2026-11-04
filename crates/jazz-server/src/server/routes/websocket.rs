@@ -843,11 +843,16 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     let session = match opened {
         Ok(session) => session,
         Err(error) => {
-            send_ws_error(
-                &mut socket,
-                WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
-            )
-            .await;
+            // A session this core does not serve (unpinned, or pinned to a
+            // bundle it never published) stays refused: the client must not
+            // retry it. Anything else may pass.
+            let refused = error.starts_with("Protocol:") || error.starts_with("Schema:");
+            let wire = if refused {
+                WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, error)
+            } else {
+                WireError::new(WireErrorCode::Internal, WireRetry::Later, error)
+            };
+            send_ws_error(&mut socket, wire).await;
             let _ = socket.close().await;
             return;
         }
@@ -1517,20 +1522,20 @@ mod tests {
     }
 
     async fn make_ws_convergence_test_state() -> Arc<ServerState> {
-        let schema = ws_public_schema_convert();
-        ServerBuilder::new(AppId::random())
+        let source = ws_public_schema_convert().public_schema().clone();
+        let state = ServerBuilder::new(AppId::random())
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
                 backend_secret: Some("backend-secret".to_owned()),
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .with_core_server_shell_schema(schema)
             .build()
             .await
             .expect("build websocket convergence test state")
-            .state
+            .state;
+        publish_source_bundle(&state, &source).await;
+        state
     }
 
     // Internal admission-boundary test: scoped-link selection is made before
@@ -2420,7 +2425,13 @@ mod tests {
             let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
                 .await
                 .expect("connect websocket");
-            let json = entry["json"].as_str().expect("fixture JSON").to_owned();
+            let mut json = entry["json"].as_str().expect("fixture JSON").to_owned();
+            // The backend pins every session it states to its bundle.
+            let mut parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            if !parsed["auth"]["backend_session"].is_null() {
+                parsed["bundle"] = serde_json::json!(current_bundle(addr, &state).await);
+                json = parsed.to_string();
+            }
             let message = if entry["writer"] == "typescript-native-runtime" {
                 WsMessage::Text(json.into())
             } else {
@@ -2803,7 +2814,87 @@ mod tests {
         identity: AuthorSubject,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
-        open_negotiated_ws_with_prelude(addr, state, ws_session_prelude(identity)).await
+        let bundle = current_bundle(addr, state).await;
+        open_negotiated_ws_with_prelude(addr, state, ws_pinned_session_prelude(identity, &bundle))
+            .await
+    }
+
+    /// Publish `source` with its own policies as a bundle, as createJazz
+    /// does on boot (`/bundles`, activating nothing); its hex id.
+    async fn publish_source_bundle(state: &Arc<ServerState>, source: &Schema) -> String {
+        use crate::server::deployment::{DeployRequest, DeploySchema, deploy};
+        let mut structural = source.clone();
+        for table in structural.values_mut() {
+            table.policies = TablePolicies::default();
+        }
+        let hash = jazz::tools::public_schema::SchemaHash::compute(&structural).to_string();
+        let permissions = source
+            .iter()
+            .map(|(name, table)| (name.clone(), table.policies.clone()))
+            .collect();
+        let response = deploy(
+            state.clone(),
+            DeployRequest {
+                target_schema_hash: hash.clone(),
+                schemas: vec![DeploySchema {
+                    hash,
+                    schema: structural,
+                }],
+                migrations: Vec::new(),
+                permissions,
+                activate: false,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("publish bundle: {}", error.body));
+        response.bundle.expect("a bundle id")
+    }
+
+    /// The bundle the store published last, which the backend pins its
+    /// sessions to (an empty schema's, when none was): every policy
+    /// session a core serves is pinned to one.
+    async fn current_bundle(_addr: std::net::SocketAddr, state: &Arc<ServerState>) -> String {
+        let latest = match state.runtime() {
+            Some(runtime) => runtime
+                .catalogue()
+                .await
+                .expect("catalogue rows")
+                .bundles
+                .into_iter()
+                .max_by_key(|bundle| bundle.published_at)
+                .map(|bundle| bundle.id.to_hex()),
+            None => None,
+        };
+        if let Some(bundle) = latest {
+            return bundle;
+        }
+        let active = state
+            .catalogue
+            .active_schema(&state.catalogue_store)
+            .expect("read active schema");
+        let source = match active {
+            Some(active) => {
+                let mut schema = state
+                    .catalogue
+                    .known_schema(&state.catalogue_store, &active.summary.schema_hash)
+                    .expect("read active schema")
+                    .expect("the active schema is known");
+                for (name, table) in schema.iter_mut() {
+                    table.policies = active.permissions.get(name).cloned().unwrap_or_default();
+                }
+                schema
+            }
+            None => Schema::new(),
+        };
+        publish_source_bundle(state, &source).await
+    }
+
+    /// A backend session prelude for `identity`, pinned to `bundle`.
+    fn ws_pinned_session_prelude(identity: AuthorSubject, bundle: &str) -> Vec<u8> {
+        let mut prelude: serde_json::Value =
+            serde_json::from_slice(&ws_session_prelude(identity)).unwrap();
+        prelude["bundle"] = serde_json::json!(bundle);
+        prelude.to_string().into_bytes()
     }
 
     async fn open_negotiated_ws_with_prelude(
@@ -4443,12 +4534,11 @@ mod tests {
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .with_core_server_shell_schema(schema.clone())
             .build()
             .await
             .expect("build websocket private docs test state")
             .state;
+        publish_source_bundle(&state, &schema.public_schema().clone()).await;
         let addr = start_ws_test_server(state.clone()).await;
         let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
         let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
@@ -4580,13 +4670,12 @@ mod tests {
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .with_core_server_shell_schema(ws_public_schema_convert())
             .with_max_websocket_connections(2)
             .build()
             .await
             .expect("build capped websocket server state")
             .state;
+        publish_source_bundle(&state, &ws_public_schema_convert().public_schema().clone()).await;
         let addr = start_ws_test_server(state.clone()).await;
 
         let first =
@@ -4637,12 +4726,15 @@ mod tests {
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .with_core_server_shell_schema(ws_public_schema_convert())
             .build()
             .await
             .expect("build first websocket server state")
             .state;
+        publish_source_bundle(
+            &state_a,
+            &ws_public_schema_convert().public_schema().clone(),
+        )
+        .await;
         let state_b = ServerBuilder::new(app_id)
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
@@ -4650,12 +4742,15 @@ mod tests {
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .with_core_server_shell_schema(ws_public_schema_convert())
             .build()
             .await
             .expect("build second websocket server state")
             .state;
+        publish_source_bundle(
+            &state_b,
+            &ws_public_schema_convert().public_schema().clone(),
+        )
+        .await;
         let addr_a = start_ws_test_server(state_a.clone()).await;
         let addr_b = start_ws_test_server(state_b.clone()).await;
         let identity = AuthorSubject::for_test_bytes([0x4a; 16]);
@@ -4934,12 +5029,14 @@ mod tests {
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .with_core_server_shell_schema(schema.clone())
             .build()
             .await
             .expect("build thin test state")
             .state;
+        // A createJazz app's store: its backend publishes the deployment
+        // as a bundle and pins its sessions to it.
+        drop(schema);
+        publish_source_bundle(&state, &source).await;
         (state, source)
     }
 
@@ -4948,10 +5045,11 @@ mod tests {
         state: &Arc<ServerState>,
         identity: AuthorSubject,
     ) -> TestWs {
+        let bundle = current_bundle(addr, state).await;
         open_negotiated_ws_with_prelude_and_features(
             addr,
             state,
-            ws_session_prelude(identity),
+            ws_pinned_session_prelude(identity, &bundle),
             jazz::wire::FEATURE_THIN_RESULTS,
         )
         .await
@@ -5285,12 +5383,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn thin_requests_wait_for_published_permissions() {
+    async fn thin_user_sessions_need_a_pin_while_trusted_links_are_served() {
         use crate::runtime::{ServerRuntimeHandle, StorageConfig};
         use jazz::thin::{ThinBody, ThinOp, ThinRequest};
-        // A catalogue-driven store whose permissions head is not published
-        // serves a user's thin requests nothing yet; a trusted link is
-        // served as SYSTEM, which no permissions govern.
+        // A catalogue-driven store whose permissions head is not published:
+        // a trusted link is served as SYSTEM, which no permissions govern.
         let source = private_docs_public_schema();
         let runtime = ServerRuntimeHandle::start_awaiting_permissions(
             JazzSchema::new(&source).unwrap(),
@@ -5325,10 +5422,14 @@ mod tests {
                 }
             }
         };
-        let ThinBody::Error { code, .. } = answer(CommitUnitTrust::Session).await else {
-            panic!("a user's thin request before any permissions must be refused");
-        };
-        assert_eq!(code, "NotReady");
+        // A user's session is never governed by the store's own
+        // permissions: unpinned, it is refused outright.
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let refused = runtime
+            .open_thin_session(alice, BTreeMap::new(), None, CommitUnitTrust::Session)
+            .await
+            .expect_err("an unpinned user session is refused");
+        assert!(refused.contains("served through createJazz"), "{refused}");
         assert_eq!(answer(CommitUnitTrust::TrustedBackend).await, ThinBody::Ok);
     }
 
@@ -5475,8 +5576,17 @@ mod tests {
         let (state, _) = private_docs_state().await;
         let runtime = state.runtime_for_client().expect("runtime");
         let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bundle = jazz::catalogue::BundleId::from_hex(
+            &current_bundle(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), &state).await,
+        )
+        .expect("bundle id");
         let session = runtime
-            .open_thin_session(alice, BTreeMap::new(), None, CommitUnitTrust::Session)
+            .open_thin_session(
+                alice,
+                BTreeMap::new(),
+                Some(bundle),
+                CommitUnitTrust::Session,
+            )
             .await
             .expect("open thin session");
         let request = |id| jazz::thin::ThinRequest {

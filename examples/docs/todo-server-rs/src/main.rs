@@ -124,6 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         backend_secret: Some(backend_secret),
         // The user this service acts as, named as `createJazz` names its users.
         backend_session: Some(Session::new(format!("jazz:app:{app_id}"), user_id)),
+        bundle: None,
         admin_secret: None,
         migrations,
     };

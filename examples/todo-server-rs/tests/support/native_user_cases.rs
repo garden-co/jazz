@@ -44,6 +44,7 @@ async fn backend_acts_as_one_user_across_workers() {
             format!("jazz:app:{}", server.app_id()),
             "alice",
         )),
+        bundle: None,
         admin_secret: None,
         migrations: Default::default(),
     };

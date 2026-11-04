@@ -242,6 +242,7 @@ impl NativeTransportConnector for NativeWebSocketConnector {
                 request.peer_identity,
                 request.auth,
                 request.authorization,
+                request.bundle,
                 request.wake,
                 request.requested_link,
             )
@@ -424,6 +425,7 @@ impl WebSocketTransport {
             peer_identity,
             auth,
             None,
+            None,
             wake,
             NativeTransportLink::OrdinarySession,
         )
@@ -437,6 +439,7 @@ impl WebSocketTransport {
         peer_identity: AuthorSubject,
         auth: AuthConfig,
         authorization: Option<String>,
+        bundle: Option<String>,
         wake: Arc<dyn Fn() + Send + Sync>,
         requested_link: NativeTransportLink,
     ) -> Result<Self, NativeConnectFailure> {
@@ -449,7 +452,7 @@ impl WebSocketTransport {
         .await
         .map_err(|_| NativeConnectFailure::WebSocket(WebSocketClientError::HandshakeTimeout))??;
 
-        let prelude = encode_prelude(peer_identity, auth, requested_link)?;
+        let prelude = encode_prelude(peer_identity, auth, bundle, requested_link)?;
         tokio::time::timeout_at(deadline, ws.send(Message::Binary(prelude.into())))
             .await
             .map_err(|_| WebSocketClientError::HandshakeTimeout)?
@@ -578,6 +581,9 @@ impl WireTransport for WebSocketTransport {
 struct WebSocketClientPrelude {
     peer_identity: String,
     auth: AuthConfig,
+    /// The published bundle a stated session is pinned to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bundle: Option<String>,
 
     #[serde(skip_serializing_if = "is_ordinary_link")]
     requested_link: NativeTransportLink,
@@ -590,12 +596,14 @@ fn is_ordinary_link(value: &NativeTransportLink) -> bool {
 fn encode_prelude(
     peer_identity: AuthorSubject,
     auth: AuthConfig,
+    bundle: Option<String>,
 
     requested_link: NativeTransportLink,
 ) -> Result<Vec<u8>, WebSocketClientError> {
     serde_json::to_vec(&WebSocketClientPrelude {
         peer_identity: peer_identity.canonical().to_owned(),
         auth,
+        bundle,
 
         requested_link,
     })
@@ -1474,6 +1482,7 @@ mod tests {
                 encode_prelude(
                     identity,
                     auth,
+                    None,
                     if entry["requested_link"] == "scope_isolated_client_relay" {
                         NativeTransportLink::ScopeIsolatedClientRelay
                     } else {
@@ -1530,6 +1539,7 @@ mod tests {
                     peer_identity: AuthorSubject::SYSTEM,
                     auth: AuthConfig::default(),
                     authorization: None,
+                    bundle: None,
                     wake: Arc::new(|| {}),
                 })
                 .await;

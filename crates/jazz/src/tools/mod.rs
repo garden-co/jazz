@@ -82,6 +82,11 @@ pub struct AppContext {
     /// backend states it (the way `createJazz` relays its users' clients).
     /// The client is then that user's session, not the backend's own link.
     pub backend_session: Option<Session>,
+    /// With `backend_session`: the published permissions bundle (its hex
+    /// id) that session is pinned to, as `createJazz` pins every session it
+    /// states. A core governs a stated session only by its bundle, and
+    /// refuses one without.
+    pub bundle: Option<String>,
     /// Admin secret for privileged sync over WebSocket and `/admin/*` HTTP.
     /// On `/ws`, a valid admin secret authenticates this client as the backend.
     pub admin_secret: Option<String>,
@@ -108,6 +113,7 @@ impl AppContext {
             jwt_token: None,
             backend_secret: None,
             backend_session: None,
+            bundle: None,
             admin_secret: None,
             migrations: Default::default(),
         }

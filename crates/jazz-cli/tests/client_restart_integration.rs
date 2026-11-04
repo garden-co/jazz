@@ -233,6 +233,7 @@ fn make_context(app_id: AppId, server_url: String, data_dir: PathBuf, user_id: &
         backend_session: Some(
             Session::new(JWT_ISSUER, user_id).with_claims(json!({ "role": "user" })),
         ),
+        bundle: None,
         admin_secret: None,
         migrations: Default::default(),
     }
@@ -424,6 +425,7 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
         jwt_token: Some(make_jwt("memory-writer")),
         backend_secret: None,
         backend_session: None,
+        bundle: None,
         admin_secret: None,
         migrations: Default::default(),
     };

@@ -113,6 +113,7 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
         jwt_token: None,
         backend_secret: None,
         backend_session: None,
+        bundle: None,
         admin_secret: None,
         migrations: Default::default(),
     };
@@ -494,6 +495,7 @@ async fn local_persistence() {
             jwt_token: None,
             backend_secret: None,
             backend_session: None,
+            bundle: None,
             admin_secret: None,
             migrations: Default::default(),
         };
@@ -530,6 +532,7 @@ async fn local_persistence() {
             jwt_token: None,
             backend_secret: None,
             backend_session: None,
+            bundle: None,
             admin_secret: None,
             migrations: Default::default(),
         };
@@ -592,6 +595,7 @@ fn backend_user_context(
         jwt_token: None,
         backend_secret: Some(TEST_BACKEND_SECRET.to_owned()),
         backend_session: Some(Session::new(format!("jazz:app:{app_id}"), user_id)),
+        bundle: None,
         admin_secret: None,
         migrations: Default::default(),
     }

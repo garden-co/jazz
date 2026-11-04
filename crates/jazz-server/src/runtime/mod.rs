@@ -1922,6 +1922,7 @@ impl Owner {
         let db = block_on(Db::open_file(config, file))
             .map_err(|error| format!("open server store: {error}"))?;
         db.set_authority();
+        db.require_session_pins();
         db.track_closed_subscribers();
         db.set_slow_query_threshold(slow_query_threshold());
         let catalogue = Catalogue::load(&db.catalogue().map_err(|error| error.to_string())?)?;

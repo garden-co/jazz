@@ -810,6 +810,7 @@ impl JazzClient {
                 peer_identity: identity.author,
                 auth: credentials.borrow_and_update().clone(),
                 authorization: None,
+                bundle: context.bundle.clone(),
                 wake: Arc::new(move || wake.notify_one()),
             };
             // The first attempt decides whether the server admits this

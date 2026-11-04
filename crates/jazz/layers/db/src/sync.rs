@@ -9522,13 +9522,13 @@ impl Db {
                 },
             ));
         }
-        // Once createJazz publishes bundles here, its backend pins every
-        // session it opens. An unpinned policy session would be governed by
-        // the current permissions, which createJazz no longer advances, so
-        // a later tightening or rollback would never reach it.
+        // A core's backend (createJazz) pins every session it opens. An
+        // unpinned policy session would be governed by this store's own
+        // permissions, which nothing deploys, so a tightening or rollback
+        // would never reach it.
         if bundle.is_none()
             && identity != AuthorSubject::SYSTEM
-            && crate::catalogue::serves_bundles(&inner.conn)?
+            && (inner.pins_required || crate::catalogue::serves_bundles(&inner.conn)?)
         {
             return Err(Error::new(
                 ErrorCode::Protocol,

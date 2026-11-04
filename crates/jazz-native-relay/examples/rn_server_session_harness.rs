@@ -65,6 +65,7 @@ async fn run() {
             "jazz:app:rn-device",
             "rn-device-core-observer",
         )),
+        bundle: None,
         admin_secret: None,
         migrations: Default::default(),
     })
@@ -156,6 +157,7 @@ async fn run() {
             "jazz:app:rn-device",
             "rn-device-core-recovery-writer",
         )),
+        bundle: None,
         admin_secret: None,
         migrations: Default::default(),
     })

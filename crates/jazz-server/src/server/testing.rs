@@ -322,6 +322,7 @@ impl JazzServer {
             jwt_token: None,
             backend_secret: Some(self.backend_secret().to_string()),
             backend_session: None,
+            bundle: None,
             admin_secret: None,
             migrations: self.published_migrations(),
         }
