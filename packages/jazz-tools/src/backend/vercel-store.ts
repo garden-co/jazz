@@ -275,7 +275,7 @@ highest=$(cat "$data/version" 2>/dev/null || true)
 if [ -n "$highest" ] && newer "$highest" "$version"; then
   # A newer deployment owns this Drive: run its core, never ours.
   if [ ! -s "$data/bin/jazz-napi-$highest.node" ]; then
-    echo "jazz: $highest owns this Drive but its server is missing; not starting $version" >&2
+    echo "jazz: $highest owns this Drive but its core is missing; not starting $version" >&2
     exit 1
   fi
   version=$highest
@@ -291,10 +291,10 @@ if [ ! -s "$addon" ]; then
   mv "$addon.tmp" "$addon"
 fi
 # The pid file may be stale (a resumed snapshot): trust it only if that
-# process runs one of our cores (or a server binary an older script ran).
+# process runs one of our cores.
 pid=$(cat "$run/jazz.pid" 2>/dev/null || true)
 cmdline=$(tr '\\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
-if [ -n "$pid" ] && [[ "$cmdline" == *"$data/bin/jazz-napi-"* || "$cmdline" == *"$data/bin/jazz-tools-"* ]]; then
+if [ -n "$pid" ] && [[ "$cmdline" == *"$data/bin/jazz-napi-"* ]]; then
   [ "$(cat "$run/jazz.version" 2>/dev/null)" = "$version" ] && exit 0
   kill -TERM "$pid" 2>/dev/null || true
   for _ in $(seq 150); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
@@ -309,7 +309,7 @@ export NODE_ENV=production
 mkdir -p "$data/store"
 printf '%s\\n' "$version" > "$data/version.tmp" && mv "$data/version.tmp" "$data/version"
 # Older cores are never started again (see above).
-find "$data/bin" \\( -name 'jazz-tools-*' -o -name 'jazz-napi-*' \\) ! -name "jazz-napi-$version.node" -delete
+find "$data/bin" -name 'jazz-napi-*' ! -name "jazz-napi-$version.node" -delete
 printf '%s\\n' "$version" > "$run/jazz.version"
 echo $$ > "$run/jazz.pid"
 exec 9>&-
