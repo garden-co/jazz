@@ -207,7 +207,7 @@ describe("startLocalJazzServer", () => {
     }
   }, 15_000);
 
-  it("accepts a deployment via /admin/deploy when admin secret matches", async () => {
+  it("accepts a deployment via /admin/bundles when admin secret matches", async () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret-for-ts-schema-sync";
 
@@ -218,7 +218,7 @@ describe("startLocalJazzServer", () => {
     });
 
     try {
-      const response = await fetch(`${server.url}/apps/${server.appId}/admin/deploy`, {
+      const response = await fetch(`${server.url}/apps/${server.appId}/admin/bundles`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -243,7 +243,7 @@ describe("startLocalJazzServer", () => {
     }
   });
 
-  it("rejects a deployment via /admin/deploy when admin secret doesn't match", async () => {
+  it("rejects a deployment via /admin/bundles when admin secret doesn't match", async () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret";
 
@@ -254,7 +254,7 @@ describe("startLocalJazzServer", () => {
     });
 
     try {
-      const response = await fetch(`${server.url}/apps/${server.appId}/admin/deploy`, {
+      const response = await fetch(`${server.url}/apps/${server.appId}/admin/bundles`, {
         method: "POST",
         headers: {
           "content-type": "application/json",

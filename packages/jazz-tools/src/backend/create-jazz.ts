@@ -593,6 +593,10 @@ async function applyBundle(
     }
     throw error;
   });
+  // An older core answers a publish without the bundle it made.
+  if (!deployed.bundle) {
+    throw new Error("createJazz: the core did not publish a permissions bundle; upgrade it");
+  }
   return deployed.bundle;
 }
 

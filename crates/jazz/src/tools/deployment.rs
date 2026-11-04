@@ -170,11 +170,7 @@ pub fn prepare_deployment(
         request.target_schema_hash.0,
     )?;
     let order = topological_order(&schemas, &migrations)?;
-    compatible::validate_compatible_graph(
-        &schemas,
-        &migrations,
-        &representatives,
-    )?;
+    compatible::validate_compatible_graph(&schemas, &migrations, &representatives)?;
     for ((from, to), lens) in &migrations {
         let check = || -> Result<(), String> {
             if lens.is_draft() {

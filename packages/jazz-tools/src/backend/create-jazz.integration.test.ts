@@ -143,7 +143,7 @@ describe("createJazz", () => {
     });
     expect(signedOut.status).toBe(401);
     // Admin and backend routes never leave the process.
-    for (const route of ["admin/deploy", "backend/admit", "admin/permissions"]) {
+    for (const route of ["admin/bundles", "backend/admit", "admin/permissions"]) {
       const response = await fetch(`${origin}/jazz/apps/${appId}/${route}`, {
         method: "POST",
         headers: { "X-Jazz-Admin-Secret": "guess" },

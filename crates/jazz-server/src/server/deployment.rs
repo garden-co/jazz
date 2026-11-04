@@ -197,14 +197,13 @@ pub(crate) async fn deploy(
             let probe =
                 ServerRuntimeHandle::start_with_storage(genesis.clone(), StorageConfig::InMemory)
                     .map_err(DeployError::internal)?;
-            let applied =
-                match change(&probe, &prepared, staged.put.clone(), revision).await {
-                    Ok(change) => probe
-                        .apply_catalogue(change)
-                        .await
-                        .map_err(DeployError::from),
-                    Err(error) => Err(error),
-                };
+            let applied = match change(&probe, &prepared, staged.put.clone(), revision).await {
+                Ok(change) => probe
+                    .apply_catalogue(change)
+                    .await
+                    .map_err(DeployError::from),
+                Err(error) => Err(error),
+            };
             probe.shutdown().await.map_err(DeployError::internal)?;
             applied?;
             state
