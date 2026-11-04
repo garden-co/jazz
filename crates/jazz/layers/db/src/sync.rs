@@ -7263,8 +7263,7 @@ impl Db {
         self.inner.borrow().client.is_some()
     }
 
-    /// Record a local commit's upload (client only); inside an open
-    /// transaction the ops join it. It reads and writes the store, so
+    /// Record a local commit's upload (client only). It reads and writes the store, so
     /// it runs inside the commit's SQLite transaction: an error leaves the
     /// replica's sync state as it was, and the caller rolls the commit back.
     /// `ops` name tables and columns as the schema the write ran under
@@ -7279,20 +7278,14 @@ impl Db {
         relayed: Option<Relayed>,
     ) -> Result<(), Error> {
         let ops = {
-            let mut inner = self.inner.borrow_mut();
+            let inner = self.inner.borrow();
             if inner.client.is_none() {
                 return Ok(());
             }
             let schema = inner.schema.clone();
-            let ops = ops
-                .into_iter()
+            ops.into_iter()
                 .map(|op| inner.stored_op(op, &schema))
-                .collect::<Result<Vec<_>, _>>()?;
-            if inner.tx.is_some() {
-                inner.capture.extend(ops);
-                return Ok(());
-            }
-            ops
+                .collect::<Result<Vec<_>, _>>()?
         };
         self.record_stored_upload(ops, seq, kind, relayed)
     }
@@ -7326,10 +7319,6 @@ impl Db {
         relayed: Option<Relayed>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
-        if inner.tx.is_some() {
-            inner.capture.extend(ops);
-            return Ok(());
-        }
         // A read-only serializable commit still goes up: the authority
         // validates its reads.
         if (ops.is_empty() && !kind.validates_reads()) || seq != inner.seq {

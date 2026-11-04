@@ -651,7 +651,7 @@ pub(crate) fn record_admitted(conn: &Storage, n: i64, schema: &JazzSchema) -> Re
 /// the version): its definition is kept, so a bundle selecting it resolves
 /// on any later open, but `n` stays with the hash first admitted as that
 /// version. A definition already kept is left as it is.
-pub(crate) fn record_equivalent(conn: &Connection, schema: &JazzSchema) -> Result<(), Error> {
+pub(crate) fn record_equivalent(conn: &Storage, schema: &JazzSchema) -> Result<(), Error> {
     if schema.public_schema().is_empty() && !schema.tables().is_empty() {
         return Ok(());
     }
@@ -667,7 +667,7 @@ pub(crate) fn record_equivalent(conn: &Connection, schema: &JazzSchema) -> Resul
 
 /// The structural schema the catalogue keeps as `hash`, if any, checked to
 /// hash to its key.
-pub(crate) fn schema(conn: &Connection, hash: &SchemaHash) -> Result<Option<PublicSchema>, Error> {
+pub(crate) fn schema(conn: &Storage, hash: &SchemaHash) -> Result<Option<PublicSchema>, Error> {
     if !exists(conn)? {
         return Ok(None);
     }

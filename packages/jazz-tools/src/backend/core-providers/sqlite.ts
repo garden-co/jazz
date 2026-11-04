@@ -113,7 +113,8 @@ function refuseServerlessDisk(dir: string): void {
   if (!host) return;
   throw new Error(
     `sqlite({ path: ${JSON.stringify(dir)} }) can't keep data on ${host}: its functions have no lasting disk. ` +
-      "Use remote({ url, appId, secret }) to a sync server or Jazz Cloud.",
+      (host === "Vercel" ? "Use vercel(), whose local store runs sqlite() in dev, or " : "Use ") +
+      "remote({ url, appId, secret }) to a sync server or Jazz Cloud.",
   );
 }
 

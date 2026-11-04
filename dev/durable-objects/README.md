@@ -121,9 +121,10 @@ implementation and is omitted from DO builds. Rust retains scope outcomes and
 undo logs, and the JS bridge throws a private marker for deliberate rollback. Nested
 scopes roll back independently. SQLite commit/rollback hooks run at the
 outermost scope boundary; Cloudflare output gates govern external durability.
-Raw SQL transaction statements are refused. The Rust transaction spanning
-`await` and persistent transaction overlay return typed unsupported errors;
-they are not implemented by this synchronous adapter.
+Raw SQL transaction statements are refused. Rust callback transactions now
+use the same staged batches as TypeScript; their persistent transaction overlay
+still returns a typed unsupported error on DO storage. Supporting that shared
+overlay is the next transaction task, not a separate async SQL callback bridge.
 
 Run the actual WASM/workerd scope and restart checks with:
 

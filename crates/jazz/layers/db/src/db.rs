@@ -641,8 +641,8 @@ struct Inner {
     changed: RefCell<Vec<(String, RowUuid, Vec<u8>)>>,
     /// The write checks of the unit being applied, run at its end.
     deferred: RefCell<Option<Vec<DeferredCheck>>>,
-    /// The open transaction's seq and the tables it wrote.
-    tx: Option<(u64, BTreeSet<String>)>,
+    /// Compatibility routing for the Rust callback API, into an ordinary batch.
+    callback_batch: Option<OpenTransactionId>,
     publications: Vec<SchemaPublication>,
     /// Set once connected upstream: this store is a replica.
     client: Option<sync::Client>,
@@ -688,8 +688,6 @@ struct Inner {
     accepted: u64,
     /// Rows written since the last server tick (only while serving).
     since_tick: Vec<(String, RowUuid, Vec<u8>)>,
-    /// Ops of the open local transaction, for upload, by stored names.
-    pub(crate) capture: Vec<StagedOp>,
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
@@ -1567,7 +1565,7 @@ impl Db {
                 fan: fanout::Fanout::default(),
                 changed: RefCell::new(Vec::new()),
                 deferred: RefCell::new(None),
-                tx: None,
+                callback_batch: None,
                 publications: Vec::new(),
                 client: None,
                 non_durable: false,
@@ -1583,7 +1581,6 @@ impl Db {
                 merge_fallbacks: RefCell::default(),
                 accepted: 0,
                 since_tick: Vec::new(),
-                capture: Vec::new(),
                 gone: RefCell::new(Vec::new()),
                 migrations: config.migrations,
                 withheld: std::cell::Cell::new(withheld > 0),
@@ -2310,10 +2307,13 @@ impl Db {
 
     /// Roll back the open SQLite transaction behind the database's back, as
     /// SQLite itself does after some errors (a full disk, an I/O error).
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn rollback_sqlite_transaction_for_test(&self) {
-        self.inner()
+        // Bypass the ordinary-reader gate: it would unwind the overlay
+        // before we inject SQLite's own full-transaction failure.
+        self.inner
+            .staging()
             .conn
             .execute_batch("ROLLBACK")
             .expect("an open SQLite transaction");
@@ -2496,8 +2496,7 @@ impl Db {
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.fetching(|| {
-            let inner = self.inner();
-            inner.run(prepared, None, &ReadSpec::of(&opts, &inner)?)
+            self.callback_read(|inner| inner.run(prepared, None, &ReadSpec::of(&opts, inner)?))
         })
         .await
     }
@@ -2509,12 +2508,13 @@ impl Db {
         prepared: &PreparedQuery,
         roots: Vec<CurrentRow>,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.inner()
-            .nest_relations(prepared, None, &ReadSpec::default(), roots)
+        self.callback_read(|inner| {
+            inner.nest_relations(prepared, None, &ReadSpec::default(), roots)
+        })
     }
 
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
-        self.inner().run(prepared, None, &ReadSpec::default())
+        self.callback_read(|inner| inner.run(prepared, None, &ReadSpec::default()))
     }
 
     pub async fn all_for_identity(
@@ -2523,8 +2523,9 @@ impl Db {
         opts: ReadOpts,
         identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let inner = self.inner();
-        inner.run(prepared, Some(identity), &ReadSpec::of(&opts, &inner)?)
+        self.callback_read(|inner| {
+            inner.run(prepared, Some(identity), &ReadSpec::of(&opts, inner)?)
+        })
     }
 
     pub async fn all_result_tree(
@@ -2532,21 +2533,22 @@ impl Db {
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<ResultTree, Error> {
-        let inner = self.inner();
-        let read = ReadSpec::of(&opts, &inner)?;
-        let roots = inner.run(prepared, None, &read)?;
-        let mut tree = Vec::with_capacity(roots.len());
-        for row in roots {
-            tree.push(inner.node(
-                prepared,
-                None,
-                &read,
-                &prepared.query.table,
-                &prepared.query.array_subqueries,
-                row,
-            )?);
-        }
-        Ok(ResultTree { roots: tree })
+        self.callback_read(|inner| {
+            let read = ReadSpec::of(&opts, inner)?;
+            let roots = inner.run(prepared, None, &read)?;
+            let mut tree = Vec::with_capacity(roots.len());
+            for row in roots {
+                tree.push(inner.node(
+                    prepared,
+                    None,
+                    &read,
+                    &prepared.query.table,
+                    &prepared.query.array_subqueries,
+                    row,
+                )?);
+            }
+            Ok(ResultTree { roots: tree })
+        })
     }
 
     // ---- subscriptions --------------------------------------------------
@@ -2753,7 +2755,7 @@ impl Db {
         mut opts: InsertOptions,
     ) -> Result<WriteHandle, Error> {
         if opts.row_id.is_none() {
-            opts.row_id = Some(self.inner().ids.next_row_id());
+            opts.row_id = Some(self.inner.staging().ids.next_row_id());
         }
         let who = who(opts.identity);
         let op = StagedOp::Insert(table.to_owned(), cells, opts);
@@ -2810,15 +2812,26 @@ impl Db {
     /// One write. On a client, a local (unauthenticated) write is also an
     /// upload: it is recorded for the authority, which decides its fate.
     fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
+        if let Some(id) = self.callback_batch() {
+            let row = op.row().expect("writes have a row id");
+            let edits = {
+                let mut inner = self.inner.staging();
+                LargeEdits {
+                    derived: std::mem::take(&mut inner.derived),
+                    pending_nodes: std::mem::take(&mut inner.pending_nodes),
+                }
+            };
+            self.stage_with_edits(id, op, edits)?;
+            return Ok(self.callback_write_handle(id, row));
+        }
         self.inner().require_mutation_admission()?;
         let (notify, handle) = self.with_upload(|| {
-            let table = op.table().to_owned();
             let (prior, mark) = {
                 let inner = self.inner();
                 let mark = inner.changed.borrow().len();
                 (inner.seq, mark)
             };
-            let (notify, handle) = self.write_unnotified(&table, |inner, seq| {
+            let (notify, handle) = self.write_unnotified(|inner, seq| {
                 let edits = inner.chunk_large_cells(&mut op)?;
                 inner.counter_deltas(&mut op)?;
                 inner.derived.extend(edits.derived);
@@ -2831,7 +2844,7 @@ impl Db {
             // handle names the row's current version, which may be the
             // newest commit's own seq, so recording it would upload a
             // second commit under that commit's transaction id.
-            let committed = notify || self.inner().tx.is_some();
+            let committed = notify;
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
             if let Err(error) = committed
@@ -2851,12 +2864,11 @@ impl Db {
         Ok(handle)
     }
 
-    /// On a replica, a local commit and its upload record are one SQLite
-    /// transaction (outside an open Jazz transaction, which already is).
+    /// On a replica, a local commit and its upload record are one SQL scope.
     fn with_upload<R>(&self, f: impl FnOnce() -> Result<R, Error>) -> Result<R, Error> {
         let wrap = {
             let inner = self.inner.borrow();
-            inner.client.is_some() && inner.tx.is_none()
+            inner.client.is_some()
         };
         if !wrap {
             return f();
@@ -2864,21 +2876,15 @@ impl Db {
         self.scope("upload_local", || f().map(ScopeOutcome::Commit))
     }
 
-    /// Run one write atomically. Inside a transaction it joins the
-    /// transaction's seq; standalone it commits. Returns whether a
-    /// standalone commit happened, which the caller notifies subscribers of
-    /// once its upload record is in.
+    /// Run one standalone write atomically. Transaction writes use the batch
+    /// path instead. Notify subscribers only after its upload record is in.
     fn write_unnotified(
         &self,
-        table: &str,
         apply: impl FnOnce(&mut Inner, u64) -> Result<WriteHandle, Error>,
     ) -> Result<(bool, WriteHandle), Error> {
         let standalone = {
             let mut inner = self.inner();
-            let (seq, standalone) = match &inner.tx {
-                Some((seq, _)) => (*seq, false),
-                None => (inner.next_seq(), true),
-            };
+            let seq = inner.next_seq();
             let handle = inner.scope("w", |inner| {
                 let mark = inner.changed.borrow().len();
                 match apply(inner, seq) {
@@ -2891,13 +2897,9 @@ impl Db {
             })?;
             let wrote = handle.seq == inner.own_pos(seq);
             if wrote {
-                if standalone {
-                    inner.seq = inner.seq.max(seq);
-                } else if let Some((_, tables)) = &mut inner.tx {
-                    tables.insert(table.to_owned());
-                }
+                inner.seq = inner.seq.max(seq);
             }
-            (standalone && wrote, handle)
+            (wrote, handle)
         };
         Ok(standalone)
     }
@@ -2908,7 +2910,8 @@ impl Db {
         &self,
         callback: impl AsyncFnOnce(&mut MergeableTx<'_>) -> Result<T, Error>,
     ) -> Result<(T, TxReceipt), Error> {
-        self.transaction_as(WriteIdentity::Database, callback).await
+        self.run_transaction(WriteIdentity::Database, callback)
+            .await
     }
 
     /// A transaction whose writes are attributed to `author`. Like every
@@ -2920,67 +2923,61 @@ impl Db {
         author: AuthorSubject,
         callback: impl AsyncFnOnce(&mut MergeableTx<'_>) -> Result<T, Error>,
     ) -> Result<(T, TxReceipt), Error> {
-        self.transaction_as(WriteIdentity::Attribution(author), callback)
+        self.run_transaction(WriteIdentity::Attribution(author), callback)
             .await
     }
 
     /// Run `callback` in one commit, its writes made as `identity`.
-    async fn transaction_as<T>(
+    async fn run_transaction<T>(
         &self,
         identity: WriteIdentity,
         callback: impl AsyncFnOnce(&mut MergeableTx<'_>) -> Result<T, Error>,
     ) -> Result<(T, TxReceipt), Error> {
+        if self.callback_batch().is_some() {
+            return Err(unsupported("nested transactions"));
+        }
+        let id = OpenTransactionId::new();
+        self.begin_mergeable(id).await?;
         {
-            let mut inner = self.inner();
-            inner.require_mutation_admission()?;
-            if inner.tx.is_some() {
-                return Err(unsupported("nested transactions"));
-            }
-            begin_savepoint(&inner.conn, "tx")?;
-            inner.changed.borrow_mut().clear();
+            let mut inner = self.inner.staging();
             let seq = inner.next_seq();
-            inner.tx = Some((seq, BTreeSet::new()));
+            inner.batches.get_mut(&id).expect("opened").sequence = Some(seq);
+            inner.callback_batch = Some(id);
         }
+        // Errors, panics and cancellation all abandon the same staged batch.
+        let guard = CallbackBatch { db: self, id };
         let mut tx = MergeableTx { db: self, identity };
-        let result = callback(&mut tx).await.and_then(|value| {
-            self.inner().require_mutation_admission()?;
-            Ok(value)
-        });
-        let captured;
-        let prior;
-        let changed = {
-            let mut inner = self.inner();
-            let (seq, tables) = inner.tx.take().expect("open transaction");
-            captured = std::mem::take(&mut inner.capture);
-            prior = inner.seq;
-            match &result {
-                Ok(_) => {
-                    if !tables.is_empty() {
-                        // A hold or observe while the tx was open may have
-                        // moved seq past the one it drew.
-                        inner.seq = inner.seq.max(seq);
-                    }
-                    Some((seq, tables))
-                }
-                Err(_) => {
-                    inner.abandon_savepoint("tx")?;
-                    None
-                }
-            }
-        };
-        let value = result?;
-        let (seq, _) = changed.expect("committed");
-        // The upload record joins the transaction's SQLite savepoint.
-        let recorded = self.record_stored_upload(captured, seq, sync::Kind::Mergeable, None);
-        if let Err(error) = recorded {
-            let mut inner = self.inner();
-            inner.seq = prior;
-            inner.abandon_savepoint("tx")?;
-            return Err(error);
+        let value = callback(&mut tx).await?;
+        self.inner.staging().callback_batch = None;
+        let receipt = self.commit_mergeable_handle(id).await?;
+        drop(guard);
+        Ok((value, receipt))
+    }
+
+    fn callback_batch(&self) -> Option<OpenTransactionId> {
+        self.inner.staging().callback_batch
+    }
+
+    fn callback_write_handle(&self, id: OpenTransactionId, row: RowUuid) -> WriteHandle {
+        let inner = self.inner.staging();
+        let seq = inner.batches[&id].sequence.expect("callback sequence");
+        WriteHandle {
+            row,
+            seq: inner.own_pos(seq),
+            tx: seq,
         }
-        end_savepoint(&self.inner.borrow().conn, "tx", true)?;
-        self.notify();
-        Ok((value, TxReceipt(seq)))
+    }
+
+    /// Application reads in a Rust callback see its ordinary transaction overlay.
+    fn callback_read<R>(
+        &self,
+        read: impl FnOnce(&mut Inner) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        if let Some(id) = self.callback_batch() {
+            self.in_overlay(id, None, |inner, _| read(inner))
+        } else {
+            read(&mut self.inner())
+        }
     }
 
     // ---- schema evolution -------------------------------------------------
@@ -3652,6 +3649,22 @@ fn delta(
     }
 }
 
+struct CallbackBatch<'a> {
+    db: &'a Db,
+    id: OpenTransactionId,
+}
+impl Drop for CallbackBatch<'_> {
+    fn drop(&mut self) {
+        {
+            let mut inner = self.db.inner.staging();
+            if inner.callback_batch == Some(self.id) {
+                inner.callback_batch = None;
+            }
+        }
+        let _ = self.db.abandon_transaction_handle(self.id);
+    }
+}
+
 /// A mergeable transaction: writes join one commit, reads see them.
 pub struct MergeableTx<'a> {
     db: &'a Db,
@@ -3775,13 +3788,6 @@ impl Inner {
             ));
         }
         Ok(())
-    }
-
-    /// Undo everything since `SAVEPOINT name`. Its changes are forgotten
-    /// first, so no subscriber hears of them whatever happens next.
-    fn abandon_savepoint(&self, name: &str) -> Result<(), Error> {
-        self.changed.borrow_mut().clear();
-        end_savepoint(&self.conn, name, false)
     }
 
     /// Published bundle `id`, resolved: the write version it selects and
@@ -7566,7 +7572,7 @@ impl MergeableTxHandle<'_> {
         let db = self.db;
         let identity = self.identity;
         let ((), receipt) = db
-            .transaction_as(identity, async |_tx| {
+            .run_transaction(identity, async |_tx| {
                 for op in ops {
                     match op {
                         StagedOp::Insert(t, c, o) => db
@@ -7910,6 +7916,8 @@ impl Store {
 }
 
 struct Batch {
+    /// The Rust callback API exposes write receipts before commit.
+    sequence: Option<u64>,
     kind: BatchKind,
     ops: Vec<(Rc<Schema>, StagedOp)>,
     /// What the batch's partial large-value updates built: descriptors
@@ -8415,6 +8423,7 @@ impl Db {
         inner.batches.insert(
             id,
             Batch {
+                sequence: None,
                 kind,
                 ops: Vec::new(),
                 edits: LargeEdits::default(),
@@ -8633,7 +8642,7 @@ impl Db {
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();
-            let seq = inner.next_seq();
+            let seq = batch.sequence.unwrap_or_else(|| inner.next_seq());
             let mark = inner.scope("commit_batch", |inner| {
                 let mark = inner.changed.borrow().len();
                 inner.defer_checks();

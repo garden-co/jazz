@@ -74,31 +74,71 @@ in the same workerd process are checked for independent storage ownership. Run
 `native-sqlite/harness/test-scopes.mjs` as documented in the README.
 
 This completes synchronous callback scopes, not all transaction APIs. Raw SQL
-savepoints are now refused. The Rust transaction spanning `await` and persistent
-overlay fail explicitly; their implementations remain in sections 4 and 5.
+savepoints are refused by the DO adapter. Rust and TypeScript now share staged
+transactions (section 4); their persistent overlay still needs section 5.
 Single-connection chunk storage and bounded caching remain in section 7.
 
-## 4. Support transactions across await explicitly
+## 4. Unify Rust and TypeScript transaction implementations — completed
 
-First prove a bridge where DO `storage.transaction(async () => ...)` owns and
-awaits the complete Rust transaction future. Pass an explicit transaction
-context through Jazz operations, translating errors into callback rejection.
-Prevent unrelated requests and ticks from joining Cloudflare's implicit active
-transaction. Test nested scopes, cancellation, and awaits that need engine
-progress so admission control cannot deadlock. DO supports async transactions;
-write staging and failing on the first suspended poll are alternatives to
-evaluate, not approved defaults.
+Rust callback transactions and `MergeableTxHandle::commit` now use the same
+staged batches, overlay validation, and commit path as the TypeScript bindings.
+Removed `transaction_as`, its callback-lifetime SQL savepoint, and its separate
+upload capture buffer. The callback facade retains owner/view write routing
+and early write receipts; it does not implement another SQL transaction engine.
+Errors and cancellation abandon the batch, including its retained upload leases.
 
-## 5. Adapt staged transactions and overlays
+This replaces the proposed async DO transaction bridge: an async application
+callback does not itself require a SQL transaction spanning the callback.
+The existing staged overlay still retains a savepoint between calls and can
+therefore span awaits; replacing that representation remains section 5. Do not
+claim full DO transaction support until that work is complete.
 
-The current overlay retains a SQLite savepoint between calls, which cannot
-escape a `transactionSync` callback. Design a bounded replacement for this
-cached speculative view while preserving read-your-writes, isolation from
-ordinary readers, read-prefix behavior, and serializable snapshot/conflict
-validation. Evaluate an incremental overlay against the existing query and
-policy machinery before choosing its representation. Do not replay the whole
-batch for every operation or load whole tables. Buffering writes alone does
-not establish isolation; any initially unsupported operation must fail explicitly.
+Native regression coverage includes callback suspension/resumption,
+cancellation, caught errors, read-your-writes, schema-view writes, commit
+receipts, upload-record failures, and large-value edits and streaming.
+
+## 5. Replace the persistent transaction overlay — in progress
+
+Client DBs and servers serving thin-client transactions use the same staged
+transaction engine: begin a batch, stage writes, read through its private view,
+then validate and commit or abandon it. For a full client DB this runs locally;
+for a thin client it runs on the server across separate protocol messages.
+Application transactions executed directly on an authority use it too.
+An authority receiving completed replica sync batches does not need this
+persistent overlay; that path already uses short synchronous scopes.
+
+Today pending writes become queryable by applying them to ordinary tables
+inside a cached SQLite savepoint. It stays open between operations and is
+rolled back before unrelated access. Replace this representation so speculative
+state survives between calls without holding a SQL transaction open.
+
+An async DO `storage.transaction()` cannot provide that lifetime: our local
+[workerd probe](README.md#async-overlay-lifetime-probe) blocks incoming HTTP and
+WebSocket handlers until the transaction exits. This prevents thin clients'
+next operation or commit from running, and prevents a client DB from receiving
+sync responses needed by remote reads. This has not been tested on deployed
+Cloudflare. Keep `transactionSync` for short rollback scopes and atomic commit.
+
+Build on existing snapshot and branch-view machinery rather than a separate
+query engine. `Cut` already selects a snapshot plus a transaction's own versions;
+`View` composes a branch head over a live or frozen base. Evaluate an incremental
+private transaction layer that makes staged versions available to those queries
+without exposing them to ordinary reads, history, subscriptions, or sync. Reusing
+view composition does not require turning transactions into public branches.
+The storage representation is not yet chosen.
+
+Preserve mergeable and serializable semantics, read-your-writes, read-prefix
+behavior across awaits, permission checks, conflict validation, and chunk/cache
+ownership. Commit through the existing validation and write path in a synchronous
+scope; abort or session loss must discard speculative state. Bound memory and
+cleanup by the transaction's touched data. Do not replay the whole batch on every
+operation or load whole tables; unsupported shapes must fail explicitly.
+
+First prove staged inserts, updates, and deletions with private transactional
+reads, ordinary-reader isolation, intervening committed writes, and existing
+conflict behavior. Then cover joins, permissions, read prefixes, large values,
+and thin-session disconnects through the shared engine. Section 5 remains required
+for full DO transaction support, even when the DO is only used as a server.
 
 ## 6. Preserve exact SQL values through JavaScript
 
@@ -170,9 +210,10 @@ sync. Use same-base CodSpeed comparisons for end-to-end performance claims.
 
 ## Delivery order
 
-Start with the refreshed harness, native scope semantics, and the async bridge
-proof. Then implement typed DO storage and single-connection chunk access,
-followed by the shared core, lifecycle, and provider. Resolve overlay support
+The refreshed harness, SQL storage boundary, callback scopes, and unified
+transaction implementation are in place. Next adapt the shared staged overlay,
+then exact SQL values and single-connection chunk access, followed by the shared
+core, lifecycle, and provider. Resolve overlay support
 before claiming full transaction compatibility. Workers-hosted `createJazz()`
 and hibernation have separate acceptance criteria.
 
