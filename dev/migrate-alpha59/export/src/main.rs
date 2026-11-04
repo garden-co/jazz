@@ -229,38 +229,19 @@ async fn export_versions<W: std::io::Write>(
     });
     // What alpha.59 reads as each row's current state, so verify can check
     // the import against alpha.59 itself rather than against its own replay.
-    let rows: Vec<_> = versions
-        .iter()
-        .map(|version| (version.schema, version.table.clone(), version.row))
-        .collect();
     let tx_ref = |tx: jazz::tx::TxId| dump::TxRef {
         node: *tx.node.as_bytes(),
         time: tx.time.0,
     };
-    let creations: std::collections::HashMap<([u8; 16], dump::TxRef), (dump::Author, u64)> =
-        versions
-            .iter()
-            .filter(|version| version.deletion.is_none())
-            .map(|version| {
-                (
-                    (*version.row.0.as_bytes(), tx_ref(version.tx)),
-                    (convert_author(&version.created_by), version.created_at.0),
-                )
-            })
-            .collect();
-    for (schema, table, row, content, deletion) in
-        node.migrate_export_current(&rows).await.map_err(err)?
-    {
-        let content = content.map(tx_ref);
-        let created = content.and_then(|tx| creations.get(&(*row.0.as_bytes(), tx)).cloned());
+    for current in node.migrate_export_current(&versions).await.map_err(err)? {
         writer
             .write(&dump::Record::Current(dump::Current {
-                schema: *schema.0.as_bytes(),
-                table,
-                row: *row.0.as_bytes(),
-                content,
-                deletion: deletion.map(tx_ref),
-                created,
+                schema: *current.schema.0.as_bytes(),
+                table: current.table,
+                row: *current.row.0.as_bytes(),
+                content: current.content.map(tx_ref),
+                deletion: current.deletion.map(tx_ref),
+                created: current.created.map(|(by, at)| (convert_author(&by), at.0)),
             }))
             .map_err(err)?;
     }
@@ -349,6 +330,14 @@ fn convert_version(version: ExportedVersion) -> Result<dump::Version, String> {
         row: *version.row.0.as_bytes(),
         tx_node: *version.tx.node.as_bytes(),
         tx_time: version.tx.time.0,
+        parents: version
+            .parents
+            .iter()
+            .map(|tx| dump::TxRef {
+                node: *tx.node.as_bytes(),
+                time: tx.time.0,
+            })
+            .collect(),
         global_time: version.global_time.map(|time| time.0),
         fate: match &version.fate {
             Fate::Accepted => "accepted".to_owned(),

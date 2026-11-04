@@ -142,7 +142,14 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
                 }
                 let version = match to_head.translate(version)? {
                     Translated::Kept(version) => version,
-                    Translated::TableGone => unreachable!("its table is in the active schema"),
+                    Translated::TableGone => {
+                        return Err(format!(
+                            "{} row {}: its table is in the active schema, but its version \
+                             translates to none",
+                            key.0,
+                            uuid_string(key.1)
+                        ));
+                    }
                 };
                 let winners = if version.deletion.is_none() {
                     &mut content

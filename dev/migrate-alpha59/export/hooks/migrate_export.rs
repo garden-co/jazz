@@ -29,6 +29,8 @@ pub struct ExportedVersion {
     pub branch: BranchKey,
     pub row: RowUuid,
     pub tx: TxId,
+    /// Transactions the version was written on top of.
+    pub parents: Vec<TxId>,
     pub made_by: AuthorSubject,
     pub kind: TxKind,
     pub fate: Fate,
@@ -43,6 +45,19 @@ pub struct ExportedVersion {
     /// cells are null.
     pub cells: BTreeMap<String, Value>,
     pub user_metadata_json: Option<String>,
+}
+
+/// What alpha.59 reads as one row's current state in one physical table.
+#[derive(Clone, Debug)]
+pub struct ExportedCurrent {
+    /// A schema and table of a version that located the row.
+    pub schema: SchemaVersionId,
+    pub table: String,
+    pub row: RowUuid,
+    pub content: Option<TxId>,
+    pub deletion: Option<TxId>,
+    /// The content winner's `created_by` and `created_at`.
+    pub created: Option<(AuthorSubject, TxTime)>,
 }
 
 /// The node's runtime catalogue: every schema version and lens it admitted.
@@ -113,38 +128,53 @@ where
     /// What this node itself reads as each row's current state: the
     /// transactions of its settled content and deletion winners. `rows` names
     /// each row by a schema and table it was written under.
+    /// What alpha.59 reads as each row's current state, once per physical
+    /// table and row the versions touch: its content and deletion winners,
+    /// and the creation it reads off the content winner.
     pub async fn migrate_export_current(
         &mut self,
-        rows: &[(SchemaVersionId, String, RowUuid)],
-    ) -> Result<Vec<(SchemaVersionId, String, RowUuid, Option<TxId>, Option<TxId>)>, Error> {
-        let mut seen = std::collections::BTreeSet::new();
-        let mut out = Vec::new();
-        for (schema, table, row) in rows {
-            let table_id = self
-                .catalogue
+        versions: &[ExportedVersion],
+    ) -> Result<Vec<ExportedCurrent>, Error> {
+        let table_id = |schema: &SchemaVersionId, table: &str| {
+            self.catalogue
                 .physical_mappings
                 .get(schema)
                 .and_then(|mapping| mapping.tables.get(table))
                 .map(|mapping| mapping.table_id)
-                .ok_or(Error::InvalidStoredValue("physical table mapping missing"))?;
-            if !seen.insert((table_id.0, row.0)) {
-                continue;
+                .ok_or(Error::InvalidStoredValue("physical table mapping missing"))
+        };
+        let mut creations = std::collections::HashMap::new();
+        let mut rows = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for version in versions {
+            let id = table_id(&version.schema, &version.table)?;
+            if version.deletion.is_none() {
+                creations.insert(
+                    (id.0, version.row.0, version.tx),
+                    (version.created_by, version.created_at),
+                );
             }
+            if seen.insert((id.0, version.row.0)) {
+                rows.push((id, version.schema, version.table.clone(), version.row));
+            }
+        }
+        let mut out = Vec::new();
+        for (id, schema, table, row) in rows {
             let content = self
-                .visible_global_layer_tx_id_for_physical_table_now(
-                    table_id,
-                    *row,
-                    VersionLayer::Content,
-                )
+                .visible_global_layer_tx_id_for_physical_table_now(id, row, VersionLayer::Content)
                 .await;
             let deletion = self
-                .visible_global_layer_tx_id_for_physical_table_now(
-                    table_id,
-                    *row,
-                    VersionLayer::Deletion,
-                )
+                .visible_global_layer_tx_id_for_physical_table_now(id, row, VersionLayer::Deletion)
                 .await;
-            out.push((*schema, table.clone(), *row, content, deletion));
+            let created = content.and_then(|tx| creations.get(&(id.0, row.0, tx)).copied());
+            out.push(ExportedCurrent {
+                schema,
+                table,
+                row,
+                content,
+                deletion,
+                created,
+            });
         }
         Ok(out)
     }
@@ -180,6 +210,7 @@ where
             branch: version.branch_key().clone(),
             row: version.row_uuid(),
             tx: tx_id,
+            parents: version.parents(),
             made_by: tx.tx.made_by,
             kind: tx.tx.kind,
             fate: tx.fate.clone(),

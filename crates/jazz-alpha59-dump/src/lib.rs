@@ -177,6 +177,8 @@ pub struct Version {
     pub tx_node: [u8; 16],
     /// Packed HLC: physical milliseconds << 18 | counter.
     pub tx_time: u64,
+    /// Transactions this version was written on top of.
+    pub parents: Vec<TxRef>,
     pub global_time: Option<u64>,
     /// `accepted`, `pending` or `rejected:<reason>`.
     pub fate: String,
@@ -296,7 +298,8 @@ impl<R: Read> Reader<R> {
         match reader.next_record()? {
             Some(Record::Header(header)) if header.format == DUMP_FORMAT => Ok((reader, header)),
             Some(Record::Header(header)) => Err(io::Error::other(format!(
-                "dump format {} is not {DUMP_FORMAT}",
+                "dump format {} is not {DUMP_FORMAT}: export the store again with the \
+                 jazz-alpha59-export attached to the GitHub release of this jazz-tools version",
                 header.format
             ))),
             _ => Err(io::Error::other("dump does not start with a header")),
@@ -366,6 +369,7 @@ mod tests {
             row: [3; 16],
             tx_node: [4; 16],
             tx_time: 5 << 18,
+            parents: vec![],
             global_time: Some(6),
             fate: "accepted".into(),
             made_by: Author::System,
@@ -394,6 +398,24 @@ mod tests {
         }
         assert_eq!(records, vec![version("todos"), version("todos")]);
         assert_eq!(reader.footer().digest, footer.digest);
+    }
+
+    #[test]
+    fn another_format_is_refused_with_a_re_export_hint() {
+        let old = Header {
+            format: DUMP_FORMAT - 1,
+            ..header()
+        };
+        let (bytes, _) = Writer::new(Vec::new(), old).unwrap().finish().unwrap();
+        let Err(error) = Reader::open(bytes.as_slice()) else {
+            panic!("an older format was read");
+        };
+        let error = error.to_string();
+        assert!(error.contains(&format!(
+            "dump format {} is not {DUMP_FORMAT}",
+            DUMP_FORMAT - 1
+        )));
+        assert!(error.contains("export the store again"), "{error}");
     }
 
     #[test]

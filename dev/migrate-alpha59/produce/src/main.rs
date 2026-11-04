@@ -521,8 +521,9 @@ fn v2_rows(db: &Db) {
         &[("body", s("edited"))],
     );
     // Settled out of order, as an insert synced late from an offline client
-    // is: its update commits first, and the insert after it wins. alpha.59
-    // then credits the row's creation to the insert, not to the version
+    // is: the update, written on top of the insert, settles first, and the
+    // older insert after it does not replace it. The update stays the
+    // winner, but carries the insert's creation, which is not the version
     // first in commit order.
     let inserted = block_on(db.insert(
         "projects",
