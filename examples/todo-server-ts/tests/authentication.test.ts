@@ -32,6 +32,11 @@ it.each([true, false])(
     const upstream = await startLocalJazzServer({
       inMemory: true,
       allowLocalFirstAuth: upstreamAllows,
+    });
+    const { bundle } = await deploy({
+      serverUrl: upstream.url,
+      appId: upstream.appId,
+      adminSecret: upstream.adminSecret,
       schema: app,
       permissions,
     });
@@ -44,6 +49,7 @@ it.each([true, false])(
             appId: upstream.appId,
             serverUrl: upstream.url,
             backendSecret: upstream.backendSecret,
+            bundle,
           },
         ),
         0,
@@ -110,7 +116,7 @@ describe("Todo Server request authentication", () => {
   beforeAll(async () => {
     jwtIssuer = await startTestJwtIssuer();
     upstream = await startLocalJazzServer();
-    await deploy({
+    const { bundle } = await deploy({
       serverUrl: upstream.url,
       appId: upstream.appId,
       adminSecret: upstream.adminSecret,
@@ -129,6 +135,7 @@ describe("Todo Server request authentication", () => {
           serverUrl: upstream.url,
           backendSecret: upstream.backendSecret,
           adminSecret: upstream.adminSecret,
+          bundle,
         },
       ),
       0,
