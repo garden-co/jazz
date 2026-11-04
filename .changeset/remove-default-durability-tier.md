@@ -7,7 +7,7 @@
 Also removed, as part of the same cleanup:
 
 - The `tier` option on Node backend sessions (`createJazzSession`). A backend that set `tier: "local"` with a `serverUrl` used to read local-first; it now reads `"remote"` by default and waits on the server. Pass `tier: "local-first"` on reads that should not wait.
-- The `clientId`, `runtimeSources` and `tier` fields of Rust's `AppContext`. The client `runtimeSources` option is unchanged.
+- The `clientId`, `runtimeSources` and `tier` fields of the TypeScript `AppContext` config. The client `runtimeSources` option is unchanged.
 - The `sqliteStorage` option on React Native `createDb()` (`ReactNativeDbConfig`). It was always rejected; storage is owned by the native runtime.
 - The React Native exports `UnimplementedSqliteStorageDriver`, `ReactNativeSqliteConnection`, `ReactNativeSqliteStorageDriver`, `ReactNativeSqliteTransaction`, `REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR` and `REACT_NATIVE_SQLITE_STORAGE_UNIMPLEMENTED_ERROR`.
 - The `--jazz-bin` flag of `jazz-tools validate`. It had no effect.
