@@ -14,7 +14,9 @@ if (!project || !stateDir) throw new Error("usage: mixed-version-client.mjs <pro
 mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 const require = createRequire(join(project, "package.json"));
 const { schema: s } = await import(pathToFileURL(require.resolve("jazz-tools")));
-const { createJazzClient } = await import(pathToFileURL(require.resolve("jazz-tools/backend")));
+const backendModule = await import(pathToFileURL(require.resolve("jazz-tools/backend")));
+// Releases before alpha.60 call it createJazzSession.
+const createJazzClient = backendModule.createJazzClient ?? backendModule.createJazzSession;
 const version = JSON.parse(
   readFileSync(join(project, "node_modules", "jazz-tools", "package.json"), "utf8"),
 ).version;

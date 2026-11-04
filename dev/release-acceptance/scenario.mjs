@@ -7,9 +7,10 @@ const [configPath, phase] = process.argv.slice(2);
 const c = JSON.parse(readFileSync(configPath, "utf8"));
 const require = createRequire(join(c.project, "package.json"));
 const { schema: s } = await import(pathToFileURL(require.resolve("jazz-tools")));
-const { createJazz, createJazzClient, remote } = await import(
-  pathToFileURL(require.resolve("jazz-tools/backend"))
-);
+const backendModule = await import(pathToFileURL(require.resolve("jazz-tools/backend")));
+const { createJazz, remote } = backendModule;
+// Baseline packages that predate the rename call it createJazzSession.
+const createJazzClient = backendModule.createJazzClient ?? backendModule.createJazzSession;
 const app = s.defineApp(
   {
     docs: s.table({ label: s.string(), body: s.string(), metadata: s.json() }, {}),
@@ -60,7 +61,7 @@ async function openBackend() {
     // backend session with the core's backend secret instead.
     assert.equal(c.phase, "baseline", "candidate packages must provide createJazz with remote()");
     const session = await timeout(
-      createJazzSession({
+      createJazzClient({
         appId: c.appId,
         serverUrl: c.serverUrl,
         app,
