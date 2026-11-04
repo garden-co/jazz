@@ -21,6 +21,8 @@ async function setup(
 ) {
   let backendUser: AccountHandle | null = null;
   const events: string[] = [];
+  let openFails = false;
+  let openGate: Promise<void> | undefined;
   const loginWithBackend = vi.fn(async () => {
     if (!backendUser) throw new Error("signed_out");
     return backendUser;
@@ -37,12 +39,16 @@ async function setup(
   const session = await createJazzSessionOwner({
     accounts,
     clearOnSignOut: options.clearOnSignOut,
-    openClient: async (account) => ({
-      db: {
-        deleteClientStorage: async () => void events.push(`wipe:${account.identity.subject}`),
-      },
-      shutdown: async () => void events.push(`close:${account.identity.subject}`),
-    }),
+    openClient: async (account) => {
+      await openGate;
+      if (openFails) throw new Error("open failed");
+      return {
+        db: {
+          deleteClientStorage: async () => void events.push(`wipe:${account.identity.subject}`),
+        },
+        shutdown: async () => void events.push(`close:${account.identity.subject}`),
+      };
+    },
   });
   let focus: (() => void) | undefined;
   const posts = vi.fn();
@@ -83,6 +89,16 @@ async function setup(
     focus: () => focus?.(),
     otherTab: () => otherTab?.(),
     hasListeners: () => !!focus || !!otherTab,
+    failOpen: (fails: boolean) => (openFails = fails),
+    /** Hold opening clients until the returned release is called. */
+    holdOpen() {
+      let release!: () => void;
+      openGate = new Promise((resolve) => (release = resolve));
+      return () => {
+        openGate = undefined;
+        release();
+      };
+    },
   };
 }
 
@@ -186,16 +202,103 @@ it("follows the backend at once on reauthenticate, and only reconnects on a refu
   await t.session.close();
 });
 
-it("waits for a running check before following a reauthenticate", async () => {
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+it("answers a reauthenticate with a probe made after it, not a running check's stale one", async () => {
   const t = await setup(undefined);
   await settle();
-  t.signIn(user("alice"));
+  // A focus check asks before the app signs in, and its answer arrives late.
+  const stale = deferred<AccountIdentity | null>();
+  t.probe.mockReturnValueOnce(stale.promise);
   t.focus();
-  const asked = t.watch.reauthenticate();
+  t.signIn(user("alice"));
+  let answered = false;
+  const asked = t.watch.reauthenticate().then(() => (answered = true));
+  await settle();
+  expect(answered).toBe(false);
+  stale.resolve(null);
   await asked;
+  expect(t.probe).toHaveBeenCalledTimes(3);
   expect(t.session.getSnapshot().account?.identity.subject).toBe("alice");
   expect(t.loginWithBackend).toHaveBeenCalledOnce();
   t.watch.stop();
+  await t.session.close();
+});
+
+it("follows a reauthenticate asked mid-transition once the session settles", async () => {
+  const t = await setup(undefined);
+  await settle();
+  t.signIn(user("alice"));
+  const release = t.holdOpen();
+  const signingIn = t.session.loginWithBackend();
+  await settle();
+  expect(t.session.getSnapshot().status).toBe("transitioning");
+  // A focus check finishing meanwhile doesn't answer the waiting reauthenticate.
+  t.focus();
+  t.signIn(user("bob"));
+  let answered = false;
+  const asked = t.watch.reauthenticate().then(() => (answered = true));
+  await settle();
+  expect(answered).toBe(false);
+  release();
+  await signingIn;
+  await asked;
+  expect(t.session.getSnapshot()).toMatchObject({ status: "ready" });
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("bob");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("recovers a session left in error for the same user on reauthenticate", async () => {
+  const t = await setup(undefined);
+  await settle();
+  t.signIn(user("alice"));
+  t.failOpen(true);
+  await expect(t.watch.reauthenticate()).rejects.toThrow("open failed");
+  expect(t.session.getSnapshot()).toMatchObject({ status: "error" });
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("alice");
+  t.failOpen(false);
+  await t.watch.reauthenticate();
+  expect(t.session.getSnapshot()).toMatchObject({ status: "ready" });
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("alice");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("rejects a reauthenticate when the backend can't be asked", async () => {
+  const t = await setup(undefined);
+  await settle();
+  t.signIn(user("alice"));
+  t.probe.mockRejectedValueOnce(new AccountAuthError("unavailable", 503));
+  const failed = t.watch.reauthenticate();
+  await expect(failed).rejects.toThrow("Jazz could not ask your backend who is signed in");
+  await expect(failed).rejects.toMatchObject({ cause: expect.any(AccountAuthError) });
+  expect(t.session.getSnapshot().status).toBe("signed-out");
+  // The next one asks again.
+  await t.watch.reauthenticate();
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("alice");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("answers a reauthenticate waiting on a transition when the watch stops", async () => {
+  const t = await setup(undefined);
+  await settle();
+  t.signIn(user("alice"));
+  const release = t.holdOpen();
+  const signingIn = t.session.loginWithBackend();
+  await settle();
+  const probes = t.probe.mock.calls.length;
+  const asked = t.watch.reauthenticate();
+  t.watch.stop();
+  await asked;
+  expect(t.probe).toHaveBeenCalledTimes(probes);
+  release();
+  await signingIn;
   await t.session.close();
 });
 

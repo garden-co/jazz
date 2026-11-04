@@ -17,7 +17,12 @@ export interface JazzUser {
   readonly id: string;
   /** The issuer Jazz records for your backend's users. */
   readonly issuer: string;
-  /** The extra claims `authenticate` returned (`session.claims` in permissions). */
+  /**
+   * The extra claims `authenticate` returned (`session.claims` in
+   * permissions), as of this user's sign-in. Jazz doesn't update them while
+   * the same user stays signed in: claims that changed (a role or an org
+   * switch) show after the next sign-in, or a page reload.
+   */
   readonly claims: Readonly<Record<string, unknown>>;
 }
 
@@ -214,9 +219,11 @@ export function createJazzAppOwner<Config, Client>(
       return task;
     },
     async reauthenticate() {
-      const current = requireSession() as JazzSession<Client> & ReauthenticatingSession;
       failure = undefined;
       try {
+        // Asked while starting: follow the backend once the session exists.
+        if (!session && pending) await pending;
+        const current = requireSession() as JazzSession<Client> & ReauthenticatingSession;
         if (!current.reauthenticate)
           throw new Error(
             "This Jazz session does not follow a backend: reauthenticate is not supported",

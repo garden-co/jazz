@@ -22,7 +22,9 @@ export interface BackendWatch {
   /**
    * The app's own auth changed (it signed in, out or as someone else): ask the
    * backend now, and follow its answer without waiting for a second one.
-   * Resolves once the session follows that answer.
+   * Resolves once the session follows that answer; rejects when the backend
+   * can't be asked (a network error or a 5xx) or following it fails. A
+   * session in error for the same user retries.
    */
   reauthenticate(): Promise<void>;
   stop(): void;
@@ -45,8 +47,9 @@ export interface BackendWatch {
  * A sync server refusing the sign-in (`authRefused`) asks the backend too, but
  * only to reconnect, with backoff, while it still names the same user. It
  * never signs anyone out: a background tab's cookie may just be stale, so a
- * sign-out waits for a check after focus returns (or for the provider). A probe that reports there is no
- * backend (404) stops the watch.
+ * sign-out waits for a check after focus returns (or for the app to call
+ * `reauthenticate`). A probe that reports there is no backend (404) stops the
+ * watch.
  */
 export function watchBackendUser<Client>(
   session: JazzSession<Client>,
@@ -90,8 +93,11 @@ export function watchBackendUser<Client>(
   // one (only reconnects) and an asked one (the app's auth changed: no
   // confirming second answer) are kept apart.
   let again: { plain: boolean; refused: boolean; asked: boolean } | undefined;
-  // `reauthenticate` callers, settled once no check runs or waits.
-  let waiters: Array<() => void> = [];
+  // `reauthenticate` callers not yet answered. An asked check takes the ones
+  // waiting when it starts, so each is answered by a probe made after it
+  // called, and settles them once it has followed (or failed to follow) it.
+  type Waiter = { resolve(): void; reject(error: Error): void };
+  let waiters: Waiter[] = [];
   let announced = session.getSnapshot().account;
 
   const settled = () => {
@@ -102,32 +108,54 @@ export function watchBackendUser<Client>(
   // its auth changed is how it recovers.
   const askable = () => settled() || session.getSnapshot().status === "error";
   const quiet = (asked = false) => stopped || !(asked ? askable() : settled());
-  async function ask(): Promise<AccountIdentity | null | "unknown"> {
+  async function ask(): Promise<AccountIdentity | null | { failed: unknown }> {
     try {
       return await probe();
     } catch (cause) {
       if (cause instanceof AccountAuthError && cause.status === 404) watch.stop();
-      return "unknown";
+      return { failed: cause };
     }
   }
-  async function once(refused: boolean, asked = false) {
-    if (quiet(asked)) return;
+  /**
+   * One check. An asked one throws when it can't follow the backend, and
+   * returns "again" when the session started a transition meanwhile, so it
+   * asks again once that settles.
+   */
+  async function once(refused: boolean, asked = false): Promise<"again" | void> {
+    // Plain checks swallow a failed transition: the session shows it.
+    const attempt = (run: Promise<unknown>) =>
+      asked
+        ? run.then(() => {})
+        : run.then(
+            () => {},
+            () => {},
+          );
+    const busy = () => (asked && !stopped ? "again" : undefined);
+    if (quiet(asked)) return busy();
     let signedIn = await ask();
-    if (signedIn === "unknown" || quiet(asked)) return;
+    if (signedIn !== null && "failed" in signedIn) {
+      if (!asked) return;
+      throw new Error("Jazz could not ask your backend who is signed in", {
+        cause: signedIn.failed,
+      });
+    }
+    if (quiet(asked)) return busy();
     const current = session.getSnapshot().account?.identity;
     if (current?.issuer === SYSTEM_ISSUER) return;
     const backendUser = current !== undefined && current.issuer !== LOCAL_FIRST_ISSUER;
     if (signedIn) {
       if (current?.issuer === signedIn.issuer && current.subject === signedIn.subject) {
+        // The same user, whose client failed to open: the app asking is
+        // how it recovers.
+        if (asked && session.getSnapshot().status === "error") return attempt(session.retry());
         // Still signed in: the refusal came from expired cookies on the old socket.
         if (refused || refusedPending) scheduleReconnect();
         return;
       }
       if (refused) return;
-      if (backendUser) await session.logout().catch(() => {});
-      if (quiet(asked)) return;
-      await session.loginWithBackend().catch(() => {});
-      return;
+      if (backendUser) await attempt(session.logout());
+      if (quiet(asked)) return busy();
+      return attempt(session.loginWithBackend());
     }
     if (!backendUser) return;
     if (refused) {
@@ -146,7 +174,7 @@ export function watchBackendUser<Client>(
       signedIn = await ask();
       if (signedIn !== null || quiet()) return;
     }
-    await session.logout().catch(() => {});
+    return attempt(session.logout());
   }
   /** Run `run` once the session is no longer mid-transition (or now). */
   function whenSettled(run: () => void) {
@@ -172,13 +200,14 @@ export function watchBackendUser<Client>(
     if (wait <= 0) reconnect();
     else reconnectTimer = setTimeout(reconnect, wait);
   }
-  function settle() {
-    const done = waiters;
-    waiters = [];
-    for (const resolve of done) resolve();
+  function settle(done: Waiter[], error?: Error) {
+    for (const waiter of done) {
+      if (error) waiter.reject(error);
+      else waiter.resolve();
+    }
   }
   function check(refused = false, asked = false) {
-    if (stopped) return settle();
+    if (stopped) return settle(waiters.splice(0));
     if (checking) {
       again = {
         plain: (!refused && !asked) || !!again?.plain,
@@ -187,16 +216,31 @@ export function watchBackendUser<Client>(
       };
       return;
     }
-    checking = once(refused, asked).finally(() => {
-      checking = undefined;
-      const next = again;
-      again = undefined;
-      // An asked check answers a plain one too.
-      if (next?.asked) check(false, true);
-      else if (next?.plain) check(false);
-      if (next?.refused) check(true);
-      if (!checking) settle();
-    });
+    const batch = asked ? waiters.splice(0) : [];
+    let retry = false;
+    let failure: Error | undefined;
+    checking = once(refused, asked)
+      .then(
+        (outcome) => {
+          retry = outcome === "again";
+        },
+        (cause: unknown) => {
+          failure = cause instanceof Error ? cause : new Error(String(cause));
+        },
+      )
+      .finally(() => {
+        checking = undefined;
+        const next = again;
+        again = undefined;
+        if (retry) waiters.unshift(...batch);
+        else settle(batch, failure);
+        // An asked check answers a plain one too. It waits for the session
+        // to settle, so it follows the backend instead of finding the
+        // session busy.
+        if (retry || next?.asked) whenSettled(() => check(false, true));
+        else if (next?.plain) check(false);
+        if (next?.refused) check(true);
+      });
   }
   const unsubscribe = session.subscribe(() => {
     const snapshot = session.getSnapshot();
@@ -217,14 +261,14 @@ export function watchBackendUser<Client>(
     },
     connected: resetRefusal,
     reauthenticate() {
-      const done = new Promise<void>((resolve) => waiters.push(resolve));
+      const done = new Promise<void>((resolve, reject) => waiters.push({ resolve, reject }));
       whenSettled(() => check(false, true));
       return done;
     },
     stop() {
       if (stopped) return;
       stopped = true;
-      settle();
+      settle(waiters.splice(0));
       clearTimeout(start);
       resetRefusal();
       unsubscribe();

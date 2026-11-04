@@ -12,7 +12,7 @@ export interface AccountHandle {
   readonly [accountHandleBrand]: true;
   readonly id: string;
   readonly identity: AccountIdentity;
-  /** For a user your backend signed in: the claims its `authenticate` returned. */
+  /** For a user your backend signed in: the claims its `authenticate` returned at sign-in. */
   readonly claims?: Readonly<Record<string, unknown>>;
 }
 

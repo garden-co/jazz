@@ -15,7 +15,11 @@ export interface UserFollowingSession<Client> extends JazzSession<Client> {
    * switch, once your session cookie (or bearer) is fresh. Jazz asks your
    * backend who is signed in now and follows its answer: another user signs
    * in, and no one signs the current user out. Resolves once the session
-   * follows that answer.
+   * follows that answer, and rejects when your backend can't be asked (a
+   * network error or a 5xx) or following it fails. A session left in error
+   * for the same user (its client failed to open) retries. The user's
+   * claims are as of their sign-in; reauthenticating as the same user
+   * doesn't update them.
    */
   reauthenticate(): Promise<void>;
 }

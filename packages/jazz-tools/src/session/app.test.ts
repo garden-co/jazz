@@ -255,7 +255,7 @@ describe("shared Jazz application lifecycle", () => {
     await settle();
     f.failAdmission(true);
     f.backend.user = "three";
-    await app.reauthenticate();
+    await expect(app.reauthenticate()).rejects.toThrow("registry offline");
     expect(app.getSnapshot().status).toBe("error");
     expect(app.getSnapshot().client).toBeUndefined();
     f.failAdmission(false);
