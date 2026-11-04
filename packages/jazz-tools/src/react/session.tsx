@@ -5,10 +5,10 @@ import {
   type ConfiguredJazzSessionProviderProps,
 } from "../react-core/session.js";
 import { jazzDevPluginActive } from "../dev-tools/auto-attach.js";
-import { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
+import { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
 import type { JazzClient } from "./create-jazz-client.js";
 import { DevToolsAutoAttach } from "./devtools-auto-attach.js";
-export { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
+export { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
 import {
   useJazzSession as useCoreJazzSession,
   type UseJazzSessionResult as CoreResult,
@@ -26,7 +26,7 @@ type JazzSessionProviderOptions = {
 
 export type JazzSessionProviderProps =
   | (ExternalProps<JazzClient> & JazzSessionProviderOptions)
-  | (ConfiguredJazzSessionProviderProps<JazzSessionConfig> & JazzSessionProviderOptions);
+  | (ConfiguredJazzSessionProviderProps<JazzClientConfig> & JazzSessionProviderOptions);
 
 export function JazzSessionProvider(props: JazzSessionProviderProps) {
   const { autoAttachDevTools, children, ...sessionProps } = props;
@@ -51,7 +51,7 @@ export function JazzSessionProvider(props: JazzSessionProviderProps) {
     <ConfiguredJazzSessionProvider
       {...sessionProps}
       config={effectiveConfig}
-      createJazzSession={createJazzSession}
+      createJazzClient={createJazzClient}
     >
       {devTools}
       {children}
@@ -62,6 +62,6 @@ export function JazzSessionProvider(props: JazzSessionProviderProps) {
 import { useJazzSessionOwner as useCoreJazzSessionOwner } from "../react-core/session.js";
 export type { JazzSessionOwnerResult } from "../react-core/session.js";
 /** Capture configuration once and retain the owner across authentication UI transitions. */
-export function useJazzSessionOwner(config: JazzSessionConfig) {
-  return useCoreJazzSessionOwner(config, createJazzSession);
+export function useJazzSessionOwner(config: JazzClientConfig) {
+  return useCoreJazzSessionOwner(config, createJazzClient);
 }

@@ -45,14 +45,14 @@ export type JazzAppViewProps<Client = CoreJazzClient> = {
 /** Framework shell only: the shared owner follows the backend's user and owns resources. */
 export function ConfiguredJazzAppProvider<Config, Client extends CoreJazzClient>({
   config,
-  createJazzSession,
+  createJazzClient,
   ...view
 }: JazzAppViewProps<Client> & {
   config: Config;
-  createJazzSession: (config: Config) => Promise<JazzSession<Client>>;
+  createJazzClient: (config: Config) => Promise<JazzSession<Client>>;
 }) {
   // This creates an inert store. No host subscription starts during render.
-  const [app] = useState(() => createJazzAppOwner(config, createJazzSession, { start: false }));
+  const [app] = useState(() => createJazzAppOwner(config, createJazzClient, { start: false }));
   const disposal = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => {
     clearTimeout(disposal.current);

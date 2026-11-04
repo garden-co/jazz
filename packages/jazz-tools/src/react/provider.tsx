@@ -7,10 +7,10 @@ import {
   useDb as useCoreDb,
   useJazzClient as useCoreJazzClient,
   useSession,
-  type CreateJazzClient,
+  type OpenJazzClient,
 } from "../react-core/provider.js";
 import { ConfiguredJazzAppProvider, type JazzAppViewProps } from "../react-core/app.js";
-import { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
+import { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
 import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import { DevToolsAutoAttach } from "./devtools-auto-attach.js";
 
@@ -24,9 +24,9 @@ interface JazzClientContextValue {
 
 // A provider given an explicit `config` opens the local-first client. It loads
 // on first use, so apps on the (default) thin client never bundle it eagerly.
-const createClient: CreateJazzClient = async (config) => {
-  const { createJazzClient } = await import("../web/create-jazz-client.js");
-  return (await createJazzClient(config)) as CreatedJazzClient;
+const createClient: OpenJazzClient = async (config) => {
+  const { openJazzClient } = await import("../web/create-jazz-client.js");
+  return (await openJazzClient(config)) as CreatedJazzClient;
 };
 
 type JazzProviderCommonProps = {
@@ -36,7 +36,7 @@ type JazzProviderCommonProps = {
   autoAttachDevTools?: boolean;
 };
 
-export type JazzAppProviderProps = JazzSessionConfig &
+export type JazzAppProviderProps = JazzClientConfig &
   JazzAppViewProps<CreatedJazzClient> & {
     autoAttachDevTools?: boolean;
   };
@@ -66,7 +66,7 @@ function ConfiguredJazzProvider({
       : config;
 
   return (
-    <CoreJazzProvider config={effectiveConfig} fallback={fallback} createJazzClient={createClient}>
+    <CoreJazzProvider config={effectiveConfig} fallback={fallback} openJazzClient={createClient}>
       {shouldAutoAttach ? <DevToolsAutoAttach /> : null}
       {children}
     </CoreJazzProvider>
@@ -99,7 +99,7 @@ function ApplicationJazzProvider(props: JazzAppProviderProps) {
   return (
     <ConfiguredJazzAppProvider
       config={config}
-      createJazzSession={createJazzSession}
+      createJazzClient={createJazzClient}
       signedOut={signedOut}
       loading={loading === undefined ? <p role="status">Loading…</p> : loading}
       error={

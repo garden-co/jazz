@@ -5,7 +5,7 @@ import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js"
 import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
-import { createJazzSession, type BrowserJazzSession } from "./create-jazz-session.js";
+import { createJazzClient, type BrowserJazzSession } from "./create-jazz-session.js";
 
 const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
 const permissions = definePermissions(app, ({ policy, session }) => {
@@ -60,7 +60,7 @@ async function open(
   store: AccountStore,
   client?: LocalFirstLoader,
 ): Promise<BrowserJazzSession> {
-  const session = await createJazzSession({
+  const session = await createJazzClient({
     scope: server.appId,
     serverUrl: server.url,
     store,
