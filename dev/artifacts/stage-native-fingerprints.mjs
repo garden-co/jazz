@@ -5,6 +5,15 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const read = (path) => JSON.parse(readFileSync(path, "utf8"));
+const localBuildHint =
+  "To build locally on any host, run `pnpm build:ci` from the repository root, or build the " +
+  "bindings with `pnpm --filter jazz-wasm build && pnpm --filter jazz-napi build` and then run " +
+  "`node dev/artifacts/stage-native-fingerprints.mjs --workspace`.";
+const readManifest = (root, path, what) => {
+  if (!existsSync(join(root, path)))
+    throw new Error(`${what} is missing (${path}). ${localBuildHint}`);
+  return read(join(root, path));
+};
 const wasmArtifactFiles = [
   "jazz_wasm_bg.wasm",
   "jazz_wasm_bg.wasm.d.ts",
@@ -17,20 +26,39 @@ export function stageNativeFingerprints(
 ) {
   if ([local, workspace, profiling].filter(Boolean).length > 1)
     throw new Error("--local, --workspace and --profiling are mutually exclusive");
-  const wasm = read(join(root, "crates/jazz-wasm/pkg/.jazz-artifact-manifest.json"));
-  const napi =
-    local || workspace || profiling
-      ? read(
-          join(
-            root,
-            "crates/jazz-napi/.native-artifacts",
-            /generation-[A-Za-z0-9.-]+/.exec(
-              readFileSync(join(root, "crates/jazz-napi/native-binding.pointer.cjs"), "utf8"),
-            )?.[0] ?? "missing",
-            ".jazz-artifact-manifest.json",
-          ),
-        )
-      : read(join(root, "crates/jazz-napi/provenance/jazz-napi.linux-x64-gnu.manifest.json"));
+  const wasm = readManifest(
+    root,
+    "crates/jazz-wasm/pkg/.jazz-artifact-manifest.json",
+    "the jazz-wasm build manifest",
+  );
+  let napi;
+  if (local || workspace || profiling) {
+    const pointer = "crates/jazz-napi/native-binding.pointer.cjs";
+    if (!existsSync(join(root, pointer)))
+      throw new Error(`the jazz-napi build pointer is missing (${pointer}). ${localBuildHint}`);
+    const generation = /generation-[A-Za-z0-9.-]+/.exec(
+      readFileSync(join(root, pointer), "utf8"),
+    )?.[0];
+    if (!generation)
+      throw new Error(
+        `the jazz-napi build pointer names no generation (${pointer}). ${localBuildHint}`,
+      );
+    napi = readManifest(
+      root,
+      `crates/jazz-napi/.native-artifacts/${generation}/.jazz-artifact-manifest.json`,
+      "the jazz-napi build manifest",
+    );
+  } else {
+    // Without a flag this stages a release from the linux-x64-gnu manifest that
+    // CI release assembly downloads. Local checkouts never have that file.
+    const releaseManifest = "crates/jazz-napi/provenance/jazz-napi.linux-x64-gnu.manifest.json";
+    if (!existsSync(join(root, releaseManifest)))
+      throw new Error(
+        `release mode (no flag) reads the NAPI manifest that CI release assembly downloads ` +
+          `(${releaseManifest}); it is not present in a local checkout. ${localBuildHint}`,
+      );
+    napi = read(join(root, releaseManifest));
+  }
   for (const [name, manifest] of [
     ["wasm", wasm],
     ["napi", napi],

@@ -488,6 +488,25 @@ export function validateNapiBindingRuntimeSurface(binding, expectedFingerprint) 
       "NAPI build is missing a required runtime surface (nativeArtifactFingerprint, NapiDb.tick, or NapiDb.wireFeatures)",
     );
 }
+/**
+ * wasm-pack is not a Cargo or pnpm dependency, so a fresh checkout may lack it.
+ * Fail before staging with an install hint instead of a bare spawn ENOENT.
+ */
+export function requireWasmPack(env = process.env, { run = spawnSync } = {}) {
+  const probe = run("wasm-pack", ["--version"], {
+    cwd: root,
+    env,
+    encoding: "utf8",
+    shell: process.platform === "win32",
+    timeout: 30_000,
+  });
+  if (probe.error || probe.status !== 0)
+    throw new Error(
+      "WASM builds need wasm-pack on PATH, and it was not found. " +
+        "Run `pnpm run ensure:rust-toolchain` from the repository root " +
+        "(or `cargo install wasm-pack@0.13.1 --locked`), then rerun the build.",
+    );
+}
 export function buildArtifact(kind, profile = "release", extraArgs = []) {
   const selected = commands[kind]?.[profile];
   if (!selected)
@@ -503,6 +522,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
     throw new Error(`unsupported NAPI target ${resolvedNapiTarget ?? "unknown"}`);
   // Resolve prerequisites before taking the lease or staging any output.
   const buildEnv = kind === "wasm" ? wasmBuildEnvironment() : process.env;
+  if (command === "wasm-pack") requireWasmPack(buildEnv);
   // No reader-facing generated file is touched before holding the clone-wide
   // lease. The fingerprint is pure source/tool metadata at this point.
   const artifactLock = acquireArtifactLease();
