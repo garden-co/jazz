@@ -93,7 +93,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
-          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
@@ -110,6 +110,11 @@ jobs:
         run: cargo test -p jazz-native-relay --example rn_server_session_harness --no-fail-fast
       - name: Build the React Native JavaScript workspace entrypoints
         run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
+      # The backend loads jazz-tools on Node, whose runtime checks the native
+      # fingerprints staged from release NAPI and fast WASM builds.
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
       - name: Build the Node runtime of the device app's backend
         run: pnpm --filter rn-device-acceptance build:device-backend
       - name: Build and stage the relay XCFramework
@@ -183,6 +188,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
@@ -197,6 +203,11 @@ jobs:
         run: cargo test -p jazz-native-relay --example rn_server_session_harness --no-fail-fast
       - name: Build the React Native JavaScript workspace entrypoints
         run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
+      # The backend loads jazz-tools on Node, whose runtime checks the native
+      # fingerprints staged from release NAPI and fast WASM builds.
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
       - name: Build the Node runtime of the device app's backend
         run: pnpm --filter rn-device-acceptance build:device-backend
       - name: Bootstrap pinned lane-local Android toolchain
