@@ -492,9 +492,12 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
 }
 
 it("preserves stored application columns named like internal metadata", () => {
-  const app = defineApp({
-    notes: { parents: s.string(), schema_version: s.string(), authored_columns: s.string() },
-  });
+  const app = defineApp(
+    {
+      notes: { parents: s.string(), schema_version: s.string(), authored_columns: s.string() },
+    },
+    { migrations: "none" },
+  );
   const names = ["parents", "schema_version", "authored_columns"];
   const rows = rowsFromBatches(
     [

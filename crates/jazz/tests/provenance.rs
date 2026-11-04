@@ -1,8 +1,8 @@
 //! Row provenance (`$createdAt`, `$updatedAt`, `$createdBy`, `$updatedBy`):
 //! engine-maintained per row version, readable, orderable and filterable by
-//! name, kept by history, and never writable by the app. Not ported from Jazz.
+//! name, kept by history, and never writable by the app.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 
@@ -185,13 +185,13 @@ fn history_keeps_each_versions_provenance() {
     block_on(db.begin_serializable(open)).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(5));
     block_on(db.update("notes", row(1), body("b"), Default::default())).unwrap();
-    let at_snapshot = block_on(db.serializable_tx_ref(open).all_prepared(&select)).unwrap();
+    let at_snapshot = block_on(db.tx_ref(open).all_prepared(&select)).unwrap();
     assert_eq!(
         u64_cell(&at_snapshot[0], "$updatedAt"),
         first,
         "the as-of read sees the old version's stamp"
     );
-    db.abandon_serializable_handle(open).unwrap();
+    db.abandon_transaction_handle(open).unwrap();
 }
 
 fn subject_cell(row: &jazz::db::CurrentRow, name: &str) -> String {
@@ -282,7 +282,7 @@ fn author_codes_never_leave_their_database() {
     block_on(server.insert("notes", body("from 5"), as_user(5, row(1)))).unwrap();
     let (up, down) = duplex();
     let _upstream = block_on(client.connect_upstream(up));
-    server.accept_subscriber(down, user(7));
+    server.accept_subscriber(down, user(7)).unwrap();
     block_on(client.insert(
         "notes",
         body("from 7"),
@@ -335,53 +335,6 @@ fn author_codes_never_leave_their_database() {
                 (row(2), user(7).principal_parts().1),
             ]),
             "{name}"
-        );
-    }
-}
-
-/// Alice's rejected write and speculative transaction must not leave cached
-/// author IDs that later name Bob or lose Alice's provenance after rollback.
-/// alice -> rollback -> bob commits -> alice commits -> distinct authors
-#[test]
-fn rollback_does_not_reuse_another_authors_cached_identity() {
-    let db = db();
-    assert!(block_on(db.insert("notes", BTreeMap::new(), as_user(1, row(1)))).is_err());
-    block_on(db.insert("notes", body("Bob"), as_user(2, row(2)))).unwrap();
-    block_on(db.insert("notes", body("Alice"), as_user(1, row(1)))).unwrap();
-    let tx = OpenTransactionId::new();
-    block_on(db.begin_serializable(tx)).unwrap();
-    block_on(
-        db.serializable_tx_ref(tx)
-            .insert("notes", body("draft"), Default::default()),
-    )
-    .unwrap();
-    db.abandon_transaction_handle(tx).unwrap();
-    block_on(db.insert(
-        "notes",
-        body("system"),
-        InsertOptions {
-            row_id: Some(row(3)),
-            ..Default::default()
-        },
-    ))
-    .unwrap();
-    let query = db
-        .prepare_query(&Query::from("notes").select(["$createdBy.identity.subject"]))
-        .unwrap();
-    let rows = block_on(db.all(&query, ReadOpts::default())).unwrap();
-    assert_eq!(rows.len(), 3);
-    for (id, author) in [
-        (row(1), user(1)),
-        (row(2), user(2)),
-        (
-            row(3),
-            AuthorSubject::system_at(NodeUuid::from_bytes([3; 16])),
-        ),
-    ] {
-        let row = rows.iter().find(|r| r.row_uuid() == id).unwrap();
-        assert_eq!(
-            subject_cell(row, "$createdBy.identity.subject"),
-            author.principal_parts().1
         );
     }
 }
@@ -464,4 +417,209 @@ fn author_provenance_carries_the_account() {
         1
     );
     assert_eq!(db.interned_authors_for_test(), 2);
+}
+
+/// A live query filtered by a provenance part (`$createdBy...`) sees the
+/// rows written after it opened: a provenance filter is not a key a changed
+/// row can be looked up by, so it must not narrow which commits wake it.
+#[test]
+fn a_subscription_filtered_by_its_author_sees_new_rows() {
+    let db = db();
+    let (_, subject) = user(1).principal_parts();
+    let mine = db
+        .prepare_query(&Query::from("notes").filter(eq(
+            col("$createdBy.identity.subject"),
+            lit(Value::String(subject)),
+        )))
+        .unwrap();
+    let mut stream = block_on(db.subscribe(&mine, ReadOpts::default())).unwrap();
+    block_on(db.insert("notes", body("mine"), as_user(1, row(1)))).unwrap();
+    block_on(db.insert("notes", body("theirs"), as_user(2, row(2)))).unwrap();
+    let mut seen = Vec::new();
+    while let Some(event) = stream.try_next_event() {
+        if let jazz::db::SubscriptionEvent::Delta { added, .. } = event {
+            seen.extend(added.iter().map(|row| row.row_uuid()));
+        }
+    }
+    assert_eq!(seen, [row(1)]);
+}
+
+/// A transaction opened for an identity attributes every write to it, and a
+/// write inside a transaction cannot choose another identity.
+#[test]
+fn a_transaction_for_an_identity_attributes_its_writes_and_fixes_their_identity() {
+    let db = db();
+    block_on(db.transaction_for_identity(user(1), async |tx| {
+        tx.insert(
+            "notes",
+            body("a"),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        )
+        .await
+    }))
+    .unwrap();
+    let staged = block_on(db.mergeable_tx_for_identity(user(2))).unwrap();
+    block_on(staged.insert(
+        "notes",
+        body("b"),
+        InsertOptions {
+            row_id: Some(row(2)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(staged.commit()).unwrap();
+
+    let select = db
+        .prepare_query(&Query::from("notes").select(["$createdBy.identity.subject"]))
+        .unwrap();
+    let rows = block_on(db.all(&select, ReadOpts::default())).unwrap();
+    let subject_of = |n: u8| {
+        let row = rows.iter().find(|r| r.row_uuid() == row(n)).unwrap();
+        subject_cell(row, "$createdBy.identity.subject")
+    };
+    assert_eq!(subject_of(1), user(1).principal_parts().1);
+    assert_eq!(subject_of(2), user(2).principal_parts().1);
+
+    let error = block_on(db.transaction_for_identity(user(1), async |tx| {
+        tx.insert("notes", body("c"), as_user(2, row(3))).await
+    }))
+    .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("selected when the transaction is opened"),
+        "{error:?}"
+    );
+    assert_eq!(
+        block_on(db.all(&select, ReadOpts::default()))
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+/// A code interned for an author inside a transaction that rolls back is
+/// undone with it, and SQLite may hand it to the next new author: the
+/// first author's later writes must not reuse it.
+///
+/// Actors: one database; writers 5 and 6.
+/// Flow: open tx → 5 writes (code N interned) → abandon (N undone) →
+/// 6 writes (N reused for 6) → 5 writes again → 5's row reads as 5's.
+#[test]
+fn an_author_code_rolled_back_is_not_reused_for_its_author() {
+    let db = db();
+    let open = OpenTransactionId::new();
+    block_on(db.begin_serializable(open)).unwrap();
+    block_on(
+        db.tx_ref(open)
+            .insert("notes", body("rolled back"), as_user(5, row(1))),
+    )
+    .unwrap();
+    db.abandon_transaction_handle(open).unwrap();
+    block_on(db.insert("notes", body("six"), as_user(6, row(2)))).unwrap();
+    block_on(db.insert("notes", body("five"), as_user(5, row(3)))).unwrap();
+
+    let select = db
+        .prepare_query(&Query::from("notes").select(["body", "$createdBy.identity.subject"]))
+        .unwrap();
+    let authors: BTreeMap<RowUuid, String> = block_on(db.all(&select, ReadOpts::default()))
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row.row_uuid(),
+                subject_cell(row, "$createdBy.identity.subject"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        authors,
+        BTreeMap::from([
+            (row(2), user(6).principal_parts().1),
+            (row(3), user(5).principal_parts().1),
+        ])
+    );
+}
+
+/// A first sync ships a large result in chunks of rows, and the client
+/// stores them in one batch that interns each author once: every row
+/// arrives, with its own body and author.
+///
+/// Actors: a server holding 1,100 notes by three writers; a client.
+/// Flow: server inserts → client subscribes → ticks → the client's rows
+/// equal the server's, row by row.
+#[test]
+fn a_first_sync_of_many_rows_keeps_every_body_and_author() {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let open = |node: u8, author: AuthorSubject| {
+        DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )
+    };
+    let server = block_on(Db::open_history_complete(open(1, AuthorSubject::SYSTEM))).unwrap();
+    let client = block_on(Db::open(open(2, user(7)))).unwrap();
+    let many = |n: u16| {
+        let mut bytes = [0; 16];
+        bytes[..2].copy_from_slice(&n.to_be_bytes());
+        RowUuid::from_bytes(bytes)
+    };
+    for n in 0..1100u16 {
+        block_on(server.insert(
+            "notes",
+            body(&format!("note {n}")),
+            InsertOptions {
+                row_id: Some(many(n)),
+                identity: WriteIdentity::Session(user(1 + (n % 3) as u8)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    let (up, down) = duplex();
+    let _upstream = block_on(client.connect_upstream(up));
+    server.accept_subscriber(down, user(7)).unwrap();
+    let select = Query::from("notes").select(["body", "$createdBy.identity.subject"]);
+    let prepared = client.prepare_query(&select).unwrap();
+    let _live = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    for _ in 0..6 {
+        block_on(client.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+
+    let read = |db: &Db| -> BTreeMap<RowUuid, (String, String)> {
+        let prepared = db.prepare_query(&select).unwrap();
+        block_on(db.all(&prepared, ReadOpts::default()))
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row.row_uuid(),
+                    (
+                        subject_cell(row, "body"),
+                        subject_cell(row, "$createdBy.identity.subject"),
+                    ),
+                )
+            })
+            .collect()
+    };
+    let on_server = read(&server);
+    assert_eq!(on_server.len(), 1100);
+    assert_eq!(on_server[&many(4)].1, user(2).principal_parts().1);
+    assert_eq!(read(&client), on_server);
 }

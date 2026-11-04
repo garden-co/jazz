@@ -2,7 +2,7 @@ use super::*;
 use uuid::Uuid;
 
 fn descriptor_hash(descriptor: &RowDescriptor) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = jazz_types::sha256::Hasher::new();
     hash_row_descriptor(&mut hasher, descriptor);
     *hasher.finalize().as_bytes()
 }
@@ -198,6 +198,50 @@ fn row_descriptor_hash_changes_when_merge_strategy_changes() {
         descriptor_hash(&counter),
         "changing only the merge strategy should change the schema hash"
     );
+}
+
+#[test]
+fn merge_strategies_round_trip_and_unknown_ones_are_refused_by_name() {
+    for strategy in [
+        ColumnMergeStrategy::Counter,
+        ColumnMergeStrategy::GSet,
+        ColumnMergeStrategy::Text,
+        ColumnMergeStrategy::Markdown,
+        ColumnMergeStrategy::Html,
+    ] {
+        let json = serde_json::to_string(&strategy).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ColumnMergeStrategy>(&json).unwrap(),
+            strategy
+        );
+    }
+    let error = serde_json::from_str::<ColumnMergeStrategy>(r#""RichText""#)
+        .expect_err("a strategy this build does not know is refused");
+    assert!(
+        error
+            .to_string()
+            .contains("merge strategy `RichText` is not supported by this version of Jazz"),
+        "{error}"
+    );
+}
+
+#[test]
+fn text_merge_strategies_hash_apart() {
+    let hashes: Vec<[u8; 32]> = [
+        ColumnMergeStrategy::Text,
+        ColumnMergeStrategy::Markdown,
+        ColumnMergeStrategy::Html,
+    ]
+    .into_iter()
+    .map(|strategy| {
+        descriptor_hash(&RowDescriptor::new(vec![
+            ColumnDescriptor::new("body", ColumnType::Text).merge_strategy(strategy),
+        ]))
+    })
+    .collect();
+    assert_ne!(hashes[0], hashes[1]);
+    assert_ne!(hashes[1], hashes[2]);
+    assert_ne!(hashes[0], hashes[2]);
 }
 
 // ========================================================================
@@ -605,7 +649,7 @@ fn schema_hash_matches_v9_default_index_fixture() {
 
     assert_eq!(
         SchemaHash::compute(&schema).to_string(),
-        "ca27c6e72893cc1819ea2583bd2c450cda8dc6498b2b06dc882c06e5fcf9bc1e",
+        "0a458c0de89c376d9c4ba504f853340705ffe05de9233494417f11c61ad26c3f",
     );
 }
 

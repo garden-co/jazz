@@ -276,7 +276,7 @@ async fn deleted_accepted_invitation_is_gone_from_the_recipient_local_store() {
 /// editor ──LocalFirst reads: invite gone; playlist and entry still cached
 /// ```
 #[tokio::test]
-async fn revoked_editor_default_read_drops_deleted_invitation_but_keeps_unauthorized_rows() {
+async fn revoked_editor_default_read_drops_the_deleted_invitation_and_the_unauthorized_rows() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let server = JazzServer::start_with_schema(schema())
@@ -424,15 +424,13 @@ async fn revoked_editor_default_read_drops_deleted_invitation_but_keeps_unauthor
                 default_ids(by_id("invitations", invite)).await.is_empty(),
                 "the deleted invitation is gone from the editor's default read"
             );
-            assert_eq!(
-                default_ids(by_id("playlists", playlist)).await,
-                vec![playlist],
-                "the undeleted playlist stays cached after losing authorization"
+            assert!(
+                default_ids(by_id("playlists", playlist)).await.is_empty(),
+                "the server evicts the playlist the editor lost access to"
             );
-            assert_eq!(
-                default_ids(by_id("entries", entry)).await,
-                vec![entry],
-                "the undeleted entry stays cached after losing authorization"
+            assert!(
+                default_ids(by_id("entries", entry)).await.is_empty(),
+                "the server evicts the entry the editor lost access to"
             );
 
             owner.shutdown().await.expect("shutdown owner");
@@ -617,15 +615,13 @@ async fn deleted_invitation_reaches_local_store_while_remote_reads_keep_the_runt
                 default_ids(by_id("invitations", invite)).await.is_empty(),
                 "the deleted invitation is gone from the editor's default read"
             );
-            assert_eq!(
-                default_ids(by_id("playlists", playlist)).await,
-                vec![playlist],
-                "the undeleted playlist stays cached after losing authorization"
+            assert!(
+                default_ids(by_id("playlists", playlist)).await.is_empty(),
+                "the server evicts the playlist the editor lost access to"
             );
-            assert_eq!(
-                default_ids(by_id("entries", entry)).await,
-                vec![entry],
-                "the undeleted entry stays cached after losing authorization"
+            assert!(
+                default_ids(by_id("entries", entry)).await.is_empty(),
+                "the server evicts the entry the editor lost access to"
             );
 
             owner.shutdown().await.expect("shutdown owner");

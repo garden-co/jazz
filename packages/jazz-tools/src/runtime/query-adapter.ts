@@ -769,10 +769,11 @@ function translateBuiltRelationToRelExpr(
   relation: BuiltRelation,
   relations: Map<string, Relation[]>,
   schema: WasmSchema,
+  unionArm = false,
 ): { expr: RelExpr; outputTable: string } {
   if (relation.union) {
     const inputs = relation.union.inputs.map((arm) =>
-      translateBuiltRelationToRelExpr(arm.input, relations, schema),
+      translateBuiltRelationToRelExpr(arm.input, relations, schema, true),
     );
     const first = inputs[0];
     if (!first) {
@@ -782,14 +783,20 @@ function translateBuiltRelationToRelExpr(
       throw new Error("union(...) requires all seed relations to output the same table.");
     }
     return {
-      expr: {
-        Union: {
-          inputs: relation.union.inputs.map((arm, index) => ({
-            label: arm.label,
-            input: inputs[index]!.expr,
-          })),
+      expr: applyRelationWindow(
+        {
+          Union: {
+            inputs: relation.union.inputs.map((arm, index) => ({
+              label: arm.label,
+              input: inputs[index]!.expr,
+            })),
+          },
         },
-      },
+        relation,
+        first.outputTable,
+        first.outputTable,
+        schema,
+      ),
       outputTable: first.outputTable,
     };
   }
@@ -817,7 +824,43 @@ function translateBuiltRelationToRelExpr(
   expr = lowerHopsToRelExpr(expr, outputTable, hops, relations, schema);
   outputTable = resolveHopsOutputTable(outputTable, hops, relations);
 
+  const outputScope = hops.length ? `__hop_${hops.length - 1}` : outputTable;
+  if (unionArm && hops.length === 0 && !relation.gather) {
+    expr = {
+      Project: { input: expr, columns: relationColumnsForTable(outputTable, outputScope, schema) },
+    };
+  }
+  expr = applyRelationWindow(expr, relation, outputTable, outputScope, schema);
+
   return { expr, outputTable };
+}
+
+function applyRelationWindow(
+  input: RelExpr,
+  relation: BuiltRelation,
+  table: string,
+  scope: string,
+  schema: WasmSchema,
+): RelExpr {
+  let expr = input;
+  if (relation.orderBy?.length) {
+    expr = {
+      OrderBy: {
+        input: expr,
+        terms: toRuntimeOrderBy(relation.orderBy, schema, table).map(({ column, direction }) => ({
+          column: relColumn(column, scope),
+          direction,
+        })),
+      },
+    };
+  }
+  if (relation.offset !== undefined && relation.offset > 0) {
+    expr = { Offset: { input: expr, offset: relation.offset } };
+  }
+  if (relation.limit !== undefined) {
+    expr = { Limit: { input: expr, limit: relation.limit } };
+  }
+  return expr;
 }
 
 /**
@@ -874,7 +917,7 @@ function translateBuilderToRelationIr(
   // The Rust relation facade identifies its output scope through Project. A
   // payload match can be the only relation feature, so preserve the ordinary
   // root-table result shape with an explicit identity projection in that case.
-  if (builder.hops.length === 0 && builder.gather === undefined) {
+  if (builder.hops.length === 0 && builder.gather === undefined && builder.union === undefined) {
     const columns = schema[relationTable]?.columns;
     if (!columns) throw new Error(`Unknown table "${relationTable}" in relation query.`);
     relation = {

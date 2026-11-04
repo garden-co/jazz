@@ -41,6 +41,8 @@ import {
 import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { deliverMutationErrorToAttachedPeers } from "./mutation-error-delivery.js";
 import { toError } from "../runtime/util.js";
+import type { RemoteLinkState } from "../runtime/remote-link-state.js";
+import { sameLinkStatus, type LinkStatus } from "../runtime/sync-status.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -53,10 +55,18 @@ type SharedWorkerGlobal = typeof globalThis & {
 type TabPeer = {
   tabId: string;
   context: RuntimeContext;
+  /**
+   * The author of the tab's own replica, as it connected; the runtime serves
+   * only its own. Anonymous tabs share one storage scope but each mints its
+   * own anonymous identity, so a second anonymous tab of another identity is
+   * refused (`identity_mismatch`) rather than relayed as the first one's.
+   */
+  author: Uint8Array;
   port: MessagePort;
   pump: BrowserWorkerTransportPump | null;
   subscriber: Transport | null;
   pendingFrames: Uint8Array[];
+  pendingLocalCompanions: Uint8Array[];
   flushedLocal: boolean;
   flushRequestId: number | null;
   flushPumpComplete: boolean;
@@ -997,7 +1007,7 @@ async function connectTab(
     });
     assertAdmission();
     // No await between the final fence, peer publication and listener handoff.
-    attachTab(context, message.tabId, port);
+    attachTab(context, message.tabId, port, message.options.author);
     releaseClaim();
     finishBootstrap();
     post(port, { type: "runtime-ready" });
@@ -1096,7 +1106,15 @@ async function initialize(context: RuntimeContext): Promise<void> {
     const node = context.pageStore.replicaNode;
     const schema = encodeSchema(options.schema);
     const proof = options.selfSignedClientProof;
-    const config = openConfig(node, options.author, 1, false, options.initialSyncFlushEvery, proof);
+    const config = openConfig(
+      node,
+      options.author,
+      1,
+      false,
+      options.initialSyncFlushEvery,
+      proof,
+      options.migrations,
+    );
     if (proof && typeof wasmModule.WasmDb.openBrowserWithSelfSignedProof !== "function") {
       throw new Error(
         "WASM runtime does not support self-signed client opens; rebuild the matching Jazz WASM artifact",
@@ -1110,14 +1128,9 @@ async function initialize(context: RuntimeContext): Promise<void> {
           proof.token,
           proof.appId,
           proof.claimedAuthor,
-          physicalOwner.storageOwner,
+          options.dbName,
         )
-      : await wasmModule.WasmDb.openBrowser(
-          context.pageStore,
-          schema,
-          config,
-          physicalOwner.storageOwner,
-        );
+      : await wasmModule.WasmDb.openBrowser(context.pageStore, schema, config, options.dbName);
     const runtime = NativeRuntimeAdapter.fromDb(
       unownedDb as never,
       options.schema,
@@ -1125,7 +1138,11 @@ async function initialize(context: RuntimeContext): Promise<void> {
       options.author,
       1,
       false,
-      { selfSignedClientProof: proof, scopeIsolatedRelay: true },
+      {
+        selfSignedClientProof: proof,
+        scopeIsolatedRelay: true,
+        slowQueryLog: { appId: options.appId, thresholdMs: options.slowQueryThresholdMs },
+      },
     );
     context.runtime = runtime;
     unownedDb = null;
@@ -1142,17 +1159,30 @@ async function initialize(context: RuntimeContext): Promise<void> {
         post(peer.port, { type: "mutation-error", event: received }),
       );
     });
-    runtime.onRemoteLinkStateChange((state) => {
+    let announced: { state: RemoteLinkState; link: LinkStatus } | null = null;
+    const announceLink = () => {
       // Only the current runtime speaks for this namespace's upstream.
-      if (context.runtime === runtime) broadcast(context, { type: "remote-link", state });
-    }, new AbortController().signal);
-    context.runtime.onServerTransportError((error) => {
+      if (context.runtime !== runtime) return;
+      const state = runtime.remoteLinkState();
+      const link = runtime.upstreamLinkStatus();
+      // Both sources can report one transition; attaching peers get their own copy.
+      if (announced?.state === state && sameLinkStatus(announced.link, link)) return;
+      announced = { state, link };
+      broadcast(context, { type: "remote-link", state, link });
+    };
+    runtime.onRemoteLinkStateChange(announceLink, new AbortController().signal);
+    runtime.onUpstreamLinkStatusChange(announceLink, new AbortController().signal);
+    context.runtime.onServerTransportError((error, { retrying }) => {
       // Transport failures are foreground events, not authority fates or
       // durable notifications. Only peers that have completed admission own a
       // tab runtime capable of rejecting an active remote wait.
       for (const peer of context.peers.values()) {
         if (!peer.subscriber || !peer.pump) continue;
-        post(peer.port, { type: "transport-error", error: serializeBrowserRelayError(error) });
+        post(peer.port, {
+          type: "transport-error",
+          error: serializeBrowserRelayError(error),
+          retrying,
+        });
       }
     });
     if (options.logLevel === "trace") {
@@ -1309,6 +1339,8 @@ function carriesCredential(authJson: string): boolean {
 
 function ensureServerConnection(context: RuntimeContext): void {
   const requestedUrl = context.serverUrl;
+  // A worker with no server has the last word on its tabs' writes.
+  if (!requestedUrl) context.runtime?.setRemoteLinkHint("none");
   if (!requestedUrl || context.explicitlyDisconnected) return;
   if (context.serverConnectionStarted) return;
   // A retained account's tabs open before the provider supplies a credential.
@@ -1387,6 +1419,7 @@ function attachTab(
   context: RuntimeContext,
   tabId: string,
   port: MessagePort,
+  author: Uint8Array,
   inspectorAttachment = false,
 ): void {
   closeTab(context, tabId);
@@ -1398,10 +1431,12 @@ function attachTab(
   peer = {
     tabId,
     context,
+    author,
     port,
     pump: null,
     subscriber: null,
     pendingFrames: [],
+    pendingLocalCompanions: [],
     flushedLocal: false,
     flushRequestId: null,
     flushPumpComplete: false,
@@ -1436,6 +1471,15 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     return;
   }
   if (message.type === "frames") {
+    // Optional host metadata is bounded and shape-checked independently. A
+    // malformed companion never prevents delivery of otherwise-valid frames.
+    const companions =
+      Array.isArray(message.localCompanions) && message.localCompanions.length <= 64
+        ? message.localCompanions.filter(
+            (value): value is Uint8Array =>
+              value instanceof Uint8Array && value.byteLength <= 4 * 1024 * 1024,
+          )
+        : [];
     if (peer.context.options.logLevel === "trace") {
       recordWorkerLifecycle(
         "peer-frames",
@@ -1450,7 +1494,15 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       // delivery continues. Preserve ordering instead of treating those
       // already-staged follower frames as a protocol violation.
       peer.pendingFrames.push(...message.frames);
+      // Legitimate foreground frames follow init's response; retain a bounded
+      // optional lane if delivery raced admission. Overflow drops evidence.
+      if (peer.pendingLocalCompanions.length + companions.length <= 64) {
+        peer.pendingLocalCompanions.push(...companions);
+      } else peer.pendingLocalCompanions.length = 0;
       return;
+    }
+    for (const companion of companions) {
+      peer.subscriber?.attachLocalSubmissionCompanion?.(companion);
     }
     peer.pump.receive(message.frames);
     return;
@@ -1641,6 +1693,46 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       post(peer.port, { type: "inspector-binding", id: message.id, binding: message.binding });
       return;
     }
+    if (message.type === "observe-local") {
+      // Use the normal admission/auth queue so a rebind cannot overtake result
+      // publication. Raw provider claims differ from the foreground's added
+      // iss/sub operands; only core can compare their canonical admitted scope.
+      await enqueueTransportTransition(peer.context, async () => {
+        if (
+          !peer.subscriber ||
+          !peer.pump ||
+          peer.context.storageInvalidated ||
+          peer.context.closing
+        )
+          throw new Error("Local observation owner/session is unavailable");
+        const subscriber = peer.subscriber;
+        await peer.pump.flush();
+        if (
+          peer.subscriber !== subscriber ||
+          peer.context.runtime !== activeRuntime ||
+          peer.context.closing ||
+          peer.context.storageInvalidated
+        )
+          throw new Error("Local observation owner/session was replaced");
+        // Equality operands only: the actual Link supplies identity, fixed
+        // claims and governance and rejects any canonical scope mismatch.
+        const observations = await activeRuntime.observeLocalBatchForPeer(
+          subscriber,
+          message.queries,
+          message.sessionClaims,
+          message.schema,
+        );
+        if (
+          peer.context.peers.get(peer.tabId) !== peer ||
+          peer.context.runtime !== activeRuntime ||
+          peer.context.storageInvalidated ||
+          peer.context.closing
+        )
+          throw new Error("Local observation owner was replaced");
+        result(peer, message.id, undefined, { observations });
+      });
+      return;
+    }
     if (message.type === "init") {
       await enqueueTransportTransition(peer.context, async () => {
         const canPublishAdmission = () =>
@@ -1661,17 +1753,22 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           unownedSubscriber = await activeRuntime.acceptPeer(
             message.sessionClaims,
             peerAuthority.epoch,
+            peer.author,
           );
           // Close and storage invalidation revoke publication synchronously,
           // without waiting for recovery to finish.
           if (!canPublishAdmission()) return;
-          const pump = attachPeerTransport(peer, activeRuntime, unownedSubscriber);
+          const subscriber = unownedSubscriber;
+          const pump = attachPeerTransport(peer, activeRuntime, subscriber);
           unownedSubscriber = null;
           recordWorkerLifecycle(
             "peer-attached",
             peer.context.options.dbName,
             peer.context.options.authSessionKey,
           );
+          for (const companion of peer.pendingLocalCompanions.splice(0)) {
+            subscriber.attachLocalSubmissionCompanion?.(companion);
+          }
           if (peer.pendingFrames.length > 0) {
             const pending = peer.pendingFrames.splice(0);
             pump.receive(pending);
@@ -1681,7 +1778,11 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           } else {
             ensureServerConnection(peer.context);
           }
-          post(peer.port, { type: "remote-link", state: activeRuntime.remoteLinkState() });
+          post(peer.port, {
+            type: "remote-link",
+            state: activeRuntime.remoteLinkState(),
+            link: activeRuntime.upstreamLinkStatus(),
+          });
           result(peer, message.id, undefined, {
             peerAuthority,
             workerRealmId,
@@ -1927,7 +2028,7 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
       } satisfies BrowserInspectorControlEvent);
       return;
     }
-    attachTab(context, message.tabId, message.port, true);
+    attachTab(context, message.tabId, message.port, context.options.author, true);
     port.postMessage({ type: "result", id: message.id } satisfies BrowserInspectorControlEvent);
   };
   const dispose = () => {
@@ -1947,6 +2048,7 @@ function result(
   id: number,
   error?: Error,
   receipt?: {
+    observations?: import("../runtime/client.js").LocalObservationSnapshot[];
     inspectorAttachmentPhysicalDbName?: string;
     peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
     workerRealmId?: string;
@@ -2018,6 +2120,10 @@ async function finalizeContextStorageReset(context: RuntimeContext): Promise<voi
   context.disposePageStoreInvalidation?.();
   context.disposePageStoreInvalidation = null;
   context.pageStore = null;
+  // The SQLite file lives in its VFS's own IndexedDB store, outside the
+  // page store's root the tab just destroyed.
+  const wasmModule = await wasmModulePromise;
+  await wasmModule?.WasmDb.destroyBrowserStorage(undefined, context.options.dbName);
   context.disposeTelemetry?.();
   context.disposeTelemetry = null;
   context.disposeAuxiliaryTrace?.();

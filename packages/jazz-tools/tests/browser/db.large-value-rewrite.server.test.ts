@@ -6,7 +6,7 @@ import {
   largeValueRewriteApp as app,
   largeValueRewritePermissions,
 } from "./large-value-rewrite-schema.js";
-import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp, type JazzServerInfo } from "./testing-server.js";
 import {
   TestCleanup,
   createBrowserTestDb,
@@ -58,13 +58,17 @@ describe("browser subscriptions while the backend rewrites a row", () => {
       });
       backendAppId = info.appId;
       await withTimeout(backend.largeValueRewriteBackendOpen(info), 20_000, "backend open");
+      const front = await startJazzApp(info, {
+        schema: app.wasmSchema,
+        permissions: largeValueRewritePermissions,
+      });
 
       // A persistent browser database, so the page reads through the
       // SharedWorker as the app does.
       const db = cleanup.track(
         await createBrowserTestDb({
           appId: info.appId,
-          serverUrl: info.serverUrl,
+          serverUrl: front.serverUrl,
           secret: generateAuthSecret(),
           driver: {
             type: "persistent",

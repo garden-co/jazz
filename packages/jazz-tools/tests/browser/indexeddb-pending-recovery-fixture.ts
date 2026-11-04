@@ -5,10 +5,13 @@ import { accountRegistryUrl } from "../../src/accounts/context.js";
 import { createAccountManager } from "../../src/accounts/create-account-manager.js";
 import type { Db } from "../../src/runtime/db.js";
 
-export const recoveryApp = s.defineApp({
-  headers: s.table({ version: s.int() }, {}),
-  items: s.table({ version: s.int() }, {}),
-});
+export const recoveryApp = s.defineApp(
+  {
+    headers: s.table({ version: s.int() }, {}),
+    items: s.table({ version: s.int() }, {}),
+  },
+  { migrations: "none" },
+);
 export const recoveryPermissions = s.definePermissions(recoveryApp, ({ policy }) => [
   policy.headers.allowRead.always(),
   policy.headers.allowInsert.always(),
@@ -20,9 +23,11 @@ export const recoveryPermissions = s.definePermissions(recoveryApp, ({ policy })
 export type RecoveryConfig = {
   appId: string;
   serverUrl: string;
+  /** The app backend to stop for the offline phase, when not `serverUrl`. */
+  backendUrl?: string;
 } & (
-  | { jwtToken: string; registryLoginResponse: unknown; secret?: never }
-  | { secret: string; jwtToken?: never; registryLoginResponse?: never }
+  | { backendSignInResponse: unknown; secret?: never }
+  | { secret: string; backendSignInResponse?: never }
 );
 
 export interface RecoveryRows {
@@ -48,9 +53,9 @@ export async function open(config: RecoveryConfig): Promise<void> {
     });
     return;
   }
-  // Internal registry-stub protocol regression: replay only the genuine login
-  // response captured after online enrollment. External offline login is not a
-  // public contract. Native transport still contacts the real, stopped server.
+  // Internal registry-stub protocol regression: replay only the genuine
+  // backend sign-in response captured online. Offline sign-in is not a public
+  // contract. Native transport still contacts the real, stopped server.
   const registry = accountRegistryUrl(config.serverUrl, config.appId);
   const accounts = createAccountManagerWithRuntime({
     registry,
@@ -60,21 +65,17 @@ export async function open(config: RecoveryConfig): Promise<void> {
       },
     },
     fetch: async (input, init) => {
-      if (
-        input !== `${registry}/login` ||
-        init?.method !== "POST" ||
-        new Headers(init.headers).get("Authorization") !== `Bearer ${config.jwtToken}`
-      ) {
+      if (input !== `${registry}/backend-sign-in` || init?.method !== "POST") {
         throw new Error("Unexpected registry request in external recovery fixture");
       }
-      return Response.json(config.registryLoginResponse);
+      return Response.json(config.backendSignInResponse);
     },
   });
   db = await createDb({
     appId: config.appId,
     serverUrl: config.serverUrl,
     driver,
-    account: await accounts.loginJWT(config.jwtToken!),
+    account: await accounts.loginWithBackend(),
   });
 }
 

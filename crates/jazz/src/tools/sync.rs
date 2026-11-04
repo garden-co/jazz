@@ -56,6 +56,15 @@ mod tests {
         assert!(postcard::from_bytes::<DurabilityTier>(&[2]).is_err());
     }
 
+    /// A read without options is LocalFirst and delivers its local opening
+    /// without waiting for a server.
+    #[test]
+    fn read_opts_default_to_local_first_delivering_the_local_opening() {
+        let opts = crate::db::ReadOpts::default();
+        assert_eq!(opts.tier, ReadTier::LocalFirst);
+        assert_eq!(opts.first_load, crate::db::FirstLoad::Deliver);
+    }
+
     /// The serialized read-tier encoding is not observable through the
     /// client API, so it is pinned here: the three tiers decode, and removed tier names and unknown tags are rejected.
     #[test]

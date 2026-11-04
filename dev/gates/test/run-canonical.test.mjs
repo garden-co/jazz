@@ -30,12 +30,10 @@ test("canonical soaks execute the exact ignored oracle and reject a missing sele
   const binary = path.join(directory, "oracle");
   fs.writeFileSync(
     source,
-    `mod node { mod tests { mod harness {
-    #[test] #[ignore] fn m3_maintained_one_shot_differential_oracle() {
+    `#[test] #[ignore] fn maintained_one_shot_differential_oracle() {
       panic!("planted ignored oracle failure");
     }
-    #[test] fn m3_maintained_one_shot_differential_oracle_control() {}
-  } } }`,
+    #[test] fn maintained_one_shot_differential_oracle_control() {}`,
   );
   const compiled = spawnSync("rustc", ["--test", source, "-o", binary], { encoding: "utf8" });
   assert.equal(compiled.status, 0, compiled.stderr);
@@ -48,7 +46,7 @@ while (($#)); do
   if [[ "$1" == -- ]]; then shift; exec "$ORACLE_BINARY" "\${filter:-}" "$@"; fi
   case "$1" in
     test|--no-default-features|--lib) shift ;;
-    -p|--features) shift 2 ;;
+    -p|--features|--test) shift 2 ;;
     *) filter="$1"; shift ;;
   esac
 done
@@ -58,7 +56,7 @@ exit 2
   );
   const env = { ...process.env, PATH: `${directory}:${process.env.PATH}`, ORACLE_BINARY: binary };
   const run = () =>
-    spawnSync("bash", [runner, "--only", "m3-maintained-one-shot", "--output-dir", directory], {
+    spawnSync("bash", [runner, "--only", "maintained-one-shot", "--output-dir", directory], {
       cwd: root,
       encoding: "utf8",
       env,

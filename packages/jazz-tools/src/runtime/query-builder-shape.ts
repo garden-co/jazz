@@ -12,6 +12,9 @@ export interface BuiltRelation {
   table?: string;
   conditions?: BuiltCondition[];
   hops?: string[];
+  orderBy?: Array<[string, "asc" | "desc"]>;
+  limit?: number;
+  offset?: number;
   gather?: BuiltGather;
   union?: {
     inputs: BuiltUnionArm[];
@@ -193,6 +196,9 @@ function normalizeBuiltRelation(value: unknown): BuiltRelation {
       ? value.hops.filter((hop): hop is string => typeof hop === "string")
       : [],
     gather: normalizeGather(value.gather),
+    ...(Array.isArray(value.orderBy) ? { orderBy: normalizeOrderBy(value.orderBy) } : {}),
+    ...(typeof value.limit === "number" ? { limit: value.limit } : {}),
+    ...(typeof value.offset === "number" ? { offset: value.offset } : {}),
   };
 
   if (isRecord(value.union) && Array.isArray(value.union.inputs)) {

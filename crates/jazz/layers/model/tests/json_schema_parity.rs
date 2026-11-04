@@ -80,3 +80,47 @@ fn native_validator_matches_the_browser_parity_fixture() {
         }
     }
 }
+
+/// `uniqueItems` gives the same verdict on every check. The `jsonschema`
+/// crate's own check hashes arrays of more than 15 items with a randomly
+/// seeded set, so `0` and `-0.0` (equal numbers) were reported as duplicates
+/// only when the seed happened to make them collide. Each check here would
+/// have drawn a fresh seed.
+#[test]
+fn unique_items_counts_equal_numbers_as_duplicates_on_every_check() {
+    let schema = serde_json::json!({ "uniqueItems": true });
+    for length in 2..=64_usize {
+        for position in 1..length {
+            let mut items: Vec<Value> = (0..length).map(|n| Value::from(n as u64 + 1)).collect();
+            items[0] = serde_json::json!(0);
+            items[position] = serde_json::json!(-0.0);
+            let array = Value::Array(items);
+            assert!(
+                matches!(check(&schema, &array), Err(JsonSchemaError::Mismatch(_))),
+                "{array} should have non-unique elements",
+            );
+        }
+    }
+    // Other spellings of one value, and objects in another key order.
+    let long = |a: Value, b: Value| {
+        let mut items: Vec<Value> = (100..120).map(Value::from).collect();
+        items.push(a);
+        items.push(b);
+        Value::Array(items)
+    };
+    for (a, b) in [
+        (serde_json::json!(1), serde_json::json!(1.0)),
+        (
+            serde_json::json!({ "a": 1, "b": [0] }),
+            serde_json::json!({ "b": [-0.0], "a": 1.0 }),
+        ),
+    ] {
+        let array = long(a, b);
+        assert!(
+            matches!(check(&schema, &array), Err(JsonSchemaError::Mismatch(_))),
+            "{array} should have non-unique elements",
+        );
+    }
+    let distinct = long(serde_json::json!(0.5), serde_json::json!({ "a": 0 }));
+    assert_eq!(check(&schema, &distinct), Ok(()));
+}

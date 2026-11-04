@@ -44,12 +44,9 @@ per-root storage markers introduced here as the epoch identity.
   boolean; rejection reasons are kind-specific payloads; the active schema is
   the only persisted schema selection; history rows require the merge columns.
 - **Catalogue payloads:** catalogue schema bytes always use version 2 (they
-  used 1 unless a table declared a composite index); lineage publications
-  always use the counted `jazz-schema-lineage-publication-v2` body and content
-  ID (`crates/jazz/layers/protocol/src/protocol.rs`,
-  `SchemaLineagePublication::content_id`); the jazz-server catalogue schema
-  and lens payloads always use version 2
-  (`crates/jazz-server/src/server/catalogue_payload_codec.rs`).
+  used 1 unless a table declared a composite index). The lineage-publication
+  body and the jazz-server catalogue payload codec are gone: the catalogue is
+  typed rows with canonical JSON definitions (SPEC ch. 10 §10.2).
 
 ### Wire bytes that change with wire v6 unchanged
 

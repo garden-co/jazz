@@ -22,8 +22,8 @@ to the shared state; they do not implement independent authentication flows.
   existing active assignment. The explicit login-or-register operation resolves
   an active assignment or creates the first assignment in one serialized owner
   request. It never reactivates or reassigns a revoked principal. Concurrent
-  requests and retries converge on the same assignment; a storage failure
-  requires authoritative recovery rather than speculative success.
+  requests and retries converge on the same assignment; after a storage
+  failure the next lookup reads committed state rather than assuming success.
 - Local-first founding is deterministic from the application namespace and
   verified founding key identity. It is usable offline; arbitrary external
   assignment cannot be accepted offline.
@@ -51,18 +51,16 @@ An application-scoped account manager provides:
 - `createLocalFirst(): AccountHandle`: synchronous offline founding and selection.
 - `getLoggedIn(): AccountHandle | undefined`: local selected state, not a fresh
   remote admission guarantee.
-- `registerJWT(auth): Promise<AccountHandle>`: explicit registration and selection.
-- `loginJWT(auth): Promise<AccountHandle>`: existing active assignment and selection.
-- `loginOrRegisterJWT(auth): Promise<AccountHandle>`: atomically resolve or create
-  an external identity's account and select it. Shared JazzSession exposes the
-  same action through its graceful shutdown and replacement lifecycle.
-- `linkJWT(auth): Promise<AccountHandle>`: link to the selected account and select
-  a new handle acting as the linked principal.
+- `loginWithBackend(): Promise<AccountHandle>`: the app's backend names the
+  signed-in user (its `authenticate`), and the core resolves or creates that
+  identity's account and selects it. The client receives no credential.
+- `linkWithBackend(guest): Promise<AccountHandle>`: link the selected
+  local-first guest to the user the backend names, and select a handle acting
+  as that user.
 - `logout()`: clear selection and stop credential use without remote revocation
   or silently deleting recoverable local-first credentials.
 
 Async failures reject with typed errors and preserve the previous selection.
-Credential inputs support refresh; plain JWT strings are a convenience.
 Concurrent operations cannot restore a login after logout or overwrite a newer
 selection. Successful remote side effects remain discoverable through login
 when the initiating UI operation was canceled.
@@ -70,7 +68,7 @@ when the initiating UI operation was canceled.
 Default provider integrations use login-or-register for signup, signin and
 restoration. Linking is an explicit alternative before enrollment: a hybrid
 application must not automatically register the incoming identity before calling
-`linkJWT`. The core primitive does not infer linking or merge accounts. Existing
+`linkWithBackend`. The core primitive does not infer linking or merge accounts. Existing
 strict login and registration operations retain their original semantics.
 
 The ordered owner performs login-or-register by looking up current admission and,
@@ -185,7 +183,7 @@ sessions. Two registries assigning identical account UUIDs must never alias
 local storage. Applications cannot supply or override this internal authority
 field separately from the opaque handle.
 
-Enrollment has no dependency on an open database or a framework. `linkJWT`
+Enrollment has no dependency on an open database or a framework. `linkWithBackend`
 operates on the selected handle's credential and the core registry only; it
 never enumerates contexts, drains uploads, or rewrites transaction authors.
 
@@ -194,7 +192,7 @@ The application or local-first auth helper uses the general lifecycle sequence:
 1. Stop admitting application work and call `oldContext.shutdown({ waitForSync: true })`.
 2. If synchronization fails, retain the existing selection and usable context;
    do not proceed to linking.
-3. Call `accounts.linkJWT(externalCredential)` outside any Jazz context.
+3. Call `accounts.linkWithBackend(guest)` outside any Jazz context.
 4. Open a new context with the returned handle. If linking fails, a new context
    may be opened with the manager's unchanged previous handle.
 
@@ -211,7 +209,7 @@ release uses sync-before-switch; it does not add cross-author replay authority.
 ## Native account roots and advisory admission
 
 The RN platform supplies its absolute application storage directory; JavaScript
-supplies no filename or path. The native account filename is lowercase BLAKE3
+supplies no filename or path. The native account filename is lowercase SHA-256
 hex plus `.sqlite`, over these exact bytes in order:
 
 - ASCII `jazz-native-account-root-v1` followed by one NUL byte;
@@ -268,16 +266,20 @@ Browser and React Native hosts reject backend selection through their absent
 backend admission adapter.
 
 Backend handles use the nil SYSTEM account UUID and exact identity
-`{ issuer: "urn:jazz:system", subject: originatingNodeUUID }`. Native runtime
-construction uses that same node UUID. Backend credential material lives in a
+`{ issuer: "urn:jazz:system", subject: backendNodeUUID }`, and SYSTEM
+provenance on rows the backend writes names that same UUID. A persistent
+backend's runtime also writes transactions as that node. A memory backend's
+counter starts over on every open, so the handle pools one random version-4
+node of its own: its transaction ids name that node while its provenance keeps
+the backend's. Backend credential material lives in a
 private WeakMap; it never enters snapshots or persisted account preferences.
 Graceful backend shutdown fences all request scopes and waits for every
 transaction originating on its node, regardless of the credited user. Trusted
 backend reopen recovers those same pending uploads. Ordinary user barriers
 remain author-scoped. Reopening an in-memory backend handle after a failed
-transition seeds the retained node-clock high-water before accepting new writes;
-an incomplete clock handoff prevents reuse. This receipt is process-local and
-adds no durable encoding.
+transition reuses its pooled node and seeds that node's retained clock
+high-water before accepting new writes; an incomplete clock handoff prevents
+reuse. This receipt is process-local and adds no durable encoding.
 
 Copied handles and SYSTEM identity objects confer no authority. Ordinary JWT
 registration, login, linking, and token extraction cannot mint or use backend
@@ -326,46 +328,28 @@ biometric-prompt options. Older native builds without the lock fail preparation.
 Persistence errors remain observable and prevent a new handle from supplying
 credentials until retention succeeds; roots are never truncated to fit storage.
 
-## Account registry record journal (v1)
+## Account registry state
 
-The registry has its own application root, separate from ordinary row storage.
-Its `default` column family is accessed through Groove `RecordStore`. Keys are
-ASCII `account-command:v1:` followed by the big-endian eight-byte revision,
-starting at zero without gaps. Recovery scans the entire `account-command:`
-prefix and rejects other versions, malformed keys, and invalid commands.
+A server keeps each application's registry as its current state, in two host
+tables of the application's store file: `_jazz_host_account_identities` (one
+row per assigned principal: exact issuer and subject, account, admission flag,
+management flag, admission generation) and `_jazz_host_account_links` (one
+row per pending or accepted link approval, keyed by its nonce). The columns
+and encodings are in `dev/proofs/server-host-tables.md`. There is no command
+journal and no replay: opening the registry reads nothing.
 
-The `jazz.account-storage.v1` profile versions the root-local journal
-key and closed descriptor contract, not a new value codec. It uses canonical Groove
-records exclusively. Its one field, `command`, is an Enum named
-`jazz.account-command.v1` with fixed registry identity 1 in this isolated root.
-Declaration-order cases and ordered payload fields are:
-
-- Register: principal Record, account Uuid.
-- RequestLink: approver Record, candidate Record, nonce Uuid, now U64, expires_at U64.
-- AcceptLink: candidate Record, nonce Uuid, now U64.
-- Revoke: approver Record, target Record.
-- FoundLocalFirst: principal Record, app Uuid.
-
-Every principal Record has issuer String then subject String, preserving exact
-UTF-8, with each nonempty component limited to 16 KiB. Groove supplies enum
-framing, record offsets, strings, UUIDs, and integers; no account-specific byte
-tags or serializer defaults define their encoding. The command and descriptor
-bytes are pinned in `layers/types/src/account_registry/command-v1.corpus` (five command lines,
-then the canonical descriptor). Roots must match the journal profile exactly;
-unknown profiles are rejected before replay. As in ordinary Groove records,
-a terminal String consumes its record remainder:
-appending valid UTF-8 can change that principal component rather than represent
-trailing garbage. Invalid UTF-8, invalid offsets, unknown enum cases, and
-invalid principal components are rejected. No private length framing is added.
-
-Conditional append remains atomic through the backend primitive, followed by a
-durability barrier before publishing state. Recovery also flushes before serving.
-A competing append or ambiguous read/write/flush error poisons the owner until
-recovery; login checks absence of the next revision before admitting cached state.
-Assignments, nonce consumption, and revocation retain the existing state-machine
-semantics. For example, a loser at revision zero cannot overwrite registration;
-a stale reader after revocation fails unavailable instead of admitting its old
-assignment. Reopening replays only the ordered committed commands.
+The decisions are `account_registry::apply` over an `AccountState`. A server
+runs each command's reads, decision and writes in one savepoint on the store's
+only writer connection, durable (`synchronous = FULL`) before the result is
+acknowledged; a refused command writes nothing. A login reads committed state
+by primary key and caches nothing, so a stale owner cannot admit from old
+state: after a revocation commits, every later lookup refuses. A write whose
+durable flush reports a failure has an unknown outcome until the next read;
+the owner announces it so live sockets re-check. Assignments, nonce
+consumption and revocation keep the state-machine semantics above: an
+assignment is permanent, revocation is never undone, and a link request
+deletes approvals that expired unaccepted (accepting one afterwards finds no
+intent).
 
 ## Shared client session lifecycle
 

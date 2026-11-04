@@ -192,7 +192,7 @@ fn message_cells(chat: usize, sender: usize, index: usize) -> BTreeMap<String, V
 /// Seed profiles, chats (odd chats public), four members per chat and
 /// `messages` chat messages. Writes run as the database identity.
 fn seed(db: &BenchDb, messages: usize) {
-    let ((), tx_id) = block_on(db.transaction(async |tx| {
+    block_on(db.transaction(async |tx| {
         for user in 0..USERS {
             tx.insert(
                 "profiles",
@@ -232,12 +232,10 @@ fn seed(db: &BenchDb, messages: usize) {
         Ok(())
     }))
     .expect("seed Chat profiles, chats and memberships");
-    db.finalize_local_mergeable_commit_for_test(tx_id)
-        .expect("settle Chat profiles, chats and memberships");
 
     for start in (0..messages).step_by(SEED_BATCH) {
         let end = (start + SEED_BATCH).min(messages);
-        let ((), tx_id) = block_on(db.transaction(async |tx| {
+        block_on(db.transaction(async |tx| {
             for index in start..end {
                 let chat = message_chat(index);
                 tx.insert(
@@ -251,8 +249,6 @@ fn seed(db: &BenchDb, messages: usize) {
             Ok(())
         }))
         .unwrap_or_else(|error| panic!("seed Chat messages {start}..{end}: {error}"));
-        db.finalize_local_mergeable_commit_for_test(tx_id)
-            .expect("settle seeded messages");
     }
 }
 
@@ -373,7 +369,7 @@ impl SendFixture {
         for _ in 0..count {
             let index = self.next_message;
             self.next_message += 1;
-            let write = block_on(self.db.insert(
+            block_on(self.db.insert(
                 "messages",
                 message_cells(OPEN_CHAT, 0, index),
                 InsertOptions {
@@ -385,11 +381,6 @@ impl SendFixture {
                 },
             ))
             .expect("member sends a message");
-            // The in-process authority plays the server's part: it runs the
-            // membership and own-profile insert policy and accepts the message.
-            self.db
-                .finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
-                .expect("authority accepts the member's message");
             let mut added = 0;
             while added == 0 {
                 added = added_rows(&next_event(&self.db, &mut self.stream));

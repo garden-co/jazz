@@ -13,8 +13,7 @@ use std::{collections::HashMap, sync::Arc};
 use crate::middleware::auth::validate_admin_secret;
 use crate::server::catalogue::MigrationGraph;
 use crate::server::{ServerState, ShutdownPhase};
-use jazz::tools::public_schema::{ColumnType, Schema, TableName, TablePolicies, Value};
-use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
+use jazz::tools::public_schema::{Schema, TablePolicies};
 use jazz::tools::transport_error::ErrorResponse;
 
 use super::utils::{
@@ -94,45 +93,6 @@ pub(super) struct AdminSubscriptionIntrospectionResponse {
     queries: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PublishMigrationRequest {
-    pub(crate) from_hash: String,
-    pub(crate) to_hash: String,
-    forward: Vec<PublishTableLens>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct PublishTableLens {
-    table: String,
-    #[serde(default)]
-    added: bool,
-    #[serde(default)]
-    removed: bool,
-    renamed_from: Option<String>,
-    operations: Vec<PublishLensOp>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub(super) enum PublishLensOp {
-    Introduce {
-        column: String,
-        column_type: ColumnType,
-        value: Value,
-    },
-    Drop {
-        column: String,
-        column_type: ColumnType,
-        value: Value,
-    },
-    Rename {
-        column: String,
-        value: String,
-    },
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct PermissionsHeadView {
@@ -147,6 +107,21 @@ pub(super) struct PermissionsHeadView {
 pub(super) struct StoredPermissionsResponse {
     head: Option<PermissionsHeadView>,
     permissions: Option<std::collections::HashMap<String, TablePolicies>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PublishedBundleView {
+    bundle: String,
+    schema_hash: String,
+    published_at: u64,
+    permissions: std::collections::HashMap<String, TablePolicies>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct PublishedBundlesResponse {
+    /// Oldest first; the last is what a backend booting now pins to.
+    bundles: Vec<PublishedBundleView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -255,116 +230,29 @@ pub(super) async fn permissions_handler(
     }))
 }
 
-/// Lower a deployment migration against its resolved source and target schemas.
-pub(crate) fn lower_migration(
-    request: PublishMigrationRequest,
-    source_schema: &Schema,
-    target_schema: &Schema,
-) -> Result<Lens, String> {
-    let source_hash = parse_schema_hash_param(&request.from_hash)?;
-    let target_hash = parse_schema_hash_param(&request.to_hash)?;
-    let tables = request.forward;
-    let mut forward = LensTransform::new();
-    for table_lens in tables {
-        let table_name = table_lens.table;
-        if table_lens.added && table_lens.removed {
-            return Err(format!(
-                "table {} cannot be both added and removed",
-                table_name
-            ));
-        }
-        if (table_lens.added || table_lens.removed) && table_lens.renamed_from.is_some() {
-            return Err(format!(
-                "table {} cannot combine added/removed markers with renamedFrom",
-                table_name
-            ));
-        }
-        if (table_lens.added || table_lens.removed) && !table_lens.operations.is_empty() {
-            return Err(format!(
-                "table {} cannot combine added/removed markers with column operations",
-                table_name
-            ));
-        }
-        if table_lens.added {
-            let target_table_name = TableName::from(table_name.clone());
-            let schema = match target_schema.get(&target_table_name) {
-                Some(schema) => schema.clone(),
-                None => {
-                    return Err(format!(
-                        "createTables references unknown target table {}",
-                        table_name
-                    ));
-                }
-            };
-            forward.push(
-                LensOp::AddTable {
-                    table: table_name.clone(),
-                    schema,
-                },
-                false,
-            );
-        }
-        if table_lens.removed {
-            let source_table_name = TableName::from(table_name.clone());
-            let schema = match source_schema.get(&source_table_name) {
-                Some(schema) => schema.clone(),
-                None => {
-                    return Err(format!(
-                        "dropTables references unknown source table {}",
-                        table_name
-                    ));
-                }
-            };
-            forward.push(
-                LensOp::RemoveTable {
-                    table: table_name.clone(),
-                    schema,
-                },
-                false,
-            );
-        }
-        if let Some(renamed_from) = table_lens.renamed_from {
-            forward.push(
-                LensOp::RenameTable {
-                    old_name: renamed_from,
-                    new_name: table_name.clone(),
-                },
-                false,
-            );
-        }
-        for operation in table_lens.operations {
-            let op = match operation {
-                PublishLensOp::Introduce {
-                    column,
-                    column_type,
-                    value,
-                } => LensOp::AddColumn {
-                    table: table_name.clone(),
-                    column,
-                    column_type,
-                    default: value,
-                },
-                PublishLensOp::Drop {
-                    column,
-                    column_type,
-                    value,
-                } => LensOp::RemoveColumn {
-                    table: table_name.clone(),
-                    column,
-                    column_type,
-                    default: value,
-                },
-                PublishLensOp::Rename { column, value } => LensOp::RenameColumn {
-                    table: table_name.clone(),
-                    old_name: column,
-                    new_name: value,
-                },
-            };
-            forward.push(op, false);
-        }
-    }
-
-    Ok(Lens::new(source_hash, target_hash, forward))
+/// Every bundle the core has published, with its permissions: what an
+/// admin reads to see what a session pinned to a bundle may do.
+pub(super) async fn published_bundles_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<Json<PublishedBundlesResponse>, Response> {
+    require_admin(&state, &headers)?;
+    let bundles = state
+        .catalogue_store
+        .published_bundles()
+        .into_iter()
+        .map(|bundle| PublishedBundleView {
+            bundle: bundle.id.to_string(),
+            schema_hash: bundle.schema.to_string(),
+            published_at: bundle.published_at,
+            permissions: bundle
+                .permissions
+                .into_iter()
+                .map(|(table, policies)| (table.to_string(), policies))
+                .collect(),
+        })
+        .collect();
+    Ok(Json(PublishedBundlesResponse { bundles }))
 }
 
 pub(super) async fn admin_subscription_introspection_handler(
@@ -416,6 +304,18 @@ pub(super) async fn internal_shutdown_handler(
 }
 
 pub(super) async fn health_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
+    // A runtime that failed and could not restart serves no sync: ask to be
+    // restarted.
+    if let Some(fault) = state.store.as_ref().and_then(|store| store.fault()) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "unhealthy",
+                "reason": fault
+            })),
+        )
+            .into_response();
+    }
     let mut phase = state.shutdown.phase();
     if !state.shutdown.is_shutting_down() && phase.is_running() {
         return Json(serde_json::json!({
@@ -479,10 +379,60 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json, serde_json::json!({ "status": "healthy" }));
     }
+
+    /// A runtime that panics is restarted and the server stays healthy. One
+    /// that panics again soon after stays stopped: the server answers 503
+    /// with why, so it is restarted.
+    #[tokio::test]
+    async fn a_runtime_that_cannot_restart_makes_the_server_unhealthy() {
+        let state = ServerBuilder::new(AppId::from_name("health-fault"))
+            .with_schema(
+                jazz::tools::public_schema::SchemaBuilder::new()
+                    .table(
+                        jazz::tools::public_schema::TableSchema::builder("notes")
+                            .column("body", jazz::tools::public_schema::ColumnType::Text),
+                    )
+                    .build(),
+            )
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build server")
+            .state;
+        let runtime = state.runtime_for_client().expect("a runtime");
+
+        let panicked = runtime
+            .with_db_for_test::<()>(|_| panic!("injected runtime failure"))
+            .await;
+        assert!(panicked.is_err());
+        let (status, json) = health(Arc::clone(&state)).await;
+        assert_eq!(status, StatusCode::OK, "restarted: {json}");
+
+        let _ = runtime
+            .with_db_for_test::<()>(|_| panic!("injected runtime failure"))
+            .await;
+        // The caller hears of the panic as it unwinds; host work queued
+        // after it runs once the store thread has handled it.
+        state
+            .store
+            .as_ref()
+            .expect("a store")
+            .kv(jazz::host::HostTable::new("probe"))
+            .expect("host table")
+            .write_many(&[(b"k".to_vec(), b"v".to_vec())])
+            .expect("host tables stay available");
+        let (status, json) = health(state).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["status"], "unhealthy");
+        let reason = json["reason"].as_str().expect("a reason");
+        assert!(reason.contains("injected runtime failure"), "{reason}");
+    }
 }
-/// Commit a complete, validated deployment. Detached execution makes request
-/// cancellation independent of the durable commit/activation boundary.
-pub(super) async fn deploy_handler(
+
+/// `/bundles`: publish a complete, validated deployment as a permissions
+/// bundle that sessions are pinned to. Nothing becomes current. Detached
+/// execution makes request cancellation independent of the durable commit.
+pub(super) async fn publish_bundle_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     body: Result<

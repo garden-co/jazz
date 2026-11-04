@@ -590,7 +590,7 @@ preimage is `magic "JFRD" | version 1 | field_count:u32be |
 descriptor_len:u32be | Groove-record-descriptor | record_len:u32be |
 Groove-record`. The descriptor has the source-order payload types and the
 engine-owned names `flat_join_payload_0`, `flat_join_payload_1`, …, so user
-projection aliases do not affect it. `row_digest` is BLAKE3's derived-key hash
+projection aliases do not affect it. `row_digest` is the derived-key hash (SHA-256 over the length-prefixed context, then the input)
 of that preimage with context `jazz.flat-join-row-digest.v1`.
 
 For example, declared payload `(u64, string)` and values `(7, "blue")` have
@@ -764,8 +764,11 @@ produces `[rowB, rowB]`, while a missing B produces `[rowA]`.
 
 Explicit `order_by` overrides the default primary ordering for the result boundary
 where it appears. Ordered row-valued results remain total and replay-stable:
-after the user-declared order terms, ties are broken by ascending row id unless
-the query surface later exposes an explicit, stable tie policy. Child-local
+after the user-declared order terms, ties are broken by row id in the direction
+of the last declared term (ascending when that term is ascending, descending when
+it is descending) unless the query surface later exposes an explicit, stable tie
+policy. Following the last term's direction lets one declared index, which ends
+in the row id, supply the whole order in either scan direction. Child-local
 `order_by` overrides only that child relation's ordering and does not reorder
 parents or sibling relation payloads. The row id used for relation defaults and explicit ordering ties
 is the child source row id, and its ordering is independently evaluated within
@@ -796,7 +799,9 @@ key encoding where that type is a valid key part (groove ch. 2). A grouped query
 whose group key contains a type without a specified stable order must be rejected
 until that type's ordering is specified. If an explicit `order_by` is applied to
 grouped output and multiple groups tie on the user order terms, the group key is
-the stable tie-breaker.
+the stable tie-breaker. Opaque synthetic row and occurrence identities identify
+groups but do not define their order. Apply this logical ordering before the
+grouped output's `offset` and `limit`.
 
 Ordering is part of the delivered result, not a presentation hint. Initial
 snapshots, reset-result-set `ViewUpdate`s, maintained subscription deltas, and
@@ -997,13 +1002,11 @@ are not marked deleted. Subscription deletion state is exposed through the
 revoking access to a row updates the subscription like any other change: a
 restoration replaces the deleted row with the live one, and a row whose read
 policy no longer holds, including because its granting row was deleted, leaves
-the result. Include-deleted reads of current tables differ by read path. Plain
-one-shot reads support only the current source and reject every other read
-view (branch views and snapshots) with a "not supported yet" error.
-Subscriptions, and transaction reads, which register as snapshot
-subscriptions, accept the current source and any snapshot; they reject branch
-views with a "not supported yet" error. History queries keep their own branch
-selection.
+the result. Include-deleted reads, one-shot or live, accept the current
+source and branch views; subscriptions and transaction reads, which register
+as snapshot subscriptions, accept snapshots too. A replica keeps a live
+branch-view read in its view upstream (ch. 8 §8.4, ch. 11 §11.5). History
+queries keep their own branch selection.
 
 Inside an open serializable transaction, `tx_query` records a binding-sensitive
 `PredicateRead` (`INV-QUERY-13`). The later phantom check (ch. 3,
@@ -1042,7 +1045,7 @@ Default result ordering is a conformance requirement for every public query
 surface. The test plan below records additional intended coverage.
 
 - Strengthen the maintained-vs-one-shot differential oracle command
-  `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
+  `cargo test -p jazz --test maintained_differential maintained_one_shot_differential_oracle -- --ignored`
   to compare the canonical `ResultTree` specified in appendix D, rather than a
   root-id set. The oracle should keep using public query shapes/builders and
   compare the maintained stream's reduced result to the one-shot result at each
@@ -1059,12 +1062,11 @@ surface. The test plan below records additional intended coverage.
   whose input rows are inserted in non-key order. These cases should assert the
   lexicographic group-key order and explicit `orderBy` override/tie behavior.
 - Add a facade-level canary next to
-  `crates/jazz/tests/incremental_delivery_canary.rs` for a large unordered
+  `crates/jazz/tests/include_live.rs` for a large unordered
   relation/include result. It should subscribe through the public `Db` API,
   insert one child whose id belongs in the middle of the child relation, assert
   the complete touched-parent replacement's order, and pin the bounded
-  allocation/byte expectation for the collector exception to
-  `groove/SPEC/INVARIANTS.md::INV-INC-1`.
+  allocation/byte expectation for the collector exception to `INV-PERF-9`.
 - Keep Rust tests aligned with
   `crates/jazz/TESTING_GUIDELINES.md`: prefer black-box integration tests
   through `Db`, `JazzClient`, `TestingClient`, public schema/permission builders,
