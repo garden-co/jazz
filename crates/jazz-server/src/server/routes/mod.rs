@@ -107,17 +107,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             get(admin_subscription_introspection_handler),
         )
         .layer(DefaultBodyLimit::max(MAX_CATALOGUE_REQUEST_BODY_BYTES));
-    let account_routes = Router::new()
-        .route("/register", post(accounts::register))
-        .route("/found-local-first", post(accounts::found_local_first))
-        .route("/revoke", post(accounts::revoke))
-        .route("/login", post(accounts::login))
-        .route("/login-or-register", post(accounts::login_or_register))
-        .route("/links/request", post(accounts::request_link))
-        .route("/links/accept", post(accounts::accept_link))
-        .layer(DefaultBodyLimit::max(64 * 1024));
     let traced_routes = Router::new()
-        .nest("/accounts", account_routes)
         .route("/backend/admit", post(accounts::admit_backend))
         .route("/ws", axum::routing::any(ws_handler))
         .route("/schema/{hash}", get(schema_handler))
@@ -230,7 +220,6 @@ mod tests {
             backend_secret: None,
             admin_secret: Some("admin-secret".to_string()),
             allow_local_first_auth: true,
-            jwks_url: None,
             ..Default::default()
         }
     }
@@ -243,7 +232,6 @@ mod tests {
             backend_secret: Some(backend_secret.to_string()),
             admin_secret: None,
             allow_local_first_auth: false,
-            jwks_url: None,
             ..Default::default()
         };
 
@@ -553,7 +541,6 @@ mod tests {
                 backend_secret: None,
                 admin_secret: Some("admin-secret".to_string()),
                 allow_local_first_auth: false,
-                jwks_url: None,
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)

@@ -2,11 +2,10 @@
 //
 //   node sync.mjs <appDir> <port> <json options>
 //
-// Production builds don't start one (withJazz / jazzPlugin only do in
-// development), so this starts JazzServer (jazz-napi, via jazz-tools/dev) on
+// Production builds don't start one, so this starts JazzServer (jazz-napi, via jazz-tools/dev) on
 // 127.0.0.1:<port> with a fresh data dir and the app's own server options,
-// publishes the app's schema and permissions from <appDir> with the same
-// deploy call the dev runtime makes, prints "SYNC READY <url>", and runs until
+// publishes the app's schema and permissions from <appDir> with the catalogue
+// deploy call, prints "SYNC READY <url>", and runs until
 // it is sent SIGTERM.
 import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";

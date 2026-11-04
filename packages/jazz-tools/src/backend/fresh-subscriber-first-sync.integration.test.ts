@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startTestJazz } from "../testing/index.js";
 import { createJazzSession } from "./index.js";
 
 const app = s.defineApp(
@@ -33,7 +33,7 @@ describe("fresh subscriber first sync", () => {
     };
     const rowCount = 100;
     const body = "x".repeat(60_000);
-    const server = await startLocalJazzServer({ ...settings, schema: app, permissions });
+    const server = await startTestJazz({ app, permissions, coreOptions: settings });
     const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
     const open = async (name: string) => {
       const session = await createJazzSession({
@@ -51,7 +51,6 @@ describe("fresh subscriber first sync", () => {
     };
     let unsubscribe: (() => void) | undefined;
     try {
-      await deploy({ ...settings, schema: app, permissions, serverUrl: server.url });
       const writer = await open("writer");
       for (let start = 0; start < rowCount; start += 20) {
         await Promise.all(

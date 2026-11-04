@@ -17,7 +17,7 @@ import {
 } from "@astryxdesign/core";
 import { app } from "@/schema";
 import { PAGE_TREE_MAX_DEPTH } from "@/src/lib/limits";
-import { createPage } from "@/src/lib/page-actions";
+import { createPage, createSongSheet } from "@/src/lib/page-actions";
 import { BlockEditor } from "./BlockEditor";
 import { DeletePageDialog } from "./DeletePageDialog";
 import { InlineText } from "./InlineText";
@@ -25,6 +25,7 @@ import { IssueProperties } from "./IssueProperties";
 import { IssuesDatabase } from "./IssuesDatabase";
 import { MovePageDialog } from "./MovePageDialog";
 import { ShareDialog } from "./ShareDialog";
+import { SongSheet } from "./SongSheet";
 import { useCan } from "./use-can";
 import { pageAdviceKey, useWorkspace } from "./workspace-context";
 
@@ -71,19 +72,31 @@ function PageBody({ pageId }: { pageId: string }) {
   const canNest = editable && page.kind === "doc" && tree.depth(pageId) + 1 < PAGE_TREE_MAX_DEPTH;
 
   const menu: DropdownMenuOption[] = [];
-  if (canNest)
+  if (canNest) {
     menu.push({
       label: "Add subpage",
       onClick: () =>
         openPage(createPage(db, { workspaceId: workspace.id, parentId: pageId, title: "" }).id),
     });
+    menu.push({
+      label: "Add song sheet",
+      onClick: async () =>
+        openPage((await createSongSheet(db, { workspaceId: workspace.id, parentId: pageId })).id),
+    });
+  }
   if (canRestructure && page.kind !== "issue")
     menu.push({ label: "Move to…", onClick: () => setDialog("move") });
   if (canRestructure)
     menu.push({ label: "Delete", variant: "destructive", onClick: () => setDialog("delete") });
 
   return (
-    <VStack gap={6} padding={6} paddingInline={4} width="100%" maxWidth={880}>
+    <VStack
+      gap={6}
+      padding={6}
+      paddingInline={4}
+      width="100%"
+      maxWidth={page.kind === "song" ? 1200 : 880}
+    >
       <VStack gap={3}>
         <HStack gap={2} justify="between" align="center" wrap="wrap">
           <Breadcrumbs variant="supporting">
@@ -117,6 +130,8 @@ function PageBody({ pageId }: { pageId: string }) {
       {page.kind === "issue" && <IssueProperties pageId={pageId} editable={editable} />}
       {page.kind === "issues" ? (
         <IssuesDatabase databaseId={pageId} editable={editable} />
+      ) : page.kind === "song" ? (
+        <SongSheet pageId={pageId} editable={editable} />
       ) : (
         <BlockEditor pageId={pageId} editable={editable} />
       )}

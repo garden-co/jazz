@@ -21,7 +21,12 @@ import {
   waitForQuery,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo, getJazzServerJwtForUser } from "./testing-server.js";
+import {
+  getJazzServerInfo,
+  jazzAppUser,
+  startJazzApp,
+  type JazzServerInfo,
+} from "./testing-server.js";
 
 const app = schema.defineApp(
   {
@@ -289,16 +294,9 @@ afterEach(async () => {
 
 describe("raw websocket private read gate", () => {
   it("delivers main-thread subscription updates for $createdBy-scoped inserts", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("created-by-async-channel-subscription"),
-    );
-    await publishSchemaAndPermissions(
-      appId,
-      serverUrl,
-      adminSecret,
-      createdByPermissions,
-      createdByApp,
-    );
+    const core = await getJazzServerInfo(uniqueDbName("created-by-async-channel-subscription"));
+    const backend = await publishSchemaAndPermissions(core, createdByPermissions, createdByApp);
+    const { appId, serverUrl } = backend;
 
     const accounts = await createAccountManager({ appId, serverUrl });
     const account = accounts.restoreLocalFirst(generateAuthSecret());
@@ -351,16 +349,13 @@ describe("raw websocket private read gate", () => {
   }, 60_000);
 
   it("lets Bob insert a camelCase chat message after global-confirmed membership", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("camel-chat-member-message-insert"),
-    );
-    await publishSchemaAndPermissions(
-      appId,
-      serverUrl,
-      adminSecret,
+    const core = await getJazzServerInfo(uniqueDbName("camel-chat-member-message-insert"));
+    const backend = await publishSchemaAndPermissions(
+      core,
       camelChatStyleMessagePermissions,
       camelChatApp,
     );
+    const { appId, serverUrl } = backend;
 
     const alice = await openUserDb(appId, serverUrl, "camel-chat-insert-alice");
     const bob = await openUserDb(appId, serverUrl, "camel-chat-insert-bob");
@@ -570,29 +565,21 @@ describe("raw websocket private read gate", () => {
   }, 60_000);
 
   it("converts a private chat invite code into normal membership visibility", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("camel-chat-private-invite"),
-    );
-    await publishSchemaAndPermissions(
-      appId,
-      serverUrl,
-      adminSecret,
+    const core = await getJazzServerInfo(uniqueDbName("camel-chat-private-invite"));
+    const backend = await publishSchemaAndPermissions(
+      core,
       camelChatStyleMessagePermissions,
       camelChatApp,
     );
+    const { appId, serverUrl } = backend;
 
     const alice = await openUserDb(appId, serverUrl, "camel-chat-invite-alice");
     // Use the same external issuer/subject for both the invite-scoped and
     // normal sessions. This fixture deliberately compares the external
     // identity subject, so a local-first identity is not interchangeable with
-    // this JWT identity.
+    // the identity the app's backend signs Bob in as.
     const bobSubject = "invite-bob";
-    const bob = await openJwtUserDb(
-      appId,
-      serverUrl,
-      "camel-chat-invite-bob",
-      await getJazzServerJwtForUser(bobSubject, undefined, appId),
-    );
+    const bob = await openBackendUserDb(backend, "camel-chat-invite-bob", bobSubject);
     const aliceUserId = requireUserSubject(alice, "Alice");
     const bobUserId = requireUserSubject(bob, "Bob");
     const joinCode = `join-${Date.now()}`;
@@ -653,18 +640,11 @@ describe("raw websocket private read gate", () => {
       "Alice private seed message global wait",
     );
 
-    const inviteSession = {
-      issuer: "https://issuer.jazz.test",
-      user_id: bobSubject,
-      claims: { join_code: joinCode },
-      authMode: "external" as const,
-    };
-    const inviteBob = await openJwtUserDb(
-      appId,
-      serverUrl,
-      "camel-chat-invite-bob-scoped",
-      await getJazzServerJwtForUser(bobSubject, { join_code: joinCode }, appId),
-    );
+    const inviteBob = await openBackendUserDb(backend, "camel-chat-invite-bob-scoped", bobSubject, {
+      join_code: joinCode,
+    });
+    // The backend vouches for the invite claim on this session.
+    expect(inviteBob.getAuthState().session?.claims).toMatchObject({ join_code: joinCode });
 
     await expect(
       waitForQuery(
@@ -684,7 +664,6 @@ describe("raw websocket private read gate", () => {
       "Bob should subscribe to the private chat through the invite claim",
       15_000,
       { tier: "remote" },
-      inviteSession,
     );
     unsubscribeInviteRead();
 
@@ -824,10 +803,9 @@ describe("raw websocket private read gate", () => {
   }, 60_000);
 
   it("reads messages through public-chat or membership read policy after global writes", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("chat-style-message-read"),
-    );
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, chatStyleMessagePermissions);
+    const core = await getJazzServerInfo(uniqueDbName("chat-style-message-read"));
+    const backend = await publishSchemaAndPermissions(core, chatStyleMessagePermissions);
+    const { appId, serverUrl } = backend;
 
     const alice = await openUserDb(appId, serverUrl, "chat-style-message-alice");
     const bob = await openUserDb(appId, serverUrl, "chat-style-message-bob");
@@ -906,10 +884,9 @@ describe("raw websocket private read gate", () => {
   }, 60_000);
 
   it("does not expose Alice's private chat or message rows to Bob without adminSecret", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("private-read-gate"),
-    );
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+    const core = await getJazzServerInfo(uniqueDbName("private-read-gate"));
+    const backend = await publishSchemaAndPermissions(core, permissions);
+    const { appId, serverUrl } = backend;
 
     const alice = await openUserDb(appId, serverUrl, "private-read-gate-alice");
     const bob = await openUserDb(appId, serverUrl, "private-read-gate-bob");
@@ -1088,37 +1065,28 @@ async function openUserDb(
   );
 }
 
-async function openJwtUserDb(
-  appId: string,
-  serverUrl: string,
+/** Open a Db for `userId` signed in through the app's backend. */
+async function openBackendUserDb(
+  backend: JazzServerInfo,
   label: string,
-  jwtToken: string,
+  userId: string,
+  claims?: Record<string, unknown>,
 ): Promise<Db> {
   return ctx.track(
     await createBrowserTestDb({
-      appId,
-      serverUrl,
-      jwtToken,
-      registerJwt: true,
+      ...(await jazzAppUser(backend, userId, claims)),
       driver: { type: "persistent", dbName: uniqueDbName(label) },
     }),
   );
 }
 
 async function publishSchemaAndPermissions(
-  appId: string,
-  serverUrl: string,
-  adminSecret: string,
+  core: JazzServerInfo,
   permissions: CompiledPermissions,
   appSchema: { wasmSchema: typeof app.wasmSchema } = app,
-): Promise<void> {
-  await deploy({
-    appId,
-    serverUrl,
-    adminSecret,
-    schema: appSchema.wasmSchema,
-    permissions,
-  });
+): Promise<JazzServerInfo> {
+  await deploy({ ...core, schema: appSchema.wasmSchema, permissions });
+  return startJazzApp(core, { schema: appSchema.wasmSchema, permissions });
 }
 
 function requireUserAccountId(db: Db, label: string): string {

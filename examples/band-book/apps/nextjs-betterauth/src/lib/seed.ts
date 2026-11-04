@@ -19,12 +19,26 @@ export type SeedIssue = {
   labels: string[];
 };
 
+/**
+ * A comment on a song sheet, written the way a person (or an LLM) would quote
+ * it: the words commented on and a little text around them, no positions.
+ */
+export type SeedComment = {
+  before?: string;
+  matched: string;
+  after?: string;
+  text: string;
+};
+
 export type SeedPage = {
   key: string;
   title: string;
-  kind: "doc" | "issues" | "issue";
+  kind: "doc" | "issues" | "issue" | "song";
   blocks?: SeedBlock[];
   issue?: SeedIssue;
+  /** A song page's rich-text body, as Markdown. */
+  sheet?: string;
+  comments?: SeedComment[];
   children?: SeedPage[];
 };
 
@@ -89,6 +103,56 @@ export const DEMO_PAGES: SeedPage[] = [
               },
               { kind: "bullet", text: "Outro: hold the last chord, let the room ring" },
             ],
+          },
+        ],
+      },
+      {
+        key: "night-bus",
+        title: "Night bus home (song sheet)",
+        kind: "song",
+        sheet: [
+          "**Key of E, 104 bpm.** Written on the N29 after the [Lisbon show](https://example.com/lisbon).",
+          "",
+          "## Verse 1",
+          "",
+          "> Last bus out of Camden, the windows fogged and gold\\",
+          "> You draw a map of nowhere on the glass against the cold",
+          "",
+          "## Chorus",
+          "",
+          "> Ride it to the end of the line\\",
+          "> Every stop is a reason to stay",
+          "",
+          "## Chords",
+          "",
+          "```",
+          "Verse   E  | C#m | A  | B",
+          "Chorus  A  | E   | B  | C#m",
+          "```",
+          "",
+          "## Arrangement",
+          "",
+          "1. Intro: guitar alone, palm muted",
+          "2. Verse 1: *drums on the second line*",
+          "3. Chorus: everyone in, harmonies on **end of the line**",
+          "",
+          "- Decide on a bridge",
+          "- Try it a tone lower for the acoustic set",
+        ].join("\n"),
+        comments: [
+          {
+            before: "the windows ",
+            matched: "fogged and gold",
+            text: "Love this image. Keep it even if the rest of the verse changes.",
+          },
+          {
+            matched: "Every stop is a reason to stay",
+            text: "Feels a syllable short when sung. Try “every single stop”?",
+          },
+          {
+            before: "Chorus: everyone in, ",
+            matched: "harmonies on **end of the line**",
+            text: "Who takes the high part? Let's try it at soundcheck.",
           },
         ],
       },
