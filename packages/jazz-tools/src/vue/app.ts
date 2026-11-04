@@ -50,7 +50,7 @@ export const JazzProvider = defineComponent({
     config: Object as PropType<AccountDbConfig>,
     appId: String,
     scope: String,
-    serverUrl: String,
+    serverUrl: { type: String as PropType<string | null>, default: undefined },
     initial: [String, Object] as PropType<JazzSessionConfig["initial"]>,
     autoAttachDevTools: { type: Boolean, default: true },
   },
