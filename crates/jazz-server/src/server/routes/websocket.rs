@@ -1819,6 +1819,32 @@ mod tests {
         );
     }
 
+    /// A vouched upgrade whose access grants no backend secret (a guest's
+    /// socket) may not state a session: it never skips the guest's own
+    /// account check, and is never labelled the backend's.
+    #[tokio::test]
+    async fn ws_a_session_access_vouch_may_not_state_a_session() {
+        use crate::middleware::workload::{BackendAccess, VOUCHED_HEADER, vouched_value};
+        let state = make_ws_test_state().await;
+        let secrets = state.workload_secrets.as_ref().expect("internal secrets");
+        let identity = AuthorSubject::for_test_bytes([0x65; 16]);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            VOUCHED_HEADER,
+            vouched_value(secrets, BackendAccess::Session)
+                .parse()
+                .unwrap(),
+        );
+        let Err(error) = ws_admission(pinned_prelude(identity, None), &headers, &state).await
+        else {
+            panic!("a session-access vouch may not state a session");
+        };
+        assert!(
+            format!("{error:?}").contains("Backend secret required"),
+            "{error:?}"
+        );
+    }
+
     /// A core admits only its app's backend. A client's own proof, a
     /// backend session without the secret, or an external JWT reaches it
     /// only through the backend (`createJazz`), never directly.

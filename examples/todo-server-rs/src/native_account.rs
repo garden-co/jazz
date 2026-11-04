@@ -58,5 +58,8 @@ pub(super) async fn enrol(context: &mut AppContext) -> jazz::tools::Result<()> {
         ));
     }
     session.account_id = Some(admitted.account);
+    // The stated session decides the client's identity; keep the context's
+    // account in step with it for anything that reads it.
+    context.account_id = Some(admitted.account);
     Ok(())
 }

@@ -45,6 +45,11 @@ pub enum WebSocketClientError {
     Send(tokio_tungstenite::tungstenite::Error),
     Receive(tokio_tungstenite::tungstenite::Error),
     ClosedDuringHandshake,
+    /// The peer sent a Close frame before its hello, with this close code.
+    ClosedBeforeHello {
+        code: u16,
+        reason: String,
+    },
     HandshakeTimeout,
     UnexpectedHandshakeMessage,
     EncodePrelude(serde_json::Error),
@@ -64,6 +69,12 @@ impl fmt::Display for WebSocketClientError {
             Self::Receive(error) => write!(f, "failed to receive websocket frame: {error}"),
             Self::ClosedDuringHandshake => {
                 write!(f, "websocket closed during handshake")
+            }
+            Self::ClosedBeforeHello { code, reason } => {
+                write!(
+                    f,
+                    "websocket closed before hello (code={code}, reason={reason})"
+                )
             }
             Self::HandshakeTimeout => write!(f, "websocket handshake timed out"),
             Self::UnexpectedHandshakeMessage => {
@@ -162,6 +173,14 @@ fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
             )
         }
         WebSocketClientError::HandshakeTimeout => true,
+        // A relay (the app's backend) accepts the upgrade and then closes
+        // when it cannot reach its core. Like the HTTP statuses below, only
+        // close codes that describe transient availability retry: going
+        // away, server error, restart, try again later and bad gateway. A
+        // refused sign-in arrives as an auth-failed wire error first.
+        WebSocketClientError::ClosedBeforeHello { code, .. } => {
+            matches!(code, 1001 | 1011 | 1012 | 1013 | 1014)
+        }
         // Only HTTP statuses that describe transient availability are
         // retryable. This includes request timeout, too early, throttling,
         // and common temporary server failures. Authorization, unsupported
@@ -707,8 +726,16 @@ async fn receive_server_hello(
         .map_err(|_| WebSocketClientError::HandshakeTimeout)?
         .ok_or(WebSocketClientError::ClosedDuringHandshake)?
         .map_err(WebSocketClientError::Receive)?;
-    let Message::Binary(bytes) = message else {
-        return Err(WebSocketClientError::UnexpectedHandshakeMessage);
+    let bytes = match message {
+        Message::Binary(bytes) => bytes,
+        Message::Close(frame) => {
+            let (code, reason) = frame
+                .map(|frame| (u16::from(frame.code), frame.reason.to_string()))
+                // A Close frame without a status is "no status received".
+                .unwrap_or((1005, String::new()));
+            return Err(WebSocketClientError::ClosedBeforeHello { code, reason });
+        }
+        _ => return Err(WebSocketClientError::UnexpectedHandshakeMessage),
     };
     let encoded = jazz::wire::decode_websocket_frame_batch(&bytes)
         .map_err(WebSocketClientError::DecodeBatch)?;
@@ -970,6 +997,43 @@ mod tests {
         server.await.unwrap();
     }
 
+    // A relay that accepts the upgrade and closes when its core is
+    // unreachable sends a real Close frame before any hello.
+    #[tokio::test]
+    async fn relay_close_before_hello_is_retryable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::Close(Some(
+                tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code: 1011.into(),
+                    reason: "admission failed".into(),
+                },
+            )))
+            .await
+            .unwrap();
+        });
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let error = receive_server_hello(&mut ws, deadline)
+            .await
+            .expect_err("closed before hello");
+        assert!(
+            matches!(
+                &error,
+                WebSocketClientError::ClosedBeforeHello { code: 1011, reason }
+                    if reason == "admission failed"
+            ),
+            "unexpected close: {error:?}"
+        );
+        assert!(native_transport_error(error).is_retryable());
+        server.await.unwrap();
+    }
+
     // This reproduces the socket library's typed EOF result below the Db API;
     // constructing an error alone would miss the actual abrupt-close category.
     #[tokio::test]
@@ -1134,6 +1198,22 @@ mod tests {
             !native_transport_error(WebSocketClientError::UnexpectedHandshakeMessage)
                 .is_retryable()
         );
+    }
+
+    #[test]
+    fn close_before_hello_retries_only_transient_close_codes() {
+        let closed = |code: u16| {
+            native_transport_error(WebSocketClientError::ClosedBeforeHello {
+                code,
+                reason: "core unavailable".to_owned(),
+            })
+        };
+        for transient in [1001, 1011, 1012, 1013, 1014] {
+            assert!(closed(transient).is_retryable(), "close {transient}");
+        }
+        for terminal in [1000, 1002, 1003, 1005, 1007, 1008, 1009, 1010, 4000] {
+            assert!(!closed(terminal).is_retryable(), "close {terminal}");
+        }
     }
 
     #[test]
