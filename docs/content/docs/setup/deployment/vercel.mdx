@@ -84,11 +84,18 @@ integration sets, and the core assumes that role with your function's OIDC token
 the AWS region your Sandbox runs in; the backend warns when they differ. Its options are the same
 as for [your own server](/docs/setup/deployment/own-server#large-values).
 
-Both `vercelBlob()` and `s3()` take a `prefix`, by default `jazz/<store id>/`, so production
-and every preview core can share one Blob store or bucket without sharing objects.
+Each Blob store or bucket serves one Vercel environment. Give production and previews their own,
+connect each to its environment, and enable OIDC for each environment in the project's settings. A core given another environment's store refuses to
+start and says so. Both `vercelBlob()` and `s3()` also take a `prefix`, by default
+`jazz/<store id>/`.
 
-A core that started on SQLite can move to Vercel Blob or S3 later: connect a store and redeploy.
-Moving back, or between Vercel Blob and S3, is not supported yet and refuses to start.
+Where large values go is a one-way choice. A core that started on SQLite can move to Vercel Blob
+or S3 later: connect a store and redeploy. Every other change, including disconnecting or swapping
+the Blob store, moving between Vercel Blob and S3, or moving back to SQLite, is not supported yet
+and the core refuses to start.
+
+History keeps every version of a row, so deleting rows doesn't free their large values, and there
+is no way to erase them yet. Expect blob storage to only grow.
 
 ## Local development
 

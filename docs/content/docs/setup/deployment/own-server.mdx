@@ -70,9 +70,12 @@ already claimed.
 
 The data directory records its choice in `<path>/blob-store`. You can move an existing directory
 from `"sqlite"` to `files()` or `s3()` later; any other switch is not supported yet and refuses to
-start. A blob directory belongs to exactly one data directory, so two data directories can't share
+start, so treat it as a one-way choice. A blob directory belongs to exactly one data directory, so two data directories can't share
 one. To copy a data directory, give the copy its own blob directory or prefix and delete its
 `store-id` and `blob-store` files before it first starts, or it claims the original's.
+
+History keeps every version of a row, so deleting rows doesn't free their large values, and there
+is no way to erase them yet. Expect blob storage to only grow.
 
 <include>../../../partials/main-backend-mount.mdx</include>
 

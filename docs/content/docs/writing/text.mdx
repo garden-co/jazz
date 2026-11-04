@@ -59,6 +59,9 @@ The merge keeps Markdown and HTML markup intact but is not tree-aware: it doesn'
 merged result is well formed. See [how text merges work](/docs/recipes/local-first/how-sync-works#text-merges)
 for the full rules.
 
+Merged values are not sanitized. Like any text users write, sanitize Markdown and HTML before you
+render them as HTML.
+
 ## Connecting an editor
 
 Three habits keep an editor pleasant to use with a text column:
