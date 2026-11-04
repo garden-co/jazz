@@ -1642,7 +1642,11 @@ struct OwnerSession {
 
 struct SessionQueues {
     inbound: RefCell<VecDeque<SyncMessage>>,
-    outbound: RefCell<VecDeque<SyncMessage>>,
+    /// Output the socket has not taken yet, encoded as it is queued so its
+    /// size is known, with its bytes.
+    outbound: RefCell<VecDeque<(Vec<AbiBytes>, usize)>>,
+    /// What the session's output holds in memory (see [`Backlog`]).
+    backlog: Backlog,
     /// Inbound messages the engine may still take in the tick serving this
     /// session.
     budget: std::cell::Cell<usize>,
@@ -1713,16 +1717,120 @@ fn start_tick<'a>(sessions: impl Iterator<Item = &'a SessionQueues> + Clone) {
             queues.done.set(false);
         }
         queues.served.set(false);
+        queues.backlog.start_tick();
     }
 }
 
 /// The engine's side of one session.
 struct SessionTransport(Rc<SessionQueues>);
 
-impl Transport for SessionTransport {
-    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        self.0.outbound.borrow_mut().push_back(message);
+impl SessionQueues {
+    fn new(slice: Rc<TickSlice>, egress: Arc<AtomicUsize>) -> Self {
+        Self {
+            inbound: RefCell::default(),
+            outbound: RefCell::default(),
+            backlog: Backlog::new(egress),
+            budget: std::cell::Cell::new(0),
+            served: std::cell::Cell::new(false),
+            done: std::cell::Cell::new(false),
+            slice,
+        }
+    }
+
+    /// Queue `message` for the socket, encoded, counting it in the backlog.
+    fn queue(&self, message: SyncMessage) -> Result<(), TransportError> {
+        let (frames, bytes) = encode_outbound(message)?;
+        self.backlog.queued(bytes);
+        self.outbound.borrow_mut().push_back((frames, bytes));
         Ok(())
+    }
+}
+
+fn encode_outbound(message: SyncMessage) -> Result<(Vec<AbiBytes>, usize), TransportError> {
+    let frames = jazz::db::encode_frames(message).map_err(|error| {
+        tracing::error!(%error, "encode outbound sync message");
+        TransportError::Failed(format!("encode outbound sync message: {error}"))
+    })?;
+    let bytes = frames.iter().map(Vec::len).sum();
+    Ok((frames, bytes))
+}
+
+/// Undrained output a session may hold beyond its biggest tick's: a reader
+/// this far behind is closed with `Backpressure` (the client reconnects
+/// later) instead of holding server memory without bound.
+pub(crate) const SESSION_BACKLOG_FLOOR: usize = 64 * 1024 * 1024;
+
+/// How much of a session's output sits in server memory: queued in the
+/// engine and handed to the socket but not yet read off it.
+///
+/// One tick's output for a session is always taken whole, however large
+/// (a first result is as big as what the client asked for). Output of a
+/// later tick is refused, and the session closed, once what earlier ticks
+/// left undrained exceeds twice the session's biggest tick, and at least
+/// [`SESSION_BACKLOG_FLOOR`]: a reader that keeps up drains a burst before
+/// the next one doubles it, and one that does not is bounded by about
+/// that much.
+struct Backlog {
+    /// Bytes the socket took and the client has not read yet.
+    egress: Arc<AtomicUsize>,
+    /// Bytes queued in the engine, not yet handed to the socket.
+    queued: std::cell::Cell<usize>,
+    /// Undrained bytes (queued and egress) when this tick started.
+    carried: std::cell::Cell<usize>,
+    /// Bytes queued in this tick.
+    burst: std::cell::Cell<usize>,
+    /// The most bytes one earlier tick queued.
+    peak: std::cell::Cell<usize>,
+}
+
+impl Backlog {
+    fn new(egress: Arc<AtomicUsize>) -> Self {
+        Self {
+            egress,
+            queued: std::cell::Cell::new(0),
+            carried: std::cell::Cell::new(0),
+            burst: std::cell::Cell::new(0),
+            peak: std::cell::Cell::new(0),
+        }
+    }
+
+    fn undrained(&self) -> usize {
+        self.queued
+            .get()
+            .saturating_add(self.egress.load(Ordering::Acquire))
+    }
+
+    /// A tick starts: what is undrained now was left by earlier ones.
+    fn start_tick(&self) {
+        self.peak.set(self.peak.get().max(self.burst.replace(0)));
+        self.carried.set(self.undrained());
+    }
+
+    /// Whether this tick may queue more for the session.
+    fn admits(&self) -> bool {
+        let allowed = SESSION_BACKLOG_FLOOR.max(self.peak.get().saturating_mul(2));
+        self.carried.get() <= allowed
+    }
+
+    fn queued(&self, bytes: usize) {
+        self.queued.set(self.queued.get() + bytes);
+        self.burst.set(self.burst.get() + bytes);
+    }
+
+    /// `bytes` left the engine for the socket.
+    fn handed_on(&self, bytes: usize) {
+        self.queued.set(self.queued.get().saturating_sub(bytes));
+    }
+}
+
+impl Transport for SessionTransport {
+    /// `Backpressure` closes the session (the engine drops a backed-up
+    /// subscriber, and the host tells the client to come back later).
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        if !self.0.backlog.admits() {
+            return Err(TransportError::Backpressure);
+        }
+        self.0.queue(message)
     }
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
@@ -1959,14 +2067,10 @@ impl Owner {
             self.db.set_identity_claims(identity, claims.clone());
             claims
         });
-        let queues = Rc::new(SessionQueues {
-            inbound: RefCell::default(),
-            outbound: RefCell::default(),
-            budget: std::cell::Cell::new(0),
-            served: std::cell::Cell::new(false),
-            done: std::cell::Cell::new(false),
-            slice: Rc::clone(&self.slice),
-        });
+        let queues = Rc::new(SessionQueues::new(
+            Rc::clone(&self.slice),
+            Arc::clone(&egress),
+        ));
         let subscriber = self.db.accept_pinned_subscriber(
             Box::new(SessionTransport(Rc::clone(&queues))),
             identity,
@@ -2072,7 +2176,7 @@ impl Owner {
             else {
                 continue;
             };
-            tracing::warn!(%error, "closing sync session");
+            tracing::warn!(%error, app = self.app.as_deref().unwrap_or("?"), "closing sync session");
             let _ = self.sessions[&id]
                 .output
                 .send((Err(session_closed_error(&error)), 0));
@@ -2083,37 +2187,14 @@ impl Owner {
             let mut outbound = session.queues.outbound.borrow_mut();
             let mut frames = Vec::new();
             let mut bytes = 0;
-            let mut failed = None;
             while session.egress.load(Ordering::Acquire) + bytes < SESSION_QUEUE_BUDGET
-                && let Some(message) = outbound.pop_front()
+                && let Some((encoded, size)) = outbound.pop_front()
             {
-                match jazz::db::encode_frames(message) {
-                    Ok(encoded) => {
-                        bytes += encoded.iter().map(Vec::len).sum::<usize>();
-                        frames.extend(encoded);
-                    }
-                    // Dropped, the message would leave the client waiting
-                    // on it: the session ends with why instead.
-                    Err(error) => {
-                        tracing::error!(%error, "encode outbound sync message");
-                        failed = Some(error.to_string());
-                        break;
-                    }
-                }
+                bytes += size;
+                frames.extend(encoded);
             }
-            if let Some(error) = failed {
-                drop(outbound);
-                let _ = session.output.send((
-                    Err(jazz::wire::WireError::new(
-                        WireErrorCode::Internal,
-                        WireRetry::Never,
-                        format!("sync session closed: {error}"),
-                    )),
-                    0,
-                ));
-                gone.push(*id);
-                continue;
-            }
+            drop(outbound);
+            session.queues.backlog.handed_on(bytes);
             if frames.is_empty() {
                 continue;
             }
@@ -2434,14 +2515,10 @@ mod tests {
         slice.cap.set(1);
         let sessions: Vec<Rc<SessionQueues>> = (0..3)
             .map(|_| {
-                Rc::new(SessionQueues {
-                    inbound: RefCell::default(),
-                    outbound: RefCell::default(),
-                    budget: std::cell::Cell::new(0),
-                    served: std::cell::Cell::new(false),
-                    done: std::cell::Cell::new(false),
-                    slice: Rc::clone(&slice),
-                })
+                Rc::new(SessionQueues::new(
+                    Rc::clone(&slice),
+                    Arc::new(AtomicUsize::new(0)),
+                ))
             })
             .collect();
         let push = |session: usize, count: u64| {
@@ -2479,6 +2556,70 @@ mod tests {
                 // A new round: session 0's messages waited only one round.
                 vec![(0, 6)],
             ]
+        );
+    }
+
+    /// A reader that stops draining is closed once what earlier ticks left
+    /// undrained passes the backlog bound; a tick's own output is taken
+    /// whole however large, and a reader that drains is admitted again.
+    #[test]
+    fn a_session_that_stops_draining_is_refused_past_its_backlog() {
+        let egress = Arc::new(AtomicUsize::new(0));
+        let queues = Rc::new(SessionQueues::new(
+            Rc::new(TickSlice::default()),
+            Arc::clone(&egress),
+        ));
+        let mut transport = SessionTransport(Rc::clone(&queues));
+        let message = || SyncMessage::Unsubscribe { id: 1 };
+        let tick = || start_tick(std::iter::once(&*queues));
+
+        tick();
+        transport
+            .send(message())
+            .expect("an idle session takes output");
+        // The socket took everything and the client read none of it:
+        // a tick's worth past the floor sits undrained.
+        egress.store(SESSION_BACKLOG_FLOOR + 1, Ordering::Release);
+        queues.backlog.handed_on(queues.backlog.queued.get());
+        queues.outbound.borrow_mut().clear();
+        // The tick that produced it is never refused...
+        transport
+            .send(message())
+            .expect("a tick's own output is whole");
+        // ...but the next tick's output is, as the reader fell behind.
+        tick();
+        assert!(matches!(
+            transport.send(message()),
+            Err(TransportError::Backpressure)
+        ));
+
+        // Once the client reads, the session takes output again.
+        egress.store(0, Ordering::Release);
+        tick();
+        transport
+            .send(message())
+            .expect("a drained session takes output");
+    }
+
+    /// The bound grows with the session's own biggest tick: a reader that
+    /// drains a large first result at a steady pace is not cut off while
+    /// it is still within twice that burst.
+    #[test]
+    fn the_backlog_bound_follows_the_biggest_tick() {
+        let egress = Arc::new(AtomicUsize::new(0));
+        let backlog = Backlog::new(Arc::clone(&egress));
+        backlog.start_tick();
+        let burst = 3 * SESSION_BACKLOG_FLOOR;
+        backlog.queued(burst);
+        backlog.handed_on(burst);
+        egress.store(burst, Ordering::Release);
+        backlog.start_tick();
+        assert!(backlog.admits(), "a burst being drained stays admitted");
+        egress.store(2 * burst + 1, Ordering::Release);
+        backlog.start_tick();
+        assert!(
+            !backlog.admits(),
+            "past twice the biggest tick it is refused"
         );
     }
 
