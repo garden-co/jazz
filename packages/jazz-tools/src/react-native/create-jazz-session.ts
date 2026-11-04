@@ -1,4 +1,3 @@
-import type { BackendAuth } from "../accounts/enrollment.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { followUser, type UserFollowingSession } from "../session/follow-user.js";
 import { nativeBackendWatchEvents } from "../session/native-backend-watch.js";
@@ -19,7 +18,7 @@ export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
      * account on this device that works offline and can later link to your
      * backend's user (`linkWithBackend`).
      */
-    initial?: "local-first" | "signed-out" | BackendAuth;
+    initial?: "local-first" | "signed-out";
   };
 
 /** Prepare the host account store once and own client replacement across authentication. */

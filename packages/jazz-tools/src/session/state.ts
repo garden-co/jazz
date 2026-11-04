@@ -1,5 +1,5 @@
 import { ensureAutomaticLocalFirst } from "../accounts/persistence.js";
-import type { AccountHandle, AccountManager } from "../accounts/state.js";
+import { admitBackendAccount, type AccountHandle, type AccountManager } from "../accounts/state.js";
 import type { JWTAuth, BackendAuth } from "../accounts/enrollment.js";
 import {
   GracefulShutdownSyncError,
@@ -113,7 +113,8 @@ export async function createJazzSessionOwner<
   let selected = accounts.getLoggedIn();
   if (!selected && options.initial === "local-first")
     selected = await ensureAutomaticLocalFirst(accounts);
-  if (typeof options.initial === "object") selected = await accounts.admitBackend(options.initial);
+  if (typeof options.initial === "object")
+    selected = await admitBackendAccount(accounts as AccountManager<unknown>, options.initial);
   await accounts.settleSelection();
   let client = selected ? await openClient(selected) : undefined;
   let snapshot: JazzSessionSnapshot<Client> = Object.freeze({

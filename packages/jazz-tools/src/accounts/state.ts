@@ -49,6 +49,25 @@ export class AccountOperationSuperseded extends Error {
   }
 }
 
+const backendAdmitters = new WeakMap<
+  AccountManager<unknown>,
+  (auth: BackendAuth) => Promise<AccountHandle>
+>();
+
+/**
+ * @internal Select the backend account `createJazz` opens its own session
+ * with, once when the session starts. Not reachable from the package's
+ * exports: no public session or manager can switch to a backend account.
+ */
+export function admitBackendAccount(
+  manager: AccountManager<unknown>,
+  auth: BackendAuth,
+): Promise<AccountHandle> {
+  const admit = backendAdmitters.get(manager);
+  if (!admit) return Promise.reject(new Error("Unknown account manager"));
+  return admit(auth);
+}
+
 /** Shared state machine. Each SSR request must own its own instance. */
 export class AccountManager<Auth> {
   private snapshot: AccountSnapshot = Object.freeze({
@@ -67,6 +86,15 @@ export class AccountManager<Auth> {
     initialAccount?: AccountHandle,
     private readonly selectionDurability?: AccountSelectionDurability,
   ) {
+    backendAdmitters.set(this as AccountManager<unknown>, async (auth) => {
+      if (!this.enrollment.admitBackend)
+        throw new Error("Backend accounts are unavailable on this host");
+      const generation = ++this.generation;
+      const account = await this.enrollment.admitBackend(auth);
+      if (generation !== this.generation) throw new AccountOperationSuperseded();
+      this.publish({ account, pending: undefined, error: undefined });
+      return account;
+    });
     if (initialAccount)
       this.snapshot = Object.freeze({
         account: initialAccount,
@@ -134,20 +162,6 @@ export class AccountManager<Auth> {
         throw new Error("Backend sign-in is unavailable on this host");
       return this.enrollment.linkWithBackend(account);
     });
-  }
-
-  /**
-   * @internal The backend account `createJazz` opens its own session with,
-   * selected once when the session starts. No public session can switch to it.
-   */
-  async admitBackend(auth: BackendAuth): Promise<AccountHandle> {
-    if (!this.enrollment.admitBackend)
-      throw new Error("Backend accounts are unavailable on this host");
-    const generation = ++this.generation;
-    const account = await this.enrollment.admitBackend(auth);
-    if (generation !== this.generation) throw new AccountOperationSuperseded();
-    this.publish({ account, pending: undefined, error: undefined });
-    return account;
   }
 
   logout(): void {

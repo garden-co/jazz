@@ -1,4 +1,3 @@
-import type { BackendAuth } from "../accounts/enrollment.js";
 import type { AccountManagerConfig } from "../accounts/create-account-manager.js";
 import type { AccountHandle } from "../accounts/state.js";
 import { createAccountManagerWithMinter } from "../accounts/account-manager-core.js";
@@ -34,7 +33,7 @@ export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
      * account on this device that works offline and can later link to your
      * backend's user (`linkWithBackend`).
      */
-    initial?: "local-first" | "signed-out" | BackendAuth;
+    initial?: "local-first" | "signed-out";
     /**
      * On sign-out (or a switch to another user), wipe the account's local
      * storage instead of keeping it for that user's next sign-in. For shared
