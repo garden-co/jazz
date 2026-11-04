@@ -156,7 +156,6 @@ export function createJazzAppOwner<Config, Client>(
   for (const name of [
     "createLocalFirst",
     "restoreLocalFirst",
-    "becomeBackend",
     "loginWithBackend",
     "linkWithBackend",
   ] as const) {
