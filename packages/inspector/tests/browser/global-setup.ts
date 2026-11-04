@@ -1,18 +1,20 @@
 import { fetchSchemaHashes } from "jazz-tools";
-import type { LocalJazzServerHandle } from "jazz-tools/testing";
+import { startTestJazz, type LocalJazzServerHandle, type TestJazz } from "jazz-tools/testing";
 import runServer from "../../scripts/dev-sync-server.js";
 import { createServer } from "vite";
 import { fileURLToPath } from "node:url";
 import { createServer as createHttpServer } from "node:http";
-import { standalonePermissions } from "./schema.js";
+import { app, permissions, standalonePermissions } from "./schema.js";
 
 export default async function globalSetup(): Promise<() => Promise<void>> {
   // #2641: let each listener own an OS-assigned port for its entire lifetime.
   // Concurrent worktrees must neither collide nor reuse another checkout.
   const servers: LocalJazzServerHandle[] = [];
   const httpServer = createHttpServer();
+  let backend: TestJazz | undefined;
   let webServer: Awaited<ReturnType<typeof createServer>> | undefined;
   const cleanup = async () => {
+    await backend?.stop();
     await Promise.all([
       webServer?.close(),
       ...servers.map((server) => server.stop()),
@@ -51,11 +53,19 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       throw new Error("Inspector browser web server did not bind a TCP listener");
     }
     process.env.JAZZ_INSPECTOR_TEST_WEB_URL = `http://127.0.0.1:${address.port}`;
-    process.env.JAZZ_INSPECTOR_TEST_SERVER_URL = overlay.url;
+    // A core admits only its app's backend: the embedded host syncs through
+    // the app's createJazz, which keeps its data on the overlay core.
+    backend = await startTestJazz({
+      core: overlay,
+      app,
+      permissions,
+      jazz: { allowedOrigins: [process.env.JAZZ_INSPECTOR_TEST_WEB_URL] },
+    });
+    process.env.JAZZ_INSPECTOR_TEST_SERVER_URL = backend.url;
     process.env.JAZZ_INSPECTOR_TEST_STANDALONE_SERVER_URL = core.url;
     console.log("Inspector browser endpoints", {
       web: process.env.JAZZ_INSPECTOR_TEST_WEB_URL,
-      sync: overlay.url,
+      sync: backend.url,
       standalone: core.url,
     });
 

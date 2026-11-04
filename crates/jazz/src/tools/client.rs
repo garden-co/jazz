@@ -774,18 +774,23 @@ impl JazzClient {
             progress,
             upstream_paused: watch::channel(false).0,
             credentials: watch::channel(AuthConfig {
-                jwt_token: if context.backend_secret.is_some() {
+                // With the backend secret, a client's own proof is the
+                // backend relaying that client (a local-first guest).
+                jwt_token: if context.backend_session.is_some() {
                     None
                 } else {
                     context.jwt_token.clone()
                 },
                 backend_secret: context.backend_secret.clone(),
                 admin_secret: context.admin_secret.clone(),
-                backend_session: None,
+                backend_session: stated_session(&context)?,
             })
             .0,
             serverless: connector.is_none(),
-            trusted: context.backend_secret.is_some() || context.admin_secret.is_some(),
+            trusted: context.admin_secret.is_some()
+                || (context.backend_secret.is_some()
+                    && context.backend_session.is_none()
+                    && context.jwt_token.is_none()),
             state: RefCell::new(State::default()),
         });
 
@@ -804,6 +809,7 @@ impl JazzClient {
                 app_id: context.app_id,
                 peer_identity: identity.author,
                 auth: credentials.borrow_and_update().clone(),
+                authorization: None,
                 wake: Arc::new(move || wake.notify_one()),
             };
             // The first attempt decides whether the server admits this
@@ -1906,8 +1912,26 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
     })
 }
 
+/// The session a backend client states for its user, as the core reads it.
+fn stated_session(context: &AppContext) -> Result<Option<serde_json::Value>> {
+    let Some(session) = context.backend_session.as_ref() else {
+        return Ok(None);
+    };
+    if context.backend_secret.is_none() || context.admin_secret.is_some() {
+        return Err(JazzError::Connection(
+            "a backend_session is stated with the backend secret alone".to_owned(),
+        ));
+    }
+    serde_json::to_value(session)
+        .map(Some)
+        .map_err(|error| JazzError::Connection(error.to_string()))
+}
+
 fn default_session_from_context(context: &AppContext) -> Option<Session> {
-    if context.backend_secret.is_some() || context.admin_secret.is_some() {
+    if let Some(session) = context.backend_session.as_ref() {
+        return Some(session.clone());
+    }
+    if context.admin_secret.is_some() {
         return None;
     }
     context

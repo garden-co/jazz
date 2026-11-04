@@ -20,6 +20,15 @@ int main(void) {
   }
   jazz_native_relay_bytes_free(&secret);
   jazz_native_relay_bytes_free(&proof);
+  const char anchor_request[] =
+      "{\"op\":\"captureAnchor\",\"text\":\"Doors at 8\",\"position\":9,\"side\":\"after\"}";
+  jazz_native_relay_bytes anchor = {0};
+  if (jazz_native_relay_text_anchors((const uint8_t *)anchor_request, sizeof(anchor_request) - 1,
+          &anchor) != JAZZ_NATIVE_RELAY_OK || anchor.len == 0) {
+    fprintf(stderr, "native text anchors ABI failed\n");
+    return 1;
+  }
+  jazz_native_relay_bytes_free(&anchor);
   /* RelayCommandRequest::Probe's postcard discriminant. The response is
    * intentionally opaque to JNI/C; only the shared Rust/JS codec decodes it. */
   const uint8_t probe[] = {0};
