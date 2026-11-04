@@ -100,6 +100,11 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver"> & {
   allowLocalFirstAuth?: boolean;
   /** @internal How the runtime opens its server socket (a backend client's credentialed one). */
   webSocket?: WebSocketConstructor;
+  /**
+   * @internal The published permissions bundle the backend link is pinned
+   * to, as createJazz pins its own: users it acts for are checked by it.
+   */
+  bundle?: string;
 } & BackendContextSchemaConfig;
 
 type ResolvedBackendContextConfig = BackendContextConfig & {
@@ -405,6 +410,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
       jwt_token: undefined,
       backend_secret: this.config.backendSecret,
       backend_session: this.config.cookieSession,
+      ...(this.config.bundle === undefined ? {} : { bundle: this.config.bundle }),
     });
   }
 
