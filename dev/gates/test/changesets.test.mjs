@@ -44,9 +44,16 @@ test("plans a changeset that names only public packages", async () => {
   );
 });
 
-test("refuses a changeset that also names a private package, as `changeset version` does", async () => {
+test("refuses a changeset that also names a private package, which `changeset version` refuses", async () => {
   await assert.rejects(
     planRelease(workspace('---\n"public-pkg": patch\n"private-pkg": patch\n---\n\nA fix.\n')),
-    /Mixed changesets/,
+    /changesets name private packages: change/,
+  );
+});
+
+test("refuses a changeset that names only a private package, whose note would be dropped", async () => {
+  await assert.rejects(
+    planRelease(workspace('---\n"private-pkg": patch\n---\n\nA fix.\n')),
+    /changesets name private packages: change/,
   );
 });
