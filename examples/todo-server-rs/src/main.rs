@@ -89,6 +89,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // and acts as one user of the app.
     let backend_secret = std::env::var("JAZZ_BACKEND_SECRET")
         .map_err(|_| "set JAZZ_BACKEND_SECRET to the sync server's backend secret")?;
+    // The published permissions bundle (its hex id) this service's user
+    // session is pinned to, as createJazz pins the sessions it states: the
+    // core governs the session by it and refuses one without.
+    let bundle = std::env::var("JAZZ_BUNDLE")
+        .map_err(|_| "set JAZZ_BUNDLE to the permissions bundle the app published")?;
     let user_id = std::env::var("TODO_USER_ID").unwrap_or_else(|_| "todo-service".to_string());
     let data_dir = std::env::var("TODO_DATA_DIR").unwrap_or_else(|_| "./todo-data".to_string());
     let port: u16 = std::env::var("TODO_PORT")
@@ -129,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         backend_secret: Some(backend_secret),
         // The user this service acts as, named as `createJazz` names its users.
         backend_session: Some(Session::new(format!("jazz:app:{app_id}"), user_id)),
-        bundle: None,
+        bundle: Some(bundle),
         admin_secret: None,
         migrations,
     };

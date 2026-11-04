@@ -735,24 +735,28 @@ async fn server_resync() {
 
     // IMPORTANT: Client app_id must match server's app_id for schema sync to work
     let test_app_id = AppId::from_string("00000000-0000-0000-0000-000000000001").unwrap();
+    let mut bundle: Option<String> = None;
 
     // 2. Act as one user (as the app's backend does), then add data.
     // Publish schema and policies before that user's transport is admitted.
     {
-        let context = backend_user_context(
+        let mut context = backend_user_context(
             test_app_id,
             server.base_url(),
             data_path.clone(),
             "client1-user",
         );
         let permissions_schema = test_schema();
-        permissions_support::publish_allow_all_permissions(
+        let published = permissions_support::publish_allow_all_permissions(
             &server.base_url(),
             test_app_id,
             TEST_ADMIN_SECRET,
             &permissions_schema,
         )
         .await;
+        // The backend pins the user's session to the bundle it published.
+        bundle = Some(published.bundle);
+        context.bundle = bundle.clone();
         let client = connect_native(context).await.unwrap();
 
         // Create a todo
@@ -794,8 +798,9 @@ async fn server_resync() {
     // via a one-shot query with GlobalServer tier. The server already has the
     // schema from step 2; the backend session lets it read via QuerySubscription.
     {
-        let context =
+        let mut context =
             backend_user_context(test_app_id, server.base_url(), data_path, "client2-user");
+        context.bundle = bundle.clone();
         let client = connect_native(context).await.unwrap();
 
         // One-shot query with GlobalServer settled tier — waits for the server's

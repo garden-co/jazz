@@ -23,7 +23,7 @@ async fn backend_acts_as_one_user_across_workers() {
         .start()
         .await
         .expect("start isolated Jazz server");
-    permissions_support::publish_allow_all_permissions(
+    let published = permissions_support::publish_allow_all_permissions(
         &server.base_url(),
         server.app_id(),
         server.admin_secret(),
@@ -44,7 +44,8 @@ async fn backend_acts_as_one_user_across_workers() {
             format!("jazz:app:{}", server.app_id()),
             "alice",
         )),
-        bundle: None,
+        // Pinned to the bundle the backend published.
+        bundle: Some(published.bundle),
         admin_secret: None,
         migrations: Default::default(),
     };
