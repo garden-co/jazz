@@ -176,6 +176,9 @@ pub(crate) async fn deploy(
     if !staged.response.changed {
         return Ok(staged.response);
     }
+    let new_bundle = (!staged.put.bundles.is_empty())
+        .then(|| jazz::catalogue::BundleId::from_hex(&staged.response.bundle))
+        .flatten();
     let genesis = JazzSchema::new(&prepared.schemas()[0]).map_err(DeployError::invalid)?;
     let runtime = match state.runtime() {
         Some(runtime) => runtime,
@@ -190,7 +193,7 @@ pub(crate) async fn deploy(
                     .map_err(DeployError::internal)?;
             let applied = match change(&probe, &prepared, staged.put.clone()).await {
                 Ok(change) => probe
-                    .apply_catalogue(change)
+                    .apply_catalogue(change, None)
                     .await
                     .map_err(DeployError::from),
                 Err(error) => Err(error),
@@ -207,9 +210,14 @@ pub(crate) async fn deploy(
         .check_unchanged(&staged)
         .map_err(DeployError::invalid)?;
     let change = change(&runtime, &prepared, staged.put).await?;
-    // The deployment's rows and admissions commit together on
-    // the store's thread, or not at all.
-    let applied = runtime.apply_catalogue(change).await;
+    // The deployment's rows and admissions commit together on the store's
+    // thread, or not at all. New permissions reach every session at once:
+    // with a bundle new to this store, the same job ends the sessions pinned
+    // to other bundles, which reconnect and are pinned again by whichever
+    // backend serves them now. Publishing a known bundle again (a cold
+    // start, a rollback, a deployment running beside one that published the
+    // same permissions) ends no one.
+    let applied = runtime.apply_catalogue(change, new_bundle).await;
     state
         .catalogue_store
         .refresh()

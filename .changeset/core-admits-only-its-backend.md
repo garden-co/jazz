@@ -1,7 +1,6 @@
 ---
 "jazz-tools": patch
 "jazz-napi": patch
-"@jazz/rust": patch
 ---
 
 **Breaking:** a sync server (core) admits only its app's backend. Browsers, React Native apps and other clients sync through the app's `createJazz` handler (`serverUrl: "/jazz"` or the backend's `/jazz` URL); a client that connects straight to a core is refused with "this core admits only its app's backend". Local-first guests keep working: the backend relays their proofs. Removed with it:

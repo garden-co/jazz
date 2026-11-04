@@ -146,9 +146,22 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
             continue;
         }
         let label = || format!("row {}", uuid_string(*row));
+        // Every version of the row was rejected: alpha.59 has no such row.
+        if current.content.is_none() && current.deletion.is_none() {
+            continue;
+        }
+        if current.content.is_none() {
+            report.check("alpha.59 current state", false, || {
+                format!(
+                    "{}: alpha.59 reads a deletion but no content for it",
+                    label()
+                )
+            });
+            continue;
+        }
         let Some((content_at, content)) = content.remove(row) else {
             report.check("alpha.59 current state", false, || {
-                format!("{}: alpha.59 reads no content version for it", label())
+                format!("{}: its current content version is missing", label())
             });
             continue;
         };

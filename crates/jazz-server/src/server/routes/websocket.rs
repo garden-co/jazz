@@ -5376,6 +5376,148 @@ mod tests {
         }
     }
 
+    /// A bundle test's store: no schema until its backend publishes one.
+    async fn bundle_test_state() -> Arc<ServerState> {
+        ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build bundle test state")
+            .state
+    }
+
+    /// The next error frame `ws` receives, skipping anything else (a sync
+    /// session's catalogue, a thin session's answers), or `None` when
+    /// none comes within `wait`.
+    async fn next_wire_error(ws: &mut TestWs, wait: Duration) -> Option<WireError> {
+        tokio::time::timeout(wait, async {
+            loop {
+                let message = ws.next().await?.ok()?;
+                let WsMessage::Binary(bytes) = &message else {
+                    continue;
+                };
+                let Ok(encoded) = postcard::from_bytes::<Vec<Vec<u8>>>(bytes) else {
+                    continue;
+                };
+                for frame in encoded {
+                    if let Ok(WireFrame::Error(error)) = decode_frame(&frame) {
+                        return Some(error);
+                    }
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_new_bundle_ends_the_sessions_pinned_to_other_bundles() {
+        let schema = private_docs_public_schema();
+        let state = bundle_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let first = publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+        let mut sync_ws = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(alice, Some(&first)),
+            0,
+        )
+        .await;
+        let mut thin_ws = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(bob, Some(&first)),
+            jazz::wire::FEATURE_THIN_RESULTS,
+        )
+        .await;
+        bind_thin_schema(&mut thin_ws, &schema).await;
+        // An unpinned SYSTEM link (an admin's, the system's own) is pinned
+        // to no bundle, so no permissions change ends it.
+        let mut system_ws = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            ws_prelude(AuthorSubject::SYSTEM),
+            0,
+        )
+        .await;
+
+        // Publishing it again (a cold start, a deployment running beside
+        // one that published the same permissions) ends no one.
+        assert_eq!(
+            publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await,
+            first
+        );
+        assert_eq!(
+            next_wire_error(&mut sync_ws, Duration::from_millis(300)).await,
+            None,
+            "republishing the same bundle leaves its sessions alone"
+        );
+
+        // New permissions: both sessions are asked to reconnect, so their
+        // backend pins them again.
+        let second = publish_docs_bundle(addr, &state, &schema, PolicyExpr::False).await;
+        assert_ne!(second, first);
+        for (ws, kind) in [(&mut sync_ws, "sync"), (&mut thin_ws, "thin")] {
+            let error = next_wire_error(ws, Duration::from_secs(5))
+                .await
+                .unwrap_or_else(|| panic!("the {kind} session pinned to the old bundle ends"));
+            assert!(error.asks_reconnect_later(), "{kind}: {error:?}");
+            assert!(error.message.contains(&second), "{kind}: {error:?}");
+        }
+        assert_eq!(
+            next_wire_error(&mut system_ws, Duration::from_millis(300)).await,
+            None,
+            "an unpinned SYSTEM link survives new permissions"
+        );
+
+        // A session pinned to the old bundle may open again: a deployment
+        // still serving it pins its own sessions as before.
+        let mut again = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(bob, Some(&first)),
+            jazz::wire::FEATURE_THIN_RESULTS,
+        )
+        .await;
+        bind_thin_schema(&mut again, &schema).await;
+        assert!(thin_titles(&mut again, 1, None).await.is_empty());
+
+        // Rolling back to a bundle this store already has ends no one, on
+        // either bundle: sessions on the newer one end only when the
+        // deployments serving it are deleted.
+        let mut on_second = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(alice, Some(&second)),
+            jazz::wire::FEATURE_THIN_RESULTS,
+        )
+        .await;
+        bind_thin_schema(&mut on_second, &schema).await;
+        assert_eq!(
+            publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await,
+            first
+        );
+        for (ws, kind) in [
+            (&mut again, "old bundle"),
+            (&mut on_second, "newer bundle"),
+            (&mut system_ws, "system link"),
+        ] {
+            assert_eq!(
+                next_wire_error(ws, Duration::from_millis(300)).await,
+                None,
+                "a rollback leaves the {kind}'s session alone"
+            );
+        }
+    }
+
     /// The error a connection opening with `prelude` and negotiating
     /// `features` (thin or sync) is refused with.
     async fn thin_refusal(

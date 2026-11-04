@@ -281,6 +281,26 @@ impl Owner {
         Ok(())
     }
 
+    /// End every thin session pinned to a bundle `ends` names, telling it
+    /// `error` first. How many ended.
+    pub(super) fn end_pinned_thin_sessions(
+        &mut self,
+        ends: &dyn Fn(&jazz::catalogue::BundleId) -> bool,
+        error: &jazz::wire::WireError,
+    ) -> usize {
+        let ending: Vec<ServerSession> = self
+            .thin
+            .iter()
+            .filter(|(_, thin)| thin.bundle.as_ref().is_some_and(ends))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &ending {
+            let _ = self.thin[id].output.send((Err(error.clone()), 0));
+            self.close_thin_session(*id);
+        }
+        ending.len()
+    }
+
     pub(super) fn close_thin_session(&mut self, session: ServerSession) {
         // Dropping the streams ends the subscriptions.
         if let Some(thin) = self.thin.remove(&session) {

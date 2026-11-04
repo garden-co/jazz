@@ -954,6 +954,7 @@ mod tests {
                 session_token: None,
             }),
             sts_endpoint: None,
+            environment: None,
         });
         let mut recorded = Vec::new();
         for _ in 0..2 {
@@ -989,6 +990,7 @@ mod tests {
             credentials: crate::vercel_blob::VercelBlobCredentials::ReadWriteToken("t".to_owned()),
             api_url: "http://127.0.0.1:9".to_owned(),
             blob_url: Some("http://127.0.0.1:9".to_owned()),
+            environment: None,
         });
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         ServerBuilder::new(app)
@@ -1025,6 +1027,7 @@ mod tests {
                     session_token: None,
                 }),
                 sts_endpoint: None,
+                environment: None,
             })
         };
         let start = |blobs: BlobStore| {

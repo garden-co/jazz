@@ -9292,18 +9292,15 @@ impl Inner {
     }
 
     /// Admitted `version` governed again by `policies`, a schema that
-    /// governed it before a reset: a published bundle's policies are kept,
-    /// any other schema's give way to the current one's.
+    /// governed it before a reset: a published bundle's policies are kept
+    /// (the schema names its bundle), any other schema's give way to the
+    /// current one's.
     pub(crate) fn regoverned(
         &self,
         version: crate::ids::SchemaVersionId,
         policies: &Rc<Schema>,
     ) -> Option<Rc<Schema>> {
-        let bundled = self
-            .bundles
-            .values()
-            .any(|(_, governing)| Rc::ptr_eq(governing, policies));
-        if bundled {
+        if policies.bundle.is_some() {
             self.governed_by(version, policies.clone())
         } else {
             self.governed(version)
