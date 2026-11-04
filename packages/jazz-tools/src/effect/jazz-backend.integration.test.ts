@@ -62,7 +62,7 @@ describe("JazzBackend Effect layer", () => {
       coreOptions: { appId, allowLocalFirstAuth: true },
     });
     try {
-      await deploy({
+      const { bundle } = await deploy({
         serverUrl: server.core.url,
         appId,
         adminSecret: server.adminSecret,
@@ -70,6 +70,7 @@ describe("JazzBackend Effect layer", () => {
         permissions,
       });
       const backendLayer = JazzBackend.layer({
+        bundle,
         appId,
         serverUrl: server.core.url,
         app,
@@ -139,7 +140,7 @@ describe("JazzBackend Effect layer", () => {
     };
     const server = await startLocalJazzServer({ appId });
     try {
-      await deploy({
+      const { bundle } = await deploy({
         serverUrl: server.url,
         appId,
         adminSecret: server.adminSecret,
@@ -147,6 +148,7 @@ describe("JazzBackend Effect layer", () => {
         permissions,
       });
       const backendLayer = JazzBackend.layer({
+        bundle,
         appId,
         serverUrl: server.url,
         app,

@@ -28,16 +28,17 @@ type RunningChild = {
 
 let jwtIssuer: TestJwtIssuerHandle;
 let upstream: LocalJazzServerHandle;
+let bundle: string;
 async function startUpstream(): Promise<void> {
   jwtIssuer = await startTestJwtIssuer();
   upstream = await startLocalJazzServer({ appId: APP_ID });
-  await deploy({
+  ({ bundle } = await deploy({
     serverUrl: upstream.url,
     appId: upstream.appId,
     adminSecret: upstream.adminSecret,
     schema: app,
     permissions,
-  });
+  }));
 }
 /** Sign in to the todo server, which provisions the identity's account. */
 async function signIn(baseUrl: string, token: string): Promise<void> {
@@ -57,6 +58,7 @@ async function startChild(cwd: string): Promise<RunningChild> {
     JAZZ_SERVER_URL: upstream.url,
     JAZZ_BACKEND_SECRET: upstream.backendSecret,
     JAZZ_JWKS_URL: jwtIssuer.jwksUrl,
+    JAZZ_BUNDLE: bundle,
   };
   delete childEnv.DB_PATH;
   const child = spawn(tsxLauncher, [join(exampleRoot, "src", "main.ts")], {
@@ -108,6 +110,7 @@ async function runCli(
     JAZZ_SERVER_URL: upstream.url,
     JAZZ_BACKEND_SECRET: upstream.backendSecret,
     JAZZ_JWKS_URL: jwtIssuer.jwksUrl,
+    JAZZ_BUNDLE: bundle,
   };
   if (dbPath === undefined) delete childEnv.DB_PATH;
   else childEnv.DB_PATH = dbPath;
