@@ -144,8 +144,7 @@ mod tests {
 
     use jazz::tools::AppId;
     use jazz::tools::public_schema::{
-        ColumnType, PolicyExpr, Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies,
-        TableSchema,
+        ColumnType, Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
     };
     use jazz::tools::schema_lens::LensOp;
     use std::time::Duration;
@@ -705,143 +704,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn chained_permissions_runtime_reconciliation_never_installs_stale_head() {
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("users").column("name", ColumnType::Text))
-            .build();
-        let schema_hash = SchemaHash::compute(&schema);
-        let state = make_state_with_schema(schema).await;
-        let users = TableName::new("users");
-        let permissions = |policy| {
-            let mut table_policies = TablePolicies::default();
-            table_policies.select.using = Some(policy);
-            std::collections::HashMap::from([(users, table_policies)])
-        };
-
-        state
-            .catalogue
-            .publish_permissions_bundle(
-                &state.catalogue_store,
-                schema_hash,
-                permissions(PolicyExpr::True),
-                None,
-            )
-            .expect("persist H1");
-        let h1 = state
-            .catalogue
-            .active_schema_summary(&state.catalogue_store)
-            .expect("read H1")
-            .expect("H1 exists")
-            .bundle_object_id;
-
-        // Freeze H1 after it reads the durable head but before it queues its
-        // runtime install. H2 is then a valid chained publication. Without the
-        // bridge mutex, H2 can install first and H1 resumes last, regressing
-        // the runtime policy despite the durable head remaining H2.
-        let (h1_read_tx, h1_read_rx) = std::sync::mpsc::sync_channel(1);
-        let (resume_h1_tx, resume_h1_rx) = std::sync::mpsc::sync_channel(1);
-        state.set_runtime_catalogue_after_permissions_read_hook_for_test(Box::new(move || {
-            h1_read_tx.send(()).expect("signal H1 durable read");
-            resume_h1_rx.recv().expect("resume H1 bridge");
-        }));
-        let first_state = state.clone();
-        let first_bridge = tokio::spawn(async move {
-            crate::server::runtime_catalogue::publish_runtime_catalogue(&first_state, &[], &[])
-                .await
-        });
-        tokio::task::spawn_blocking(move || h1_read_rx.recv())
-            .await
-            .expect("join H1 read waiter")
-            .expect("observe H1 durable read");
-
-        state
-            .catalogue
-            .publish_permissions_bundle(
-                &state.catalogue_store,
-                schema_hash,
-                permissions(PolicyExpr::False),
-                Some(h1),
-            )
-            .expect("persist H2 after H1");
-        let (h2_read_tx, h2_read_rx) = std::sync::mpsc::sync_channel(1);
-        state.set_runtime_catalogue_after_permissions_read_hook_for_test(Box::new(move || {
-            h2_read_tx.send(()).expect("signal H2 durable read");
-        }));
-        let (second_started_tx, second_started_rx) = std::sync::mpsc::sync_channel(1);
-        let (start_second_tx, start_second_rx) = std::sync::mpsc::sync_channel(1);
-        state.set_runtime_catalogue_before_publication_hook_for_test(Box::new(move || {
-            second_started_tx
-                .send(())
-                .expect("signal H2 bridge attempt");
-            start_second_rx.recv().expect("start H2 bridge");
-        }));
-        let second_state = state.clone();
-        let second_bridge = tokio::spawn(async move {
-            crate::server::runtime_catalogue::publish_runtime_catalogue(&second_state, &[], &[])
-                .await
-        });
-
-        tokio::task::spawn_blocking(move || second_started_rx.recv())
-            .await
-            .expect("join H2 bridge waiter")
-            .expect("observe H2 bridge attempt");
-        start_second_tx.send(()).expect("start H2 bridge");
-        assert!(
-            matches!(
-                h2_read_rx.recv_timeout(Duration::from_millis(100)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            ),
-            "H2 must wait for H1's runtime bridge to release publication order"
-        );
-
-        resume_h1_tx.send(()).expect("resume H1 bridge");
-        first_bridge
-            .await
-            .expect("join H1 bridge")
-            .expect("bridge H1");
-        second_bridge
-            .await
-            .expect("join H2 bridge")
-            .expect("bridge H2");
-
-        let current = state
-            .catalogue
-            .active_schema(&state.catalogue_store)
-            .expect("read durable permissions")
-            .expect("durable H2");
-        assert_eq!(current.summary.version, 2);
-        assert_eq!(
-            current
-                .permissions
-                .get(&users)
-                .expect("durable users permissions")
-                .select
-                .using
-                .as_ref(),
-            Some(&PolicyExpr::False)
-        );
-
-        let active_schema = state
-            .runtime()
-            .expect("runtime shell started")
-            .current_schema()
-            .await
-            .expect("read runtime schema");
-        assert_eq!(
-            active_schema
-                .public_schema()
-                .get(&users)
-                .expect("runtime users table")
-                .policies
-                .select
-                .using
-                .as_ref(),
-            Some(&PolicyExpr::False),
-            "runtime policy must converge to the durable H2 head"
-        );
-    }
-
     async fn read_migration_graph(app: &axum::Router) -> Value {
         let response = app
             .clone()
@@ -887,7 +749,7 @@ mod tests {
         assert_eq!(
             read_migration_graph(&app).await,
             serde_json::json!({
-                "activeSchemaHash": null, "schemas": [], "migrations": []
+                "latestBundleSchemaHash": null, "schemas": [], "migrations": []
             })
         );
     }
@@ -926,7 +788,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migration_graph_includes_isolated_schemas_forward_edges_and_active_schema() {
+    async fn migration_graph_includes_isolated_schemas_and_forward_edges() {
         let schema = |column| {
             SchemaBuilder::new()
                 .table(TableSchema::builder("users").column(column, ColumnType::Text))
@@ -975,20 +837,6 @@ mod tests {
             serde_json::json!([{ "fromHash": from, "toHash": to }])
         );
         assert_eq!(read_migration_graph(&app).await, graph);
-
-        state
-            .catalogue
-            .publish_permissions_bundle(
-                &state.catalogue_store,
-                SchemaHash::from_hex(&to).unwrap(),
-                std::collections::HashMap::new(),
-                None,
-            )
-            .unwrap();
-        let active = read_migration_graph(&app).await;
-        assert_eq!(active["activeSchemaHash"], to);
-        assert_eq!(active["schemas"], graph["schemas"]);
-        assert_eq!(active["migrations"], graph["migrations"]);
     }
 
     #[tokio::test]
@@ -1688,58 +1536,9 @@ mod tests {
 
     /// A schema published without a lens is recorded by the admin catalogue
     /// but never reaches the Core runtime store. The next restart must still
-    /// start, and keep serving the active schema.
+    /// start, and keep serving the first schema.
     #[tokio::test]
-    async fn dynamic_core_restarts_after_unbridged_schema_publish_over_active_schema() {
-        let dir = tempfile::tempdir().unwrap();
-        let name = "restart-unbridged-active";
-        let (first, unbridged) = restart_fixture_schemas();
-        let first_runtime = jazz::schema::JazzSchema::new(&first).unwrap();
-
-        let built = persistent_dynamic_builder(dir.path(), name)
-            .build()
-            .await
-            .unwrap();
-        store_legacy_schema(&built.state, &first).await;
-        crate::server::runtime_catalogue::publish_permissions_and_runtime(
-            &built.state,
-            SchemaHash::compute(&first),
-            std::collections::HashMap::from([(
-                TableName::new("notes"),
-                TablePolicies::new().with_select(PolicyExpr::True),
-            )]),
-            None,
-        )
-        .await
-        .unwrap();
-        store_legacy_schema(&built.state, &unbridged).await;
-        built.shutdown().await;
-
-        let restarted = persistent_dynamic_builder(dir.path(), name)
-            .build()
-            .await
-            .expect("restart after publishing a schema without a lens");
-        let current = restarted
-            .state
-            .runtime()
-            .expect("restarted core runtime")
-            .current_schema()
-            .await
-            .unwrap();
-        assert_eq!(current.version_id(), first_runtime.version_id());
-        restarted.shutdown().await;
-
-        let restarted_again = persistent_dynamic_builder(dir.path(), name)
-            .build()
-            .await
-            .expect("second restart stays healthy");
-        restarted_again.shutdown().await;
-    }
-
-    /// Same as above for an app that never published permissions, so startup
-    /// has no active schema to fall back on.
-    #[tokio::test]
-    async fn dynamic_core_restarts_after_unbridged_schema_publish_without_permissions() {
+    async fn dynamic_core_restarts_after_unbridged_schema_publish() {
         let dir = tempfile::tempdir().unwrap();
         let name = "restart-unbridged-no-permissions";
         let (first, unbridged) = restart_fixture_schemas();

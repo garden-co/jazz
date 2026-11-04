@@ -2884,25 +2884,7 @@ mod tests {
         if let Some(bundle) = latest {
             return bundle;
         }
-        let active = state
-            .catalogue
-            .active_schema(&state.catalogue_store)
-            .expect("read active schema");
-        let source = match active {
-            Some(active) => {
-                let mut schema = state
-                    .catalogue
-                    .known_schema(&state.catalogue_store, &active.summary.schema_hash)
-                    .expect("read active schema")
-                    .expect("the active schema is known");
-                for (name, table) in schema.iter_mut() {
-                    table.policies = active.permissions.get(name).cloned().unwrap_or_default();
-                }
-                schema
-            }
-            None => Schema::new(),
-        };
-        publish_source_bundle(state, &source).await
+        publish_source_bundle(state, &Schema::new()).await
     }
 
     /// A backend session prelude for `identity`, pinned to `bundle`.
