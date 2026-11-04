@@ -266,8 +266,12 @@ impl S3ChunkStore {
             .enable_all()
             .build()
             .map_err(|error| format!("s3 blobs: start runtime: {error}"))?;
+        // Redirects are not followed: a cross-host one would carry the
+        // session token along, and a bucket's 301 names its region, which
+        // `send` handles itself.
         let http = reqwest::Client::builder()
             .timeout(OPERATION_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| format!("s3 blobs: http client: {error}"))?;
         let keys = KeyState {
@@ -378,11 +382,32 @@ impl ChunkStore for S3ChunkStore {
     }
 }
 
-/// A response rebuilt from its status and body, once the body was read.
-fn rebuilt(status: reqwest::StatusCode, body: &[u8]) -> reqwest::Response {
+/// A response rebuilt from its status, headers and body, once the body was
+/// read.
+fn rebuilt(
+    status: reqwest::StatusCode,
+    headers: reqwest::header::HeaderMap,
+    body: &[u8],
+) -> reqwest::Response {
     let mut response = http::Response::new(body.to_vec());
     *response.status_mut() = status;
+    *response.headers_mut() = headers;
     reqwest::Response::from(response)
+}
+
+/// The region a bucket's reply names (its `x-amz-bucket-region` header, or
+/// a `<Region>` in the body), if that is a region name other than
+/// `signed_for`. It goes into host names, so anything but a plain region
+/// name (`[a-z0-9-]`, at most 32 long) is ignored.
+fn named_region(header: Option<&str>, body: &[u8], signed_for: &str) -> Option<String> {
+    let named = header
+        .map(str::to_owned)
+        .or_else(|| xml_field(&String::from_utf8_lossy(body), "Region"))?;
+    let plain = (1..=32).contains(&named.len())
+        && named
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    (plain && named != signed_for).then_some(named)
 }
 
 /// What one request to the bucket was.
@@ -538,19 +563,16 @@ impl Inner {
         {
             return Ok(response);
         }
-        let header = response
-            .headers()
-            .get("x-amz-bucket-region")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
+        let headers = response.headers().clone();
         let body = response
             .bytes()
             .await
             .map_err(|error| format!("s3 blobs: {}", error.without_url()))?;
-        let named = header.or_else(|| xml_field(&String::from_utf8_lossy(&body), "Region"));
-        let Some(region) = named.filter(|region| !region.is_empty() && *region != signed_for)
-        else {
-            return Ok(rebuilt(status, &body));
+        let header = headers
+            .get("x-amz-bucket-region")
+            .and_then(|value| value.to_str().ok());
+        let Some(region) = named_region(header, &body, &signed_for) else {
+            return Ok(rebuilt(status, headers, &body));
         };
         tracing::warn!(
             bucket = %self.options.bucket,
@@ -1222,9 +1244,6 @@ mod tests {
         assert_eq!(block(again.get(&key)).unwrap().as_deref(), Some(&bytes[..]));
     }
 
-    /// A bucket serves one environment: the first store with an
-    /// environment claims it at the bucket's root (create-if-absent), and
-    /// a store of another environment is refused under any prefix.
     /// A bucket in another region than the store was given (on Vercel,
     /// `AWS_REGION` is the function's region) answers naming its own: the
     /// store signs for that one from then on.
@@ -1241,6 +1260,97 @@ mod tests {
         assert_eq!(store.inner.region(), "eu-west-1");
     }
 
+    /// The same, when the bucket answers 301 with `x-amz-bucket-region`
+    /// and no body.
+    #[test]
+    fn a_bucket_naming_its_region_in_a_header_is_signed_for_its_own() {
+        let bucket = mock::MockS3::start();
+        *bucket.state.bucket_region.lock().unwrap() = Some("ap-south-1".to_owned());
+        bucket
+            .state
+            .region_by_header
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let store = S3ChunkStore::new(bucket.options("app/"), "me".to_owned()).unwrap();
+        let (key, bytes) = node(10);
+        block(store.put(&key, &bytes)).unwrap();
+        assert_eq!(block(store.get(&key)).unwrap().as_deref(), Some(&bytes[..]));
+        assert_eq!(store.inner.region(), "ap-south-1");
+    }
+
+    /// A reply naming something other than a plain region name is passed
+    /// on as it came, and the region kept is unchanged: it would go into
+    /// the host name. Its headers come along.
+    #[test]
+    fn a_reply_naming_no_plain_region_is_passed_on() {
+        assert_eq!(
+            named_region(Some("eu-west-1"), b"", "auto").as_deref(),
+            Some("eu-west-1")
+        );
+        assert_eq!(
+            named_region(None, b"<Error><Region>us-west-2</Region></Error>", "auto").as_deref(),
+            Some("us-west-2")
+        );
+        assert_eq!(named_region(Some("auto"), b"", "auto"), None, "the same");
+        for junk in [
+            "",
+            "evil.example.com/x",
+            "EU-WEST-1",
+            "a b",
+            &"a".repeat(33),
+        ] {
+            assert_eq!(named_region(Some(junk), b"", "auto"), None, "{junk:?}");
+            let body = format!("<Error><Region>{junk}</Region></Error>");
+            assert_eq!(
+                named_region(None, body.as_bytes(), "auto"),
+                None,
+                "{junk:?}"
+            );
+        }
+
+        let bucket = mock::MockS3::start();
+        *bucket.state.bucket_region.lock().unwrap() = Some("evil.example.com/x".to_owned());
+        bucket
+            .state
+            .region_by_header
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let store = S3ChunkStore::new(bucket.options("app/"), "me".to_owned()).unwrap();
+        let (key, bytes) = node(11);
+        let error = block(store.put(&key, &bytes)).unwrap_err();
+        assert!(error.message.contains("301"), "{error}");
+        assert_eq!(store.inner.region(), "auto");
+    }
+
+    /// With no endpoint, the host is built from the region kept, so a
+    /// bucket found in another region is addressed there.
+    #[test]
+    fn the_aws_host_follows_the_region_kept() {
+        let options = S3Options {
+            bucket: "jazz-app".to_owned(),
+            region: "us-east-1".to_owned(),
+            path_style: false,
+            endpoint: None,
+            prefix: "blobs/".to_owned(),
+            credentials: S3Credentials::Static(Keys {
+                access_key_id: String::new(),
+                secret_access_key: String::new(),
+                session_token: None,
+            }),
+            sts_endpoint: None,
+            environment: None,
+        };
+        let store = S3ChunkStore::new(options, "me".to_owned()).unwrap();
+        *store.inner.region.lock().unwrap() = "eu-central-1".to_owned();
+        let (url, host, _) = store.inner.locate("x", false);
+        assert_eq!(host, "jazz-app.s3.eu-central-1.amazonaws.com");
+        assert!(
+            url.starts_with("https://jazz-app.s3.eu-central-1.amazonaws.com/"),
+            "{url}"
+        );
+    }
+
+    /// A bucket serves one environment: the first store with an
+    /// environment claims it at the bucket's root (create-if-absent), and
+    /// a store of another environment is refused under any prefix.
     #[test]
     fn a_bucket_serves_one_environment() {
         let bucket = mock::MockS3::start();
@@ -1454,6 +1564,9 @@ pub(crate) mod mock {
         /// Set: the bucket's region; a request signed for another is
         /// refused naming it, as AWS refuses one.
         pub bucket_region: Mutex<Option<String>>,
+        /// Name `bucket_region` the way a 301 does (`x-amz-bucket-region`,
+        /// no body), not as a 400's `<Region>`.
+        pub region_by_header: AtomicBool,
         /// Set: reads (GET) only under this prefix; puts anywhere.
         pub only_prefix_reads: Mutex<Option<String>>,
         /// Set: a create-if-absent put of this key answers 412 while the key
@@ -1484,7 +1597,13 @@ pub(crate) mod mock {
             let served = Arc::clone(&state);
             let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
                 let state = Arc::clone(&served);
-                async move { serve(&state, request).await }
+                async move {
+                    use axum::response::IntoResponse as _;
+                    match moved(&state, &request) {
+                        Some(moved) => moved,
+                        None => serve(&state, request).await.into_response(),
+                    }
+                }
             });
             runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
             Self {
@@ -1534,6 +1653,30 @@ pub(crate) mod mock {
             status,
             format!("<Error><Code>{code}</Code><Message>mock</Message></Error>").into_bytes(),
         )
+    }
+
+    /// The 301 a bucket in `bucket_region` answers a request signed for
+    /// another region with, when `region_by_header` is set.
+    fn moved(state: &State, request: &axum::extract::Request) -> Option<axum::response::Response> {
+        use axum::response::IntoResponse as _;
+        if !state.region_by_header.load(Ordering::Relaxed) {
+            return None;
+        }
+        let region = state.bucket_region.lock().unwrap().clone()?;
+        let signed_for = request
+            .headers()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split("Credential=").nth(1))
+            .and_then(|credential| credential.split('/').nth(2))
+            .unwrap_or_default();
+        (signed_for != region).then(|| {
+            (
+                axum::http::StatusCode::MOVED_PERMANENTLY,
+                [("x-amz-bucket-region", region)],
+            )
+                .into_response()
+        })
     }
 
     async fn serve(state: &State, request: axum::extract::Request) -> Reply {
