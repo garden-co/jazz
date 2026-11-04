@@ -58,22 +58,12 @@ running Node/WASM consumers still requires the generated artifacts.
 
 ### Building only jazz-tools
 
-`pnpm --filter jazz-tools build:runtime` does not build the native bindings
-itself, so on a fresh checkout it stops and tells you which inputs are missing.
-`pnpm build:ci` builds the bindings, stages their fingerprints, and then builds
-`jazz-tools`. The same steps by hand, which work on any host (Linux x64 and
-arm64, macOS):
-
-```sh
-pnpm --filter jazz-wasm build
-pnpm --filter jazz-napi build
-node dev/artifacts/stage-native-fingerprints.mjs --workspace
-pnpm --filter jazz-tools build:runtime
-```
-
-Run `stage-native-fingerprints.mjs` without a flag only in CI release assembly:
-that mode reads the downloaded `linux-x64-gnu` NAPI release manifest, which a
-local checkout does not have.
+`pnpm --filter jazz-tools build:runtime` works from a fresh checkout on any
+supported host (Linux x64 and arm64, macOS). When the `jazz-wasm` package, the
+host's `jazz-napi` binding or their fingerprints are missing, it builds them
+(release profile) and stages the fingerprints before compiling. Inputs that are
+already present are reused. In CI (`CI` set) it fails instead, because
+workflows produce or download every native artifact explicitly.
 
 `pnpm run ensure:rust-toolchain` adds the `wasm32-unknown-unknown` Rust target
 and installs `wasm-pack` if it is missing. It requires an existing Rust/rustup

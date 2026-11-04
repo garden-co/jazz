@@ -316,7 +316,7 @@ test("release fingerprint staging verifies downloaded WASM bytes before deriving
 test("fingerprint staging explains how to build locally when inputs are missing", () => {
   const root = releaseFixture();
   try {
-    const localHint = /pnpm build:ci[\s\S]*stage-native-fingerprints\.mjs --workspace/;
+    const localHint = /pnpm --filter jazz-tools build:runtime[\s\S]*--workspace/;
     assert.throws(
       () => stageNativeFingerprints(root, { workspace: true }),
       (error) =>

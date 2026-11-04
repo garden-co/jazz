@@ -5,10 +5,11 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const read = (path) => JSON.parse(readFileSync(path, "utf8"));
-const localBuildHint =
-  "To build locally on any host, run `pnpm build:ci` from the repository root, or build the " +
-  "bindings with `pnpm --filter jazz-wasm build && pnpm --filter jazz-napi build` and then run " +
-  "`node dev/artifacts/stage-native-fingerprints.mjs --workspace`.";
+// The one place the local build hint lives; native-inputs.mjs and README
+// point here rather than repeating the steps.
+export const localBuildHint =
+  "Run `pnpm --filter jazz-tools build:runtime`, which builds any missing native inputs for " +
+  "this host (Linux x64/arm64, macOS) and stages them with --workspace.";
 const readManifest = (root, path, what) => {
   if (!existsSync(join(root, path)))
     throw new Error(`${what} is missing (${path}). ${localBuildHint}`);
