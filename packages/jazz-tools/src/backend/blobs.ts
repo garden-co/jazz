@@ -11,9 +11,11 @@ export interface S3BlobStore {
   readonly endpoint?: string;
   /**
    * Prepended to every object name. Defaults to `jazz/<appId>/<store id>/`,
-   * one per store, so stores sharing a bucket (preview and production) never
-   * share objects. A prefix is claimed by the first store that uses it, and
-   * any other store is refused there.
+   * one per store, so stores sharing a bucket (a preview core per branch)
+   * never share objects. A prefix is claimed by the first store that uses
+   * it, and any other store is refused there. A `vercel()` core also claims
+   * the whole bucket for its environment, so production and previews each
+   * need a bucket of their own.
    */
   readonly prefix?: string;
 }
@@ -64,8 +66,10 @@ export interface VercelBlobStore {
   readonly storeId?: string;
   /**
    * Prepended to every blob's pathname. Defaults to `jazz/<appId>/<store id>/`,
-   * one per core, so preview and production cores sharing a Blob store never
-   * share blobs. A prefix is claimed by the first core that uses it.
+   * one per core, so the preview cores of different branches sharing a Blob
+   * store never share blobs. A prefix is claimed by the first core that uses
+   * it. The Blob store itself serves one environment: production and
+   * previews each need their own.
    */
   readonly prefix?: string;
 }

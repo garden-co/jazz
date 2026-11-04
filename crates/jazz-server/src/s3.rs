@@ -273,7 +273,31 @@ impl S3ChunkStore {
                 claim_failed: Mutex::new(None),
             }),
             runtime: Some(runtime),
-        })
+        }
+        .claiming_now())
+    }
+
+    /// Check the store's claims (environment, then prefix) right away, so
+    /// a refused store says so at startup rather than at its first large
+    /// value. A core whose only credential is a workload token that has not
+    /// arrived yet checks them on first use instead.
+    fn claiming_now(self) -> Self {
+        let inner = Arc::clone(&self.inner);
+        let waits_for_token = matches!(
+            &inner.options.credentials,
+            S3Credentials::WebIdentity {
+                token: WebIdentityToken::Workload,
+                ..
+            }
+        ) && crate::middleware::workload::latest_workload_token().is_none();
+        if !waits_for_token && let Some(runtime) = &self.runtime {
+            runtime.spawn(async move {
+                if let Err(error) = inner.claim().await {
+                    tracing::error!(%error, "s3 blobs: checking the large-value store at startup failed");
+                }
+            });
+        }
+        self
     }
 
     pub fn options(&self) -> &S3Options {
@@ -633,6 +657,29 @@ impl Inner {
                 rooted: true,
             })
             .await?;
+        if response.status() == reqwest::StatusCode::FORBIDDEN {
+            // A policy scoped to the prefix (`prefix/*`) reaches every
+            // object but this one: its read answered AccessDenied, which
+            // reads as absent, and its put is refused.
+            let body = response.text().await.unwrap_or_default();
+            if xml_field(&body, "Code").as_deref() == Some("AccessDenied") {
+                return Err(format!(
+                    "s3 blobs: cannot claim bucket {bucket} for the {environment} environment: \
+                     the credentials may not read or write s3://{bucket}/{ENVIRONMENT_OBJECT}. \
+                     Allow s3:GetObject and s3:PutObject on arn:aws:s3:::{bucket}/{ENVIRONMENT_OBJECT} \
+                     as well as on the prefix",
+                    bucket = self.options.bucket,
+                ));
+            }
+            return Err(self
+                .failure(
+                    reqwest::StatusCode::FORBIDDEN,
+                    &body,
+                    "claim",
+                    ENVIRONMENT_OBJECT,
+                )
+                .await);
+        }
         if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
             return match self.read_marker(ENVIRONMENT_OBJECT, true).await? {
                 Some(claimed) if &claimed == environment => Ok(()),
@@ -1119,6 +1166,26 @@ mod tests {
         block(other.put(&key, &bytes)).unwrap();
     }
 
+    /// Keys scoped to the prefix cannot reach the environment marker at
+    /// the bucket's root: the claim says which permission is missing.
+    #[test]
+    fn a_prefix_scoped_policy_names_the_marker_it_cannot_reach() {
+        let bucket = mock::MockS3::start();
+        *bucket.state.only_prefix.lock().unwrap() = Some("prod/".to_owned());
+        let mut options = bucket.options("prod/");
+        options.environment = Some("production".to_owned());
+        let store = S3ChunkStore::new(options, "store-a".to_owned()).unwrap();
+        let (key, bytes) = node(6);
+        let error = block(store.put(&key, &bytes)).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("s3:GetObject and s3:PutObject on arn:aws:s3:::bucket/.jazz-environment"),
+            "{error}"
+        );
+        assert!(bucket.names("prod/").is_empty());
+    }
+
     /// Without s3:ListBucket a missing key answers 403: it reads as absent.
     /// A body larger than any node is refused.
     #[test]
@@ -1223,6 +1290,9 @@ pub(crate) mod mock {
         pub failing: AtomicBool,
         /// A missing key answers 403 AccessDenied, as without s3:ListBucket.
         pub deny_missing: AtomicBool,
+        /// Set: the keys may only touch objects under this prefix (an IAM
+        /// policy on `bucket/prefix/*`); anything else answers 403.
+        pub only_prefix: Mutex<Option<String>>,
         /// Keys by access key id; `test`/`test` is always valid.
         issued: Mutex<BTreeMap<String, (String, String)>>,
         /// What STS was last asked to accept.
@@ -1314,6 +1384,11 @@ pub(crate) mod mock {
             return error(StatusCode::FORBIDDEN, code);
         }
         let key = parts.uri.path().trim_start_matches('/').to_owned();
+        if let Some(prefix) = state.only_prefix.lock().unwrap().as_deref()
+            && !key.starts_with(&format!("bucket/{prefix}"))
+        {
+            return error(StatusCode::FORBIDDEN, "AccessDenied");
+        }
         let header = |name: &str| {
             parts
                 .headers

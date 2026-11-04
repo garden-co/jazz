@@ -200,7 +200,28 @@ impl VercelBlobChunkStore {
                 claim_failed: Mutex::new(None),
             }),
             runtime: Some(runtime),
-        })
+        }
+        .claiming_now())
+    }
+
+    /// Check the store's claims (environment, then prefix) right away, so
+    /// a refused store says so at startup rather than at its first large
+    /// value. A core whose only credential is a workload token that has not
+    /// arrived yet checks them on first use instead.
+    fn claiming_now(self) -> Self {
+        let inner = Arc::clone(&self.inner);
+        let waits_for_token = matches!(
+            &inner.options.credentials,
+            VercelBlobCredentials::Oidc(WebIdentityToken::Workload)
+        ) && crate::middleware::workload::latest_workload_token().is_none();
+        if !waits_for_token && let Some(runtime) = &self.runtime {
+            runtime.spawn(async move {
+                if let Err(error) = inner.claim().await {
+                    tracing::error!(%error, "vercel blobs: checking the large-value store at startup failed");
+                }
+            });
+        }
+        self
     }
 
     pub fn options(&self) -> &VercelBlobOptions {
@@ -446,7 +467,15 @@ impl Inner {
 
     /// With [`VercelBlobOptions::environment`] set, check that the Blob
     /// store serves that environment only, claiming it if none has yet.
-    /// Like the owner claim, a put without overwrite read back.
+    ///
+    /// The claim is a put with `x-allow-overwrite: 0`, read back. Vercel
+    /// does not document that put as an atomic create-if-absent, so cores
+    /// of two environments that start against a fresh Blob store in the
+    /// same instant might both pass. The marker then holds one of them,
+    /// and the other is refused the next time it starts (a `vercel()`
+    /// core restarts with every deployment and every idle recycle), before
+    /// it reads or writes anything. Until then it only writes under its
+    /// own prefix, which the other environment never reads or deletes.
     async fn claim_environment(&self) -> Result<(), String> {
         let Some(environment) = &self.options.environment else {
             return Ok(());

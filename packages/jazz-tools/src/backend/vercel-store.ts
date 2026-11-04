@@ -534,6 +534,11 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   if (!options.backendCredential) refuseOtherEnvironment(trust, env);
   const trustLine = `${trust.issuer} ${trust.audience} ${trust.subject}`;
   const blobs = resolveCoreBlobs(options, env);
+  if (blobs && environmentOf(trust) === undefined) {
+    console.warn(
+      `vercel(): the core's workload ${trust.subject} names no Vercel environment, so its blob store is not claimed for one; make sure no other environment uses that store`,
+    );
+  }
   const script = Buffer.from(startScript(appId, version, tarballUrl, trust, blobs));
 
   const startServer = async (sbx: SandboxHandle) => {
