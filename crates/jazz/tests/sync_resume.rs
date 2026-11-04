@@ -1354,3 +1354,79 @@ fn a_row_that_left_the_other_subscription_live_is_evicted_by_a_listing() {
         "no live read holds room 0 any more"
     );
 }
+
+/// A client-to-server duplex that never delivers the client's commits: its
+/// writes stay pending for as long as the test needs.
+struct HoldCommits(Box<dyn Transport>);
+
+impl Transport for HoldCommits {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        if matches!(message, SyncMessage::Commit { .. }) {
+            return Ok(());
+        }
+        self.0.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.0.try_recv()
+    }
+}
+
+/// Support is followed from the row the server settled, not from a
+/// pending local write: a note moved to another room, its write not yet
+/// settled, still keeps the room the server holds for it (were the write
+/// rejected, the server would never send that room again).
+#[test]
+fn a_pending_write_does_not_move_what_another_read_holds() {
+    let server = seeded(1);
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "notes",
+            id(4, 0),
+            AuthorSubject::SYSTEM,
+            cells(&[
+                ("room", Value::Uuid(id(1, 0).0)),
+                ("body", Value::String("n0".into())),
+            ]),
+        )
+        .unwrap();
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    let member_of = client
+        .prepare_query(&Query::from("rooms").join_via("memberships", "room", []))
+        .unwrap();
+    let notes = client
+        .prepare_query(&Query::from("notes").include("room"))
+        .unwrap();
+    let _member_of = block_on(client.subscribe(&member_of, ReadOpts::default())).unwrap();
+    let _notes = block_on(client.subscribe(&notes, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(local_rooms(&client), [id(1, 0)]);
+
+    // Away, the note moves to room 1 locally and alice leaves room 0.
+    assert!(client.detach_connection(&upstream));
+    block_on(client.update(
+        "notes",
+        id(4, 0),
+        cells(&[("room", Value::Uuid(id(1, 1).0))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(Box::new(HoldCommits(client_side))));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        client.pending_upload_count(),
+        1,
+        "the move is still pending"
+    );
+    assert_eq!(
+        local_rooms(&client),
+        [id(1, 0)],
+        "room 0 is the settled note's room, which the server holds for it"
+    );
+}

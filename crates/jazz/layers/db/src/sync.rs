@@ -4227,6 +4227,51 @@ impl Inner {
         Ok(ids)
     }
 
+    /// Each of `rows`' images in `table` as the server settled it through
+    /// `through`: the current version when it is accepted at or below
+    /// `through`, otherwise the newest such version in history.
+    fn settled_images(
+        &self,
+        table: &str,
+        rows: Vec<RowUuid>,
+        through: u64,
+    ) -> Result<Vec<Image>, Error> {
+        let settled = |image: &Image| image.at.accepted() && image.at.seq <= through;
+        let mut out = Vec::new();
+        let mut unsettled = Vec::new();
+        for image in self.images_of(table, false, rows)? {
+            if settled(&image) {
+                out.push(image);
+            } else {
+                unsettled.push(RowUuid::from_bytes(image.id));
+            }
+        }
+        if unsettled.is_empty() {
+            return Ok(out);
+        }
+        unsettled.sort();
+        unsettled.dedup();
+        let have: HashSet<([u8; 16], Vec<u8>)> = out
+            .iter()
+            .map(|image| (image.id, image.key.clone()))
+            .collect();
+        let mut newest: HashMap<([u8; 16], Vec<u8>), Image> = HashMap::new();
+        for image in self.images_of(table, true, unsettled)? {
+            let slot = (image.id, image.key.clone());
+            if !settled(&image) || have.contains(&slot) {
+                continue;
+            }
+            match newest.get(&slot) {
+                Some(kept) if kept.at.seq >= image.at.seq => {}
+                _ => {
+                    newest.insert(slot, image);
+                }
+            }
+        }
+        out.extend(newest.into_values());
+        Ok(out)
+    }
+
     /// Every image of each of `rows` in `table` (or its history).
     fn images_of(
         &self,
@@ -6955,6 +7000,29 @@ impl Db {
             if listed.is_empty() {
                 continue;
             }
+            // A read that touches `table` neither as its root nor through
+            // its support holds none of its rows: skip it before reading.
+            let (root, support) = {
+                let inner = self.inner.borrow();
+                let other = remote_query(&other);
+                if history_source_table(&other.table).is_some() || other.flat_join.is_some() {
+                    continue;
+                }
+                // The read's own includes and relations, which its listing
+                // view drops.
+                let support = inner.support_of(&other)?;
+                let root = match crate::db::union_plan(&other, &inner.schema)? {
+                    Some(_) => None,
+                    None => Some(inner.schema.table(&other.table)?.stored.clone()),
+                };
+                (root, support)
+            };
+            let mut support_tables_read = Vec::new();
+            support_tables(&support, &mut support_tables_read);
+            let follows = support_tables_read.iter().any(|read| read == table);
+            if root.as_deref() != Some(table) && !follows {
+                continue;
+            }
             let Some((prepared, read)) =
                 self.listed_view(&other, &binding, include_deleted, &view, through)?
             else {
@@ -6975,17 +7043,12 @@ impl Db {
             if rows.is_empty() {
                 continue;
             }
-            let root = inner.schema.table(&prepared.query.table)?.stored.clone();
-            if root == table {
+            if root.as_deref() == Some(table) {
                 held.extend(rows.iter().map(|row| *row.0.as_bytes()));
             }
-            // The read's own includes and relations, which its listing view drops.
-            let support = inner.support_of(&remote_query(&other))?;
-            let mut support_tables_read = Vec::new();
-            support_tables(&support, &mut support_tables_read);
-            if !support_tables_read.iter().any(|read| read == table) {
+            let Some(root) = root.filter(|_| follows) else {
                 continue;
-            }
+            };
             let mut out = Vec::new();
             let (mut watch, mut kept, mut gone, mut followed) = (
                 Watches::default(),
@@ -7003,7 +7066,11 @@ impl Db {
                 gone: &mut gone,
                 followed: &mut followed,
             };
-            for image in inner.images_of(&root, false, rows)? {
+            // Followed from each row as the server settled it through
+            // `through`, as its view was read: a pending local write's
+            // references are not the server's, and a rejected one would
+            // leave the row it moved away from evicted and never re-sent.
+            for image in inner.settled_images(&root, rows, through)? {
                 inner.follow_support(&support, &image, None, &mut follow)?;
             }
             held.extend(
