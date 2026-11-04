@@ -1001,6 +1001,23 @@ fn an_unpinned_trusted_link_may_not_act_for_a_user_once_bundles_are_served() {
         "unpinned, the link writes as itself but not for alice"
     );
 
+    // A core that requires pins refuses it too before its backend has
+    // published anything.
+    let core = self::server();
+    core.require_session_pins();
+    let (_core_client, core_server, core_up, core_down) = pipe();
+    core.accept_pinned_subscriber(core_server, AuthorSubject::SYSTEM, None, None)
+        .unwrap();
+    core_up
+        .borrow_mut()
+        .extend([commit(4, 4, as_alice()), commit(5, 5, Acting::Own)]);
+    block_on(core.tick()).unwrap();
+    assert_eq!(
+        fates(&core_down),
+        vec![(4, false), (5, true)],
+        "a core requiring pins refuses an unpinned act-for with no bundle published"
+    );
+
     let (_pinned_client, pinned_server, pinned_up, pinned_down) = pipe();
     server
         .accept_pinned_subscriber(pinned_server, AuthorSubject::SYSTEM, None, Some(bundle))

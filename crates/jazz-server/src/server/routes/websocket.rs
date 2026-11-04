@@ -1224,16 +1224,14 @@ async fn close_ws_for_shutdown<S: SyncSocket>(socket: &mut S) {
 fn session_open_wire_error(error: &crate::runtime::SessionOpenError) -> WireError {
     use crate::runtime::SessionOpenError;
     match error {
-        SessionOpenError::Refused(refusal) if refusal.code == jazz::db::ErrorCode::Protocol => {
-            WireError::new(
-                WireErrorCode::AuthFailed,
-                WireRetry::Never,
-                refusal.to_string(),
-            )
-        }
+        // The store refused this session as asked: unpinned, pinned to a
+        // bundle it never published (a mistyped id, another app's), or to
+        // one whose schema it never admitted. A backend publishes its
+        // bundle before it opens sessions, so none of these clears by
+        // retrying, and the client reports it instead of backing off.
         SessionOpenError::Refused(refusal) => WireError::new(
-            WireErrorCode::NotReady,
-            WireRetry::Later,
+            WireErrorCode::AuthFailed,
+            WireRetry::Never,
             refusal.to_string(),
         ),
         SessionOpenError::Runtime(message) => {
@@ -5373,9 +5371,9 @@ mod tests {
 
         // Once bundles are published, an unpinned user session is refused,
         // as a sync session is, and so is a pin to a bundle never published.
-        // The first is refused for good; the second may open once the
-        // bundle is published, so the client retries it later.
-        let refused = thin_refusal(addr, &state, pinned_thin_prelude(bob, None)).await;
+        // Both are refused for good, so the client reports them.
+        let thin = jazz::wire::FEATURE_THIN_RESULTS;
+        let refused = thin_refusal(addr, &state, pinned_thin_prelude(bob, None), thin).await;
         assert!(
             refused.message.contains("served through createJazz"),
             "{refused:?}"
@@ -5385,29 +5383,36 @@ mod tests {
             (WireErrorCode::AuthFailed, WireRetry::Never)
         );
         let unknown = "cd".repeat(32);
-        let refused = thin_refusal(addr, &state, pinned_thin_prelude(bob, Some(&unknown))).await;
-        assert!(
-            refused.message.contains("is not published on this store"),
-            "{refused:?}"
-        );
-        assert_eq!(
-            (refused.code, refused.retry),
-            (WireErrorCode::NotReady, WireRetry::Later)
-        );
+        let unknown_pin = || pinned_thin_prelude(bob, Some(&unknown));
+        // A sync session pinned to it is refused the same way.
+        for features in [thin, 0] {
+            let refused = thin_refusal(addr, &state, unknown_pin(), features).await;
+            assert!(
+                refused.message.contains("is not published on this store"),
+                "{refused:?}"
+            );
+            assert_eq!(
+                (refused.code, refused.retry),
+                (WireErrorCode::AuthFailed, WireRetry::Never),
+                "a pin to an unknown bundle is refused for good (features {features})"
+            );
+        }
     }
 
-    /// The error a thin connection opening with `prelude` is refused with.
+    /// The error a connection opening with `prelude` and negotiating
+    /// `features` (thin or sync) is refused with.
     async fn thin_refusal(
         addr: std::net::SocketAddr,
         state: &Arc<ServerState>,
         prelude: Vec<u8>,
+        features: u64,
     ) -> WireError {
         let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
             .await
             .expect("connect websocket");
         ws.send(WsMessage::Binary(prelude.into())).await.unwrap();
         ws.send(WsMessage::Binary(
-            ws_client_hello_batch_with_features(jazz::wire::FEATURE_THIN_RESULTS).into(),
+            ws_client_hello_batch_with_features(features).into(),
         ))
         .await
         .unwrap();
