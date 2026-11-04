@@ -924,8 +924,9 @@ describe("createJazz", () => {
     // pid, back after a restart) holds nothing: only the OS lock counts.
     await writeFile(join(dir, "jazz.lock"), `process ${process.pid}`);
     const first = await createJazz({ app, permissions, store: sqlite({ path: dir }) });
+    // The error names the usual cause: Jazz created at module scope.
     await expect(createJazz({ app, permissions, store: sqlite({ path: dir }) })).rejects.toThrow(
-      /is already open/,
+      /is already open.*createJazz at module scope.*Create Jazz lazily/s,
     );
     await first.close();
     // Closed, the directory is free again.
@@ -936,7 +937,7 @@ describe("createJazz", () => {
     process.env.VERCEL = "1";
     try {
       await expect(createJazz({ app, permissions, store: sqlite({ path: dir }) })).rejects.toThrow(
-        /Use remote\(/,
+        /Use vercel\(\), whose local store runs sqlite\(\) in dev, or remote\(/,
       );
     } finally {
       if (previous === undefined) delete process.env.VERCEL;

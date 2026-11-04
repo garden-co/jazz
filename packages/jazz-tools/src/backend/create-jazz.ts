@@ -89,7 +89,10 @@ export type JazzStore =
   | {
       readonly kind: "vercel";
       readonly options: VercelStoreOptions;
-      /** What runs outside a Vercel deployment, e.g. under `next dev`. */
+      /**
+       * What runs outside a Vercel deployment, e.g. under `next dev`
+       * (default: `sqlite({ path: ".jazz/local" })`).
+       */
       readonly local: Extract<JazzStore, { kind: "sqlite" | "memory" }>;
     };
 
@@ -98,6 +101,11 @@ export type JazzStore =
  * its app id on first start and keeps it beside its data; set `appId` only
  * to keep the id of an existing app. Large values' bytes go to `blobs`,
  * by default `files()` in `<path>/blobs`.
+ *
+ * Only one process can open `path` at a time (it holds `<path>/jazz.lock`
+ * while the core is open); a second one fails with "already open". It
+ * refuses to start on serverless hosts with no lasting disk (Vercel, AWS
+ * Lambda, Netlify): use `vercel()` or `remote()` there.
  */
 export function sqlite(options: {
   path: string;
@@ -167,8 +175,13 @@ export function remote(
 }
 
 /**
- * A core in a persistent Vercel Sandbox in your own Vercel project, with its
- * data on a Drive: one for production and one per Git branch for previews.
+ * The store for apps deployed on Vercel. Use it in dev too: outside a
+ * production or preview deployment (`next dev`, `vercel dev`, tests) it runs
+ * `local`, by default `sqlite({ path: ".jazz/local" })`.
+ *
+ * Deployed, it runs a core in a persistent Vercel Sandbox in your own Vercel
+ * project, with its data on a Drive: one for production and one per Git
+ * branch for previews.
  * It is created on first use, wakes when a request needs it (about a second)
  * and stops after `idleMs` without requests or sockets. The function's Vercel
  * OIDC token is its only credential, so there are no secrets and no env vars:
@@ -184,9 +197,7 @@ export function remote(
  * the Sandbox to re-pin the core. Install `@vercel/sandbox` and
  * `@vercel/functions` next to `jazz-tools`. A deployment of a newer jazz-tools
  * restarts the core on its version, and an older deployment never moves it
- * back. Outside a production or preview deployment (`next dev`, `vercel dev`,
- * tests) it runs `local` instead: by default a SQLite core in `.jazz/local`.
- * Branch cores are not deleted when a branch merges yet: each keeps its
+ * back. Branch cores are not deleted when a branch merges yet: each keeps its
  * Sandbox and a Drive of up to `maxDriveBytes` until you remove them.
  */
 export function vercel(
@@ -359,7 +370,21 @@ export interface Jazz {
   readonly basePath: string;
   /** Answer one request under `basePath` (sync, sign-in, the HTTP stream). */
   handle(request: Request): Promise<Response>;
-  /** Route handlers for a Next.js catch-all route (`app/jazz/[...path]/route.ts`). */
+  /**
+   * Route handlers for a Next.js catch-all route. Create Jazz on the first
+   * request, not at module scope (see `createJazz`):
+   *
+   * ```ts
+   * // app/jazz/[...path]/route.ts
+   * import { getJazz } from "@/lib/jazz.server"; // returns a cached createJazz promise
+   *
+   * let handlers: Promise<ReturnType<Jazz["next"]>> | undefined;
+   * const get = () => (handlers ??= getJazz().then((jazz) => jazz.next()));
+   * export const GET = async (request: Request) => (await get()).GET(request);
+   * export const POST = async (request: Request) => (await get()).POST(request);
+   * export const DELETE = async (request: Request) => (await get()).DELETE(request);
+   * ```
+   */
   next(): {
     GET(request: Request): Promise<Response>;
     POST(request: Request): Promise<Response>;
@@ -793,7 +818,8 @@ function refuseServerlessDisk(dir: string): void {
   if (!host) return;
   throw new Error(
     `sqlite({ path: ${JSON.stringify(dir)} }) can't keep data on ${host}: its functions have no lasting disk. ` +
-      "Use remote({ url, appId, secret }) to a sync server or Jazz Cloud.",
+      (host === "Vercel" ? "Use vercel(), whose local store runs sqlite() in dev, or " : "Use ") +
+      "remote({ url, appId, secret }) to a sync server or Jazz Cloud.",
   );
 }
 
@@ -961,6 +987,20 @@ function openRemoteCore(
  * permissions your code declares to its core (in this process, or a remote
  * one), and serves sync on your own origin under `basePath`. There is no
  * separate deploy step: a rollback of your backend rolls Jazz back with it.
+ *
+ * Create it once per process, on the first request, not at module scope:
+ * frameworks import route modules in other processes too (Next.js build and
+ * dev workers), and each import would open the store. Cache the promise on
+ * `globalThis` so dev hot reloads reuse it, and drop it if it rejects:
+ *
+ * ```ts
+ * const cached = globalThis as { jazz?: Promise<Jazz> };
+ * export function getJazz() {
+ *   const pending = (cached.jazz ??= createJazz({ app, permissions, store, authenticate }));
+ *   pending.catch(() => { if (cached.jazz === pending) cached.jazz = undefined; });
+ *   return pending;
+ * }
+ * ```
  */
 export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   const basePath = (options.basePath ?? DEFAULT_BASE_PATH).replace(/\/+$/, "");
