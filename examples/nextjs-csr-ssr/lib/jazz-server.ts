@@ -27,7 +27,7 @@ export function jazz(): Promise<Jazz> {
     app: schemaApp,
     permissions,
     store: process.env.JAZZ_IN_MEMORY === "1" ? memory() : sqlite({ path: ".jazz" }),
-  }));
+  }).ready());
   // A failed start must not poison every later request.
   pending.catch(() => {
     if (globalState.__jazzNextCsrSsr === pending) globalState.__jazzNextCsrSsr = undefined;

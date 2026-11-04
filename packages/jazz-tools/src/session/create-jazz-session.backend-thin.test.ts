@@ -88,7 +88,12 @@ function memoryStore(): AccountStore {
 describe("browser session against the app's backend", () => {
   it("signs in on the thin client and upgrades with a client loader", async () => {
     const appId = randomUUID();
-    const jazz = await createJazz({ app, permissions, store: memory({ appId }), authenticate });
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory({ appId }),
+      authenticate,
+    }).ready();
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz);
     signInAs(origin, "alice");

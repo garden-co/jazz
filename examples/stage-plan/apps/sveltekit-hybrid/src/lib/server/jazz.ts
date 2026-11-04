@@ -29,7 +29,7 @@ export function jazz(): Promise<Jazz> {
       const session = await auth().api.getSession({ headers: request.headers });
       return session ? { userId: session.user.id } : null;
     },
-  });
+  }).ready();
   pending = started;
   // A failed start must not poison every later request.
   started.catch(() => {

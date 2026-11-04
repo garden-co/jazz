@@ -1,0 +1,242 @@
+import { randomUUID } from "node:crypto";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { schema as s } from "../index.js";
+import { Db } from "../runtime/db.js";
+import { earlyDbMethodKind } from "./early-db.js";
+import { createJazz, memory, sqlite, type Jazz } from "./index.js";
+
+// `createJazz` at a module's top level: it opens nothing until first use,
+// and a later call for the same store (a hot reload) reuses its core.
+
+const app = s.defineApp(
+  { todos: s.table({ title: s.string(), owner: s.uuid() }, {}) },
+  { migrations: "none" },
+);
+const permissions = s.definePermissions(app, ({ policy, session }) => {
+  policy.todos.allowRead.where({ owner: session.user.account });
+  policy.todos.allowInsert.where({ owner: session.user.account });
+  policy.todos.allowUpdate.never();
+  policy.todos.allowDelete.never();
+});
+
+const cleanups: Array<() => Promise<unknown>> = [];
+afterEach(async () => {
+  while (cleanups.length) await cleanups.pop()!().catch(() => undefined);
+});
+
+async function tempDir(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "jazz-lazy-"));
+  cleanups.push(() => rm(dir, { recursive: true, force: true }));
+  return join(dir, "store");
+}
+
+const as = (userId: string) => (_request: Request) => ({ userId });
+
+describe("createJazz, opened on first use", () => {
+  it("opens nothing when called, and its db takes writes before the store opens", async () => {
+    const path = await tempDir();
+    const jazz = createJazz({ app, permissions, store: sqlite({ path }) });
+    cleanups.push(() => jazz.close());
+    // Nothing on disk, and no app id yet.
+    await expect(readdir(path)).rejects.toThrow(/ENOENT/);
+    expect(() => jazz.appId).toThrow(/await jazz.ready\(\)/);
+    expect(jazz.basePath).toBe("/jazz");
+
+    // A write returns its row at once and applies as the store opens.
+    const owner = randomUUID();
+    const first = jazz.db.insert(app.todos, { title: "early", owner });
+    expect(first.value).toMatchObject({ title: "early", owner });
+    expect(first.value.id).toMatch(/^[0-9a-f-]{36}$/);
+    const second = jazz.db.insert(app.todos, { title: "next", owner }, { id: randomUUID() });
+    // Reads wait for the open, and see the writes made before it.
+    const rows = await jazz.db.all(app.todos.where({ owner }));
+    expect(rows.map((todo) => todo.title).sort()).toEqual(["early", "next"]);
+    expect(rows.find((todo) => todo.title === "next")?.id).toBe(second.value.id);
+    await expect(first.wait({ tier: "global" })).resolves.toEqual(first.value);
+    expect(jazz.appId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(await readdir(path)).toContain("app-id");
+
+    // Once open, the db is the backend's own.
+    const after = jazz.db.insert(app.todos, { title: "after", owner });
+    await after.wait({ tier: "global" });
+    expect(await jazz.db.one(app.todos.where({ id: after.value.id }))).toMatchObject({
+      title: "after",
+    });
+  }, 60_000);
+
+  it("queues updates, deletes and subscriptions made before the store opens", async () => {
+    const jazz = createJazz({ app, permissions, store: memory() });
+    cleanups.push(() => jazz.close());
+    const owner = randomUUID();
+    const seen: string[][] = [];
+    const stop = jazz.db.subscribe(app.todos.where({ owner }), (rows) =>
+      seen.push(rows.map((todo) => todo.title)),
+    );
+    const { value } = jazz.db.insert(app.todos, { title: "draft", owner });
+    const updated = jazz.db.update(app.todos, value.id, { title: "final" });
+    // Calls that answer at once can't before the store opens.
+    expect(() => jazz.db.getSyncStatus()).toThrow(/not available until the store has opened/);
+    await updated.wait({ tier: "global" });
+    expect(await jazz.db.one(app.todos.where({ id: value.id }))).toMatchObject({ title: "final" });
+    await expect.poll(() => seen.at(-1)).toEqual(["final"]);
+    stop();
+
+    const removed = jazz.db.delete(app.todos, value.id);
+    await removed.wait({ tier: "global" });
+    expect(await jazz.db.all(app.todos.where({ owner }))).toEqual([]);
+  }, 60_000);
+
+  it("knows how to treat every Db method before the store opens", () => {
+    const names = Object.getOwnPropertyNames(Db.prototype).filter(
+      (name) => name !== "constructor" && typeof Reflect.get(Db.prototype, name) === "function",
+    );
+    const kinds = Object.fromEntries(names.map((name) => [name, earlyDbMethodKind(name)]));
+    // A new async Db method belongs in WAITS (early-db.ts), a new write in WRITES.
+    for (const name of ["insert", "restore", "update", "upsert", "delete"]) {
+      expect(kinds[name]).toBe("write");
+    }
+    for (const name of ["all", "one", "transaction", "waitForSync", "canInsert"]) {
+      expect(kinds[name]).toBe("waits");
+    }
+    // Internal to Db and its own callers, never reached through the early db.
+    const internal = new Set([
+      "inspectorAttachmentOptions",
+      "allFromInspectorAttachment",
+      "prefetchRuntimeQueries",
+      "ensureReady",
+      "allInternal",
+      "runShutdown",
+    ]);
+    const asyncOnes = names.filter(
+      (name) =>
+        Reflect.get(Db.prototype, name)?.constructor?.name === "AsyncFunction" &&
+        kinds[name] !== "waits" &&
+        !internal.has(name),
+    );
+    expect(asyncOnes).toEqual([]);
+  });
+
+  it("opens one core per store and process, and a later call swaps in its options", async () => {
+    const path = await tempDir();
+    const request = new Request("http://app.test/api");
+    const first = createJazz({
+      app,
+      permissions,
+      store: sqlite({ path }),
+      authenticate: as("alice"),
+    });
+    cleanups.push(() => first.close());
+    const alice = await first.accountFor(request);
+    const appId = first.appId;
+
+    // A hot reload evaluates the module again: the same store, new options.
+    const reloaded = createJazz({
+      app,
+      permissions,
+      store: sqlite({ path }),
+      authenticate: as("bob"),
+      basePath: "/api/jazz",
+    });
+    expect(reloaded).toBe(first);
+    expect(reloaded.basePath).toBe("/api/jazz");
+    const bob = await reloaded.accountFor(request);
+    expect(bob).not.toBe(alice);
+    expect(reloaded.appId).toBe(appId);
+    // The backend's own db moved to the new session and still works.
+    const owner = randomUUID();
+    await reloaded.db.insert(app.todos, { title: "after reload", owner }).wait({ tier: "global" });
+    expect(await reloaded.db.all(app.todos.where({ owner }))).toHaveLength(1);
+
+    // New permissions apply to the next use: the user may no longer insert.
+    const noInserts = s.definePermissions(app, ({ policy, session }) => {
+      policy.todos.allowRead.where({ owner: session.user.account });
+      policy.todos.allowInsert.never();
+      policy.todos.allowUpdate.never();
+      policy.todos.allowDelete.never();
+    });
+    const asBob = (store: ReturnType<typeof sqlite>, rules: typeof permissions) =>
+      createJazz({ app, permissions: rules, store, authenticate: as("bob") });
+    const insertAsBob = async (jazz: Jazz) =>
+      (await jazz.forRequest(request))
+        .insert(app.todos, { title: "bob's", owner: bob! })
+        .wait({ tier: "global" });
+    await expect(insertAsBob(asBob(sqlite({ path }), permissions))).resolves.toBeTruthy();
+    await expect(insertAsBob(asBob(sqlite({ path }), noInserts))).rejects.toThrow();
+    await expect(insertAsBob(asBob(sqlite({ path }), permissions))).resolves.toBeTruthy();
+
+    // Settings that would need another core are refused while it is open.
+    expect(() =>
+      createJazz({ app, permissions, store: sqlite({ path, blobs: "sqlite" }) }),
+    ).toThrow(/already open in this process with other store settings/);
+
+    // Closed, the next call opens the store again.
+    await first.close();
+    await expect(first.ready()).rejects.toThrow(/was closed/);
+    const again = createJazz({ app, permissions, store: sqlite({ path }) });
+    cleanups.push(() => again.close());
+    expect(again).not.toBe(first);
+    expect((await again.ready()).appId).toBe(appId);
+  }, 60_000);
+
+  it("keeps memory stores apart unless they name one app, and retries an open that failed", async () => {
+    const one = createJazz({ app, permissions, store: memory() });
+    const two = createJazz({ app, permissions, store: memory() });
+    cleanups.push(
+      () => one.close(),
+      () => two.close(),
+    );
+    expect(one).not.toBe(two);
+    expect((await one.ready()).appId).not.toBe((await two.ready()).appId);
+    const appId = randomUUID();
+    const named = createJazz({ app, permissions, store: memory({ appId }) });
+    cleanups.push(() => named.close());
+    expect(createJazz({ app, permissions, store: memory({ appId }) })).toBe(named);
+
+    const path = await tempDir();
+    const previous = process.env.VERCEL;
+    process.env.VERCEL = "1";
+    const jazz = createJazz({ app, permissions, store: sqlite({ path }) });
+    cleanups.push(() => jazz.close());
+    try {
+      await expect(jazz.ready()).rejects.toThrow(/Use remote\(/);
+      // A write made meanwhile fails with the open's error, not unhandled.
+      const write = jazz.db.insert(app.todos, { title: "lost", owner: randomUUID() });
+      await expect(write.wait({ tier: "local" })).rejects.toThrow(/Use remote\(/);
+    } finally {
+      if (previous === undefined) delete process.env.VERCEL;
+      else process.env.VERCEL = previous;
+    }
+    await jazz.ready();
+  }, 60_000);
+
+  it("serves requests before it has opened, and leaves other routes alone", async () => {
+    const path = await tempDir();
+    const jazz: Jazz = createJazz({ app, permissions, store: sqlite({ path }) });
+    cleanups.push(() => jazz.close());
+    const server: Server = createServer((req, res) =>
+      jazz.nodeHandler(req, res, () => {
+        res.statusCode = 404;
+        res.end("app route");
+      }),
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => server.close(resolve)));
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    // An app route passes on without opening the store.
+    const other = await fetch(`${origin}/elsewhere`);
+    expect(await other.text()).toBe("app route");
+    await expect(readdir(path)).rejects.toThrow(/ENOENT/);
+
+    // A Jazz route opens it and is answered.
+    const answered = await fetch(`${origin}/jazz/apps/any/schemas`);
+    expect(await answered.text()).not.toBe("app route");
+    expect(jazz.appId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(await readdir(path)).toContain("app-id");
+  }, 60_000);
+});

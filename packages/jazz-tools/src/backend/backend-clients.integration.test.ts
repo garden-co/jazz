@@ -104,7 +104,7 @@ async function appWith(backendClients: Parameters<typeof createJazz>[0]["backend
     store: memory({ appId }),
     authenticate,
     backendClients,
-  });
+  }).ready();
   cleanups.push(() => jazz.close());
   return { appId, jazz, origin: await serve(jazz) };
 }
