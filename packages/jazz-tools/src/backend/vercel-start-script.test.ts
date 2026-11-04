@@ -90,7 +90,9 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(await start("1.0.0", undefined, trust, blobs)).toBe("running");
     const line = read("servers.log")!;
     expect(line).toMatch(/^app-blobs us-east-1 arn:aws:iam::1:role\/vercel server /);
-    expect(line).toContain("--blobs s3 --s3-role-from-workload --s3-prefix it's/");
+    expect(line).toContain(
+      "--blobs s3 --s3-role-from-workload --blobs-environment production --s3-prefix it's/",
+    );
   });
 
   it("starts a core whose large values go to the project's Blob store", async () => {
@@ -100,7 +102,7 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     );
     expect(read("servers.log")).toContain(
       "--blobs vercel-blob --vercel-blob-token-from-workload --vercel-blob-store-id abc " +
-        "--vercel-blob-prefix it's/ --trusted-workload-issuer",
+        "--blobs-environment production --vercel-blob-prefix it's/ --trusted-workload-issuer",
     );
   });
 
