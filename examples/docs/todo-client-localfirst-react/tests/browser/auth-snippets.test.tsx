@@ -6,7 +6,7 @@ import { APP_ID, SERVER_URL } from "./test-constants.js";
 describe("account recovery snippets", () => {
   it("restores the same account and identity after logout through the session", async () => {
     const session = await createJazzSession({
-      appId: APP_ID,
+      scope: APP_ID,
       serverUrl: SERVER_URL,
       initial: "local-first",
     });

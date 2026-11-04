@@ -52,8 +52,6 @@ pub(super) struct ThinSession {
     identity: AuthorSubject,
     /// The identity's claims, bound to every read; `None` for SYSTEM.
     claims: Option<BTreeMap<String, Value>>,
-    /// A session under its own identity (not a trusted backend link).
-    untrusted: bool,
     /// The published permissions bundle its backend pinned it to: its
     /// reads and writes are governed by that bundle's policies.
     bundle: Option<jazz::catalogue::BundleId>,
@@ -85,7 +83,6 @@ impl ThinSession {
         Self {
             identity,
             claims,
-            untrusted: identity != AuthorSubject::SYSTEM,
             bundle,
             version: None,
             subscriptions: BTreeMap::new(),
@@ -284,6 +281,26 @@ impl Owner {
         Ok(())
     }
 
+    /// End every thin session pinned to a bundle `ends` names, telling it
+    /// `error` first. How many ended.
+    pub(super) fn end_pinned_thin_sessions(
+        &mut self,
+        ends: &dyn Fn(&jazz::catalogue::BundleId) -> bool,
+        error: &jazz::wire::WireError,
+    ) -> usize {
+        let ending: Vec<ServerSession> = self
+            .thin
+            .iter()
+            .filter(|(_, thin)| thin.bundle.as_ref().is_some_and(ends))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &ending {
+            let _ = self.thin[id].output.send((Err(error.clone()), 0));
+            self.close_thin_session(*id);
+        }
+        ending.len()
+    }
+
     pub(super) fn close_thin_session(&mut self, session: ServerSession) {
         // Dropping the streams ends the subscriptions.
         if let Some(thin) = self.thin.remove(&session) {
@@ -292,23 +309,11 @@ impl Owner {
     }
 
     pub(super) fn thin_request(&mut self, session: ServerSession, request: ThinRequest) {
-        let Some(thin) = self.thin.get(&session) else {
+        if !self.thin.contains_key(&session) {
             return;
-        };
-        // A pinned session's bundle is published already: it does not wait
-        // for the current permissions.
-        let body = if self.awaiting_permissions && thin.untrusted && thin.bundle.is_none() {
-            ThinBody::Error {
-                code: "NotReady".to_owned(),
-                message: "no permissions are published for this app yet; deploy them before \
-                          connecting thin clients"
-                    .to_owned(),
-            }
-        } else {
-            match self.serve_thin(session, request.id, request.op) {
-                Some(body) => body,
-                None => return,
-            }
+        }
+        let Some(body) = self.serve_thin(session, request.id, request.op) else {
+            return;
         };
         let response = ThinResponse {
             id: request.id,

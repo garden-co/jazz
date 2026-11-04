@@ -1,7 +1,6 @@
 ---
 "jazz-tools": patch
 "jazz-napi": patch
-"@jazz/rust": patch
 ---
 
 A Jazz core now serves only sessions pinned to a published permissions bundle. Every user session it governs is governed by the bundle the app's backend pinned it to, never by permissions activated on the core, so a core refuses a stated session without a bundle even before the app published one. `createJazz` already pins every session it opens, so apps on `createJazz` need no change. The refusal arrives as a terminal auth failure (`AuthFailed`, no retry) instead of a retryable internal error, and so does a session pinned to a bundle the core never published (a mistyped or foreign bundle id), so the client reports it instead of retrying forever.

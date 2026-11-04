@@ -9,7 +9,6 @@ import { h } from "./dom";
 import { signInScreen } from "./sign-in";
 
 const root = document.getElementById("app")!;
-const appId = import.meta.env.VITE_JAZZ_APP_ID;
 
 const status = (message: string, error = false) =>
   h(
@@ -20,7 +19,7 @@ const status = (message: string, error = false) =>
 
 // Better Auth's session drives sign-in; the server's Jazz (`createJazz` in
 // src/lib/backend-jazz-client.ts) reads it in `authenticate`.
-const jazz = createJazzApp({ appId, serverUrl: "/jazz" });
+const jazz = createJazzApp({ serverUrl: "/jazz" });
 
 let shown: { key: string; dispose?(): void } | undefined;
 function show(key: string, render: () => HTMLElement | { element: HTMLElement; dispose(): void }) {

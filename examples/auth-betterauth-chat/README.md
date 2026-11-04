@@ -25,7 +25,7 @@ cp .env.example .env
 The `.env` file only needs the values already in `.env.example`:
 
 - `NEXT_PUBLIC_APP_ORIGIN`: Next app origin used by Better Auth and Playwright
-- `NEXT_PUBLIC_JAZZ_APP_ID`: the Jazz app id
+- `JAZZ_APP_ID`: the Jazz app id
 - `NEXT_PUBLIC_CHAT_ID`: general chat room id
 - `NEXT_PUBLIC_ANNOUNCEMENTS_CHAT_ID`: announcements chat room id
 

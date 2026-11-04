@@ -11,7 +11,7 @@ function TodoApp() {
 export function LocalFirstAuthExpoApp() {
   return (
     <JazzSessionProvider
-      config={{ appId: "my-app", serverUrl: "https://your-core.example", initial: "local-first" }}
+      config={{ serverUrl: "https://your-app.example/jazz", initial: "local-first" }}
     >
       <View>
         <Text>My App</Text>

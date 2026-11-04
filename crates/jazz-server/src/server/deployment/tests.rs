@@ -728,8 +728,6 @@ async fn publish_only_deployments_publish_content_addressed_bundles() {
         assert_eq!(rollback["changed"], false, "{rollback}");
         assert_eq!(rollback["bundle"], json!(open));
 
-        let head = http(&router, "GET", "/permissions", Value::Null).await.1;
-        assert_eq!(head["head"], Value::Null, "nothing was activated: {head}");
         assert_published_bundles(&router, &open, &closed, &base, &next).await;
         server.shutdown().await;
         (open, closed)
@@ -756,5 +754,88 @@ async fn publish_only_deployments_publish_content_addressed_bundles() {
             >= 2,
         "the upgraded write schema is admitted"
     );
+    server.shutdown().await;
+}
+
+/// A deployment publishes a bundle and admits its schemas, but no schema or
+/// permissions become current, before or after the core reopens: sessions
+/// write by the bundle they pin to.
+#[tokio::test]
+async fn deployments_never_make_a_schema_current() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (schema(&[]), schema(&["body"]));
+    {
+        let server = builder(Some(dir.path())).build().await.unwrap();
+        let router = create_router(server.state.clone());
+        deploy_ok(&router, request(&a, &[&a], vec![])).await;
+        deploy_ok(
+            &router,
+            request(&b, &[&a, &b], vec![migration(&a, &b, &["body"])]),
+        )
+        .await;
+        let catalogue = server.state.runtime().unwrap().catalogue().await.unwrap();
+        assert!(catalogue.head().is_none());
+        assert!(catalogue.permissions.is_empty());
+        assert_eq!(catalogue.bundles.len(), 2);
+        assert_eq!(
+            graph(&router).await["latestBundleSchemaHash"],
+            json!(SchemaHash::compute(&b).to_string())
+        );
+        server.shutdown().await;
+    }
+    let reopened = builder(Some(dir.path())).build().await.unwrap();
+    let catalogue = reopened.state.runtime().unwrap().catalogue().await.unwrap();
+    assert!(catalogue.head().is_none());
+    assert_eq!(catalogue.bundles.len(), 2);
+    reopened.shutdown().await;
+}
+
+/// The migration graph's latest bundle is the one published last, not the
+/// newest schema: a bundle for an older schema published after a newer one
+/// is the latest. Publishing an existing bundle again moves nothing.
+#[tokio::test]
+async fn the_latest_bundle_is_the_last_one_published() {
+    let server = builder(None).build().await.unwrap();
+    let router = create_router(server.state.clone());
+    let (base, next) = (schema(&[]), schema(&["body"]));
+    let with = |mut request: Value, read: PolicyExpr| {
+        request["permissions"] = serde_json::to_value(HashMap::from([(
+            TableName::new("notes"),
+            TablePolicies::new().with_select(read),
+        )]))
+        .unwrap();
+        request
+    };
+    let latest = |router: Router| async move {
+        graph(&router).await["latestBundleSchemaHash"]
+            .as_str()
+            .map(str::to_owned)
+    };
+    let hash = |schema: &Schema| Some(SchemaHash::compute(schema).to_string());
+
+    publish_ok(
+        &router,
+        with(request(&base, &[&base], vec![]), PolicyExpr::True),
+    )
+    .await;
+    assert_eq!(latest(router.clone()).await, hash(&base));
+    let upgrade = with(
+        request(&next, &[&next], vec![migration(&base, &next, &["body"])]),
+        PolicyExpr::False,
+    );
+    publish_ok(&router, upgrade.clone()).await;
+    assert_eq!(latest(router.clone()).await, hash(&next));
+    // New policies for the older schema, published right after: within the
+    // same millisecond or not, this bundle is the latest.
+    let older = publish_ok(
+        &router,
+        with(request(&base, &[], vec![]), PolicyExpr::False),
+    )
+    .await;
+    assert_eq!(older["changed"], true, "{older}");
+    assert_eq!(latest(router.clone()).await, hash(&base));
+    let again = publish_ok(&router, upgrade).await;
+    assert_eq!(again["changed"], false, "{again}");
+    assert_eq!(latest(router.clone()).await, hash(&base));
     server.shutdown().await;
 }
