@@ -9,7 +9,10 @@ import {
   wantsMarkdown,
   type SearchHit,
 } from "@/lib/agent-search";
+import { searchEvent } from "@/lib/search-analytics";
+import { track } from "@vercel/analytics/server";
 import { createFromSource } from "fumadocs-core/search/server";
+import { after } from "next/server";
 
 const server = createFromSource(source, {
   // https://docs.orama.com/docs/orama-js/supported-languages
@@ -75,6 +78,13 @@ export async function GET(request: Request): Promise<Response> {
   const limit = parseLimit(url.searchParams.get("limit"), DEFAULT_LIMIT, MAX_LIMIT);
   const hits = (await server.search(query)) as SearchHit[];
   const pages = groupByPage(hits, limit, headingFor);
+
+  // The site's search box records its own (settled) searches client-side; the
+  // JSON path runs on every keystroke, so only the Markdown path tracks here.
+  const event = searchEvent(query, "api", pages.length);
+  if (event) {
+    after(() => track(event.name, event.properties, { request }).catch(() => {}));
+  }
 
   let fullText: Map<string, string> | undefined;
   const full = url.searchParams.get("full");

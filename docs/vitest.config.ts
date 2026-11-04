@@ -5,7 +5,11 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "node",
-    include: ["components/**/*.test.ts", "lib/agent-search.test.ts"],
+    include: [
+      "components/**/*.test.ts",
+      "lib/agent-search.test.ts",
+      "lib/search-analytics.test.ts",
+    ],
     exclude: ["**/node_modules/**", "**/.next/**"],
   },
 });

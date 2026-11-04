@@ -2,6 +2,8 @@
 
 import { type Dispatch, type SetStateAction, useEffect, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { track } from "@vercel/analytics";
+import { searchEvent } from "@/lib/search-analytics";
 import { Search } from "lucide-react";
 import { Button } from "@astryxdesign/core/Button";
 import { IconButton } from "@astryxdesign/core/IconButton";
@@ -131,6 +133,45 @@ export function SearchIconButton({ onOpen }: { onOpen: () => void }) {
   );
 }
 
+/** How long the query must stay unchanged before it counts as one search. */
+const SETTLE_MS = 1200;
+
+/**
+ * Records a search once the user stops typing (or picks a result), not on
+ * every keystroke the palette sends to the endpoint. Each distinct query is
+ * recorded at most once per open page.
+ */
+function useSearchTracking() {
+  const state = useRef<{
+    timer?: ReturnType<typeof setTimeout>;
+    pending?: { query: string; results: number };
+    sent: Set<string>;
+  }>({ sent: new Set() });
+
+  return useMemo(() => {
+    const flush = () => {
+      const s = state.current;
+      clearTimeout(s.timer);
+      const pending = s.pending;
+      s.pending = undefined;
+      if (!pending) return;
+      const event = searchEvent(pending.query, "ui", pending.results);
+      if (!event || s.sent.has(event.properties.query)) return;
+      s.sent.add(event.properties.query);
+      track(event.name, event.properties);
+    };
+    return {
+      searched(query: string, results: number) {
+        const s = state.current;
+        clearTimeout(s.timer);
+        s.pending = { query, results };
+        s.timer = setTimeout(flush, SETTLE_MS);
+      },
+      flush,
+    };
+  }, []);
+}
+
 /**
  * Site search on Astryx `CommandPalette`, backed by the Fumadocs search
  * endpoint (`/api/search`). The caller owns the open state and renders the
@@ -146,6 +187,7 @@ export function SiteSearch({
   const router = useRouter();
   // The palette reports the picked item's id; map it back to its URL.
   const urls = useRef(new Map<string, string>());
+  const tracking = useSearchTracking();
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -171,6 +213,7 @@ export function SiteSearch({
           if (!response.ok) return [];
           const items = toItems((await response.json()) as SearchResult[]);
           for (const item of items) urls.current.set(item.id, item.auxiliaryData!.url);
+          tracking.searched(query, items.length);
           return items;
         } catch {
           return [];
@@ -179,7 +222,7 @@ export function SiteSearch({
       bootstrap: () => [],
       cancel: () => controller?.abort(),
     };
-  }, []);
+  }, [tracking]);
 
   return (
     <CommandPalette<SearchItem>
@@ -191,6 +234,7 @@ export function SiteSearch({
       emptyBootstrapText="Type to search the docs"
       emptySearchText="No results"
       onValueChange={(id) => {
+        tracking.flush();
         const url = urls.current.get(id);
         if (url) router.push(url);
       }}
