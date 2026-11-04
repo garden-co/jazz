@@ -329,3 +329,143 @@ fn a_pinned_sessions_serializable_reads_validate_by_its_bundle() {
     )
     .expect("its reads still hold under its bundle");
 }
+
+/// A duplex that counts the row images the server ships.
+struct CountingPipe {
+    out: std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<jazz::db::SyncMessage>>>,
+    inbound: std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<jazz::db::SyncMessage>>>,
+    shipped: Option<std::rc::Rc<std::cell::Cell<usize>>>,
+}
+
+impl jazz::db::Transport for CountingPipe {
+    fn send(&mut self, message: jazz::db::SyncMessage) -> Result<(), jazz::db::TransportError> {
+        if let (Some(count), jazz::db::SyncMessage::Rows { images, .. }) = (&self.shipped, &message)
+        {
+            count.set(count.get() + images.len());
+        }
+        self.out.borrow_mut().push_back(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<jazz::db::SyncMessage> {
+        self.inbound.borrow_mut().pop_front()
+    }
+}
+
+/// (client side, server side, rows the server side shipped).
+fn counting_pipe() -> (
+    Box<dyn jazz::db::Transport>,
+    Box<dyn jazz::db::Transport>,
+    std::rc::Rc<std::cell::Cell<usize>>,
+) {
+    let up = std::rc::Rc::default();
+    let down = std::rc::Rc::default();
+    let shipped = std::rc::Rc::new(std::cell::Cell::new(0));
+    (
+        Box::new(CountingPipe {
+            out: std::rc::Rc::clone(&up),
+            inbound: std::rc::Rc::clone(&down),
+            shipped: None,
+        }),
+        Box::new(CountingPipe {
+            out: down,
+            inbound: up,
+            shipped: Some(std::rc::Rc::clone(&shipped)),
+        }),
+        shipped,
+    )
+}
+
+/// An authority with `rows` users and two published bundles: one that
+/// reads every user and one that reads none.
+fn server_with_users(rows: u8) -> (Db, BundleId, BundleId) {
+    let server = block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap();
+    server.set_authority();
+    for n in 0..rows {
+        server
+            .seed_settled_mergeable_for_bootstrap(
+                "users",
+                RowUuid::from_bytes([n + 1; 16]),
+                AuthorSubject::SYSTEM,
+                BTreeMap::from([("name".to_owned(), Value::String(format!("user {n}")))]),
+            )
+            .unwrap();
+    }
+    let open = block_on(server.publish_bundle(&users(PolicyExpr::True))).unwrap();
+    let closed = block_on(server.publish_bundle(&users(PolicyExpr::False))).unwrap();
+    (server, open, closed)
+}
+
+/// Reconnect `db`'s upstream to `server`, pinned to `bundle`: the rows
+/// the server shipped while `pump` ran.
+fn reconnect_pinned(
+    server: &Db,
+    db: &Db,
+    author: AuthorSubject,
+    bundle: BundleId,
+    upstream: &jazz::db::Upstream,
+) -> (usize, jazz::db::Upstream) {
+    assert!(db.detach_connection(upstream));
+    let (client_side, server_side, shipped) = counting_pipe();
+    let upstream = block_on(db.connect_upstream(client_side));
+    server
+        .accept_pinned_subscriber(server_side, author, None, Some(bundle))
+        .unwrap();
+    pump(server, &[db]);
+    (shipped.get(), upstream)
+}
+
+/// A pinned session that reconnects under the bundle it settled under
+/// resumes from where it settled: nothing that did not change ships again.
+#[test]
+fn a_pinned_session_resumes_under_the_same_bundle() {
+    let (server, open, _) = server_with_users(20);
+    let alice = AuthorSubject::for_test_bytes([0x55; 16]);
+    let db = client(1, alice);
+    let (client_side, server_side, shipped) = counting_pipe();
+    let upstream = block_on(db.connect_upstream(client_side));
+    server
+        .accept_pinned_subscriber(server_side, alice, None, Some(open))
+        .unwrap();
+    let prepared = db.prepare_query(&Query::from("users")).unwrap();
+    let _stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &[&db]);
+    assert_eq!(shipped.get(), 20, "the first opening ships every row");
+    assert_eq!(local(&db).len(), 20);
+
+    let (shipped, _upstream) = reconnect_pinned(&server, &db, alice, open, &upstream);
+    assert_eq!(
+        shipped, 0,
+        "a caught-up resume under the same bundle ships nothing"
+    );
+    assert_eq!(local(&db).len(), 20);
+}
+
+/// A result settled under one bundle is no resume point under another:
+/// the session opens fresh, so rows the new bundle reads arrive and rows
+/// it does not are dropped, though none of them changed.
+#[test]
+fn a_pinned_session_under_another_bundle_opens_fresh() {
+    let (server, open, closed) = server_with_users(5);
+    let alice = AuthorSubject::for_test_bytes([0x55; 16]);
+    let db = client(1, alice);
+    let (client_side, server_side, _) = counting_pipe();
+    let upstream = block_on(db.connect_upstream(client_side));
+    server
+        .accept_pinned_subscriber(server_side, alice, None, Some(closed))
+        .unwrap();
+    let prepared = db.prepare_query(&Query::from("users")).unwrap();
+    let _stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &[&db]);
+    assert_eq!(local(&db), [], "the closed bundle reads no user");
+
+    // Now under the bundle that reads every user: nothing changed since
+    // the last settle, yet every row is the session's to read.
+    let (shipped, upstream) = reconnect_pinned(&server, &db, alice, open, &upstream);
+    assert_eq!(shipped, 5);
+    assert_eq!(local(&db).len(), 5);
+
+    // And back: the rows the closed bundle hides leave the replica.
+    let (_, _upstream) = reconnect_pinned(&server, &db, alice, closed, &upstream);
+    assert_eq!(local(&db), []);
+}

@@ -352,7 +352,7 @@ fn a_reopened_replica_resumes_its_subscription_from_its_stored_watermark() {
         _ => None,
     });
     assert!(
-        matches!(since, Some(Some(seq)) if seq > 0),
+        matches!(since, Some(Some(since)) if since.through > 0),
         "the subscription resumes from its stored watermark: {since:?}"
     );
     assert_eq!(labels(&client), ["held"]);

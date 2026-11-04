@@ -202,15 +202,16 @@ pub(crate) fn commit_clock<'de, D: serde::Deserializer<'de>>(
     Ok(clock)
 }
 
-/// [`accepted_seq`], when the peer may send none.
-pub(crate) fn accepted_seq_opt<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<u64>, D::Error> {
-    let seq = Option::<u64>::deserialize(deserializer)?;
-    if seq.is_some_and(|seq| seq > MAX_SEQ) {
-        return Err(serde::de::Error::custom("an accepted seq past 2^52"));
-    }
-    Ok(seq)
+/// Where a replica's result of a read last settled: authority seq
+/// `through`, read under `under`, the permissions bundle its connection
+/// was pinned to then (see [`SyncMessage::Welcome`]); `None` for an
+/// unpinned connection. The server resumes a read only under the same
+/// bundle: another one's policies may have shown other rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Since {
+    #[serde(deserialize_with = "accepted_seq")]
+    pub through: u64,
+    pub under: Option<[u8; 32]>,
 }
 
 /// `_clock` of the first version of kind `n`: `_clock < band_start(PENDING)` is
@@ -1212,9 +1213,9 @@ pub enum SyncMessage {
         /// view (head over an optional live or frozen base), or a
         /// snapshot. Part of the read's identity (`INV-BVIEW-12`).
         view: Box<ReadViewSourceSpec>,
-        /// Last complete checkpoint for this read, independent of its lifetime.
-        #[serde(deserialize_with = "accepted_seq_opt")]
-        since: Option<u64>,
+        /// Last complete checkpoint for this read, independent of its
+        /// lifetime, with the permissions bundle it was settled under.
+        since: Option<Since>,
         span: ReadSpan,
     },
     Unsubscribe {
@@ -1378,6 +1379,10 @@ pub enum SyncMessage {
     Welcome {
         admitted: bool,
         catalogue: CatalogueUpdate,
+        /// The permissions bundle this session is pinned to (`None`:
+        /// unpinned). The client stamps the results it settles on this
+        /// connection with it, as their [`Since::under`].
+        pinned: Option<[u8; 32]>,
     },
     /// Server → client: the position the whole connection is settled
     /// through. Every read it settled is complete through `through`, and
@@ -1697,6 +1702,8 @@ struct ActiveRead {
     view: ReadViewSourceSpec,
     watermark: Option<[u8; 32]>,
     through: Option<u64>,
+    /// The bundle `through` was settled under ([`Since::under`]).
+    under: Option<[u8; 32]>,
     lifetime: ReadLifetime,
 }
 
@@ -1715,8 +1722,11 @@ impl ActiveRead {
         }
     }
 
-    fn since(&self) -> Option<u64> {
-        self.through
+    fn since(&self) -> Option<Since> {
+        self.through.map(|through| Since {
+            through,
+            under: self.under,
+        })
     }
 }
 
@@ -1850,6 +1860,10 @@ pub(crate) struct Client {
     /// knows every version the authority deployed, so its own sessions'
     /// commits under a version it still lacks are refused (INV-SYNC-52).
     catalogued: bool,
+    /// The bundle the upstream pinned this connection to, once its
+    /// `Welcome` said (`Some(None)`: unpinned). Results settled on it are
+    /// stamped with it ([`Since::under`]); none is stored before it is known.
+    pinned: Option<Option<[u8; 32]>>,
     /// Rows asked for whole (their shipped deltas did not apply), until a
     /// whole image of each arrives. This store holds a stale version of
     /// each, so no result it settles is the server's: no watermark is
@@ -4977,7 +4991,7 @@ pub(crate) const WITHHELD_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_withheld
 /// so that opening an existing store without one leaves the file
 /// byte-identical.
 const WATERMARKS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_watermarks \
-    (key BLOB PRIMARY KEY, through INTEGER NOT NULL) WITHOUT ROWID";
+    (key BLOB PRIMARY KEY, through INTEGER NOT NULL, under BLOB) WITHOUT ROWID";
 
 /// A remote query's `_jazz_watermarks` key: what it reads, and as whom.
 /// How far it reaches (tier and wait) is not part of it: every tier's
@@ -5289,20 +5303,33 @@ impl Inner {
         Ok(())
     }
 
-    /// Where a remote query's result was last settled through.
-    fn watermark(&self, key: &[u8; 32]) -> Result<Option<u64>, Error> {
+    /// Where a remote query's result was last settled through, and the
+    /// bundle it was settled under ([`Since`]).
+    fn watermark(&self, key: &[u8; 32]) -> Result<Option<(u64, Option<[u8; 32]>)>, Error> {
         if !self.has_table("_jazz_watermarks")? {
             return Ok(None);
         }
-        self.conn
+        let found = self
+            .conn
             .cached_row(
-                "SELECT through FROM _jazz_watermarks WHERE key = ?1",
+                "SELECT through, under FROM _jazz_watermarks WHERE key = ?1",
                 [key.as_slice()],
-                |r| r.get::<_, i64>(0),
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<Vec<u8>>>(1)?)),
             )
             .optional()
-            .map(|through| through.map(|through| through as u64))
-            .map_err(storage)
+            .map_err(storage)?;
+        found
+            .map(|(through, under)| {
+                let under = under
+                    .map(|under| {
+                        <[u8; 32]>::try_from(under.as_slice()).map_err(|_| {
+                            crate::format::unsupported("bad bundle id in _jazz_watermarks")
+                        })
+                    })
+                    .transpose()?;
+                Ok((through as u64, under))
+            })
+            .transpose()
     }
 
     fn active_read(
@@ -5329,9 +5356,10 @@ impl Inner {
             )
         });
         // A replica that cannot read its watermark opens fresh.
-        let through = watermark
+        let (through, under) = watermark
             .as_ref()
-            .and_then(|key| self.watermark(key).ok().flatten());
+            .and_then(|key| self.watermark(key).ok().flatten())
+            .map_or((None, None), |(through, under)| (Some(through), under));
         ActiveRead {
             query,
             binding,
@@ -5339,6 +5367,7 @@ impl Inner {
             view,
             watermark,
             through,
+            under,
             lifetime,
         }
     }
@@ -5352,7 +5381,7 @@ impl Inner {
         include_deleted: bool,
         view: &ReadViewSourceSpec,
         at: Option<u64>,
-    ) -> Option<u64> {
+    ) -> Option<Since> {
         let read = self.active_read(
             query.clone(),
             binding.clone(),
@@ -5383,6 +5412,7 @@ impl Inner {
         if let Some(client) = self.client.as_mut() {
             for read in client.reads.values_mut() {
                 read.through = None;
+                read.under = None;
             }
             client.forgotten = true;
         }
@@ -5391,11 +5421,20 @@ impl Inner {
 
     /// Record that a remote query's result settled through authority seq
     /// `through`, replacing where it had settled before.
+    /// It is stamped with the bundle this connection is pinned to; before
+    /// the upstream's `Welcome` said which, nothing is stored.
     fn store_watermark(&self, key: &[u8; 32], through: u64) -> Result<(), Error> {
+        let Some(under) = self.client.as_ref().and_then(|client| client.pinned) else {
+            return Ok(());
+        };
         self.exec(WATERMARKS_DDL, []).map_err(storage)?;
         self.exec(
-            "INSERT OR REPLACE INTO _jazz_watermarks (key, through) VALUES (?1, ?2)",
-            rusqlite::params![key.as_slice(), through as i64],
+            "INSERT OR REPLACE INTO _jazz_watermarks (key, through, under) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                key.as_slice(),
+                through as i64,
+                under.map(|under| under.to_vec())
+            ],
         )
         .map_err(storage)?;
         Ok(())
@@ -6620,6 +6659,7 @@ impl Client {
             stranded: false,
             uncatalogued: None,
             catalogued: false,
+            pinned: None,
             whole: HashMap::new(),
             deferred: VecDeque::new(),
             releasing: None,
@@ -6787,6 +6827,7 @@ impl Db {
         client.wanted.extend(asked);
         client.unadmitted = false;
         client.catalogued = false;
+        client.pinned = None;
         client.connection += 1;
         let connection = client.connection;
         if client.stranded {
@@ -7504,7 +7545,7 @@ impl Db {
             }
             at => at.map(|at| at.seq),
         };
-        let message = |id: u64, since: Option<u64>| SyncMessage::Read {
+        let message = |id: u64, since: Option<Since>| SyncMessage::Read {
             id,
             query: Box::new(remote_query(&prepared.query).into_owned()),
             binding: prepared.binding.clone(),
@@ -8131,7 +8172,9 @@ impl Db {
                     SyncMessage::Welcome {
                         admitted,
                         catalogue,
+                        pinned,
                     } => {
+                        inner.client.as_mut().expect("client").pinned = Some(pinned);
                         queue.push_front(SyncMessage::SchemaAdmission { admitted });
                         queue.push_front(SyncMessage::Catalogue(catalogue));
                     }
@@ -8198,8 +8241,11 @@ impl Db {
                                         live.visible = Some(at);
                                         client.visibility_moved = true;
                                     }
-                                    if resumable {
+                                    // Resumable only under the bundle it was
+                                    // read by, known once the `Welcome` said.
+                                    if resumable && let Some(pinned) = client.pinned {
                                         read.through = Some(through);
+                                        read.under = pinned;
                                         client.forgotten = false;
                                         live_watermark = read.watermark;
                                     }
@@ -8845,6 +8891,7 @@ impl Inner {
         // What the authority deployed is known again once the next
         // upstream sends its catalogue.
         client.catalogued = false;
+        client.pinned = None;
         let mut link = client.hint.get();
         link.detached = true;
         client.hint.set(link);
@@ -10680,6 +10727,7 @@ impl Db {
                     SyncMessage::Welcome {
                         admitted: !unadmitted,
                         catalogue,
+                        pinned: session.bundle.map(|bundle| bundle.0),
                     }
                 } else {
                     SyncMessage::Catalogue(catalogue)
@@ -11230,17 +11278,18 @@ impl Db {
                 inner.sessions[index]
                     .subs
                     .insert(id, (queue, group, windowed, false));
-                if let Some(since) = since {
-                    // A pinned session reads by its bundle's policies, which
-                    // what it resumes from may not have been read under.
-                    let claims = inner.sessions[index].claims.is_some()
-                        || inner.sessions[index].bundle.is_some();
+                // A pinned session reads by its bundle's policies: it
+                // resumes only from a result settled under that same bundle
+                // (another's may have shown other rows), else opens fresh.
+                let pinned = inner.sessions[index].bundle.map(|bundle| bundle.0);
+                if let Some(since) = since.filter(|since| since.under == pinned) {
+                    let claims = inner.sessions[index].claims.is_some();
                     let resume = inner.resume_from(
                         &prepared,
                         policy,
                         &resume_read,
                         &support,
-                        since,
+                        since.through,
                         claims,
                     )?;
                     if let Some(resume) = resume {
@@ -11525,14 +11574,17 @@ impl Db {
                 let resume = if at.is_none()
                     && matches!(opts.read_view.source, ReadViewSourceSpec::Current)
                 {
+                    // Only from a result settled under this session's bundle.
+                    let under = inner.sessions[index].bundle.map(|bundle| bundle.0);
                     since
+                        .filter(|since| since.under == under)
                         .map(|since| {
                             inner.resume_from(
                                 &prepared,
                                 policy,
                                 &read,
                                 &support,
-                                since,
+                                since.through,
                                 prepared.request_claims.is_some(),
                             )
                         })
@@ -13161,7 +13213,10 @@ mod tests {
             tier: ReadTier::Remote,
             wait: None,
             view: Box::new(ReadViewSourceSpec::Current),
-            since: Some(since),
+            since: Some(Since {
+                through: since,
+                under: None,
+            }),
             span: ReadSpan::Live,
         };
         let serializable = |snapshot| WireKind::Serializable {
