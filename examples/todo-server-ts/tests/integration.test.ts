@@ -85,17 +85,18 @@ describe("Todo Server Integration", () => {
   let server: RunningServer;
   let baseUrl: string;
   let upstream: LocalJazzServerHandle;
+  let bundle: string;
 
   beforeAll(async () => {
     jwtIssuer = await startTestJwtIssuer();
     upstream = await startLocalJazzServer();
-    await deploy({
+    ({ bundle } = await deploy({
       serverUrl: upstream.url,
       appId: upstream.appId,
       adminSecret: upstream.adminSecret,
       schema: app,
       permissions,
-    });
+    }));
     // Create an isolated persistent server for the CRUD suite.
     const todoServer = await createServer(
       {
@@ -126,6 +127,7 @@ describe("Todo Server Integration", () => {
       serverUrl: upstream.url,
       backendSecret: upstream.backendSecret,
       adminSecret: upstream.adminSecret,
+      bundle,
     };
   }
 

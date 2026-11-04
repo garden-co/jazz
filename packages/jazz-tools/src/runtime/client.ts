@@ -366,6 +366,8 @@ export interface AuthConfig {
   admin_secret?: string;
   /** Opaque session payload forwarded by a backend proxy. */
   backend_session?: unknown;
+  /** The published permissions bundle the session is pinned to. */
+  bundle?: string;
 }
 
 /**

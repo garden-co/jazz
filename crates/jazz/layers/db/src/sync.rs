@@ -9041,6 +9041,31 @@ impl Inner {
         governed
     }
 
+    /// Refuse a trusted link that acts for a user (`who` is a session it
+    /// vouches for) while unpinned on a store that serves bundles: nothing
+    /// deploys this store's own permissions any more, so that user would be
+    /// checked by permissions no deployment chose. A backend pins its link
+    /// to the bundle it deployed (createJazz does).
+    fn check_acts_pinned(
+        &self,
+        index: usize,
+        policy: Option<AuthorSubject>,
+        who: Who,
+    ) -> Result<(), Error> {
+        if policy.is_none()
+            && matches!(who, Who::Session(_))
+            && self.sessions[index].bundle.is_none()
+            && (self.pins_required || crate::catalogue::serves_bundles(&self.conn)?)
+        {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "an unpinned backend link cannot act for a user: pin the link to the \
+                 bundle the backend deployed",
+            ));
+        }
+        Ok(())
+    }
+
     /// Whether session `index` declared a schema version this store has
     /// not admitted.
     fn session_unadmitted(&self, index: usize) -> bool {
@@ -9519,13 +9544,13 @@ impl Db {
                 },
             ));
         }
-        // Once createJazz publishes bundles here, its backend pins every
-        // session it opens. An unpinned policy session would be governed by
-        // the current permissions, which createJazz no longer advances, so
-        // a later tightening or rollback would never reach it.
+        // A core's backend (createJazz) pins every session it opens. An
+        // unpinned policy session would be governed by this store's own
+        // permissions, which nothing deploys, so a tightening or rollback
+        // would never reach it.
         if bundle.is_none()
             && identity != AuthorSubject::SYSTEM
-            && crate::catalogue::serves_bundles(&inner.conn)?
+            && (inner.pins_required || crate::catalogue::serves_bundles(&inner.conn)?)
         {
             return Err(Error::new(
                 ErrorCode::Protocol,
@@ -11358,7 +11383,12 @@ impl Db {
             SyncMessage::CheckAllowed { id, action, acting } => {
                 // As for a commit: a trusted link may ask for a session it
                 // vouches for; a session link only for its own.
-                let result = match commit_who(policy, &acting) {
+                let result = match commit_who(policy, &acting).and_then(|who| {
+                    self.inner
+                        .borrow()
+                        .check_acts_pinned(index, policy, who)
+                        .map(|()| who)
+                }) {
                     Ok(who) => {
                         let identity = match who {
                             Who::Session(author) => Some(author),
@@ -11802,6 +11832,10 @@ impl Db {
                     None => match commit_who(policy, &acting)
                         .map_err(|error| (error, Vec::new()))
                         .and_then(|who| {
+                            self.inner
+                                .borrow()
+                                .check_acts_pinned(index, policy, who)
+                                .map_err(|error| (error, Vec::new()))?;
                             let (ops, mut roots) = db
                                 .resolve_deltas(policy, ops)
                                 .map_err(|error| (error, Vec::new()))?;
