@@ -17,7 +17,7 @@ export type E2eeSodiumStream = E2EeSodiumStream
 
 export declare class JazzCore {
   /** Open the core's storage and serve it in this process. */
-  static open(options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "sqlite"; blobsDir?: string; jwtPublicKey?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  static open(options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }): Promise<JazzCore>
   /**
    * Route one HTTP request. `url` is the path and query, as the core's
    * router sees them (`/apps/<appId>/...` or `/health`).
@@ -41,7 +41,7 @@ export declare class JazzCoreSocket {
 }
 
 export declare class JazzServer {
-  static start(options: { appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }): Promise<JazzServer>
+  static start(options: { appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }): Promise<JazzServer>
   get appId(): string
   get url(): string
   get port(): number
@@ -87,7 +87,7 @@ export declare class NapiDb {
   deleteInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): void
   restore(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): Write
   restoreInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): void
-  beginStreamingMutation(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
+  beginStreamingMutation(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null, transaction?: string | undefined | null): StreamingMutation
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
   /**
    * Open a deliberate backend runtime. Unlike the public raw-open entrypoint,
@@ -238,6 +238,8 @@ export declare class PendingNativeRead {
 export declare class StreamingMutation {
   push(chunk: Uint8Array): void
   finish(): Write
+  /** Stage the value's row mutation in the transaction it began in. */
+  finishInTransaction(): void
   abort(): boolean
 }
 
@@ -249,15 +251,6 @@ export declare class Subscription {
   readAll(): Array<SubscriptionEvent>
   drain(): Array<SubscriptionEvent>
   close(): boolean
-}
-
-export declare class TestJwtIssuer {
-  static start(): Promise<TestJwtIssuer>
-  get jwksUrl(): string
-  get issuer(): string
-  get audience(): string
-  jwtForUser(userId: string, claims?: Record<string, unknown> | undefined, options?: { expiresInSeconds?: number; issuer?: string } | undefined): string
-  stop(): Promise<void>
 }
 
 /**
@@ -314,6 +307,12 @@ export declare class Write {
   wait(tier: string, observeOnly?: boolean | undefined | null): Promise<undefined>
   close(): boolean
 }
+
+/** The anchor at `position` (UTF-16 code units) of `text`. */
+export declare function captureTextAnchor(text: string, version: number | undefined | null, position: number, side: JsonValue): JsonValue
+
+/** The range `start..end` (UTF-16 code units) of `text`. */
+export declare function captureTextRange(text: string, version: number | undefined | null, start: number, end: number): JsonValue
 
 export interface DeleteOptions {
   author?: Uint8Array
@@ -396,6 +395,12 @@ export declare function mintLocalFirstToken(seedB64: string, audience: string, t
 
 /** Exact build/ABI fingerprint for the generated native artifact. */
 export declare function nativeArtifactFingerprint(): string
+
+/** Where `anchor` lands in `text`: `{ position, confidence, ambiguous }`. */
+export declare function resolveTextAnchor(anchor: JsonValue, text: string, version?: number | undefined | null): JsonValue
+
+/** Where `range` lands in `text`: `{ start, end, confidence, ambiguous }`. */
+export declare function resolveTextRange(range: JsonValue, text: string, version?: number | undefined | null): JsonValue
 
 export interface RestoreOptions {
   author?: Uint8Array

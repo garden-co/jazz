@@ -5,7 +5,7 @@ import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { appMigrations } from "../testing/client-migrations.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startTestJazz } from "../testing/index.js";
 
 it("accepts a serializable read of an unchanged table after migration", async () => {
   const projects = s.table({ title: s.string() }, {});
@@ -26,17 +26,19 @@ it("accepts a serializable read of an unchanged table after migration", async ()
       policy.projects.allowInsert.always();
       policy.notes.allowRead.always();
     });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app: oldApp,
+    permissions: permissions(oldApp),
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
-    const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };
-    await deploy({ ...target, schema: oldApp, permissions: permissions(oldApp) });
     const account = await localAccountConfig(server.appId, server.url);
     db = await createDb(account);
     const project = await db.insert(oldApp.projects, { title: "Project" }).wait({ tier: "global" });
     await db.shutdown();
     db = undefined;
-    await deploy({ ...target, schema: newApp, permissions: permissions(newApp), migration });
+    await server.redeploy({ app: newApp, permissions: permissions(newApp), migration });
     db = await createDb(account);
     const query = newApp.projects.where({ id: project.id });
     expect(await db.one(query, { tier: "remote" })).toEqual(project);
@@ -69,18 +71,20 @@ it("preserves serializable conflict detection after renaming the queried table",
     policy.initiatives.allowRead.always();
     policy.initiatives.allowInsert.always();
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app: oldApp,
+    permissions: oldPermissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   let writer: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
-    const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };
-    await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
     const account = await localAccountConfig(server.appId, server.url);
     db = await createDb(account);
     const project = await db.insert(oldApp.projects, { title: "Project" }).wait({ tier: "global" });
     await db.shutdown();
     db = undefined;
-    await deploy({ ...target, schema: newApp, permissions: newPermissions, migration });
+    await server.redeploy({ app: newApp, permissions: newPermissions, migration });
     db = await createDb(account);
     writer = await createDb(await localAccountConfig(server.appId, server.url));
     expect(await db.all(newApp.initiatives, { tier: "remote" })).toEqual([project]);
