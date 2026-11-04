@@ -1,7 +1,7 @@
 import { useState, useEffect, use, Suspense } from "react";
 import { JazzProvider } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
-import { BrowserAuthSecretStore } from "jazz-tools";
+import { createAccountManager } from "jazz-tools";
 import { TodoList } from "./TodoList.js";
 import { GenerateData } from "./GenerateData.js";
 
@@ -33,24 +33,21 @@ function Router() {
   return <GenerateData />;
 }
 
-const appId = requireEnv(import.meta.env.VITE_JAZZ_APP_ID, "JAZZ_APP_ID");
-const serverUrl = requireEnv(import.meta.env.VITE_JAZZ_SERVER_URL, "JAZZ_SERVER_URL");
+// The app's backend serves Jazz on this origin (see jazz.server.ts).
+const serverUrl = `${location.origin}/jazz`;
 const telemetryCollectorUrl = import.meta.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL;
 
-function requireEnv(value: string | undefined, name: string): string {
-  if (!value) {
-    throw new Error(`${name} is required`);
-  }
-  return value;
-}
+// Every browser is a local-first guest of the app's backend.
+const accountPromise = createAccountManager({ serverUrl }).then(
+  (accounts) => accounts.getLoggedIn() ?? accounts.createLocalFirst(),
+);
 
 function AppInner() {
-  const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
+  const account = use(accountPromise);
   const config: DbConfig & { asyncSubscriptionsOnly: boolean } = {
-    appId,
     env: import.meta.env.DEV ? "dev" : "prod",
     devMode: import.meta.env.DEV,
-    secret,
+    account,
     serverUrl,
     telemetryCollectorUrl,
     logLevel: telemetryCollectorUrl ? "debug" : undefined,

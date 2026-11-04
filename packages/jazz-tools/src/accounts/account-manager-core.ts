@@ -18,7 +18,7 @@ export async function createAccountManagerWithMinter(
   const scope = clientScope({ ...config, serverUrl });
   const registry = accountRegistryUrl(serverUrl, scope);
   const store = config.store ?? browserAccountStore(registry, config.env ?? "dev");
-  return prepareAccountManager({ appId: scope, registry, store, mintToken });
+  return prepareAccountManager({ appId: scope, registry, store, mintToken, fetch: config.fetch });
 }
 
 function browserAccountStore(registry: string, env: string): AccountStore {

@@ -23,6 +23,13 @@ export interface AccountManagerConfig {
    * before its provider confirms it.
    */
   store?: AccountStore;
+  /**
+   * The `fetch` sign-in requests to the app's backend go through (default:
+   * the global one). Supply one that adds what the backend authenticates
+   * requests by, when that is not a cookie the global one sends, such as a
+   * native app's bearer.
+   */
+  fetch?: typeof fetch;
 }
 
 /** Prepare crypto and restore selection; createLocalFirst() is synchronous afterward. */

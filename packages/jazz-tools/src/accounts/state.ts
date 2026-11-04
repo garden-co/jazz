@@ -14,13 +14,7 @@ export interface AccountHandle {
   readonly identity: AccountIdentity;
 }
 
-export type AccountOperation =
-  | "becomeBackend"
-  | "loginWithBackend"
-  | "linkWithBackend"
-  | "registerJWT"
-  | "loginJWT"
-  | "loginOrRegisterJWT";
+export type AccountOperation = "becomeBackend" | "loginWithBackend" | "linkWithBackend";
 export interface AccountSnapshot {
   readonly account: AccountHandle | undefined;
   readonly pending: AccountOperation | undefined;
@@ -43,12 +37,6 @@ export interface AccountEnrollment<Auth> {
   loginWithBackend?(): Promise<AccountHandle>;
   /** Link the selected local-first guest to the user the backend names. */
   linkWithBackend?(account: AccountHandle): Promise<AccountHandle>;
-  /** @internal Test fixtures: enroll with a JWT the test's core trusts. */
-  registerJWT?(auth: Auth): Promise<AccountHandle>;
-  /** @internal */
-  loginJWT?(auth: Auth): Promise<AccountHandle>;
-  /** @internal */
-  loginOrRegisterJWT?(auth: Auth): Promise<AccountHandle>;
 }
 
 export class AccountOperationSuperseded extends Error {
@@ -142,35 +130,6 @@ export class AccountManager<Auth> {
       if (!this.enrollment.linkWithBackend)
         throw new Error("Backend sign-in is unavailable on this host");
       return this.enrollment.linkWithBackend(account);
-    });
-  }
-
-  /**
-   * @internal Test fixtures only: enroll with a JWT the test's core trusts.
-   * Apps sign in through their backend or stay local-first.
-   */
-  registerJWT(auth: Auth): Promise<AccountHandle> {
-    return this.enrollJWT("registerJWT", auth);
-  }
-
-  /** @internal Test fixtures only. */
-  loginJWT(auth: Auth): Promise<AccountHandle> {
-    return this.enrollJWT("loginJWT", auth);
-  }
-
-  /** @internal Test fixtures only. */
-  loginOrRegisterJWT(auth: Auth): Promise<AccountHandle> {
-    return this.enrollJWT("loginOrRegisterJWT", auth);
-  }
-
-  private enrollJWT(
-    operation: "registerJWT" | "loginJWT" | "loginOrRegisterJWT",
-    auth: Auth,
-  ): Promise<AccountHandle> {
-    return this.run(operation, () => {
-      const enroll = this.enrollment[operation];
-      if (!enroll) throw new Error("JWT enrollment is unavailable on this host");
-      return enroll.call(this.enrollment, auth);
     });
   }
 

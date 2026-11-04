@@ -1175,9 +1175,6 @@ describe("NAPI integration", () => {
       adminSecret,
       schema: policyGraphSchema,
       permissions,
-      jwksUrl: jwtIssuer.jwksUrl,
-      jwtIssuer: jwtIssuer.issuer,
-      jwtAudience: jwtIssuer.audience,
     });
     let context: {
       asBackend(): Db;
@@ -1410,9 +1407,6 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         dataDir,
-        jwksUrl: jwtIssuer.jwksUrl,
-        jwtIssuer: jwtIssuer.issuer,
-        jwtAudience: jwtIssuer.audience,
       });
       await deployProject({
         serverUrl: server.url,
@@ -1514,9 +1508,6 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         dataDir,
-        jwksUrl: jwtIssuer.jwksUrl,
-        jwtIssuer: jwtIssuer.issuer,
-        jwtAudience: jwtIssuer.audience,
       });
       context = createJazzContext({
         appId,

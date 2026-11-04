@@ -28,7 +28,7 @@ use tokio::sync::OnceCell;
 use tracing::warn;
 
 use super::auth::{
-    AuthConfig, JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, validate_jwt_with_cache_at,
+    ExpectedJwtClaims, JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, validate_jwt_with_cache_at,
 };
 use crate::server::ServerState;
 
@@ -57,7 +57,7 @@ pub struct TrustedWorkload {
 /// Verifies workload tokens against the trusted workload's issuer.
 pub struct WorkloadVerifier {
     workload: TrustedWorkload,
-    claims: AuthConfig,
+    claims: ExpectedJwtClaims,
     http_client: reqwest::Client,
     jwks: OnceCell<JwksCache>,
 }
@@ -72,10 +72,9 @@ impl WorkloadVerifier {
     }
 
     pub fn with_client(workload: TrustedWorkload, http_client: reqwest::Client) -> Self {
-        let claims = AuthConfig {
-            jwt_issuer: Some(workload.issuer.clone()),
-            jwt_audience: Some(workload.audience.clone()),
-            ..AuthConfig::default()
+        let claims = ExpectedJwtClaims {
+            issuer: workload.issuer.clone(),
+            audience: workload.audience.clone(),
         };
         Self {
             workload,

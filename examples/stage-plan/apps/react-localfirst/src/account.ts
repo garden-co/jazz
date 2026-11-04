@@ -5,19 +5,13 @@ import type { JazzSessionConfig } from "jazz-tools/client";
  * profile holds the account secret. Crew join shows through invite links.
  */
 export function sessionConfig(overrides: Partial<JazzSessionConfig> = {}): JazzSessionConfig {
-  const env = import.meta.env as Record<string, string | undefined>;
-  const appId = overrides.appId ?? env.VITE_JAZZ_APP_ID ?? env.JAZZ_APP_ID;
-  const serverUrl = overrides.serverUrl ?? env.VITE_JAZZ_SERVER_URL ?? env.JAZZ_SERVER_URL;
-  if (!appId) throw new Error("Missing Jazz appId");
-  if (!serverUrl) throw new Error("Missing Jazz serverUrl");
+  // The app's backend serves Jazz on this origin (`/jazz`), so it needs no URL.
   return {
     env: "dev",
     // Start on the thin client; load the local-first one in its own chunk
     // once the page has loaded, then keep working offline.
     client: () => import("jazz-tools/local-first"),
     ...overrides,
-    appId,
-    serverUrl,
     initial: "local-first",
   };
 }
