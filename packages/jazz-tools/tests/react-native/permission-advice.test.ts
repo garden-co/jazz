@@ -3,6 +3,7 @@ import { schema } from "../../src/schema-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
 import { withNativeRelayFixture } from "./fixture.js";
 import { encodeNativeForegroundCommand, decodeNativeForegroundResponse } from "jazz-rn/relay";
+import type { TestJazz } from "../../src/testing/index.js";
 
 const app = schema.defineApp(
   {
@@ -22,15 +23,12 @@ const permissions = schema.definePermissions(app, ({ policy, session }) => [
 // Advice suspends only while a connected authority may answer; without one the
 // relay answers "unknown" at once, so pending handles need a live server.
 it("isolates pending advice handles and retires them on cancel and close", async () => {
-  const { startLocalJazzServer, startTestJwtIssuer, deploy } =
+  const { startLocalJazzServer, startTestJazz, deploy } =
     await import("../../src/testing/index.js");
-  const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
     inMemory: true,
-    jwksUrl: issuer.jwksUrl,
-    jwtIssuer: issuer.issuer,
-    jwtAudience: issuer.audience,
   });
+  let backend: TestJazz | undefined;
   try {
     await deploy({
       appId: server.appId,
@@ -39,6 +37,7 @@ it("isolates pending advice handles and retires them on cancel and close", async
       schema: app,
       permissions,
     });
+    backend = await startTestJazz({ core: server, app, permissions });
     await withNativeRelayFixture(
       app,
       permissions,
@@ -91,21 +90,12 @@ it("isolates pending advice handles and retires them on cancel and close", async
       },
       {
         appId: server.appId,
-        session: {
-          issuer: issuer.issuer,
-          user_id: "rn-advice-isolation",
-          claims: {},
-          authMode: "external",
-        },
-        upstream: {
-          serverUrl: server.url,
-          jwt: issuer.jwtForUser("rn-advice-isolation"),
-        },
+        upstream: { backend: backend!, userId: "rn-advice-isolation" },
       },
     );
   } finally {
+    await backend?.stop();
     await server.stop();
-    await issuer.stop();
   }
 }, 30_000);
 
@@ -137,24 +127,15 @@ it("rejects spoofed credentials and keeps local permission advice unknown withou
 });
 
 it("uses authority dry runs and admitted identity across scopes, disconnect, and shutdown", async () => {
-  const { startLocalJazzServer, startTestJwtIssuer, deploy } =
+  const { startLocalJazzServer, startTestJazz, deploy } =
     await import("../../src/testing/index.js");
-  const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
     inMemory: true,
-    jwksUrl: issuer.jwksUrl,
-    jwtIssuer: issuer.issuer,
-    jwtAudience: issuer.audience,
   });
-  const options = (user: string) => ({
+  let backend: TestJazz | undefined;
+  const options = async (user: string) => ({
     appId: server.appId,
-    session: {
-      issuer: issuer.issuer,
-      user_id: user,
-      claims: {},
-      authMode: "external" as const,
-    },
-    upstream: { serverUrl: server.url, jwt: issuer.jwtForUser(user) },
+    upstream: { backend: backend!, userId: user },
   });
   try {
     await deploy({
@@ -164,6 +145,7 @@ it("uses authority dry runs and admitted identity across scopes, disconnect, and
       schema: app,
       permissions,
     });
+    backend = await startTestJazz({ core: server, app, permissions });
     await withNativeRelayFixture(
       app,
       permissions,
@@ -185,7 +167,7 @@ it("uses authority dry runs and admitted identity across scopes, disconnect, and
               bob.createDb({
                 ...bob.config,
                 // @ts-expect-error An unrelated credential cannot override Bob's account.
-                cookieSession: options("alice").session,
+                cookieSession: (await options("alice")).session,
               }),
             ).rejects.toThrow("account_handle_required");
             const other = await bob.createDb();
@@ -193,7 +175,7 @@ it("uses authority dry runs and admitted identity across scopes, disconnect, and
             expect(await other.canRead(app.notes, row.id)).toBe("denied");
             expect(await other.canInsert(app.notes, { title: "dry run" })).toBe("allowed");
           },
-          options("bob"),
+          await options("bob"),
         );
         await db.disconnect();
         const pending = db.canRead(app.notes, row.id);
@@ -210,10 +192,10 @@ it("uses authority dry runs and admitted identity across scopes, disconnect, and
         await db.shutdown();
         expect(await closing).toBe("unknown");
       },
-      options("alice"),
+      await options("alice"),
     );
   } finally {
+    await backend?.stop();
     await server.stop();
-    await issuer.stop();
   }
 }, 30_000);

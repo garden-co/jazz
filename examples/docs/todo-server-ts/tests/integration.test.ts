@@ -7,7 +7,6 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { randomUUID } from "node:crypto";
-import { createAccountManager } from "jazz-tools";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
@@ -42,11 +41,7 @@ describe("Todo Server Integration", () => {
   // allowing this explicit lifecycle setup to contend safely with CI workers.
   beforeAll(async () => {
     issuer = await startTestJwtIssuer();
-    upstream = await startLocalJazzServer({
-      jwksUrl: issuer.jwksUrl,
-      jwtIssuer: "https://todo-docs.example.test",
-      jwtAudience: issuer.audience,
-    });
+    upstream = await startLocalJazzServer();
 
     await deploy({
       serverUrl: upstream.url,
@@ -180,27 +175,19 @@ describe("Todo Server Integration", () => {
       const aliceTitle = `Alice private ${Date.now()}`;
       const bobTitle = `Bob private ${Date.now()}`;
       const admit = async () => {
-        const token = issuer.jwtForUser(
+        const token = await issuer.jwtForUser(
           randomUUID(),
           {},
           { issuer: "https://todo-docs.example.test" },
         );
-        let stored: string | null = null;
-        const accounts = await createAccountManager({
-          appId: upstream!.appId,
-          serverUrl: upstream!.url,
-          env: `todo-docs-${randomUUID()}`,
-          store: {
-            async read() {
-              return stored;
-            },
-            async update(transform) {
-              stored = transform(stored);
-            },
-          },
+        // The server provisions the identity's account on sign-in.
+        const signIn = await fetch(`${baseUrl}/sign-in`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
         });
-        const account = await accounts.registerJWT(token);
-        return { id: account.id, token };
+        expect(signIn.status).toBe(200);
+        const { account } = (await signIn.json()) as { account: string };
+        return { id: account, token };
       };
       const alice = await admit();
       const bob = await admit();

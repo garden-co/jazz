@@ -27,7 +27,6 @@ export const {
   NapiDb,
   StreamingMutation,
   Subscription,
-  TestJwtIssuer,
   Transport,
   Write,
   mintLocalFirstToken,

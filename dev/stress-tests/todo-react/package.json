@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node ../../examples/with-local-core.mjs vite --port 5477",
+    "dev": "vite --port 5477",
     "build": "node ../../../packages/jazz-tools/dist/cli.js validate && vite build",
     "preview": "vite preview"
   },

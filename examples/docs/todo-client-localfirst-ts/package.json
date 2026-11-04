@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node ../../../dev/examples/with-local-core.mjs vite",
+    "dev": "vite",
     "check": "tsc --noEmit && tsc --noEmit --project tsconfig.browser-test.json",
     "build": "node ../../../packages/jazz-tools/dist/cli.js validate && pnpm run check && vite build",
     "preview": "vite preview",

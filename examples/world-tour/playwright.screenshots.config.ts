@@ -20,12 +20,12 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "node ../../dev/examples/with-local-core.mjs pnpm exec vite dev --port 5176",
+    command: "pnpm exec vite dev --port 5176",
     port: 5176,
     reuseExistingServer: false,
     cwd: import.meta.dirname,
     env: {
-      // Walkthrough screenshots start from an empty core, so the demo tour is always fresh.
+      // Walkthrough screenshots start from empty, in-memory Jazz, so the demo tour is always fresh.
       JAZZ_IN_MEMORY: "1",
     },
   },

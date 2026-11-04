@@ -222,6 +222,7 @@ impl NativeTransportConnector for NativeWebSocketConnector {
                 request.app_id,
                 request.peer_identity,
                 request.auth,
+                request.authorization,
                 request.wake,
                 request.requested_link,
             )
@@ -403,6 +404,7 @@ impl WebSocketTransport {
             app_id,
             peer_identity,
             auth,
+            None,
             wake,
             NativeTransportLink::OrdinarySession,
         )
@@ -415,16 +417,18 @@ impl WebSocketTransport {
         app_id: AppId,
         peer_identity: AuthorSubject,
         auth: AuthConfig,
+        authorization: Option<String>,
         wake: Arc<dyn Fn() + Send + Sync>,
         requested_link: NativeTransportLink,
     ) -> Result<Self, NativeConnectFailure> {
         let deadline = tokio::time::Instant::now() + WS_CLIENT_HANDSHAKE_TIMEOUT;
         let url = ws_url(base_url.as_ref(), app_id);
-        let (mut ws, _) = tokio::time::timeout_at(deadline, open_client_websocket(url))
-            .await
-            .map_err(|_| {
-                NativeConnectFailure::WebSocket(WebSocketClientError::HandshakeTimeout)
-            })??;
+        let (mut ws, _) = tokio::time::timeout_at(
+            deadline,
+            open_client_websocket(url, authorization.as_deref()),
+        )
+        .await
+        .map_err(|_| NativeConnectFailure::WebSocket(WebSocketClientError::HandshakeTimeout))??;
 
         let prelude = encode_prelude(peer_identity, auth, requested_link)?;
         tokio::time::timeout_at(deadline, ws.send(Message::Binary(prelude.into())))
@@ -596,6 +600,7 @@ fn ws_url(base_url: &str, app_id: AppId) -> String {
 /// `set_nodelay` is applied here rather than via `connect_async`'s flag.
 async fn open_client_websocket(
     url: String,
+    authorization: Option<&str>,
 ) -> Result<
     (
         tokio_tungstenite::WebSocketStream<
@@ -605,9 +610,23 @@ async fn open_client_websocket(
     ),
     NativeConnectFailure,
 > {
-    let request = url
+    let mut request = url
         .into_client_request()
         .map_err(WebSocketClientError::Connect)?;
+    if let Some(authorization) = authorization {
+        let value = authorization.parse().map_err(|_| {
+            WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::HttpFormat(
+                tokio_tungstenite::tungstenite::http::Error::from(
+                    tokio_tungstenite::tungstenite::http::header::HeaderValue::from_bytes(b"\n")
+                        .unwrap_err(),
+                ),
+            ))
+        })?;
+        request.headers_mut().insert(
+            tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
+            value,
+        );
+    }
     let host = request.uri().host().ok_or_else(|| {
         WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Url(
             tokio_tungstenite::tungstenite::error::UrlError::NoHostName,
@@ -1001,7 +1020,7 @@ mod tests {
         });
         let ws = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            open_client_websocket(format!("ws://{address}")),
+            open_client_websocket(format!("ws://{address}"), None),
         )
         .await
         .expect("bounded client connect")
@@ -1430,6 +1449,7 @@ mod tests {
                     app_id: AppId::random(),
                     peer_identity: AuthorSubject::SYSTEM,
                     auth: AuthConfig::default(),
+                    authorization: None,
                     wake: Arc::new(|| {}),
                 })
                 .await;
