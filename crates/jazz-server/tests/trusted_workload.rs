@@ -95,7 +95,7 @@ async fn admits_only_the_trusted_workload() {
         token_with(&issuer, SUBJECT, |c| c["exp"] = json!(1)),
     ] {
         let response = http
-            .get(format!("{app}/admin/permissions"))
+            .get(format!("{app}/admin/bundles"))
             .header("X-Jazz-Backend-Credential", &refused)
             .header("X-Jazz-Backend-Access", "admin")
             .send()
@@ -112,7 +112,7 @@ async fn admits_only_the_trusted_workload() {
     assert_eq!(wrong.status(), 401);
     assert!(wrong.text().await.unwrap().contains("workload"));
     let guessed = http
-        .get(format!("{app}/admin/permissions"))
+        .get(format!("{app}/admin/bundles"))
         .header("X-Jazz-Admin-Secret", "admin-secret")
         .send()
         .await
@@ -140,7 +140,7 @@ async fn admits_only_the_trusted_workload() {
         ("X-Jazz-Admin-Secret", good.clone()),
     ] {
         let forwarded = http
-            .get(format!("{app}/admin/permissions"))
+            .get(format!("{app}/admin/bundles"))
             .header("X-Jazz-Backend-Credential", &good)
             .header(name, value)
             .send()
@@ -149,7 +149,7 @@ async fn admits_only_the_trusted_workload() {
         assert_eq!(forwarded.status(), 401);
     }
     let backend = http
-        .get(format!("{app}/admin/permissions"))
+        .get(format!("{app}/admin/bundles"))
         .header("X-Jazz-Backend-Credential", &good)
         .header("X-Jazz-Backend-Access", "backend")
         .send()
@@ -157,7 +157,7 @@ async fn admits_only_the_trusted_workload() {
         .unwrap();
     assert_eq!(backend.status(), 401);
     let admin = http
-        .get(format!("{app}/admin/permissions"))
+        .get(format!("{app}/admin/bundles"))
         .header("X-Jazz-Backend-Credential", &good)
         .header("X-Jazz-Backend-Access", "admin")
         .send()
