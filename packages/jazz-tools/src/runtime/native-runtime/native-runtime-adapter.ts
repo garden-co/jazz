@@ -38,6 +38,7 @@ import type {
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
 import { parseRelationQueryJsonLossless } from "../../ir.js";
 import type {
+  LocalObservationSnapshot,
   TxId,
   InsertResult,
   MutationErrorEvent,
@@ -240,6 +241,12 @@ type NativeRestoreOptions = NativeWriteOptions & {
 };
 
 type NativeDb = {
+  observeLocalBatch?(
+    queries: Uint8Array[],
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): unknown;
+
   captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
   /** WASM settles its promise-shaped wait early once `cancelled` settles. */
   waitForPendingWrites?(
@@ -483,6 +490,12 @@ type Write = {
 };
 
 export type Transport = {
+  /** @internal Only the private foreground/worker carrier enables this lane. */
+  observeLocalBatch?(queries: Uint8Array[], claims: Record<string, unknown>): unknown;
+  enableLocalSubmissionSource?(): void;
+  retireLocalSubmissionPort?(): void;
+  takeLocalSubmissionCompanions?(): Uint8Array[];
+  attachLocalSubmissionCompanion?(bytes: Uint8Array): boolean;
   close(): boolean;
   recvWireFrames(): unknown[];
   sendWireFrame(frame: Uint8Array): void;
@@ -891,6 +904,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverReplacementRetirement: Promise<void> | null = null;
   private serverTransportError: Error | null = null;
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
+  private localRelayError: Error | null = null;
+  private readonly localRelayErrorWaiters: ServerTransportErrorWaiter[] = [];
   private serverTransportWorkEpoch = 0;
   private serverTransportWorkWaiters: ServerTransportWorkWaiter[] = [];
   private serverEndpointUrl: string | null = null;
@@ -1132,6 +1147,152 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
+  private localObservationRelay:
+    | ((
+        queries: readonly string[],
+        claims: Record<string, unknown>,
+        schema: Uint8Array,
+      ) => Promise<LocalObservationSnapshot[]>)
+    | null = null;
+
+  /** @internal Installed only by the private local follower connection. */
+  setLocalObservationRelay(
+    relay: NonNullable<NativeRuntimeAdapter["localObservationRelay"]>,
+  ): () => void {
+    const owner = this.ownerRuntime;
+    owner.localObservationRelay = relay;
+    return () => {
+      if (owner.localObservationRelay === relay) owner.localObservationRelay = null;
+    };
+  }
+
+  async observeLocalBatch(
+    queries: readonly string[],
+    sessionJson?: string | null,
+    expectedSchema?: Uint8Array,
+  ): Promise<LocalObservationSnapshot[]> {
+    if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+    if (!queries.length) throw new Error("Local observation requires queries");
+    if (expectedSchema && !sameBytes(expectedSchema, this.schemaBytes))
+      throw new Error("Local observation schema view is not available on this durable owner");
+    if (this.ownerRuntime.localObservationRelay) {
+      const session = readSession(sessionJson);
+      if (session && (session.backendAuthority || !sameBytes(session.identity, this.peerIdentity)))
+        throw new Error("Local observation requires the admitted foreground identity");
+      await this.ensureClientSessionClaims(session);
+      const claims =
+        session?.claims ??
+        (this.clientSessionClaimsKey
+          ? (JSON.parse(this.clientSessionClaimsKey) as Record<string, unknown>)
+          : {});
+      return this.ownerRuntime.localObservationRelay(queries, claims, this.schemaBytes);
+    }
+    if (this.ownerRuntime.nonDurableClient)
+      throw new Error("Local observation durable owner is unavailable");
+    const observe = this.db.observeLocalBatch;
+    if (!observe)
+      throw new Error(
+        "Native runtime does not expose local accepted observations; rebuild matching artifacts",
+      );
+    const session = readSession(sessionJson);
+    const context = this.nativeReadContext(session, undefined);
+    await this.ensureClientSessionClaims(session);
+    await this.processPendingPeerActivityBeforeRead();
+    return this.runWhenCoreIdle(() => {
+      if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+      const raw = observe.call(
+        this.db,
+        queries.map((q) => nativeQueryInput(q, this.schema)),
+        this.nativeReadAuthor(context),
+        this.nativeReadClaims(context),
+      );
+      return this.decodeLocalObservationBatch(raw, queries);
+    });
+  }
+
+  /** @internal The actual admitted link supplies scope; no foreground token is interpreted here. */
+  async observeLocalBatchForPeer(
+    peer: Transport,
+    queries: readonly string[],
+    expectedClaims: Record<string, unknown>,
+    expectedSchema: Uint8Array,
+  ): Promise<LocalObservationSnapshot[]> {
+    if (!queries.length || !sameBytes(expectedSchema, this.schemaBytes))
+      throw new Error("Local observation schema view is not available on this durable owner");
+    if (!peer.observeLocalBatch)
+      throw new Error(
+        "Admitted link does not expose local observations; rebuild matching artifacts",
+      );
+    await this.processPendingPeerActivityBeforeRead();
+    return this.runWhenCoreIdle(() => {
+      if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+      return this.decodeLocalObservationBatch(
+        peer.observeLocalBatch!(
+          queries.map((q) => nativeQueryInput(q, this.schema)),
+          expectedClaims,
+        ),
+        queries,
+      );
+    });
+  }
+
+  private decodeLocalObservationBatch(
+    raw: unknown,
+    queries: readonly string[],
+  ): LocalObservationSnapshot[] {
+    if (!Array.isArray(raw) || raw.length !== queries.length)
+      throw new Error("Incomplete local observation batch");
+    let through: string | undefined;
+    return raw.map((value, index) => {
+      if (
+        !isRecord(value) ||
+        typeof value.through !== "string" ||
+        !/^[0-9]+$/.test(value.through) ||
+        !Array.isArray(value.rows) ||
+        !Array.isArray(value.evidence) ||
+        !Array.isArray(value.provenance)
+      )
+        throw new Error("Malformed local observation result");
+      through ??= value.through;
+      if (value.through !== through) throw new Error("Local observations do not share one cut");
+      const rows = rowsFromBatches(
+        readRowBatches(Uint8Array.from(value.rows)),
+        this.schema,
+        subscriptionOutputColumns(queries[index]!, this.schema).rootColumns,
+      );
+      const ids = new Set(rows.map((row) => row.id));
+      if (
+        ids.size !== rows.length ||
+        value.evidence.length !== rows.length ||
+        value.provenance.length !== rows.length
+      )
+        throw new Error("Incomplete local observation evidence");
+      for (const pair of value.evidence) {
+        if (!isRecord(pair) || typeof pair.rowId !== "string" || !ids.delete(pair.rowId))
+          throw new Error("Mismatched local observation row");
+        for (const origin of [pair.state, pair.content]) {
+          if (
+            !isRecord(origin) ||
+            typeof origin.transactionId !== "string" ||
+            !origin.transactionId ||
+            typeof origin.position !== "string" ||
+            !/^[0-9]+$/.test(origin.position) ||
+            BigInt(origin.position) > BigInt(value.through)
+          )
+            throw new Error("Malformed local observation origin");
+        }
+      }
+      if (value.provenance.some((p) => p !== "local-submission" && p !== "authority-read"))
+        throw new Error("Unknown local observation provenance");
+      return {
+        rows,
+        through: value.through,
+        evidence: value.evidence,
+        provenance: value.provenance,
+      } as LocalObservationSnapshot;
+    });
+  }
+
   createPeerAuthority(): { node: Uint8Array; epoch: bigint; features: number } {
     return {
       node: this.node,
@@ -1147,13 +1308,15 @@ export class NativeRuntimeAdapter implements Runtime {
   }): Promise<Transport> {
     if (this !== this.ownerRuntime) return await this.ownerRuntime.connectUpstreamPeer(authority);
     this.peerUpstreamAttached = true;
-    if (authority)
-      return this.connectNegotiatedUpstream({
-        protocolVersion: WIRE_PROTOCOL_VERSION,
-        features: authority.features,
-        authority,
-      });
-    return await this.db.connectUpstream();
+    const transport = authority
+      ? await this.connectNegotiatedUpstream({
+          protocolVersion: WIRE_PROTOCOL_VERSION,
+          features: authority.features,
+          authority,
+        })
+      : await this.db.connectUpstream();
+    this.localRelayError = null;
+    return transport;
   }
 
   onPeerTransportWork(listener: (requiresDistinctPass?: boolean) => void): () => void {
@@ -3091,6 +3254,21 @@ export class NativeRuntimeAdapter implements Runtime {
     this.handleServerTransportError(error, this.serverConnectionGeneration, retrying);
   }
 
+  /** The durable worker itself failed, so a tab cannot establish Local either. */
+  reportLocalRelayError(error: Error): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.reportLocalRelayError(error);
+    this.localRelayError ??= error;
+    for (const waiter of this.localRelayErrorWaiters.splice(0)) {
+      if (waiter.active) waiter.reject(this.localRelayError);
+    }
+    // The broker replaces failed workers. Local persistence for this attempt
+    // has failed, but authority acceptance can still arrive after replacement.
+    // A pump or watchdog failure may already have stopped the upstream. Its
+    // teardown must preserve that terminal error for subsequent Global waits.
+    if (this.serverTransportError && !this.serverTransportErrorRetrying) return;
+    this.handleServerTransportError(error, this.serverConnectionGeneration, true);
+  }
+
   /** Clear a terminal remote-peer error after its replacement transport is ready. */
   clearRemoteServerTransportError(): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.clearRemoteServerTransportError();
@@ -3161,6 +3339,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.pendingLocalSettlements.size > 0) {
       await Promise.all(this.pendingLocalSettlements);
     }
+    this.throwServerTransportErrorForTier("local");
   }
 
   /** Observe worker durability work, including fire-and-forget mutations. */
@@ -4421,6 +4600,9 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private throwServerTransportErrorForTier(tier: string, throughOutage = false): void {
+    if (tier === "local" && this.nonDurableClient && this.localRelayError) {
+      throw this.localRelayError;
+    }
     if (tier !== "global" && tier !== "remote") return;
     const error = this.serverTransportErrorFor(throughOutage);
     if (error) throw error;
@@ -4430,8 +4612,10 @@ export class NativeRuntimeAdapter implements Runtime {
     tier: string,
     throughOutage = false,
   ): { promise: Promise<never>; cancel: () => void } | null {
-    if (tier !== "global" && tier !== "remote") return null;
-    const error = this.serverTransportErrorFor(throughOutage);
+    const local = tier === "local" && this.nonDurableClient;
+    if (!local && tier !== "global" && tier !== "remote") return null;
+    const error = local ? this.localRelayError : this.serverTransportErrorFor(throughOutage);
+    const waiters = local ? this.localRelayErrorWaiters : this.serverTransportErrorWaiters;
     if (error) {
       return {
         promise: Promise.reject(error),
@@ -4446,14 +4630,14 @@ export class NativeRuntimeAdapter implements Runtime {
     const promise = new Promise<never>((_, reject) => {
       waiter.reject = reject;
     });
-    this.serverTransportErrorWaiters.push(waiter);
+    waiters.push(waiter);
     return {
       promise,
       cancel: () => {
         if (!waiter.active) return;
         waiter.active = false;
-        const index = this.serverTransportErrorWaiters.indexOf(waiter);
-        if (index >= 0) this.serverTransportErrorWaiters.splice(index, 1);
+        const index = waiters.indexOf(waiter);
+        if (index >= 0) waiters.splice(index, 1);
       },
     };
   }

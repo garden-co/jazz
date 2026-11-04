@@ -3550,6 +3550,46 @@ export class Db {
     await this.shutdown();
   }
 
+  /** @internal Partial metadata observations, never authority SELECT or completeness. */
+  async observeE2eeHistory(queries: readonly QueryBuilder<{ id: string }>[]) {
+    this.assertOpen();
+    if (!queries.length || queries.some((query) => !query._table.startsWith("__e2ee_")))
+      throw new Error("E2EE observations require metadata queries");
+    const client = this.getClient(queries[0]!._schema);
+    if (queries.some((query) => this.getClient(query._schema) !== client))
+      throw new Error("E2EE observations require one executing schema handle");
+    // Hydration is ordinary local-first work and may see pending rows. Discard
+    // them. Only the subsequent ONE core cut supplies rows paired with origins.
+    await Promise.all(queries.map((query) => this.all(query, { tier: "local-first" })));
+    this.assertOpen();
+    const plans = queries.map((query) => {
+      const builderJson = query._build();
+      const built = normalizeBuiltQuery(JSON.parse(builderJson));
+      const schema = requireSchemaWithTable(query._schema, built.table);
+      const output = resolveQueryOutputTable(schema, built);
+      const prepared = prepareTransformRead(query, built, output);
+      if (prepared.computedState)
+        throw new Error("Computed E2EE observation queries are not supported");
+      return {
+        query: translateQuery(builderJson, schema, prepared.physical),
+        transform: prepared.transform,
+      };
+    });
+    const snapshots = await client.observeLocalBatch(
+      plans.map((plan) => plan.query),
+      this.getAccessContext()?.readSession,
+    );
+    this.assertOpen();
+    // The synchronous core batch drops its cut on every return/error and opens
+    // no ordinary transaction, so no pending prefix or rollback state escapes.
+    return snapshots.map((snapshot, index) => ({
+      rows: snapshot.rows.map(plans[index]!.transform),
+      settlements: snapshot.evidence,
+      through: snapshot.through,
+      provenance: snapshot.provenance,
+    }));
+  }
+
   /**
    * Execute a query and return all matching rows as typed objects.
    *

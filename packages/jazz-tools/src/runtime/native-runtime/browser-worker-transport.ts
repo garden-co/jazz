@@ -112,6 +112,7 @@ export class BrowserWorkerTransportPump {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.transport.retireLocalSubmissionPort?.();
     this.receiveDeadline.close();
     this.removeWorkListener();
     this.transport.clearOutboundScheduler?.();
@@ -152,7 +153,12 @@ export class BrowserWorkerTransportPump {
     this.outboundDrainScheduled = true;
     queueMicrotask(() => {
       this.outboundDrainScheduled = false;
-      if (!this.closed) this.drainOutboundFrames();
+      if (this.closed) return;
+      try {
+        this.drainOutboundFrames();
+      } catch (error) {
+        this.onError(error);
+      }
     });
   }
 
