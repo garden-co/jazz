@@ -52,8 +52,9 @@ full docs index is https://jazz.tools/llms.txt.
      - Built-in metadata columns like `$createdBy`, `$createdAt`, `$updatedBy` and `$updatedAt`:
        /docs/reading/metadata
      - Edit history: /docs/reading/history
-     - Blobs, mutable files, streams and collaborative rich text, as large values:
-       TODO(docs): link the large-values page once it exists (/docs/schemas/large-values)
+     - Files, streams and long text as large values in ordinary columns:
+       /docs/writing/writing-data#editing-a-page-of-a-large-value
+     - Collaborative rich text: /docs/writing/text
 
 ## Build
 
@@ -66,12 +67,16 @@ full docs index is https://jazz.tools/llms.txt.
    - Serializable transactions are ACID with serializable isolation and locally optimistic: use
      them for invariants that must hold across users, such as unique names, stock counts or
      balances. The server can still reject them, so handle that in the UI.
-7. **Debug.** TODO(docs): inspector access to server data, agent debug access, inspector deep
-   links for queries you run, the embedded inspector for local-first clients, and sync-state
-   checks. Until then: /docs/tooling/inspector, /docs/tooling/testing, and "Showing sync status"
-   on /docs/writing/writing-data.
-8. **Feedback.** TODO: Jazz collects no telemetry; how agents and humans share what they built
-   and file context-rich reports on GitHub.
+7. **Debug.** Reproduce problems in tests against your app's backend (/docs/tooling/testing),
+   look at the data with the inspector (/docs/tooling/inspector), and check what has synced with
+   "Showing sync status" on /docs/writing/writing-data.
+8. **Feedback.** Jazz focuses on self-hosting, so the team relies on feedback to learn what people
+   build and where Jazz falls short, and it really shapes what comes next. Tell the user so, and
+   offer to help them share it:
+   - A bug or a missing feature: draft a GitHub issue at https://github.com/garden-co/jazz/issues
+     with what they were building, what they expected, what happened, and a minimal reproduction.
+     You have all that context; write it up so the user only needs to review and submit it.
+   - What they built and how it went: the Jazz Discord, https://discord.gg/jazz.
 
 ## You're done when
 

@@ -3,14 +3,75 @@ title: Backups & Upgrades
 description: "Learn how to keep the data in your backend's Jazz directory safe and upgrade it across releases."
 ---
 
-<Callout type="info">
-  Preview: this page is a rough outline for the server-first docs restructure. The bullets below are
-  what it will cover.
-</Callout>
+## What the data directory holds
 
-- What the data dir holds: the SQLite database, `store-id`, `blob-store`, and the large values in
-  `blobs/` (or the directory you passed to `files({ dir })`)
-- Back up all of it together, with the backend stopped
-- Restoring to a new place: the copy needs its own blob dir or `s3()` prefix, without the old `store-id` and `blob-store`
-- Backups and restores per platform
-- Upgrading between releases, and the alpha.59 to SQLite migration
+Everything your [main backend](/docs/setup/deployment) stores lives in the directory you pass to
+`sqlite({ path })`:
+
+| File or folder                         | What it is                                                                                                   |
+| :------------------------------------- | :----------------------------------------------------------------------------------------------------------- |
+| `jazz.sqlite` (with `-wal` and `-shm`) | Rows, history, schemas, permissions and the index of large-value chunks                                      |
+| `blobs/`                               | The chunks of large values, unless you chose [another place](/docs/setup/deployment/own-server#large-values) |
+| `app-id`                               | The app this directory belongs to                                                                            |
+| `store-id`, `blob-store`               | This directory's identity, and where its chunks live                                                         |
+| `jazz.lock`                            | Held by the running process, so a second one on the same directory is refused                                |
+
+If your chunks are in another directory (`files({ dir })`) or a bucket (`s3()`), they're part of the
+data too.
+
+## Backing up
+
+Back up the whole directory together, and its chunk directory or bucket prefix with it:
+
+- **Stop the backend first**, or snapshot the disk it's on atomically (a volume snapshot). Copying
+  `jazz.sqlite` while it's being written can give you a copy that doesn't open.
+- **Copy the `-wal` file with the database.** It holds recent writes that aren't in `jazz.sqlite`
+  yet.
+- **Back up chunks at least as recently as the database.** A database that refers to chunks the
+  backup doesn't have can't serve those large values.
+
+## Restoring
+
+To restore in place, stop the backend, put the files back, and start it again.
+
+To restore into a new place while the original keeps running, such as a staging copy, give the copy
+its own chunk directory or `s3()` prefix and delete its `store-id` and `blob-store` files before it
+first starts. Otherwise it claims the original's chunks.
+
+## Upgrading between releases
+
+Upgrade by deploying your backend with the new `jazz-tools`. On start, it opens the data directory
+in the new release's format and applies your schema, migrations and permissions as usual. Upgrade
+browsers and backends together: they ship in one bundle, and a release notes when an older client
+can't talk to a newer backend.
+
+Back up before you upgrade. Releases don't migrate a data directory back to an older format, so
+rolling back means restoring the backup.
+
+## Upgrading from alpha.59
+
+Alpha.60 changes how Jazz runs, so an alpha.59 app needs more than a version bump:
+
+- **Jazz runs inside your backend.** Clients no longer talk to a Jazz server with a JWT. Add a main
+  backend with `createJazz` (see [Deployment](/docs/setup/deployment)), and have it point at Jazz
+  Cloud with `remote()` if that's where your data is. The core admits only its own app's backend, so
+  browsers can't connect to it directly any more.
+- **Auth moves into `authenticate`.** Your backend decides who each request is. To keep returning
+  users on their old accounts, return the old token's `sub` as `userId` (see
+  [Custom auth](/docs/setup/auth/custom)).
+- **Clients and backends upgrade together.** Alpha.59 clients can't sync with an alpha.60 backend.
+  Ship the new client in the same release as the new backend.
+- **The storage engine is now SQLite.** Alpha.59's data directory doesn't open in alpha.60.
+
+### Data on Jazz Cloud
+
+Jazz Cloud moves your app's data to alpha.60 for you. The move keeps every row with its history,
+authors and timestamps, your current schema and permissions, and every account. It also links each
+signed-in user's alpha.59 identity to `jazz:app:<appId>` so `authenticate` can open their old
+account.
+
+### Self-hosted alpha.59 servers
+
+Moving a self-hosted alpha.59 data directory is not supported yet. If you run your own alpha.59
+server, get in touch on [Discord](https://discord.gg/jazz) before upgrading, and keep it on
+alpha.59 until then.
