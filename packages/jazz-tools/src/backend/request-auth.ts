@@ -582,7 +582,8 @@ async function verifyLocalFirstIdentityProof(token: string, appId: string): Prom
   }
 }
 
-async function verifyExternalJwt(
+/** @internal Verify `token`'s signature, expiry, issuer and audience. */
+export async function verifyExternalJwt(
   token: string,
   payload: JwtPayload,
   config: BackendRequestAuthConfig,

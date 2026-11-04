@@ -971,7 +971,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
           })
         : await openInProcessCore(store, bundle);
   const appId = core.appId;
-  const issuer = `jazz:app:${appId}`;
+  // One spelling per app: an app id that is a UUID names its users by the
+  // lowercase hyphenated form, whatever form the store was given.
+  const issuer = `jazz:app:${canonicalAppId(appId)}`;
 
   let session: JazzSession<JazzClient>;
   try {
@@ -2059,4 +2061,12 @@ function isLocalEndpoint(endpoint: string): boolean {
   } catch {
     return false;
   }
+}
+
+const UUID_APP_ID = /^([0-9a-f]{8})-?([0-9a-f]{4})-?([0-9a-f]{4})-?([0-9a-f]{4})-?([0-9a-f]{12})$/i;
+
+/** @internal The form of `appId` its users' `jazz:app:` issuer uses. */
+export function canonicalAppId(appId: string): string {
+  const parts = UUID_APP_ID.exec(appId);
+  return parts ? parts.slice(1).join("-").toLowerCase() : appId;
 }
