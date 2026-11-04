@@ -758,3 +758,36 @@ async fn publish_only_deployments_publish_content_addressed_bundles() {
     );
     server.shutdown().await;
 }
+
+/// A deployment publishes a bundle and admits its schemas, but no schema or
+/// permissions become current, before or after the core reopens: sessions
+/// write by the bundle they pin to.
+#[tokio::test]
+async fn deployments_never_make_a_schema_current() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (schema(&[]), schema(&["body"]));
+    {
+        let server = builder(Some(dir.path())).build().await.unwrap();
+        let router = create_router(server.state.clone());
+        deploy_ok(&router, request(&a, &[&a], vec![])).await;
+        deploy_ok(
+            &router,
+            request(&b, &[&a, &b], vec![migration(&a, &b, &["body"])]),
+        )
+        .await;
+        let catalogue = server.state.runtime().unwrap().catalogue().await.unwrap();
+        assert!(catalogue.head().is_none());
+        assert!(catalogue.permissions.is_empty());
+        assert_eq!(catalogue.bundles.len(), 2);
+        assert_eq!(
+            graph(&router).await["latestBundleSchemaHash"],
+            json!(SchemaHash::compute(&b).to_string())
+        );
+        server.shutdown().await;
+    }
+    let reopened = builder(Some(dir.path())).build().await.unwrap();
+    let catalogue = reopened.state.runtime().unwrap().catalogue().await.unwrap();
+    assert!(catalogue.head().is_none());
+    assert_eq!(catalogue.bundles.len(), 2);
+    reopened.shutdown().await;
+}
