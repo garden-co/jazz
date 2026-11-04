@@ -2087,6 +2087,33 @@ impl Owner {
     /// is due. Each one held the store's only writer for its whole run,
     /// delaying every session, so the line says how long, what SQLite did,
     /// and how to make it fast.
+    /// Text merges that ran past their work budget: each write stood as
+    /// sent, so a concurrent edit left the current text (history keeps it).
+    fn report_merge_fallbacks(&self) {
+        let (fallbacks, dropped) = self.db.take_merge_fallbacks();
+        let app = self.app.as_deref().unwrap_or_default();
+        for fallback in &fallbacks {
+            tracing::warn!(
+                app,
+                table = %fallback.table,
+                row = %fallback.row.0,
+                column = %fallback.column,
+                bytes = fallback.bytes,
+                "text merge ran past its work budget in app {app}: the write stood as sent, \
+                 and a concurrent edit to {}.{} left the current text (history keeps it)",
+                fallback.table,
+                fallback.column,
+            );
+        }
+        if dropped > 0 {
+            tracing::warn!(
+                app,
+                dropped,
+                "{dropped} more text merges in app {app} ran past their work budget"
+            );
+        }
+    }
+
     fn report_slow_queries(&self) {
         let Some((shapes, dropped)) = self.db.take_due_slow_queries() else {
             return;
@@ -2260,6 +2287,7 @@ impl Owner {
             runner.pump(self);
         }
         self.report_slow_queries();
+        self.report_merge_fallbacks();
         for (subscriber, error) in self.db.take_closed_subscribers() {
             let Some(id) = self
                 .sessions
