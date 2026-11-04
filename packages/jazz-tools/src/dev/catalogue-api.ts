@@ -158,6 +158,27 @@ export async function fetchStoredPermissions(
   };
 }
 
+/** A permissions bundle the core has published: what sessions pin to. */
+export interface PublishedBundle {
+  bundle: string;
+  schemaHash: string;
+  publishedAt: number;
+  permissions: Record<string, TablePolicies>;
+}
+
+/** Every bundle the core has published, oldest first. */
+export async function fetchPublishedBundles(
+  serverUrl: string,
+  options: FetchStoredPermissionsOptions,
+): Promise<PublishedBundle[]> {
+  const body = (await fetchAdminJson(
+    appScopedUrl(serverUrl, options.appId, "admin/bundles"),
+    options.adminSecret,
+    "Bundles",
+  )) as { bundles?: PublishedBundle[] };
+  return body.bundles ?? [];
+}
+
 export type PublishedMigrationValue =
   | { type: "Integer"; value: number }
   | { type: "BigInt"; value: bigint | string | number }

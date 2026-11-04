@@ -641,6 +641,46 @@ async fn compatible_connections_preserve_branch_and_convergence_validation() {
 /// A deployment published to `/bundles` publishes its permissions as a
 /// bundle, by content: the same bundle again (a rollback) changes nothing,
 /// and the current permissions stay as they were.
+/// `GET /bundles` lists both bundles, each with its write schema and
+/// permissions; a rollback adds no third.
+async fn assert_published_bundles(
+    router: &Router,
+    open: &str,
+    closed: &str,
+    base: &Schema,
+    next: &Schema,
+) {
+    let (status, body) = http(router, "GET", "/bundles", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut listed = body["bundles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|bundle| {
+            (
+                bundle["bundle"].as_str().unwrap().to_owned(),
+                bundle["schemaHash"].as_str().unwrap().to_owned(),
+                bundle["permissions"]["notes"]["select"]["using"].to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    listed.sort();
+    let mut expected = vec![
+        (
+            open.to_owned(),
+            SchemaHash::compute(base).to_string(),
+            serde_json::to_value(PolicyExpr::True).unwrap().to_string(),
+        ),
+        (
+            closed.to_owned(),
+            SchemaHash::compute(next).to_string(),
+            serde_json::to_value(PolicyExpr::False).unwrap().to_string(),
+        ),
+    ];
+    expected.sort();
+    assert_eq!(listed, expected, "{body}");
+}
+
 #[tokio::test]
 async fn publish_only_deployments_publish_content_addressed_bundles() {
     let dir = tempfile::tempdir().unwrap();
@@ -690,11 +730,14 @@ async fn publish_only_deployments_publish_content_addressed_bundles() {
 
         let head = http(&router, "GET", "/permissions", Value::Null).await.1;
         assert_eq!(head["head"], Value::Null, "nothing was activated: {head}");
+        assert_published_bundles(&router, &open, &closed, &base, &next).await;
         server.shutdown().await;
         (open, closed)
     };
     // Both bundles, and both write schemas, outlive a restart.
     let server = builder(Some(&path)).build().await.unwrap();
+    let router = create_router(server.state.clone());
+    assert_published_bundles(&router, &open, &closed, &base, &next).await;
     let rows = server.state.runtime().unwrap().catalogue().await.unwrap();
     let mut bundles = rows
         .bundles

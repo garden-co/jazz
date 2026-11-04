@@ -158,6 +158,14 @@ impl StoredCatalogue {
         self.index.lock().ok()?.latest_bundle
     }
 
+    /// Every published permissions bundle, oldest first.
+    pub(crate) fn published_bundles(&self) -> Vec<jazz::catalogue::CatalogueBundle> {
+        self.index
+            .lock()
+            .map(|index| index.bundles.clone())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn new(
         app_id: AppId,
         initial_schema: Option<Schema>,
@@ -303,8 +311,9 @@ struct CatalogueIndex {
     lenses: HashMap<(SchemaHash, SchemaHash), Lens>,
     /// Every permissions revision, oldest first; the last is current.
     revisions: Vec<ActiveSchema>,
-    /// Every published permissions bundle (see [`jazz::catalogue`]).
-    bundles: HashSet<jazz::catalogue::BundleId>,
+    /// Every published permissions bundle (see [`jazz::catalogue`]),
+    /// oldest first.
+    bundles: Vec<jazz::catalogue::CatalogueBundle>,
     /// The bundle published last: what a backend booting now pins to.
     latest_bundle: Option<jazz::catalogue::BundleId>,
 }
@@ -358,12 +367,11 @@ impl CatalogueIndex {
             });
             parent = Some(bundle_object_id);
         }
-        index.bundles = rows.bundles.iter().map(|bundle| bundle.id).collect();
-        index.latest_bundle = rows
+        index.bundles = rows.bundles.clone();
+        index
             .bundles
-            .iter()
-            .max_by_key(|bundle| bundle.published_at)
-            .map(|bundle| bundle.id);
+            .sort_by_key(|bundle| (bundle.published_at, bundle.id.0));
+        index.latest_bundle = index.bundles.last().map(|bundle| bundle.id);
         if let Some(schema) = initial_schema {
             index.add_schema(schema.clone());
         }

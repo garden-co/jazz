@@ -101,7 +101,7 @@ impl StoredCatalogue {
         let permissions: jazz::catalogue::Permissions = permissions.into_iter().collect();
         let bundle = jazz::catalogue::bundle_id(&schema_hash, &permissions)
             .map_err(|error| CatalogueError::WriteError(error.to_string()))?;
-        let new = !expected.bundles.contains(&bundle);
+        let new = !expected.bundles.iter().any(|known| known.id == bundle);
         if new {
             put.bundles.push((schema_hash, permissions, now));
         }
