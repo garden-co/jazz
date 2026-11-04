@@ -32,8 +32,8 @@ web-time = "1.1"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 talc = "5.0.4"
-sqlite-wasm-rs = { version = "0.5", default-features = false }
-sqlite-wasm-vfs = "0.2"
+sqlite-wasm-rs = { version = "0.5", default-features = false, optional = true }
+sqlite-wasm-vfs = { version = "0.2", optional = true }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
@@ -49,10 +49,13 @@ web-sys = { version = "0.3", features = [
 ] }
 
 [features]
-default = ["console_error_panic_hook", "transport-compression-ruzstd"]
+default = ["browser", "console_error_panic_hook", "transport-compression-ruzstd"]
+# Browser stores include SQLite; the experimental DO workspace supplies a host shim.
+browser = ["dep:sqlite-wasm-rs", "dep:sqlite-wasm-vfs"]
+durable-object = []
 bench-probes = []
 # Browser store comparison probes (IndexedDB vs OPFS); never in release builds.
-browser-bench = []
+browser-bench = ["browser"]
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]
 transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]

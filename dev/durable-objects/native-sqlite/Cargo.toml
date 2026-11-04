@@ -1,0 +1,17 @@
+# The Cloudflare Durable Object build of jazz-wasm: the engine on the
+# object's own SQLite (`ctx.storage.sql`), with no SQLite compiled in.
+# A workspace of its own because it patches sqlite-wasm-rs for every crate
+# in the build, which the main workspace's browser build must not see.
+[workspace]
+resolver = "2"
+members = ["jazz-do"]
+
+[patch.crates-io]
+sqlite-wasm-rs = { path = "sqlite-wasm-rs-decls" }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[profile.release.package.jazz-do]
+opt-level = "s"

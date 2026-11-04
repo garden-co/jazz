@@ -3,7 +3,7 @@
 Jazz's authority can use a Durable Object's own `ctx.storage.sql`, without a
 page VFS. The refresh found a query-compilation limit the earlier spike missed;
 not every current query shape fits yet. This directory contains compatibility probes
-rather than a production DO provider. Implementation
+and an **experimental** WASM host, not a production DO provider. Implementation
 work is described in [PLAN.md](PLAN.md).
 
 ## Compatibility baseline (2026-11-04)
@@ -82,6 +82,41 @@ must be inspected rather than counted as platform incompatibility. Failed
 native prepares do not enter the SQL trace. Native limits do not emulate the
 DO authorizer, JS value bridge, or callback transaction lifetime.
 
+## Experimental WASM build and WebSocket harness
+
+`native-sqlite/` ports the isolated build from
+[PR #4579](https://github.com/garden-co/jazz/pull/4579), source head
+`838e7fa8b927292a29853b66c4c05c80cb81f0e6`, to the current tree. Its workspace
+patches `sqlite-wasm-rs` to declarations only; Rust implements the SQLite C
+symbols over DO SQL. Browser stores remain enabled by default in `jazz-wasm`;
+this experiment disables them. The patch does not apply to browser builds.
+
+```sh
+# Requires wasm-pack and the wasm32-unknown-unknown Rust target.
+# FAST skips LTO and wasm-opt; use it for compatibility checks.
+FAST=1 dev/durable-objects/native-sqlite/build.sh
+node dev/durable-objects/native-sqlite/harness/serve.mjs
+
+# In another terminal: a small sync smoke workload, not a performance claim.
+cargo build -p jazz-example-doc-shelf-benchmark --bin doc-shelf-do-ceiling-ws
+SMOKE=1 STORE=20 PROJECT=20 SESSIONS=2 GROUP=2 ROWS=2 WRITES=2 \
+  target/debug/doc-shelf-do-ceiling-ws ws://127.0.0.1:8787
+```
+
+The default optimized build additionally needs wasm-opt. `PERSIST=<directory>`
+retains DO storage, `TRACE=1` counts SQL statements, and `INSPECTOR_PORT=9229`
+enables the optional CPU profiler. The harness accepts fixture identities from
+its caller; bind it only to local loopback. It is not production authentication.
+
+The shim still counts SAVEPOINT/RELEASE without opening real scopes, and
+ROLLBACK TO fails. Wide integer bindings now fail explicitly: the older
+experiment's decimal-text binding would silently change current app values.
+Wide reads and non-UTF-8 text also fail; integral REAL results lose their storage
+class in the bridge. It buffers whole result sets and opens the engine through
+the memory-store path, so its chunk-cache behavior is not a production durable
+store. These limitations are intentional evidence for the storage and
+transaction work in the plan, not supported Jazz semantics.
+
 ## Validation of this refresh
 
 - Probe assertions pass on the pinned runtime, including async helper commit
@@ -93,6 +128,12 @@ DO authorizer, JS value bridge, or callback transaction lifetime.
 - A subsequent Jazz integration run, including the new fresh-schema,
   schema-evolution, and retained-column boundary tests, reports 908 passed,
   0 failed, and 4 ignored.
+- The isolated DO WASM build succeeds, and the normal browser WASM target
+  passes `cargo check -p jazz-wasm --target wasm32-unknown-unknown`.
+- The WebSocket smoke checks 20 seeded rows, two subscribers, and two writes
+  of two rows each. Both writes reach global acknowledgement and both
+  subscribers' contents match the expected result; the authority reports no
+  errors. This exercises successful writes, not rollback or production auth.
 - The new trace contains 5,376,911 statements, 14,360 distinct SQL texts, and
   5,717 connections. This capture preceded adding the VM/trigger limits.
   Replay preparation produces 2,142 jobs / 223,444 operations.
