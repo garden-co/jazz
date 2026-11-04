@@ -44,10 +44,10 @@ export function parseLimit(raw: string | null, fallback: number, max: number): n
   return Math.min(n, max);
 }
 
-/** Strip fumadocs' `<mark>` highlights and any other tags; collapse whitespace. */
+/** Strip fumadocs' `<mark>` highlights (and nothing else: docs text mentions `<JazzProvider>`); collapse whitespace. */
 function cleanContent(text: string): string {
   return text
-    .replace(/<\/?[a-z][^>]*>/gi, "")
+    .replace(/<\/?mark>/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -114,6 +114,20 @@ export function markdownPath(path: string): string {
   return path.startsWith("/docs") ? `/llms.mdx${path}` : path;
 }
 
+export const MAX_QUERY_CHARS = 200;
+
+/**
+ * The query as it is echoed back: one line, capped, inside an inline code span
+ * that can't be closed early, so a crafted `q=` can't inject headings, links
+ * or instructions into a page served from jazz.tools.
+ */
+export function displayQuery(query: string): string {
+  const oneLine = query.replace(/\s+/g, " ").trim();
+  const capped =
+    oneLine.length > MAX_QUERY_CHARS ? `${oneLine.slice(0, MAX_QUERY_CHARS)}…` : oneLine;
+  return `\`${capped.replace(/`/g, "'")}\``;
+}
+
 export function renderMarkdown(opts: {
   query: string;
   origin: string;
@@ -122,7 +136,7 @@ export function renderMarkdown(opts: {
 }): string {
   const { query, origin, pages, fullText } = opts;
   const lines: string[] = [];
-  lines.push(`# Jazz docs search: ${query}`);
+  lines.push(`# Jazz docs search: ${displayQuery(query)}`);
   lines.push("");
 
   if (pages.length === 0) {

@@ -36,6 +36,13 @@ function headingFor(path: string, anchor: string): string | undefined {
   return headings.get(path)?.get(anchor);
 }
 
+/** The same URL serves JSON or Markdown depending on Accept, so caches must key on it. */
+function withVaryAccept(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.set("Vary", "Accept");
+  return new Response(response.body, { status: response.status, headers });
+}
+
 /**
  * `GET /api/search?query=…` returns fumadocs JSON for the site's search box.
  *
@@ -49,15 +56,16 @@ export async function GET(request: Request): Promise<Response> {
   if (!wantsMarkdown(url, request.headers.get("accept"))) {
     if (!url.searchParams.has("query") && url.searchParams.has("q")) {
       url.searchParams.set("query", url.searchParams.get("q")!);
-      return server.GET(new Request(url, request));
+      return withVaryAccept(await server.GET(new Request(url, request)));
     }
-    return server.GET(request);
+    return withVaryAccept(await server.GET(request));
   }
 
   const query = (url.searchParams.get("q") ?? url.searchParams.get("query") ?? "").trim();
   const headers = {
     "Content-Type": "text/markdown; charset=utf-8",
-    "Cache-Control": "public, max-age=300, s-maxage=3600",
+    // Browser cache only: a CDN hit would skip the function and its analytics event.
+    "Cache-Control": "public, max-age=60",
     Vary: "Accept",
   };
 

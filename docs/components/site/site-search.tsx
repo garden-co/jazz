@@ -148,6 +148,8 @@ function useSearchTracking() {
     sent: Set<string>;
   }>({ sent: new Set() });
 
+  useEffect(() => () => clearTimeout(state.current.timer), []);
+
   return useMemo(() => {
     const flush = () => {
       const s = state.current;
