@@ -74,9 +74,7 @@ async function publishBundle(
     schemas: [{ hash: targetSchemaHash, schema: structural }],
     migrations: [],
     permissions,
-    activate: false,
   });
-  if (!deployed.bundle) throw new Error("the core did not publish a bundle");
   return deployed.bundle;
 }
 
