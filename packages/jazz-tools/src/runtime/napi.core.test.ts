@@ -35,6 +35,13 @@ import {
 import { SubscriptionManager } from "./subscription-manager.js";
 import type { WasmRow } from "../drivers/types.js";
 import {
+  mergePermissionsIntoWasmSchema,
+  type CompiledPermissionsMap,
+} from "../schema-permissions.js";
+import { computeSchemaHash } from "../schema-hash.js";
+import { deployArtifacts } from "../dev/catalogue.js";
+import { fetchMigrationGraph } from "../dev/migration-graph.js";
+import {
   createOpenTransactionId,
   type TxId,
   type OpenTransactionId,
@@ -48,6 +55,29 @@ const TEST_EXTERNAL_ISSUER = "https://issuer.example";
 
 function testExternalAccountId(userId: string): string {
   return testAccountId(JSON.stringify([TEST_EXTERNAL_ISSUER, userId]));
+}
+
+/**
+ * Publish `schema` with `permissions` as a bundle, as createJazz does on
+ * boot, and answer its id: a user session the backend states is pinned to it.
+ */
+async function publishBundle(
+  server: LocalJazzServerHandle,
+  schema: WasmSchema,
+  permissions: CompiledPermissionsMap,
+): Promise<string> {
+  const structural = mergePermissionsIntoWasmSchema(schema, {});
+  const targetSchemaHash = await computeSchemaHash(structural);
+  const target = { appId: server.appId, serverUrl: server.url, adminSecret: server.adminSecret! };
+  const deployed = await deployArtifacts(target, await fetchMigrationGraph(target), {
+    targetSchemaHash,
+    schemas: [{ hash: targetSchemaHash, schema: structural }],
+    migrations: [],
+    permissions,
+    activate: false,
+  });
+  if (!deployed.bundle) throw new Error("the core did not publish a bundle");
+  return deployed.bundle;
 }
 
 function testExternalSession(userId: string, claims: Record<string, unknown> = {}) {
@@ -1862,8 +1892,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       inMemory: true,
       backendSecret: "core-napi-permission-advice-backend",
       adminSecret: "core-napi-permission-advice-admin",
-      schema: OWNED_TODOS_SCHEMA,
-      permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
+    });
+    const bundle = await publishBundle(server, OWNED_TODOS_SCHEMA as WasmSchema, {
+      todos: OWNED_TODOS_SCHEMA.todos.policies!,
     });
 
     const openRuntime = (userId: string, sourceId: number) => {
@@ -1881,6 +1912,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         JSON.stringify({
           backend_secret: server!.backendSecret,
           backend_session: testExternalSession(userId, { sub: userId }),
+          bundle,
         }),
       );
       return runtime;
@@ -2403,11 +2435,14 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       inMemory: true,
       adminSecret: "core-napi-branch-policy-admin",
       backendSecret: "core-napi-branch-policy-backend",
-      schema: CHAT_POLICY_SCHEMA,
-      permissions: Object.fromEntries(
+    });
+    const bundle = await publishBundle(
+      server,
+      CHAT_POLICY_SCHEMA as WasmSchema,
+      Object.fromEntries(
         Object.entries(CHAT_POLICY_SCHEMA).map(([name, table]) => [name, table.policies ?? {}]),
       ),
-    });
+    );
 
     const openRuntime = (userId: string, sourceId: number) => {
       const runtime = new NativeRuntimeAdapter(
@@ -2424,6 +2459,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         JSON.stringify({
           backend_secret: "core-napi-branch-policy-backend",
           backend_session: testExternalSession(userId),
+          bundle,
         }),
       );
       return runtime;

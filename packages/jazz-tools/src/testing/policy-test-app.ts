@@ -9,6 +9,7 @@ import type { Session } from "../runtime/context.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import { deploy } from "../dev/catalogue.js";
+import { publishTestBundle } from "./publish-test-bundle.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../dev/dev-server.js";
 
 type PolicyTestAppSchema = { wasmSchema: WasmSchema };
@@ -270,6 +271,13 @@ export async function createPolicyTestApp(
     schema: app,
     permissions,
   });
+  // Published as createJazz publishes it; the backend link is pinned to it,
+  // since an unpinned link cannot act for the users it tests.
+  const bundle = await publishTestBundle(
+    { appId: server.appId, serverUrl: server.url, adminSecret },
+    app,
+    permissions,
+  );
 
   const jazzContext = createJazzContext({
     appId: server.appId,
@@ -281,6 +289,7 @@ export async function createPolicyTestApp(
       options.clientBackendSecret === undefined
         ? backendSecret
         : (options.clientBackendSecret ?? undefined),
+    bundle,
     env: "test",
   });
 
