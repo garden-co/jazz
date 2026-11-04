@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { schema as s, migration as m } from "../index.js";
-import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
+import {
+  deploy,
+  startLocalJazzServer,
+  startTestJazz,
+  type LocalJazzServerHandle,
+  type TestJazz,
+} from "../testing/index.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { type Db } from "./db.js";
 import { appMigrations } from "../testing/client-migrations.js";
@@ -75,6 +81,9 @@ const newPermissions = s.definePermissions(newApp, ({ policy }) => [
 
 describe("schema migrations", () => {
   let server: LocalJazzServerHandle;
+  // The app's backend, running the latest deploy: clients of both schema
+  // versions sync through it.
+  let front: TestJazz;
   let oldDb: Db;
   let newDb: Db;
 
@@ -101,14 +110,16 @@ describe("schema migrations", () => {
       permissions: newPermissions,
       migration,
     });
+    front = await startTestJazz({ app: newApp, permissions: newPermissions, core: server });
 
-    oldDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
-    newDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
+    oldDb = await createDb({ ...(await localAccountConfig(appId, front.url)) });
+    newDb = await createDb({ ...(await localAccountConfig(appId, front.url)) });
   });
 
   afterEach(async () => {
     await oldDb.shutdown();
     await newDb.shutdown();
+    await front.stop();
     await server.stop();
   });
 
@@ -191,17 +202,14 @@ it("publishes UUID reference identity lenses and relates rows written before pub
     policy.records.allowRead.always(),
     policy.records.allowInsert.always(),
   ]);
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app: beforeApp,
+    permissions: permissionsBefore,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   let oldDb: Db | undefined, newDb: Db | undefined;
   try {
-    const { appId, adminSecret, url: serverUrl } = server;
-    await deploy({
-      appId,
-      adminSecret,
-      serverUrl,
-      schema: beforeApp,
-      permissions: permissionsBefore,
-    });
+    const { appId, url: serverUrl } = server;
     oldDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
     const owner = await oldDb
       .insert(beforeApp.users, { name: "Existing owner" })
@@ -214,14 +222,7 @@ it("publishes UUID reference identity lenses and relates rows written before pub
       })
       .wait({ tier: "global" });
     expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
-    await deploy({
-      appId,
-      adminSecret,
-      serverUrl,
-      schema: afterApp,
-      permissions: permissionsAfter,
-      migration,
-    });
+    await server.redeploy({ app: afterApp, permissions: permissionsAfter, migration });
     newDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
     const rows = await waitForRows(
       newDb,
@@ -292,6 +293,7 @@ it("publishes generated default-bearing relation migrations and preserves them a
   ]);
   const root = await mkdtemp(join(tmpdir(), "jazz-default-relation-e2e-"));
   let server: LocalJazzServerHandle | undefined;
+  let front: TestJazz | undefined;
   let oldDb: Db | undefined, newDb: Db | undefined;
   try {
     server = await startLocalJazzServer({
@@ -305,7 +307,8 @@ it("publishes generated default-bearing relation migrations and preserves them a
       schema: beforeApp,
       permissions: permissionsBefore,
     });
-    oldDb = await createDb(await localAccountConfig(appId, server.url));
+    front = await startTestJazz({ app: beforeApp, permissions: permissionsBefore, core: server });
+    oldDb = await createDb(await localAccountConfig(appId, front.url));
     const owner = await oldDb
       .insert(beforeApp.users, { name: "Existing owner" })
       .wait({ tier: "global" });
@@ -364,6 +367,8 @@ it("publishes generated default-bearing relation migrations and preserves them a
 
     await oldDb.shutdown();
     oldDb = undefined;
+    await front.stop();
+    front = undefined;
     await server.stop();
     server = await startLocalJazzServer({
       appId,
@@ -388,7 +393,8 @@ it("publishes generated default-bearing relation migrations and preserves them a
         migration: await loadDefinedMigration(migrationFile),
       }),
     });
-    newDb = await createDb(await localAccountConfig(appId, server.url));
+    front = await startTestJazz({ app: shippedApp, permissions: permissionsAfter, core: server });
+    newDb = await createDb(await localAccountConfig(appId, front.url));
     const rows = await waitForRows(
       newDb,
       shippedApp.records.where({ id: existing.id }).include({ owner: true }),
@@ -428,6 +434,7 @@ it("publishes generated default-bearing relation migrations and preserves them a
   } finally {
     await newDb?.shutdown();
     await oldDb?.shutdown();
+    await front?.stop();
     await server?.stop();
     await rm(root, { recursive: true, force: true });
   }
@@ -453,25 +460,15 @@ it("a client shipping the app's migrations writes a renamed column where the ser
     policy.notes.allowRead.always(),
     policy.notes.allowInsert.always(),
   ]);
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app: beforeApp,
+    permissions: allowBefore,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   let oldDb: Db | undefined, newDb: Db | undefined;
   try {
-    const { appId, adminSecret, url: serverUrl } = server;
-    await deploy({
-      appId,
-      adminSecret,
-      serverUrl,
-      schema: beforeApp,
-      permissions: allowBefore,
-    });
-    await deploy({
-      appId,
-      adminSecret,
-      serverUrl,
-      schema: afterApp,
-      permissions: allowAfter,
-      migration: rename,
-    });
+    const { appId, url: serverUrl } = server;
+    await server.redeploy({ app: afterApp, permissions: allowAfter, migration: rename });
     newDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
     oldDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
     const created = await newDb

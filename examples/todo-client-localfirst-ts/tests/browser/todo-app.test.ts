@@ -11,7 +11,7 @@ import { prepareTestAccount } from "../../../testing/accounts.js";
 import { describe, it, expect, afterEach } from "vitest";
 import { startApp } from "../../src/main.js";
 import { app } from "../../schema.js";
-import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { APP_ID, SERVER_URL } from "./test-constants.js";
 import type { Db, DbConfig } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
@@ -61,11 +61,7 @@ describe("Vanilla TS Todo App E2E", () => {
     const appId = config?.appId ?? APP_ID;
     const account =
       config?.account ??
-      (await prepareTestAccount(
-        createAccountManager,
-        appId,
-        config?.serverUrl ?? `http://127.0.0.1:${TEST_PORT}`,
-      ));
+      (await prepareTestAccount(createAccountManager, appId, config?.serverUrl ?? SERVER_URL));
     const { db, destroy } = await startApp(el, {
       appId,
       account,
@@ -163,11 +159,7 @@ describe("Vanilla TS Todo App E2E", () => {
 
   it("persists todos across app destroy and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
-    const account = await prepareTestAccount(
-      createAccountManager,
-      APP_ID,
-      `http://127.0.0.1:${TEST_PORT}`,
-    );
+    const account = await prepareTestAccount(createAccountManager, APP_ID, SERVER_URL);
 
     // First session: mount, add todo, destroy
     const el1 = await mount({ account, driver: { type: "persistent", dbName } });
@@ -194,7 +186,7 @@ describe("Vanilla TS Todo App E2E", () => {
   });
 
   it("syncs a todo between two app instances through the server", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = SERVER_URL;
 
     const el1 = await mount({
       appId: APP_ID,

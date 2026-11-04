@@ -141,24 +141,13 @@ function playBeats({ id, stage, pages, actions, state }) {
 }
 
 /**
- * Server spec for a Vite example that syncs with a core directly:
- * dev/examples/with-local-core.mjs starts the core next to Vite, empty and in
- * memory unless `fresh` is false.
+ * Server spec for a Vite example whose Jazz runs inside its Vite server
+ * (jazz.server.ts): empty and in memory unless `fresh` is false.
  */
 export function viteServer({ dir, port, env, fresh = true }) {
   return {
-    command: "node",
-    args: [
-      join(repo, "dev/examples/with-local-core.mjs"),
-      "pnpm",
-      "exec",
-      "vite",
-      "--port",
-      String(port),
-      "--strictPort",
-      "--host",
-      "127.0.0.1",
-    ],
+    command: "pnpm",
+    args: ["exec", "vite", "--port", String(port), "--strictPort", "--host", "127.0.0.1"],
     env: { ...(fresh ? { JAZZ_IN_MEMORY: "1" } : {}), ...env },
     ready: /Local:\s+http/,
   };

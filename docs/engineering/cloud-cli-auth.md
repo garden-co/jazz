@@ -20,24 +20,24 @@ powers as the dashboard and without handing agents a root secret.
 
 ## Parity audit (dashboard vs CLI)
 
-| Dashboard action                                                 | Who                        | CLI before                                   | CLI now                                                                                |
-| ---------------------------------------------------------------- | -------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------- | ------------ |
-| Sign in / out, switch team                                       | user                       | none                                         | `login`, `logout`, `whoami`                                                            |
-| List teams                                                       | member                     | none                                         | `teams list`                                                                           |
-| List apps                                                        | member                     | none                                         | `apps list [--team]`                                                                   |
-| Create app (name, region)                                        | admin                      | none (`create-jazz` makes _unclaimed_ apps)  | `apps create <name> [--team] [--region]`                                               |
-| Claim unclaimed app                                              | admin                      | none                                         | `apps claim <appId> --name <n> [--admin-secret]`                                       |
-| View app settings                                                | member                     | none                                         | `apps get <appId>`                                                                     |
-| Auth settings (JWKS / public key, issuer, audience, local-first) | admin                      | admin-secret `PATCH /api/apps/:id/auth` only | `apps auth get                                                                         | set <appId>` |
-| Rotate admin + backend secrets                                   | admin                      | none                                         | `apps secrets rotate <appId>`                                                          |
-| Delete app (type name to confirm)                                | admin                      | unclaimed apps only, with admin secret       | `apps delete <appId> --confirm <name>`                                                 |
-| Rollout status                                                   | member                     | admin-secret `GET /api/apps/:id/status`      | `apps status <appId> [--wait]`                                                         |
-| Stable-release upgrades                                          | read: member, apply: admin | admin-secret `/api/apps/:id/upgrade`         | `apps upgrade <appId> [--release … --expected-version … --acknowledge-client-upgrade]` |
-| Deploy schema / permissions / migrations                         | admin secret               | `deploy` with admin secret                   | unchanged in this stage (see _Stage 2_)                                                |
-| Members: list, invite, promote/demote, remove, invitations       | admin                      | none                                         | not yet                                                                                |
-| Logs (Loki), insights (Prometheus)                               | member                     | none                                         | not yet                                                                                |
-| Billing, payment methods, coupons                                | admin                      | none                                         | intentionally dashboard-only                                                           |
-| Open Inspector                                                   | member                     | `inspect` (self-hosted, in #3157)            | Cloud path in #3157                                                                    |
+| Dashboard action                                                | Who                        | CLI before                                   | CLI now                                                                                |
+| --------------------------------------------------------------- | -------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------- | ------------ |
+| Sign in / out, switch team                                      | user                       | none                                         | `login`, `logout`, `whoami`                                                            |
+| List teams                                                      | member                     | none                                         | `teams list`                                                                           |
+| List apps                                                       | member                     | none                                         | `apps list [--team]`                                                                   |
+| Create app (name, region)                                       | admin                      | none (`create-jazz` makes _unclaimed_ apps)  | `apps create <name> [--team] [--region]`                                               |
+| Claim unclaimed app                                             | admin                      | none                                         | `apps claim <appId> --name <n> [--admin-secret]`                                       |
+| View app settings                                               | member                     | none                                         | `apps get <appId>`                                                                     |
+| Auth settings (local-first; the JWT verifier settings are gone) | admin                      | admin-secret `PATCH /api/apps/:id/auth` only | `apps auth get                                                                         | set <appId>` |
+| Rotate admin + backend secrets                                  | admin                      | none                                         | `apps secrets rotate <appId>`                                                          |
+| Delete app (type name to confirm)                               | admin                      | unclaimed apps only, with admin secret       | `apps delete <appId> --confirm <name>`                                                 |
+| Rollout status                                                  | member                     | admin-secret `GET /api/apps/:id/status`      | `apps status <appId> [--wait]`                                                         |
+| Stable-release upgrades                                         | read: member, apply: admin | admin-secret `/api/apps/:id/upgrade`         | `apps upgrade <appId> [--release … --expected-version … --acknowledge-client-upgrade]` |
+| Deploy schema / permissions / migrations                        | admin secret               | `deploy` with admin secret                   | unchanged in this stage (see _Stage 2_)                                                |
+| Members: list, invite, promote/demote, remove, invitations      | admin                      | none                                         | not yet                                                                                |
+| Logs (Loki), insights (Prometheus)                              | member                     | none                                         | not yet                                                                                |
+| Billing, payment methods, coupons                               | admin                      | none                                         | intentionally dashboard-only                                                           |
+| Open Inspector                                                  | member                     | `inspect` (self-hosted, in #3157)            | Cloud path in #3157                                                                    |
 
 "Who" is the WorkOS organization role the dashboard requires. The CLI API
 enforces the same roles because it calls the same `lib/team.ts` checks.
@@ -175,8 +175,7 @@ Logged in to https://v2.dashboard.jazz.tools as ada@example.com.
 $ jazz-tools apps create "Todo" --region eu-central-1 --json
 {"appId":"…","teamId":"org_…","name":"Todo","region":"eu-central-1","adminSecret":"…","backendSecret":"…"}
 
-$ jazz-tools apps auth set "$APP" --jwks-url https://auth.example.com/.well-known/jwks.json \
-    --jwt-issuer https://auth.example.com --jwt-audience todo --allow-local-first-auth false
+$ jazz-tools apps auth set "$APP" --allow-local-first-auth false
 $ jazz-tools apps status "$APP" --wait
 ```
 

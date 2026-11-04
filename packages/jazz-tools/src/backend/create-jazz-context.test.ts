@@ -377,6 +377,7 @@ describe("backend/create-jazz-context", () => {
       {
         appId: "server-app",
         accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
+        backendSecret: "secret",
         jwksUrl: undefined,
         allowLocalFirstAuth: true,
         jwtPublicKey: undefined,
@@ -391,6 +392,7 @@ describe("backend/create-jazz-context", () => {
       {
         appId: "server-app",
         accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
+        backendSecret: "secret",
         jwksUrl: undefined,
         allowLocalFirstAuth: true,
         jwtPublicKey: undefined,
@@ -497,6 +499,7 @@ describe("backend/create-jazz-context", () => {
       {
         appId: "server-app",
         accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
+        backendSecret: "secret",
         jwksUrl: "https://issuer.example/.well-known/jwks.json",
         allowLocalFirstAuth: false,
         jwtPublicKey: undefined,
@@ -536,6 +539,7 @@ describe("backend/create-jazz-context", () => {
       {
         appId: "server-app",
         accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
+        backendSecret: "secret",
         jwksUrl: undefined,
         jwtPublicKey: {
           kty: "oct",

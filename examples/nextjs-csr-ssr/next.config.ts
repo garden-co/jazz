@@ -1,9 +1,6 @@
 import { relative, resolve } from "node:path";
 import type { NextConfig } from "next";
 
-// `pnpm dev` starts a local Jazz core (dev/examples/with-local-core.mjs) and
-// passes its URL and app id in NEXT_PUBLIC_JAZZ_SERVER_URL / NEXT_PUBLIC_JAZZ_APP_ID.
-
 // Monorepo CI only: the correctness harness admits one sealed jazz-wasm
 // build and names it in JAZZ_CORRECTNESS_WASM_PACKAGE. Every import of
 // jazz-wasm must load that build, or the bundle carries two different copies.

@@ -37,6 +37,10 @@ pub struct NativeTransportRequest {
     pub app_id: AppId,
     pub peer_identity: AuthorSubject,
     pub auth: AuthConfig,
+    /// The `Authorization` header of the socket's upgrade request: what an
+    /// app's own backend authenticates its native clients by (its bearer),
+    /// as a browser's request carries the app's cookie. Never sent to a core.
+    pub authorization: Option<String>,
     pub wake: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -51,6 +55,10 @@ impl std::fmt::Debug for NativeTransportRequest {
             // an impersonated session. Requests are routinely included in
             // connection diagnostics, so no auth detail is safe to expose.
             .field("auth", &"<redacted>")
+            .field(
+                "authorization",
+                &self.authorization.as_ref().map(|_| "<redacted>"),
+            )
             .field("wake", &"inbound-only callback")
             .finish()
     }
@@ -172,6 +180,7 @@ mod tests {
             app_id,
             peer_identity,
             auth: AuthConfig::default(),
+            authorization: None,
             wake: Arc::new(|| {}),
         }))
         .expect("connector result");
@@ -206,6 +215,7 @@ mod tests {
                 admin_secret: Some(marker.to_owned()),
                 backend_session: Some(serde_json::json!({ "credential": marker })),
             },
+            authorization: Some(format!("Bearer {marker}")),
             wake: Arc::new(|| {}),
         };
 
