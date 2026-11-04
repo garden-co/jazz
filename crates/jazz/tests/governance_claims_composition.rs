@@ -74,6 +74,56 @@ fn count(s: &mut SubscriptionStream, mut n: usize) -> usize {
     n
 }
 
+/// Alice's root and retained-name groups converge after Bob activates the
+/// retained structure. Either group's removal must preserve sharing for survivors.
+#[test]
+fn review_converged_group_keys_survive_either_cancellation() {
+    for drop_root in [false, true] {
+        let db = open(schema(PolicyExpr::True, false));
+        seed(
+            &db,
+            "notes",
+            1,
+            BTreeMap::from([("body".into(), Value::String("secret".into()))]),
+        );
+        let view = block_on(db.register_schema_view(schema(PolicyExpr::True, true))).unwrap();
+        let rootq = db.prepare_query(&Query::from("notes")).unwrap();
+        let viewq = view.prepare_query(&Query::from("notes")).unwrap();
+        let mut a = Some(
+            block_on(db.subscribe_for_identity(&rootq, ReadOpts::default(), alice())).unwrap(),
+        );
+        let mut b = Some(
+            block_on(view.subscribe_for_identity(&viewq, ReadOpts::default(), alice())).unwrap(),
+        );
+        assert_eq!(db.fanout_stats().groups, 2);
+        assert_eq!(count(a.as_mut().unwrap(), 0), 1);
+        assert_eq!(count(b.as_mut().unwrap(), 0), 1);
+        block_on(db.activate_schema(schema(PolicyExpr::True, true))).unwrap();
+        assert_eq!(count(a.as_mut().unwrap(), 1), 1);
+        assert_eq!(count(b.as_mut().unwrap(), 1), 1);
+        let mut fresh =
+            block_on(db.subscribe_for_identity(&rootq, ReadOpts::default(), alice())).unwrap();
+        assert_eq!(count(&mut fresh, 0), 1);
+        if drop_root {
+            drop(a.take());
+        } else {
+            drop(b.take());
+        }
+        block_on(db.tick()).unwrap();
+        let mut newest =
+            block_on(view.subscribe_for_identity(&viewq, ReadOpts::default(), alice())).unwrap();
+        assert_eq!(count(&mut newest, 0), 1);
+        block_on(db.activate_schema(schema(PolicyExpr::False, true))).unwrap();
+        assert_eq!(count(&mut fresh, 1), 0);
+        assert_eq!(count(&mut newest, 1), 0);
+        if let Some(a) = a.as_mut() {
+            assert_eq!(count(a, 1), 0)
+        }
+        if let Some(b) = b.as_mut() {
+            assert_eq!(count(b, 1), 0)
+        }
+    }
+}
 /// Alice's explicit and default-author execution use the same effective claim
 /// source: only matching fixed/empty scopes are immune to registry revocation.
 #[test]
