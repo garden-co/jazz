@@ -76,7 +76,7 @@ export function PosterStudio({
 }) {
   const session = useSession();
   const { data: authSession } = authClient.useSession();
-  const { logout } = useJazzAuth();
+  const { reauthenticate } = useJazzAuth();
   const { data: canvases, error: canvasesError } = useAll(app.canvases);
   const author = session?.user.account ?? null;
   // The poster the user picked in this visit; until then the invited poster,
@@ -156,8 +156,9 @@ export function PosterStudio({
             label="Sign out"
             variant="ghost"
             clickAction={async () => {
-              // Signs out of Jazz first (flushing local writes), then of Better Auth.
-              await logout();
+              // Signs out of Better Auth, then Jazz follows the backend's answer.
+              await authClient.signOut();
+              await reauthenticate();
               window.location.assign("/");
             }}
           />

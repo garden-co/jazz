@@ -1,6 +1,5 @@
-import { createServer } from "node:http";
 import { accountRegistryUrl } from "../accounts/context.js";
-import { requestAccountRegistry, readAccountAssignment } from "../accounts/registry-client.js";
+import { requestVouchedAccount, readAccountAssignment } from "../accounts/registry-client.js";
 import { createHmac, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -67,7 +66,7 @@ const externalJwtPublicKey = {
  */
 async function createExternalIdentity(
   actorName: string,
-  server: { url: string },
+  server: { url: string; backendSecret?: string },
   appId: string,
 ): Promise<ExternalIdentity> {
   const header = Buffer.from(
@@ -89,34 +88,18 @@ async function createExternalIdentity(
   const token = `${header}.${payload}.${signature}`;
   const userId = actorName;
   const identity = { issuer: EXTERNAL_ISSUER, subject: userId };
-  const response = await requestAccountRegistry(
+  // The app's backend registers the user it verified.
+  const response = await requestVouchedAccount(
     accountRegistryUrl(server.url, appId),
-    "register",
-    token,
+    "login-or-register",
+    identity,
+    server.backendSecret!,
   );
   return { token, userId, user: readAccountAssignment(response, identity) };
 }
 
 async function startRequestTestServer(options: Parameters<typeof startLocalJazzServer>[0]) {
-  const jwks = createServer((_request, response) => {
-    response.setHeader("Content-Type", "application/json");
-    response.end(JSON.stringify({ keys: [externalJwtPublicKey] }));
-  });
-  await new Promise<void>((resolve) => jwks.listen(0, "127.0.0.1", resolve));
-  onTestFinished(
-    () =>
-      new Promise<void>((resolve, reject) =>
-        jwks.close((error) => (error ? reject(error) : resolve())),
-      ),
-  );
-  const address = jwks.address();
-  if (!address || typeof address === "string") throw new Error("No JWKS port");
-  return startLocalJazzServer({
-    ...options,
-    jwksUrl: `http://127.0.0.1:${address.port}`,
-    jwtIssuer: EXTERNAL_ISSUER,
-    jwtAudience: "napi-request-audience",
-  });
+  return startLocalJazzServer(options);
 }
 
 async function createLocalFirstIdentity(

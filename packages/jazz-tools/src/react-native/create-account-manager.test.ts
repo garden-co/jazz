@@ -155,10 +155,7 @@ describe("React Native account preparation", () => {
       store: accountStore,
     };
     const manager = await createAccountManager(config);
-    const exp = Math.floor(Date.now() / 1000) + 3600;
-    await manager.loginJWT(
-      `e30.${btoa(JSON.stringify({ iss: identity.issuer, sub: identity.subject, exp }))}.sig`,
-    );
+    await manager.loginWithBackend();
     await vi.waitFor(async () => expect(await accountStore.read()).not.toBeNull());
     expect(JSON.parse((await accountStore.read())!).assignment).toBeUndefined();
     expect((await createAccountManager(config)).getLoggedIn()).toBeUndefined();

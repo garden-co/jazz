@@ -5,7 +5,6 @@ import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createAccountManager } from "jazz-tools";
 
 import {
   deploy,
@@ -31,12 +30,7 @@ let jwtIssuer: TestJwtIssuerHandle;
 let upstream: LocalJazzServerHandle;
 async function startUpstream(): Promise<void> {
   jwtIssuer = await startTestJwtIssuer();
-  upstream = await startLocalJazzServer({
-    appId: APP_ID,
-    jwksUrl: jwtIssuer.jwksUrl,
-    jwtIssuer: EXTERNAL_ISSUER,
-    jwtAudience: jwtIssuer.audience,
-  });
+  upstream = await startLocalJazzServer({ appId: APP_ID });
   await deploy({
     serverUrl: upstream.url,
     appId: upstream.appId,
@@ -45,22 +39,14 @@ async function startUpstream(): Promise<void> {
     permissions,
   });
 }
-async function registerToken(token: string): Promise<void> {
-  let stored: string | null = null;
-  const accounts = await createAccountManager({
-    appId: APP_ID,
-    serverUrl: upstream.url,
-    env: `todo-cli-${crypto.randomUUID()}`,
-    store: {
-      async read() {
-        return stored;
-      },
-      async update(transform) {
-        stored = transform(stored);
-      },
-    },
+/** Sign in to the todo server, which provisions the identity's account. */
+async function signIn(baseUrl: string, token: string): Promise<void> {
+  const response = await fetch(`${baseUrl}/sign-in`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
   });
-  await accounts.registerJWT(token);
+  expect(response.status).toBe(200);
+  await response.body?.cancel();
 }
 
 async function startChild(cwd: string): Promise<RunningChild> {
@@ -166,13 +152,17 @@ describe("Todo server CLI", () => {
 
   it("persists authenticated todos across fresh CLI processes with the default path", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "jazz-todo-cli-restart-"));
-    const token = jwtIssuer.jwtForUser("todo-cli-restart-user", {}, { issuer: EXTERNAL_ISSUER });
+    const token = await jwtIssuer.jwtForUser(
+      "todo-cli-restart-user",
+      {},
+      { issuer: EXTERNAL_ISSUER },
+    );
     let first: RunningChild | undefined;
     let second: RunningChild | undefined;
 
     try {
-      await registerToken(token);
       first = await startChild(cwd);
+      await signIn(first.baseUrl, token);
       const createResponse = await fetch(`${first.baseUrl}/todos`, {
         method: "POST",
         headers: {

@@ -9,3 +9,9 @@ export { appMigrations } from "./client-migrations.js";
 export { createPolicyTestApp, PolicyTestApp } from "./policy-test-app.js";
 export { startTestJwtIssuer, type TestJwtIssuerHandle } from "./test-jwt-issuer.js";
 export type { PolicyTestSession, TestDb } from "./policy-test-app.js";
+export {
+  startTestJazz,
+  type StartTestJazzOptions,
+  type TestJazz,
+  type TestUserConfig,
+} from "./test-jazz.js";

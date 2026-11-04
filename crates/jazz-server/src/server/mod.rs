@@ -4,7 +4,6 @@ use std::sync::{Arc, RwLock as StdRwLock};
 use std::thread;
 
 use crate::middleware::AuthConfig;
-use crate::middleware::auth::JwtVerifier;
 use jazz::tools::AppId;
 
 mod account_store;
@@ -34,10 +33,7 @@ pub use embedded::{
 };
 pub use shutdown::{ShutdownController, ShutdownPhase, WebSocketEntryRefused};
 #[cfg(feature = "embedded-server")]
-pub use testing::{
-    JazzServer, JazzServerBuilder, ServerDataDir, TEST_JWT_AUDIENCE, TEST_JWT_ISSUER,
-    TestJwtIssuer, TestJwtOptions,
-};
+pub use testing::{JazzServer, JazzServerBuilder, ServerDataDir, TEST_JWT_ISSUER};
 
 /// Publish catalogue inputs directly into an in-process test server.
 #[cfg(feature = "embedded-server")]
@@ -95,7 +91,6 @@ pub struct ServerState {
     pub app_id: AppId,
     /// Authentication configuration.
     pub auth_config: AuthConfig,
-    pub jwt_verifier: Option<Arc<JwtVerifier>>,
     /// How backend credentials are checked (see `middleware::workload`): a
     /// trusted workload's token, or the admin secret.
     pub(crate) backend_credential: Option<Arc<crate::middleware::workload::BackendCredential>>,

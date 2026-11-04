@@ -8,7 +8,8 @@
     "build": "env NEXT_PUBLIC_APP_ORIGIN=http://127.0.0.1:3000 NEXT_PUBLIC_JAZZ_APP_ID=00000000-0000-0000-0000-00000000a6e7 BETTER_AUTH_SECRET=music-agent-build-better-auth-secret-0123456789 sh -c 'jazz-tools validate && next build'",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.129.0",
@@ -23,6 +24,7 @@
     "server-only": "0.0.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@types/node": "catalog:default",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
