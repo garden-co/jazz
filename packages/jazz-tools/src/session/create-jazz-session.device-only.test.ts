@@ -71,6 +71,7 @@ describe("device-only browser session (serverUrl: null)", () => {
     const session = await openDeviceOnly(memoryStore());
     await expect(session.reauthenticate()).resolves.toBeUndefined();
     await expect(session.loginWithBackend()).rejects.toThrow(/serverUrl: null/);
+    await expect(session.linkWithBackend()).rejects.toThrow(/serverUrl: null/);
     expect(session.getSnapshot().status).toBe("ready");
   }, 60_000);
 

@@ -46,16 +46,16 @@ export async function createJazzSession(
   config: JazzSessionConfig,
 ): Promise<UserFollowingSession<JazzClient>> {
   refuseClientAppId(config);
-  const accounts = await createAccountManager(config);
   const { serverUrl } = config;
+  // Jazz on this device only: no backend names a user, so the session opens
+  // this device's local-first account and never asks one.
+  if (serverUrl === null && config.initial !== undefined && config.initial !== "local-first") {
+    throw new Error(
+      'serverUrl: null has no backend to sign in through, so it always opens this device\'s local-first account: leave out initial or set it to "local-first"',
+    );
+  }
+  const accounts = await createAccountManager(config);
   if (serverUrl === null) {
-    // Jazz on this device only: no backend names a user, so the session
-    // opens this device's local-first account and never asks one.
-    if (config.initial !== undefined && config.initial !== "local-first") {
-      throw new Error(
-        'serverUrl: null has no backend to sign in through, so it always opens this device\'s local-first account: leave out initial or set it to "local-first"',
-      );
-    }
     return createJazzSessionOwner({
       accounts,
       initial: "local-first",
