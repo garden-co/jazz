@@ -99,6 +99,21 @@ const config = {
         permanent: false,
       },
       {
+        source: "/docs/setup/backend/trusted",
+        destination: "/docs/setup/deployment/own-server#trusted-backend-use",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/backend/user-scoped",
+        destination: "/docs/setup/deployment/own-server#user-scoped-use",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/backend/backend-clients",
+        destination: "/docs/setup/backend-client",
+        permanent: false,
+      },
+      {
         source: "/docs/setup/web-client/local-first-install",
         destination: "/docs/setup/web-client/local-first-client",
         permanent: false,
@@ -177,7 +192,7 @@ const config = {
       },
       {
         source: "/docs/getting-started/server-setup",
-        destination: "/docs/setup/backend/trusted",
+        destination: "/docs/setup/deployment",
         permanent: false,
       },
       {
