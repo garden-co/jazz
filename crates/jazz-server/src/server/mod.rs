@@ -167,7 +167,7 @@ impl ServerState {
         if let Some(existing) = core_server_shell.clone() {
             return Ok(existing);
         }
-        let started = store.start_runtime(schema, crate::runtime::NodeRole::Core, false, true)?;
+        let started = store.start_runtime(schema, crate::runtime::NodeRole::Core, false)?;
         *core_server_shell = Some(started.clone());
         Ok(started)
     }

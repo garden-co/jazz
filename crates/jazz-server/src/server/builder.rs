@@ -307,12 +307,7 @@ impl ServerBuilder {
     ) -> Result<Option<crate::server::ServerRuntimeHandle>, String> {
         let role = NodeRole::Core;
         if let Some(schema) = &self.core_server_shell_schema {
-            return Ok(Some(store.start_runtime(
-                schema.clone(),
-                role,
-                false,
-                false,
-            )?));
+            return Ok(Some(store.start_runtime(schema.clone(), role, false)?));
         }
 
         let (schema, dynamic) = match &self.schema_mode {
@@ -326,9 +321,8 @@ impl ServerBuilder {
             .map_err(|error| format!("failed to build server shell schema: {error}"))?;
         // The newest published schema may never have reached the shell store
         // (published without a lens, or its lens bridge failed). A dynamic
-        // server then reopens with the store's own current schema; startup
-        // re-applies the durable permissions head right after.
-        Ok(Some(store.start_runtime(schema, role, dynamic, dynamic)?))
+        // server then reopens with the store's own current schema.
+        Ok(Some(store.start_runtime(schema, role, dynamic)?))
     }
 
     /// The storage to open, and the blob-store record to write once it has

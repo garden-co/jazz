@@ -237,6 +237,17 @@ describe("migration graph", () => {
     );
   });
 
+  it("reads an older core's active schema as its latest bundle's schema", async () => {
+    const older = {
+      activeSchemaHash: b,
+      schemas: [a, b],
+      migrations: [{ fromHash: a, toHash: b }],
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json(older)));
+    const options = { appId: "app", serverUrl: "https://example.test", adminSecret: "secret" };
+    await expect(fetchMigrationGraph(options)).resolves.toEqual(graph([a, b], [[a, b]], b));
+  });
+
   it("reports HTTP failures and malformed graphs instead of drawing misleading output", async () => {
     const fetch = vi
       .fn()

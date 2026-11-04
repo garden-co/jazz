@@ -5300,11 +5300,6 @@ mod tests {
         // one none.
         let open = publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await;
         let closed = publish_docs_bundle(addr, &state, &schema, PolicyExpr::False).await;
-        // As after a restart over these bundles, the store waits for a
-        // permissions head; sessions pinned to a published bundle are
-        // served regardless.
-        let runtime = state.runtime_for_client().expect("runtime");
-        runtime.await_permissions_for_test().await;
         let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
         let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
         let features = jazz::wire::FEATURE_THIN_RESULTS;
@@ -5413,10 +5408,9 @@ mod tests {
     async fn thin_user_sessions_need_a_pin_while_trusted_links_are_served() {
         use crate::runtime::{ServerRuntimeHandle, StorageConfig};
         use jazz::thin::{ThinBody, ThinOp, ThinRequest};
-        // A catalogue-driven store whose permissions head is not published:
-        // a trusted link is served as SYSTEM, which no permissions govern.
+        // A trusted link is served as SYSTEM, which no permissions govern.
         let source = private_docs_public_schema();
-        let runtime = ServerRuntimeHandle::start_awaiting_permissions(
+        let runtime = ServerRuntimeHandle::start_with_storage(
             JazzSchema::new(&source).unwrap(),
             StorageConfig::InMemory,
         )

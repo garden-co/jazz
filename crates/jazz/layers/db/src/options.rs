@@ -494,9 +494,6 @@ pub enum Reason {
     /// A read needs large-value chunks this replica requested from
     /// upstream but has not received yet (code `NotObserved`).
     MissingChunks,
-    /// The server holds commits from an untrusted session until it has a
-    /// published permissions head to check them by (code `WriteRejected`).
-    PermissionsHeadMissing,
     /// The write was built on an unsettled write the authority rejected,
     /// so it is rejected too (code `WriteRejected`, SPEC 4 §4.6).
     PredecessorRejected,
@@ -511,7 +508,7 @@ pub enum Reason {
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 13] = [
+    pub const ALL: [Reason; 12] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -521,7 +518,6 @@ impl Reason {
         Reason::MissingRequired,
         Reason::BranchMove,
         Reason::MissingChunks,
-        Reason::PermissionsHeadMissing,
         Reason::PredecessorRejected,
         Reason::SchemaVersionNotDeployed,
         Reason::IdentityMismatch,
@@ -544,7 +540,6 @@ impl Reason {
             Reason::MissingRequired => "missing_required",
             Reason::BranchMove => "branch_move",
             Reason::MissingChunks => "missing_chunks",
-            Reason::PermissionsHeadMissing => "permissions_head_missing",
             Reason::PredecessorRejected => "predecessor_rejected",
             Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
             Reason::IdentityMismatch => "identity_mismatch",

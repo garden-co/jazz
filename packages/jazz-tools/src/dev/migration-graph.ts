@@ -72,7 +72,17 @@ export async function fetchMigrationGraph(options: MigrationGraphOptions): Promi
       `Migration graph fetch failed: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ""}`,
     );
   }
-  const graph = (await response.json()) as MigrationGraph;
+  const body = (await response.json()) as MigrationGraph & { activeSchemaHash?: string | null };
+  // A core from before alpha.60 names the schema its last deployment made
+  // current instead; that deployment's bundle is its latest.
+  const graph: MigrationGraph =
+    body && body.latestBundleSchemaHash === undefined && body.activeSchemaHash !== undefined
+      ? {
+          latestBundleSchemaHash: body.activeSchemaHash,
+          schemas: body.schemas,
+          migrations: body.migrations,
+        }
+      : body;
   const isHash = (hash: unknown): hash is string =>
     typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash);
   if (
