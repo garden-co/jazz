@@ -927,8 +927,6 @@ connection that sends any other frame after its `Hello` ends with
   naming an open transaction stages the row write in it instead
   (`FinishStream` answers `Staged`). A stream is named by its `BeginStream`
   request id and ends with its connection.
-- While no permissions head is published, an untrusted thin session's
-  requests are answered `NotReady`.
 - A thin session's answers share its connection's egress budget: a live
   query's events wait on the owner while the budget is spent.
 

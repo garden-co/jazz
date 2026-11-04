@@ -52,8 +52,6 @@ pub(super) struct ThinSession {
     identity: AuthorSubject,
     /// The identity's claims, bound to every read; `None` for SYSTEM.
     claims: Option<BTreeMap<String, Value>>,
-    /// A session under its own identity (not a trusted backend link).
-    untrusted: bool,
     /// The published permissions bundle its backend pinned it to: its
     /// reads and writes are governed by that bundle's policies.
     bundle: Option<jazz::catalogue::BundleId>,
@@ -85,7 +83,6 @@ impl ThinSession {
         Self {
             identity,
             claims,
-            untrusted: identity != AuthorSubject::SYSTEM,
             bundle,
             version: None,
             subscriptions: BTreeMap::new(),
@@ -292,23 +289,11 @@ impl Owner {
     }
 
     pub(super) fn thin_request(&mut self, session: ServerSession, request: ThinRequest) {
-        let Some(thin) = self.thin.get(&session) else {
+        if !self.thin.contains_key(&session) {
             return;
-        };
-        // A pinned session's bundle is published already: it does not wait
-        // for the current permissions.
-        let body = if self.awaiting_permissions && thin.untrusted && thin.bundle.is_none() {
-            ThinBody::Error {
-                code: "NotReady".to_owned(),
-                message: "no permissions are published for this app yet; deploy them before \
-                          connecting thin clients"
-                    .to_owned(),
-            }
-        } else {
-            match self.serve_thin(session, request.id, request.op) {
-                Some(body) => body,
-                None => return,
-            }
+        }
+        let Some(body) = self.serve_thin(session, request.id, request.op) else {
+            return;
         };
         let response = ThinResponse {
             id: request.id,
