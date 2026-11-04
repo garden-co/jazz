@@ -45,12 +45,12 @@ sqlite({ path: "./data/jazz", blobs: "sqlite" }); // inside the SQLite database 
 
 `s3()` works with AWS S3, Cloudflare R2 and MinIO. All its options are optional:
 
-| Option     | Default                    | What it does                                 |
-| :--------- | :------------------------- | :------------------------------------------- |
-| `bucket`   | `S3_BUCKET_NAME`           | The bucket                                   |
-| `region`   | `AWS_REGION`               | The bucket's region; `auto` for R2           |
-| `endpoint` | AWS                        | Another S3-compatible endpoint, such as R2's |
-| `prefix`   | `jazz/<appId>/<store id>/` | Prepended to every object name               |
+| Option     | Default            | What it does                                 |
+| :--------- | :----------------- | :------------------------------------------- |
+| `bucket`   | `S3_BUCKET_NAME`   | The bucket                                   |
+| `region`   | `AWS_REGION`       | The bucket's region; `auto` for R2           |
+| `endpoint` | AWS                | Another S3-compatible endpoint, such as R2's |
+| `prefix`   | `jazz/<store id>/` | Prepended to every object name               |
 
 ```ts
 // Cloudflare R2

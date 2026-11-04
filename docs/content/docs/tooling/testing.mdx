@@ -205,7 +205,7 @@ it("signs in the user authenticate names", async () => {
     }),
   );
   expect(await response.json()).toMatchObject({
-    identity: { issuer: `jazz:app:${appId}`, subject: "alice" },
+    identity: { issuer: "jazz:backend", subject: "alice" },
     claims: { role: "admin" },
   });
 

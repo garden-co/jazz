@@ -61,7 +61,7 @@ users' credentials.
 2. The client sees the new user (the `user` prop or `setUser`) and signs in through `/jazz`. Your
    backend runs `authenticate` and returns the user id.
 3. Jazz gives that user an account the first time, and the same account every time after. The
-   identity is `{ issuer: "jazz:app:<appId>", subject: userId }`.
+   identity is `{ issuer: "jazz:backend", subject: userId }`.
 4. Every sync connection asks `authenticate` again, so a sign-out or changed claims apply on the
    next reconnect.
 
@@ -129,7 +129,7 @@ Public sessions and author columns expose the same structured value:
 ```ts
 {
   account: "00000000-0000-4000-8000-000000000001",
-  identity: { issuer: "jazz:app:my-app", subject: "alice" },
+  identity: { issuer: "jazz:backend", subject: "alice" },
 }
 ```
 

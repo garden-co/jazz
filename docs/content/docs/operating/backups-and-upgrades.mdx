@@ -67,7 +67,7 @@ Alpha.60 changes how Jazz runs, so an alpha.59 app needs more than a version bum
 
 Jazz Cloud moves your app's data to alpha.60 for you. The move keeps every row with its history,
 authors and timestamps, your current schema and permissions, and every account. It also links each
-signed-in user's alpha.59 identity to `jazz:app:<appId>` so `authenticate` can open their old
+signed-in user's alpha.59 identity to `jazz:backend` so `authenticate` can open their old
 account.
 
 ### Self-hosted alpha.59 servers
@@ -99,7 +99,9 @@ exporter download, no Rust toolchain, and nothing writes to your alpha.59 direct
    happy with the result.
 
 `--app-id` is your app's ID exactly as before, case included: the import uses it to link each
-returning user's old sign-in to their account, as `jazz:app:<appId>` with their old `sub`. Pass
+returning user's old sign-in to their account, as `jazz:backend` with their old `sub`, and to keep
+local-first guests on their accounts. It's written to `<data-dir>/app-id`, so your code never needs
+it: `sqlite({ path })` runs as the old app. Pass
 `--no-backend-identity-links` to skip that. The dump holds all your app's data, so store it like the
 data directory and delete it when you're done.
 

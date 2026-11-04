@@ -84,7 +84,7 @@ integration sets, and the core assumes that role with your function's OIDC token
 the AWS region your Sandbox runs in; the backend warns when they differ. Its options are the same
 as for [your own server](/docs/setup/deployment/own-server#large-values).
 
-Both `vercelBlob()` and `s3()` take a `prefix`, by default `jazz/<appId>/<store id>/`, so production
+Both `vercelBlob()` and `s3()` take a `prefix`, by default `jazz/<store id>/`, so production
 and every preview core can share one Blob store or bucket without sharing objects.
 
 A core that started on SQLite can move to Vercel Blob or S3 later: connect a store and redeploy.
