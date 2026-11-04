@@ -3597,6 +3597,7 @@ mod tests {
         let prelude = serde_json::json!({
             "peer_identity": identity.canonical(),
             "auth": { "jwt_token": alice, "backend_secret": JazzServer::BACKEND_SECRET },
+            "bundle": core.latest_bundle(),
         });
         ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
             .await
@@ -3744,6 +3745,7 @@ mod tests {
             &core,
             serde_json::json!({
                 "peer_identity": identity.canonical(),
+                "bundle": core.latest_bundle(),
                 "auth": { "jwt_token": token },
             }),
         )
@@ -3754,6 +3756,7 @@ mod tests {
             &core,
             serde_json::json!({
                 "peer_identity": identity.canonical(),
+                "bundle": core.latest_bundle(),
                 "auth": { "jwt_token": token },
                 "local_first_audience": endpoint,
             }),
@@ -3768,6 +3771,7 @@ mod tests {
             &core,
             serde_json::json!({
                 "peer_identity": identity.canonical(),
+                "bundle": core.latest_bundle(),
                 "auth": { "jwt_token": token, "backend_secret": JazzServer::BACKEND_SECRET },
                 "local_first_audience": endpoint,
             }),
@@ -3779,6 +3783,7 @@ mod tests {
             &core,
             serde_json::json!({
                 "peer_identity": identity.canonical(),
+                "bundle": core.latest_bundle(),
                 "auth": { "jwt_token": token, "backend_secret": JazzServer::BACKEND_SECRET },
                 "local_first_audience": "https://other.example.com/jazz",
             }),
@@ -3822,7 +3827,11 @@ mod tests {
         ))
         .await
         .expect("connect Alice");
-        let prelude = serde_json::json!({ "peer_identity": identity.canonical(), "auth": { "jwt_token": alice, "backend_secret": JazzServer::BACKEND_SECRET } });
+        let prelude = serde_json::json!({
+            "peer_identity": identity.canonical(),
+            "auth": { "jwt_token": alice, "backend_secret": JazzServer::BACKEND_SECRET },
+            "bundle": core.latest_bundle(),
+        });
         ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
             .await
             .expect("prelude");

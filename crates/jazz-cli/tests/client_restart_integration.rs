@@ -307,7 +307,9 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     let app_id = AppId::from_string(APP_ID_STR).expect("parse app id");
 
     let server = ServerProcess::start(0, server_data.path()).await;
-    publish_allow_all_permissions(&server.base_url(), app_id, ADMIN_SECRET, &test_schema()).await;
+    let published =
+        publish_allow_all_permissions(&server.base_url(), app_id, ADMIN_SECRET, &test_schema())
+            .await;
 
     let client_dir = TempDir::new().expect("client dir");
     let mut context = make_context(
@@ -316,6 +318,8 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         client_dir.path().to_path_buf(),
         user_id,
     );
+    // The backend pins the user's session to the bundle it published.
+    context.bundle = Some(published.bundle);
     jazz_testkit::enroll_test_context_with_admin_secret(ADMIN_SECRET, &mut context)
         .await
         .expect("enroll the restart fixture before public admission");

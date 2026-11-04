@@ -140,7 +140,7 @@ mod tests {
                                 TEST_JWT_ISSUER,
                                 format!("rn-device-private-{scope}"),
                             )),
-                            bundle: None,
+                            bundle: server.latest_bundle(),
                             admin_secret: None,
                             migrations: Default::default(),
                         };
