@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { connectedBlobStore, resolveVercelBlob, resolveVercelS3, s3, vercelBlob } from "./blobs.js";
-import { resolveCoreBlobs } from "./vercel-store.js";
+import { environmentOf, resolveCoreBlobs } from "./vercel-store.js";
 
 describe("s3()", () => {
   it("keeps only the options given", () => {
@@ -57,5 +57,16 @@ describe("vercelBlob()", () => {
     // Without one, large values stay in SQLite, and the core says how to move them.
     expect(resolveCoreBlobs({}, {}, warn)).toBeUndefined();
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/no Blob store is connected/));
+  });
+});
+
+describe("environmentOf", () => {
+  const trust = (subject: string) => ({ issuer: "i", audience: "a", subject });
+
+  it("names the environment a core's blob store is claimed for", () => {
+    expect(environmentOf(trust("owner:t:project:p:environment:production"))).toBe("production");
+    expect(environmentOf(trust("owner:t:project:p:environment:preview"))).toBe("preview");
+    expect(environmentOf(trust("owner:t:project:p:environment:staging"))).toBe("staging");
+    expect(environmentOf(trust("some-other-workload"))).toBeUndefined();
   });
 });
