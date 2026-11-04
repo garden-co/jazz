@@ -110,10 +110,14 @@ jobs:
         run: cargo test -p jazz-native-relay --example rn_server_session_harness --no-fail-fast
       - name: Build the React Native JavaScript workspace entrypoints
         run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
-      # Apple's ar cannot archive the WASM build's SQLite objects; the build
-      # finds Homebrew's llvm-ar on its own.
-      - name: Install LLVM for the WASM archiver
-        run: brew list llvm >/dev/null 2>&1 || brew install llvm
+      # Apple's clang and ar cannot build or archive the WASM build's SQLite
+      # objects. The build finds Homebrew's llvm-ar on its own; point cc-rs at
+      # Homebrew's clang for the wasm32 target.
+      - name: Install LLVM for the WASM build's SQLite
+        run: |
+          set -euo pipefail
+          brew list llvm >/dev/null 2>&1 || brew install llvm
+          echo "CC_wasm32_unknown_unknown=$(brew --prefix llvm)/bin/clang" >> "${GITHUB_ENV}"
       # The backend loads jazz-tools on Node, whose runtime checks the native
       # fingerprints staged from release NAPI and fast WASM builds.
       - uses: ./.github/actions/install-rust-tool
