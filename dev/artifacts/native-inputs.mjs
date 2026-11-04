@@ -16,6 +16,9 @@ export const fingerprintPaths = [
   "packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts",
 ];
 
+// Most CI providers set CI=true; treat explicit "false"/"0" as a local run.
+export const isCI = (env) => Boolean(env.CI) && !/^(false|0)$/i.test(env.CI);
+
 export function missingNativeInputs(root = repositoryRoot) {
   const has = (path) => existsSync(join(root, path));
   return {
@@ -46,7 +49,7 @@ export function ensureNativeInputs(
     missing.napi && "jazz-napi binding",
     missing.fingerprints && "native fingerprints",
   ].filter(Boolean);
-  if (env.CI)
+  if (isCI(env))
     throw new Error(
       `missing native inputs in CI (${names.join(", ")}); CI must build or download them ` +
         "before building jazz-tools",

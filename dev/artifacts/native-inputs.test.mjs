@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ensureNativeInputs, missingNativeInputs } from "./native-inputs.mjs";
+import { ensureNativeInputs, isCI, missingNativeInputs } from "./native-inputs.mjs";
 
 const fingerprint = "b".repeat(64);
 const wasmFiles = ["jazz_wasm_bg.wasm", "jazz_wasm_bg.wasm.d.ts", "jazz_wasm.d.ts", "jazz_wasm.js"];
@@ -146,4 +146,10 @@ test("a failed native build stops before staging", () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("CI detection ignores explicit false values", () => {
+  for (const value of ["true", "1", "yes"]) assert.equal(isCI({ CI: value }), true, value);
+  for (const value of [undefined, "", "false", "FALSE", "0"])
+    assert.equal(isCI({ CI: value }), false, String(value));
 });

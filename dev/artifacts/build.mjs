@@ -492,6 +492,8 @@ export function validateNapiBindingRuntimeSurface(binding, expectedFingerprint) 
  * wasm-pack is not a Cargo or pnpm dependency, so a fresh checkout may lack it.
  * Fail before staging with an install hint instead of a bare spawn ENOENT.
  */
+// process.report names the runtime glibc version only on glibc hosts.
+const isGlibc = () => Boolean(process.report?.getReport?.().header?.glibcVersionRuntime);
 export function requireWasmPack(env = process.env, { run = spawnSync } = {}) {
   const probe = run("wasm-pack", ["--version"], {
     cwd: root,
@@ -520,6 +522,11 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
   const expectedNapiBinding = kind === "napi" && napiBindingForTarget[resolvedNapiTarget];
   if (kind === "napi" && !expectedNapiBinding)
     throw new Error(`unsupported NAPI target ${resolvedNapiTarget ?? "unknown"}`);
+  if (kind === "napi" && !target && process.platform === "linux" && !isGlibc())
+    throw new Error(
+      "local NAPI builds support glibc Linux only (the binding is linux-*-gnu); this host looks " +
+        "like musl (e.g. Alpine). Build on a glibc distribution or pass an explicit --target.",
+    );
   // Resolve prerequisites before taking the lease or staging any output.
   const buildEnv = kind === "wasm" ? wasmBuildEnvironment() : process.env;
   if (command === "wasm-pack") requireWasmPack(buildEnv);
