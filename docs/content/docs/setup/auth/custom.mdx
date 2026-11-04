@@ -14,11 +14,11 @@ import { app, permissions } from "./schema";
 import { getUser } from "./your-auth";
 
 export const jazz = await createJazz({
-  appId: "my-app",
   app,
   permissions,
   store: remote({
     url: process.env.JAZZ_SERVER_URL!,
+    appId: "my-app",
     secret: process.env.JAZZ_ADMIN_SECRET!,
   }),
   authenticate: async (request) => {

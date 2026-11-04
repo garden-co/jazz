@@ -55,6 +55,25 @@ function store(name) {
 }
 /** The app's own backend: Jazz in it (`createJazz`) in front of the core, with backend authority. */
 async function openBackend() {
+  if (typeof remote !== "function") {
+    // Baseline packages that predate `remote({ secret })` admit their
+    // backend session with the core's backend secret instead.
+    assert.equal(c.phase, "baseline", "candidate packages must provide createJazz with remote()");
+    const session = await timeout(
+      createJazzSession({
+        appId: c.appId,
+        serverUrl: c.serverUrl,
+        app,
+        permissions,
+        driver: { type: "persistent", dataPath: join(c.state, "backend") },
+        store: store("backend"),
+        initial: { backendSecret: c.backendSecret },
+      }),
+      "open backend",
+    );
+    sessions.add(session);
+    return { db: session.getSnapshot().client.db };
+  }
   const jazz = await timeout(
     createJazz({
       app,

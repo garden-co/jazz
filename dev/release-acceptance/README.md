@@ -44,7 +44,9 @@ repository:
 
 Run `node dev/release-acceptance/run.mjs /absolute/config.json`.
 The CLI must be executable. Use `phase: baseline` for historical mechanics
-checks; those may have older package versions. Final-preview/published runs
+checks; those may have older package versions (the backend scenario runs
+`createJazz` with `remote()`, and falls back to a backend-secret session only
+for baseline packages that predate it). Final-preview/published runs
 require alpha56 manifests. The script checks CLI and tarball hashes and compares
 every installed package file against extracted tarball bytes. Unexpected files
 are rejected except nested dependency directories; pin native payload packages
