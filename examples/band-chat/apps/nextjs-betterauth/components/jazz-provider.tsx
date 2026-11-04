@@ -7,7 +7,6 @@ import { authClient } from "@/src/lib/auth-client";
 // offline writes) in its own chunk once the page has loaded.
 const loadLocalFirst = () => import("jazz-tools/local-first");
 
-const APP_ID = process.env.NEXT_PUBLIC_JAZZ_APP_ID;
 // Better Auth signs users in; BandChat's backend (`createJazz` in
 // src/lib/jazz.server.ts) reads its session in `authenticate`.
 type AuthActions = { signOut(): Promise<void> };
@@ -24,21 +23,8 @@ export function useBandChatLifecycle(): AuthActions {
 }
 
 export function JazzProvider({ children }: React.PropsWithChildren) {
-  // Fail closed: next.config.ts sets it from the checked configuration.
-  if (!APP_ID)
-    return (
-      <StatusScreen>
-        <Banner
-          status="error"
-          collapsible={false}
-          title="BandChat is not configured"
-          description="Set NEXT_PUBLIC_JAZZ_APP_ID."
-        />
-      </StatusScreen>
-    );
   return (
     <Jazz
-      appId={APP_ID}
       serverUrl="/jazz"
       client={loadLocalFirst}
       loading={<LoadingScreen label="Connecting BandChat…" />}
