@@ -59,7 +59,7 @@ test("the variant environment never inherits a sync server or app secrets", () =
         JAZZ_SERVER_URL: "https://v2.sync.jazz.tools",
         JAZZ_ADMIN_SECRET: "a",
         BACKEND_SECRET: "b",
-        NEXT_PUBLIC_JAZZ_APP_ID: "theirs",
+        JAZZ_APP_ID: "theirs",
         PUBLIC_JAZZ_SERVER_URL: "https://v2.sync.jazz.tools",
       },
     },
@@ -68,7 +68,7 @@ test("the variant environment never inherits a sync server or app secrets", () =
   assert.equal(env.JAZZ_SERVER_URL, undefined);
   assert.equal(env.JAZZ_ADMIN_SECRET, undefined);
   assert.equal(env.BACKEND_SECRET, undefined);
-  assert.notEqual(env.NEXT_PUBLIC_JAZZ_APP_ID, "theirs");
+  assert.notEqual(env.JAZZ_APP_ID, "theirs");
   assert.equal(env.PUBLIC_JAZZ_SERVER_URL, undefined);
   assert.equal(env.NEXT_PUBLIC_APP_ORIGIN, ORIGIN);
   assert.equal(env.APP_ORIGIN, ORIGIN);
@@ -77,10 +77,12 @@ test("the variant environment never inherits a sync server or app secrets", () =
   assert.match(env.BETTER_AUTH_SECRET, /^[0-9a-f]{64}$/);
 });
 
-test("a variant's public prefix names its app id variable", () => {
+test("the app id is the backend's alone, whatever a variant's public prefix", () => {
   const env = variantEnv({ publicPrefix: "PUBLIC_", env: {} }, { dataPath: "/d", baseEnv: {} });
-  assert.match(env.PUBLIC_JAZZ_APP_ID, /^[0-9a-f-]{36}$/);
+  assert.match(env.JAZZ_APP_ID, /^[0-9a-f-]{36}$/);
+  assert.equal(env.PUBLIC_JAZZ_APP_ID, undefined);
   assert.equal(env.NEXT_PUBLIC_JAZZ_APP_ID, undefined);
+  assert.equal(env.PUBLIC_APP_ORIGIN, ORIGIN);
   assert.equal(env.APP_ORIGIN, ORIGIN);
 });
 

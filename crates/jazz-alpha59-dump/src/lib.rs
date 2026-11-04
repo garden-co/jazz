@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 /// Bumped when a record changes shape.
 pub const DUMP_FORMAT: u32 = 2;
 
+// Records are read and written one at a time; boxing the large ones buys
+// nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Record {
     Header(Header),

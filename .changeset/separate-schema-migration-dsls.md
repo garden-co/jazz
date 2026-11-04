@@ -14,4 +14,4 @@ import { schema as s, migration as m } from "jazz-tools";
 
 Schema and permission helpers stay under `s`. Migration behavior and serialized formats are unchanged.
 
-Rewrite existing files in `migrations/` too, including already-deployed ones: `deploy` loads the whole migration chain, and a file that still uses the old builders now fails with `Failed to load migration <file>` and a pointer to `migration as m`.
+Rewrite existing files in `migrations/` too, including already-deployed ones: `jazz-tools validate`, `jazz-tools migrations graph` and `deploy()` load the whole migration chain, and a file that still uses the old builders now fails with `Failed to load migration <file>` and a pointer to `migration as m`.

@@ -7,7 +7,7 @@ import { serverConfig } from "./config";
 // Load the native backend at runtime rather than through the Next bundler.
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-const { createJazz, remote, sqlite } = createRequire(import.meta.url)(
+const { acceptLocalFirstAuth, createJazz, remote, sqlite } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
@@ -35,7 +35,8 @@ export function backend(): Promise<Jazz> {
     authenticate: async (request) => {
       const { auth } = await import("./auth");
       const session = await auth.api.getSession({ headers: request.headers });
-      return session ? { userId: session.user.id } : null;
+      // Signed out: a local-first guest shopper.
+      return session ? { userId: session.user.id } : acceptLocalFirstAuth(request);
     },
   }).ready());
   // A failed start must not poison later requests.

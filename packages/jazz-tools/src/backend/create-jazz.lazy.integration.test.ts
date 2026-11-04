@@ -203,10 +203,10 @@ describe("createJazz, opened on first use", () => {
     const jazz = createJazz({ app, permissions, store: sqlite({ path }) });
     cleanups.push(() => jazz.close());
     try {
-      await expect(jazz.ready()).rejects.toThrow(/Use remote\(/);
+      await expect(jazz.ready()).rejects.toThrow(/or remote\(/);
       // A write made meanwhile fails with the open's error, not unhandled.
       const write = jazz.db.insert(app.todos, { title: "lost", owner: randomUUID() });
-      await expect(write.wait({ tier: "local" })).rejects.toThrow(/Use remote\(/);
+      await expect(write.wait({ tier: "local" })).rejects.toThrow(/or remote\(/);
     } finally {
       if (previous === undefined) delete process.env.VERCEL;
       else process.env.VERCEL = previous;

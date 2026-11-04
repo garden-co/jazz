@@ -91,7 +91,10 @@ export type JazzStore =
   | {
       readonly kind: "vercel";
       readonly options: VercelStoreOptions;
-      /** What runs outside a Vercel deployment, e.g. under `next dev`. */
+      /**
+       * What runs outside a Vercel deployment, e.g. under `next dev`
+       * (default: `sqlite({ path: ".jazz/local" })`).
+       */
       readonly local: Extract<JazzStore, { kind: "sqlite" | "memory" }>;
     };
 
@@ -100,6 +103,11 @@ export type JazzStore =
  * its app id on first start and keeps it beside its data; set `appId` only
  * to keep the id of an existing app. Large values' bytes go to `blobs`,
  * by default `files()` in `<path>/blobs`.
+ *
+ * Only one process can open `path` at a time (it holds `<path>/jazz.lock`
+ * while the core is open); a second one fails with "already open". It
+ * refuses to start on serverless hosts with no lasting disk (Vercel, AWS
+ * Lambda, Netlify): use `vercel()` or `remote()` there.
  */
 export function sqlite(options: {
   path: string;
@@ -169,8 +177,13 @@ export function remote(
 }
 
 /**
- * A core in a persistent Vercel Sandbox in your own Vercel project, with its
- * data on a Drive: one for production and one per Git branch for previews.
+ * The store for apps deployed on Vercel. Use it in dev too: outside a
+ * production or preview deployment (`next dev`, `vercel dev`, tests) it runs
+ * `local`, by default `sqlite({ path: ".jazz/local" })`.
+ *
+ * Deployed, it runs a core in a persistent Vercel Sandbox in your own Vercel
+ * project, with its data on a Drive: one for production and one per Git
+ * branch for previews.
  * It is created on first use, wakes when a request needs it (about a second)
  * and stops after `idleMs` without requests or sockets. The function's Vercel
  * OIDC token is its only credential, so there are no secrets and no env vars:
@@ -187,9 +200,7 @@ export function remote(
  * the Sandbox to re-pin the core. Install `@vercel/sandbox` and
  * `@vercel/functions` next to `jazz-tools`. A deployment of a newer jazz-tools
  * restarts the core on its version, and an older deployment never moves it
- * back. Outside a production or preview deployment (`next dev`, `vercel dev`,
- * tests) it runs `local` instead: by default a SQLite core in `.jazz/local`.
- * Branch cores are not deleted when a branch merges yet: each keeps its
+ * back. Branch cores are not deleted when a branch merges yet: each keeps its
  * Sandbox and a Drive of up to `maxDriveBytes` until you remove them.
  */
 export function vercel(
@@ -220,6 +231,44 @@ function blobOptions(blobs: BlobStore): {
   return { blobs: "files", ...(blobs.dir === undefined ? {} : { blobsDir: blobs.dir }) };
 }
 
+declare const localFirstGuestBrand: unique symbol;
+
+/**
+ * `authenticate`'s answer for a request from a local-first guest: an account
+ * a browser made on its own, before (or without) signing in. Return
+ * {@link acceptLocalFirstAuth} for the requests you let guests make; any other
+ * answer refuses a guest.
+ */
+export interface LocalFirstGuest {
+  readonly [localFirstGuestBrand]: true;
+}
+
+const LOCAL_FIRST_GUEST = Object.freeze({
+  kind: "jazz:local-first-guest",
+}) as unknown as LocalFirstGuest;
+
+/**
+ * Let this request through as a local-first guest, when it comes from one.
+ * Guests are refused unless `authenticate` returns this: a guest has no user
+ * in your auth, so only your permissions stand between it and your data.
+ *
+ * ```ts
+ * authenticate: async (request) => {
+ *   const session = await auth.api.getSession({ headers: request.headers });
+ *   return session ? { userId: session.user.id } : acceptLocalFirstAuth(request);
+ * },
+ * ```
+ *
+ * An app with no sign-in of its own, where every browser is a guest, passes
+ * it as is: `authenticate: acceptLocalFirstAuth`.
+ *
+ * For a request that is not a guest's, it means the same as `null`: no one
+ * is signed in.
+ */
+export function acceptLocalFirstAuth(_request: Request): LocalFirstGuest {
+  return LOCAL_FIRST_GUEST;
+}
+
 /** Who the request's user is, as the app's own auth decides. */
 export interface JazzUser {
   /** Stable user id in your auth system. Becomes the identity's `sub`. */
@@ -236,8 +285,15 @@ export interface CreateJazzOptions {
    * Decide who sent `request`, with your app's own session (a cookie, a
    * header). Return null for a signed-out request. Jazz calls it when a
    * browser signs in or opens a sync session, and in `forRequest`.
+   *
+   * Local-first guests are refused unless it returns
+   * `acceptLocalFirstAuth(request)` for them; an app with no sign-in passes
+   * `authenticate: acceptLocalFirstAuth`. Without `authenticate`, only
+   * backend code reaches the data.
    */
-  authenticate?: (request: Request) => JazzUser | null | Promise<JazzUser | null>;
+  authenticate?: (
+    request: Request,
+  ) => JazzUser | LocalFirstGuest | null | Promise<JazzUser | LocalFirstGuest | null>;
   /** The path Jazz is mounted under. Defaults to `/jazz`. */
   basePath?: string;
   /**
@@ -327,7 +383,16 @@ export interface Jazz {
   ready(): Promise<Jazz>;
   /** Answer one request under `basePath` (sync, sign-in, the HTTP stream). */
   handle(request: Request): Promise<Response>;
-  /** Route handlers for a Next.js catch-all route (`app/jazz/[...path]/route.ts`). */
+  /**
+   * Route handlers for a Next.js catch-all route:
+   *
+   * ```ts
+   * // app/jazz/[...path]/route.ts
+   * import { jazz } from "@/lib/jazz.server"; // export const jazz = createJazz({ ... })
+   *
+   * export const { GET, POST, DELETE } = jazz.next();
+   * ```
+   */
   next(): {
     GET(request: Request): Promise<Response>;
     POST(request: Request): Promise<Response>;
@@ -765,7 +830,8 @@ function refuseServerlessDisk(dir: string): void {
   if (!host) return;
   throw new Error(
     `sqlite({ path: ${JSON.stringify(dir)} }) can't keep data on ${host}: its functions have no lasting disk. ` +
-      "Use remote({ url, appId, secret }) to a sync server or Jazz Cloud.",
+      (host === "Vercel" ? "Use vercel(), whose local store runs sqlite() in dev, or " : "Use ") +
+      "remote({ url, appId, secret }) to a sync server or Jazz Cloud.",
   );
 }
 
@@ -1080,8 +1146,26 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   async function authenticate(request: Request): Promise<JazzUser | null> {
     const client = await backendClients.resolve(request);
     if (client !== null) return client !== "refused" && client.kind === "user" ? client.user : null;
+    const answer = await askAuthenticate(request);
+    return answer === LOCAL_FIRST_GUEST ? null : (answer as JazzUser | null);
+  }
+
+  async function askAuthenticate(request: Request): Promise<JazzUser | LocalFirstGuest | null> {
     if (!options.authenticate) return null;
     return (await options.authenticate(request)) ?? null;
+  }
+
+  /** Whether the app lets `request` in as a local-first guest (`acceptLocalFirstAuth`). */
+  let warnedGuestsOff = false;
+  async function acceptsGuest(request: Request): Promise<boolean> {
+    if ((await askAuthenticate(request)) === LOCAL_FIRST_GUEST) return true;
+    if (!warnedGuestsOff) {
+      warnedGuestsOff = true;
+      console.warn(
+        "createJazz: refused a local-first guest. To let guests sync, return acceptLocalFirstAuth(request) from authenticate for them.",
+      );
+    }
+    return false;
   }
 
   /** One admin account request to the core: this backend vouches for the identities. */
@@ -1461,6 +1545,26 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
             });
         }, every);
         (recheck as unknown as { unref?: () => void }).unref?.();
+      } else if (admitted.guest && every > 0) {
+        // The app may stop letting guests in (or this one): ask again, as for users.
+        let checking = false;
+        recheck = setInterval(() => {
+          if (checking || ended) return;
+          checking = true;
+          void acceptsGuest(request)
+            .then(
+              (accepted) => {
+                if (ended || accepted) return;
+                onEvent(null, { kind: "close", code: 1008, reason: "authenticate again" });
+                end();
+              },
+              () => {},
+            )
+            .finally(() => {
+              checking = false;
+            });
+        }, every);
+        (recheck as unknown as { unref?: () => void }).unref?.();
       }
       socket = core.openSocket(headerPairs(request.headers), onEvent, admitted.access);
       return socket.send(admitted.prelude);
@@ -1518,6 +1622,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     access: BackendAccess;
     trusted: boolean;
     expiresAt?: number;
+    /** A local-first guest, let in by `acceptLocalFirstAuth`. */
+    guest?: true;
   } | null> {
     let parsed: Record<string, unknown>;
     try {
@@ -1564,6 +1670,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       if (client) return null;
       const audience = guestAudience(request, token);
       if (!audience) return null;
+      // Guests are off unless the app's `authenticate` lets this one in.
+      if (!(await acceptsGuest(request))) return null;
       if (audience.endpoint === undefined) {
         // Its own token decides who it is; the backend's secret only vouches
         // for the bundle this socket is pinned to (see `pinnedSocket`).
@@ -1573,6 +1681,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
           userId: undefined,
           access: "session",
           trusted: false,
+          guest: true,
         };
       }
       // Signed for this endpoint, which the core can't know: vouch for it.
@@ -1588,6 +1697,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         userId: undefined,
         access: "backend",
         trusted: false,
+        guest: true,
       };
     }
     const stated = auth.backend_session as { user_id?: unknown } | undefined;

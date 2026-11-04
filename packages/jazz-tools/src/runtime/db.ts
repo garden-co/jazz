@@ -4418,7 +4418,7 @@ async function openDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
 export function assertNoClientBackendSecret(config: object): void {
   if (Object.hasOwn(config, "backendSecret")) {
     throw new Error(
-      "DbConfig does not accept backendSecret. Use createJazzContext() from jazz-tools/backend on a trusted server instead.",
+      "DbConfig does not accept backendSecret. Use createJazz() or createJazzSession() from jazz-tools/backend on a trusted server instead.",
     );
   }
 }

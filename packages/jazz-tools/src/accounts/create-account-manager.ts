@@ -1,9 +1,9 @@
 import { DefaultRuntimeSource } from "../runtime/default-runtime-source.js";
 import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
 import type { RuntimeSourcesConfig } from "../runtime/context.js";
-import { clientScope, DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
+import { clientScope } from "../runtime/client-scope.js";
 import type { AccountStore } from "./persistence.js";
-import { createAccountManagerWithMinter } from "./account-manager-core.js";
+import { createAccountManagerWithMinter, resolvedServerUrl } from "./account-manager-core.js";
 
 export interface AccountManagerConfig {
   /**
@@ -13,8 +13,11 @@ export interface AccountManagerConfig {
   appId?: string;
   /** The app id an existing local-first app's users were created under. */
   scope?: string;
-  /** The app's Jazz endpoint (default `"/jazz"`, its own backend). */
-  serverUrl?: string;
+  /**
+   * The app's Jazz endpoint (default `"/jazz"`, its own backend), or `null`
+   * to keep Jazz on this device only, with no server and no sign-in.
+   */
+  serverUrl?: string | null;
   env?: string;
   runtimeSources?: RuntimeSourcesConfig;
   /**
@@ -34,7 +37,7 @@ export interface AccountManagerConfig {
 
 /** Prepare crypto and restore selection; createLocalFirst() is synchronous afterward. */
 export async function createAccountManager(config: AccountManagerConfig) {
-  const scope = clientScope({ ...config, serverUrl: config.serverUrl ?? DEFAULT_SERVER_URL });
+  const scope = clientScope({ ...config, serverUrl: resolvedServerUrl(config) });
   const source = new DefaultRuntimeSource();
   await source.load({ appId: scope, runtimeSources: config.runtimeSources });
   return createAccountManagerWithMinter(config, (secret, audience) =>
