@@ -24,7 +24,7 @@ pnpm dev
 
 `pnpm dev` runs the server with `tsx watch` against `src/main.ts`. The HTTP API listens on a default port (see `main.ts`).
 
-The server connects to the Jazz server at `JAZZ_SERVER_URL` with `JAZZ_BACKEND_SECRET`. Set `JAZZ_BUNDLE` to the bundle id that deploying the app's schema and permissions returned: the requests it serves for signed-in users are checked by that bundle's permissions.
+The server connects to the Jazz server at `JAZZ_SERVER_URL` with `JAZZ_BACKEND_SECRET`. `JAZZ_BUNDLE` is required: set it to the bundle id that deploying the app's schema and permissions returned: the requests it serves for signed-in users are checked by that bundle's permissions.
 
 Storage is persistent by default. The CLI resolves its database path in this order:
 

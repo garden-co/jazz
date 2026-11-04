@@ -1384,7 +1384,7 @@ async function loadLocalMigrationGraph(
   return { schemas, migrations, currentSchemaHash: current?.hash ?? null };
 }
 
-/** Publish all missing local history and activate schema.ts with its permissions. */
+/** Publish all missing local history and schema.ts with its permissions as a bundle. */
 export async function deploy(options: DeployOptions): Promise<DeployResult> {
   const migrationsDir = resolvedMigrationsDir(options.schemaDir, options.migrationsDir);
   if ("noVerify" in options)

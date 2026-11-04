@@ -336,7 +336,7 @@ export default function App() {
           fetchPublishedBundles(activeConnection.serverUrl, {
             appId: activeConnection.appId,
             adminSecret: activeAdminSecret,
-          }).catch(() => []),
+          }),
         ]);
 
         if (!active) {

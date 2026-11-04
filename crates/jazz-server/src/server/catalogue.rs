@@ -154,8 +154,9 @@ pub(crate) struct StoredCatalogue {
 
 impl StoredCatalogue {
     /// The permissions bundle published last, if any.
+    #[cfg(feature = "embedded-server")]
     pub(crate) fn latest_bundle(&self) -> Option<jazz::catalogue::BundleId> {
-        self.index.lock().ok()?.latest_bundle
+        Some(self.index.lock().ok()?.bundles.last()?.id)
     }
 
     /// Every published permissions bundle, oldest first.
@@ -314,8 +315,6 @@ struct CatalogueIndex {
     /// Every published permissions bundle (see [`jazz::catalogue`]),
     /// oldest first.
     bundles: Vec<jazz::catalogue::CatalogueBundle>,
-    /// The bundle published last: what a backend booting now pins to.
-    latest_bundle: Option<jazz::catalogue::BundleId>,
 }
 
 impl CatalogueIndex {
@@ -371,7 +370,6 @@ impl CatalogueIndex {
         index
             .bundles
             .sort_by_key(|bundle| (bundle.published_at, bundle.id.0));
-        index.latest_bundle = index.bundles.last().map(|bundle| bundle.id);
         if let Some(schema) = initial_schema {
             index.add_schema(schema.clone());
         }

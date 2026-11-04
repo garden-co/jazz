@@ -103,6 +103,11 @@ export async function createServer(
   if (!serverUrl || !backendSecret) {
     throw new Error("JAZZ_SERVER_URL and JAZZ_BACKEND_SECRET are required");
   }
+  if (!bundle) {
+    // Users act through a link pinned to the bundle this app deployed; an
+    // unpinned link cannot act for them.
+    throw new Error("JAZZ_BUNDLE is required: pass the bundle id that `deploy` returned");
+  }
 
   const session = await createJazzSession({
     appId,

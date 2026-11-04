@@ -1,4 +1,5 @@
 import { computeSchemaHash } from "../schema-hash.js";
+import { fetchPublishedBundles } from "../dev/catalogue-api.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -274,6 +275,16 @@ describe("startLocalJazzServer", () => {
       });
 
       expect(response.status).toBe(401);
+      // Listing the published bundles needs the same secret.
+      await expect(
+        fetchPublishedBundles(server.url, {
+          appId: server.appId,
+          adminSecret: "wrong-admin-secret",
+        }),
+      ).rejects.toThrow(/401/);
+      await expect(
+        fetchPublishedBundles(server.url, { appId: server.appId, adminSecret }),
+      ).resolves.toEqual([]);
     } finally {
       await stopTrackedLocalJazzServer(server);
     }

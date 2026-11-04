@@ -921,6 +921,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn published_bundles_require_the_admin_secret() {
+        let state = ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(test_auth_config())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .unwrap()
+            .state;
+        let app = make_test_router(state);
+        for secret in [None, Some("wrong-secret"), Some("admin-secret")] {
+            let mut request = axum::http::Request::builder().uri(test_app_route("/admin/bundles"));
+            if let Some(secret) = secret {
+                request = request.header("X-Jazz-Admin-Secret", secret);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(axum::body::Body::empty()).unwrap())
+                .await
+                .unwrap();
+            if secret != Some("admin-secret") {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                continue;
+            }
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(json, serde_json::json!({ "bundles": [] }));
+        }
+    }
+
+    #[tokio::test]
     async fn migration_graph_includes_isolated_schemas_forward_edges_and_active_schema() {
         let schema = |column| {
             SchemaBuilder::new()

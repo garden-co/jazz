@@ -131,7 +131,7 @@ describe("App", () => {
     cleanup();
   });
 
-  it("migrates a v2 connection without retaining its secret and connects manually when bundles fetch fails", async () => {
+  it("migrates a v2 connection without retaining its secret and connects manually with no published bundle", async () => {
     const adminSecret = "admin-secret";
     localStorage.setItem(
       STORAGE_KEY,
@@ -166,7 +166,7 @@ describe("App", () => {
     fetchSchemaHashesMock.mockResolvedValue({
       hashes: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
     });
-    fetchPublishedBundlesMock.mockRejectedValue(new Error("Bundles fetch failed: 404"));
+    fetchPublishedBundlesMock.mockResolvedValue([]);
 
     render(<App />);
 
@@ -219,6 +219,20 @@ describe("App", () => {
         }),
       );
     });
+  });
+
+  it("shows a published bundles fetch failure instead of an empty bundle", async () => {
+    storeActiveConnection();
+    const shutdown = vi.fn();
+    createJazzClientMock.mockResolvedValueOnce({ shutdown });
+    fetchPublishedBundlesMock.mockRejectedValueOnce(new Error("Bundles fetch failed: 401"));
+
+    render(<App />);
+    await enterStoredConnectionSecret();
+
+    expect((await screen.findByRole("alert")).textContent).toBe("Bundles fetch failed: 401");
+    expect(screen.queryByText("Inspector ready")).toBeNull();
+    await waitFor(() => expect(shutdown).toHaveBeenCalledTimes(1));
   });
 
   it("shuts down a client resolved before required schema setup fails", async () => {
