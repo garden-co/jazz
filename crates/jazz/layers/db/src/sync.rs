@@ -80,7 +80,7 @@ pub use crate::wire::TransportError;
 pub(crate) use conflicts::Built;
 pub use conflicts::WriteConflict;
 pub use large_delta::{CellDelta, WireDelta};
-pub(crate) use pending::{PENDING_DDL, holds_encoded_pending, replace_encoded_pending};
+pub(crate) use pending::PENDING_DDL;
 
 /// Wall-clock Unix ms.
 fn now_ms() -> i64 {

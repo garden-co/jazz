@@ -119,42 +119,6 @@ fn has_rows(conn: &rusqlite::Connection, table: &str) -> Result<bool, Error> {
             .map_err(storage)?)
 }
 
-/// Whether this is a development store from before ops were stored as rows
-/// of their cells (each op an encoded message in `_jazz_pending_items`)
-/// that still holds an upload, pending or refused, in that layout. Reads
-/// only.
-pub(crate) fn holds_encoded_pending(conn: &rusqlite::Connection) -> Result<bool, Error> {
-    Ok(has_table(conn, "_jazz_pending_items")?
-        && (has_rows(conn, "_jazz_pending")? || has_rows(conn, "_jazz_rejected")?))
-}
-
-/// Lay out a development store's empty pending tables anew if they are in
-/// the encoded-op layout: `format::admit` refused one holding uploads, so
-/// nothing is lost. The drops are one savepoint, and `_jazz_pending_items`
-/// (what marks the old layout) goes last, so a crash part way leaves the
-/// old layout whole, to be replaced again at the next open.
-pub(crate) fn replace_encoded_pending(conn: &rusqlite::Connection) -> Result<(), Error> {
-    if !has_table(conn, "_jazz_pending_items")? {
-        return Ok(());
-    }
-    conn.execute_batch("SAVEPOINT jazz_replace_pending")
-        .map_err(storage)?;
-    let dropped = conn.execute_batch(
-        "DROP TRIGGER IF EXISTS _jazz_pending_forget; \
-         DROP TABLE IF EXISTS _jazz_pending; \
-         DROP TABLE IF EXISTS _jazz_rejected_ops; \
-         DROP TABLE IF EXISTS _jazz_rejected; \
-         DROP TABLE _jazz_pending_items;",
-    );
-    let end = match dropped {
-        Ok(()) => "RELEASE jazz_replace_pending",
-        Err(_) => "ROLLBACK TO jazz_replace_pending; RELEASE jazz_replace_pending",
-    };
-    let ended = conn.execute_batch(end).map_err(storage);
-    dropped.map_err(storage)?;
-    ended
-}
-
 /// A stored part that does not read back is another layout's: refused as
 /// an unsupported storage format, never misread.
 fn bad(detail: impl std::fmt::Display) -> Error {

@@ -144,6 +144,4 @@ encoded sync messages (`_jazz_pending` with named columns, one
 cell with its kind and a native SQLite value, `_jazz_pending_deltas`,
 `_jazz_pending_reads` and `_jazz_pending_read_rows`; the retry store's
 `_jazz_rejected_ops`, `_jazz_rejected_cells` and `_jazz_rejected_deltas`
-in the same layout), regenerated it the same way. A development store in
-the encoded-op layout (`_jazz_pending_items`) opens with its pending tables
-laid out anew when it holds no upload, and is refused when it holds one.
+in the same layout), regenerated it the same way.
