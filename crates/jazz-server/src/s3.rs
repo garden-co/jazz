@@ -211,6 +211,16 @@ const OWNER_OBJECT: &str = ".jazz-owner";
 /// whose stores may use the bucket.
 pub(crate) const ENVIRONMENT_OBJECT: &str = ".jazz-environment";
 
+/// What reading a marker object found.
+enum Marker {
+    Found(String),
+    /// 404: no such object.
+    Missing,
+    /// 403 AccessDenied: absent to keys without s3:ListBucket, or not
+    /// readable with these keys.
+    Denied,
+}
+
 /// Large-value bytes in an S3-compatible bucket ([`S3Options`]).
 pub struct S3ChunkStore {
     inner: Arc<Inner>,
@@ -608,6 +618,16 @@ impl Inner {
 
     /// A small marker object's contents, or `None` if there is none.
     async fn read_marker(&self, name: &str, rooted: bool) -> Result<Option<String>, String> {
+        Ok(match self.read_marker_status(name, rooted).await? {
+            Marker::Found(contents) => Some(contents),
+            Marker::Missing | Marker::Denied => None,
+        })
+    }
+
+    /// A small marker object's contents, or which answer said it is absent:
+    /// a 404, or a 403 AccessDenied (absence to keys without s3:ListBucket,
+    /// or a key that may not read it).
+    async fn read_marker_status(&self, name: &str, rooted: bool) -> Result<Marker, String> {
         let response = self
             .send(Request {
                 method: reqwest::Method::GET,
@@ -618,11 +638,23 @@ impl Inner {
                 rooted,
             })
             .await?;
-        let Some(response) = self.found(response, "read", name).await? else {
-            return Ok(None);
-        };
-        let body = read_bounded(response, 1024, name).await?;
-        Ok(Some(String::from_utf8_lossy(&body).trim().to_owned()))
+        let status = response.status();
+        if status.is_success() {
+            let body = read_bounded(response, 1024, name).await?;
+            return Ok(Marker::Found(
+                String::from_utf8_lossy(&body).trim().to_owned(),
+            ));
+        }
+        let body = response.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Marker::Missing);
+        }
+        if status == reqwest::StatusCode::FORBIDDEN
+            && xml_field(&body, "Code").as_deref() == Some("AccessDenied")
+        {
+            return Ok(Marker::Denied);
+        }
+        Err(self.failure(status, &body, "read", name).await)
     }
 
     /// With [`S3Options::environment`] set, check that the bucket serves
@@ -684,12 +716,19 @@ impl Inner {
                 .await);
         }
         if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
-            return match self.read_marker(ENVIRONMENT_OBJECT, true).await? {
-                Some(claimed) if &claimed == environment => Ok(()),
-                Some(claimed) => Err(refused(&claimed)),
-                // Its put says it exists, and its read answered as absent:
-                // AccessDenied on GetObject (or a delete in between).
-                None => Err(unreachable_marker()),
+            return match self.read_marker_status(ENVIRONMENT_OBJECT, true).await? {
+                Marker::Found(claimed) if &claimed == environment => Ok(()),
+                Marker::Found(claimed) => Err(refused(&claimed)),
+                // Its put says it exists, and its read was denied: the keys
+                // may not read it (s3:GetObject).
+                Marker::Denied => Err(unreachable_marker()),
+                // Its put says it exists, and its read found none: deleted
+                // in between. A later claim starts over.
+                Marker::Missing => Err(format!(
+                    "s3 blobs: the environment marker s3://{}/{ENVIRONMENT_OBJECT} vanished \
+                     while claiming it for the {environment} environment",
+                    self.options.bucket
+                )),
             };
         }
         self.expect_ok(response, "claim", ENVIRONMENT_OBJECT)
@@ -1217,6 +1256,23 @@ mod tests {
         assert!(bucket.names("b/").is_empty());
     }
 
+    /// A marker created by someone else and deleted before our read: the
+    /// claim says it vanished, not that a permission is missing.
+    #[test]
+    fn a_marker_deleted_while_claiming_says_it_vanished() {
+        let bucket = mock::MockS3::start();
+        let mut options = bucket.options("a/");
+        options.environment = Some("production".to_owned());
+        *bucket.state.conflict_then_vanish.lock().unwrap() =
+            Some("bucket/.jazz-environment".to_owned());
+        let store = S3ChunkStore::new(options, "store-a".to_owned()).unwrap();
+        let (key, bytes) = node(8);
+        let error = block(store.put(&key, &bytes)).unwrap_err();
+        assert!(error.message.contains("vanished"), "{error}");
+        assert!(!error.message.contains("s3:GetObject"), "{error}");
+        assert!(bucket.names("a/").is_empty());
+    }
+
     /// Without s3:ListBucket a missing key answers 403: it reads as absent.
     /// A body larger than any node is refused.
     #[test]
@@ -1326,6 +1382,10 @@ pub(crate) mod mock {
         pub only_prefix: Mutex<Option<String>>,
         /// Set: reads (GET) only under this prefix; puts anywhere.
         pub only_prefix_reads: Mutex<Option<String>>,
+        /// Set: a create-if-absent put of this key answers 412 while the key
+        /// stays absent, as when another writer created it and it was
+        /// deleted before our read.
+        pub conflict_then_vanish: Mutex<Option<String>>,
         /// Keys by access key id; `test`/`test` is always valid.
         issued: Mutex<BTreeMap<String, (String, String)>>,
         /// What STS was last asked to accept.
@@ -1442,6 +1502,11 @@ pub(crate) mod mock {
                     base64::engine::general_purpose::STANDARD.encode(Sha256::digest(&body));
                 if header("x-amz-checksum-sha256") != Some(digest.as_str()) {
                     return error(StatusCode::BAD_REQUEST, "BadDigest");
+                }
+                if header("if-none-match") == Some("*")
+                    && state.conflict_then_vanish.lock().unwrap().as_deref() == Some(key.as_str())
+                {
+                    return error(StatusCode::PRECONDITION_FAILED, "PreconditionFailed");
                 }
                 if header("if-none-match") == Some("*") && objects.contains_key(&key) {
                     return error(StatusCode::PRECONDITION_FAILED, "PreconditionFailed");
