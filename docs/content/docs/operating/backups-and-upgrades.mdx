@@ -72,20 +72,39 @@ account.
 
 ### Self-hosted alpha.59 servers
 
-Move a self-hosted data directory with the same import tool Jazz Cloud uses. It runs in three steps,
-and none of them touch the original directory:
+Move a self-hosted data directory with the same import tool Jazz Cloud uses. You need Node and the
+exporter download, no Rust toolchain, and nothing writes to your alpha.59 directory.
 
-1. **Export** reads a copy of your alpha.59 data directory with alpha.59's own code and writes a
-   dump.
-2. **Import** builds a new alpha.60 data directory from the dump. It needs your app's ID, which it uses
-   to link returning users' identities to their accounts.
-3. **Verify** checks the new directory against what alpha.59 read: every row, every sign-in and
-   every identity link.
+1. **Stop the alpha.59 server.**
+2. **Download the exporter.** Get `jazz-alpha59-export-<platform>` (`linux-x64`, `linux-arm64` or
+   `darwin-arm64`) from the
+   [v2.0.0-alpha.60 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.60), and
+   check it against `jazz-alpha59-export.sha256` from the same release.
+3. **Export** the data with alpha.59's own code. `--work` is an empty scratch directory: the
+   exporter reads a private copy of your data there.
 
-Stop the alpha.59 server, run all three, then point your new backend's `sqlite({ path })` at the new
-directory. Keep the old directory until you've checked the new one. The dump holds all your data,
-so keep it where your data lives and delete it afterwards.
+   ```bash title="Terminal"
+   ./jazz-alpha59-export --data-dir ./data --work ./export-work --out app.dump
+   ```
 
-A few things alpha.59 could store are not supported yet, and the import stops with an error naming
-them rather than leaving them out: branched rows, schemas published but never activated, and writes
-the server hadn't settled yet.
+4. **Import and verify** into a new, empty directory. Verify checks every row, sign-in and identity
+   link against what alpha.59 read.
+
+   ```bash title="Terminal"
+   npx jazz-tools@alpha migrate-alpha59 import --dump app.dump --data-dir ./data-new --app-id <appId>
+   npx jazz-tools@alpha migrate-alpha59 verify --dump app.dump --data-dir ./data-new --app-id <appId>
+   ```
+
+5. **Start your new backend** with `sqlite({ path: "./data-new" })`. Keep `./data` until you're
+   happy with the result.
+
+`--app-id` is your app's ID exactly as before, case included: the import uses it to link each
+returning user's old sign-in to their account, as `jazz:app:<appId>` with their old `sub`. Pass
+`--no-backend-identity-links` to skip that. The dump holds all your app's data, so store it like the
+data directory and delete it when you're done.
+
+The import brings over your current schema and its permissions. A few things alpha.59 could store
+are not supported yet, and the import stops with an error naming them rather than leaving them
+out: branched rows, writes the server hadn't settled yet, and rows with no migration path to the
+current schema. Versions that carry transaction metadata are refused too; pass
+`--drop-transaction-metadata` to import them without it. A failed import cleans up after itself.
