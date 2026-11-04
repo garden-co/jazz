@@ -46,7 +46,6 @@
     getSnapshot: () => startup,
     subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
     createLocalFirst: unavailable, restoreLocalFirst: unavailable,
-      becomeBackend: unavailable,
       loginWithBackend: unavailable,
       linkWithBackend: unavailable,
     logout: unavailable, retry: start,

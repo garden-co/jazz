@@ -101,9 +101,9 @@ client-side persistence components.
 
 Cookie-based WebSocket auth is enabled with `--auth-cookie-name` or `JAZZ_AUTH_COOKIE_NAME`. When no
 explicit auth credential is supplied, the sync server reads that named cookie and validates the JWT
-it contains. If your app uses a separate application session cookie, resolve it in your own app server
-and obtain an admitted account handle from its JWT. Pass that handle to `await client.forAccount(account)`;
-`forRequest` accepts bearer headers and does not parse application session cookies.
+it contains. If your app uses its own session cookie, run Jazz in your app's backend with
+`createJazz` instead: its `authenticate` reads that cookie, and `jazz.forRequest(request)` acts as
+the user it names.
 
 If you prefer to start the database server programmatically, you can use `startLocalJazzServer` from `jazz-tools/dev`.
 It expects similar arguments as the CLI.

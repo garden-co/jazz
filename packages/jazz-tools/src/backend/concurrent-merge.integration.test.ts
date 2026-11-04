@@ -5,8 +5,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
-import { createJazzSession } from "./index.js";
+import { deploy, startLocalJazzServer, startTestJazz, type TestJazz } from "../testing/index.js";
 
 describe("finite concurrent local write convergence", () => {
   for (const withGSet of [false, true]) {
@@ -37,24 +36,16 @@ describe("finite concurrent local write convergence", () => {
           allowLocalFirstAuth: true,
         };
         let server = await startLocalJazzServer({ ...settings, schema: app, permissions });
-        const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
-        async function open(name: string) {
-          const session = await createJazzSession({
-            appId: settings.appId,
-            app,
-            permissions,
-            serverUrl: server.url,
-            driver: { type: "persistent", dataPath: join(directory, name) },
-            initial: { backendSecret: settings.backendSecret },
-          });
+        // Each editor is an app's own Jazz (createJazz) in front of the core.
+        const sessions: TestJazz[] = [];
+        async function open() {
+          const session = await startTestJazz({ app, permissions, core: server });
           sessions.push(session);
-          const snapshot = session.getSnapshot();
-          if (!snapshot.client) throw snapshot.error ?? new Error(snapshot.status);
-          return snapshot.client.db;
+          return session.jazz.db;
         }
         try {
           await deploy({ ...settings, schema: app, permissions, serverUrl: server.url });
-          const writer = await open("writer");
+          const writer = await open();
           const id = randomUUID();
           await writer
             .upsert(app.records, id, {
@@ -65,7 +56,7 @@ describe("finite concurrent local write convergence", () => {
               tags: ["seed"],
             })
             .wait({ tier: "global" });
-          const observer = await open("observer");
+          const observer = await open();
           await observer.all(app.records, { tier: "remote" });
           const port = server.port;
           if (offline) {
@@ -93,7 +84,7 @@ describe("finite concurrent local write convergence", () => {
           }
           await Promise.all(tails.map((settle) => settle()));
           await delay(1000);
-          const editor = await open("editor");
+          const editor = await open();
           expect(await editor.all(app.records, { tier: "remote" })).toMatchObject([
             { revision: 100, archived: false },
           ]);
@@ -111,10 +102,7 @@ describe("finite concurrent local write convergence", () => {
             .poll(() => writer.all(app.records, { tier: "remote" }))
             .toMatchObject([{ title: "settled", revision: 100, archived: true }]);
         } finally {
-          for (const session of sessions.reverse()) {
-            await session.getSnapshot().client?.shutdown({ waitForSync: false });
-            await session.close();
-          }
+          for (const session of sessions.reverse()) await session.stop();
           await server.stop();
           await rm(directory, { recursive: true, force: true });
         }
