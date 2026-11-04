@@ -183,12 +183,20 @@ export function proveForegroundWriteAbi(
   )
     throw new Error("foreground Commit did not return a non-zero public txId");
   markFailure("foreground-write-retire-failed");
+  // A committed handle is retired: committing it again is refused, and a
+  // rollback is the relay's idempotent no-op, reporting nothing rolled back.
+  const recommitted = execute({
+    type: "commitTransaction",
+    transaction: mergeable,
+  });
+  if (recommitted.type !== "operationError")
+    throw new Error("foreground committed a terminal transaction handle twice");
   const retired = execute({
     type: "rollbackTransaction",
     transaction: mergeable,
   });
-  if (retired.type !== "operationError")
-    throw new Error("foreground accepted a terminal transaction handle");
+  if (retired.type !== "transactionRolledBack" || retired.rolledBack)
+    throw new Error("foreground rolled back a terminal transaction handle");
 
   markFailure("foreground-write-rollback-failed");
   const exclusive = requireTransaction("serializable");
