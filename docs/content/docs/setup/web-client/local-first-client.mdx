@@ -28,7 +28,7 @@ Jazz needs no bundler plugin. Two settings cover the common setups:
   };
   ```
 
-Pass the app ID and server URL to the client through your framework's public env vars (`VITE_*`, `NEXT_PUBLIC_*`, SvelteKit's `PUBLIC_*`). Secrets stay server-only and unprefixed: `JAZZ_ADMIN_SECRET` and `BACKEND_SECRET`. Publish schema and permissions with `pnpm dlx jazz-tools@alpha deploy <appId>`; see [Migrations](/docs/schemas/migrations).
+The browser names no app: it syncs with your backend at `/jazz` (or the `serverUrl` you pass), and the app ID belongs to the backend's store (`remote({ appId })`, `sqlite({ appId })`), read from server-only env like `JAZZ_APP_ID`. Secrets stay server-only too: `JAZZ_ADMIN_SECRET` and `BACKEND_SECRET`. Publish schema and permissions with `pnpm dlx jazz-tools@alpha deploy <appId>`; see [Migrations](/docs/schemas/migrations).
 
 ## Wasm loading
 
