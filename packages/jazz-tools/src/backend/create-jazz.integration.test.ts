@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { generateSecret, identityOf, signChallenge, signToken } from "../local-first-auth/index.js";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { JazzCore } from "jazz-napi";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import {
@@ -1209,8 +1209,11 @@ describe("createJazz", () => {
     expect(refused).not.toBe(first);
     await expect(refused.ready()).rejects.toThrow(/is already open.*another process/s);
     await other.close();
-    // Free again, the same Jazz opens on its next use.
+    // Free again, the same Jazz opens on its next use after the backoff.
+    const now = Date.now.bind(Date);
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => now() + 2_000);
     await refused.ready();
+    spy.mockRestore();
     await refused.close();
 
     const previous = process.env.VERCEL;
