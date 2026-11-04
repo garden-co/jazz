@@ -6,6 +6,7 @@
   "scripts": {
     "test": "node --experimental-strip-types --test src/*.test.mjs",
     "start": "expo start --clear",
+    "backend": "tsx server.ts",
     "android": "expo run:android",
     "ios": "expo run:ios",
     "build": "jazz-tools validate && tsc --noEmit",
@@ -29,6 +30,7 @@
     "@babel/plugin-transform-flow-strip-types": "^7.27.1",
     "@types/react": "^19.0.0",
     "babel-preset-expo": "~54.0.10",
+    "tsx": "^4.0.0",
     "typescript": "catalog:default"
   }
 }

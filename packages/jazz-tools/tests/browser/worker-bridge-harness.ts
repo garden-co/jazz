@@ -18,7 +18,12 @@ import {
 } from "../../src/runtime/indexeddb-page-store.js";
 import { setBrowserFollowerProbeTimingForTest } from "../../src/runtime/native-runtime/browser-follower-connection.js";
 import { TestCleanup, uniqueDbName, waitForCondition, waitForQuery } from "./support.js";
-import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
+import {
+  getJazzServerInfo,
+  jazzCore,
+  startJazzApp,
+  type JazzServerInfo,
+} from "./testing-server.js";
 import { closeRemoteBrowserDb, waitForRemoteBrowserDbTitle } from "./remote-browser-db.js";
 import { CompiledPermissions, schema as s, migration as m } from "../../src/";
 import { computeSchemaHash, deploy } from "../../src/dev/catalogue.js";
@@ -332,14 +337,14 @@ export const cataloguePermissionsV2 = s.definePermissions(catalogueAppV2, ({ pol
  * Structurally valid JWT with a deliberately invalid signature: parses fine on
  * the client (sub/exp claims) but the testing server rejects it at handshake.
  */
-export function makeStructurallyValidJwt(userId: string): string {
+export function makeStructurallyValidJwt(userId: string, issuer = "urn:jazz:test"): string {
   const encode = (value: unknown) =>
     btoa(JSON.stringify(value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   const header = encode({ alg: "HS256", typ: "JWT" });
   const payload = encode({
-    // Match TestJwtIssuer's ordinary external identity so this remains a
-    // same-principal refresh after the server rejects the signature.
-    iss: "urn:jazz:test",
+    // Pass the signed-in user's issuer for a same-principal token the
+    // server rejects for its signature.
+    iss: issuer,
     sub: userId,
     exp: Math.floor(Date.now() / 1000) + 3600,
   });
@@ -476,7 +481,10 @@ export async function publishCatalogueSchemaFamily(scope: string): Promise<JazzS
     migration,
   });
 
-  return testingServer;
+  return startJazzApp(testingServer, {
+    schema: catalogueAppV2.wasmSchema,
+    permissions: cataloguePermissionsV2,
+  });
 }
 
 export async function publishSyncServerSchemaAndPermissions(
@@ -505,23 +513,22 @@ export async function publishSyncServerSchemaAndPermissions(
       delete: { using: { type: "True" } },
     },
   };
-  await publishPermissionsForServer(testingServer, permissionsToPublish, schema);
-  return testingServer;
+  return publishPermissionsForServer(testingServer, permissionsToPublish, schema);
 }
 
+/**
+ * Deploy `permissions` to the core behind `testingServer`, then (re)start the
+ * app backend for them on the same origin, so clients reconnect to the new
+ * bundle. Returns the app backend's info.
+ */
 export async function publishPermissionsForServer(
   testingServer: JazzServerInfo,
   permissions: CompiledPermissions,
   schema?: Schema,
-): Promise<void> {
-  const { appId, serverUrl, adminSecret } = testingServer;
-  await deploy({
-    appId,
-    serverUrl,
-    adminSecret,
-    schema: schema ?? app.wasmSchema,
-    permissions,
-  });
+): Promise<JazzServerInfo> {
+  const deployedSchema = schema ?? app.wasmSchema;
+  await deploy({ ...jazzCore(testingServer), schema: deployedSchema, permissions });
+  return startJazzApp(testingServer, { schema: deployedSchema, permissions });
 }
 
 export async function replaceStorageManifest(name: string, manifest: unknown): Promise<void> {

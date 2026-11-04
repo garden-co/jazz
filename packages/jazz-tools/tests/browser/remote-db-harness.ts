@@ -1,6 +1,7 @@
 import type { Db, QueryBuilder } from "../../src/runtime/db.js";
 import type { DbConfig } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
+import { createAccountManager } from "../../src/accounts/create-account-manager.js";
 import { createBrowserTestDb } from "./account-fixtures.js";
 
 export interface RemoteBrowserDbCreateInput {
@@ -11,7 +12,12 @@ export interface RemoteBrowserDbCreateInput {
   queryJson?: string;
   schemaJson: string;
   serverUrl?: string;
-  jwtToken?: string;
+  /**
+   * A user's own origin of the app backend (from `jazzAppUserUrl`): sign in
+   * there and sync as them. Needs the opener to expose `__jazzAppRequest`
+   * (Node's `jazzAppRequest`), since the backend answers no CORS.
+   */
+  userUrl?: string;
   adminSecret?: string;
   localFirstSecret?: string;
   logLevel?: DbConfig["logLevel"];
@@ -37,6 +43,10 @@ interface RemoteBrowserDbState {
 declare global {
   interface Window {
     __jazzRemoteBrowserDbs__?: Map<string, RemoteBrowserDbState>;
+    __jazzAppRequest?: (
+      url: string,
+      init: { method: string; headers: [string, string][]; body: string | null },
+    ) => Promise<{ status: number; headers: [string, string][]; body: string }>;
   }
 }
 
@@ -66,6 +76,36 @@ function makeAllRowsQuery(
   };
 }
 
+/** Sign in at a user's origin, relaying the requests through the opener's Node. */
+async function loginAtUserOrigin(appId: string, userUrl: string) {
+  const relay = window.__jazzAppRequest;
+  if (!relay) throw new Error("A remote fixture signs in at userUrl only through __jazzAppRequest");
+  const relayFetch: typeof fetch = async (resource, init) => {
+    const request = new Request(resource, init);
+    const response = await relay(request.url, {
+      method: request.method,
+      headers: [...request.headers],
+      body: request.method === "GET" || request.method === "HEAD" ? null : await request.text(),
+    });
+    return new Response(response.body, { status: response.status, headers: response.headers });
+  };
+  let stored: string | null = null;
+  const accounts = await createAccountManager({
+    appId,
+    serverUrl: userUrl,
+    fetch: relayFetch,
+    store: {
+      async read() {
+        return stored;
+      },
+      async update(transform) {
+        stored = transform(stored);
+      },
+    },
+  });
+  return accounts.loginWithBackend();
+}
+
 export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): Promise<void> {
   if (input.adminSecret !== undefined)
     throw new Error("Remote browser fixtures do not admit backend credentials");
@@ -76,16 +116,15 @@ export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): 
     store.delete(input.id);
   }
 
+  if (input.userUrl !== undefined && input.serverUrl !== undefined)
+    throw new Error("Pass a remote browser fixture either serverUrl or userUrl, not both");
   const schema = JSON.parse(input.schemaJson) as WasmSchema;
   const db = await createBrowserTestDb({
     appId: input.appId,
     driver: { type: "persistent", dbName: input.dbName },
-    serverUrl: input.serverUrl,
-    ...(input.jwtToken
-      ? { jwtToken: input.jwtToken }
-      : input.localFirstSecret
-        ? { secret: input.localFirstSecret }
-        : {}),
+    serverUrl: input.userUrl ?? input.serverUrl,
+    ...(input.userUrl ? { account: await loginAtUserOrigin(input.appId, input.userUrl) } : {}),
+    ...(input.localFirstSecret ? { secret: input.localFirstSecret } : {}),
     logLevel: input.logLevel,
   });
 

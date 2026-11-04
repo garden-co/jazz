@@ -70,10 +70,6 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = [
 tower = { version = "0.5", features = ["util"] }
 
 [[test]]
-name = "jwks_retry"
-required-features = ["test"]
-
-[[test]]
 name = "trusted_workload"
 required-features = ["test"]
 

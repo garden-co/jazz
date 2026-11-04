@@ -78,6 +78,21 @@ describe("startLocalJazzServer via JazzServer", () => {
     },
   );
 
+  it("rejects the removed JWT options instead of ignoring them", async () => {
+    // A core admits only its app's backend; it verifies no user JWTs.
+    for (const removed of ["jwksUrl", "jwtIssuer", "jwtAudience"]) {
+      await expect(
+        JazzServer.start({
+          appId: "00000000-0000-0000-0000-000000000004",
+          inMemory: true,
+          adminSecret: "removed-jwt-admin",
+          backendSecret: "removed-jwt-backend",
+          [removed]: "https://issuer.example",
+        } as Parameters<typeof JazzServer.start>[0]),
+      ).rejects.toThrow(new RegExp(`unknown field \`${removed}\``));
+    }
+  });
+
   it("rejects direct NAPI startup on an occupied explicit port without killing the process", async () => {
     const blocker = createServer();
     await new Promise<void>((resolve, reject) => {
