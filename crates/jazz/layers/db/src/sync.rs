@@ -1689,6 +1689,10 @@ struct LiveRead {
     /// results read as of it (or the connection's, when that is further),
     /// see `Inner::visible_read`. Kept across reconnects.
     visible: Option<Pos>,
+    /// The rows the upstream last listed as this read's result (its last
+    /// listing settle), kept across reconnects: another read's listing
+    /// leaves them on the replica for this one to judge.
+    listed: HashSet<[u8; 16]>,
 }
 
 enum ReadLifetime {
@@ -6223,7 +6227,7 @@ impl Inner {
         // it), and the supporting tables with their policies' inputs.
         let mut inputs = self.read_dependencies_in(prepared, identity, read)?;
         // The policies that govern the read: a pinned session's bundle's,
-        // as `read_dependencies` takes them.
+        // as `read_dependencies_in` takes them.
         let policies = prepared
             .schema
             .as_ref()
@@ -6853,37 +6857,31 @@ impl Db {
         Upstream(connection)
     }
 
-    /// Evict the cached rows of a remote query's settled view that its
-    /// answer, listing `listed`, left out: the server's result no longer
-    /// holds them for this reader. The answer judges only the rows its read
-    /// view holds: a branch view's answer, the rows on its head branch. A
-    /// row a pending write touches waits for the server's own word on it.
-    /// Each pass reads the view again, so rows that move up into a window
-    /// are checked too.
-    fn evict_unanswered(
+    /// How the settled view of a remote query is read as of `through`, as
+    /// its answer's listing judges it (see [`Self::evict_unanswered`]):
+    /// `None` for a read no listing judges.
+    fn listed_view(
         &self,
-        query: Query,
-        binding: BTreeMap<String, Value>,
+        query: &Query,
+        binding: &BTreeMap<String, Value>,
         include_deleted: bool,
         view: &ReadViewSourceSpec,
-        listed: &[[u8; 16]],
         through: u64,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<(PreparedQuery, ReadSpec)>, Error> {
         // A history read lists versions and a flat join tuples, not the
         // rows a replica caches.
         if history_source_table(&query.table).is_some() || query.flat_join.is_some() {
-            return Ok(());
+            return Ok(None);
         }
-        let listed: HashSet<[u8; 16]> = listed.iter().copied().collect();
         // Only which rows the view holds matters: ids, not values (whose
         // large chunks may not be here yet), nor included rows.
-        let mut query = remote_query(&query).into_owned();
+        let mut query = remote_query(query).into_owned();
         query.select = Some(Vec::new());
         query.includes.clear();
         query.array_subqueries.clear();
         let prepared = PreparedQuery {
             query,
-            binding,
+            binding: binding.clone(),
             shape: Shape([0; 16]),
             binding_id: Binding([0; 16]),
             request_claims: None,
@@ -6902,10 +6900,59 @@ impl Db {
         read.position = Position::Current;
         // A frozen view is this store's own state, not the server's to judge.
         if read.frozen() {
-            return Ok(());
+            return Ok(None);
         }
         read.settled_only = true;
         read.cut = Some(crate::compile::Cut::at(Pos::at(through)));
+        Ok(Some((prepared, read)))
+    }
+
+    /// Evict the cached rows of a remote query's settled view that its
+    /// answer, listing `listed`, left out: the server's result no longer
+    /// holds them for this reader. The answer judges only the rows its read
+    /// view holds: a branch view's answer, the rows on its head branch. A
+    /// row a pending write touches waits for the server's own word on it.
+    /// Each pass reads the view again, so rows that move up into a window
+    /// are checked too.
+    fn evict_unanswered(
+        &self,
+        query: Query,
+        binding: BTreeMap<String, Value>,
+        include_deleted: bool,
+        view: &ReadViewSourceSpec,
+        listed: &[[u8; 16]],
+        through: u64,
+    ) -> Result<(), Error> {
+        let Some((prepared, read)) =
+            self.listed_view(&query, &binding, include_deleted, view, through)?
+        else {
+            return Ok(());
+        };
+        let listed: HashSet<[u8; 16]> = listed.iter().copied().collect();
+        // Rows another live read of the same table was last listed with:
+        // that read's own listing judges them. Evicted here, a resumed one
+        // would count them as held and never ship them.
+        let others: HashSet<[u8; 16]> = self
+            .inner
+            .borrow()
+            .client
+            .as_ref()
+            .map(|client| {
+                client
+                    .reads
+                    .values()
+                    .filter(|other| {
+                        other.query.table == query.table
+                            && !(other.query == query
+                                && other.binding == binding
+                                && other.include_deleted == include_deleted
+                                && other.view == *view)
+                    })
+                    .filter_map(|other| other.live())
+                    .flat_map(|live| live.listed.iter().copied())
+                    .collect()
+            })
+            .unwrap_or_default();
         let (table, head, base) = {
             let inner = self.inner.borrow();
             let schema = inner.schema.clone();
@@ -6931,11 +6978,12 @@ impl Db {
                 Err(error) if crate::large::is_missing(&error) => return Ok(()),
                 rows => rows?,
             };
-            let stale: Vec<RowUuid> = rows
+            let mut stale: Vec<RowUuid> = rows
                 .into_iter()
                 .filter(|row| row.union_arm.is_none() && !listed.contains(row.id.0.as_bytes()))
                 .map(|row| row.id)
                 .collect();
+            stale.retain(|row| !others.contains(row.0.as_bytes()));
             if stale.is_empty() || stale == previous {
                 return Ok(());
             }
@@ -7449,6 +7497,7 @@ impl Inner {
                 refused: refused.clone(),
                 global: global.clone(),
                 visible: None,
+                listed: HashSet::new(),
             }),
         );
         let client = self.client.as_mut().expect("client");
@@ -8254,6 +8303,9 @@ impl Db {
                                 ReadLifetime::Live(live) => {
                                     live.answered.set(true);
                                     live.global.set(global);
+                                    if let Some(members) = &members {
+                                        live.listed = members.iter().copied().collect();
+                                    }
                                     if live.visible.is_none_or(|v| v.n != at.n || v.seq < at.seq) {
                                         live.visible = Some(at);
                                         client.visibility_moved = true;

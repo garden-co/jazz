@@ -1162,3 +1162,65 @@ fn a_one_shot_remote_read_after_a_delete_sees_another_replicas_restore() {
     );
     assert_eq!(ids(&a, None), [id(3, 0)], "and installs it locally");
 }
+
+/// Two subscriptions over one row, where it leaves one of them while the
+/// client is away without changing (its membership input did): the row
+/// stays on the replica for the other, whichever reopens first.
+fn a_row_one_subscription_lost_stays_for_the_other(lost_first: bool) {
+    let server = seeded(1);
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    // Rooms alice is a member of, and every room.
+    let member_of = client
+        .prepare_query(&Query::from("rooms").join_via("memberships", "room", []))
+        .unwrap();
+    let every = client.prepare_query(&Query::from("rooms")).unwrap();
+    let (first, second) = if lost_first {
+        (&member_of, &every)
+    } else {
+        (&every, &member_of)
+    };
+    let _first = block_on(client.subscribe(first, ReadOpts::default())).unwrap();
+    let _second = block_on(client.subscribe(second, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    let rooms = |db: &Db| {
+        let prepared = db.prepare_query(&Query::from("rooms")).unwrap();
+        let opts = ReadOpts {
+            tier: ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        };
+        let mut rows: Vec<RowUuid> = block_on(db.all(&prepared, opts))
+            .unwrap()
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect();
+        rows.sort();
+        rows
+    };
+    assert_eq!(rooms(&client), [id(1, 0), id(1, 1)]);
+
+    // Away, alice leaves room 0: it leaves the first query unchanged.
+    assert!(client.detach_connection(&upstream));
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        rooms(&client),
+        [id(1, 0), id(1, 1)],
+        "every room is still the second query's"
+    );
+}
+
+#[test]
+fn a_row_one_subscription_lost_stays_when_the_losing_one_reopens_first() {
+    a_row_one_subscription_lost_stays_for_the_other(true);
+}
+
+#[test]
+fn a_row_one_subscription_lost_stays_when_the_holding_one_reopens_first() {
+    a_row_one_subscription_lost_stays_for_the_other(false);
+}
