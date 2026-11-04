@@ -26,9 +26,7 @@ export type { JazzSession, JazzSessionSnapshot } from "../session/state.js";
 export { default as JazzSessionProvider } from "./JazzSessionProvider.svelte";
 export { sessionState, getJazzSession, type JazzSessionState } from "./session-state.js";
 
-export * from "../session/auth-provider-exports.js";
-
 export { default as JazzProvider } from "./JazzProvider.svelte";
 export { useJazzAuth, type JazzAuthState } from "./auth-state.js";
-export { backendAuth, betterAuth, type JazzAuth, type JazzAppSnapshot } from "../session/app.js";
+export type { JazzAppSnapshot, JazzUser } from "../session/app.js";
 export type { JazzAppConfig } from "../session/create-jazz-app.js";
