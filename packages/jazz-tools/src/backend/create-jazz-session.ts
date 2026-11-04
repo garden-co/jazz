@@ -317,7 +317,8 @@ export async function openJazzSession(
   }
   const session = await createJazzSessionOwner({
     accounts,
-    initial,
+    initial: typeof initial === "object" ? undefined : initial,
+    backend: typeof initial === "object" ? initial : undefined,
     openClient: async (account) => {
       const backend = getBackendAuth(account, registry);
       if (!backend) {

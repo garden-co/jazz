@@ -105,24 +105,24 @@ fetched throws instead, so clients retry rather than signing out.
 
 ## In the client
 
-With React, pass `backendAuth` to `JazzProvider`:
+With React, `JazzProvider` follows whoever your backend names. After your own sign-in or sign-out,
+call `reauthenticate()` from `useJazzAuth()`:
 
 ```tsx
-import { JazzProvider, backendAuth } from "jazz-tools/react";
+import { JazzProvider, useJazzAuth } from "jazz-tools/react";
 
-<JazzProvider
-  appId="my-app"
-  serverUrl="/jazz"
-  auth={backendAuth({ key: user?.id ?? null, isPending, logout: () => signOut() })}
-  signedOut={<SignIn />}
->
+<JazzProvider appId="my-app" serverUrl="/jazz" signedOut={<SignIn />}>
   <App />
 </JazzProvider>;
+
+function SignOutButton() {
+  const { reauthenticate } = useJazzAuth();
+  return <button onClick={async () => (await signOut(), await reauthenticate())}>Sign out</button>;
+}
 ```
 
-`key` is whatever identifies the signed-in user on the client, or `null`; when it changes, Jazz
-signs in again through your backend. `logout` signs out of your auth; your source must then report
-`key: null`. For Better Auth, `betterAuth(authClient)` does all of this for you.
+Jazz also asks your backend when the app starts, when the page regains focus and when another tab
+signs in or out.
 
 Without React, own the session yourself:
 
@@ -130,9 +130,7 @@ Without React, own the session yourself:
 import { createJazzSession } from "jazz-tools/client";
 
 const jazz = await createJazzSession({ appId: "my-app", serverUrl: "/jazz" });
-await jazz.loginWithBackend(); // after your own sign-in
-// ...
-await jazz.logout(); // before your own sign-out
+await jazz.reauthenticate(); // after your own sign-in or sign-out
 ```
 
 Svelte, Solid, Vue and React Native expose the same actions through their bindings.

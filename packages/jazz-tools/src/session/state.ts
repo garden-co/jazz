@@ -100,7 +100,12 @@ export async function createJazzSessionOwner<
 >(options: {
   accounts: AccountManager<JWTAuth>;
   openClient(account: AccountHandle): Promise<Client>;
-  initial?: "local-first" | "signed-out" | BackendAuth;
+  initial?: "local-first" | "signed-out";
+  /**
+   * @internal Open as the backend this core admits with `auth`: only the
+   * session `createJazz` opens on its own core passes it.
+   */
+  backend?: BackendAuth;
   /**
    * Wipe the signed-out account's local storage, unsynced writes included,
    * instead of keeping it for that user's next sign-in (shared devices).
@@ -113,8 +118,8 @@ export async function createJazzSessionOwner<
   let selected = accounts.getLoggedIn();
   if (!selected && options.initial === "local-first")
     selected = await ensureAutomaticLocalFirst(accounts);
-  if (typeof options.initial === "object")
-    selected = await admitBackendAccount(accounts as AccountManager<unknown>, options.initial);
+  if (options.backend)
+    selected = await admitBackendAccount(accounts as AccountManager<unknown>, options.backend);
   await accounts.settleSelection();
   let client = selected ? await openClient(selected) : undefined;
   let snapshot: JazzSessionSnapshot<Client> = Object.freeze({
