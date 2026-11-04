@@ -1496,9 +1496,17 @@ impl ServerRuntimeHandle {
 
     /// Apply `change` to the store's catalogue in one transaction (see
     /// [`Db::apply_catalogue`]): a change that fails leaves nothing behind.
+    ///
+    /// With `supersedes`, the change publishes that bundle new to this
+    /// store, and every session pinned to another bundle ends, told to
+    /// reconnect later, in the same job as the commit:
+    /// a publish that commits always ends them, so a deployment retried
+    /// after a later failure (which then changes nothing) leaves no session
+    /// on the permissions it replaced.
     pub async fn apply_catalogue(
         &self,
         change: CatalogueChange,
+        supersedes: Option<jazz::catalogue::BundleId>,
     ) -> Result<(), CatalogueApplyError> {
         let result = self
             .run(move |owner| {
@@ -1516,6 +1524,19 @@ impl ServerRuntimeHandle {
                             CatalogueApplyError::Rejected(error.to_string())
                         }
                     })?;
+                    if let Some(published) = supersedes {
+                        let ended = owner.end_pinned_sessions(
+                            &|bundle| *bundle != published,
+                            &superseded_error(&published),
+                        );
+                        if ended > 0 {
+                            tracing::info!(
+                                bundle = %published,
+                                ended,
+                                "new permissions bundle: sessions pinned to others reconnect"
+                            );
+                        }
+                    }
                     owner
                         .reload_catalogue()
                         .map_err(CatalogueApplyError::Failed)?;
@@ -1633,6 +1654,8 @@ struct Owner {
 
 struct OwnerSession {
     subscriber: SubscriberId,
+    /// The published bundle its backend pinned it to, if any.
+    bundle: Option<jazz::catalogue::BundleId>,
     /// The parts of a message split across frames, until its last part.
     joiner: jazz::db::FrameJoiner,
     queues: Rc<SessionQueues>,
@@ -2081,6 +2104,7 @@ impl Owner {
             session,
             OwnerSession {
                 subscriber,
+                bundle,
                 // An untrusted peer's split message must fit the budget
                 // its frames are admitted against (SPEC 8.1).
                 joiner: if identity != AuthorSubject::SYSTEM {
@@ -2122,6 +2146,29 @@ impl Owner {
                 }
             }
         }
+    }
+
+    /// End every session (sync or thin) pinned to a bundle `ends` names,
+    /// telling each peer `error` first. Unpinned sessions (the system's,
+    /// an admin's) stay. How many ended.
+    fn end_pinned_sessions(
+        &mut self,
+        ends: &dyn Fn(&jazz::catalogue::BundleId) -> bool,
+        error: &jazz::wire::WireError,
+    ) -> usize {
+        let ending: Vec<ServerSession> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.bundle.as_ref().is_some_and(ends))
+            .map(|(id, _)| *id)
+            .collect();
+        let mut ended = ending.len();
+        for id in ending {
+            let _ = self.sessions[&id].output.send((Err(error.clone()), 0));
+            self.close_session(id);
+        }
+        ended += self.end_pinned_thin_sessions(ends, error);
+        ended
     }
 
     fn close_session(&mut self, session: ServerSession) {
@@ -2208,6 +2255,21 @@ impl Owner {
         }
         self.pump_thin();
     }
+}
+
+/// What a session pinned to a bundle other than `published` is told when it
+/// ends: reconnect later. `NotReady` with `Later` is the close every client
+/// already answers by reconnecting with backoff, so new permissions need no
+/// new wire code; the message says why.
+fn superseded_error(published: &jazz::catalogue::BundleId) -> jazz::wire::WireError {
+    jazz::wire::WireError::new(
+        WireErrorCode::NotReady,
+        WireRetry::Later,
+        format!(
+            "permissions changed: bundle {published} was published; reconnect through the \
+             app's backend"
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -2848,10 +2910,13 @@ mod tests {
         let runtime = store
             .start_runtime(schema(), NodeRole::Core, false)
             .unwrap();
-        let refused = block_on(runtime.apply_catalogue(CatalogueChange {
-            activate: Some((1, schema(), Vec::new())),
-            ..CatalogueChange::default()
-        }))
+        let refused = block_on(runtime.apply_catalogue(
+            CatalogueChange {
+                activate: Some((1, schema(), Vec::new())),
+                ..CatalogueChange::default()
+            },
+            None,
+        ))
         .unwrap_err();
         assert!(
             matches!(&refused, CatalogueApplyError::Rejected(message) if message.contains("never makes a schema current")),
