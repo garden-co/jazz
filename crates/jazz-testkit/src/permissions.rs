@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 
 use jazz::tools::{PolicyExpr, Schema, SchemaHash, TableName, TablePolicies};
 use reqwest::{Client, StatusCode};
-use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 use std::collections::HashMap;
 

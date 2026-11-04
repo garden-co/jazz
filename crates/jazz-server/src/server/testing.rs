@@ -297,6 +297,15 @@ impl JazzServer {
 
     /// Returns a clone of the shared `Arc<ServerState>` for in-process tests
     /// that need to inspect or drive internal server state.
+    /// Re-read the catalogue a test changed on the runtime directly, so the
+    /// clients this server makes see what it published (its latest bundle).
+    pub fn refresh_catalogue(&self) {
+        self.state
+            .catalogue_store
+            .refresh()
+            .expect("refresh test server catalogue");
+    }
+
     pub fn server_state(&self) -> std::sync::Arc<super::ServerState> {
         self.state.clone()
     }

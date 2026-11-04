@@ -32,7 +32,7 @@ async fn deploy(server: &JazzServer, schema: &Schema) {
         .with_delete(PolicyExpr::True);
     let permissions = HashMap::from([(TableName::from("notes"), policies)]);
     let hash = SchemaHash::compute(schema).to_string();
-    let response = reqwest::Client::new().post(format!("{}/apps/{}/admin/deploy", server.base_url(), server.app_id()))
+    let response = reqwest::Client::new().post(format!("{}/apps/{}/admin/bundles", server.base_url(), server.app_id()))
         .header("X-Jazz-Admin-Secret", server.admin_secret())
         .json(&serde_json::json!({"targetSchemaHash":hash, "schemas":[{"hash":hash,"schema":schema}], "migrations":[], "permissions":permissions}))
         .send().await.unwrap();
