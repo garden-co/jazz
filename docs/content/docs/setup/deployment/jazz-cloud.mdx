@@ -31,7 +31,7 @@ Then point `createJazz` at Jazz Cloud with the `remote()` store:
 import { createJazz, remote } from "jazz-tools/backend";
 import { app, permissions } from "./schema";
 
-export const jazz = await createJazz({
+export const jazz = createJazz({
   app,
   permissions,
   store: remote({

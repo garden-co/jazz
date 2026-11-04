@@ -33,7 +33,7 @@ import { Hono } from "hono";
 import { createJazz, sqlite } from "jazz-tools/backend";
 import { app, permissions } from "./schema";
 
-const jazz = await createJazz({
+const jazz = createJazz({
   app,
   permissions,
   store: sqlite({ path: "./data/jazz" }),

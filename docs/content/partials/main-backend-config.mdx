@@ -6,3 +6,8 @@
   configure, and no Jazz token in the browser. See [How Auth Works in Jazz](/docs/setup/auth/backend).
 - Admin and backend routes never leave the process: from outside, only sync and sign-in are
   reachable under `/jazz`.
+- `createJazz` opens nothing when your module loads: the store opens on first use, such as the first
+  request or `jazz.db` call, and there's one Jazz per store per process. So it's safe at a module's
+  top level everywhere, including Next.js, whose build and dev workers import your modules too.
+  `await jazz.ready()` opens it right away, for a server that should fail at startup rather than on
+  its first request.

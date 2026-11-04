@@ -20,7 +20,7 @@ const { sealedSession } = await workos.userManagement.authenticateWithCode({
   session: { sealSession: true, cookiePassword },
 });
 
-export const jazz = await createJazz({
+export const jazz = createJazz({
   app,
   permissions,
   store: remote({ appId, url, secret }),

@@ -21,7 +21,7 @@ import { createJazz, sqlite } from "jazz-tools/backend";
 import { auth } from "./auth"; // your Better Auth instance
 import { app, permissions } from "./schema";
 
-export const jazz = await createJazz({
+export const jazz = createJazz({
   app,
   permissions,
   store: sqlite({ path: "./data/jazz" }),

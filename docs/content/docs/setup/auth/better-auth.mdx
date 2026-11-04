@@ -183,7 +183,7 @@ import { app } from "./schema";
 import permissions from "./permissions";
 import { authOptions } from "./auth-options";
 
-export const jazz = await createJazz({
+export const jazz = createJazz({
   app,
   permissions,
   store: remote({

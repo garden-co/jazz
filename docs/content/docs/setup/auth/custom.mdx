@@ -13,7 +13,7 @@ import { createJazz, remote } from "jazz-tools/backend";
 import { app, permissions } from "./schema";
 import { getUser } from "./your-auth";
 
-export const jazz = await createJazz({
+export const jazz = createJazz({
   app,
   permissions,
   store: remote({
