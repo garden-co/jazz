@@ -20,7 +20,7 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::json;
 use support::{
-    PublishedPermissionsHead, TestingClient, deny_all_select_permissions, has_added_id,
+    TestingClient, deny_all_select_permissions, has_added_id,
     has_removed, publish_allow_all_permissions, publish_permissions, push_catalogue_in_memory,
     wait_for, wait_for_query, wait_for_query_results, wait_for_remote_query_ready,
     wait_for_subscription_update,
@@ -572,6 +572,15 @@ struct SchemaConnectivityHttpResponse {
 #[serde(rename_all = "camelCase")]
 struct StoredSchemaHttpResponse {
     schema: jazz::tools::Schema,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishedPermissionsHead {
+    schema_hash: String,
+    version: u64,
+    parent_bundle_object_id: Option<String>,
+    bundle_object_id: String,
 }
 
 #[derive(Debug, Deserialize)]

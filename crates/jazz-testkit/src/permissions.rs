@@ -11,20 +11,11 @@ use std::collections::HashMap;
 const PUBLISH_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
 const PUBLISH_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct PublishedPermissionsHead {
-    #[serde(rename = "schemaHash")]
-    pub schema_hash: String,
-    pub version: u64,
-    #[serde(rename = "parentBundleObjectId")]
-    pub parent_bundle_object_id: Option<String>,
-    #[serde(rename = "bundleObjectId")]
-    pub bundle_object_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PermissionsHeadResponse {
-    head: Option<PublishedPermissionsHead>,
+/// A published permissions bundle: what a backend pins its sessions to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedBundle {
+    /// Its hex id.
+    pub bundle: String,
 }
 
 pub fn allow_all_permissions(schema: &Schema) -> Vec<(TableName, TablePolicies)> {
@@ -51,7 +42,7 @@ pub async fn publish_allow_all_permissions(
     app_id: impl std::fmt::Display,
     admin_secret: &str,
     schema: &Schema,
-) -> PublishedPermissionsHead {
+) -> PublishedBundle {
     publish_permissions(
         base_url,
         app_id,
@@ -82,13 +73,13 @@ pub async fn publish_permissions(
     admin_secret: &str,
     schema: &Schema,
     permissions: impl IntoIterator<Item = (TableName, TablePolicies)>,
-) -> PublishedPermissionsHead {
+) -> PublishedBundle {
     let client = Client::new();
     let body = schema_deployment(schema, permissions);
     let deadline = Instant::now() + PUBLISH_RETRY_TIMEOUT;
     loop {
         let response = client
-            .post(format!("{base_url}/apps/{app_id}/admin/deploy"))
+            .post(format!("{base_url}/apps/{app_id}/admin/bundles"))
             .header("X-Jazz-Admin-Secret", admin_secret)
             .json(&body)
             .send()
@@ -105,19 +96,9 @@ pub async fn publish_permissions(
             "deployment failed: {}",
             response.text().await.unwrap()
         );
-        break;
+        let body: JsonValue = response.json().await.expect("bundle response");
+        return PublishedBundle {
+            bundle: body["bundle"].as_str().expect("bundle id").to_owned(),
+        };
     }
-    client
-        .get(format!("{base_url}/apps/{app_id}/admin/permissions"))
-        .header("X-Jazz-Admin-Secret", admin_secret)
-        .send()
-        .await
-        .expect("fetch deployed permissions")
-        .error_for_status()
-        .expect("permissions head response")
-        .json::<PermissionsHeadResponse>()
-        .await
-        .expect("decode permissions head")
-        .head
-        .expect("deployment activates permissions")
 }

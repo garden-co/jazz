@@ -243,6 +243,43 @@ pub(crate) async fn deploy(
     Ok(staged.response)
 }
 
+/// Publish `source` (a schema carrying its permissions as table policies)
+/// as a permissions bundle, as `createJazz` does on boot: no permissions
+/// become current. Its hex bundle id.
+#[cfg(any(test, feature = "embedded-server"))]
+pub(crate) async fn publish_source_bundle(
+    state: Arc<ServerState>,
+    source: &Schema,
+) -> Result<String, String> {
+    let mut structural = source.clone();
+    for table in structural.values_mut() {
+        table.policies = TablePolicies::default();
+    }
+    let hash = jazz::tools::public_schema::SchemaHash::compute(&structural).to_string();
+    let permissions = source
+        .iter()
+        .map(|(name, table)| (*name, table.policies.clone()))
+        .collect();
+    let response = deploy(
+        state,
+        DeployRequest {
+            target_schema_hash: hash.clone(),
+            schemas: vec![DeploySchema {
+                hash,
+                schema: structural,
+            }],
+            migrations: Vec::new(),
+            permissions,
+            activate: false,
+        },
+    )
+    .await
+    .map_err(|error| error.body.to_string())?;
+    response
+        .bundle
+        .ok_or_else(|| "a bundle publish answers its id".to_owned())
+}
+
 /// What applying `prepared` to `runtime`'s catalogue changes.
 async fn change(
     runtime: &ServerRuntimeHandle,

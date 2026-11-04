@@ -177,8 +177,8 @@ impl JazzServer {
         let mut server_builder =
             apply_storage_mode(server_builder, storage_data_dir, persistent_storage);
 
-        if let Some(schema) = schema {
-            server_builder = server_builder.with_schema(schema);
+        if let Some(schema) = &schema {
+            server_builder = server_builder.with_schema(schema.clone());
         }
         let built = server_builder
             .build()
@@ -196,6 +196,11 @@ impl JazzServer {
         )
         .await?;
         server.auth_clock = auth_clock;
+        // As createJazz does on boot: the schema's permissions go out as a
+        // bundle, which the clients this server makes pin their sessions to.
+        if let Some(schema) = &schema {
+            crate::server::deployment::publish_source_bundle(server.state.clone(), schema).await?;
+        }
         Ok(server)
     }
 
@@ -322,7 +327,7 @@ impl JazzServer {
             jwt_token: None,
             backend_secret: Some(self.backend_secret().to_string()),
             backend_session: None,
-            bundle: None,
+            bundle: self.latest_bundle(),
             admin_secret: None,
             migrations: self.published_migrations(),
         }
@@ -347,6 +352,15 @@ impl JazzServer {
 
     /// The versions and lenses published to this server so far, as an app
     /// that deployed them ships them (SPEC 10.7).
+    /// The permissions bundle published last on this server (hex), which
+    /// the clients it makes pin their stated sessions to.
+    pub fn latest_bundle(&self) -> Option<String> {
+        self.state
+            .catalogue_store
+            .latest_bundle()
+            .map(|bundle| bundle.to_hex())
+    }
+
     pub fn published_migrations(&self) -> jazz::db::Migrations {
         let state = &self.state;
         let store = &state.catalogue_store;
