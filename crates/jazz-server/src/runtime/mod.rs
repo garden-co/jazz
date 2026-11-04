@@ -1540,6 +1540,9 @@ impl ServerRuntimeHandle {
                     }
                     #[cfg(test)]
                     if std::mem::take(&mut owner.fail_next_reload) {
+                        // As a reload that failed partway: the runtime's
+                        // view of the catalogue is no longer the store's.
+                        owner.catalogue = Catalogue::default();
                         return Err(CatalogueApplyError::Failed(
                             "injected catalogue reload failure".to_owned(),
                         ));
@@ -1559,6 +1562,12 @@ impl ServerRuntimeHandle {
             self.notify_activity();
         }
         result
+    }
+
+    /// Read the store's catalogue again into the runtime's view of it,
+    /// which a change that committed and then failed may have left behind.
+    pub async fn reload_catalogue(&self) -> Result<(), String> {
+        self.run(|owner| owner.reload_catalogue()).await
     }
 
     /// Tests: how many sessions (sync and thin) the runtime serves now.

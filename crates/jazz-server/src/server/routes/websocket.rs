@@ -5239,8 +5239,6 @@ mod tests {
         );
     }
 
-    /// Publish the docs schema as a bundle whose docs read by `select`
-    /// (createJazz's `/bundles`); its hex id.
     /// Publish the docs schema with `select` as its read policy, as a
     /// backend publishes its bundle on boot: the answer's status and body.
     async fn post_docs_bundle(
@@ -5271,6 +5269,8 @@ mod tests {
         (status, body)
     }
 
+    /// Publish the docs schema as a bundle whose docs read by `select`
+    /// (createJazz's `/bundles`); its hex id.
     async fn publish_docs_bundle(
         addr: std::net::SocketAddr,
         state: &Arc<ServerState>,
@@ -5523,6 +5523,7 @@ mod tests {
         .await;
         bind_thin_schema(&mut on_second, &schema).await;
         let open = runtime.open_sessions_for_test().await;
+        assert_eq!(open, 3, "the system link and two thin sessions");
         assert_eq!(
             publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await,
             first
@@ -5577,11 +5578,40 @@ mod tests {
         assert!(error.asks_reconnect_later(), "{error:?}");
 
         // The retry finds the bundle published and changes nothing.
+        let version = jazz::schema::JazzSchema::new(&schema)
+            .expect("docs schema")
+            .version_id();
+        assert!(
+            !runtime
+                .runtime_catalogue_contains_schema(version)
+                .await
+                .unwrap(),
+            "the failed reload left the runtime's catalogue behind"
+        );
         let (status, body) = post_docs_bundle(addr, &state, &schema, PolicyExpr::False).await;
         assert_eq!(status, reqwest::StatusCode::OK, "{body}");
         assert_eq!(body["changed"], false, "{body}");
-        assert_ne!(body["bundle"], first.as_str());
+        let second = body["bundle"].as_str().expect("bundle id").to_owned();
+        assert_ne!(second, first);
         assert_eq!(runtime.open_sessions_for_test().await, 0);
+        // The retry brought the runtime's catalogue up to date, and the new
+        // bundle serves.
+        assert!(
+            runtime
+                .runtime_catalogue_contains_schema(version)
+                .await
+                .unwrap(),
+            "the retry reloads the runtime's catalogue"
+        );
+        let mut on_second = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(alice, Some(&second)),
+            jazz::wire::FEATURE_THIN_RESULTS,
+        )
+        .await;
+        bind_thin_schema(&mut on_second, &schema).await;
+        assert!(thin_titles(&mut on_second, 1, None).await.is_empty());
     }
 
     /// The error a connection opening with `prelude` and negotiating
