@@ -22,7 +22,7 @@ export function TodoList() {
   const { data: todos = [] } = useAll(todosQuery);
   // #endregion reading-reactive-hooks-react
   const session = useSession();
-  const sessionUserId = session?.user_id ?? null;
+  const sessionUserId = session?.user.account ?? null;
   const [title, setTitle] = useState("");
 
   const handleSubmit = (e: React.FormEvent) => {

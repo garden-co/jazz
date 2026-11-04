@@ -44,22 +44,29 @@ pub(crate) mod sync;
 
 #[path = "shard.rs"]
 pub mod shard;
+#[path = "transaction_reads.rs"]
+mod transaction_reads;
 pub use crate::names::LensEffects;
-pub use crate::options::REMOTE_LINK_ATTEMPT_WINDOW;
+pub use crate::options::{REMOTE_LINK_ATTEMPT_WINDOW, TickScheduler, TickUrgency};
 use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
+#[path = "accepted_read.rs"]
+mod accepted_read;
 use crate::values::{
     AuthorKey, STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, author_key,
     begin_savepoint, cell_from_sql, column_from_sql, end_savepoint, in_savepoint, quote, storage,
     to_sql, unsupported,
 };
+pub use accepted_read::{AcceptedRead, AcceptedRowEvidence, AcceptedVersion};
 pub use sync::{
     ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
-    FrameJoiner, Image, MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction,
-    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
-    TransportError, TxName, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError,
-    WireKind, WireOp, WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite,
-    WriteConflict, decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
+    FrameJoiner, Image, LocalEvidenceProvenance, LocalObservation, LocalObservationCut,
+    LocalSubmissionExport, LocalSubmissionRoute, MAX_SEQ, Outcome, PENDING, Pos, ReadSpan,
+    RejectedTransaction, RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId,
+    SyncMessage, Transport, TransportError, TxName, Upstream, WireBase, WireChunk, WireChunkRef,
+    WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport,
+    WireTransportAdapter, WireWrite, WriteConflict, decode_message, duplex, encode_frames,
+    validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -97,12 +104,19 @@ pub struct PreparedQuery {
 }
 
 impl PreparedQuery {
+    /// An unrelated requested subject does not replace the executing author's registry.
+    fn fixed_claims_for(&self, author: AuthorSubject) -> Option<&BTreeMap<String, Value>> {
+        self.request_claims
+            .as_ref()
+            .and_then(|(requested, claims)| (*requested == author).then_some(claims))
+    }
+
     /// The same query without its window (limit and offset).
     pub(crate) fn unwindowed(&self) -> PreparedQuery {
         let mut query = self.query.clone();
         query.limit = None;
         query.offset = 0;
-        let shape = blake3::hash(format!("{:?}unwindowed", self.shape.0).as_bytes());
+        let shape = jazz_types::sha256::hash(format!("{:?}unwindowed", self.shape.0).as_bytes());
         PreparedQuery {
             query,
             shape: Shape(short(shape)),
@@ -120,7 +134,7 @@ impl PreparedQuery {
                 .map(|id| Operand::Literal(Value::Uuid(id.0)))
                 .collect(),
         ));
-        let shape = blake3::hash(format!("{query:?}").as_bytes());
+        let shape = jazz_types::sha256::hash(format!("{query:?}").as_bytes());
         PreparedQuery {
             query,
             shape: Shape(short(shape)),
@@ -146,7 +160,7 @@ impl PreparedQuery {
         author: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Self {
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = jazz_types::sha256::Hasher::new();
         hasher.update(&self.binding_id.0);
         hasher.update(format!("{author:?}{claims:?}").as_bytes());
         self.binding_id = Binding(short(hasher.finalize()));
@@ -155,7 +169,7 @@ impl PreparedQuery {
     }
 }
 
-fn short(hash: blake3::Hash) -> [u8; 16] {
+fn short(hash: jazz_types::sha256::Hash) -> [u8; 16] {
     hash.as_bytes()[..16].try_into().expect("16 bytes")
 }
 
@@ -262,8 +276,10 @@ pub enum SubscriptionEvent {
 }
 
 /// What a read observes: deletions and the branch view.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct ReadSpec {
+    // Bound by the executing Db, never copied from PreparedQuery.
+    governance: Governance,
     include_deleted: bool,
     /// A replica's `ReadTier::Remote` read: its pending local versions
     /// (at `_clock >= 1<<52`) are left out, and a row they changed
@@ -303,7 +319,19 @@ enum Position {
 }
 
 impl ReadSpec {
-    fn of(opts: &ReadOpts, inner: &Inner) -> Result<Self, Error> {
+    fn new(governance: Governance) -> Self {
+        Self {
+            governance,
+            include_deleted: false,
+            settled_only: false,
+            view: None,
+            cut: None,
+            position: Position::Current,
+            splices: Vec::new(),
+        }
+    }
+
+    fn of(opts: &ReadOpts, inner: &Inner, governance: Governance) -> Result<Self, Error> {
         let mut cut = None;
         let view = match &opts.read_view.source {
             ReadViewSourceSpec::Current => None,
@@ -331,6 +359,7 @@ impl ReadSpec {
             inner.check_not_stranded()?;
         }
         Ok(Self {
+            governance,
             include_deleted: opts.read_view.include_deleted,
             settled_only: inner.client.is_some() && opts.tier == ReadTier::Remote,
             view,
@@ -374,7 +403,12 @@ impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         self.dropped.set(self.dropped.get() + 1);
         if let Some((inner, query, binding, include_deleted, view, reach)) = self.remote.take() {
-            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, &view, reach);
+            Db {
+                inner,
+                view: None,
+                governance: Governance::CurrentOwner,
+            }
+            .detach_remote(&query, &binding, include_deleted, &view, reach);
         }
     }
 }
@@ -454,6 +488,8 @@ pub struct SchemaPublication {
 
 struct Inner {
     conn: Connection,
+    scheduler: Option<Rc<dyn TickScheduler>>,
+    read_deadlines: Vec<Weak<web_time::Instant>>,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
     /// Errors the next ticks fail with, for tests of a tick driver.
@@ -523,6 +559,12 @@ struct Inner {
     /// Where each admitted version stores its tables and columns.
     names: crate::names::Names,
     views: BTreeMap<SchemaViewId, JazzSchema>,
+    /// Published bundles sessions are pinned to, resolved: the write
+    /// version each selects and the schema its policies govern by.
+    bundles: HashMap<crate::catalogue::BundleId, (crate::ids::SchemaVersionId, Rc<Schema>)>,
+    /// Views governed by a bundle's policies (see `Inner::governed_view`),
+    /// by bundle, with the view each was built from.
+    bundle_views: RefCell<HashMap<crate::catalogue::BundleId, (Rc<Schema>, Rc<Schema>)>>,
     /// Open transaction batches, by id.
     batches: HashMap<OpenTransactionId, Batch>,
     identity: DbIdentity,
@@ -623,8 +665,14 @@ const RECLAIM_NODES_PER_TICK: usize = 256;
 /// Leaves one tick may move to, or delete from, the chunk store.
 const CHUNK_STORE_NODES_PER_TICK: usize = 256;
 
-/// Chunk-store operations in flight at once.
-const CHUNK_STORE_CONCURRENCY: usize = 16;
+/// [`Db::take_chunk_io`] or [`Db::finish_chunk_io`] on a store whose tick
+/// runs its chunk I/O itself.
+fn not_host_run() -> Error {
+    Error::new(
+        ErrorCode::Protocol,
+        "chunk I/O: this store runs its chunk I/O itself; open it with DbConfig::with_host_chunk_io to run it from the host",
+    )
+}
 
 /// File store settings.
 #[derive(Clone, Copy, Debug)]
@@ -678,6 +726,31 @@ pub struct Db {
     inner: Rc<Store>,
     /// `Some` for a schema-view handle: operations run under this schema.
     view: Option<Rc<Schema>>,
+    governance: Governance,
+}
+
+/// Policy provenance is selected by trusted handle/session construction,
+/// never inferred from the schema carrying an operation's names.
+#[derive(Clone, Debug)]
+enum Governance {
+    CurrentOwner,
+    Selected(Rc<Schema>, crate::catalogue::BundleId),
+}
+
+impl Governance {
+    fn key(&self) -> Option<crate::catalogue::BundleId> {
+        match self {
+            Self::CurrentOwner => None,
+            Self::Selected(_, bundle) => Some(*bundle),
+        }
+    }
+
+    fn policies(&self, inner: &Inner) -> Rc<Schema> {
+        match self {
+            Self::CurrentOwner => inner.owner.clone(),
+            Self::Selected(policies, _) => policies.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1278,7 +1351,8 @@ impl Db {
         names.check_types(&schema)?;
         // Variants are tagged before any DDL: an enum default is its tag.
         names.mint(&conn, &schema)?;
-        let chunks = crate::large::Chunks::install(path, config.chunk_store.clone())?;
+        let chunks =
+            crate::large::Chunks::install(path, config.chunk_store.clone(), config.host_chunk_io)?;
         // Statements are keyed per table and verb; the default 16 entries
         // thrash as soon as a schema has a few tables.
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
@@ -1364,8 +1438,11 @@ impl Db {
         let owner = Rc::new(schema.clone());
         let db = Self {
             view: None,
+            governance: Governance::CurrentOwner,
             inner: Rc::new(Store::new(Inner {
                 conn,
+                scheduler: None,
+                read_deadlines: Vec::new(),
                 mutation_admission_closed: false,
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),
@@ -1395,6 +1472,8 @@ impl Db {
                 },
                 names,
                 views: BTreeMap::new(),
+                bundles: HashMap::new(),
+                bundle_views: RefCell::default(),
                 batches: HashMap::new(),
                 system_node: config.system_node.unwrap_or(config.identity.node),
                 identity: config.identity,
@@ -1613,8 +1692,19 @@ impl Db {
     /// The shared state, set up to run under this handle's schema.
     fn inner(&self) -> std::cell::RefMut<'_, Inner> {
         let mut inner = self.inner.borrow_mut();
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        inner.schema = self.governing_schema(&inner);
         inner
+    }
+
+    /// Keep this handle's names while resolving its explicit policy source.
+    fn governing_schema(&self, inner: &Inner) -> Rc<Schema> {
+        match (&self.view, &self.governance) {
+            (None, _) => self.governance.policies(inner),
+            (Some(view), Governance::Selected(_, _)) => view.clone(),
+            (Some(view), Governance::CurrentOwner) => {
+                Rc::new((**view).clone().with_policies_of(inner.owner.clone()))
+            }
+        }
     }
 
     pub fn table(&self, table: impl Into<String>) -> Query {
@@ -1638,123 +1728,216 @@ impl Db {
             inner.fan.collect();
             inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
         }
-        self.pump_chunk_store().await
+        let result = self.pump_chunk_store().await;
+        self.schedule_read_deadlines();
+        result
     }
 
     /// Fetch the offloaded nodes reads wait on, move settled leaves to the
-    /// chunk store and delete reclaimed ones from it ([`crate::chunk_store`]).
-    /// A failed operation is retried next tick; the first failure is
-    /// returned once the rest ran.
+    /// chunk store and delete reclaimed ones from it ([`crate::chunk_store`]),
+    /// unless the host runs that I/O. The fetches run first, so messages
+    /// held for those nodes are served before the puts start. A failed
+    /// operation is retried next tick; the first failure is returned once
+    /// the rest ran.
     async fn pump_chunk_store(&self) -> Result<(), Error> {
         let chunks = self.inner().chunks.clone();
+        if chunks.host_io() {
+            return Ok(());
+        }
         let Some(store) = chunks.store().cloned() else {
             return Ok(());
         };
-        let Some(wanted) = chunks.begin_fetch() else {
+        let Some(mut io) = self.begin_chunk_io(&chunks)? else {
             return Ok(());
         };
+        let wanted = std::mem::take(&mut io.fetch);
         let any = !wanted.is_empty();
         let mut fetched = self.fetch_from(&chunks, &*store, wanted).await;
+        if let Some(lease) = &mut io.lease {
+            // Fetched (or failed, and asked again by the read that needs it).
+            lease.unfetched.clear();
+        }
         if any && fetched.is_ok() {
-            // Messages held for those nodes are served now, not a tick later.
             fetched = self.sync_tick();
         }
-        let moved = match chunks.offload_store() {
-            Some(_) => self.offload_to(&*store).await,
-            None => Ok(()),
-        };
-        chunks.end_fetch();
-        fetched.and(moved)
+        let done = io.run(&*store).await;
+        let applied = self.end_chunk_io(&chunks, done);
+        fetched.and(applied)
     }
 
-    /// Install what the chunk store holds for `wanted`; reads waiting on
-    /// those nodes run again.
+    /// The next batch of chunk-store work, for a store opened
+    /// [`crate::options::DbConfig::with_host_chunk_io`]: `None` while the
+    /// last one is out or without a chunk store. Hand what running it came
+    /// to back with [`Self::finish_chunk_io`]; a batch dropped instead ends
+    /// there, and its work goes to the next one.
+    pub fn take_chunk_io(&self) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
+        let chunks = self.inner().chunks.clone();
+        if !chunks.host_io() {
+            return Err(not_host_run());
+        }
+        if chunks.store().is_none() {
+            return Ok(None);
+        }
+        self.begin_chunk_io(&chunks)
+    }
+
+    /// Apply a batch [`Self::take_chunk_io`] handed out: fetched nodes are
+    /// installed and the reads and requests waiting on them run again,
+    /// moved leaves leave SQLite, deleted ones leave the queue. Failed
+    /// operations are retried in a later batch; the first failure is
+    /// returned once the rest are applied. A batch this store did not hand
+    /// out, or not the one out now, is refused.
+    pub fn finish_chunk_io(&self, done: crate::chunk_store::ChunkIoDone) -> Result<(), Error> {
+        let chunks = self.inner().chunks.clone();
+        if !chunks.host_io() {
+            return Err(not_host_run());
+        }
+        let outstanding = chunks.outstanding();
+        let ours = done.io.lease.as_ref().is_some_and(|lease| {
+            std::ptr::eq(lease.chunks.as_ptr(), std::sync::Arc::as_ptr(&chunks))
+                && Some(lease.batch) == outstanding
+        });
+        if !ours {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                match outstanding {
+                    None => "chunk I/O: no batch is out to finish",
+                    Some(_) => "chunk I/O: this is not the batch that is out",
+                },
+            ));
+        }
+        self.end_chunk_io(&chunks, done)
+    }
+
+    /// Start a batch: what reads wait on, and (between SQLite transactions,
+    /// so the mark that a put may have landed is durable before it does)
+    /// settled leaves to put and reclaimed ones to delete.
+    fn begin_chunk_io(
+        &self,
+        chunks: &std::sync::Arc<crate::large::Chunks>,
+    ) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
+        let Some((batch, fetch)) = chunks.begin_fetch() else {
+            return Ok(None);
+        };
+        // From here the lease ends the batch however this returns.
+        let lease = crate::chunk_store::Lease {
+            chunks: std::sync::Arc::downgrade(chunks),
+            batch,
+            unfetched: fetch.clone(),
+        };
+        let mut io = crate::chunk_store::ChunkIo::unleased(fetch);
+        io.lease = Some(lease);
+        if chunks.offload_store().is_some() {
+            let inner = self.inner();
+            if inner.conn.is_autocommit() {
+                io.puts = crate::large::begin_offload(&inner.conn, CHUNK_STORE_NODES_PER_TICK)?;
+            }
+            io.deletes = crate::large::pending_deletes(&inner.conn, CHUNK_STORE_NODES_PER_TICK)?;
+        }
+        Ok(Some(io))
+    }
+
+    /// End a batch [`Self::begin_chunk_io`] started, once it is applied.
+    fn end_chunk_io(
+        &self,
+        chunks: &crate::large::Chunks,
+        mut done: crate::chunk_store::ChunkIoDone,
+    ) -> Result<(), Error> {
+        let lease = done.io.lease.take();
+        let applied = self.apply_chunk_io(chunks, done);
+        if let Some(mut lease) = lease {
+            // Fetches that failed are asked again by the reads that need them.
+            lease.unfetched.clear();
+        }
+        applied
+    }
+
+    fn apply_chunk_io(
+        &self,
+        chunks: &crate::large::Chunks,
+        done: crate::chunk_store::ChunkIoDone,
+    ) -> Result<(), Error> {
+        let crate::chunk_store::ChunkIoDone {
+            io,
+            fetched,
+            put,
+            deleted,
+        } = done;
+        let mut first = None;
+        let mut fetch_failed = None;
+        let any = !io.fetch.is_empty();
+        if any {
+            self.install_fetched(chunks, &io.fetch, fetched, &mut fetch_failed);
+        }
+        {
+            let inner = self.inner();
+            if !io.puts.is_empty() {
+                in_savepoint(&inner.conn, "jazz_lv_offloaded", || {
+                    for ((key, _), put) in io.puts.iter().zip(put) {
+                        match put {
+                            Ok(()) => crate::large::offloaded(&inner.conn, key)?,
+                            Err(error) => {
+                                first.get_or_insert(error);
+                            }
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+            if !io.deletes.is_empty() {
+                in_savepoint(&inner.conn, "jazz_lv_deleted", || {
+                    for (key, done) in io.deletes.iter().zip(deleted) {
+                        match done {
+                            Ok(()) => crate::large::deleted(&inner.conn, key)?,
+                            Err(error) => {
+                                first.get_or_insert(error);
+                            }
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+        if any && fetch_failed.is_none() {
+            // Messages held for those nodes are served now, not a tick later.
+            self.sync_tick()?;
+        }
+        fetch_failed.or(first).map_or(Ok(()), Err)
+    }
+
+    /// Install what the chunk store answered for `wanted`; reads waiting
+    /// on those nodes run again.
+    fn install_fetched(
+        &self,
+        chunks: &crate::large::Chunks,
+        wanted: &[jazz_types::large_values::chunks::ChunkRequest],
+        answers: Vec<Result<Option<bytes::Bytes>, Error>>,
+        first: &mut Option<Error>,
+    ) {
+        for (request, answer) in wanted.iter().zip(answers) {
+            if let Err(error) = answer.and_then(|bytes| chunks.install_from_store(request, bytes)) {
+                // Asked again by the next read that needs it.
+                first.get_or_insert(error);
+            }
+        }
+        self.inner().retry_awaiting();
+    }
+
+    /// Fetch `wanted` from the chunk store and install it.
     async fn fetch_from(
         &self,
         chunks: &crate::large::Chunks,
         store: &dyn crate::chunk_store::ChunkStore,
         wanted: Vec<jazz_types::large_values::chunks::ChunkRequest>,
     ) -> Result<(), Error> {
-        use futures::StreamExt;
         if wanted.is_empty() {
             return Ok(());
         }
-        let keys: Vec<_> = wanted
-            .iter()
-            .map(crate::chunk_store::NodeKey::from)
-            .collect();
-        let answers: Vec<_> = futures::stream::iter(keys.iter().map(|key| store.get(key)))
-            .buffered(CHUNK_STORE_CONCURRENCY)
-            .collect()
+        let done = crate::chunk_store::ChunkIo::unleased(wanted)
+            .run(store)
             .await;
         let mut first = None;
-        for (request, answer) in wanted.iter().zip(answers) {
-            match answer.and_then(|bytes| chunks.install_from_store(request, bytes)) {
-                Ok(()) => {}
-                Err(error) => {
-                    // Asked again by the next read that needs it.
-                    first.get_or_insert(error);
-                }
-            }
-        }
-        self.inner().retry_awaiting();
-        first.map_or(Ok(()), Err)
-    }
-
-    /// Move a batch of settled leaves to the chunk store, then delete a
-    /// batch of reclaimed ones from it. Puts start only between SQLite
-    /// transactions, so the mark that a put may have landed is durable
-    /// before it does.
-    async fn offload_to(&self, store: &dyn crate::chunk_store::ChunkStore) -> Result<(), Error> {
-        use futures::StreamExt;
-        let mut first = None;
-        let batch = {
-            let inner = self.inner();
-            if inner.conn.is_autocommit() {
-                crate::large::begin_offload(&inner.conn, CHUNK_STORE_NODES_PER_TICK)?
-            } else {
-                Vec::new()
-            }
-        };
-        if !batch.is_empty() {
-            let puts: Vec<_> =
-                futures::stream::iter(batch.iter().map(|(key, bytes)| store.put(key, bytes)))
-                    .buffered(CHUNK_STORE_CONCURRENCY)
-                    .collect()
-                    .await;
-            let inner = self.inner();
-            in_savepoint(&inner.conn, "jazz_lv_offloaded", || {
-                for ((key, _), put) in batch.iter().zip(puts) {
-                    match put {
-                        Ok(()) => crate::large::offloaded(&inner.conn, key)?,
-                        Err(error) => {
-                            first.get_or_insert(error);
-                        }
-                    }
-                }
-                Ok(())
-            })?;
-        }
-        let deletes =
-            crate::large::pending_deletes(&self.inner().conn, CHUNK_STORE_NODES_PER_TICK)?;
-        if !deletes.is_empty() {
-            let done: Vec<_> = futures::stream::iter(deletes.iter().map(|key| store.delete(key)))
-                .buffered(CHUNK_STORE_CONCURRENCY)
-                .collect()
-                .await;
-            let inner = self.inner();
-            in_savepoint(&inner.conn, "jazz_lv_deleted", || {
-                for (key, done) in deletes.iter().zip(done) {
-                    match done {
-                        Ok(()) => crate::large::deleted(&inner.conn, key)?,
-                        Err(error) => {
-                            first.get_or_insert(error);
-                        }
-                    }
-                }
-                Ok(())
-            })?;
-        }
+        self.install_fetched(chunks, &done.io.fetch, done.fetched, &mut first);
         first.map_or(Ok(()), Err)
     }
 
@@ -1784,12 +1967,27 @@ impl Db {
                     let Some(store) = chunks.store().cloned().filter(|_| chunks.has_fetch()) else {
                         return Err(error);
                     };
-                    let Some(wanted) = chunks.begin_fetch() else {
+                    if chunks.host_io() {
+                        // Beside the host's batch, which may be out: a
+                        // node a read waits on is referenced, so no
+                        // delete in that batch removes it.
+                        let wanted = chunks.take_fetch();
+                        if wanted.is_empty() {
+                            return Err(error);
+                        }
+                        self.fetch_from(&chunks, &*store, wanted).await?;
+                        continue;
+                    }
+                    let Some((batch, wanted)) = chunks.begin_fetch() else {
                         return Err(error);
                     };
-                    let fetched = self.fetch_from(&chunks, &*store, wanted).await;
-                    chunks.end_fetch();
-                    fetched?;
+                    // Ends the batch even if this future is dropped.
+                    let _lease = crate::chunk_store::Lease {
+                        chunks: std::sync::Arc::downgrade(&chunks),
+                        batch,
+                        unfetched: Vec::new(),
+                    };
+                    self.fetch_from(&chunks, &*store, wanted).await?;
                 }
                 result => return result,
             }
@@ -1908,6 +2106,7 @@ impl Db {
     }
 
     pub async fn close(&self) -> Result<(), Error> {
+        self.retire_local_observation_capabilities();
         self.tick().await
     }
 
@@ -1921,6 +2120,7 @@ impl Db {
     /// an in-memory shutdown phase, not a stored policy or storage retirement;
     /// a new storage owner starts with mutation admission open.
     pub fn stop_mutation_admission(&self) {
+        self.retire_local_observation_capabilities();
         self.inner().mutation_admission_closed = true;
     }
 
@@ -1935,7 +2135,8 @@ impl Db {
         identity: Option<AuthorSubject>,
     ) -> Result<(String, String), Error> {
         let inner = self.inner();
-        let compiled = inner.compile(prepared, identity, &ReadSpec::default())?;
+        let compiled =
+            inner.compile(prepared, identity, &ReadSpec::new(self.governance.clone()))?;
         let mut statement = inner
             .conn
             .prepare(&format!("EXPLAIN QUERY PLAN {}", compiled.sql))
@@ -2042,9 +2243,10 @@ impl Db {
         // included, so their metadata columns are accepted).
         let session = Session::system();
         Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, true)?;
-        let shape =
-            blake3::hash(format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes());
-        let bound = blake3::hash(format!("{binding:?}").as_bytes());
+        let shape = jazz_types::sha256::hash(
+            format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes(),
+        );
+        let bound = jazz_types::sha256::hash(format!("{binding:?}").as_bytes());
         Ok(PreparedQuery {
             query: query.clone(),
             binding,
@@ -2064,7 +2266,11 @@ impl Db {
     ) -> Result<Vec<CurrentRow>, Error> {
         self.fetching(|| {
             let inner = self.inner();
-            inner.run(prepared, None, &ReadSpec::of(&opts, &inner)?)
+            inner.run(
+                prepared,
+                None,
+                &ReadSpec::of(&opts, &inner, self.governance.clone())?,
+            )
         })
         .await
     }
@@ -2076,12 +2282,17 @@ impl Db {
         prepared: &PreparedQuery,
         roots: Vec<CurrentRow>,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.inner()
-            .nest_relations(prepared, None, &ReadSpec::default(), roots)
+        self.inner().nest_relations(
+            prepared,
+            None,
+            &ReadSpec::new(self.governance.clone()),
+            roots,
+        )
     }
 
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
-        self.inner().run(prepared, None, &ReadSpec::default())
+        self.inner()
+            .run(prepared, None, &ReadSpec::new(self.governance.clone()))
     }
 
     pub async fn all_for_identity(
@@ -2091,7 +2302,11 @@ impl Db {
         identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         let inner = self.inner();
-        inner.run(prepared, Some(identity), &ReadSpec::of(&opts, &inner)?)
+        inner.run(
+            prepared,
+            Some(identity),
+            &ReadSpec::of(&opts, &inner, self.governance.clone())?,
+        )
     }
 
     pub async fn all_result_tree(
@@ -2100,7 +2315,7 @@ impl Db {
         opts: ReadOpts,
     ) -> Result<ResultTree, Error> {
         let inner = self.inner();
-        let read = ReadSpec::of(&opts, &inner)?;
+        let read = ReadSpec::of(&opts, &inner, self.governance.clone())?;
         let roots = inner.run(prepared, None, &read)?;
         let mut tree = Vec::with_capacity(roots.len());
         for row in roots {
@@ -2145,7 +2360,7 @@ impl Db {
         identity: Option<AuthorSubject>,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
-        let read = ReadSpec::of(&opts, &self.inner())?;
+        let read = ReadSpec::of(&opts, &self.inner(), self.governance.clone())?;
         let client = self.is_client();
         let non_durable = self.inner().non_durable;
         // A branch view's head (and live base) is kept current upstream,
@@ -2687,6 +2902,29 @@ impl Db {
         result
     }
 
+    /// Publish the bundle that selects `schema`'s structure as the write
+    /// schema, with `schema`'s policies, and return its id (see
+    /// [`crate::catalogue::bundle_id`]). Nothing is activated: sessions
+    /// pinned to it are governed by it. Publishing it again changes nothing.
+    pub async fn publish_bundle(
+        &self,
+        schema: &jazz_model::model::public_schema::Schema,
+    ) -> Result<crate::catalogue::BundleId, Error> {
+        let hash = crate::catalogue::structural_hash(schema);
+        let permissions = crate::catalogue::permissions_of(schema);
+        let id = crate::catalogue::bundle_id(&hash, &permissions)?;
+        let published_at = crate::catalogue::now_millis();
+        self.apply_catalogue(crate::catalogue::CatalogueChange {
+            put: crate::catalogue::CataloguePut {
+                bundles: vec![(hash, permissions, published_at)],
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await?;
+        Ok(id)
+    }
+
     /// The current schema, with its policies.
     pub fn current_schema(&self) -> JazzSchema {
         self.inner().owner.jazz.clone()
@@ -2785,7 +3023,7 @@ impl Db {
                 inner.owner = Rc::new(target);
                 // Read policies that changed may read differently from
                 // here: a subscription resuming from before opens fresh.
-                let mut digest = blake3::Hasher::new();
+                let mut digest = jazz_types::sha256::Hasher::new();
                 for table in &inner.owner.jazz.runtime().tables {
                     digest.update(format!("{}{:?}", table.name, table.read_policy).as_bytes());
                 }
@@ -3302,6 +3540,15 @@ impl Drop for Inner {
 }
 
 impl Inner {
+    fn require_attribution_backend(&self) -> Result<(), Error> {
+        if self.identity.author != AuthorSubject::SYSTEM {
+            return Err(unsupported(
+                "backend-attributed transactions outside a SYSTEM backend",
+            ));
+        }
+        Ok(())
+    }
+
     fn require_mutation_admission(&self) -> Result<(), Error> {
         if self.mutation_admission_closed {
             return Err(Error::new(
@@ -3320,6 +3567,41 @@ impl Inner {
     }
 
     /// An admitted schema under the names this store keeps it by.
+    /// Published bundle `id`, resolved: the write version it selects and
+    /// that version governed by the bundle's policies. `None` when this
+    /// store has no such bundle, or has not admitted its write schema.
+    pub(crate) fn bundle(
+        &mut self,
+        id: &crate::catalogue::BundleId,
+    ) -> Result<Option<(crate::ids::SchemaVersionId, Rc<Schema>)>, Error> {
+        if let Some(found) = self.bundles.get(id) {
+            return Ok(Some(found.clone()));
+        }
+        let Some((hash, permissions)) = crate::catalogue::bundle(&self.conn, id)? else {
+            return Ok(None);
+        };
+        let Some((version, structural)) = self
+            .admitted
+            .iter()
+            .find(|(_, schema)| crate::catalogue::structural_hash(schema.public_schema()) == hash)
+        else {
+            return Ok(None);
+        };
+        let mut public = structural.public_schema().clone();
+        for (name, table) in public.iter_mut() {
+            table.policies = permissions.get(name).cloned().unwrap_or_default();
+        }
+        let governing = JazzSchema::new(&public).map_err(|error| {
+            Error::new(
+                ErrorCode::Schema,
+                format!("bundle {id} does not compile: {error}"),
+            )
+        })?;
+        let resolved = (*version, Rc::new(self.named(&governing)));
+        self.bundles.insert(*id, resolved.clone());
+        Ok(Some(resolved))
+    }
+
     fn named(&self, schema: &JazzSchema) -> Schema {
         match self.names.get(&schema.version_id()) {
             Some(names) => Schema::stored_as(schema, names, self.names.tags()),
@@ -3582,11 +3864,9 @@ impl Inner {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
     ) -> (Option<Session>, Session) {
-        let claims_for = |author: AuthorSubject| match &prepared.request_claims {
-            Some((requested, claims)) if *requested == author => {
-                Session::for_author(author, claims.clone())
-            }
-            _ => self.session(author),
+        let claims_for = |author: AuthorSubject| match prepared.fixed_claims_for(author) {
+            Some(claims) => Session::for_author(author, claims.clone()),
+            None => self.session(author),
         };
         let policy = identity.map(claims_for);
         let claims = policy
@@ -3602,8 +3882,18 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<Compiled, Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
-        self.read_ctx(prepared, policy.as_ref(), &claims, read)
+        let schema = self.read_schema(prepared, read);
+        self.read_ctx(prepared, &schema, policy.as_ref(), &claims, read)
             .compile_query(&prepared.query, read.include_deleted)
+    }
+
+    fn read_schema(&self, prepared: &PreparedQuery, read: &ReadSpec) -> Rc<Schema> {
+        let names = prepared.schema.as_ref().unwrap_or(&self.owner);
+        Rc::new(
+            (**names)
+                .clone()
+                .with_policies_of(read.governance.policies(self)),
+        )
     }
 
     /// The compile context of a read of `prepared` (or of one of its
@@ -3611,11 +3901,11 @@ impl Inner {
     pub(crate) fn read_ctx<'s>(
         &'s self,
         prepared: &'s PreparedQuery,
+        schema: &'s Schema,
         policy: Option<&'s Session>,
         claims: &'s Session,
         read: &ReadSpec,
     ) -> Ctx<'s> {
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         Ctx::new(schema, policy, claims, &prepared.binding)
             .with_view(read.view.clone())
             .with_withheld(self.withheld.get())
@@ -3649,7 +3939,7 @@ impl Inner {
         let mut compiled = self.compile(prepared, identity, read)?;
         // Array relations are part of a subscription's dependencies, and
         // of the tables its cut is decided over.
-        let tables = self.with_relation_tables(prepared, &compiled.tables)?;
+        let tables = self.with_relation_tables(prepared, identity, read, &compiled.tables)?;
         let visible = self.visible_read(read, &tables);
         if let std::borrow::Cow::Owned(visible) = &visible {
             compiled = self.compile(prepared, identity, visible)?;
@@ -3658,28 +3948,48 @@ impl Inner {
         Ok((rows, tables))
     }
 
-    /// `tables` (a compiled root's) and the stored tables of `prepared`'s
-    /// array relations, nested ones too: what a read's cut is decided
-    /// over, so its relations read as of the same position as its roots.
+    /// Compile every child shape under the executing context, without reading
+    /// rows. Nested filters and SELECT policies contribute their real tables.
+    fn relation_read_tables(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+    ) -> Result<BTreeSet<String>, Error> {
+        let (policy, claims) = self.read_sessions(prepared, identity);
+        let schema = self.read_schema(prepared, read);
+        let mut pending: Vec<_> = prepared
+            .query
+            .array_subqueries
+            .iter()
+            .map(|array| (prepared.query.table.as_str(), array))
+            .collect();
+        let mut tables = BTreeSet::new();
+        while let Some((parent, array)) = pending.pop() {
+            tables.extend(
+                self.read_ctx(prepared, &schema, policy.as_ref(), &claims, read)
+                    .child_read_tables(parent, array)?,
+            );
+            pending.extend(
+                array
+                    .nested_arrays
+                    .iter()
+                    .map(|nested| (array.table.as_str(), nested)),
+            );
+        }
+        Ok(tables)
+    }
+
+    /// Root and recursively compiled relation dependencies share one visibility cut.
     pub(crate) fn with_relation_tables(
         &self,
         prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
         tables: &BTreeSet<String>,
     ) -> Result<BTreeSet<String>, Error> {
-        fn arrays(
-            schema: &Schema,
-            out: &mut BTreeSet<String>,
-            list: &[crate::query::ArraySubquery],
-        ) -> Result<(), Error> {
-            for array in list {
-                out.insert(schema.stored_table(&array.table)?.to_owned());
-                arrays(schema, out, &array.nested_arrays)?;
-            }
-            Ok(())
-        }
         let mut out = tables.clone();
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
-        arrays(schema, &mut out, &prepared.query.array_subqueries)?;
+        out.extend(self.relation_read_tables(prepared, identity, read)?);
         Ok(out)
     }
 
@@ -3750,7 +4060,7 @@ impl Inner {
                 // A group's key: the group-by cell, a chunked one by its
                 // identity (SPEC 19.11).
                 let key = format!("{:?}", Sql::from(row.get_ref(0).map_err(storage)?));
-                blake3::hash(key.as_bytes()).as_bytes()[..16].to_vec()
+                jazz_types::sha256::hash(key.as_bytes()).as_bytes()[..16].to_vec()
             } else {
                 row.get(0).map_err(storage)?
             };
@@ -3873,7 +4183,7 @@ impl Inner {
         let visible;
         let read = if read.position != Position::Current && read.cut.is_none() {
             let compiled = self.compile(prepared, identity, read)?;
-            let tables = self.with_relation_tables(prepared, &compiled.tables)?;
+            let tables = self.with_relation_tables(prepared, identity, read, &compiled.tables)?;
             visible = self.visible_read(read, &tables).into_owned();
             &visible
         } else {
@@ -3952,7 +4262,8 @@ impl Inner {
         let mut relations = BTreeMap::new();
         for array in arrays {
             let (policy, claims) = self.read_sessions(prepared, identity);
-            let ctx = || self.read_ctx(prepared, policy.as_ref(), &claims, read);
+            let schema = self.read_schema(prepared, read);
+            let ctx = || self.read_ctx(prepared, &schema, policy.as_ref(), &claims, read);
             let parent = if array.outer_column == "id" {
                 Value::Uuid(row.id.0)
             } else {
@@ -4266,9 +4577,22 @@ impl Inner {
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<(String, Vec<Sql>, OverlayRead), Error> {
+        self.policy_check_in(&self.schema, table, row, key, cut, policy)
+    }
+
+    /// [`Inner::policy_check`], its policy compiled in `schema`.
+    fn policy_check_in(
+        &self,
+        schema: &Schema,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        cut: Option<Cut>,
+        policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
+    ) -> Result<(String, Vec<Sql>, OverlayRead), Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(cut, false);
+        let mut ctx = Ctx::new(schema, None, &claims, &binding).with_cut(cut, false);
         let condition = policy(&mut ctx)?;
         let read = OverlayRead {
             rows: ctx.overlaid_rows,
@@ -4327,6 +4651,7 @@ impl Inner {
     /// the policy's other rows are each read as of `cut`.
     fn holds_as_of(
         &self,
+        schema: &Schema,
         table: &Table,
         row: RowUuid,
         key: &[u8],
@@ -4335,7 +4660,7 @@ impl Inner {
     ) -> Result<bool, Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(Some(cut), false);
+        let mut ctx = Ctx::new(schema, None, &claims, &binding).with_cut(Some(cut), false);
         let condition = policy(&mut ctx)?;
         let source = ctx.source(table)?;
         let mut params = ctx.params;
@@ -4356,8 +4681,12 @@ impl Inner {
 
     /// Whether `author` may `operation` the version of `row` at `at`, with
     /// the policy's other rows as they stood then too.
+    /// Whether `author` may `operation` the version of `row` at `at`, by
+    /// `schema`'s policies (`table` is `schema`'s).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn check_version(
         &self,
+        schema: &Schema,
         table: &Table,
         row: RowUuid,
         key: &[u8],
@@ -4376,7 +4705,7 @@ impl Inner {
             },
             None => Cut::at(at.0),
         };
-        self.holds_as_of(table, row, key, cut, |ctx| {
+        self.holds_as_of(schema, table, row, key, cut, |ctx| {
             ctx.operation_policy(table, operation, "a", &session)
         })
     }
@@ -4389,10 +4718,28 @@ impl Inner {
         author: AuthorSubject,
         operation: Operation,
     ) -> Result<bool, Error> {
+        self.check_in(&self.schema, table, row, key, author, operation)
+    }
+
+    /// [`Inner::check`] by `schema`'s policies (`table` is `schema`'s).
+    pub(crate) fn check_in(
+        &self,
+        schema: &Schema,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        author: AuthorSubject,
+        operation: Operation,
+    ) -> Result<bool, Error> {
         let session = self.session(author);
-        self.holds(table, row, key, |ctx| {
+        let (sql, params, _) = self.policy_check_in(schema, table, row, key, None, |ctx| {
             ctx.operation_policy(table, operation, "a", &session)
-        })
+        })?;
+        let value: i64 = self
+            .conn
+            .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+            .map_err(storage)?;
+        Ok(value != 0)
     }
 
     /// Check a write's own policy as SPEC 7 has it: on committed state
@@ -5384,7 +5731,7 @@ impl Inner {
         let cell = self.bind_cell(table, column, value, Cells::Authored)?;
         let incoming = self.logical_text(&column.name, value)?;
         let format = column.merge.text_format().expect("a text strategy");
-        let merged = crate::text_merge::merge3(format, &base, &current, &incoming);
+        let merged = jazz_text::merge3(format, &base, &current, &incoming);
         Ok((merged != incoming).then_some((merged, cell)))
     }
 
@@ -6813,7 +7160,10 @@ impl SchemaViewId {
     fn for_schema(schema: &JazzSchema) -> Self {
         let bytes =
             serde_json::to_vec(schema.public_schema()).expect("public schema always serializes");
-        Self(blake3::derive_key("jazz typed schema view id v1", &bytes))
+        Self(jazz_types::sha256::derive_key(
+            "jazz typed schema view id v1",
+            &bytes,
+        ))
     }
 }
 
@@ -6877,9 +7227,47 @@ fn same_tables(
 }
 
 impl Db {
-    /// Register a typed schema view. The handle shares this owner's store,
-    /// batches, clock and subscriptions; it reads and writes its own columns
-    /// of the physical tables, which hold the union of every admitted view.
+    /// A handle that reads and writes as a sync session declaring schema
+    /// `version` is served: by that admitted version's names, governed by
+    /// the current schema's policies. `None` while `version` is not
+    /// admitted.
+    pub fn governed_view(&self, version: crate::ids::SchemaVersionId) -> Option<Db> {
+        let view = self.inner.borrow().governed(version)?;
+        Some(Db {
+            inner: self.inner.clone(),
+            view: Some(view),
+            governance: Governance::CurrentOwner,
+        })
+    }
+
+    /// [`Self::governed_view`] for a session pinned to published bundle
+    /// `bundle` (see [`Self::check_session_pin`]): governed by the
+    /// bundle's policies instead of the current schema's. Without a bundle
+    /// it is [`Self::governed_view`]. `None` while `version` is not
+    /// admitted or the bundle does not resolve.
+    pub fn pinned_view(
+        &self,
+        version: crate::ids::SchemaVersionId,
+        bundle: Option<&crate::catalogue::BundleId>,
+    ) -> Result<Option<Db>, Error> {
+        let Some(bundle) = bundle else {
+            return Ok(self.governed_view(version));
+        };
+        let mut inner = self.inner.borrow_mut();
+        let Some((_, governing)) = inner.bundle(bundle)? else {
+            return Ok(None);
+        };
+        let Some(view) = inner.governed_by(version, governing.clone()) else {
+            return Ok(None);
+        };
+        drop(inner);
+        Ok(Some(Db {
+            inner: self.inner.clone(),
+            view: Some(view),
+            governance: Governance::Selected(governing, *bundle),
+        }))
+    }
+
     /// Ship more of the app's versions and lenses (see
     /// [`DbConfig::with_migrations`]): a client learns an app's migrations
     /// when it first sees the app, not only when it opens.
@@ -6908,6 +7296,9 @@ impl Db {
         }
     }
 
+    /// Register a typed schema view. The handle shares this owner's store,
+    /// batches, clock and subscriptions; it reads and writes its own columns
+    /// of the physical tables, which hold the union of every admitted view.
     pub async fn register_schema_view(&self, schema: JazzSchema) -> Result<Db, Error> {
         // A version the app's lenses lead to is admitted as the authority
         // admits it, not named against the current one.
@@ -6961,9 +7352,14 @@ impl Db {
                 .or_insert(schema);
             logical
         };
+        let logical = match &self.governance {
+            Governance::CurrentOwner => logical,
+            Governance::Selected(policies, _) => logical.with_policies_of(policies.clone()),
+        };
         Ok(Db {
             inner: self.inner.clone(),
             view: Some(Rc::new(logical)),
+            governance: self.governance.clone(),
         })
     }
 
@@ -7000,11 +7396,20 @@ struct Overlay {
 /// The store behind its one gate: every borrow first undoes a transaction
 /// handle's overlay, so nothing but that handle's next stage or read sees
 /// it.
-struct Store(RefCell<Inner>, RefCell<Vec<u64>>);
+struct Store(
+    RefCell<Inner>,
+    // Invalidates owner-local observation cuts and trusted in-process routes.
+    std::cell::Cell<u64>,
+    RefCell<Vec<u64>>,
+);
 
 impl Store {
     fn new(inner: Inner) -> Self {
-        Self(RefCell::new(inner), RefCell::new(Vec::new()))
+        Self(
+            RefCell::new(inner),
+            std::cell::Cell::new(0),
+            RefCell::new(Vec::new()),
+        )
     }
 
     /// A callback can drop a read while the store is borrowed. Keep that
@@ -7015,12 +7420,12 @@ impl Store {
                 client.forget_once(id);
             }
         } else {
-            self.1.borrow_mut().push(id);
+            self.2.borrow_mut().push(id);
         }
     }
 
     fn flush_cancelled_fetches(&self, inner: &mut Inner) {
-        let cancelled = std::mem::take(&mut *self.1.borrow_mut());
+        let cancelled = std::mem::take(&mut *self.2.borrow_mut());
         if let Some(client) = inner.client.as_mut() {
             for id in cancelled {
                 client.forget_once(id);
@@ -7055,11 +7460,28 @@ impl Store {
 
 struct Batch {
     kind: BatchKind,
+    reads_state: Rc<RefCell<transaction_reads::ReadState>>,
+    /// None retains the ordinary per-operation identity contract.
+    identity: Option<WriteIdentity>,
     ops: Vec<(Rc<Schema>, StagedOp)>,
+    /// Original scope captured at each successful stage, before names lower.
+    observation_provenance: Vec<Option<sync::SubmissionProvenance>>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
     edits: LargeEdits,
+    /// Leases of the streamed values the batch's writes hold: their chunks
+    /// stay until the batch commits or is dropped.
+    uploads: Vec<crate::db::large_ops::UploadLease>,
+}
+
+impl Batch {
+    fn reader(&self) -> Option<AuthorSubject> {
+        match self.identity.map(who) {
+            Some(Who::Session(author)) => Some(author),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -7547,6 +7969,82 @@ impl Db {
         )
     }
 
+    /// Open an owner-wide mergeable batch for an authenticated session.
+    /// Reads and writes through every schema view retain this identity.
+    /// Delegated replica reads require LocalOnly until scoped remote coverage
+    /// is available. The authority authenticates every uploaded commit.
+    pub async fn begin_mergeable_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.begin_mergeable(id).await?;
+        self.bind_transaction_identity(id, WriteIdentity::Session(author));
+        Ok(())
+    }
+
+    /// Open an owner-wide serializable batch for an authenticated session.
+    /// A replica may read remotely as its own identity; delegated remote reads
+    /// require scoped coverage and currently return an unsupported-shape error.
+    pub async fn begin_serializable_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.begin_serializable(id).await?;
+        self.bind_transaction_identity(id, WriteIdentity::Session(author));
+        Ok(())
+    }
+
+    /// Open a SYSTEM backend mergeable batch with separate row provenance.
+    /// Attribution does not apply the named author's session read policies.
+    pub async fn begin_mergeable_for_attribution(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.inner().require_attribution_backend()?;
+        self.begin_mergeable(id).await?;
+        self.bind_transaction_identity(id, WriteIdentity::Attribution(author));
+        Ok(())
+    }
+
+    /// Open a SYSTEM backend serializable batch with separate row provenance.
+    /// The authority still authenticates the connection receiving a replica's
+    /// commit; selecting an attribution is not an upstream credential.
+    pub async fn begin_serializable_for_attribution(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.inner().require_attribution_backend()?;
+        self.begin_serializable(id).await?;
+        self.bind_transaction_identity(id, WriteIdentity::Attribution(author));
+        Ok(())
+    }
+
+    fn bind_transaction_identity(&self, id: OpenTransactionId, identity: WriteIdentity) {
+        self.inner().batches.get_mut(&id).expect("opened").identity = Some(identity);
+    }
+
+    /// Resolve a staged operation before it reads or chunks any cell.
+    pub(crate) fn transaction_write_identity(
+        &self,
+        id: OpenTransactionId,
+        requested: WriteIdentity,
+    ) -> Result<WriteIdentity, Error> {
+        let inner = self.inner.staging();
+        let batch = inner
+            .batches
+            .get(&id)
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        match batch.identity {
+            None => Ok(requested),
+            Some(bound) if requested == WriteIdentity::Database || requested == bound => Ok(bound),
+            Some(_) => Err(rejected("write identity differs from its transaction")),
+        }
+    }
+
     fn begin(&self, id: OpenTransactionId, kind: BatchKind) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         inner.require_mutation_admission()?;
@@ -7557,8 +8055,12 @@ impl Db {
             id,
             Batch {
                 kind,
+                reads_state: Rc::new(RefCell::new(transaction_reads::ReadState::default())),
+                identity: None,
                 ops: Vec::new(),
+                observation_provenance: Vec::new(),
                 edits: LargeEdits::default(),
+                uploads: Vec::new(),
             },
         );
         Ok(())
@@ -7575,25 +8077,31 @@ impl Db {
     }
 
     pub fn abandon_transaction_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
-        self.inner
+        // Abandonment remains available after the mutation-admission fence.
+        self.remove_batch(id).map(drop)
+    }
+
+    fn remove_batch(&self, id: OpenTransactionId) -> Result<Batch, Error> {
+        let batch = self
+            .inner
             .borrow_mut()
             .batches
             .remove(&id)
-            .map(drop)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        transaction_reads::close_pending_reads(&batch.reads_state);
+        Ok(batch)
     }
 
     fn take_batch(&self, id: OpenTransactionId) -> Result<Batch, Error> {
         self.inner().require_mutation_admission()?;
-        self.inner
-            .borrow_mut()
-            .batches
-            .remove(&id)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
+        self.remove_batch(id)
     }
 
+    /// Commit a mergeable batch, consuming its handle. An unfinished read
+    /// refuses the commit with `NotObserved` before any write is published.
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
+        batch.reads_state.borrow().check_commit()?;
         if !matches!(batch.kind, BatchKind::Mergeable) {
             return Err(rejected(format!("transaction {id:?} is not mergeable")));
         }
@@ -7605,12 +8113,14 @@ impl Db {
     /// same rows at the same versions now as it did at the snapshot (this
     /// catches phantoms: rows that entered or left a predicate or window).
     /// The check and the apply run under one store borrow, so nothing can
-    /// commit in between.
+    /// commit in between. An unfinished read refuses the commit with
+    /// `NotObserved` and consumes the handle before publishing any write.
     pub async fn commit_serializable_handle(
         &self,
         id: OpenTransactionId,
     ) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
+        batch.reads_state.borrow().check_commit()?;
         let BatchKind::Serializable {
             snapshot,
             reads,
@@ -7675,9 +8185,9 @@ impl Db {
                 for read in reads {
                     let spec = ReadSpec {
                         include_deleted: read.include_deleted,
-                        ..ReadSpec::default()
+                        ..ReadSpec::new(self.governance.clone())
                     };
-                    let now = inner.read_versions(&read.prepared, None, &spec)?;
+                    let now = inner.read_versions(&read.prepared, batch.reader(), &spec)?;
                     let changed = now.len() != read.rows.len()
                         || now.iter().zip(&read.rows).any(|(now, then)| {
                             now.0 != then.0
@@ -7749,9 +8259,9 @@ impl Db {
             for read in reads {
                 let spec = ReadSpec {
                     include_deleted: read.include_deleted,
-                    ..ReadSpec::default()
+                    ..ReadSpec::new(self.governance.clone())
                 };
-                if inner.read_versions(&read.prepared, None, &spec)? != read.rows {
+                if inner.read_versions(&read.prepared, batch.reader(), &spec)? != read.rows {
                     return Err(conflict(
                         "a row read by the transaction changed since its snapshot",
                     ));
@@ -7762,6 +8272,7 @@ impl Db {
     }
 
     fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+        crate::db::large_ops::renew_upload_leases(&self.inner(), &batch.uploads)?;
         self.with_upload(|| self.commit_ops_now(batch, kind))
     }
 
@@ -7774,8 +8285,15 @@ impl Db {
             begin_savepoint(&inner.conn, "commit_batch")?;
             let mark = inner.changed.borrow().len();
             inner.defer_checks();
+            // Session-bound batches recheck current permissions at commit.
+            // Ordinary unbound batches keep their existing replay contract.
+            let checked = if batch.reader().is_some() {
+                0
+            } else {
+                ops.len()
+            };
             let applied = inner
-                .apply_with_edits(ops, &batch.edits, ops.len(), seq)
+                .apply_with_edits(ops, &batch.edits, checked, seq)
                 .and_then(|()| inner.finish_checks(seq));
             if let Err(error) = applied {
                 inner.abandon_checks();
@@ -7798,7 +8316,16 @@ impl Db {
             .iter()
             .map(|(schema, op)| self.inner().stored_op(op.clone(), schema))
             .collect::<Result<Vec<_>, _>>()
-            .and_then(|ops| self.record_stored_upload(ops, seq, kind, None));
+            .and_then(|ops| {
+                self.record_stored_upload_with_provenance(
+                    ops,
+                    seq,
+                    kind,
+                    None,
+                    Some(&batch.observation_provenance),
+                    batch.identity,
+                )
+            });
         if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
@@ -7825,7 +8352,7 @@ impl Db {
         read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
         let mut inner = self.inner.staging();
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        inner.schema = self.governing_schema(&inner);
         let batch = inner
             .batches
             .get(&id)
@@ -7981,12 +8508,10 @@ impl Db {
             .map_err(|error| self.serializable_write_conflict(id, &op, error))?;
         let mut inner = self.inner.staging();
         let schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
-        inner
-            .batches
-            .get_mut(&id)
-            .expect("validated")
-            .ops
-            .push((schema, op));
+        let provenance = inner.observation_submission(&schema, &op, &self.governance);
+        let batch = inner.batches.get_mut(&id).expect("validated");
+        batch.ops.push((schema, op));
+        batch.observation_provenance.push(provenance);
         Ok(())
     }
 
@@ -8033,10 +8558,17 @@ impl Db {
         mut op: StagedOp,
         mut edits: LargeEdits,
     ) -> Result<(), Error> {
+        if let Some(requested) = op.identity() {
+            match self.transaction_write_identity(id, requested)? {
+                WriteIdentity::Session(author) => op.attribute(author, true),
+                WriteIdentity::Attribution(author) => op.attribute(author, false),
+                WriteIdentity::Database => {}
+            }
+        }
         let marks = {
             let mut inner = self.inner.staging();
             inner.require_mutation_admission()?;
-            inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+            inner.schema = self.governing_schema(&inner);
             let chunked = inner.chunk_large_cells(&mut op)?;
             edits.pending_nodes.extend(chunked.pending_nodes);
             let batch = inner
@@ -8058,6 +8590,23 @@ impl Db {
         staged
     }
 
+    /// Keep a streamed value's upload lease for as long as batch `id` is
+    /// open.
+    pub(crate) fn hold_upload(
+        &self,
+        id: OpenTransactionId,
+        lease: crate::db::large_ops::UploadLease,
+    ) -> Result<(), Error> {
+        self.inner
+            .staging()
+            .batches
+            .get_mut(&id)
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?
+            .uploads
+            .push(lease);
+        Ok(())
+    }
+
     fn record_read(
         &self,
         id: OpenTransactionId,
@@ -8076,19 +8625,22 @@ impl Db {
             return Ok(());
         }
         let mut inner = self.inner();
-        let Some(Batch {
-            kind: BatchKind::Serializable { snapshot, own, .. },
-            ..
-        }) = inner.batches.get(&id)
+        let Some(
+            batch @ Batch {
+                kind: BatchKind::Serializable { snapshot, own, .. },
+                ..
+            },
+        ) = inner.batches.get(&id)
         else {
             return Ok(());
         };
+        let identity = batch.reader();
         let read = ReadSpec {
             include_deleted,
             cut: Some(inner.serializable_cut(*snapshot, own)?),
-            ..ReadSpec::default()
+            ..ReadSpec::new(self.governance.clone())
         };
-        let rows = inner.read_versions(prepared, None, &read)?;
+        let rows = inner.read_versions(prepared, identity, &read)?;
         if let Some(Batch {
             kind: BatchKind::Serializable { reads, pinned, .. },
             ..
@@ -8223,7 +8775,9 @@ impl TxRef<'_> {
     }
 
     /// As [`Self::all_prepared_with`], seeing only what `identity`'s read
-    /// policies let it see (`None`: everything).
+    /// policies let it see. In a bound batch, `None` inherits the batch's
+    /// identity and a different explicit identity is rejected. In an unbound
+    /// batch, `None` retains the unrestricted read contract.
     pub async fn all_prepared_as(
         &self,
         prepared: &PreparedQuery,
@@ -8238,6 +8792,8 @@ impl TxRef<'_> {
     /// the authority's answer, offline too. `LocalOnly` never asks the
     /// authority; `LocalFirst` can answer offline from the replica's known cut.
     /// The first successful serializable read fixes its snapshot for later reads.
+    /// Concurrent reads run in first-poll order, retaining the staging prefix
+    /// each saw on admission. Cancelling an ordinary read releases its place.
     pub async fn all_prepared_at(
         &self,
         prepared: &PreparedQuery,
@@ -8245,8 +8801,44 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
     ) -> Result<Vec<CurrentRow>, Error> {
-        // Capture before hydration: later writes must not leak into an
-        // already admitted read, including when another read is cancelled.
+        let identity = {
+            let inner = self.db.inner.staging();
+            let batch = inner
+                .batches
+                .get(&self.id)
+                .ok_or_else(|| rejected("transaction is not open"))?;
+            if batch.identity.is_some() {
+                let reader = batch.reader();
+                let author = reader.unwrap_or(AuthorSubject::SYSTEM);
+                if identity.is_some_and(|requested| requested != author)
+                    || prepared
+                        .request_claims
+                        .as_ref()
+                        .is_some_and(|(requested, _)| *requested != author)
+                {
+                    return Err(rejected(
+                        "transaction read identity differs from its bound identity",
+                    ));
+                }
+                if inner.client.is_some() && tier != ReadTier::LocalOnly {
+                    let changed_claims =
+                        prepared.request_claims.as_ref().is_some_and(|(_, claims)| {
+                            *claims != inner.claims.get(&author).cloned().unwrap_or_default()
+                        });
+                    if author != inner.identity.author || changed_claims {
+                        return Err(unsupported(
+                            "delegated remote transaction reads without scoped coverage",
+                        ));
+                    }
+                }
+                reader
+            } else {
+                identity
+            }
+        };
+        let guard = self.db.transaction_read_guard(self.id)?;
+        // Capture before waiting: later writes must not leak into this read's
+        // admitted prefix while an earlier read selects the shared snapshot.
         // Peeks skip the store gate, which would undo the cached overlay.
         let prefix = self
             .db
@@ -8256,6 +8848,21 @@ impl TxRef<'_> {
             .get(&self.id)
             .ok_or_else(|| rejected("transaction is not open"))?
             .prefix();
+        guard.wait().await?;
+        self.db.check_read_guard(self.id, &guard)?;
+        self.all_prepared_guarded(prepared, include_deleted, identity, tier, &guard, prefix)
+            .await
+    }
+
+    async fn all_prepared_guarded(
+        &self,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+        identity: Option<AuthorSubject>,
+        tier: ReadTier,
+        guard: &transaction_reads::ReadGuard,
+        prefix: BatchPrefix,
+    ) -> Result<Vec<CurrentRow>, Error> {
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
         // the replica when the link cannot answer.
@@ -8310,23 +8917,30 @@ impl TxRef<'_> {
         {
             let at = pinned.then_some(snapshot);
             self.db.remote_shape(&prepared.query)?;
-            let through = self
-                .db
-                .fetch(
-                    prepared,
-                    at,
-                    include_deleted,
-                    if tier == ReadTier::Remote {
-                        sync::RemoteReach::REMOTE
-                    } else {
-                        sync::RemoteReach::BEST_EFFORT
-                    },
-                    None,
-                    None,
-                    tier == ReadTier::Remote,
-                    &ReadViewSourceSpec::Current,
-                )
-                .await?;
+            let fetch = self.db.fetch(
+                prepared,
+                at,
+                include_deleted,
+                if tier == ReadTier::Remote {
+                    sync::RemoteReach::REMOTE
+                } else {
+                    sync::RemoteReach::BEST_EFFORT
+                },
+                None,
+                None,
+                tier == ReadTier::Remote,
+                &ReadViewSourceSpec::Current,
+            );
+            let mut fetch = std::pin::pin!(fetch);
+            let through = std::future::poll_fn(|cx| {
+                guard.watch(cx.waker());
+                if let Err(error) = self.db.check_read_guard(self.id, guard) {
+                    return std::task::Poll::Ready(Err(error));
+                }
+                fetch.as_mut().poll(cx)
+            })
+            .await?;
+            self.db.check_read_guard(self.id, guard)?;
             if let Some(Batch {
                 kind:
                     BatchKind::Serializable {
@@ -8349,7 +8963,7 @@ impl TxRef<'_> {
             let read = ReadSpec {
                 include_deleted,
                 cut,
-                ..ReadSpec::default()
+                ..ReadSpec::new(self.db.governance.clone())
             };
             let roots = inner.run(prepared, identity, &read)?;
             inner.nest_relations(prepared, identity, &read, roots)

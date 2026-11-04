@@ -49,7 +49,7 @@ runs. Compare trends and CodSpeed's regression warnings, not single runs.
 The apps need the release WASM/NAPI artifacts and the compiled Jazz Tools runtime. Then:
 
 ```sh
-node dev/artifacts/verify-starter-e2e-artifacts.mjs
+node dev/artifacts/verify-package-artifacts.mjs
 pnpm --filter jazz-example-load-times-benchmark build:apps   # all ten apps, a few minutes
 pnpm --filter jazz-example-load-times-benchmark exec playwright install chromium
 pnpm --filter jazz-example-load-times-benchmark bench

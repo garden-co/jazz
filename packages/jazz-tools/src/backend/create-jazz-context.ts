@@ -1,5 +1,14 @@
+import { textAnchorsFrom, type TextAnchors } from "../runtime/text-anchors.js";
+import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
+import { clientScope } from "../runtime/client-scope.js";
 import { accountRegistryUrl } from "../accounts/context.js";
-import { NapiDb } from "jazz-napi";
+import {
+  NapiDb,
+  captureTextAnchor,
+  captureTextRange,
+  resolveTextAnchor,
+  resolveTextRange,
+} from "jazz-napi";
 import type { JWK } from "jose";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
@@ -89,6 +98,8 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver"> & {
    * backend can create local-first accounts.
    */
   allowLocalFirstAuth?: boolean;
+  /** @internal How the runtime opens its server socket (a backend client's credentialed one). */
+  webSocket?: WebSocketConstructor;
 } & BackendContextSchemaConfig;
 
 type ResolvedBackendContextConfig = BackendContextConfig & {
@@ -118,6 +129,15 @@ interface BackendMutationErrorSink {
 }
 
 class BackendRuntimeSource extends RuntimeSource<DbConfig> {
+  override textAnchors(): TextAnchors {
+    return textAnchorsFrom({
+      captureTextAnchor,
+      captureTextRange,
+      resolveTextAnchor,
+      resolveTextRange,
+    });
+  }
+
   private initializedSchemaJson?: string;
   private runtime?: FlushableRuntime;
   private client?: JazzClient;
@@ -232,6 +252,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
         readAuthorizationHost: "trusted-serving",
         backendMode: true,
         systemNode,
+        webSocket: this.config.webSocket,
         slowQueryLog: {
           appId: this.config.appId,
           thresholdMs: this.config.slowQueryThresholdMs,
@@ -248,7 +269,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     this.client = JazzClient.connectWithRuntime(
       this.runtime,
       {
-        appId: config.appId,
+        appId: clientScope(config),
         schema,
         serverUrl: config.serverUrl,
         env: config.env,
@@ -761,6 +782,7 @@ export class JazzContext {
       {
         appId: this.config.appId,
         accountRegistry: accountRegistryUrl(this.config.serverUrl, this.config.appId),
+        backendSecret: this.config.backendSecret,
         jwksUrl: this.config.jwksUrl,
         jwtPublicKey: this.config.jwtPublicKey,
         jwtIssuer: this.config.jwtIssuer,

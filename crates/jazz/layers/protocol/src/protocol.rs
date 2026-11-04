@@ -1895,8 +1895,8 @@ mod version_record_wire_row {
             let original = OwnedRecord::new(raw.clone(), descriptor);
             let encoded = encode(&original).unwrap();
             assert_eq!(
-                blake3::hash(&encoded).to_hex().as_str(),
-                "18d2325b449fa54152ec1f34c699ebdcfab7650b1ad9204087e3550ee979391d"
+                jazz_types::sha256::hash(&encoded).to_hex().as_str(),
+                "171d50dc3af93e711a6fe510893c47073e33d296f643a7ea9ffd621b278aba9a"
             );
             assert_eq!(&encoded[..6], b"JVRR\x03\x00");
             assert_eq!(decode(&encoded).unwrap(), original);
@@ -3150,7 +3150,7 @@ impl PolicyBindingKey {
         let mut exact = Vec::new();
         put_str(&mut exact, self.identity.canonical());
         exact.extend_from_slice(&self.canonical_claims.comparison_key);
-        blake3::derive_key("jazz.authority-policy-binding-directory.v1", &exact)
+        jazz_types::sha256::derive_key("jazz.authority-policy-binding-directory.v1", &exact)
     }
 }
 
@@ -5657,7 +5657,7 @@ mod tests {
         let Value::Array(nodes) = &encoded else {
             panic!("claim node array")
         };
-        let mut receipt = blake3::Hasher::new();
+        let mut receipt = jazz_types::sha256::Hasher::new();
         for node in nodes {
             let Value::Record(record) = node else {
                 panic!("claim node record")
@@ -5667,7 +5667,7 @@ mod tests {
         }
         assert_eq!(
             receipt.finalize().to_hex().as_str(),
-            "115d7dd21a7920aff3799d618abdfdedf47dd42e20401bcb744e689314bf907b"
+            "b8ea9b223b684e1dd7e201bb2e0a30cb15fdc20d1715cb49b1d7a3e1a417d177"
         );
         assert_eq!(
             policy_binding_directory_claims_from_value(encoded).unwrap(),

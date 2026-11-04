@@ -1,3 +1,4 @@
+import { mintLocalFirstTokenFromSeed } from "./local-first-token.js";
 import type { ClientMigrations } from "./client-migrations.js";
 import type { RemoteLinkState } from "./remote-link-state.js";
 import type { LinkStatus } from "./sync-status.js";
@@ -5,6 +6,7 @@ import type { WasmSchema } from "../drivers/types.js";
 import type { JazzClient } from "./client.js";
 import type { DbConfig } from "./db.js";
 import type { AuthFailureReason } from "./auth-state.js";
+import type { TextAnchors } from "./text-anchors.js";
 
 export interface RuntimeTokenOptions {
   secret: string;
@@ -203,11 +205,21 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
     return null;
   }
 
-  mintLocalFirstToken(_options: RuntimeTokenOptions): string {
-    throw new Error("Db runtime source does not support local-first auth");
+  /** Same on every host: minted in TypeScript by `src/local-first-auth`. */
+  mintLocalFirstToken(options: RuntimeTokenOptions): string {
+    return mintLocalFirstTokenFromSeed(
+      options.secret,
+      options.audience,
+      options.ttlSeconds,
+      Number(options.nowSeconds),
+    );
   }
 
   mintAnonymousToken(_options: RuntimeTokenOptions): string {
     throw new Error("Db runtime source does not support anonymous auth");
+  }
+
+  textAnchors(): TextAnchors {
+    throw new Error("Db runtime source does not support text anchors yet");
   }
 }

@@ -6,6 +6,7 @@ import { createJazzClient as createReactJazzClient } from "../react/create-jazz-
 import { createJazzClient as createSvelteJazzClient } from "../svelte/create-jazz-client.js";
 import { createJazzClient as createVueJazzClient } from "../vue/create-jazz-client.js";
 import { createJazzClient } from "./create-jazz-client.js";
+import { createJazzClient as createLazyJazzClient } from "./lazy-local-first.js";
 
 const app = schema.defineApp(
   {
@@ -19,8 +20,20 @@ describe("web/create-jazz-client public API", () => {
     ["react", createReactJazzClient],
     ["svelte", createSvelteJazzClient],
     ["vue", createVueJazzClient],
-  ])("%s re-exports the canonical web client factory", (_framework, createClient) => {
-    expect(createClient).toBe(createJazzClient);
+  ])("%s re-exports the web client factory that loads on first use", (_framework, createClient) => {
+    expect(createClient).toBe(createLazyJazzClient);
+  });
+
+  it("opens the same shared client lazily as directly", async () => {
+    const config = await localAccountConfig(`web-create-jazz-client-${randomUUID()}`);
+    const direct = await createJazzClient(config);
+    const lazy = await createLazyJazzClient(config);
+    try {
+      expect(lazy.db).toBe(direct.db);
+    } finally {
+      await lazy.shutdown();
+      await direct.shutdown();
+    }
   });
 
   it("inserts with generated and supplied IDs, queries, and shuts down after activity", async () => {

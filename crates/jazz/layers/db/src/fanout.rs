@@ -1,8 +1,8 @@
 //! Subscription fan-out: shared execution and keyed invalidation.
 //!
-//! Subscriptions whose compiled SQL and parameters are identical share one
-//! live result (a `Group`); a session-independent shape (a public feed) is
-//! one group however many identities watch it. Each group declares
+//! Subscriptions with the same author, claims provenance, governance, compiled
+//! SQL and parameters share one live result (a `Group`). Keeping their scope
+//! distinct also covers policies introduced later. Each group declares
 //! `Watch`es: the tables it reads, narrowed where the query or its read
 //! policy pins a column to one value (a root filter `room = R`, a policy
 //! `EXISTS memberships WHERE member = session.user`). A commit's changed
@@ -27,15 +27,18 @@ enum Watch {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct GroupKey {
+    governance: Option<crate::catalogue::BundleId>,
     /// The renamed tables and columns of the schema naming the rows:
     /// versions on either side of a rename compile to the same SQL but
     /// label rows differently.
     renames: String,
     sql: String,
     params: String,
-    /// Set only when the SQL depends on the identity's session (array
-    /// relations, read as the identity, always may).
-    identity: Option<String>,
+    /// Keep the author even when today's policy is public: a later owner
+    /// policy may depend on the session identity.
+    identity: String,
+    /// Preserve registry-following versus explicit (including empty) claims.
+    request_claims: String,
     /// The array relations nested in each row: queries that differ only
     /// in them compile to the same root SQL.
     relations: String,
@@ -228,7 +231,9 @@ impl Fanout {
     fn drop_group(&mut self, gid: u64) {
         if let Some(group) = self.groups.remove(&gid) {
             let group = group.borrow();
-            self.by_key.remove(&group.key);
+            if self.by_key.get(&group.key) == Some(&gid) {
+                self.by_key.remove(&group.key);
+            }
             self.unindex(gid, &group.watches);
         }
     }
@@ -303,7 +308,28 @@ impl Fanout {
 }
 
 impl Inner {
-    /// Open a subscription: join the group with identical SQL, or start one.
+    fn group_key(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        compiled: &Compiled,
+    ) -> GroupKey {
+        GroupKey {
+            governance: read.governance.key(),
+            renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
+            sql: compiled.sql.clone(),
+            params: format!("{:?}", compiled.params),
+            identity: format!("{identity:?}"),
+            request_claims: format!("{:?}", prepared.request_claims),
+            relations: format!("{:?}", prepared.query.array_subqueries),
+            partial: format!("{:?}", compiled.partial),
+            splices: read.splices.clone(),
+            position: format!("{:?}", read.position),
+        }
+    }
+
+    /// Open a subscription: join the group with identical SQL and scope, or start one.
     pub(super) fn subscribe_member(
         &mut self,
         prepared: &PreparedQuery,
@@ -312,18 +338,8 @@ impl Inner {
         settled: sync::SettledBy,
     ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
         self.check_splices(&prepared.query, &read.splices)?;
-        let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
-        let key = GroupKey {
-            renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
-            sql: compiled.sql.clone(),
-            params: format!("{:?}", compiled.params),
-            identity: (session_used || !prepared.query.array_subqueries.is_empty())
-                .then(|| format!("{identity:?}")),
-            relations: format!("{:?}", prepared.query.array_subqueries),
-            partial: format!("{:?}", compiled.partial),
-            splices: read.splices.clone(),
-            position: format!("{:?}", read.position),
-        };
+        let (compiled, _) = self.compile_tracked(prepared, identity, &read)?;
+        let key = self.group_key(prepared, identity, &read, &compiled);
         let now = settled.get();
         let member = |queue: &Queue| Member {
             queue: Rc::downgrade(queue),
@@ -363,7 +379,7 @@ impl Inner {
         }
         // A replica missing chunks the result needs opens it once they
         // arrive. Its cut is decided over its relations' tables too.
-        let tables = self.with_relation_tables(prepared, &compiled.tables)?;
+        let tables = self.with_relation_tables(prepared, identity, &read, &compiled.tables)?;
         let visible = self.visible_read(&read, &tables);
         let applied = cut_of(&visible);
         let run = match &visible {
@@ -456,7 +472,10 @@ impl Inner {
         let root = schema.table(&query.table)?;
         let mut bare = prepared.clone();
         bare.query.includes.retain(|include| include.require);
-        let others = self.compile_tracked(&bare, identity, read)?.0.tables;
+        let bare_compiled = self.compile_tracked(&bare, identity, read)?.0;
+        // An include can also support a nested child policy or filter. Such a
+        // change must recompute those children, not replay their cached rows.
+        let others = self.with_relation_tables(&bare, identity, read, &bare_compiled.tables)?;
         let mut out = Vec::new();
         for include in query.includes.iter().filter(|include| !include.require) {
             let column = include.path.split('.').next().unwrap_or_default();
@@ -474,19 +493,7 @@ impl Inner {
         Ok(out)
     }
 
-    /// The stored tables a read of `prepared` as `identity` depends on: what
-    /// its live subscription would watch, its compiled SQL reads, and what
-    /// those tables' read policies read. A write to any other table cannot
-    /// change its result.
-    pub(super) fn read_dependencies(
-        &self,
-        prepared: &PreparedQuery,
-        identity: Option<AuthorSubject>,
-    ) -> Result<BTreeSet<String>, Error> {
-        self.read_dependencies_in(prepared, identity, &ReadSpec::default())
-    }
-
-    /// [`Self::read_dependencies`] of a read in `read`'s view.
+    /// Tables a read and its policies depend on under its execution context.
     pub(super) fn read_dependencies_in(
         &self,
         prepared: &PreparedQuery,
@@ -503,10 +510,12 @@ impl Inner {
             }
         }
         if let Some(author) = identity {
+            let policies = read.governance.policies(self);
+            let policies = policies.as_ref();
             for table in tables.clone() {
                 // Internal tables (history, branches) carry no policy.
-                if self.owner.by_stored(&table).is_some() {
-                    tables.extend(self.read_policy_tables(&table, author)?);
+                if policies.by_stored(&table).is_some() {
+                    tables.extend(self.read_policy_tables(policies, &table, author)?);
                 }
             }
         }
@@ -520,8 +529,9 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<(Compiled, bool), Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
+        let schema = self.read_schema(prepared, read);
         let compiled = self
-            .read_ctx(prepared, policy.as_ref(), &claims, read)
+            .read_ctx(prepared, &schema, policy.as_ref(), &claims, read)
             .compile_query(&prepared.query, read.include_deleted)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
         Ok((compiled, used))
@@ -535,7 +545,7 @@ impl Inner {
         read: &ReadSpec,
         compiled: &Compiled,
     ) -> Result<Vec<Watch>, Error> {
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        let schema = self.read_schema(prepared, read);
         // Watches name stored tables and columns: changed rows do.
         let stored = |name: &str| schema.stored_table(name).map(str::to_owned);
         // Under a branch view, inherited rows read with the head's branch
@@ -552,6 +562,11 @@ impl Inner {
         // Tables the query itself reaches (joins, arrays, includes,
         // reachability): these always watch the whole table.
         let mut structural = BTreeSet::new();
+        // A policy can read another row of the root table. The query's
+        // root predicate cannot narrow changes to that supporting occurrence.
+        if compiled.sql.matches(&quote(&root.stored)).count() > 1 {
+            structural.insert(root.stored.clone());
+        }
         fn joins(
             out: &mut BTreeSet<String>,
             list: &[crate::query::JoinVia],
@@ -567,18 +582,7 @@ impl Inner {
             Ok(())
         }
         joins(&mut structural, &query.joins, &stored)?;
-        fn arrays(
-            out: &mut BTreeSet<String>,
-            list: &[crate::query::ArraySubquery],
-            stored: &dyn Fn(&str) -> Result<String, Error>,
-        ) -> Result<(), Error> {
-            for array in list {
-                out.insert(stored(&array.table)?);
-                arrays(out, &array.nested_arrays, stored)?;
-            }
-            Ok(())
-        }
-        arrays(&mut structural, &query.array_subqueries, &stored)?;
+        structural.extend(self.relation_read_tables(prepared, identity, read)?);
         for source in query.flat_join.iter().flat_map(|flat| &flat.sources) {
             let table = &source.table;
             structural.insert(stored(history_source_table(table).unwrap_or(table))?);
@@ -780,15 +784,14 @@ impl Inner {
 
     /// `author`'s claims changed: re-run only the groups whose policy or
     /// claim operands read them. A group with no policy identity takes its
-    /// claims from this node's own author; one with request claims carries
-    /// its own and is unaffected.
+    /// claims from this node's own author. Only request claims matching
+    /// that effective author are fixed; unrelated scopes still use the registry.
     pub(super) fn refresh_identity(&mut self, author: AuthorSubject) {
         let own = self.identity.author;
         self.refresh_where(
             |group| {
-                group.prepared.request_claims.is_none()
-                    && (group.identity == Some(author)
-                        || (group.identity.is_none() && author == own))
+                let effective = group.identity.unwrap_or(own);
+                effective == author && group.prepared.fixed_claims_for(effective).is_none()
             },
             false,
         );
@@ -804,21 +807,61 @@ impl Inner {
             .collect();
         for (gid, group) in groups {
             let mut group = group.borrow_mut();
-            // A schema the current one governs (a sync session's) takes the
-            // policies of whichever schema is current now.
-            if reset
-                && let Some(pinned) = &group.prepared.schema
-                && pinned.policies_from.is_some()
-                && let Some(governed) = self.governed(pinned.jazz.version_id())
-            {
-                group.prepared.schema = Some(governed);
-            }
+            // Group.read retains explicit admission governance. Compilation
+            // refreshes CurrentOwner and preserves Selected; names stay intact.
             let old = std::mem::take(&mut group.watches);
             self.fan.unindex(gid, &old);
+            // Retire only this group's old key. Another refreshed group may
+            // now own the same key; its index entry must survive cancellation.
+            if self.fan.by_key.get(&group.key) == Some(&gid) {
+                self.fan.by_key.remove(&group.key);
+            }
             let watches = self
                 .compile(&group.prepared, group.identity, &group.read)
                 .and_then(|compiled| {
-                    self.watches(&group.prepared, group.identity, &group.read, &compiled)
+                    // Rebuild properties derived from compilation before
+                    // applying another delta under the refreshed policy.
+                    let prepared = &group.prepared;
+                    let read = &group.read;
+                    let schema = self.read_schema(prepared, read);
+                    let root = schema
+                        .stored_table(
+                            history_source_table(&prepared.query.table)
+                                .unwrap_or(&prepared.query.table),
+                        )?
+                        .to_owned();
+                    let watches = self.watches(prepared, group.identity, read, &compiled)?;
+                    let tables = self.with_relation_tables(
+                        prepared,
+                        group.identity,
+                        read,
+                        &compiled.tables,
+                    )?;
+                    let includes =
+                        self.output_only_includes(prepared, group.identity, read, &compiled)?;
+                    let branches = view_branches(&schema, read, &watches);
+                    let masks = view_masks(
+                        &schema,
+                        prepared,
+                        read,
+                        watches
+                            .iter()
+                            .map(|(Watch::Table(table) | Watch::Key(table, ..))| table),
+                    );
+                    let recheck = recheckable(&prepared.query, &root, read, &compiled);
+                    let projected = order_projected(&prepared.query, &compiled);
+                    group.root = root;
+                    group.tables = tables;
+                    group.includes = includes;
+                    group.branches = branches;
+                    group.masks = masks;
+                    group.recheck = recheck;
+                    group.projected = projected;
+                    group.keys.clear();
+                    group.key =
+                        self.group_key(&group.prepared, group.identity, &group.read, &compiled);
+                    self.fan.by_key.entry(group.key.clone()).or_insert(gid);
+                    Ok(watches)
                 })
                 .unwrap_or(old);
             self.fan.index(gid, &watches);
@@ -1374,12 +1417,16 @@ impl Inner {
                     }
                     continue;
                 }
+                // Read access is by the group's own policies: a pinned
+                // session's bundle, not the current schema.
+                let policies = self.read_schema(&group.prepared, &group.read);
                 if let Ok(splices) = self.value_delta(
                     &group.prepared.query.table,
                     out.row.id,
                     column,
                     (from, to),
                     group.identity,
+                    &policies,
                 ) {
                     out.splices.push((column.clone(), splices));
                 }
@@ -1598,6 +1645,7 @@ pub(crate) fn view_masks<'t>(
         .then(|| schema.stored_table(&query.table).ok().map(str::to_owned))
         .flatten();
     let base_read = ReadSpec {
+        governance: read.governance.clone(),
         position: Position::Current,
         include_deleted: read.include_deleted,
         settled_only: read.settled_only,

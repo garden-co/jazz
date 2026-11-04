@@ -1,6 +1,0 @@
-{
-  "title": "Install",
-  "defaultOpen": false,
-  "collapsible": true,
-  "pages": ["client", "typescript-server"]
-}

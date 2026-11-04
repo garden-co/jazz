@@ -210,7 +210,7 @@ describe("cli migrations", () => {
     expect(logs).toContain(
       "No reviewed migration file needed because this schema change does not require row transformations.",
     );
-    expect(logs.some((line) => line.includes("Run npx jazz-tools@"))).toBe(true);
+    expect(logs.some((line) => line.includes("createJazz publishes"))).toBe(true);
   });
 
   it("skips creating a migration file for reordered columns across explicit schema hashes", async () => {
