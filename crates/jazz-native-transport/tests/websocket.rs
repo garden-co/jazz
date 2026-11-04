@@ -244,6 +244,7 @@ async fn connected_native_transport_reports_idle_websocket_closure() {
             peer_identity: jazz::ids::AuthorSubject::SYSTEM,
             auth: transport_auth("secret"),
             authorization: None,
+            bundle: None,
             wake: Arc::new(|| {}),
         })
         .await
@@ -289,6 +290,7 @@ async fn connected_native_transport_reports_owner_drop() {
             peer_identity: jazz::ids::AuthorSubject::SYSTEM,
             auth: transport_auth("secret"),
             authorization: None,
+            bundle: None,
             wake: Arc::new(|| {}),
         })
         .await
@@ -373,6 +375,7 @@ async fn public_jazz_client_syncs_through_explicit_native_adapter() {
                     jwt_token: None,
                     backend_secret: None,
                     backend_session: None,
+                    bundle: None,
                     admin_secret: Some("secret".to_owned()),
                     migrations: Default::default(),
                 },

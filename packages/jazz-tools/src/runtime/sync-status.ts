@@ -10,7 +10,8 @@
  *   - `network`: the server has been unreachable for a while; the client
  *     keeps retrying (`retrying: true`).
  *   - `auth`: the server refused the credential. The client waits for a new
- *     one (`db.updateAuthToken(...)` or the auth provider's refresh).
+ *     one (`db.updateAuthToken(...)`, or a fresh sign-in through the app's
+ *     backend).
  *   - `stopped`: a failure retrying cannot fix (a protocol error or an
  *     incompatible server); only `db.reconnect()` tries again.
  */

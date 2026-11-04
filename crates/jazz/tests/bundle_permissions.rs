@@ -469,3 +469,42 @@ fn a_pinned_session_under_another_bundle_opens_fresh() {
     let (_, _upstream) = reconnect_pinned(&server, &db, alice, closed, &upstream);
     assert_eq!(local(&db), []);
 }
+
+#[test]
+fn a_pinned_subscription_keeps_its_bundle_when_the_schema_changes() {
+    let (server, _row) = server_with_row(
+        block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap(),
+    );
+    let closed = block_on(server.publish_bundle(&users(PolicyExpr::False))).unwrap();
+    let bob = AuthorSubject::for_test_bytes([0x66; 16]);
+    let (on_closed, _b) = pinned(&server, 2, bob, closed);
+    pump(&server, &[&on_closed]);
+    assert_eq!(
+        local(&on_closed),
+        [],
+        "the closed bundle does not read the row"
+    );
+
+    // A new schema version re-runs every subscription. Bob's must still be
+    // governed by his bundle, not by the store's own schema, which reads
+    // everything.
+    let v2 = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("users")
+                .column("name", ColumnType::Text)
+                .policies(read_and_allow_all_writes(PolicyExpr::True)),
+        )
+        .table(
+            TableSchemaBuilder::new("notes")
+                .column("body", ColumnType::Text)
+                .policies(read_and_allow_all_writes(PolicyExpr::True)),
+        )
+        .build();
+    block_on(server.admit_schema_with_lenses(compile_schema(&v2), &[])).unwrap();
+    pump(&server, &[&on_closed]);
+    assert_eq!(
+        local(&on_closed),
+        [],
+        "still closed after the schema changed"
+    );
+}
