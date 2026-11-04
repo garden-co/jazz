@@ -1,3 +1,4 @@
+import "./abort-signal.js";
 import { clientScope } from "../runtime/client-scope.js";
 import { installNativeRuntimeEntropy } from "../runtime/runtime-entropy.js";
 import type { RuntimeClientContext } from "../runtime/runtime-source.js";
