@@ -1144,7 +1144,7 @@ dependencies = [
  "jazz-model",
  "jazz-protocol",
  "jazz-types",
- "jsonwebtoken 10.4.0",
+ "jsonwebtoken",
  "postcard",
  "rand 0.8.8",
  "rustc-hash",
@@ -1173,6 +1173,7 @@ dependencies = [
  "futures",
  "jazz-model",
  "jazz-protocol",
+ "jazz-text",
  "jazz-types",
  "postcard",
  "rusqlite",
@@ -1190,6 +1191,7 @@ dependencies = [
  "base64 0.22.1",
  "hex",
  "internment",
+ "jazz-text",
  "jazz-types",
  "jsonschema",
  "postcard",
@@ -1241,12 +1243,14 @@ version = "0.1.0"
 dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
+ "bytes",
  "futures",
  "futures-util",
  "hex",
+ "hmac",
  "http",
  "jazz",
- "jsonwebtoken 10.4.0",
+ "jsonwebtoken",
  "postcard",
  "reqwest",
  "rusqlite",
@@ -1262,6 +1266,10 @@ dependencies = [
  "tungstenite",
  "uuid",
 ]
+
+[[package]]
+name = "jazz-text"
+version = "0.1.0"
 
 [[package]]
 name = "jazz-types"
@@ -1320,21 +1328,6 @@ dependencies = [
  "serde_json",
  "unicode-general-category",
  "uuid-simd",
-]
-
-[[package]]
-name = "jsonwebtoken"
-version = "9.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
-dependencies = [
- "base64 0.22.1",
- "js-sys",
- "pem",
- "ring",
- "serde",
- "serde_json",
- "simple_asn1",
 ]
 
 [[package]]
@@ -2710,13 +2703,11 @@ name = "todo-server"
 version = "0.1.0"
 dependencies = [
  "axum 0.7.9",
- "base64 0.22.1",
  "futures-util",
  "http-body-util",
  "jazz",
  "jazz-native-transport",
  "jazz-server",
- "jsonwebtoken 9.3.1",
  "mimalloc",
  "reqwest",
  "reqwest-eventsource",

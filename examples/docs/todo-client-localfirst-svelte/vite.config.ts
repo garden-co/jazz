@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { jazzPlugin } from "jazz-tools/dev/vite";
 import { fileURLToPath } from "node:url";
+import { jazzBackend } from "./jazz.server.js";
 
 export default defineConfig({
   resolve: {
@@ -11,5 +11,7 @@ export default defineConfig({
       ),
     },
   },
-  plugins: [svelte(), jazzPlugin()],
+  plugins: [svelte(), jazzBackend({ dataDir: ".jazz" })],
+  // jazz-wasm is wasm-bindgen output, which Vite's dependency pre-bundler cannot handle.
+  optimizeDeps: { exclude: ["jazz-wasm"] },
 });

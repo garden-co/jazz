@@ -28,7 +28,7 @@ use tokio::sync::OnceCell;
 use tracing::warn;
 
 use super::auth::{
-    AuthConfig, JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, validate_jwt_with_cache_at,
+    ExpectedJwtClaims, JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, validate_jwt_with_cache_at,
 };
 use crate::server::ServerState;
 
@@ -57,7 +57,7 @@ pub struct TrustedWorkload {
 /// Verifies workload tokens against the trusted workload's issuer.
 pub struct WorkloadVerifier {
     workload: TrustedWorkload,
-    claims: AuthConfig,
+    claims: ExpectedJwtClaims,
     http_client: reqwest::Client,
     jwks: OnceCell<JwksCache>,
 }
@@ -72,10 +72,9 @@ impl WorkloadVerifier {
     }
 
     pub fn with_client(workload: TrustedWorkload, http_client: reqwest::Client) -> Self {
-        let claims = AuthConfig {
-            jwt_issuer: Some(workload.issuer.clone()),
-            jwt_audience: Some(workload.audience.clone()),
-            ..AuthConfig::default()
+        let claims = ExpectedJwtClaims {
+            issuer: workload.issuer.clone(),
+            audience: workload.audience.clone(),
         };
         Self {
             workload,
@@ -163,8 +162,24 @@ impl WorkloadVerifier {
         if verified.subject != self.workload.subject {
             return Err("workload token subject is not the trusted workload".to_owned());
         }
+        if let Ok(mut latest) = LATEST_WORKLOAD_TOKEN.lock() {
+            *latest = Some(token.to_owned());
+        }
         Ok(())
     }
+}
+
+/// The trusted workload's latest verified token in this process: on
+/// Vercel, the deploying function's OIDC token, which is also what its AWS
+/// role trusts ([`crate::s3::WebIdentityToken::Workload`]).
+static LATEST_WORKLOAD_TOKEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The trusted workload's latest verified token, if one arrived yet.
+pub fn latest_workload_token() -> Option<String> {
+    LATEST_WORKLOAD_TOKEN
+        .lock()
+        .ok()
+        .and_then(|token| token.clone())
 }
 
 /// How a server checks the backend credential.

@@ -29,6 +29,8 @@ mod bundle_permissions;
 mod catalogue_rows;
 #[path = "../claims_change.rs"]
 mod claims_change;
+#[path = "../claims_registry_refresh.rs"]
+mod claims_registry_refresh;
 #[path = "../column_defaults.rs"]
 mod column_defaults;
 #[path = "../commit_atomicity_frames.rs"]
@@ -85,6 +87,8 @@ mod local_first_server_wait;
 mod maybe_conflicting;
 #[path = "../mutation_admission.rs"]
 mod mutation_admission;
+#[path = "../nested_policy_dependencies.rs"]
+mod nested_policy_dependencies;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
 #[path = "../parameterized_subscription_routing.rs"]
@@ -127,6 +131,8 @@ mod relay_serves_on_arrival;
 mod schema_activation;
 #[path = "../schema_renames.rs"]
 mod schema_renames;
+#[path = "../self_table_policy_watches.rs"]
+mod self_table_policy_watches;
 #[path = "../serializable_relay.rs"]
 mod serializable_relay;
 #[path = "../serializable_sqlite.rs"]
@@ -149,10 +155,16 @@ mod storage_corpus;
 mod storage_errors;
 #[path = "../stored_identities.rs"]
 mod stored_identities;
+#[path = "../streaming_transaction.rs"]
+mod streaming_transaction;
 #[path = "../streaming_upload_ownership.rs"]
 mod streaming_upload_ownership;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
+#[path = "../subscription_refresh_metadata.rs"]
+mod subscription_refresh_metadata;
+#[path = "../subscription_scope_sharing.rs"]
+mod subscription_scope_sharing;
 #[path = "../sync_access_loss.rs"]
 mod sync_access_loss;
 #[path = "../sync_aggregates.rs"]
@@ -203,3 +215,8 @@ mod transaction_read_prefix;
 
 #[path = "../executing_handle_policy_context.rs"]
 mod executing_handle_policy_context;
+#[path = "../governance_claims_composition.rs"]
+mod governance_claims_composition;
+
+#[path = "../governance_ordinary_composition.rs"]
+mod governance_ordinary_composition;

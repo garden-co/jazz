@@ -982,12 +982,27 @@ mod client_transport {
                     .start()
                     .await
                     .expect("start test server");
-                let alice = TestingClient::builder()
-                    .with_server(&server)
-                    .with_schema(schema)
-                    .with_user_id("alice-auth-failure")
-                    .ready_on("documents", Duration::from_secs(30))
-                    .connect()
+                // A local-first guest, relayed by the app's backend: its own
+                // proof expires an hour after the server's test clock reads now.
+                let seed = [0xa7; 32];
+                let subject = jazz::tools::identity::derive_user_id(&seed).to_string();
+                let mut context = server.make_client_context_for_user(schema, &subject);
+                context.jwt_token = Some(
+                    jazz::tools::identity::mint_jazz_self_signed_token_at(
+                        &seed,
+                        jazz::tools::identity::LOCAL_FIRST_ISSUER,
+                        &server.app_id().to_string(),
+                        3600,
+                        auth_clock.now_seconds(),
+                    )
+                    .expect("mint guest proof"),
+                );
+                context.account_id = Some(jazz::account_registry::local_first_account_id(
+                    *server.app_id().uuid(),
+                    &subject,
+                ));
+                let alice = jazz_testkit::connect(context).await.expect("connect alice");
+                support::wait_for_remote_query_ready(&alice, "documents", Duration::from_secs(30))
                     .await;
 
                 let (document_id, _, transaction_id) = alice
@@ -1006,8 +1021,6 @@ mod client_transport {
                 drop(online);
 
                 disconnect_client(&alice);
-                // The context token is minted with a one-hour expiry against
-                // the server's test auth clock.
                 auth_clock.advance(Duration::from_secs(4000));
 
                 let rejected = reconnect_client(&alice).await;

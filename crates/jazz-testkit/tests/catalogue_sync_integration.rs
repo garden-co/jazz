@@ -778,8 +778,7 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published_impl() 
     seed_schema_catalogue(&server, &schema).await;
 
     let mut reader_context =
-        server.make_client_context_for_user(schema.clone(), test_user_id("reader-dynamic"));
-    reader_context.backend_secret = None;
+        server.make_user_context(schema.clone(), test_user_id("reader-dynamic"));
     reader_context.admin_secret = None;
     support::enroll_test_context(&mut reader_context)
         .await

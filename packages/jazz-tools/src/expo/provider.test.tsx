@@ -17,7 +17,7 @@ it("uses the Expo host factory and native loading/recovery controls", async () =
   await act(async () => {
     await Promise.resolve();
   });
-  expect(host.create).toHaveBeenCalledWith(expect.objectContaining({ initial: "local-first" }));
+  expect(host.create.mock.calls[0][0].initial).toBeUndefined();
   expect(view.container.querySelector("native-pressable")?.textContent).toBe("Try again");
   expect(view.container.querySelector("section, p, button")).toBeNull();
 });

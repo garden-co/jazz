@@ -37,9 +37,6 @@ pre-commit:
       exclude: "crates/jazz-rn/src/**, examples/*/schema/app.ts, examples/docs/*/schema/app.ts, crates/jazz-napi/index.d.ts, crates/jazz-napi/index.js"
       run: pnpm oxlint --fix {staged_files}
       stage_fixed: true
-    starters-parity:
-      glob: "starters/**"
-      run: node dev/scripts/check-starters-parity.mjs
     # Type-check the docs snippet packages. `--only` skips the topological
     # `^build` chain, which otherwise drags in jazz-rn's native (NDK) build —
     # not needed to type-check the snippets. Because `--only` skips that chain,

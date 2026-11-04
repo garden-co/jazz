@@ -38,9 +38,8 @@ the app's own backend, same-origin with the app's cookies: its `authenticate`
 decides who is signed in, and the answer carries the account, identity and
 claims but no token. `linkWithBackend(guest)` does the same for a local-first
 guest who just signed up, and the backend links the guest to that user. The
-sync connection is admitted the same way, on each connect. `registerJWT`,
-`loginJWT` and `loginOrRegisterJWT` remain only as internal test fixtures for
-cores that trust a test JWT; apps don't use them.
+sync connection is admitted the same way, on each connect. A core verifies no
+user JWTs.
 
 For passphrase/passkey backup, explicitly call `exportLocalFirstSecret(handle)`.
 Restore with `accounts.restoreLocalFirst(secret)` outside a context after normal

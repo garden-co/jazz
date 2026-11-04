@@ -9,7 +9,7 @@ import {
 import type { PublicSession, Session } from "../runtime/context.js";
 
 const mock = vi.hoisted(() => ({ createJazzClient: vi.fn() }));
-vi.mock("./create-jazz-client.js", () => ({ createJazzClient: mock.createJazzClient }));
+vi.mock("../web/create-jazz-client.js", () => ({ createJazzClient: mock.createJazzClient }));
 
 import { JazzProvider } from "./provider.js";
 import { useSession } from "./provider.js";
