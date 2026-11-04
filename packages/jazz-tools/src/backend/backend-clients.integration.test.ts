@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { exportJWK, generateKeyPair, SignJWT, type JWTPayload } from "jose";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
-import { createJazz, createJazzSession, memory, trustWorkload, type Jazz } from "./index.js";
+import { createJazz, createJazzClient, memory, trustWorkload, type Jazz } from "./index.js";
 import { backendDbForSession } from "./create-jazz-session.js";
 
 const app = s.defineApp(
@@ -194,7 +194,7 @@ describe("scoped backend clients", () => {
   it("sync with the user's permissions", async () => {
     const { appId, jazz, origin } = await appWith([scoped({ sub: "worker" })]);
     let tokens = 0;
-    const session = await createJazzSession({
+    const session = await createJazzClient({
       appId,
       app,
       permissions,
@@ -254,7 +254,7 @@ describe("trusted backend clients", () => {
       ).status,
     ).toBe(401);
 
-    const session = await createJazzSession({
+    const session = await createJazzClient({
       appId,
       app,
       permissions,
@@ -303,10 +303,10 @@ describe("trusted backend clients", () => {
       driver: { type: "memory" as const },
     };
     await expect(
-      createJazzSession({ ...base, credential: () => sign({ sub: "intruder" }) }),
+      createJazzClient({ ...base, credential: () => sign({ sub: "intruder" }) }),
     ).rejects.toThrow(/neither as a trusted machine nor as a user/);
     await expect(
-      createJazzSession({
+      createJazzClient({
         ...base,
         credential: () => sign({ sub: "ops" }),
         initial: "local-first",
@@ -364,7 +364,7 @@ describe("trusted backend clients", () => {
     expect(answered).toBe("message");
     // Through its client: a write as alice carries her identity and is
     // checked against her policies.
-    const session = await createJazzSession({
+    const session = await createJazzClient({
       appId,
       app,
       permissions,

@@ -7,4 +7,4 @@ Deployments no longer activate permissions on the core. The `/admin/deploy` rout
 
 `GET /admin/bundles` lists every published bundle with its write schema and permissions, and `fetchPublishedBundles()` from `jazz-tools` reads it. The standalone Inspector shows the permissions of the latest bundle published for the schema it inspects.
 
-`createJazzSession()` from `jazz-tools/backend` takes `bundle`, the id `deploy()` returned. A backend that acts for its users without `createJazz` must pass it: an unpinned backend link can no longer act for a user, only as itself.
+`createJazzClient()` from `jazz-tools/backend` takes `bundle`, the id `deploy()` returned. A backend that acts for its users without `createJazz` must pass it: an unpinned backend link can no longer act for a user, only as itself.

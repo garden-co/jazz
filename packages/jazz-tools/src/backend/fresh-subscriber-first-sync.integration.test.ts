@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { startTestJazz } from "../testing/index.js";
-import { createJazzSession } from "./index.js";
+import { createJazzClient } from "./index.js";
 
 const app = s.defineApp(
   {
@@ -34,9 +34,9 @@ describe("fresh subscriber first sync", () => {
     const rowCount = 100;
     const body = "x".repeat(60_000);
     const server = await startTestJazz({ app, permissions, coreOptions: settings });
-    const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
+    const sessions: Awaited<ReturnType<typeof createJazzClient>>[] = [];
     const open = async (name: string) => {
-      const session = await createJazzSession({
+      const session = await createJazzClient({
         appId: settings.appId,
         app,
         permissions,

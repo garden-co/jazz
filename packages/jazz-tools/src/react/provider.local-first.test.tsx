@@ -8,8 +8,8 @@ import {
 } from "../runtime/auth-secret-store.js";
 import type { PublicSession, Session } from "../runtime/context.js";
 
-const mock = vi.hoisted(() => ({ createJazzClient: vi.fn() }));
-vi.mock("../web/create-jazz-client.js", () => ({ createJazzClient: mock.createJazzClient }));
+const mock = vi.hoisted(() => ({ openJazzClient: vi.fn() }));
+vi.mock("../web/create-jazz-client.js", () => ({ openJazzClient: mock.openJazzClient }));
 
 import { JazzProvider } from "./provider.js";
 import { useSession } from "./provider.js";
@@ -57,8 +57,8 @@ function IdentityProbe() {
 describe("JazzProvider local-first auth", () => {
   beforeEach(() => {
     Object.defineProperty(globalThis, "localStorage", { configurable: true, value: makeStorage() });
-    mock.createJazzClient.mockReset();
-    mock.createJazzClient.mockResolvedValue(makeClient());
+    mock.openJazzClient.mockReset();
+    mock.openJazzClient.mockResolvedValue(makeClient());
   });
 
   afterEach(() => {
@@ -79,9 +79,7 @@ describe("JazzProvider local-first auth", () => {
     );
     await waitFor(() => {
       expect(view.getByTestId("identity").dataset.account).toBe(account.id);
-      expect(mock.createJazzClient).toHaveBeenCalledWith(
-        expect.objectContaining({ appId, account }),
-      );
+      expect(mock.openJazzClient).toHaveBeenCalledWith(expect.objectContaining({ appId, account }));
     });
   });
 

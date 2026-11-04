@@ -9,12 +9,16 @@
  * session cookies and sign-in; these browser tests exercise Jazz policies.
  */
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { type JazzClient, createJazzClient } from "jazz-tools/react";
-import { createAccountManager, type AccountHandle } from "jazz-tools";
+import type { Db } from "../../../../packages/jazz-tools/src/runtime/db.js";
+import {
+  acquireBrowserTestAccount,
+  createBrowserTestDb,
+} from "../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
 import { deploy } from "../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   getJazzServerInfo,
-  signInWithJazzApp,
+  jazzAppUserUrl,
+  loginAtJazzAppUser,
   startJazzApp,
   type JazzServerInfo,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
@@ -22,8 +26,11 @@ import { app } from "../../schema.js";
 import permissions from "../../permissions.js";
 import { schema as betterAuthSchema } from "../../schema-better-auth/schema.js";
 
+/** A test user's client: its Db, and how to close it. */
+type JazzClient = { db: Db; shutdown(): Promise<void> };
+
 const clients: JazzClient[] = [];
-const accountsByRole = new Map<Role, Promise<{ serverUrl: string; account: AccountHandle }>>();
+const userUrls = new Map<Role, Promise<string>>();
 let server: JazzServerInfo;
 
 type Role = "admin" | "member";
@@ -42,26 +49,32 @@ afterEach(async () => {
 
 /** A client signed in with `role`, or a local-first guest without one. */
 async function makeClient(role?: Role): Promise<JazzClient> {
-  let config: { serverUrl: string; account: AccountHandle };
+  let serverUrl = server.serverUrl;
+  let account;
   if (role) {
-    let signedIn = accountsByRole.get(role);
-    if (!signedIn) {
-      signedIn = signInWithJazzApp(createAccountManager, server, `test-${role}`, { role });
-      accountsByRole.set(role, signedIn);
+    // A user signs in through the app's backend on their own origin; each
+    // sign-in there names the same user, so the same account.
+    let userUrl = userUrls.get(role);
+    if (!userUrl) {
+      userUrl = jazzAppUserUrl(server, `test-${role}`, { role });
+      userUrls.set(role, userUrl);
     }
-    config = await signedIn;
+    serverUrl = await userUrl;
+    account = await loginAtJazzAppUser(server.appId, serverUrl);
   } else {
-    const manager = await createAccountManager({
+    account = await acquireBrowserTestAccount({
       appId: server.appId,
-      serverUrl: server.serverUrl,
+      serverUrl,
+      key: crypto.randomUUID(),
     });
-    config = { serverUrl: server.serverUrl, account: manager.createLocalFirst() };
   }
-  const client = await createJazzClient({
+  const db = await createBrowserTestDb({
     appId: server.appId,
+    serverUrl,
     driver: { type: "memory" },
-    ...config,
+    account,
   });
+  const client = { db, shutdown: () => db.shutdown() };
   clients.push(client);
   return client;
 }
