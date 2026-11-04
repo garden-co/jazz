@@ -6,7 +6,7 @@ Node + Express REST API backed by Jazz as the database. No frontend: pure server
 
 - Running Jazz inside a Node backend with `createJazz` from `jazz-tools/backend`: no browser, no WASM.
 - Authenticated CRUD over `/todos` (`GET`, `POST`, `PUT /:id`, `DELETE /:id`) with row-level permissions enforced server-side.
-- Request authentication in the app's own `authenticate`: every `/todos` request sends `Authorization: Bearer <jwt>`, the server verifies it against the identity provider's JWKS, and `jazz.forRequest(request)` opens the database as that user.
+- Request authentication in the app's own `authenticate`: every `/todos` request sends `Authorization: Bearer <jwt>`, `fromJWT` verifies it against the identity provider's JWKS, and `jazz.forRequest(request)` opens the database as that user.
 - Server-Sent Events (`/todos/live`) pushing only the authenticated caller's live snapshot on every mutation.
 - Write durability control via `wait({ tier })` (`local`, `edge`, `global`).
 - Explicit persistent or in-memory storage selection for programmatic servers and the CLI.
@@ -24,7 +24,7 @@ pnpm dev
 
 `pnpm dev` runs the server with `tsx watch` against `src/main.ts`. The HTTP API listens on a default port (see `main.ts`).
 
-`JAZZ_JWKS_URL` is required: the JWKS endpoint of the identity provider whose JWTs the API accepts.
+`JAZZ_JWKS_URL` and `JAZZ_JWT_ISSUER` are required: the JWKS endpoint and issuer of the identity provider whose JWTs the API accepts. Set `JAZZ_JWT_AUDIENCE` too when the issuer signs tokens for other apps.
 
 Jazz runs in the server process and keeps its data in SQLite. To keep the data on a Jazz core elsewhere (Jazz Cloud, or a sync server you run) instead, set `JAZZ_SERVER_URL`, `JAZZ_APP_ID` and `JAZZ_ADMIN_SECRET`. `createJazz` publishes the app's schema and permissions on start, so there is no separate deploy step.
 
@@ -38,8 +38,8 @@ Storage is persistent by default. The CLI resolves its database path in this ord
 
 ## Authentication
 
-Who a request is, this server decides: its `authenticate` verifies the bearer JWT against
-`JAZZ_JWKS_URL` and hands Jazz the token's `sub`. Jazz gives each user their own account the
+Who a request is, this server decides: its `authenticate` (`fromJWT`) verifies the bearer JWT
+against `JAZZ_JWKS_URL` and `JAZZ_JWT_ISSUER` and hands Jazz the token's `sub`. Jazz gives each user their own account the
 first time it sees them; `POST /sign-in` returns it.
 
 ```bash

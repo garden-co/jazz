@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateSecret, identityOf, signChallenge, signToken } from "../local-first-auth/index.js";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
@@ -12,6 +13,7 @@ import {
   createJazz,
   createJazzSession,
   files,
+  fromJWT,
   memory,
   remote,
   sqlite,
@@ -143,7 +145,7 @@ describe("createJazz", () => {
     });
     expect(signedOut.status).toBe(401);
     // Admin and backend routes never leave the process.
-    for (const route of ["admin/bundles", "backend/admit", "admin/permissions"]) {
+    for (const route of ["admin/bundles", "backend/admit"]) {
       const response = await fetch(`${origin}/jazz/apps/${appId}/${route}`, {
         method: "POST",
         headers: { "X-Jazz-Admin-Secret": "guess" },
@@ -231,6 +233,36 @@ describe("createJazz", () => {
     const probe = await fetch(`${origin}/jazz/apps/${appId}/ws`);
     expect(probe.status).toBe(426);
     expect(probe.headers.get("x-jazz-stream")).toBeNull();
+  }, 60_000);
+
+  it("signs users in with fromJWT and keeps their account and claims", async () => {
+    const { privateKey, publicKey } = await generateKeyPair("ES256", { extractable: true });
+    const issuer = "https://idp.example";
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: fromJWT({ publicKey: await exportJWK(publicKey), issuer, audience: "my-app" }),
+    });
+    cleanups.push(() => jazz.close());
+    const bearer = async (subject: string) =>
+      new Request("http://app/x", {
+        headers: {
+          authorization: `Bearer ${await new SignJWT({ role: "editor" })
+            .setProtectedHeader({ alg: "ES256" })
+            .setIssuer(issuer)
+            .setAudience("my-app")
+            .setSubject(subject)
+            .setExpirationTime("5m")
+            .sign(privateKey)}`,
+        },
+      });
+    const account = await jazz.accountFor(await bearer("user_01"));
+    expect(account).toEqual(expect.any(String));
+    // A fresh token for the same user opens the same account.
+    await expect(jazz.accountFor(await bearer("user_01"))).resolves.toBe(account);
+    await expect(jazz.accountFor(await bearer("user_02"))).resolves.not.toBe(account);
+    await expect(jazz.accountFor(new Request("http://app/x"))).resolves.toBeNull();
   }, 60_000);
 
   it("links only a guest whose proof is for this app or this endpoint", async () => {
@@ -1100,49 +1132,46 @@ describe("createJazz", () => {
   it.each([
     ["has no route for bundles", 404, /predates per-deployment permissions bundles/],
     ["publishes no bundle", 200, /did not publish a permissions bundle/],
-  ] as const)(
-    "refuses a core that %s instead of activating its deployment",
-    async (_label, status, error) => {
-      const appId = randomUUID();
-      const core = await startLocalJazzServer({ appId, inMemory: true });
-      cleanups.push(() => core.stop());
-      // An older core: everything but the `/bundles` route it never had.
-      const older = createServer((request, response) => {
-        if (request.url?.endsWith("/admin/bundles")) {
-          response.statusCode = status;
-          response.setHeader("content-type", "application/json");
-          response.end(
-            status === 200
-              ? JSON.stringify({ changed: true, published: { schemas: [], migrations: [] } })
-              : "",
-          );
-          return;
-        }
-        const target = new URL(request.url ?? "/", core.url);
-        const upstream = httpRequest(
-          target,
-          { method: request.method, headers: { ...request.headers, host: target.host } },
-          (answer) => {
-            response.writeHead(answer.statusCode ?? 502, answer.headers);
-            answer.pipe(response);
-          },
+  ] as const)("refuses a core that %s", async (_label, status, error) => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    // An older core: everything but the `/bundles` route it never had.
+    const older = createServer((request, response) => {
+      if (request.url?.endsWith("/admin/bundles")) {
+        response.statusCode = status;
+        response.setHeader("content-type", "application/json");
+        response.end(
+          status === 200
+            ? JSON.stringify({ changed: true, published: { schemas: [], migrations: [] } })
+            : "",
         );
-        request.pipe(upstream);
-      });
-      await new Promise<void>((resolve) => older.listen(0, "127.0.0.1", resolve));
-      cleanups.push(() => new Promise<void>((resolve) => older.close(() => resolve())));
-      const url = `http://127.0.0.1:${(older.address() as AddressInfo).port}`;
+        return;
+      }
+      const target = new URL(request.url ?? "/", core.url);
+      const upstream = httpRequest(
+        target,
+        { method: request.method, headers: { ...request.headers, host: target.host } },
+        (answer) => {
+          response.writeHead(answer.statusCode ?? 502, answer.headers);
+          answer.pipe(response);
+        },
+      );
+      request.pipe(upstream);
+    });
+    await new Promise<void>((resolve) => older.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => older.close(() => resolve())));
+    const url = `http://127.0.0.1:${(older.address() as AddressInfo).port}`;
 
-      await expect(
-        createJazz({ app, permissions, store: remote({ url, appId, secret: core.adminSecret }) }),
-      ).rejects.toThrow(error);
-      // Nothing was activated as the app's current permissions.
-      const head = await fetch(`${core.url}/apps/${appId}/admin/permissions`, {
-        headers: { "X-Jazz-Admin-Secret": core.adminSecret },
-      });
-      expect(((await head.json()) as { head: unknown }).head).toBeNull();
-    },
-  );
+    await expect(
+      createJazz({ app, permissions, store: remote({ url, appId, secret: core.adminSecret }) }),
+    ).rejects.toThrow(error);
+    // The real core published no bundle, so no session can pin to it.
+    const listed = await fetch(`${core.url}/apps/${appId}/admin/bundles`, {
+      headers: { "X-Jazz-Admin-Secret": core.adminSecret },
+    });
+    expect(((await listed.json()) as { bundles: unknown[] }).bundles).toEqual([]);
+  });
 
   it("presents the backend credential on every request and socket to a remote core", async () => {
     const appId = randomUUID();

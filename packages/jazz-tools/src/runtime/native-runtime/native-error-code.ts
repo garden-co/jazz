@@ -69,7 +69,6 @@ export type NativeCoreErrorReason =
   | "missing_required"
   | "branch_move"
   | "missing_chunks"
-  | "permissions_head_missing"
   | "predecessor_rejected"
   | "schema_version_not_deployed"
   | "identity_mismatch";
@@ -85,7 +84,6 @@ export const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCore
   "missing_required",
   "branch_move",
   "missing_chunks",
-  "permissions_head_missing",
   "predecessor_rejected",
   "schema_version_not_deployed",
   "identity_mismatch",

@@ -8,15 +8,14 @@ import express, { Request, Response, NextFunction } from "express";
 import type { Application } from "express";
 import type { Server } from "node:http";
 import { join } from "node:path";
-import { createRemoteJWKSet, jwtVerify } from "jose";
 import {
   createJazz,
+  fromJWT,
   memory,
   remote,
   sqlite,
   type Db,
   type JazzStore,
-  type JazzUser,
 } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
@@ -61,6 +60,13 @@ export interface TodoServerOptions {
    * Defaults to `JAZZ_JWKS_URL`.
    */
   jwksUrl?: string;
+  /** The `iss` of the JWTs this API accepts. Defaults to `JAZZ_JWT_ISSUER`. */
+  jwtIssuer?: string;
+  /**
+   * The `aud` that names this API. Defaults to `JAZZ_JWT_AUDIENCE`; without
+   * one, the issuer must be this API's alone.
+   */
+  jwtAudience?: string;
   /**
    * A Jazz core elsewhere (Jazz Cloud, or a sync server you run) to keep the
    * data in, instead of `storage`. Defaults to `JAZZ_SERVER_URL`; needs
@@ -107,12 +113,16 @@ export async function createServer(
 ): Promise<TodoServer> {
   const serverUrl = options.serverUrl ?? process.env.JAZZ_SERVER_URL;
   const jwksUrl = options.jwksUrl ?? process.env.JAZZ_JWKS_URL;
+  const jwtIssuer = options.jwtIssuer ?? process.env.JAZZ_JWT_ISSUER;
+  const jwtAudience = options.jwtAudience ?? process.env.JAZZ_JWT_AUDIENCE;
 
   if (storage.type === "persistent" && storage.dataPath.trim() === "") {
     throw new Error("Persistent storage requires a non-empty dataPath");
   }
-  if (!jwksUrl) {
-    throw new Error("JAZZ_JWKS_URL is required: the API accepts JWTs from that issuer");
+  if (!jwksUrl || !jwtIssuer) {
+    throw new Error(
+      "JAZZ_JWKS_URL and JAZZ_JWT_ISSUER are required: the API accepts that issuer's JWTs",
+    );
   }
 
   let store: JazzStore;
@@ -129,17 +139,7 @@ export async function createServer(
 
   // Who a request is, this API decides: here, the subject of a JWT that
   // the identity provider signed. Jazz gives each subject its own account.
-  const keys = createRemoteJWKSet(new URL(jwksUrl));
-  async function authenticate(request: globalThis.Request): Promise<JazzUser | null> {
-    const authorization = request.headers.get("authorization");
-    if (!authorization?.startsWith("Bearer ")) return null;
-    try {
-      const { payload } = await jwtVerify(authorization.slice("Bearer ".length), keys);
-      return payload.sub ? { userId: payload.sub } : null;
-    } catch {
-      return null;
-    }
-  }
+  const authenticate = fromJWT({ jwksUrl, issuer: jwtIssuer, audience: jwtAudience ?? false });
 
   const jazz = await createJazz({ app: schemaApp, permissions, store, authenticate });
   // Preserve the programmatic administrative handle for embedding and tests.

@@ -61,7 +61,7 @@ describe("Todo Server request authentication", () => {
           type: "persistent",
           dataPath: join(mkdtempSync(join(tmpdir(), "jazz-auth-")), "jazz.db"),
         },
-        { jwksUrl: jwtIssuer.jwksUrl },
+        { jwksUrl: jwtIssuer.jwksUrl, jwtIssuer: EXTERNAL_ISSUER },
       ),
       0,
     );

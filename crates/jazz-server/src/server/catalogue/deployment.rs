@@ -153,7 +153,6 @@ mod tests {
         let base_hash = SchemaHash::compute(&base);
         let next_hash = SchemaHash::compute(&next);
         let store = StoredCatalogue::new(
-            AppId::from_name("deployment-write-delta"),
             Some(base.clone()),
             crate::runtime::AppStore::memory()
                 .unwrap()

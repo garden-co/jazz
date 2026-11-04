@@ -35,6 +35,7 @@ async function startChild(cwd: string): Promise<RunningChild> {
     PORT: "0",
     JAZZ_APP_ID: APP_ID,
     JAZZ_JWKS_URL: jwtIssuer.jwksUrl,
+    JAZZ_JWT_ISSUER: EXTERNAL_ISSUER,
   };
   delete childEnv.JAZZ_SERVER_URL;
   delete childEnv.DB_PATH;
@@ -85,6 +86,7 @@ async function runCli(
     PORT: "0",
     JAZZ_APP_ID: APP_ID,
     JAZZ_JWKS_URL: jwtIssuer.jwksUrl,
+    JAZZ_JWT_ISSUER: EXTERNAL_ISSUER,
   };
   delete childEnv.JAZZ_SERVER_URL;
   if (dbPath === undefined) delete childEnv.DB_PATH;

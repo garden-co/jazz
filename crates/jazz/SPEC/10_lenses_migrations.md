@@ -85,24 +85,29 @@ what an open needs is read back from its own rows.
 
 Definitions are immutable and stored whole as canonical JSON text (object
 keys sorted, no whitespace), so SQL can read them with `json_each`; decisions
-about them (admission, publication time, activation) are real columns. The
-current permissions revision is the highest; its parent is the one before it.
-Every revision is kept.
+about them (admission, publication time, activation) are real columns. A
+replica's current permissions revision is the highest; its parent is the one
+before it. Every revision is kept. A server's store has no revisions: its
+sessions are governed by the bundle they pin (SPEC 8), never by a current
+schema.
 
 `Db::apply_catalogue(CatalogueChange { put, admit, activate })` writes new
 definition rows, admits versions with their lenses and makes a write schema
 current at a revision in one savepoint: a change that fails leaves neither
 rows nor in-memory state behind. A server deploy computes that change from
 the stored rows (`prepare_catalogue_change`) and applies it in one
-transaction, so a deploy is never half written. Admitted versions are
+transaction, so a deploy is never half written. A deploy only puts and admits
+(the store's first version included); it never activates, and a server
+refuses a change that does (`INV-LENS-7`). Admitted versions are
 immutable: a deploy that gives an admitted version a new incoming lens is
 refused and must publish a new convergent target instead. Lenses are needed
 only at admission, because the cells they produce are persisted in
 `_jazz_lens_cells`.
 
 On open, a store makes the head revision's write schema (with its policies)
-current; with no revision yet it opens under the lowest admitted version, and
-a store with no catalogue at all under the schema it was given. The server's
+current; with no revision yet (every server store) it opens under the lowest
+admitted version, and a store with no catalogue at all under the schema it
+was given. The server's
 HTTP catalogue index (schema hashes, lenses, permission bundle ids) is
 rebuilt from these rows; a permission bundle id is a version 5 UUID over the
 bundle's canonical JSON, chained to its parent revision.

@@ -34,7 +34,10 @@ describe("Todo Server Integration", () => {
     issuer = await startTestJwtIssuer();
 
     // Create server with temp persistent storage.
-    const todoServer = await createServer({ jwksUrl: issuer.jwksUrl });
+    const todoServer = await createServer({
+      jwksUrl: issuer.jwksUrl,
+      jwtIssuer: "https://todo-docs.example.test",
+    });
 
     // Start on random available port
     server = await startServer(todoServer, 0);

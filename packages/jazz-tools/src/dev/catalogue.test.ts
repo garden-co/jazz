@@ -142,7 +142,7 @@ describe("dev catalogue push behavior", () => {
             JSON.stringify({
               schemas: kind === "initial" ? [] : [hash],
               migrations: [],
-              activeSchemaHash: kind === "initial" ? null : hash,
+              latestBundleSchemaHash: kind === "initial" ? null : hash,
             }),
           );
         expect(input.endsWith("/admin/bundles")).toBe(true);

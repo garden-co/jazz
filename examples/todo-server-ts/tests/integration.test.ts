@@ -103,7 +103,7 @@ describe("Todo Server Integration", () => {
   });
 
   function jazzOptions() {
-    return { jwksUrl: jwtIssuer.jwksUrl };
+    return { jwksUrl: jwtIssuer.jwksUrl, jwtIssuer: EXTERNAL_ISSUER };
   }
 
   describe("Health Check", () => {

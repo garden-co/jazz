@@ -10,8 +10,7 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { createRemoteJWKSet, jwtVerify } from "jose";
-import { createJazz, remote, sqlite, type Db, type JazzUser } from "jazz-tools/backend";
+import { createJazz, fromJWT, remote, sqlite, type Db } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
@@ -55,8 +54,9 @@ export interface TodoServerConfig {
   serverUrl?: string;
   appId?: string;
   adminSecret?: string;
-  /** The JWKS endpoint of the identity provider whose JWTs this API accepts. */
+  /** The JWKS endpoint and issuer of the identity provider whose JWTs this API accepts. */
   jwksUrl?: string;
+  jwtIssuer?: string;
 }
 
 /** The parts of an Express request `authenticate` reads, as a fetch Request. */
@@ -86,26 +86,23 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   const appId = config.appId ?? process.env.JAZZ_APP_ID?.trim();
   const adminSecret = config.adminSecret ?? process.env.JAZZ_ADMIN_SECRET?.trim();
   const jwksUrl = config.jwksUrl ?? process.env.JAZZ_JWKS_URL?.trim();
+  const jwtIssuer = config.jwtIssuer ?? process.env.JAZZ_JWT_ISSUER?.trim();
   const writeTier = serverUrl ? "global" : "local";
 
   if (serverUrl && (!appId || !adminSecret)) {
     throw new Error("JAZZ_SERVER_URL needs JAZZ_APP_ID and JAZZ_ADMIN_SECRET");
   }
+  if (Boolean(jwksUrl) !== Boolean(jwtIssuer)) {
+    throw new Error("JAZZ_JWKS_URL and JAZZ_JWT_ISSUER go together");
+  }
 
   // #region context-setup-ts-backend
   // Who a request is, your backend decides: here, the subject of a JWT
-  // your identity provider signed.
-  const keys = jwksUrl ? createRemoteJWKSet(new URL(jwksUrl)) : undefined;
-  async function authenticate(request: globalThis.Request): Promise<JazzUser | null> {
-    const authorization = request.headers.get("authorization");
-    if (!keys || !authorization?.startsWith("Bearer ")) return null;
-    try {
-      const { payload } = await jwtVerify(authorization.slice("Bearer ".length), keys);
-      return payload.sub ? { userId: payload.sub } : null;
-    } catch {
-      return null;
-    }
-  }
+  // your identity provider signed. Without one configured, nobody is signed in.
+  const authenticate =
+    jwksUrl && jwtIssuer
+      ? fromJWT({ jwksUrl, issuer: jwtIssuer, audience: false })
+      : async () => null;
 
   const jazz = await createJazz({
     app: schemaApp,
