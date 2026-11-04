@@ -10,7 +10,8 @@
  * JAZZ_E2E_PROD=1.
  *
  * `publicPrefix` is the framework's browser-visible env prefix (default
- * NEXT_PUBLIC_); the harness sets `<prefix>JAZZ_APP_ID` and APP_ORIGIN.
+ * NEXT_PUBLIC_); the harness sets `<prefix>APP_ORIGIN`, APP_ORIGIN and the
+ * backend's JAZZ_APP_ID.
  *
  * `env` is added to the harness environment for build, start and tests. Use it
  * for settings a production build requires, or to match values a variant's
@@ -87,7 +88,7 @@ export const VARIANTS = Object.freeze([
     // `pnpm build` pins these, so the server must start with the same values.
     env: Object.freeze({
       NEXT_PUBLIC_APP_ORIGIN: "http://127.0.0.1:3000",
-      NEXT_PUBLIC_JAZZ_APP_ID: "00000000-0000-0000-0000-00000000a6e7",
+      JAZZ_APP_ID: "00000000-0000-0000-0000-00000000a6e7",
       BETTER_AUTH_SECRET: "music-agent-build-better-auth-secret-0123456789",
     }),
   }),
@@ -105,7 +106,7 @@ export const VARIANTS = Object.freeze([
     // `pnpm build` pins these, so the server must start with the same values.
     env: Object.freeze({
       NEXT_PUBLIC_APP_ORIGIN: "http://127.0.0.1:3000",
-      NEXT_PUBLIC_JAZZ_APP_ID: "00000000-0000-0000-0000-000000000301",
+      JAZZ_APP_ID: "00000000-0000-0000-0000-000000000301",
       BETTER_AUTH_SECRET: "2ff8ef66a6ee1a1e551a8f0c7dfa9c8d6fd4cc683a963f04989fdd84cc9cdb53",
     }),
   }),
