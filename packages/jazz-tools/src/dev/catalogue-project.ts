@@ -873,21 +873,21 @@ async function loadMigrationBaseline(
   if (local) return local;
   if (!options.serverUrl) {
     throw new Error(
-      "No local schema snapshot found. Pass --server-url and --admin-secret to use the server's active schema as the migration baseline.",
+      "No local schema snapshot found. Pass --server-url and --admin-secret to use the schema of the server's latest bundle as the migration baseline.",
     );
   }
   const appId = requireAppId(options.appId);
   const adminSecret = requireServerValue(options.adminSecret, "adminSecret");
   const graph = await fetchMigrationGraph({ appId, serverUrl: options.serverUrl, adminSecret });
-  if (!graph.activeSchemaHash) {
+  if (!graph.latestBundleSchemaHash) {
     throw new Error(
-      "No local schema snapshot or active server schema found. Deploy the initial schema before creating a migration. No snapshot was created.",
+      "No local schema snapshot or published bundle found. Deploy the initial schema before creating a migration. No snapshot was created.",
     );
   }
   return resolveRemoteHistoricalSchema(
     storage,
-    graph.activeSchemaHash,
-    "active schema",
+    graph.latestBundleSchemaHash,
+    "latest bundle's schema",
     appId,
     options.serverUrl,
     adminSecret,

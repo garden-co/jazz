@@ -380,22 +380,40 @@ pub(crate) fn put(conn: &Connection, put: &CataloguePut) -> Result<(), Error> {
     if !put.bundles.is_empty() {
         conn.execute_batch(BUNDLES_DDL).map_err(storage)?;
     }
+    // Bundles are ordered by `published_at`: a new bundle is stamped after
+    // every earlier one, even within the same millisecond or behind a clock
+    // that stepped back, so the newest bundle is the last one published.
+    let mut last: Option<i64> = if put.bundles.is_empty() {
+        None
+    } else {
+        conn.query_row("SELECT max(published_at) FROM _jazz_bundles", [], |r| {
+            r.get(0)
+        })
+        .map_err(storage)?
+    };
     for (schema, permissions, published_at) in &put.bundles {
         let def = canonical_json(&without_defaults(permissions))?;
         let id = bundle_hash(schema, &def);
-        conn.prepare_cached(
-            "INSERT INTO _jazz_bundles (id, hash, published_at, def) VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT (id) DO NOTHING",
-        )
-        .and_then(|mut statement| {
-            statement.execute(params![
-                id.as_bytes().to_vec(),
-                schema.as_bytes().to_vec(),
-                *published_at as i64,
-                def
-            ])
-        })
-        .map_err(storage)?;
+        let at = last.map_or(*published_at as i64, |last| {
+            (*published_at as i64).max(last + 1)
+        });
+        let inserted = conn
+            .prepare_cached(
+                "INSERT INTO _jazz_bundles (id, hash, published_at, def) VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .and_then(|mut statement| {
+                statement.execute(params![
+                    id.as_bytes().to_vec(),
+                    schema.as_bytes().to_vec(),
+                    at,
+                    def
+                ])
+            })
+            .map_err(storage)?;
+        if inserted > 0 {
+            last = Some(at);
+        }
     }
     Ok(())
 }
