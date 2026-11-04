@@ -40,11 +40,10 @@ export interface VercelStoreOptions {
    */
   name?: string;
   /**
-   * The core's app id. Defaults to one the core generates on its Drive at
-   * first start and keeps. Set it only to keep the id of
-   * an existing app.
+   * Not an option: the core generates its app id on its Drive at first
+   * start and keeps it there.
    */
-  appId?: string;
+  appId?: never;
   /** Sandbox region. Defaults to `iad1`. Fixed when the Sandbox is created. */
   region?: string;
   /**
@@ -112,7 +111,7 @@ export interface SandboxHandle {
 
 /** The shape `createJazz` drives a core through (see `Core` in create-jazz.ts). */
 export interface VercelCore {
-  /** The app id the core runs as (see `VercelStoreOptions.appId`). */
+  /** The app id the core runs as, kept on its Drive. */
   readonly appId: string;
   readonly serverUrl: string;
   readonly adminSecret: string;
@@ -220,7 +219,6 @@ export function newerVersion(a: string, b: string): boolean {
  * stopped first; the same one is left alone.
  */
 export function startScript(
-  appId: string | undefined,
   version: string,
   tarballUrl: string,
   trust: TrustedWorkload,
@@ -281,7 +279,7 @@ if [ -n "$pid" ] && [[ "$(tr '\\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" == *
   kill -KILL "$pid" 2>/dev/null || true
 fi
 if [ ! -s "$data/app-id" ]; then
-  app_id=${appId ? q(appId) : "$(cat /proc/sys/kernel/random/uuid)"}
+  app_id=$(cat /proc/sys/kernel/random/uuid)
   printf '%s\\n' "$app_id" > "$data/app-id.tmp" && mv "$data/app-id.tmp" "$data/app-id"
 fi
 app_id=$(cat "$data/app-id")
@@ -505,7 +503,7 @@ export interface OpenVercelCoreOptions {
 
 export async function openVercelCore(params: OpenVercelCoreOptions): Promise<VercelCore> {
   const { options, openRemote } = params;
-  const appId = options.appId;
+  refuseVercelAppId(options);
   const env = params.env ?? process.env;
   const sdk =
     params.sdk ??
@@ -539,7 +537,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       `vercel(): the core's workload ${trust.subject} names no Vercel environment, so its blob store is not claimed for one; make sure no other environment uses that store`,
     );
   }
-  const script = Buffer.from(startScript(appId, version, tarballUrl, trust, blobs));
+  const script = Buffer.from(startScript(version, tarballUrl, trust, blobs));
 
   const startServer = async (sbx: SandboxHandle) => {
     // A fresh path each time: bash reads a script as it runs, so one that is
@@ -724,9 +722,6 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
             ? live.appId
             : (await sbx.readFileToBuffer({ path: "/data/app-id" }))?.toString("utf8").trim();
         if (!coreAppId) throw new Error(`vercel(): core ${name} has no app id on its Drive`);
-        if (appId && coreAppId !== appId) {
-          throw new Error(`vercel(): core ${name} belongs to app ${coreAppId}, not ${appId}`);
-        }
         await refuseForeignPin(sbx);
         if (live?.base === base) {
           live.sbx = sbx;
@@ -914,4 +909,13 @@ function wakingWebSocket(resolveOrigin: () => Promise<string>): WebSocketConstru
       this.emit("close", { code, reason });
     }
   };
+}
+
+/** The core keeps its own app id; one passed from JavaScript is refused, not ignored. */
+function refuseVercelAppId(options: object): void {
+  if ("appId" in options) {
+    throw new Error(
+      "vercel(): appId is not an option: the core keeps its own app id on its Drive.",
+    );
+  }
 }

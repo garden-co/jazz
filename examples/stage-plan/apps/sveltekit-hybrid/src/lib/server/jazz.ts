@@ -19,7 +19,7 @@ export function jazz(): Promise<Jazz> {
     permissions,
     store: config.remote
       ? remote({ url: config.remote.url, appId: config.appId, secret: config.remote.adminSecret })
-      : sqlite({ path: config.dataPath, appId: config.appId }),
+      : sqlite({ path: config.dataPath }),
     // Better Auth's session cookie decides who the user is. Guests have no
     // session and keep their local-first account.
     authenticate: async (request) => {

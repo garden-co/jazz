@@ -15,7 +15,7 @@ export type JazzSessionConfig = Omit<JazzClientConfig, "account" | "serverUrl" |
   Omit<AccountManagerConfig, "appId"> & {
     /**
      * Not for a client: the app id belongs to your backend's store
-     * (`remote({ appId })`, `sqlite({ appId })`). A client is scoped by its
+     * (`remote({ appId })`, or the id a store keeps). A client is scoped by its
      * `serverUrl`; use `scope` to keep local-first users created under an
      * app id.
      */

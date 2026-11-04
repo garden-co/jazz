@@ -54,10 +54,10 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     version: string,
     tarballUrl = "http://127.0.0.1:9/none.tgz",
     workload = trust,
-    blobs?: Parameters<typeof startScript>[4],
+    blobs?: Parameters<typeof startScript>[3],
   ) {
     const script = join(root, `start-${Math.random()}.sh`);
-    writeFileSync(script, startScript("app-1", version, tarballUrl, workload, blobs, root));
+    writeFileSync(script, startScript(version, tarballUrl, workload, blobs, root));
     const child = spawn("bash", [script], { stdio: "ignore", detached: true });
     children.push(child);
     const exited = new Promise<number>((resolve) =>
@@ -111,10 +111,11 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(await start("1.0.0")).toBe("running");
     const first = read("tmp/jazz.pid");
     expect(read("data/version")).toBe("1.0.0");
-    expect(read("data/app-id")).toBe("app-1");
-    // The server runs as the app and trusts only the workload.
+    // The core generates its app id on the Drive, and runs as it.
+    const appId = read("data/app-id");
+    expect(appId).toMatch(/^[0-9a-f-]{36}$/);
     expect(read("servers.log")).toBe(
-      `1.0.0 server app-1 --port 1625 --data-dir ${root}/data/store --blobs sqlite ` +
+      `1.0.0 server ${appId} --port 1625 --data-dir ${root}/data/store --blobs sqlite ` +
         `--trusted-workload-issuer ${trust.issuer} --trusted-workload-audience ${trust.audience} ` +
         `--trusted-workload-subject ${trust.subject}`,
     );

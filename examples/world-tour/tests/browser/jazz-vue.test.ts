@@ -27,7 +27,7 @@ import {
   useSession,
 } from "jazz-tools/vue";
 import { app } from "../../schema.js";
-import { APP_ID, SERVER_URL } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 
 interface Scope {
   marker: string;
@@ -103,9 +103,9 @@ afterEach(async () => {
 });
 
 async function mount(child: ReturnType<typeof defineComponent>): Promise<Mounted> {
-  const accounts = await createAccountManager({ appId: APP_ID, serverUrl: SERVER_URL });
+  const accounts = await createAccountManager({ appId: SCOPE, serverUrl: SERVER_URL });
   const client = await createJazzClient({
-    appId: APP_ID,
+    appId: SCOPE,
     serverUrl: SERVER_URL,
     driver: { type: "memory" },
     account: accounts.createLocalFirst(),

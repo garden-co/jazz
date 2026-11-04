@@ -183,7 +183,7 @@ describe("createJazz, opened on first use", () => {
     expect((await again.ready()).appId).toBe(appId);
   }, 60_000);
 
-  it("keeps memory stores apart unless they name one app, and retries an open that failed", async () => {
+  it("keeps memory stores apart, and retries an open that failed", async () => {
     const one = createJazz({ app, permissions, store: memory() });
     const two = createJazz({ app, permissions, store: memory() });
     cleanups.push(
@@ -192,10 +192,6 @@ describe("createJazz, opened on first use", () => {
     );
     expect(one).not.toBe(two);
     expect((await one.ready()).appId).not.toBe((await two.ready()).appId);
-    const appId = randomUUID();
-    const named = createJazz({ app, permissions, store: memory({ appId }) });
-    cleanups.push(() => named.close());
-    expect(createJazz({ app, permissions, store: memory({ appId }) })).toBe(named);
 
     const path = await tempDir();
     const previous = process.env.VERCEL;
