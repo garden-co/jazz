@@ -56,7 +56,7 @@ pub use jazz_server::push_catalogue_in_memory;
 
 #[allow(unused_imports)]
 pub use crate::permissions::{
-    PublishedPermissionsHead, allow_all_permissions, deny_all_select_permissions,
+    PublishedBundle, allow_all_permissions, deny_all_select_permissions,
     publish_allow_all_permissions, publish_permissions, schema_deployment,
 };
 

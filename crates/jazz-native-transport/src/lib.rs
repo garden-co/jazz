@@ -241,7 +241,10 @@ impl NativeTransportConnector for NativeWebSocketConnector {
                 request.app_id,
                 request.peer_identity,
                 request.auth,
-                request.authorization,
+                Upgrade {
+                    authorization: request.authorization,
+                    bundle: request.bundle,
+                },
                 request.wake,
                 request.requested_link,
             )
@@ -423,7 +426,7 @@ impl WebSocketTransport {
             app_id,
             peer_identity,
             auth,
-            None,
+            Upgrade::default(),
             wake,
             NativeTransportLink::OrdinarySession,
         )
@@ -436,10 +439,14 @@ impl WebSocketTransport {
         app_id: AppId,
         peer_identity: AuthorSubject,
         auth: AuthConfig,
-        authorization: Option<String>,
+        upgrade: Upgrade,
         wake: Arc<dyn Fn() + Send + Sync>,
         requested_link: NativeTransportLink,
     ) -> Result<Self, NativeConnectFailure> {
+        let Upgrade {
+            authorization,
+            bundle,
+        } = upgrade;
         let deadline = tokio::time::Instant::now() + WS_CLIENT_HANDSHAKE_TIMEOUT;
         let url = ws_url(base_url.as_ref(), app_id);
         let (mut ws, _) = tokio::time::timeout_at(
@@ -449,7 +456,7 @@ impl WebSocketTransport {
         .await
         .map_err(|_| NativeConnectFailure::WebSocket(WebSocketClientError::HandshakeTimeout))??;
 
-        let prelude = encode_prelude(peer_identity, auth, requested_link)?;
+        let prelude = encode_prelude(peer_identity, auth, bundle, requested_link)?;
         tokio::time::timeout_at(deadline, ws.send(Message::Binary(prelude.into())))
             .await
             .map_err(|_| WebSocketClientError::HandshakeTimeout)?
@@ -578,9 +585,21 @@ impl WireTransport for WebSocketTransport {
 struct WebSocketClientPrelude {
     peer_identity: String,
     auth: AuthConfig,
+    /// The published bundle a stated session is pinned to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bundle: Option<String>,
 
     #[serde(skip_serializing_if = "is_ordinary_link")]
     requested_link: NativeTransportLink,
+}
+
+/// What a socket carries beside its auth: the upgrade's `Authorization`
+/// header (for the app's own backend) and the bundle a stated session is
+/// pinned to.
+#[derive(Default)]
+struct Upgrade {
+    authorization: Option<String>,
+    bundle: Option<String>,
 }
 
 fn is_ordinary_link(value: &NativeTransportLink) -> bool {
@@ -590,12 +609,14 @@ fn is_ordinary_link(value: &NativeTransportLink) -> bool {
 fn encode_prelude(
     peer_identity: AuthorSubject,
     auth: AuthConfig,
+    bundle: Option<String>,
 
     requested_link: NativeTransportLink,
 ) -> Result<Vec<u8>, WebSocketClientError> {
     serde_json::to_vec(&WebSocketClientPrelude {
         peer_identity: peer_identity.canonical().to_owned(),
         auth,
+        bundle,
 
         requested_link,
     })
@@ -1474,6 +1495,7 @@ mod tests {
                 encode_prelude(
                     identity,
                     auth,
+                    None,
                     if entry["requested_link"] == "scope_isolated_client_relay" {
                         NativeTransportLink::ScopeIsolatedClientRelay
                     } else {
@@ -1530,6 +1552,7 @@ mod tests {
                     peer_identity: AuthorSubject::SYSTEM,
                     auth: AuthConfig::default(),
                     authorization: None,
+                    bundle: None,
                     wake: Arc::new(|| {}),
                 })
                 .await;
