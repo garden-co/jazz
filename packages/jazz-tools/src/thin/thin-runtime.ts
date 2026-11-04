@@ -254,7 +254,12 @@ export class ThinRuntime implements Runtime {
   close(): void {
     this.closed = true;
     this.wanted = false;
-    this.dropConnection(new ThinConnectionLostError("the thin runtime is closed"));
+    const error = new ThinConnectionLostError("the thin runtime is closed");
+    this.dropConnection(error);
+    // Disconnect retains unsent requests for a later connection. Permanent
+    // close has no successor, so it must settle those requests too.
+    for (const request of this.oneShots.values()) request.reject(error);
+    this.oneShots.clear();
     for (const live of this.liveQueries.values()) live.callback = undefined;
     this.liveQueries.clear();
   }
