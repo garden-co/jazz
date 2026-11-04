@@ -22,29 +22,51 @@ pnpm add @vercel/sandbox
 Use the `vercel()` store:
 
 ```ts title="jazz.server.ts"
-import { createJazz, vercel } from "jazz-tools/backend";
+import { createJazz, vercel, type Jazz } from "jazz-tools/backend";
 import { app, permissions } from "./schema";
 
-export const jazz = await createJazz({
-  app,
-  permissions,
-  store: vercel(),
-  authenticate: async (request) => {
-    const session = await getSession(request); // your own auth
-    return session ? { userId: session.user.id } : null;
-  },
-});
+declare global {
+  var __jazz: Promise<Jazz> | undefined;
+}
+
+export function getJazz(): Promise<Jazz> {
+  const pending = (globalThis.__jazz ??= createJazz({
+    app,
+    permissions,
+    store: vercel(),
+    authenticate: async (request) => {
+      const session = await getSession(request); // your own auth
+      return session ? { userId: session.user.id } : null;
+    },
+  }));
+  // A failed start shouldn't break every later request.
+  pending.catch(() => {
+    if (globalThis.__jazz === pending) globalThis.__jazz = undefined;
+  });
+  return pending;
+}
 ```
+
+Create Jazz on the first request, not at module scope. Next.js imports your modules in more than
+one process (the build and its dev workers), and each one that ran `createJazz` would open the
+store. Keeping the promise on `globalThis` makes every request in a process, and every hot reload in
+`next dev`, share one Jazz.
 
 <include>../../../partials/main-backend-config.mdx</include>
 
 Mount it with a catch-all route under `/jazz`, where clients connect by default:
 
 ```ts title="app/jazz/[...path]/route.ts"
-import { jazz } from "@/jazz.server";
+import { getJazz } from "@/jazz.server";
 
-export const { GET, POST, DELETE } = jazz.next();
+const handlers = async () => (await getJazz()).next();
+
+export const GET = async (request: Request) => (await handlers()).GET(request);
+export const POST = async (request: Request) => (await handlers()).POST(request);
+export const DELETE = async (request: Request) => (await handlers()).DELETE(request);
 ```
+
+Elsewhere on the server, `await getJazz()` wherever the examples on this site use `jazz`.
 
 Then deploy as usual with `git push` or `vercel deploy`. Your functions authenticate to Vercel with
 their own OIDC token, and the core's secrets are generated inside the Sandbox, so there are no
@@ -95,7 +117,15 @@ Moving back, or between Vercel Blob and S3, is not supported yet and refuses to 
 Outside Vercel, `vercel()` uses a local store instead, by default `sqlite({ path: ".jazz/local" })`.
 Only production and preview deployments use the Sandbox: `next dev`, `vercel dev` and an
 environment pulled with `vercel env pull` all run against a SQLite file on your machine. Pass `local` to
-choose a different one.
+choose a different one, such as `vercel({ local: sqlite({ path: ".jazz/dev" }) })` to keep data you
+already have.
+
+Use `vercel()` in development too, rather than switching to `sqlite()` yourself: `sqlite()` refuses
+to start on Vercel, which has no lasting disk.
+
+Only one process can open a SQLite directory at a time. If a second one tries, it fails with
+"already open (process N)": a second dev server is running, or something created Jazz at module
+scope in a worker. Create Jazz lazily as above, or give each server its own `path`.
 
 ## Options
 

@@ -2,11 +2,39 @@
 
 <Tabs groupId="backend-framework" items={["Next.js", "Hono", "Express / Node", "Bun", "Effect"]} persist updateAnchor>
   <Tab value="Next.js">
-    ```ts title="app/jazz/[...path]/route.ts"
-    import { jazz } from "@/jazz.server";
+    In Next.js, create Jazz on the first request rather than at module scope: Next imports your
+    modules in its build and dev workers too, and each one that ran `createJazz` would open the
+    store. Wrap the `createJazz` call above in a function that keeps one promise per process:
 
-    export const { GET, POST, DELETE } = jazz.next();
+    ```ts title="jazz.server.ts"
+    import { createJazz, type Jazz } from "jazz-tools/backend";
+
+    declare global {
+      var __jazz: Promise<Jazz> | undefined;
+    }
+
+    export function getJazz(): Promise<Jazz> {
+      const pending = (globalThis.__jazz ??= createJazz({
+        /* app, permissions, store, authenticate as above */
+      }));
+      pending.catch(() => {
+        if (globalThis.__jazz === pending) globalThis.__jazz = undefined;
+      });
+      return pending;
+    }
     ```
+
+    ```ts title="app/jazz/[...path]/route.ts"
+    import { getJazz } from "@/jazz.server";
+
+    const handlers = async () => (await getJazz()).next();
+
+    export const GET = async (request: Request) => (await handlers()).GET(request);
+    export const POST = async (request: Request) => (await handlers()).POST(request);
+    export const DELETE = async (request: Request) => (await handlers()).DELETE(request);
+    ```
+
+    Then `await getJazz()` wherever the examples below use `jazz`.
 
     On Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/functions`; install
     `@vercel/functions` and `ws`). Under plain `next dev`, which can't upgrade sockets, the browser
