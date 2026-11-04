@@ -32,9 +32,6 @@ interface LocalJazzServerOptions {
   port?: number;
   dataDir?: string;
   inMemory?: boolean;
-  jwksUrl?: string;
-  jwtIssuer?: string;
-  jwtAudience?: string;
   backendSecret?: string;
   adminSecret?: string;
   allowLocalFirstAuth?: boolean;
@@ -128,9 +125,6 @@ export async function startLocalJazzServer(
       host,
       dataDir,
       inMemory: options.inMemory,
-      jwksUrl: options.jwksUrl,
-      jwtIssuer: options.jwtIssuer,
-      jwtAudience: options.jwtAudience,
       backendSecret,
       adminSecret,
       allowLocalFirstAuth: options.allowLocalFirstAuth,

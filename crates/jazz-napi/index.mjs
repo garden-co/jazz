@@ -8,6 +8,8 @@ const nativeBinding = require("./index.cjs");
 
 export default nativeBinding;
 export const {
+  captureTextAnchor,
+  captureTextRange,
   E2EeSodiumStream,
   e2eeSodiumDecrypt,
   e2eeSodiumEncrypt,
@@ -25,11 +27,12 @@ export const {
   NapiDb,
   StreamingMutation,
   Subscription,
-  TestJwtIssuer,
   Transport,
   Write,
   mintLocalFirstToken,
   verifyLocalFirstIdentityProof,
   nativeArtifactFingerprint,
+  resolveTextAnchor,
+  resolveTextRange,
   validateSchema,
 } = nativeBinding;

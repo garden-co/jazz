@@ -46,28 +46,16 @@ export async function createBrowserTestDb(
   config: Omit<DbConfig, "secret" | "jwtToken" | "adminSecret"> & {
     account?: AccountHandle;
     secret?: string;
-    jwtToken?: string;
-    /** Fixture-only explicit registry enrollment before obtaining a login handle. */
-    registerJwt?: boolean;
     adminSecret?: string;
   },
 ): Promise<Db> {
-  const {
-    account: selectedAccount,
-    secret,
-    jwtToken,
-    registerJwt,
-    adminSecret,
-    ...dbConfig
-  } = config;
+  const { account: selectedAccount, secret, adminSecret, ...dbConfig } = config;
   if (adminSecret !== undefined)
     throw new Error("Browser test fixtures do not admit backend credentials");
-  if (secret !== undefined && jwtToken !== undefined)
-    throw new Error("Browser test fixtures select either a local-first secret or a JWT");
 
   let account = selectedAccount;
   const serverUrl = config.serverUrl ?? "http://127.0.0.1:1";
-  if (!account && secret === undefined && jwtToken === undefined) {
+  if (!account && secret === undefined) {
     account = await acquireBrowserTestAccount({ appId: config.appId, serverUrl, env: config.env });
   }
   if (!account) {
@@ -85,20 +73,7 @@ export async function createBrowserTestDb(
         },
       },
     });
-    if (secret !== undefined) {
-      account = accounts.restoreLocalFirst(secret);
-    } else {
-      if (jwtToken === undefined) throw new Error("Browser fixture requires an account credential");
-      if (registerJwt) {
-        try {
-          await accounts.registerJWT(jwtToken);
-        } catch (error) {
-          if (!(error instanceof AccountAuthError) || error.code !== "identity_already_assigned")
-            throw error;
-        }
-      }
-      account = await accounts.loginJWT(jwtToken);
-    }
+    account = accounts.restoreLocalFirst(secret!);
   }
   return await createAccountDb({ ...dbConfig, account });
 }

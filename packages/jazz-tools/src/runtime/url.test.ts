@@ -4,8 +4,8 @@ import { accountAppId } from "../accounts/local-first.js";
 
 describe("appScopedUrl", () => {
   it("trims the server url, preserves any base path, and normalizes the app-scoped path", () => {
-    expect(appScopedUrl(" https://api.example.com/base/ ", "my app", "/admin/deploy")).toBe(
-      "https://api.example.com/base/apps/my%20app/admin/deploy",
+    expect(appScopedUrl(" https://api.example.com/base/ ", "my app", "/admin/bundles")).toBe(
+      "https://api.example.com/base/apps/my%20app/admin/bundles",
     );
   });
 

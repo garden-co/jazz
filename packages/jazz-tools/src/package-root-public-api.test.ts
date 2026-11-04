@@ -370,6 +370,7 @@ describe("package root public API", () => {
       "PersistedWriteRejectedError",
       "Transaction",
       "createDb",
+      "fetchPublishedBundles",
       "fetchSchemaHashes",
       "fetchStoredPermissions",
       "fetchStoredWasmSchema",
@@ -498,7 +499,7 @@ describe("package root public API", () => {
     const exportedSubpaths = new Set(Object.keys(packageJson.exports));
 
     expect(Array.from(exportedSubpaths)).toEqual(
-      expect.arrayContaining(["./react-native", "./expo", "./expo/polyfills", "./dev/expo"]),
+      expect.arrayContaining(["./react-native", "./expo", "./expo/polyfills"]),
     );
   });
 
