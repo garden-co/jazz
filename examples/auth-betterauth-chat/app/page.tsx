@@ -58,7 +58,6 @@ function ChatShell({
 
 // Jazz runs inside this app's backend (src/lib/jazz.server.ts), on its own origin.
 const config = {
-  appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
   serverUrl: "/jazz",
 };
 

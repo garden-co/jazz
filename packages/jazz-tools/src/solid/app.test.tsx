@@ -85,7 +85,7 @@ it("retries startup through the default UI and exposes unified auth to children"
   document.body.append(node);
   dispose = render(
     () => (
-      <JazzProvider appId="test" autoAttachDevTools={false}>
+      <JazzProvider scope="test" autoAttachDevTools={false}>
         <Child />
       </JazzProvider>
     ),
@@ -131,7 +131,7 @@ it("follows the backend on reauthenticate and releases children before shutdown"
   dispose = render(
     () => (
       <JazzProvider
-        appId="test"
+        scope="test"
         initial="signed-out"
         signedOut={<SignedOut />}
         loading={<p>WAIT</p>}

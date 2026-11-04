@@ -66,7 +66,7 @@ describe("Svelte Jazz session", () => {
     const component = mount(JazzSessionProvider, {
       target,
       props: {
-        config: { appId: "test", serverUrl: "http://localhost:1", initial: "local-first" },
+        config: { scope: "test", serverUrl: "http://localhost:1", initial: "local-first" },
         autoAttachDevTools: false,
         children: createRawSnippet(() => ({ render: () => "<p>Ready</p>" })),
         fallback: createRawSnippet(() => ({

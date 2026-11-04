@@ -11,9 +11,9 @@ A Jazz session owns the selected account and its client. Configure it once; use 
 import { createJazzClient } from "jazz-tools/client";
 
 const jazz = await createJazzClient({
-  appId: "my-app",
   serverUrl: "/jazz",
   initial: "local-first",
+  client: () => import("jazz-tools/local-first"),
 });
 const { client, account } = jazz.getSnapshot();
 ```
@@ -43,7 +43,11 @@ import { JazzSessionProvider, useJazzSession } from "jazz-tools/react";
 function App() {
   return (
     <JazzSessionProvider
-      config={{ appId, serverUrl, initial: "local-first" }}
+      config={{
+        serverUrl: "/jazz",
+        initial: "local-first",
+        client: () => import("jazz-tools/local-first"),
+      }}
       fallback={<AccountStatus />}
     >
       <TodoApp />

@@ -88,6 +88,14 @@ struct Cli {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
+    /// Import an alpha.59 server data dir into a new one, from the dump that
+    /// `jazz-alpha59-export` writes (`import`), and check the result
+    /// (`verify`). Run `jazz-tools migrate-alpha59` for its usage.
+    #[command(name = "migrate-alpha59")]
+    MigrateAlpha59 {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Create a new resource
     Create {
         #[command(subcommand)]
@@ -301,10 +309,10 @@ fn main() {
 }
 
 async fn run() {
-    // Initialize tracing with layered subscriber
-    init_tracing();
-
     let cli = Cli::parse();
+    // migrate-alpha59 prints its JSON summary on stdout, so its logs go to
+    // stderr.
+    init_tracing(matches!(cli.command, Commands::MigrateAlpha59 { .. }));
     if let Err(error) = validate_server_cli_options(&cli.command) {
         eprintln!("Server error: {error}");
         shutdown_tracing();
@@ -312,6 +320,11 @@ async fn run() {
     }
 
     match cli.command {
+        Commands::MigrateAlpha59 { args } => {
+            let code = jazz_cli::migrate_alpha59::main(args).await;
+            shutdown_tracing();
+            std::process::exit(code);
+        }
         Commands::Create { resource } => match resource {
             CreateResource::App { name } => {
                 let app_id = name.map_or_else(AppId::random, |name| AppId::from_name(&name));
@@ -534,11 +547,17 @@ static OTEL_LOGGER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLog
 static OTEL_METER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::metrics::SdkMeterProvider> =
     std::sync::OnceLock::new();
 
-fn init_tracing() {
+fn init_tracing(to_stderr: bool) {
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let fmt_layer = tracing_subscriber::fmt::layer();
+    let writer = if to_stderr {
+        BoxMakeWriter::new(std::io::stderr)
+    } else {
+        BoxMakeWriter::new(std::io::stdout)
+    };
+    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(writer);
 
     #[cfg(feature = "otel")]
     {
