@@ -217,6 +217,44 @@ function blobOptions(blobs: BlobStore): {
   return { blobs: "files", ...(blobs.dir === undefined ? {} : { blobsDir: blobs.dir }) };
 }
 
+declare const localFirstGuestBrand: unique symbol;
+
+/**
+ * `authenticate`'s answer for a request from a local-first guest: an account
+ * a browser made on its own, before (or without) signing in. Return
+ * {@link acceptLocalFirstAuth} for the requests you let guests make; any other
+ * answer refuses a guest.
+ */
+export interface LocalFirstGuest {
+  readonly [localFirstGuestBrand]: true;
+}
+
+const LOCAL_FIRST_GUEST = Object.freeze({
+  kind: "jazz:local-first-guest",
+}) as unknown as LocalFirstGuest;
+
+/**
+ * Let this request through as a local-first guest, when it comes from one.
+ * Guests are refused unless `authenticate` returns this: a guest has no user
+ * in your auth, so only your permissions stand between it and your data.
+ *
+ * ```ts
+ * authenticate: async (request) => {
+ *   const session = await auth.api.getSession({ headers: request.headers });
+ *   return session ? { userId: session.user.id } : acceptLocalFirstAuth(request);
+ * },
+ * ```
+ *
+ * An app with no sign-in of its own, where every browser is a guest, passes
+ * it as is: `authenticate: acceptLocalFirstAuth`.
+ *
+ * For a request that is not a guest's, it means the same as `null`: no one
+ * is signed in.
+ */
+export function acceptLocalFirstAuth(_request: Request): LocalFirstGuest {
+  return LOCAL_FIRST_GUEST;
+}
+
 /** Who the request's user is, as the app's own auth decides. */
 export interface JazzUser {
   /** Stable user id in your auth system. Becomes the identity's `sub`. */
@@ -233,8 +271,15 @@ export interface CreateJazzOptions {
    * Decide who sent `request`, with your app's own session (a cookie, a
    * header). Return null for a signed-out request. Jazz calls it when a
    * browser signs in or opens a sync session, and in `forRequest`.
+   *
+   * Local-first guests are refused unless it returns
+   * `acceptLocalFirstAuth(request)` for them; an app with no sign-in passes
+   * `authenticate: acceptLocalFirstAuth`. Without `authenticate`, only
+   * backend code reaches the data.
    */
-  authenticate?: (request: Request) => JazzUser | null | Promise<JazzUser | null>;
+  authenticate?: (
+    request: Request,
+  ) => JazzUser | LocalFirstGuest | null | Promise<JazzUser | LocalFirstGuest | null>;
   /** The path Jazz is mounted under. Defaults to `/jazz`. */
   basePath?: string;
   /**
@@ -1005,8 +1050,26 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   async function authenticate(request: Request): Promise<JazzUser | null> {
     const client = await backendClients.resolve(request);
     if (client !== null) return client !== "refused" && client.kind === "user" ? client.user : null;
+    const answer = await askAuthenticate(request);
+    return answer === LOCAL_FIRST_GUEST ? null : (answer as JazzUser | null);
+  }
+
+  async function askAuthenticate(request: Request): Promise<JazzUser | LocalFirstGuest | null> {
     if (!options.authenticate) return null;
     return (await options.authenticate(request)) ?? null;
+  }
+
+  /** Whether the app lets `request` in as a local-first guest (`acceptLocalFirstAuth`). */
+  let warnedGuestsOff = false;
+  async function acceptsGuest(request: Request): Promise<boolean> {
+    if ((await askAuthenticate(request)) === LOCAL_FIRST_GUEST) return true;
+    if (!warnedGuestsOff) {
+      warnedGuestsOff = true;
+      console.warn(
+        "createJazz: refused a local-first guest. To let guests sync, return acceptLocalFirstAuth(request) from authenticate for them.",
+      );
+    }
+    return false;
   }
 
   /** One admin account request to the core: this backend vouches for the identities. */
@@ -1341,6 +1404,26 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
             });
         }, every);
         (recheck as unknown as { unref?: () => void }).unref?.();
+      } else if (admitted.guest && every > 0) {
+        // The app may stop letting guests in (or this one): ask again, as for users.
+        let checking = false;
+        recheck = setInterval(() => {
+          if (checking || ended) return;
+          checking = true;
+          void acceptsGuest(request)
+            .then(
+              (accepted) => {
+                if (ended || accepted) return;
+                onEvent(null, { kind: "close", code: 1008, reason: "authenticate again" });
+                end();
+              },
+              () => {},
+            )
+            .finally(() => {
+              checking = false;
+            });
+        }, every);
+        (recheck as unknown as { unref?: () => void }).unref?.();
       }
       socket = core.openSocket(headerPairs(request.headers), onEvent, admitted.access);
       return socket.send(admitted.prelude);
@@ -1398,6 +1481,8 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     access: BackendAccess;
     trusted: boolean;
     expiresAt?: number;
+    /** A local-first guest, let in by `acceptLocalFirstAuth`. */
+    guest?: true;
   } | null> {
     let parsed: Record<string, unknown>;
     try {
@@ -1444,6 +1529,8 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       if (client) return null;
       const audience = guestAudience(request, token);
       if (!audience) return null;
+      // Guests are off unless the app's `authenticate` lets this one in.
+      if (!(await acceptsGuest(request))) return null;
       if (audience.endpoint === undefined) {
         // Its own token decides who it is; the backend's secret only vouches
         // for the bundle this socket is pinned to (see `pinnedSocket`).
@@ -1453,6 +1540,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
           userId: undefined,
           access: "session",
           trusted: false,
+          guest: true,
         };
       }
       // Signed for this endpoint, which the core can't know: vouch for it.
@@ -1468,6 +1556,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         userId: undefined,
         access: "backend",
         trusted: false,
+        guest: true,
       };
     }
     const stated = auth.backend_session as { user_id?: unknown } | undefined;

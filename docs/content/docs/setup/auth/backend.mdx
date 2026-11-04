@@ -26,6 +26,9 @@ export const jazz = await createJazz({
 - `userId` is your user's stable id. Jazz gives each one an account the first time they sign in.
 - `claims` are anything your [policies](/docs/schemas/policies) should see, under `session.claims`.
 - Return `null` for a signed-out request.
+- Return `acceptLocalFirstAuth(request)` (from `jazz-tools/backend`) to let a signed-out
+  [local-first](/docs/setup/auth/local-first) guest sync. Guests are refused otherwise. An app with
+  no sign-in at all passes `authenticate: acceptLocalFirstAuth`.
 
 Jazz asks `authenticate` on every sign-in, on every sync connection and in `jazz.forRequest`. A
 sign-out or changed claims apply on the next reconnect, and a connection ends when its sign-in

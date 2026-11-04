@@ -101,7 +101,17 @@ Svelte, Solid, Vue and React Native expose the same actions through their bindin
 ## Guests who sign up
 
 An app can start every visitor as a [local-first](/docs/setup/auth/local-first) guest
-(`initial: "local-first"`). When the guest signs up, call `linkWithBackend()` instead of
+(`initial: "local-first"`). Its backend lets guests sync by returning `acceptLocalFirstAuth(request)`
+from `authenticate` for signed-out requests; guests are refused otherwise:
+
+```ts
+authenticate: async (request) => {
+  const user = await yourAuth.userFor(request);
+  return user ? { userId: user.id } : acceptLocalFirstAuth(request);
+},
+```
+
+When the guest signs up, call `linkWithBackend()` instead of
 `loginWithBackend()`:
 
 ```ts

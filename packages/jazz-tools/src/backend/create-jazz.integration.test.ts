@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import {
+  acceptLocalFirstAuth,
   createJazz,
   createJazzSession,
   files,
@@ -38,10 +39,10 @@ afterEach(async () => {
   while (cleanups.length) await cleanups.pop()!().catch(() => undefined);
 });
 
-/** The test app's own auth: the user named in a header. */
+/** The test app's own auth: the user named in a header, else a local-first guest. */
 function authenticate(request: Request) {
   const userId = request.headers.get("x-test-user");
-  return userId ? { userId } : null;
+  return userId ? { userId } : acceptLocalFirstAuth(request);
 }
 
 const requestPaths: string[] = [];
@@ -373,8 +374,8 @@ describe("createJazz", () => {
       permissions,
       store: memory(),
       authenticate: (request) => {
-        const user = authenticate(request);
-        return user && !signedOut.has(user.userId) ? user : null;
+        const userId = request.headers.get("x-test-user");
+        return userId && !signedOut.has(userId) ? { userId } : null;
       },
       recheckSeconds: 0.05,
     });
@@ -404,6 +405,71 @@ describe("createJazz", () => {
     const refused = upgrades;
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     expect(upgrades).toBe(refused);
+  }, 30_000);
+
+  it("refuses local-first guests unless authenticate accepts them", async () => {
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        const userId = request.headers.get("x-test-user");
+        return userId ? { userId } : null;
+      },
+    });
+    cleanups.push(() => jazz.close());
+    let upgrades = 0;
+    const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
+    const guestSession = await createJazzSession({
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "local-first",
+    });
+    cleanups.push(() => guestSession.close());
+    const guest = guestSession.getSnapshot().client!;
+    await guest.db.insert(app.todos, {
+      title: "kept on the device",
+      owner: guest.session!.user!.account,
+    });
+
+    // The socket is refused as an auth failure, so the client stops retrying.
+    await expect
+      .poll(() => guest.db.getSyncStatus().link, { timeout: 10_000, interval: 50 })
+      .toMatchObject({ state: "offline", reason: "auth" });
+    expect(upgrades).toBeGreaterThan(0);
+    expect(await jazz.db.all(app.todos)).toEqual([]);
+  }, 30_000);
+
+  it("ends a guest's open sync session once authenticate stops accepting guests", async () => {
+    let guestsWelcome = true;
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => (guestsWelcome ? authenticate(request) : null),
+      recheckSeconds: 0.05,
+    });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const guestSession = await createJazzSession({
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "local-first",
+    });
+    cleanups.push(() => guestSession.close());
+    const guest = guestSession.getSnapshot().client!;
+    await guest.db
+      .insert(app.todos, { title: "synced", owner: guest.session!.user!.account })
+      .wait({ tier: "global" });
+
+    guestsWelcome = false;
+    await expect
+      .poll(() => guest.db.getSyncStatus().link, { timeout: 10_000, interval: 50 })
+      .toMatchObject({ state: "offline", reason: "auth" });
   }, 30_000);
 
   it("reconnects a user whose socket's cookies expired but who is still signed in", async () => {
@@ -994,10 +1060,13 @@ describe("createJazz", () => {
 
     // A guest whose client names no app: the backend vouches for the
     // endpoint its proof is for, and the remote core founds its account.
+    // (From a browser nobody signed in on: a signed-in request is the
+    // user's, never a guest's.)
+    const guestOrigin = await serve(jazz, { sockets: true });
     const guestSession = await createJazzSession({
       app,
       permissions,
-      serverUrl: `${origin}/jazz`,
+      serverUrl: `${guestOrigin}/jazz`,
       driver: { type: "memory" },
       initial: "local-first",
     });
