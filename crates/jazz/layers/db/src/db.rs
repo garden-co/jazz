@@ -814,6 +814,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
         jazz: jazz.clone(),
         version: jazz.version_id(),
         policies_from: None,
+        bundle: None,
         stored_names: false,
     })
 }
@@ -1329,6 +1330,7 @@ impl Db {
                 jazz: config.schema.clone(),
                 version: config.schema.version_id(),
                 policies_from: None,
+                bundle: None,
                 stored_names: false,
             };
             physical.union(&schema)?;
@@ -2844,6 +2846,15 @@ impl Db {
         Ok(id)
     }
 
+    /// Revoke published bundle `id`: no session is pinned to it again
+    /// ([`Db::check_session_pin`] refuses it) and publishing it again is
+    /// refused, while it stays in the catalogue. The host closes the
+    /// sessions pinned to it. `false` when it was revoked already; an
+    /// error when this store never published it.
+    pub fn revoke_bundle(&self, id: &crate::catalogue::BundleId) -> Result<bool, Error> {
+        crate::catalogue::revoke(&self.inner().conn, id, crate::catalogue::now_millis())
+    }
+
     /// The current schema, with its policies.
     pub fn current_schema(&self) -> JazzSchema {
         self.inner().owner.jazz.clone()
@@ -3507,7 +3518,9 @@ impl Inner {
                 format!("bundle {id} does not compile: {error}"),
             )
         })?;
-        let resolved = (*version, Rc::new(self.named(&governing)));
+        let mut named = self.named(&governing);
+        named.bundle = Some(*id);
+        let resolved = (*version, Rc::new(named));
         self.bundles.insert(*id, resolved.clone());
         Ok(Some(resolved))
     }

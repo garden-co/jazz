@@ -1591,6 +1591,68 @@ impl ServerRuntimeHandle {
         result
     }
 
+    /// Bundle `published` is new to this store: end every session pinned
+    /// to another bundle, asking it to reconnect. Each reconnects through
+    /// whichever backend serves it now and is pinned again by that
+    /// backend, so a permissions change reaches every session a newer
+    /// deployment serves, while a deployment still running beside it pins
+    /// its own sessions as before. How many ended.
+    pub async fn supersede_bundles(
+        &self,
+        published: jazz::catalogue::BundleId,
+    ) -> Result<usize, String> {
+        let error = jazz::wire::WireError::new(
+            WireErrorCode::NotReady,
+            WireRetry::Later,
+            format!(
+                "permissions changed: bundle {published} was published; reconnect through \
+                 the app's backend"
+            ),
+        );
+        let ended = self
+            .run(move |owner| Ok(owner.end_pinned_sessions(&|bundle| *bundle != published, &error)))
+            .await?;
+        if ended > 0 {
+            self.notify_activity();
+        }
+        Ok(ended)
+    }
+
+    /// Revoke published bundle `id` ([`Db::revoke_bundle`]) and end every
+    /// session pinned to it with an error that does not ask for a retry:
+    /// reconnecting through a backend that still serves it is refused.
+    /// `false` when it was revoked already.
+    pub async fn revoke_bundle(
+        &self,
+        id: jazz::catalogue::BundleId,
+    ) -> Result<bool, CatalogueApplyError> {
+        let error = jazz::wire::WireError::new(
+            WireErrorCode::AuthFailed,
+            WireRetry::Never,
+            format!("permissions bundle {id} was revoked"),
+        );
+        let result = self
+            .run(move |owner| {
+                Ok((|| {
+                    let revoked = owner.db.revoke_bundle(&id).map_err(|error| {
+                        if error.code == jazz::db::ErrorCode::Storage {
+                            CatalogueApplyError::Failed(error.to_string())
+                        } else {
+                            CatalogueApplyError::Rejected(error.to_string())
+                        }
+                    })?;
+                    owner.end_pinned_sessions(&|bundle| *bundle == id, &error);
+                    Ok(revoked)
+                })())
+            })
+            .await
+            .unwrap_or_else(|error| Err(CatalogueApplyError::Failed(error)));
+        if result.is_ok() {
+            self.notify_activity();
+        }
+        result
+    }
+
     /// Tests: run `f` on the runtime's database.
     #[cfg(test)]
     pub(crate) async fn with_db_for_test<T: Send + 'static>(
@@ -1697,6 +1759,8 @@ struct Owner {
 
 struct OwnerSession {
     subscriber: SubscriberId,
+    /// The published bundle its backend pinned it to, if any.
+    bundle: Option<jazz::catalogue::BundleId>,
     /// A session under its own identity (not a trusted backend or
     /// authority link) and not pinned to a bundle: its reads wait for the
     /// permissions head.
@@ -2054,6 +2118,7 @@ impl Owner {
             session,
             OwnerSession {
                 subscriber,
+                bundle,
                 // A pinned session's bundle is published already: it does
                 // not wait for the current permissions.
                 awaits_permissions: identity != AuthorSubject::SYSTEM && bundle.is_none(),
@@ -2141,6 +2206,29 @@ impl Owner {
                 inbound.push_front(message);
             }
         }
+    }
+
+    /// End every session (sync or thin) pinned to a bundle `ends` names,
+    /// telling each peer `error` first. Unpinned sessions (the system's,
+    /// an admin's) stay. How many ended.
+    fn end_pinned_sessions(
+        &mut self,
+        ends: &dyn Fn(&jazz::catalogue::BundleId) -> bool,
+        error: &jazz::wire::WireError,
+    ) -> usize {
+        let ending: Vec<ServerSession> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.bundle.as_ref().is_some_and(ends))
+            .map(|(id, _)| *id)
+            .collect();
+        let mut ended = ending.len();
+        for id in ending {
+            let _ = self.sessions[&id].output.send((Err(error.clone()), 0));
+            self.close_session(id);
+        }
+        ended += self.end_pinned_thin_sessions(ends, error);
+        ended
     }
 
     fn close_session(&mut self, session: ServerSession) {

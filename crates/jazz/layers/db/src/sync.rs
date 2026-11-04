@@ -9195,18 +9195,15 @@ impl Inner {
     }
 
     /// Admitted `version` governed again by `policies`, a schema that
-    /// governed it before a reset: a published bundle's policies are kept,
-    /// any other schema's give way to the current one's.
+    /// governed it before a reset: a published bundle's policies are kept
+    /// (the schema names its bundle), any other schema's give way to the
+    /// current one's.
     pub(crate) fn regoverned(
         &self,
         version: crate::ids::SchemaVersionId,
         policies: &Rc<Schema>,
     ) -> Option<Rc<Schema>> {
-        let bundled = self
-            .bundles
-            .values()
-            .any(|(_, governing)| Rc::ptr_eq(governing, policies));
-        if bundled {
+        if policies.bundle.is_some() {
             self.governed_by(version, policies.clone())
         } else {
             self.governed(version)
@@ -9522,9 +9519,9 @@ impl Db {
 
     /// Whether this store may serve a session of `identity` pinned to
     /// `bundle` ([`Self::check_serves`] first). A bundle this store has not
-    /// published, or whose write schema it has not admitted, is refused, and
-    /// so is an unpinned session of a user once createJazz publishes
-    /// bundles here.
+    /// published, one revoked ([`Self::revoke_bundle`]), or one whose write
+    /// schema it has not admitted, is refused, and so is an unpinned
+    /// session of a user once createJazz publishes bundles here.
     pub fn check_session_pin(
         &self,
         identity: AuthorSubject,
@@ -9532,6 +9529,17 @@ impl Db {
     ) -> Result<(), Error> {
         self.check_serves(identity)?;
         let mut inner = self.inner.borrow_mut();
+        if let Some(bundle) = bundle
+            && crate::catalogue::revoked_at(&inner.conn, bundle)?.is_some()
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                format!(
+                    "permissions bundle {bundle} was revoked: the backend serving it must be \
+                     redeployed with other permissions"
+                ),
+            ));
+        }
         if let Some(bundle) = bundle
             && inner.bundle(bundle)?.is_none()
         {

@@ -368,3 +368,36 @@ fn a_pinned_subscription_keeps_its_bundle_when_the_schema_changes() {
         "still closed after the schema changed"
     );
 }
+
+#[test]
+fn a_revoked_bundle_pins_no_session_and_is_not_published_again() {
+    let (server, _row) = server_with_row(
+        block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap(),
+    );
+    let leaky = block_on(server.publish_bundle(&users(PolicyExpr::True))).unwrap();
+    assert!(server.revoke_bundle(&leaky).unwrap(), "revoked now");
+    assert!(
+        !server.revoke_bundle(&leaky).unwrap(),
+        "revoking again changes nothing"
+    );
+    let catalogue = server.catalogue().unwrap();
+    assert!(
+        catalogue
+            .bundles
+            .iter()
+            .all(|bundle| bundle.id != leaky || bundle.revoked_at.is_some()),
+        "it stays in the catalogue, marked revoked"
+    );
+
+    let alice = AuthorSubject::for_test_bytes([0x55; 16]);
+    let error = server.check_session_pin(alice, Some(&leaky)).unwrap_err();
+    assert!(error.to_string().contains("was revoked"), "{error}");
+    let error = block_on(server.publish_bundle(&users(PolicyExpr::True))).unwrap_err();
+    assert!(error.to_string().contains("was revoked"), "{error}");
+
+    // Other permissions still publish and pin.
+    let other = block_on(server.publish_bundle(&users(PolicyExpr::False))).unwrap();
+    server.check_session_pin(alice, Some(&other)).unwrap();
+    let error = server.revoke_bundle(&BundleId([9; 32])).unwrap_err();
+    assert!(error.to_string().contains("not published"), "{error}");
+}

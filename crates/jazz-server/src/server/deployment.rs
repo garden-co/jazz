@@ -182,9 +182,30 @@ pub(crate) async fn deploy(
         .catalogue_store
         .stage_deployment(&prepared)
         .map_err(DeployError::invalid)?;
+    // A revoked bundle stays published (its id is its content), so
+    // publishing it again is otherwise a no-op that boots a backend whose
+    // every session is refused.
+    if state
+        .catalogue_store
+        .published_bundles()
+        .iter()
+        .any(|known| known.id.to_hex() == staged.response.bundle && known.revoked_at.is_some())
+    {
+        return Err(DeployError::new(
+            StatusCode::CONFLICT,
+            "bundle_revoked",
+            format!(
+                "permissions bundle {} was revoked; deploy with other permissions",
+                staged.response.bundle
+            ),
+        ));
+    }
     if !staged.response.changed {
         return Ok(staged.response);
     }
+    let new_bundle = (!staged.put.bundles.is_empty())
+        .then(|| jazz::catalogue::BundleId::from_hex(&staged.response.bundle))
+        .flatten();
     let genesis = JazzSchema::new(&prepared.schemas()[0]).map_err(DeployError::invalid)?;
     let runtime = match state.runtime() {
         Some(runtime) => runtime,
@@ -224,6 +245,19 @@ pub(crate) async fn deploy(
         .refresh()
         .map_err(DeployError::internal)?;
     applied?;
+    // New permissions reach every session at once: those pinned to other
+    // bundles reconnect and are pinned again by whichever backend serves
+    // them now. Publishing a bundle again changes nothing, so neither a
+    // cold start nor a deployment running beside this one ends anyone.
+    if let Some(published) = new_bundle {
+        let ended = runtime
+            .supersede_bundles(published)
+            .await
+            .map_err(DeployError::internal)?;
+        if ended > 0 {
+            tracing::info!(bundle = %published, ended, "new permissions bundle: sessions pinned to others reconnect");
+        }
+    }
     Ok(staged.response)
 }
 

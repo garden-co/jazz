@@ -115,6 +115,9 @@ pub(super) struct PublishedBundleView {
     bundle: String,
     schema_hash: String,
     published_at: u64,
+    /// When an admin revoked it; absent while it serves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revoked_at: Option<u64>,
     permissions: std::collections::HashMap<String, TablePolicies>,
 }
 
@@ -245,6 +248,7 @@ pub(super) async fn published_bundles_handler(
             bundle: bundle.id.to_string(),
             schema_hash: bundle.schema.to_string(),
             published_at: bundle.published_at,
+            revoked_at: bundle.revoked_at,
             permissions: bundle
                 .permissions
                 .into_iter()
@@ -253,6 +257,64 @@ pub(super) async fn published_bundles_handler(
         })
         .collect();
     Ok(Json(PublishedBundlesResponse { bundles }))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RevokedBundleResponse {
+    bundle: String,
+    /// `false` when it was revoked already.
+    revoked: bool,
+}
+
+/// `/bundles/{bundle}/revoke`: revoke a published bundle. Every session
+/// pinned to it ends at once, no backend can pin a session to it again,
+/// and publishing it again is refused, so a deployment whose permissions
+/// leak can be stopped without waiting for its backends to be retired.
+pub(super) async fn revoke_bundle_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(params): Path<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = require_admin(&state, &headers) {
+        return response;
+    }
+    let Some(id) = params
+        .get("bundle")
+        .and_then(|text| jazz::catalogue::BundleId::from_hex(text))
+    else {
+        return bad_request("invalid permissions bundle id");
+    };
+    let Some(runtime) = state.runtime() else {
+        return not_found(format!(
+            "permissions bundle {id} is not published on this store"
+        ));
+    };
+    let _publication = state.runtime_catalogue_publication.lock().await;
+    let revoked = runtime.revoke_bundle(id).await;
+    if let Err(error) = state.catalogue_store.refresh() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(error.to_string())),
+        )
+            .into_response();
+    }
+    match revoked {
+        Ok(revoked) => (
+            StatusCode::OK,
+            Json(RevokedBundleResponse {
+                bundle: id.to_hex(),
+                revoked,
+            }),
+        )
+            .into_response(),
+        Err(crate::runtime::CatalogueApplyError::Rejected(message)) => not_found(message),
+        Err(crate::runtime::CatalogueApplyError::Failed(message)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(message)),
+        )
+            .into_response(),
+    }
 }
 
 pub(super) async fn admin_subscription_introspection_handler(
