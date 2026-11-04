@@ -577,20 +577,23 @@ async fn activate_legacy_fixture(
     // Sessions are pinned to a published bundle, as createJazz pins them:
     // publish this schema's permissions as one, for the clients made next.
     runtime
-        .apply_catalogue(jazz::catalogue::CatalogueChange {
-            put: jazz::catalogue::CataloguePut {
-                bundles: vec![(
-                    SchemaHash::compute(schema),
-                    permissions.into_iter().collect(),
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64,
-                )],
+        .apply_catalogue(
+            jazz::catalogue::CatalogueChange {
+                put: jazz::catalogue::CataloguePut {
+                    bundles: vec![(
+                        SchemaHash::compute(schema),
+                        permissions.into_iter().collect(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64,
+                    )],
+                    ..Default::default()
+                },
                 ..Default::default()
             },
-            ..Default::default()
-        })
+            None,
+        )
         .await
         .unwrap();
     server.refresh_catalogue();
