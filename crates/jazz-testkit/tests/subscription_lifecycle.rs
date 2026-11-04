@@ -292,7 +292,15 @@ async fn dropped_subscription_stops_delivery_and_resubscribes_cleanly_impl() {
     )
     .await;
 
+    let held = jazz::tools::test_support::live_subscriptions(&alice);
     drop(alice_stream);
+    // The engine subscription goes with the stream, so its unsubscription
+    // is queued on the connection ahead of the probe below.
+    assert_eq!(
+        jazz::tools::test_support::live_subscriptions(&alice),
+        held - 1,
+        "dropping the stream releases its engine subscription at once"
+    );
     // A one-shot query on an unrelated table round-trips on the same
     // connection, so the server has processed alice's unsubscription before
     // bob's next write arrives.
