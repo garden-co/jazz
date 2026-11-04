@@ -16,10 +16,7 @@ use crate::server::{ServerState, ShutdownPhase};
 use jazz::tools::public_schema::{Schema, TablePolicies};
 use jazz::tools::transport_error::ErrorResponse;
 
-use super::utils::{
-    parse_app_id_param, parse_schema_hash_param, permissions_head_view, permissions_map_view,
-    unix_timestamp_millis,
-};
+use super::utils::{parse_app_id_param, parse_schema_hash_param, unix_timestamp_millis};
 
 /// Admin secret presented in the `X-Jazz-Admin-Secret` request header, if any.
 pub(super) fn admin_secret_header(headers: &HeaderMap) -> Option<&str> {
@@ -91,22 +88,6 @@ pub(super) struct AdminSubscriptionIntrospectionResponse {
     app_id: String,
     generated_at: u64,
     queries: Vec<serde_json::Value>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct PermissionsHeadView {
-    pub(super) schema_hash: String,
-    pub(super) version: u64,
-    pub(super) parent_bundle_object_id: Option<String>,
-    pub(super) bundle_object_id: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct StoredPermissionsResponse {
-    head: Option<PermissionsHeadView>,
-    permissions: Option<std::collections::HashMap<String, TablePolicies>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -207,27 +188,6 @@ pub(super) async fn migration_graph_handler(
         .migration_graph(&state.catalogue_store)
         .map_err(read_failed("migration graph"))?;
     Ok(Json(graph))
-}
-
-pub(super) async fn permissions_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-) -> Result<Json<StoredPermissionsResponse>, Response> {
-    require_admin(&state, &headers)?;
-    let current = state
-        .catalogue
-        .active_schema(&state.catalogue_store)
-        .map_err(read_failed("current permissions"))?;
-    Ok(Json(match current {
-        Some(current) => StoredPermissionsResponse {
-            head: Some(permissions_head_view(current.summary)),
-            permissions: Some(permissions_map_view(current.permissions)),
-        },
-        None => StoredPermissionsResponse {
-            head: None,
-            permissions: None,
-        },
-    }))
 }
 
 /// Every bundle the core has published, with its permissions: what an
