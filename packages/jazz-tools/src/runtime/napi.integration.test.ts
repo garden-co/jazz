@@ -760,7 +760,6 @@ describe("NAPI integration", () => {
     let context: {
       asBackend(): Db;
       forSession(session: Session): Db;
-      forRequest(request: Request): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
 
@@ -1179,7 +1178,6 @@ describe("NAPI integration", () => {
     let context: {
       asBackend(): Db;
       forSession(session: Session): Db;
-      forRequest(request: Request): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -1389,7 +1387,6 @@ describe("NAPI integration", () => {
     let server: Awaited<ReturnType<typeof startLocalJazzServer>> | null = null;
     let context: {
       asBackend(): Db;
-      forRequest(request: Request): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);

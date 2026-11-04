@@ -2,7 +2,7 @@ import React from "react";
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 const host = vi.hoisted(() => ({ create: vi.fn() }));
-vi.mock("./create-jazz-session.js", () => ({ createJazzSession: host.create }));
+vi.mock("./create-jazz-session.js", () => ({ createJazzClient: host.create }));
 
 import { JazzProvider } from "./provider.js";
 afterEach(cleanup);

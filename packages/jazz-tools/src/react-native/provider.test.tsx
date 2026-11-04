@@ -6,21 +6,21 @@ import { makeFakeAccount, makeFakeClient } from "../react-core/test-utils.js";
 import type { DbConfig } from "./create-db.js";
 
 const mocks = vi.hoisted(() => ({
+  openJazzClient: vi.fn(),
   createJazzClient: vi.fn(),
-  createJazzSession: vi.fn(),
 }));
 
-vi.mock("./create-jazz-session.js", () => ({ createJazzSession: mocks.createJazzSession }));
+vi.mock("./create-jazz-session.js", () => ({ createJazzClient: mocks.createJazzClient }));
 
 vi.mock("./create-jazz-client.js", () => ({
-  createJazzClient: mocks.createJazzClient,
+  openJazzClient: mocks.openJazzClient,
 }));
 
 import { JazzProvider } from "./provider.js";
 
 beforeEach(() => {
   vi.useFakeTimers();
-  mocks.createJazzClient.mockReset();
+  mocks.openJazzClient.mockReset();
 });
 
 afterEach(async () => {
@@ -39,7 +39,7 @@ function makeClient(userId: string) {
 describe("React Native JazzProvider", () => {
   it("reuses its client when a public provider rerender keeps the same native admission capability", async () => {
     const client = makeClient("first");
-    mocks.createJazzClient.mockResolvedValue(client);
+    mocks.openJazzClient.mockResolvedValue(client);
     const capability = new Uint8Array(32);
     const initialConfig: DbConfig = {
       appId: "native-provider-stable",
@@ -72,14 +72,14 @@ describe("React Native JazzProvider", () => {
     );
     await act(async () => Promise.resolve());
 
-    expect(mocks.createJazzClient).toHaveBeenCalledOnce();
+    expect(mocks.openJazzClient).toHaveBeenCalledOnce();
     expect(client.shutdown).not.toHaveBeenCalled();
   });
 
   it("replaces its client when the public provider receives a different native admission capability", async () => {
     const firstClient = makeClient("first");
     const secondClient = makeClient("second");
-    mocks.createJazzClient.mockResolvedValueOnce(firstClient).mockResolvedValueOnce(secondClient);
+    mocks.openJazzClient.mockResolvedValueOnce(firstClient).mockResolvedValueOnce(secondClient);
     const initialSource = new Uint8Array(32);
     const replacementSource = new Uint8Array(32);
     const initialConfig: DbConfig = {
@@ -96,7 +96,7 @@ describe("React Native JazzProvider", () => {
       </JazzProvider>,
     );
     await act(async () => Promise.resolve());
-    expect(mocks.createJazzClient).toHaveBeenCalledOnce();
+    expect(mocks.openJazzClient).toHaveBeenCalledOnce();
 
     result.rerender(
       <JazzProvider
@@ -115,15 +115,15 @@ describe("React Native JazzProvider", () => {
     });
 
     expect(firstClient.shutdown).toHaveBeenCalledOnce();
-    expect(mocks.createJazzClient).toHaveBeenCalledTimes(2);
-    expect(mocks.createJazzClient.mock.calls[1]?.[0]).toMatchObject({
+    expect(mocks.openJazzClient).toHaveBeenCalledTimes(2);
+    expect(mocks.openJazzClient.mock.calls[1]?.[0]).toMatchObject({
       nativeRelay: { capability: replacementSource },
     });
   });
 });
 
 it("uses native defaults and the native session factory for ergonomic props", async () => {
-  mocks.createJazzSession.mockRejectedValue(new Error("native offline"));
+  mocks.createJazzClient.mockRejectedValue(new Error("native offline"));
   const view = render(
     <JazzProvider
       appId="native-app"
@@ -137,8 +137,8 @@ it("uses native defaults and the native session factory for ergonomic props", as
   await act(async () => {
     await Promise.resolve();
   });
-  expect(mocks.createJazzSession).toHaveBeenCalledOnce();
-  expect(mocks.createJazzSession.mock.calls[0][0].initial).toBeUndefined();
+  expect(mocks.createJazzClient).toHaveBeenCalledOnce();
+  expect(mocks.createJazzClient.mock.calls[0][0].initial).toBeUndefined();
   expect(view.container.querySelector("native-pressable")?.textContent).toBe("Try again");
   expect(view.container.querySelector("section, p, button")).toBeNull();
 });

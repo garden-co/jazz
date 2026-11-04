@@ -23,7 +23,7 @@ function assertCurrentRnBoundary(packageReadme, installGuide, spec) {
   );
   assert.match(
     packageReadme,
-    /AccountHandle.*createJazzClient.*matching native development or release build/i,
+    /createJazzClient.*AccountHandle.*matching native development or release build/i,
     "persistent clients must retain account-handle admission and native-build requirements",
   );
   assert.match(
@@ -295,7 +295,7 @@ function assertPublicClientSeedStages(source) {
     previous = position;
   }
   for (const pattern of [
-    /markFailure\("public-client-open-failed"\);\s*const client = await createJazzClient/,
+    /markFailure\("public-client-open-failed"\);\s*const client = await openJazzClient/,
     /markFailure\("public-client-subscribe-failed"\);\s*unsubscribe = client\.db\.subscribe/,
     /markFailure\("public-client-write-failed"\);\s*const write = client\.db\.insert/,
     /markFailure\("public-client-read-failed"\);\s*const rows = await client\.db\.all/,
@@ -386,13 +386,13 @@ function assertPublicClientRelayReadback(source) {
   const create = awaitCall(client.initializer);
   assert.ok(
     create &&
-      isIdentifier(create.expression, "createJazzClient") &&
+      isIdentifier(create.expression, "openJazzClient") &&
       create.arguments.length === 1 &&
       ts.isCallExpression(create.arguments[0]) &&
       isIdentifier(create.arguments[0].expression, "clientConfig") &&
       create.arguments[0].arguments.length === 1 &&
       isIdentifier(create.arguments[0].arguments[0], "admitted"),
-    "relay readback must await createJazzClient(clientConfig(admitted))",
+    "relay readback must await openJazzClient(clientConfig(admitted))",
   );
   assert.ok(
     ts.isVariableStatement(unsubscribeStatement) &&
@@ -999,7 +999,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   // The restart assertion must cross the public RN API. A byte-level `all`
   // after re-admission only proves the host transport; it does not prove a
   // fresh application can start, select its foreground runtime, and decode a
-  // persisted row through `createJazzClient`.
+  // persisted row through `openJazzClient`.
   assert.match(app, /await proveHighLevelForegroundRestart\(reopened, receipt\.runNonce\)/);
   assert.match(
     app,
@@ -1012,7 +1012,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
     app,
     /markFailure\("public-client-relay-readback-failed"\);\s*await proveHighLevelForegroundRelayReadback\(scopeA, receipt\.runNonce\)/,
   );
-  assert.match(highLevelForeground, /createJazzClient\(clientConfig\(admitted\)\)/);
+  assert.match(highLevelForeground, /openJazzClient\(clientConfig\(admitted\)\)/);
   assert.match(highLevelForeground, /client\.db\.all\(app\.todos\)/);
   assert.match(highLevelForeground, /assertPersistedTitleForRun/);
   assertPublicClientRelayReadback(highLevelForeground);

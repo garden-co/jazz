@@ -5,12 +5,12 @@ import { accountRegistryUrl } from "../accounts/context.js";
 import { clientScope } from "../runtime/client-scope.js";
 import { createAccountManager, type AccountManagerConfig } from "./create-account-manager.js";
 import {
-  createJazzClient,
+  openJazzClient,
   type JazzClient,
-  type JazzClientConfig,
+  type OpenJazzClientConfig,
 } from "../react-native/create-jazz-client.js";
 
-export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
+export type JazzClientConfig = Omit<OpenJazzClientConfig, "account"> &
   AccountManagerConfig & {
     /**
      * Who the app starts as before your backend names a user: signed out
@@ -22,14 +22,14 @@ export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
   };
 
 /** Prepare the host account store once and own client replacement across authentication. */
-export async function createJazzSession(
-  config: JazzSessionConfig,
+export async function createJazzClient(
+  config: JazzClientConfig,
 ): Promise<UserFollowingSession<JazzClient>> {
   const accounts = await createAccountManager(config);
   return createJazzSessionOwner({
     accounts,
     initial: config.initial,
-    openClient: (account) => createJazzClient({ ...config, account }),
+    openClient: (account) => openJazzClient({ ...config, account }),
     decorate: followUser({
       registry: accountRegistryUrl(config.serverUrl, clientScope(config)),
       events: nativeBackendWatchEvents,

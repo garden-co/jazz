@@ -34,7 +34,7 @@ describe("JazzProvider — stable config deps", () => {
    */
   it("does not release when an equivalent config is rebuilt in another property order", async () => {
     const alice = makeFakeClient({ authMode: "local-first", userId: "alice", claims: {} });
-    const createJazzClient = vi.fn().mockResolvedValue(alice);
+    const openJazzClient = vi.fn().mockResolvedValue(alice);
 
     // Track setTimeout calls made after initial mount so we can detect spurious
     // release timers scheduled by an unnecessary cleanup.
@@ -42,7 +42,7 @@ describe("JazzProvider — stable config deps", () => {
 
     function Wrapper({ config }: { config: AccountDbConfig }) {
       return (
-        <JazzProvider config={config} createJazzClient={createJazzClient} fallback={null}>
+        <JazzProvider config={config} openJazzClient={openJazzClient} fallback={null}>
           <div data-testid="child" />
         </JazzProvider>
       );
@@ -62,7 +62,7 @@ describe("JazzProvider — stable config deps", () => {
       await Promise.resolve();
     });
 
-    expect(createJazzClient).toHaveBeenCalledTimes(1);
+    expect(openJazzClient).toHaveBeenCalledTimes(1);
 
     // Reset the spy so we only observe calls that happen during the re-render.
     setTimeoutSpy.mockClear();
@@ -107,7 +107,7 @@ describe("JazzProvider — stable config deps", () => {
 
     function Wrapper({ factory }: { factory: typeof firstFactory }) {
       return (
-        <JazzProvider config={config} createJazzClient={factory} fallback={null}>
+        <JazzProvider config={config} openJazzClient={factory} fallback={null}>
           <div data-testid="child" />
         </JazzProvider>
       );
@@ -135,14 +135,14 @@ describe("JazzProvider — stable config deps", () => {
     const anonymous = makeFakeClient({ authMode: "local-first", userId: "anonymous", claims: {} });
     anonymous.shutdown = vi.fn(() => shutdownFinished);
     const authenticated = makeFakeClient({ authMode: "external", userId: "alice", claims: {} });
-    const createJazzClient = vi
+    const openJazzClient = vi
       .fn()
       .mockResolvedValueOnce(anonymous)
       .mockResolvedValueOnce(authenticated);
 
     function Wrapper({ config }: { config: AccountDbConfig }) {
       return (
-        <JazzProvider config={config} createJazzClient={createJazzClient} fallback={null}>
+        <JazzProvider config={config} openJazzClient={openJazzClient} fallback={null}>
           <div data-testid="child" />
         </JazzProvider>
       );
@@ -173,11 +173,11 @@ describe("JazzProvider — stable config deps", () => {
     });
 
     expect(anonymous.shutdown).toHaveBeenCalledOnce();
-    expect(createJazzClient).toHaveBeenCalledTimes(1);
+    expect(openJazzClient).toHaveBeenCalledTimes(1);
 
     finishShutdown();
     await act(async () => Promise.resolve());
 
-    expect(createJazzClient).toHaveBeenCalledTimes(2);
+    expect(openJazzClient).toHaveBeenCalledTimes(2);
   });
 });

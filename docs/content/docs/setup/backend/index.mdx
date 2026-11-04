@@ -111,9 +111,9 @@ The browser talks to the same origin, so `serverUrl` is a path, and your app's o
 all it needs. It never holds a Jazz credential:
 
 ```ts title="src/jazz.ts"
-import { createJazzSession } from "jazz-tools/client";
+import { createJazzClient } from "jazz-tools/client";
 
-export const session = await createJazzSession({ appId: "my-app", serverUrl: "/jazz" });
+export const session = await createJazzClient({ appId: "my-app", serverUrl: "/jazz" });
 await session.loginWithBackend();
 ```
 

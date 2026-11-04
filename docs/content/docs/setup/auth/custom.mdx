@@ -127,9 +127,9 @@ signs in again through your backend. `logout` signs out of your auth; your sourc
 Without React, own the session yourself:
 
 ```ts
-import { createJazzSession } from "jazz-tools/client";
+import { createJazzClient } from "jazz-tools/client";
 
-const jazz = await createJazzSession({ appId: "my-app", serverUrl: "/jazz" });
+const jazz = await createJazzClient({ appId: "my-app", serverUrl: "/jazz" });
 await jazz.loginWithBackend(); // after your own sign-in
 // ...
 await jazz.logout(); // before your own sign-out

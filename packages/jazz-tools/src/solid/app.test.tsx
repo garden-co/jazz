@@ -7,8 +7,8 @@ import { attachSubscriptionStore } from "../subscription-store-internal.js";
 import { JazzProvider, useJazzAuth } from "./app.js";
 import { useJazzClient } from "./provider.js";
 const factory = vi.hoisted(() => vi.fn());
-vi.mock("../session/create-jazz-session.js", () => ({ createJazzSession: factory }));
-vi.mock("../web/create-jazz-client.js", () => ({ createJazzClient: vi.fn() }));
+vi.mock("../session/create-jazz-session.js", () => ({ createJazzClient: factory }));
+vi.mock("../web/create-jazz-client.js", () => ({ openJazzClient: vi.fn() }));
 vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
 const flush = async () => {
   for (let i = 0; i < 40; i++) await Promise.resolve();

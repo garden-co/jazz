@@ -1,10 +1,10 @@
-import type { JazzSessionConfig } from "jazz-tools/client";
+import type { JazzClientConfig } from "jazz-tools/client";
 
 /**
  * A local-first account, like the todo example: no sign-up, the browser
  * profile holds the account secret. Crew join shows through invite links.
  */
-export function sessionConfig(overrides: Partial<JazzSessionConfig> = {}): JazzSessionConfig {
+export function sessionConfig(overrides: Partial<JazzClientConfig> = {}): JazzClientConfig {
   // The app's backend serves Jazz on this origin (`/jazz`), so it needs no URL.
   return {
     env: "dev",

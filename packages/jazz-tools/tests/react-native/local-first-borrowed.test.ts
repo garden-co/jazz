@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { schema } from "../../src/schema-namespace.js";
-import { createAccountManager, createJazzClient } from "../../src/react-native/index.js";
+import { createAccountManager, openJazzClient } from "../../src/react-native/index.js";
 import { createNativeAccountTestSession } from "../../src/_dev/native-account-session.js";
 import { serializeSchemaSource } from "../../src/drivers/schema-wire.js";
 import { createPlatformHost, installPlatformHost } from "./native-platform.js";
@@ -12,7 +12,7 @@ it("opens a borrowed local-first account foreground and subscribes without brows
   const directory = await mkdtemp(join(tmpdir(), "rn-local-first-borrowed-"));
   const host = createPlatformHost(directory);
   installPlatformHost(host);
-  let client: Awaited<ReturnType<typeof createJazzClient>> | undefined;
+  let client: Awaited<ReturnType<typeof openJazzClient>> | undefined;
   let lease: Awaited<ReturnType<typeof createNativeAccountTestSession>> | undefined;
   let stop = () => {};
   try {
@@ -37,7 +37,7 @@ it("opens a borrowed local-first account foreground and subscribes without brows
       { migrations: "none" },
     );
     lease = await createNativeAccountTestSession(config, serializeSchemaSource(app.wasmSchema));
-    client = await createJazzClient({ ...config, nativeRelay: { capability: lease.capability } });
+    client = await openJazzClient({ ...config, nativeRelay: { capability: lease.capability } });
     expect(client.session).toMatchObject({
       authMode: "local-first",
       user: { account: account.id, identity: account.identity },

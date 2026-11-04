@@ -7,7 +7,7 @@ const [configPath, phase] = process.argv.slice(2);
 const c = JSON.parse(readFileSync(configPath, "utf8"));
 const require = createRequire(join(c.project, "package.json"));
 const { schema: s } = await import(pathToFileURL(require.resolve("jazz-tools")));
-const { createJazzSession } = await import(pathToFileURL(require.resolve("jazz-tools/backend")));
+const { createJazzClient } = await import(pathToFileURL(require.resolve("jazz-tools/backend")));
 const app = s.defineApp(
   {
     docs: s.table({ label: s.string(), body: s.string(), metadata: s.json() }, {}),
@@ -52,7 +52,7 @@ function store(name) {
 }
 async function open(name, backend = false) {
   const session = await timeout(
-    createJazzSession({
+    createJazzClient({
       appId: c.appId,
       serverUrl: c.serverUrl,
       app,

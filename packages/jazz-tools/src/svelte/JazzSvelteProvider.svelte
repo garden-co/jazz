@@ -8,7 +8,7 @@ serialises shutdown before starting a replacement.
 	import type { AccountDbConfig as DbConfig } from '../accounts/context.js';
 	import { serializeClientConfig } from '../runtime/client-config-key.js';
 	import JazzSvelteClientProvider from './JazzSvelteClientProvider.svelte';
-	import { createJazzClient, type JazzClient } from './create-jazz-client.js';
+	import { openJazzClient, type JazzClient } from './create-jazz-client.js';
 	import { assertNoClassicProviderProps } from '../classic-api.js';
 	import { toError } from '../runtime/util.js';
 
@@ -135,7 +135,7 @@ serialises shutdown before starting a replacement.
 				}
 
 				validateClassicProps();
-				const createdClient = await createJazzClient(nextConfig);
+				const createdClient = await openJazzClient(nextConfig);
 				if (cancelled) {
 					await createdClient.shutdown();
 					return;

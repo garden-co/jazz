@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { createJazzSession } from "jazz-tools/client";
+import { createJazzClient } from "jazz-tools/client";
 import { getRecoveryPhrase, restoreRecoveryPhrase } from "../../src/auth-snippets.js";
 import { APP_ID, SERVER_URL } from "./test-constants.js";
 
 describe("account recovery snippets", () => {
   it("restores the same account and identity after logout through the session", async () => {
-    const session = await createJazzSession({
+    const session = await createJazzClient({
       appId: APP_ID,
       serverUrl: SERVER_URL,
       initial: "local-first",

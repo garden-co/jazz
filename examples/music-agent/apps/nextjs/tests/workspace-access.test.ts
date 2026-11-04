@@ -81,8 +81,8 @@ async function signIn(email: string, name: string) {
   );
   if (!account) throw new Error(`the app's Jazz resolves no account for ${email}`);
 
-  const { createJazzSession } = await import("jazz-tools/backend");
-  const browser = await createJazzSession({
+  const { createJazzClient } = await import("jazz-tools/backend");
+  const browser = await createJazzClient({
     appId: server.appId,
     app,
     permissions,

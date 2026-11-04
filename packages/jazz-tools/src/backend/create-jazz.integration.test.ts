@@ -11,7 +11,7 @@ import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import {
   createJazz,
-  createJazzSession,
+  createJazzClient,
   files,
   fromJWT,
   memory,
@@ -118,7 +118,7 @@ function signInAs(origin: string, userId: string) {
 
 async function userSession(appId: string, origin: string, userId: string) {
   signInAs(origin, userId);
-  const session = await createJazzSession({
+  const session = await createJazzClient({
     appId,
     app,
     permissions,
@@ -523,7 +523,7 @@ describe("createJazz", () => {
 
       // A browser client names no app: the backend vouches for the endpoint
       // its guest's proof is for.
-      const session = await createJazzSession({
+      const session = await createJazzClient({
         ...(scoping === "names the app" ? { appId } : {}),
         app,
         permissions,
@@ -1026,7 +1026,7 @@ describe("createJazz", () => {
 
     // A guest whose client names no app: the backend vouches for the
     // endpoint its proof is for, and the remote core founds its account.
-    const guestSession = await createJazzSession({
+    const guestSession = await createJazzClient({
       app,
       permissions,
       serverUrl: `${origin}/jazz`,
@@ -1067,7 +1067,7 @@ describe("createJazz", () => {
 
     // Local-first guests too: each backend pins its guests' sessions.
     const guestOf = async (origin: string) => {
-      const session = await createJazzSession({
+      const session = await createJazzClient({
         app,
         permissions,
         serverUrl: `${origin}/jazz`,

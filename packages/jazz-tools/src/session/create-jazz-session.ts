@@ -6,7 +6,7 @@ import {
   type CreateAccountDb,
   type JazzClient,
 } from "../web/registered-jazz-client.js";
-import type { JazzClientConfig } from "../web/create-jazz-client.js";
+import type { OpenJazzClientConfig } from "../web/create-jazz-client.js";
 import {
   createClient as createThinDb,
   mintLocalFirstTokenInJs,
@@ -25,7 +25,7 @@ import { followUser, type UserFollowingSession } from "./follow-user.js";
 
 export type { LocalFirstLoader };
 
-export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
+export type JazzClientConfig = Omit<OpenJazzClientConfig, "account"> &
   AccountManagerConfig & {
     /**
      * Who the app starts as before your backend names a user: signed out
@@ -57,7 +57,7 @@ export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
 export type BrowserJazzSession = UserFollowingSession<JazzClient>;
 
 /** Own one configured client and serialize its account lifecycle. */
-export async function createJazzSession(config: JazzSessionConfig): Promise<BrowserJazzSession> {
+export async function createJazzClient(config: JazzClientConfig): Promise<BrowserJazzSession> {
   const serverUrl = config.serverUrl ?? DEFAULT_SERVER_URL;
   const {
     initial,

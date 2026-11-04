@@ -59,7 +59,7 @@ describe("Svelte Jazz session", () => {
     const { session } = await setup(events);
     const factory = await import("../session/create-jazz-session.js");
     const create = vi
-      .spyOn(factory, "createJazzSession")
+      .spyOn(factory, "createJazzClient")
       .mockRejectedValueOnce(new Error("startup failed"))
       .mockResolvedValueOnce(session);
     const target = document.createElement("div");
