@@ -157,10 +157,12 @@ export async function createJazzSessionOwner<
     operation: JazzSessionOperation,
     mutate: () => AccountHandle | undefined | Promise<AccountHandle | undefined>,
     token: number,
+    detached?: Promise<void>,
   ) => {
     if (token !== generation) throw superseded();
     const previous = selected;
-    await detach({ status: "transitioning", account: selected, pending: operation }).done;
+    await (detached ??
+      detach({ status: "transitioning", account: selected, pending: operation }).done);
     if (token !== generation) throw superseded();
     try {
       if (client) {
@@ -244,8 +246,14 @@ export async function createJazzSessionOwner<
     if (busy || loggingOut)
       return Promise.reject(new Error("A Jazz session operation is already pending"));
     const token = ++generation;
-    const task = Promise.resolve().then(() => perform(operation, mutate, token));
+    // Publish "transitioning" as the operation becomes pending, so no one
+    // sees a settled session that would refuse their operation as busy. It
+    // is busy before listeners hear of it, so one that starts an operation
+    // of its own is refused rather than racing this one.
+    let detached!: { done: Promise<void> };
+    const task = Promise.resolve().then(() => perform(operation, mutate, token, detached.done));
     busy = task;
+    detached = detach({ status: "transitioning", account: selected, pending: operation });
     void task
       .finally(() => {
         if (busy === task) busy = undefined;
