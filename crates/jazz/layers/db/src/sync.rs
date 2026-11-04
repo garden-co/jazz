@@ -5347,7 +5347,7 @@ impl Inner {
                 let context = context
                     .map(|context| {
                         <[u8; 32]>::try_from(context.as_slice()).map_err(|_| {
-                            crate::format::unsupported("bad bundle id in _jazz_watermarks")
+                            crate::format::unsupported("bad read context in _jazz_watermarks")
                         })
                     })
                     .transpose()?;

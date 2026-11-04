@@ -483,38 +483,77 @@ fn a_pinned_session_under_another_bundle_opens_fresh() {
     assert_eq!(local(&db), []);
 }
 
-/// Claims are part of what a session's reads are evaluated under: a
-/// session that reconnects with the same claims resumes, one whose claims
-/// changed opens fresh (its policies may read them differently).
+/// Claims are part of what a session's reads are evaluated under: under
+/// a bundle whose policy reads a claim, a session that reconnects with the
+/// same claims resumes with the same rows, and one whose claim changed
+/// opens fresh, so the rows the new claim hides leave and the rows it
+/// reads arrive, though none of them changed.
 #[test]
 fn a_session_with_claims_resumes_only_with_the_same_claims() {
-    let (server, open, _) = server_with_users(4);
-    let alice = AuthorSubject::for_test_bytes([0x55; 16]);
-    let claims = |role: &str| {
+    let server = block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap();
+    server.set_authority();
+    let teams = ["red", "red", "red", "blue", "blue"];
+    for (n, team) in teams.iter().enumerate() {
+        server
+            .seed_settled_mergeable_for_bootstrap(
+                "users",
+                RowUuid::from_bytes([n as u8 + 1; 16]),
+                AuthorSubject::SYSTEM,
+                BTreeMap::from([("name".to_owned(), Value::String((*team).to_owned()))]),
+            )
+            .unwrap();
+    }
+    let by_team = |team: &str| -> Vec<RowUuid> {
+        teams
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| **t == team)
+            .map(|(n, _)| RowUuid::from_bytes([n as u8 + 1; 16]))
+            .collect()
+    };
+    // The bundle reads the users named for the session's team claim.
+    let own_team =
+        block_on(server.publish_bundle(&users(common::session_eq("name", &["claims", "team"]))))
+            .unwrap();
+    let claims = |team: &str| {
         Some(BTreeMap::from([(
-            "role".to_owned(),
-            Value::String(role.to_owned()),
+            jazz::query::provider_claim_key("team"),
+            Value::String(team.to_owned()),
         )]))
     };
+    let sorted = |mut rows: Vec<RowUuid>| {
+        rows.sort();
+        rows
+    };
+    let alice = AuthorSubject::for_test_bytes([0x55; 16]);
     let db = client(1, alice);
     let (client_side, server_side, shipped) = counting_pipe();
     let upstream = block_on(db.connect_upstream(client_side));
     server
-        .accept_pinned_subscriber(server_side, alice, claims("editor"), Some(open))
+        .accept_pinned_subscriber(server_side, alice, claims("red"), Some(own_team))
         .unwrap();
     let prepared = db.prepare_query(&Query::from("users")).unwrap();
     let _stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &[&db]);
-    assert_eq!(shipped.get(), 4);
+    assert_eq!(shipped.get(), 3, "the red team's rows ship");
+    assert_eq!(sorted(local(&db)), by_team("red"));
 
     let (shipped, upstream) =
-        reconnect_with(&server, &db, alice, claims("editor"), open, &upstream);
-    assert_eq!(shipped, 0, "the same claims resume");
+        reconnect_with(&server, &db, alice, claims("red"), own_team, &upstream);
+    assert_eq!(shipped, 0, "the same claims resume: nothing ships again");
+    assert_eq!(sorted(local(&db)), by_team("red"));
 
-    let (shipped, _upstream) =
-        reconnect_with(&server, &db, alice, claims("viewer"), open, &upstream);
-    assert_eq!(shipped, 4, "other claims open fresh");
-    assert_eq!(local(&db).len(), 4);
+    let (shipped, upstream) =
+        reconnect_with(&server, &db, alice, claims("blue"), own_team, &upstream);
+    assert_eq!(shipped, 2, "another team opens fresh: its rows ship");
+    assert_eq!(
+        sorted(local(&db)),
+        by_team("blue"),
+        "and the red team's rows leave"
+    );
+
+    let (_, _upstream) = reconnect_with(&server, &db, alice, claims("red"), own_team, &upstream);
+    assert_eq!(sorted(local(&db)), by_team("red"), "and back again");
 }
 
 #[test]
