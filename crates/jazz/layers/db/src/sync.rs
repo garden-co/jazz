@@ -2532,6 +2532,10 @@ struct Follow<'w> {
     /// eviction.
     gone: &'w mut Vec<RowKey>,
     followed: &'w mut HashSet<(usize, u64)>,
+    /// Follow rows as the server settled them through this position, not
+    /// as they stand with pending local writes: a replica judging what
+    /// the server holds for a read (see `Db::held_by_other_reads`).
+    settled: Option<u64>,
 }
 
 /// The watch on row `id` of stored table `table`.
@@ -3493,7 +3497,13 @@ impl Inner {
         } else {
             format!("{} = ?1", quote(column))
         };
-        for found in self.images_where(table, false, &filter, &[&value])? {
+        let found = match follow.settled {
+            Some(through) => {
+                self.settled_where(table, &filter, column, &value, contains, through)?
+            }
+            None => self.images_where(table, false, &filter, &[&value])?,
+        };
+        for found in found {
             let row = RowUuid::from_bytes(found.id);
             let can = readable(
                 self,
@@ -4238,27 +4248,29 @@ impl Inner {
     ) -> Result<Vec<Image>, Error> {
         let settled = |image: &Image| image.at.accepted() && image.at.seq <= through;
         let mut out = Vec::new();
-        let mut unsettled = Vec::new();
+        // The slots (row and branch key) whose current version is not
+        // settled: only they are looked up in history.
+        let mut unsettled: HashSet<([u8; 16], Vec<u8>)> = HashSet::new();
         for image in self.images_of(table, false, rows)? {
             if settled(&image) {
                 out.push(image);
             } else {
-                unsettled.push(RowUuid::from_bytes(image.id));
+                unsettled.insert((image.id, image.key.clone()));
             }
         }
         if unsettled.is_empty() {
             return Ok(out);
         }
-        unsettled.sort();
-        unsettled.dedup();
-        let have: HashSet<([u8; 16], Vec<u8>)> = out
+        let mut ids: Vec<RowUuid> = unsettled
             .iter()
-            .map(|image| (image.id, image.key.clone()))
+            .map(|(id, _)| RowUuid::from_bytes(*id))
             .collect();
+        ids.sort();
+        ids.dedup();
         let mut newest: HashMap<([u8; 16], Vec<u8>), Image> = HashMap::new();
-        for image in self.images_of(table, true, unsettled)? {
+        for image in self.images_of(table, true, ids)? {
             let slot = (image.id, image.key.clone());
-            if !settled(&image) || have.contains(&slot) {
+            if !settled(&image) || !unsettled.contains(&slot) {
                 continue;
             }
             match newest.get(&slot) {
@@ -4270,6 +4282,44 @@ impl Inner {
         }
         out.extend(newest.into_values());
         Ok(out)
+    }
+
+    /// The images of `table` that match `filter` (on `column`, against
+    /// `value`) as the server settled them through `through`: a row a
+    /// pending write moved out of the match still matches, one it moved in
+    /// does not.
+    #[allow(clippy::too_many_arguments)]
+    fn settled_where(
+        &self,
+        table: &str,
+        filter: &str,
+        column: &str,
+        value: &Sql,
+        contains: bool,
+        through: u64,
+    ) -> Result<Vec<Image>, Error> {
+        let mut ids: Vec<RowUuid> = self
+            .images_where(table, false, filter, &[value])?
+            .into_iter()
+            .chain(self.images_where(table, true, filter, &[value])?)
+            .map(|image| RowUuid::from_bytes(image.id))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .settled_images(table, ids, through)?
+            .into_iter()
+            .filter(|image| match image_cell(image, column) {
+                Some(cell) if contains => {
+                    array_elements(&cell).is_some_and(|elements| elements.contains(value))
+                }
+                Some(cell) => cell == *value,
+                None => false,
+            })
+            .collect())
     }
 
     /// Every image of each of `rows` in `table` (or its history).
@@ -7010,17 +7060,20 @@ impl Db {
                 }
                 // The read's own includes and relations, which its listing
                 // view drops.
+                // A union's rows carry their arm, and its listing names
+                // rows by id alone: no listing judges them (see
+                // `evict_unanswered`), so it is not consulted here either.
+                if crate::db::union_plan(&other, &inner.schema)?.is_some() {
+                    continue;
+                }
                 let support = inner.support_of(&other)?;
-                let root = match crate::db::union_plan(&other, &inner.schema)? {
-                    Some(_) => None,
-                    None => Some(inner.schema.table(&other.table)?.stored.clone()),
-                };
+                let root = inner.schema.table(&other.table)?.stored.clone();
                 (root, support)
             };
             let mut support_tables_read = Vec::new();
             support_tables(&support, &mut support_tables_read);
             let follows = support_tables_read.iter().any(|read| read == table);
-            if root.as_deref() != Some(table) && !follows {
+            if root != table && !follows {
                 continue;
             }
             let Some((prepared, read)) =
@@ -7043,12 +7096,12 @@ impl Db {
             if rows.is_empty() {
                 continue;
             }
-            if root.as_deref() == Some(table) {
+            if root == table {
                 held.extend(rows.iter().map(|row| *row.0.as_bytes()));
             }
-            let Some(root) = root.filter(|_| follows) else {
+            if !follows {
                 continue;
-            };
+            }
             let mut out = Vec::new();
             let (mut watch, mut kept, mut gone, mut followed) = (
                 Watches::default(),
@@ -7065,6 +7118,7 @@ impl Db {
                 held: &mut kept,
                 gone: &mut gone,
                 followed: &mut followed,
+                settled: Some(through),
             };
             // Followed from each row as the server settled it through
             // `through`, as its view was read: a pending local write's
@@ -10826,6 +10880,7 @@ impl Db {
                         held: &mut held_rows,
                         gone: &mut gone,
                         followed: &mut followed,
+                        settled: None,
                     };
                     // A shipped row may point at rows the client never had:
                     // its support is followed whole. A held one's changed
@@ -11985,6 +12040,7 @@ impl Db {
                     held: &mut held,
                     gone: &mut gone,
                     followed: &mut followed,
+                    settled: None,
                 };
                 for image in &images {
                     let floor = unchanged

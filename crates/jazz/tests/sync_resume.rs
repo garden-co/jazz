@@ -55,6 +55,12 @@ fn schema() -> JazzSchema {
                     .column("body", ColumnType::Text)
                     .policies(allow_all_policies()),
             )
+            .table(
+                TableSchemaBuilder::new("reactions")
+                    .fk_column("note", "notes")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
             .build(),
     )
 }
@@ -1376,8 +1382,7 @@ impl Transport for HoldCommits {
 /// pending local write: a note moved to another room, its write not yet
 /// settled, still keeps the room the server holds for it (were the write
 /// rejected, the server would never send that room again).
-#[test]
-fn a_pending_write_does_not_move_what_another_read_holds() {
+fn a_pending_write_does_not_move_what_another_read_holds(member_of_first: bool) {
     let server = seeded(1);
     server
         .seed_settled_mergeable_for_bootstrap(
@@ -1400,8 +1405,13 @@ fn a_pending_write_does_not_move_what_another_read_holds() {
     let notes = client
         .prepare_query(&Query::from("notes").include("room"))
         .unwrap();
-    let _member_of = block_on(client.subscribe(&member_of, ReadOpts::default())).unwrap();
-    let _notes = block_on(client.subscribe(&notes, ReadOpts::default())).unwrap();
+    let (first, second) = if member_of_first {
+        (&member_of, &notes)
+    } else {
+        (&notes, &member_of)
+    };
+    let _first = block_on(client.subscribe(first, ReadOpts::default())).unwrap();
+    let _second = block_on(client.subscribe(second, ReadOpts::default())).unwrap();
     pump(&server, &client);
     assert_eq!(local_rooms(&client), [id(1, 0)]);
 
@@ -1429,4 +1439,135 @@ fn a_pending_write_does_not_move_what_another_read_holds() {
         [id(1, 0)],
         "room 0 is the settled note's room, which the server holds for it"
     );
+}
+
+#[test]
+fn a_pending_write_does_not_move_what_another_read_holds_losing_one_first() {
+    a_pending_write_does_not_move_what_another_read_holds(true);
+}
+
+#[test]
+fn a_pending_write_does_not_move_what_another_read_holds_holding_one_first() {
+    a_pending_write_does_not_move_what_another_read_holds(false);
+}
+
+/// The reactions `db` holds, read locally.
+fn local_reactions(db: &Db) -> Vec<RowUuid> {
+    let prepared = db.prepare_query(&Query::from("reactions")).unwrap();
+    let opts = ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let mut rows: Vec<RowUuid> = block_on(db.all(&prepared, opts))
+        .unwrap()
+        .iter()
+        .map(|row| row.row_uuid())
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// Every hop of another read's support is followed as the server settled
+/// it: a pending write that moves a note out of a room's relation does not
+/// stop the note's reactions from being that read's, two hops down.
+fn a_pending_write_does_not_move_support_below_the_first_hop(joined_first: bool) {
+    use jazz::query::{ArraySubquery, col, eq, lit};
+    let server = seeded(1);
+    let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
+        server
+            .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
+            .unwrap();
+    };
+    seed(
+        "notes",
+        id(4, 0),
+        cells(&[
+            ("room", Value::Uuid(id(1, 0).0)),
+            ("body", Value::String("n0".into())),
+        ]),
+    );
+    seed(
+        "reactions",
+        id(5, 1),
+        cells(&[
+            ("note", Value::Uuid(id(4, 0).0)),
+            ("body", Value::String("b".into())),
+        ]),
+    );
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    // Reactions to the note whose body is n0, and room 0 with its notes'
+    // reactions.
+    let joined = client
+        .prepare_query(&Query::from("reactions").join_via_column(
+            "notes",
+            "id",
+            "note",
+            [eq(col("body"), lit(Value::String("n0".into())))],
+        ))
+        .unwrap();
+    let mut notes = ArraySubquery::new("notes", "notes", "room", "id");
+    notes
+        .nested_arrays
+        .push(ArraySubquery::new("reactions", "reactions", "note", "id"));
+    let room = client
+        .prepare_query(
+            &Query::from("rooms")
+                .filter(eq(col("name"), lit(Value::String("room 0".into()))))
+                .array_subquery(notes),
+        )
+        .unwrap();
+    let (first, second) = if joined_first {
+        (&joined, &room)
+    } else {
+        (&room, &joined)
+    };
+    let _first = block_on(client.subscribe(first, ReadOpts::default())).unwrap();
+    let _second = block_on(client.subscribe(second, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(local_reactions(&client), [id(5, 1)]);
+
+    // Away, the note moves to room 1 locally, and the server renames it:
+    // reaction 1 leaves the joined read unchanged.
+    assert!(client.detach_connection(&upstream));
+    block_on(client.update(
+        "notes",
+        id(4, 0),
+        cells(&[("room", Value::Uuid(id(1, 1).0))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(server.update(
+        "notes",
+        id(4, 0),
+        cells(&[("body", Value::String("renamed".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(Box::new(HoldCommits(client_side))));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        client.pending_upload_count(),
+        1,
+        "the move is still pending"
+    );
+    assert_eq!(
+        local_reactions(&client),
+        [id(5, 1)],
+        "reaction 1 is still the settled note's, which the room's read holds"
+    );
+}
+
+#[test]
+fn a_pending_write_does_not_move_support_below_the_first_hop_joined_first() {
+    a_pending_write_does_not_move_support_below_the_first_hop(true);
+}
+
+#[test]
+fn a_pending_write_does_not_move_support_below_the_first_hop_room_first() {
+    a_pending_write_does_not_move_support_below_the_first_hop(false);
 }
