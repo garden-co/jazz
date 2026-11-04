@@ -181,25 +181,32 @@ describe("fromJWT", () => {
     await expect(authenticate(request(await sign({})))).rejects.toThrow(/Unable to fetch JWKS/);
   });
 
-  it("retries one refresh for an unknown key during an outage, then signs it out", async () => {
+  it("keeps an unknown key retrying through an outage instead of signing it out", async () => {
     let up = true;
     const fetch = vi.fn(async () =>
       up ? Response.json({ keys: [jwk] }) : new Response("down", { status: 503 }),
     );
     vi.stubGlobal("fetch", fetch);
+    const start = Date.now();
     const authenticate = fromJWT({ jwksUrl: jwksUrl(), issuer: ISSUER, audience: AUDIENCE });
     expect((await authenticate(request(await sign({}))))?.userId).toBe("user_01");
-    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 31_000 });
+    vi.useFakeTimers({ toFake: ["Date"], now: start + 31_000 });
     up = false;
     const unknown = await sign({}, { key: otherKey, kid: "k9" });
     // The refresh fails: the request throws, so the client retries.
     await expect(authenticate(request(unknown))).rejects.toThrow(/JWKS/);
-    // Within the cooldown no refetch: the cached keys refuse it.
-    expect(await authenticate(request(unknown))).toBeNull();
-    expect(await authenticate(request(unknown))).toBeNull();
-    // One refresh attempt, then the cooldown holds; known keys still work.
+    // Within the cooldown no refetch, but the retry still fails rather than
+    // being refused by keys that predate the outage.
+    await expect(authenticate(request(unknown))).rejects.toThrow(/JWKS/);
     expect(fetch).toHaveBeenCalledTimes(2);
+    // Known keys still work from the cache.
     expect((await authenticate(request(await sign({}))))?.userId).toBe("user_01");
+    // Once the provider is back and the cooldown is over, a refresh that
+    // succeeds is what refuses the unknown key.
+    up = true;
+    vi.setSystemTime(start + 62_000);
+    expect(await authenticate(request(unknown))).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
 
   it("refuses configurations it cannot verify safely", () => {
