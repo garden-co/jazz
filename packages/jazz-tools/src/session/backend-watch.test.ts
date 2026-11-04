@@ -725,13 +725,67 @@ it("keeps the guest when the user signs out while the link runs", async () => {
   await t.close();
 });
 
-it("with linkGuest off, signs a user with no account in and leaves the guest", async () => {
+it("with linkGuest off, leaves a guest whose user has no account to the app", async () => {
   const t = await guestSetup({ linkWithBackend: async () => user("alice"), linkGuest: false });
   t.backendNames(user("alice"));
   await t.watch.reauthenticate();
+  t.focus();
+  await settle();
   expect(t.linkWithBackend).not.toHaveBeenCalled();
-  expect(t.loginWithBackend).toHaveBeenCalledOnce();
+  expect(t.loginWithBackend).not.toHaveBeenCalled();
+  expect(t.subject()).toBe("guest");
+  // So the app's own link after its sign-up still goes through.
+  await t.session.linkWithBackend();
   expect(t.subject()).toBe("alice");
+  // A user who already has an account is still signed in.
+  const u = await guestSetup({ linkWithBackend: async () => user("bob"), linkGuest: false });
+  u.backendNames(user("bob"), true);
+  await u.watch.reauthenticate();
+  expect(u.loginWithBackend).toHaveBeenCalledOnce();
+  expect(u.subject()).toBe("bob");
+  await t.close();
+  await u.close();
+});
+
+it("keeps linking, never signs in instead, when the link fails for a reason that may pass", async () => {
+  for (const failure of [
+    new AccountAuthError("account_registry_unavailable", 503),
+    new AccountAuthError("invalid_link_challenge", 400),
+    new AccountAuthError("account_request_timeout"),
+  ]) {
+    let fails = true;
+    const t = await guestSetup({
+      linkWithBackend: async () => {
+        if (fails) throw failure;
+        return user("alice");
+      },
+    });
+    t.backendNames(user("alice"));
+    await expect(t.watch.reauthenticate(), failure.code).rejects.toThrow(failure.code);
+    t.focus();
+    await settle();
+    expect(t.loginWithBackend, failure.code).not.toHaveBeenCalled();
+    expect(t.subject(), failure.code).toBe("guest");
+    fails = false;
+    t.focus();
+    await settle();
+    expect(t.subject(), failure.code).toBe("alice");
+    await t.close();
+  }
+});
+
+it("re-checks once when the link says signed out, and stops if the backend keeps disagreeing", async () => {
+  // The probe keeps naming alice while every link answers signed out.
+  const t = await guestSetup({
+    linkWithBackend: async () => {
+      throw new AccountAuthError("signed_out", 401);
+    },
+  });
+  t.backendNames(user("alice"));
+  await expect(t.watch.reauthenticate()).rejects.toThrow("signed_out");
+  expect(t.linkWithBackend).toHaveBeenCalledTimes(2);
+  expect(t.loginWithBackend).not.toHaveBeenCalled();
+  expect(t.subject()).toBe("guest");
   await t.close();
 });
 

@@ -1243,9 +1243,16 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
           if ((status !== 409 && status !== 403) || !(await userIs(account))) throw error;
         }
       }
-    } catch {
-      // The core's reason (e.g. the identity already belongs to another
-      // account, or the challenge was used) stays on the backend.
+    } catch (error) {
+      const status = (error as { status?: number }).status;
+      // The core is down, slow or failing: the link may still go through on
+      // a retry, so say so rather than refuse it for good.
+      if (status === undefined || status >= 500) {
+        console.error("Jazz: linking a guest failed on the core", error);
+        return new Response("account_registry_unavailable", { status: 503 });
+      }
+      // The core refused it: its reason (e.g. the identity already belongs
+      // to another account, or the challenge was used) stays on the backend.
       return new Response("link_refused", { status: 409 });
     }
     if (options.guestKeyAfterLink === "revoke" && !guestRevoked) {

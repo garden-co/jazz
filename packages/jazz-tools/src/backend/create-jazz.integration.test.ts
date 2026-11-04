@@ -758,6 +758,120 @@ describe("createJazz", () => {
     }
   });
 
+  /** A core behind a proxy that lets a test hold, or fail, the core's `link` calls. */
+  async function heldCore(appId: string) {
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const control: { hold?: () => Promise<void>; fail?: number } = {};
+    const proxy = createServer(async (request, response) => {
+      if (request.url?.endsWith("/admin/accounts/link")) {
+        if (control.fail) {
+          response.statusCode = control.fail;
+          response.end("account_registry_unavailable");
+          return;
+        }
+        const hold = control.hold;
+        control.hold = undefined;
+        await hold?.();
+      }
+      const target = new URL(request.url ?? "/", core.url);
+      const upstream = httpRequest(
+        target,
+        { method: request.method, headers: { ...request.headers, host: target.host } },
+        (answer) => {
+          response.writeHead(answer.statusCode ?? 502, answer.headers);
+          answer.pipe(response);
+        },
+      );
+      request.pipe(upstream);
+    });
+    await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => proxy.close(() => resolve())));
+    const url = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`;
+    return { core, url, control };
+  }
+
+  it("links a tab whose guest another tab's link revoked between founding and linking", async () => {
+    const appId = randomUUID();
+    const { core, url, control } = await heldCore(appId);
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: remote({ url, appId, secret: core.adminSecret }),
+      authenticate,
+      guestKeyAfterLink: "revoke",
+    });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const post = (path: string, body?: unknown) =>
+      fetch(`${origin}/jazz/apps/${appId}/accounts/${path}`, {
+        method: "POST",
+        headers: { "x-test-user": "alice", "content-type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    const link = async () => {
+      const { challenge } = (await (await post("backend-link/challenge")).json()) as {
+        challenge: string;
+      };
+      return post("backend-link", { challenge, proof: signChallenge(secret, challenge) });
+    };
+    const secret = generateSecret();
+    // Tab B's guest is founded, then its link waits at the core...
+    let reached!: () => void;
+    let release!: () => void;
+    const atLink = new Promise<void>((resolve) => (reached = resolve));
+    control.hold = () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+        reached();
+      });
+    const tabB = link();
+    await atLink;
+    // ...while tab A links the same guest and revokes its key.
+    const tabA = await link();
+    expect(tabA.status).toBe(200);
+    release();
+    // B's link reaches the core with a revoked guest: alice already belongs
+    // to the guest's account, so it is done, not refused.
+    const b = await tabB;
+    expect(b.status).toBe(200);
+    expect(((await b.json()) as { account: string }).account).toBe(
+      ((await tabA.json()) as { account: string }).account,
+    );
+  });
+
+  it("answers a core outage during a link as unavailable, and a retry links", async () => {
+    const appId = randomUUID();
+    const { core, url, control } = await heldCore(appId);
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: remote({ url, appId, secret: core.adminSecret }),
+      authenticate,
+    });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const post = (path: string, body?: unknown) =>
+      fetch(`${origin}/jazz/apps/${appId}/accounts/${path}`, {
+        method: "POST",
+        headers: { "x-test-user": "alice", "content-type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    const secret = generateSecret();
+    const link = async () => {
+      const { challenge } = (await (await post("backend-link/challenge")).json()) as {
+        challenge: string;
+      };
+      return post("backend-link", { challenge, proof: signChallenge(secret, challenge) });
+    };
+    control.fail = 503;
+    const failed = await link();
+    expect(failed.status).toBe(503);
+    expect(await failed.text()).toBe("account_registry_unavailable");
+    control.fail = undefined;
+    expect((await link()).status).toBe(200);
+  });
+
   it("revokes the guest key on a retry when the first link's revoke didn't happen", async () => {
     const appId = randomUUID();
     const core = await startLocalJazzServer({ appId, inMemory: true });

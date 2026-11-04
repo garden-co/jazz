@@ -25,9 +25,10 @@ export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
      * user signing in to Jazz for the first time), link the guest to them:
      * the account and everything the guest wrote become theirs. On by
      * default. Turn it off on shared devices, where the guest may be someone
-     * else's: that user then signs in to an account of their own, the guest
-     * stays on this device, and the app can still call `linkWithBackend`
-     * itself after its own sign-up.
+     * else's: the session then leaves such a guest as it is, and your app
+     * decides after its own sign-in, with `linkWithBackend()` (the guest's
+     * data becomes the user's) or `loginWithBackend()` (an account of the
+     * user's own; the guest stays on this device).
      */
     linkGuestOnSignUp?: boolean;
   };

@@ -248,10 +248,13 @@ export async function createJazzSessionOwner<
       return Promise.reject(new Error("A Jazz session operation is already pending"));
     const token = ++generation;
     // Publish "transitioning" as the operation becomes pending, so no one
-    // sees a settled session that would refuse their operation as busy.
-    const detached = detach({ status: "transitioning", account: selected, pending: operation });
+    // sees a settled session that would refuse their operation as busy. It
+    // is busy before listeners hear of it, so one that starts an operation
+    // of its own is refused rather than racing this one.
+    let detached!: { done: Promise<void> };
     const task = Promise.resolve().then(() => perform(operation, mutate, token, detached.done));
     busy = task;
+    detached = detach({ status: "transitioning", account: selected, pending: operation });
     void task
       .finally(() => {
         if (busy === task) busy = undefined;
