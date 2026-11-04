@@ -132,7 +132,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     const error = await createDb({ ...serverConfig } as never).catch((error: unknown) => error);
 
     expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toMatch(/createJazzContext/);
+    expect((error as Error).message).toMatch(/createJazz\(\) or createJazzSession\(\)/);
   });
 
   it("rejects explicit memory configuration instead of importing the browser WASM runtime", async () => {

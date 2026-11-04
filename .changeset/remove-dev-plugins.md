@@ -7,4 +7,4 @@ Breaking: remove the dev plugins. `jazz-tools/dev/next` (`withJazz`), `jazz-tool
 - Next.js: `serverExternalPackages: ["jazz-napi"]`.
 - Vite, for the local-first client: `optimizeDeps: { exclude: ["jazz-wasm"] }`, with `jazz-wasm` as a direct dependency of your app (the plugin used to alias it for pnpm's strict layout).
 
-`jazz-tools/dev` keeps `startLocalJazzServer` and `deploy` for tests and fixtures.
+`jazz-tools/dev` and `jazz-tools/testing` keep `startLocalJazzServer` and `deploy()` for tests and fixtures.
