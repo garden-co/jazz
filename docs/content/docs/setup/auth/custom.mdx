@@ -191,8 +191,8 @@ Apps on alpha.59 signed users in with JWTs, so their accounts belong to identiti
 open their old accounts and keep all their data. Pass `--no-backend-identity-links` to skip this.
 
 Two issuers that used the same `sub` for different accounts can't both map to one `userId`. The
-import stops and reports how many users are affected and which issuers conflict. Your provider's `sub` must stay the same
-for each user: `fromJWT` checks that every token comes from the one `issuer` you configured.
+import then stops and names the issuers that conflict. Your provider's `sub` must stay the same for
+each user: `fromJWT` checks that every token comes from the one `issuer` you configured.
 
 ## Backend request contexts
 

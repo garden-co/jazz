@@ -277,7 +277,11 @@ async function getRemoteJwksDocument(
     // While a failed refresh cools down, the provider is presumed still
     // down: keep failing, so a token with a new key is retried rather than
     // refused by keys that predate it.
-    if (jwksRefreshFailures.has(jwksUrl)) throw jwksRefreshFailures.get(jwksUrl);
+    if (jwksRefreshFailures.has(jwksUrl)) {
+      throw new Error(`JWKS refresh from ${jwksUrl} failed recently; retrying after the cooldown`, {
+        cause: jwksRefreshFailures.get(jwksUrl),
+      });
+    }
     return cached.document;
   }
 
