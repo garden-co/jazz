@@ -48,9 +48,6 @@ export {
 
 export { useJazzSessionOwner, type JazzSessionOwnerResult } from "./session.js";
 
-export * from "../session/auth-provider-exports.js";
-export { useBetterAuth, useAuthProvider } from "./auth-provider.js";
-
 export { useJazzAuth, type JazzAuthState } from "../react-core/app.js";
-export { backendAuth, betterAuth, type JazzAuth } from "../session/app.js";
+export type { JazzUser } from "../session/app.js";
 export type { JazzAppProviderProps } from "./provider.js";

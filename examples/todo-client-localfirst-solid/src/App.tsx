@@ -9,6 +9,7 @@ export function App(props: AppProps = {}) {
   // The app's backend serves Jazz on this origin (`/jazz`), so the client needs no URL.
   const config = (): JazzAppConfig => ({
     env: "dev",
+    initial: "local-first",
     ...props.config,
   });
   const content = () => (
