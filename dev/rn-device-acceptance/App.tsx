@@ -201,7 +201,7 @@ async function observeTrustedAdmissionLifecycleInner(
   // This remains byte-only JSI transport: the fixed test record envelope is
   // decoded by the compiled Rust relay, never reconstructed as a JS row API.
   markFailure("foreground-write-failed");
-  proveForegroundWriteAbi(foregroundFactory, scopeB.capability, foregroundCodec);
+  proveForegroundWriteAbi(foregroundFactory, scopeB.capability, foregroundCodec, markFailure);
   // Two aliases opened in this one installed JSI runtime communicate only
   // through their common admitted native relay; B must observe A's committed
   // binding delta. This is deliberately not evidence for two physical JSI
