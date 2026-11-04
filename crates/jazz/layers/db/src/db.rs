@@ -814,6 +814,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
         jazz: jazz.clone(),
         version: jazz.version_id(),
         policies_from: None,
+        bundle: None,
         stored_names: false,
     })
 }
@@ -1329,6 +1330,7 @@ impl Db {
                 jazz: config.schema.clone(),
                 version: config.schema.version_id(),
                 policies_from: None,
+                bundle: None,
                 stored_names: false,
             };
             physical.union(&schema)?;
@@ -3507,7 +3509,9 @@ impl Inner {
                 format!("bundle {id} does not compile: {error}"),
             )
         })?;
-        let resolved = (*version, Rc::new(self.named(&governing)));
+        let mut named = self.named(&governing);
+        named.bundle = Some(*id);
+        let resolved = (*version, Rc::new(named));
         self.bundles.insert(*id, resolved.clone());
         Ok(Some(resolved))
     }

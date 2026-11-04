@@ -2,7 +2,7 @@
 "jazz-tools": patch
 ---
 
-**Breaking:** reads now have exactly two tiers, `ReadTier.LocalFirst` (`"local-first"`) and `ReadTier.Remote` (`"remote"`). A local-first read can wait a bounded time for the server on its initial load with the new `firstLoadRemoteWaitMs` option (default `0`, which shows local data at once):
+**Breaking:** reads now have exactly two tiers, `ReadTier.LocalFirst` (`"local-first"`) and `ReadTier.Remote` (`"remote"`). A local-first read can wait a bounded time for the server on its initial load with the new `firstLoadRemoteWaitMs` option (`0` shows local data at once; see the client-default-first-load-wait changeset for the browser and React Native default):
 
 ```ts
 db.subscribe(app.todos, onRows, {
@@ -23,5 +23,3 @@ Outside the browser, a client with a server now reads `"remote"` by default, whe
 TypeScript rejects `firstLoadRemoteWaitMs` on a `"remote"` read; `tier` selects which options a read accepts.
 
 Write waits now accept only `"local"` and `"global"`. The deprecated `"edge"` overload is removed from TypeScript, and `wait({ tier: "edge" })` rejects at runtime with a `TypeError` instead of warning and waiting for `"global"`. Use `wait({ tier: "global" })` for server confirmation. The error rejects only the wait: the write was already applied, so wait on the existing handle with a valid tier rather than retrying the write. The durability semantics of `"local"` and `"global"` are unchanged.
-
-**Breaking wire and storage change:** remove the legacy `"edge"` durability. The new wire protocol and storage format use compact tags; older peers and stored data are rejected. Upgrade clients, bindings, and servers together and initialize a new storage after exporting any needed data with the matching older release.

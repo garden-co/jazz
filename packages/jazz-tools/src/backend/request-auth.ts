@@ -137,6 +137,8 @@ const JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
 const jwksDocuments = new Map<string, CachedJwksDocument>();
 const jwksFetches = new Map<string, Promise<LocalJwksDocument>>();
 const jwksRefreshNotBefore = new Map<string, number>();
+/** The last forced refresh's failure, rethrown until its cooldown ends. */
+const jwksRefreshFailures = new Map<string, unknown>();
 const JWKS_FORCED_REFRESH_COOLDOWN_MS = 30_000;
 
 function readHeader(request: RequestLike, name: string): string | undefined {
@@ -272,6 +274,14 @@ async function getRemoteJwksDocument(
     now < cached.expiresAtMs &&
     now < (jwksRefreshNotBefore.get(jwksUrl) ?? 0)
   ) {
+    // While a failed refresh cools down, the provider is presumed still
+    // down: keep failing, so a token with a new key is retried rather than
+    // refused by keys that predate it.
+    if (jwksRefreshFailures.has(jwksUrl)) {
+      throw new Error(`JWKS refresh from ${jwksUrl} failed recently; retrying after the cooldown`, {
+        cause: jwksRefreshFailures.get(jwksUrl),
+      });
+    }
     return cached.document;
   }
 
@@ -283,12 +293,14 @@ async function getRemoteJwksDocument(
         expiresAtMs: refreshedAtMs + JWKS_CACHE_TTL_MS,
       });
       jwksRefreshNotBefore.set(jwksUrl, refreshedAtMs + JWKS_FORCED_REFRESH_COOLDOWN_MS);
+      jwksRefreshFailures.delete(jwksUrl);
       return document;
     },
     (error: unknown) => {
       // A failed refresh also waits out the cooldown, so tokens with
       // unknown keys can't make every request fetch during an outage.
       jwksRefreshNotBefore.set(jwksUrl, Date.now() + JWKS_FORCED_REFRESH_COOLDOWN_MS);
+      jwksRefreshFailures.set(jwksUrl, error);
       throw error;
     },
   );
@@ -632,8 +644,9 @@ export async function verifyExternalJwt(
     try {
       await verifyJwtSignatureWithJwks(token, jwks);
     } catch {
-      // A refresh that fails throws, so the client retries; it also starts
-      // the cooldown, after which an unknown key is refused from the cache.
+      // A refresh that fails throws, so the client retries, and keeps
+      // throwing through its cooldown; only a refresh that succeeds can
+      // refuse an unknown key.
       jwks = await getRemoteJwksDocument(config.jwksUrl, true);
       try {
         await verifyJwtSignatureWithJwks(token, jwks);

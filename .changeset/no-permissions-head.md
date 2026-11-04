@@ -1,6 +1,5 @@
 ---
 "jazz-tools": patch
-"@jazz/rust": patch
 ---
 
 The core no longer keeps a current permissions head: every session is governed by the bundle it pins.

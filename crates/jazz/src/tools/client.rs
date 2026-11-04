@@ -218,6 +218,31 @@ impl Shared {
         self.state.borrow_mut()
     }
 
+    /// Drop the engine subscriptions whose public streams were dropped.
+    /// Dropping one queues its unsubscription on the connection, so doing it
+    /// as the public stream drops orders the unsubscription ahead of
+    /// anything the caller asks next on the same connection.
+    fn drop_cancelled(&self) {
+        let cancelled: Vec<Forwarder> = {
+            // A stream dropped while the state is borrowed is dropped by
+            // the next tick instead.
+            let Ok(mut state) = self.state.try_borrow_mut() else {
+                return;
+            };
+            let mut cancelled = Vec::new();
+            for mut forwarder in std::mem::take(&mut state.forwarders) {
+                if forwarder.cancelled() {
+                    cancelled.push(forwarder);
+                } else {
+                    state.forwarders.push(forwarder);
+                }
+            }
+            cancelled
+        };
+        // Outside the state borrow: dropping each runs engine cleanup.
+        drop(cancelled);
+    }
+
     fn ensure_open(&self) -> Result<()> {
         let state = self.state.borrow();
         if state.closed {
@@ -284,6 +309,9 @@ impl Shared {
         if self.state.borrow().stopped.is_some() {
             return;
         }
+        // Before the tick flushes the connection: a stream dropped since the
+        // last one unsubscribes in this flush, not the next.
+        self.drop_cancelled();
         let result = self.db.tick().await;
         {
             let mut state = self.state();
@@ -316,11 +344,7 @@ impl Shared {
     fn forward(&self) {
         let mut state = self.state();
         state.forwarders.retain_mut(|forwarder| {
-            if !matches!(
-                forwarder.cancellation.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ) || forwarder.sender.is_closed()
-            {
+            if forwarder.cancelled() {
                 return false;
             }
             while let Some(event) = forwarder.stream.try_next_event() {
@@ -368,6 +392,14 @@ impl Shared {
 }
 
 impl Forwarder {
+    /// Its public stream was dropped.
+    fn cancelled(&mut self) -> bool {
+        !matches!(
+            self.cancellation.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ) || self.sender.is_closed()
+    }
+
     fn delta(
         &mut self,
         schema: &Schema,
@@ -1116,7 +1148,17 @@ impl JazzClient {
         });
         self.shared.ensure_driven();
         self.shared.tick_soon();
-        Ok(SubscriptionStream::new(receiver, cancel))
+        let shared = Rc::downgrade(&self.shared);
+        Ok(SubscriptionStream::new(
+            receiver,
+            cancel,
+            Box::new(move || {
+                if let Some(shared) = shared.upgrade() {
+                    shared.drop_cancelled();
+                    shared.tick_soon();
+                }
+            }),
+        ))
     }
 
     fn open_core_subscription(
@@ -1725,6 +1767,11 @@ impl JazzClient {
     /// The engine's sync state, for test failure messages.
     pub(crate) fn sync_debug_for_test(&self) -> String {
         self.shared.db.sync_debug()
+    }
+
+    /// Engine subscriptions this client still holds for public streams.
+    pub(crate) fn live_subscriptions_for_test(&self) -> usize {
+        self.shared.state().forwarders.len()
     }
 
     pub(crate) fn disconnect_upstream_for_test(&self) -> bool {
