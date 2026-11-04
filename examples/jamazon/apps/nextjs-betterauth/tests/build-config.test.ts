@@ -10,7 +10,7 @@ const secrets = { BETTER_AUTH_SECRET: "auth-secret" };
 const deployment = {
   NODE_ENV: "production",
   NEXT_PUBLIC_APP_ORIGIN: "https://shop.example",
-  NEXT_PUBLIC_JAZZ_APP_ID: "jamazon",
+  JAZZ_APP_ID: "jamazon",
   PAYMENT_PROVIDER: "sandbox",
   ...secrets,
 };
@@ -22,7 +22,7 @@ describe("build configuration fails closed", () => {
     const config = readBuildConfig({ NODE_ENV: "production", ...secrets });
     expect(usesLocalDefaults(config)).toBe(false);
     expect(() => assertBuildConfiguration(config)).toThrow(
-      /must set NEXT_PUBLIC_APP_ORIGIN, NEXT_PUBLIC_JAZZ_APP_ID, PAYMENT_PROVIDER/,
+      /must set NEXT_PUBLIC_APP_ORIGIN, JAZZ_APP_ID, PAYMENT_PROVIDER/,
     );
   });
 
