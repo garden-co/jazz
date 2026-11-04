@@ -471,8 +471,11 @@ async fn ws_admission(
 
     // A session the backend states is policy-scoped, and its authority is the
     // backend credential. A guest's own proof decides who it is: its key
-    // must hold the account the registry assigned it.
-    if !has_session_header {
+    // must hold the account the registry assigned it. (Session extraction
+    // already refuses a stated session without the backend secret; this keys
+    // off both so the skip never rests on the header alone.)
+    let backend_stated = backend_credential && has_session_header;
+    if !backend_stated {
         let account = peer_identity
             .account_id()
             .ok_or("public sessions require an enrolled account identity")?;
@@ -494,7 +497,7 @@ async fn ws_admission(
         identity: peer_identity,
         claims: session_claims(session)?,
         trust: CommitUnitTrust::Session,
-        credential: if has_session_header {
+        credential: if backend_stated {
             WebSocketCredential::Backend
         } else {
             WebSocketCredential::Session

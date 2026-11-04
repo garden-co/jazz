@@ -2040,7 +2040,7 @@ impl NapiDb {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct JazzServerStartOptions {
     app_id: String,
     port: Option<u16>,
@@ -2059,6 +2059,7 @@ struct JazzServerStartOptions {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TrustedWorkloadOptions {
     issuer: String,
     audience: String,

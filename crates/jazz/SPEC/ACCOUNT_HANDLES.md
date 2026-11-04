@@ -57,9 +57,6 @@ An application-scoped account manager provides:
 - `linkWithBackend(guest): Promise<AccountHandle>`: link the selected
   local-first guest to the user the backend names, and select a handle acting
   as that user.
-- `registerJWT`, `loginJWT` and `loginOrRegisterJWT` remain as
-  internal test fixtures for cores that trust a test JWT; applications do not
-  use them.
 - `logout()`: clear selection and stop credential use without remote revocation
   or silently deleting recoverable local-first credentials.
 
