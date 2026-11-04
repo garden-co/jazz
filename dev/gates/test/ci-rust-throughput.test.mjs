@@ -1465,7 +1465,10 @@ test("the jazz-tools npm package ships no native CLI binary", () => {
   // ships as the jazz-napi addon (serveCore) that vercel() Sandboxes run.
   assert.doesNotMatch(packageBuild, /jazz-tools-(linux|darwin)-/);
   assert.doesNotMatch(packageBuild, /bin\/native/);
-  const launcher = fs.readFileSync(path.join(root, "packages/jazz-tools/bin/jazz-tools.js"), "utf8");
+  const launcher = fs.readFileSync(
+    path.join(root, "packages/jazz-tools/bin/jazz-tools.js"),
+    "utf8",
+  );
   assert.doesNotMatch(launcher, /bin.*native|spawnSync\(binaryPath/);
 });
 
