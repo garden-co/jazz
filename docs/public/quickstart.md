@@ -7,7 +7,8 @@ options for open choices, or just make the choices needed to get things running 
 choice below has a default you can take when the user has no preference.
 
 All docs links are paths on https://jazz.tools. Append `.md` to any docs page for Markdown. The
-full docs index is https://jazz.tools/llms.txt.
+full docs index is https://jazz.tools/llms.txt. To search the docs, fetch
+https://jazz.tools/api/search?q=<words>&format=md (add `&full=1` to include the top three pages).
 
 ## Decide
 
