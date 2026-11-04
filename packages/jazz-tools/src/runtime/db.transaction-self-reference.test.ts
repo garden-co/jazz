@@ -4,7 +4,7 @@ import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startTestJazz } from "../testing/index.js";
 
 // A nullable self-reference must not hide transaction-committed rows from Global reads.
 // The string-typed parent column is the control shape without a relation.
@@ -37,24 +37,21 @@ describe("transaction-committed rows in a hierarchical table", () => {
           policy.categories.allowRead.always();
           policy.categories.allowInsert.always();
         });
-        const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+        const server = await startTestJazz({
+          app: app,
+          permissions: permissions,
+          coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+        });
         let context: ReturnType<typeof createJazzContext> | undefined;
         let client: Awaited<ReturnType<typeof createDb>> | undefined;
         try {
-          await deploy({
-            serverUrl: server.url,
-            appId: server.appId,
-            adminSecret: server.adminSecret,
-            schema: app,
-            permissions,
-          });
           let db;
           if (writer === "backend") {
             context = createJazzContext({
               appId: server.appId,
               app,
               permissions,
-              serverUrl: server.url,
+              serverUrl: server.core.url,
               adminSecret: server.adminSecret,
               backendSecret: server.backendSecret,
               driver: { type: "memory" },

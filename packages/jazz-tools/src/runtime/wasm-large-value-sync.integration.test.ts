@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { expect, it, onTestFinished } from "vitest";
 import { schema as s } from "../index.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startTestJazz } from "../testing/index.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 
@@ -28,19 +28,12 @@ it.each([
 ] as const)(
   "$operation syncs two pending values of $bytes bytes",
   async ({ operation, bytes }) => {
-    const server = await startLocalJazzServer({
-      appId: randomUUID(),
-      inMemory: true,
-      allowLocalFirstAuth: true,
+    const server = await startTestJazz({
+      app,
+      permissions,
+      coreOptions: { appId: randomUUID(), inMemory: true, allowLocalFirstAuth: true },
     });
     onTestFinished(() => server.stop());
-    await deploy({
-      appId: server.appId,
-      serverUrl: server.url,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
     const alice = await createDb(await localAccountConfig(server.appId, server.url));
     onTestFinished(() => alice.shutdown());
     await alice.insert(app.docs, { label: "warmup", body: "ready" }).wait({ tier: "global" });

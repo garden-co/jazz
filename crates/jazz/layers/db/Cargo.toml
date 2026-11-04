@@ -17,6 +17,7 @@ sql-trace = []
 durable-object-limits = ["rusqlite/limits"]
 
 [dependencies]
+jazz-text.workspace = true
 jazz-types.workspace = true
 jazz-model.workspace = true
 jazz-protocol.workspace = true

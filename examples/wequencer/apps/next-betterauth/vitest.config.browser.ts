@@ -10,7 +10,9 @@ import {
   blockJazzServerTransport,
   unblockJazzServerTransport,
   stopJazzServerTransportControl,
-  jazzServerJwtForUser,
+  jazzAppFront,
+  jazzAppRequest,
+  jazzAppUser,
   stopJazzServerByUrl,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
@@ -47,8 +49,10 @@ export default defineConfig({
         jazzServerTransportControlStop: async (_context, url) =>
           stopJazzServerTransportControl(url),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
-        jazzServerJwtForUser: async (_context, userId, claims, appId) =>
-          jazzServerJwtForUser(userId, claims, appId),
+        jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
+        jazzAppUser: async (_context, frontUrl, userId, claims) =>
+          jazzAppUser(frontUrl, userId, claims),
+        jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),
       },
     },
     testTimeout: 30_000,

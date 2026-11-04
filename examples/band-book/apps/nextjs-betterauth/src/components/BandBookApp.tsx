@@ -38,7 +38,7 @@ export function BandBookApp({
   setupError?: { message: string; retry: () => void } | null;
 }) {
   const me = useSession()?.user.account ?? null;
-  const { logout } = useJazzAuth();
+  const { reauthenticate } = useJazzAuth();
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
@@ -115,8 +115,11 @@ export function BandBookApp({
           items={[
             {
               label: "Sign out",
-              // Flushes Jazz, then revokes the Better Auth session.
-              onClick: () => void logout(),
+              // Revokes the Better Auth session, then Jazz follows the backend.
+              onClick: async () => {
+                await authClient.signOut();
+                await reauthenticate();
+              },
             },
           ]}
         />
