@@ -5,34 +5,6 @@ an external project. It does not publish packages, provision Cloud, or test
 installed devices. A passing local result is not complete release acceptance.
 See [the release runbook](../RELEASE_RUNBOOK.md) for the remaining gates.
 
-## Scaffold the candidate
-
-Save a config outside the repository, replacing every placeholder:
-
-```json
-{
-  "phase": "final-preview",
-  "sourceSha": "<40-hex-versioned-candidate-sha>",
-  "packageVersion": "2.0.0-alpha.56",
-  "createJazzSpec": "https://pkg.pr.new/garden-co/jazz/create-jazz@<40-hex-versioned-candidate-sha>",
-  "parent": "/absolute/new/external/parent",
-  "name": "alpha56-starter",
-  "starter": "react-localfirst"
-}
-```
-
-Run `node dev/release-acceptance/scaffold.mjs /absolute/scaffold-config.json`.
-This invokes the exact preview `create-jazz` executable with selfhosted hosting
-and checks the resulting Jazz dependency pin. For a published release, set
-`phase` to `published` and `createJazzSpec` to `create-jazz@2.0.0-alpha.56`;
-that path invokes `npm create jazz@2.0.0-alpha.56`. It never requests a tenant.
-The preview mode is the equivalent executable, not a claim to have exercised a
-registry version that has not been published.
-
-Inspect the scaffold's pins, install its exact candidate dependencies, and
-capture installation logs/lockfile. Run its production build and browser
-acceptance separately. The scaffold wrapper does not claim these steps passed.
-
 ## Run CLI and persistent-client acceptance
 
 Install the packed candidate packages and matching native payloads in a fresh
@@ -156,11 +128,10 @@ The process restart is graceful; this does not claim abrupt crash durability.
 ## Explicit remaining gates
 
 The runner prints `NOT_RUN` for separate acceptance gates, even after local
-PASS: scaffold, external JWT/negative auth, denied-write settlement, deterministic
+PASS: external JWT/negative auth, denied-write settlement, deterministic
 in-flight cancellation, real old-wire-v2 client rejection with no mutation,
 browser/worker, Android/iOS, Cloud version/digest pinning, sleep/wake and cleanup.
-Attach the independent scaffold receipt when run; its absence is not inferred
-from local CLI success. Session-close races do not prove in-flight cancellation.
+Session-close races do not prove in-flight cancellation.
 
 Cloud needs a new disposable **preview** tenant only after infra supplies the
 matching image. Root verifies tenant status version, immutable digest and preview

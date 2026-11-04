@@ -36,8 +36,9 @@ this document or public receipts.
   receipts, exact dependency versions and tarball size budgets.
 - Ensure RN payload packages are part of the fixed release group and published
   before the wrapper. Verify the exact tarballs that will be uploaded.
-- Smoke-test published preview packages as an adopter: `npm create jazz`, CLI
-  validation/deployment, local CLI server, authentication, write/read/delete of a
+- Check that `npm create jazz` from the preview prints the live agent brief
+  (https://jazz.tools/agent-brief.md). Smoke-test published preview packages as an
+  adopter: CLI validation/deployment, local CLI server, authentication, write/read/delete of a
   specific row while another remains, reconnect and persistent reopen.
 - Include browser/worker and Android/iOS acceptance appropriate to changed code.
   For storage changes, run the published-version compatibility fixtures. Reuse a

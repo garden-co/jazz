@@ -4,7 +4,7 @@ import { prepareTestAccount } from "../../../testing/accounts.js";
  * Core browser canary for the React todo app.
  *
  * Mounts the real <App /> component in Chromium and connects two persistent
- * IndexedDB clients to one local Jazz server. The public serverUrl config is
+ * IndexedDB clients to the app's backend. The public serverUrl config is
  * converted by the runtime to the websocket endpoint.
  */
 
@@ -13,7 +13,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { act, useEffect } from "react";
 import { App } from "../../src/App.js";
 import { app } from "../../schema.js";
-import { APP_ID, ADMIN_SECRET, SERVER_URL } from "./test-constants.js";
+import { APP_ID, SERVER_URL } from "./test-constants.js";
 import type { DbConfig } from "jazz-tools";
 import { useDb } from "jazz-tools/react";
 
@@ -101,11 +101,10 @@ describe("React Todo App core browser canary", () => {
     appId?: string;
     serverUrl?: string;
     secret?: string;
-    adminSecret?: string;
     driver?: DbConfig["driver"];
     onEdgeSettled?: (error: Error | null) => void;
   }): Promise<HTMLDivElement> {
-    const { onEdgeSettled, secret, adminSecret: _adminSecret, ...dbConfig } = config;
+    const { onEdgeSettled, secret, ...dbConfig } = config;
     const appId = dbConfig.appId ?? "test-app";
     const account = await prepareTestAccount(
       createAccountManager,
@@ -163,7 +162,7 @@ describe("React Todo App core browser canary", () => {
     mounts.length = 0;
   });
 
-  it("syncs two persistent IndexedDB app instances through one core server", async () => {
+  it("syncs two persistent IndexedDB app instances through the app's backend", async () => {
     const writerDbName = uniqueDbName("core-writer");
     const readerDbName = uniqueDbName("core-reader");
     let writerEdgeResult: Error | null | undefined;
@@ -246,7 +245,6 @@ describe("React Todo App core browser canary", () => {
       appId: APP_ID,
       driver: { type: "persistent", dbName },
       serverUrl: SERVER_URL,
-      adminSecret: ADMIN_SECRET,
       secret: "jazz-auth-v1:GWA1Dzw4x_QVSAKK3_i0U4MlfJBdYlG3jOwAK_rLx28",
     });
 
@@ -263,7 +261,6 @@ describe("React Todo App core browser canary", () => {
       appId: APP_ID,
       driver: { type: "persistent", dbName },
       serverUrl: SERVER_URL,
-      adminSecret: ADMIN_SECRET,
       secret: "jazz-auth-v1:GWA1Dzw4x_QVSAKK3_i0U4MlfJBdYlG3jOwAK_rLx28",
     });
 
@@ -290,7 +287,6 @@ describe("React Todo App core browser canary", () => {
       appId: APP_ID,
       driver: { type: "persistent", dbName: writerDbName },
       serverUrl: SERVER_URL,
-      adminSecret: ADMIN_SECRET,
       secret: writerSecret,
       onEdgeSettled: (error) => {
         writerEdgeResult = error;
@@ -300,7 +296,6 @@ describe("React Todo App core browser canary", () => {
       appId: APP_ID,
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
-      adminSecret: ADMIN_SECRET,
       secret: readerSecret,
       onEdgeSettled: (error) => {
         readerEdgeResult = error;
@@ -336,7 +331,6 @@ describe("React Todo App core browser canary", () => {
       appId: APP_ID,
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
-      adminSecret: ADMIN_SECRET,
       secret: readerSecret,
       onEdgeSettled: (error) => {
         edgeResult = error;
