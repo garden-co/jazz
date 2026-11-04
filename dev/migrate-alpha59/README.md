@@ -25,9 +25,9 @@ import side ships in `jazz-tools` until a release removes it.
    npx jazz-tools@<version> migrate-alpha59 verify --dump app.dump --data-dir ./data-new --app-id <app id>
    ```
 
-   `--app-id` must be the app id your app passes to `remote()`, exactly,
-   case included: it names the `createJazz` identity of every returning
-   user (see below).
+   `--app-id` must be the alpha.59 app's id, exactly, case included: its
+   guests' accounts are derived from it, and the import keeps it with the
+   data (see below).
 
 5. Start the new server on `./data-new`. Keep `./data` until you are happy.
 

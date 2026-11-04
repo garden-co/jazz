@@ -37,6 +37,9 @@ grep -q '"unsupported_by_sqlite":\[\]' "$work/census.json"
   tee "$work/import.json"
 # user-1, user-2 and user-9 link as createJazz users; revoked user-3 does not.
 grep -q '"backend_identities_linked":3' "$work/import.json"
+# The import keeps the app id beside the data, exactly as given: sqlite()
+# on this dir runs as the alpha.59 app.
+test "$(cat "$work/a60/app-id")" = "$app"
 "${import[@]}" verify --dump "$work/dump" --data-dir "$work/a60" --app-id "$app"
 
 # Only the active schema came over, and rows written under v1 read under

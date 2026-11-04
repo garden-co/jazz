@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { generateSecret, identityOf, signChallenge, signToken } from "../local-first-auth/index.js";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { JazzCore } from "jazz-napi";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import {
@@ -19,6 +19,7 @@ import {
   memory,
   remote,
   sqlite,
+  vercel,
   type Jazz,
 } from "./index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
@@ -1209,8 +1210,11 @@ describe("createJazz", () => {
     expect(refused).not.toBe(first);
     await expect(refused.ready()).rejects.toThrow(/is already open.*another process/s);
     await other.close();
-    // Free again, the same Jazz opens on its next use.
+    // Free again, the same Jazz opens on its next use after the backoff.
+    const now = Date.now.bind(Date);
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => now() + 2_000);
     await refused.ready();
+    spy.mockRestore();
     await refused.close();
 
     const previous = process.env.VERCEL;
@@ -1246,8 +1250,27 @@ describe("createJazz", () => {
       sqlite({ path: dir, appId: randomUUID() } as unknown as Parameters<typeof sqlite>[0]),
     ).toThrow(/appId is not an option.*migrate-alpha59/);
     expect(() => memory({ appId: randomUUID() } as never)).toThrow(/appId is not an option/);
+    // vercel() too, when called: in dev its local store would never read it.
+    expect(() => vercel({ appId: randomUUID() } as never)).toThrow(
+      /vercel\(\): appId is not an option/,
+    );
     const rows = await second.db.all(app.todos.where({ id: inserted.id }));
     expect(rows.map((todo) => todo.title)).toEqual(["kept"]);
+  }, 60_000);
+
+  it("runs a sqlite store as the alpha.59 app its import kept", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-imported-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    // What `jazz-tools migrate-alpha59 import --app-id` leaves beside the
+    // data: the id exactly as given, case included.
+    const alpha59 = "0A590000-0000-4000-8000-000000000059";
+    await writeFile(join(dir, "app-id"), `${alpha59}\n`);
+    const jazz = await createJazz({ app, permissions, store: sqlite({ path: dir }) }).ready();
+    cleanups.push(() => jazz.close());
+    expect(jazz.appId).toBe(alpha59);
+    await jazz.db.insert(app.todos, { title: "after import", owner: randomUUID() }).wait({
+      tier: "global",
+    });
   }, 60_000);
 
   it("keeps a sqlite store's large values as files, and keeps that choice", async () => {

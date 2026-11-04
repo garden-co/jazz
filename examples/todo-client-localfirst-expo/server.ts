@@ -9,7 +9,7 @@ import permissions from "./permissions";
 
 async function main() {
   const port = Number(process.env.PORT ?? 1625);
-  const jazz = await createJazz({
+  const jazz = createJazz({
     app,
     permissions,
     store: sqlite({ path: ".jazz" }),

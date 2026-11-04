@@ -97,6 +97,24 @@ interface QueuedWrite {
 type Method = (...args: unknown[]) => unknown;
 
 /**
+ * At most this many writes wait for the store to open: past it a write
+ * throws, so a store that is slow to open never grows the queue unbounded.
+ */
+export const MAX_EARLY_WRITES = 10_000;
+
+/** The backend's own database, as `earlyDb` makes it, and its lifecycle. */
+export interface EarlyDb {
+  readonly db: Db;
+  /**
+   * Close it: from now on every call throws. Resolves once the writes made
+   * before have been applied to the open store (or failed with its open).
+   */
+  drain(): Promise<void>;
+  /** Fail the writes still waiting with `error` (a close gave up on the open). */
+  abandon(error: unknown): void;
+}
+
+/**
  * The backend's own database before its store has opened, and after: once
  * open, every call goes to the `Db` that `live` names then (a reload moves
  * it). Before that, writes return at once (an insert's row, id included)
@@ -104,9 +122,10 @@ type Method = (...args: unknown[]) => unknown;
  * wait for it; a subscription starts then. Calls that must answer now,
  * like `getSyncStatus()`, throw until it has opened.
  */
-export function earlyDb(open: () => Promise<Db>, live: () => Db | undefined): Db {
+export function earlyDb(open: () => Promise<Db>, live: () => Db | undefined): EarlyDb {
   let queue: QueuedWrite[] = [];
   let flushing: Promise<Db> | undefined;
+  let closed = false;
 
   /** The open db, with the writes queued so far applied to it first. */
   function opened(): Promise<Db> {
@@ -120,19 +139,28 @@ export function earlyDb(open: () => Promise<Db>, live: () => Db | undefined): Db
       },
       (error: unknown) => {
         flushing = undefined;
-        const batch = queue;
-        queue = [];
-        for (const write of batch) write.fail(error);
+        abandon(error);
         throw error;
       },
     );
     return flushing;
   }
 
+  function abandon(error: unknown): void {
+    const batch = queue;
+    queue = [];
+    for (const write of batch) write.fail(error);
+  }
+
   // Queued writes go first, so a write made now never overtakes them.
-  const now = () => (queue.length === 0 ? live() : undefined);
+  const now = () => (closed || queue.length > 0 ? undefined : live());
 
   function enqueue(write: (db: Db) => AnyHandle): Promise<AnyHandle> {
+    if (queue.length >= MAX_EARLY_WRITES) {
+      throw new Error(
+        `jazz.db: ${MAX_EARLY_WRITES} writes are already waiting for the store to open; \`await jazz.ready()\` before writing more`,
+      );
+    }
     const applied = new Promise<AnyHandle>((resolve, reject) => {
       queue.push({
         apply(db) {
@@ -204,10 +232,15 @@ export function earlyDb(open: () => Promise<Db>, live: () => Db | undefined): Db
     );
   }
 
-  return new Proxy(Object.create(Db.prototype) as Db, {
+  const db = new Proxy(Object.create(Db.prototype) as Db, {
     get(_target, name) {
       // Not a thenable, and no well-known symbols: `await jazz.db` stays the db.
       if (typeof name === "symbol" || name === "then") return undefined;
+      if (closed) {
+        return () => {
+          throw new Error(`jazz.db.${name}: this Jazz was closed`);
+        };
+      }
       const db = now();
       if (db) {
         const value = Reflect.get(db, name, db) as unknown;
@@ -216,4 +249,12 @@ export function earlyDb(open: () => Promise<Db>, live: () => Db | undefined): Db
       return early(name);
     },
   });
+  return {
+    db,
+    async drain() {
+      closed = true;
+      if (queue.length > 0 || flushing) await opened().catch(() => {});
+    },
+    abandon,
+  };
 }

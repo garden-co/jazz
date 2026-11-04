@@ -4,10 +4,10 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { Db } from "../runtime/db.js";
-import { earlyDbMethodKind } from "./early-db.js";
+import { earlyDb, earlyDbMethodKind, MAX_EARLY_WRITES } from "./early-db.js";
 import { createJazz, memory, sqlite, type Jazz } from "./index.js";
 
 // `createJazz` at a module's top level: it opens nothing until first use,
@@ -26,8 +26,15 @@ const permissions = s.definePermissions(app, ({ policy, session }) => {
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   while (cleanups.length) await cleanups.pop()!().catch(() => undefined);
 });
+
+/** Move the clock `ms` on, for a backoff to pass. */
+function later(ms: number): void {
+  const now = Date.now.bind(Date);
+  vi.spyOn(Date, "now").mockImplementation(() => now() + ms);
+}
 
 async function tempDir(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "jazz-lazy-"));
@@ -183,7 +190,106 @@ describe("createJazz, opened on first use", () => {
     expect((await again.ready()).appId).toBe(appId);
   }, 60_000);
 
-  it("keeps memory stores apart, and retries an open that failed", async () => {
+  it("applies the writes made before a close, even one made while the store opens", async () => {
+    const path = await tempDir();
+    const jazz = createJazz({ app, permissions, store: sqlite({ path }) });
+    const owner = randomUUID();
+    // Never waited for, and the close comes while the store is still opening.
+    const write = jazz.db.insert(app.todos, { title: "kept", owner });
+    const closing = jazz.close();
+    // From the close on, the db refuses at once.
+    expect(() => jazz.db.insert(app.todos, { title: "late", owner })).toThrow(/was closed/);
+    await closing;
+    await expect(jazz.ready()).rejects.toThrow(/was closed/);
+    // The close applied it to the backend's db before closing the store,
+    // rather than dropping it: it has its transaction. (That it then reaches
+    // the core before the close finishes is the backend's shutdown, waiting
+    // for sync.)
+    await expect(write.txId).resolves.toBeTruthy();
+  }, 60_000);
+
+  it("opens the store once for concurrent first uses, and once more after a close", async () => {
+    const path = await tempDir();
+    const request = new Request("http://app.test/api");
+    const jazz = createJazz({ app, permissions, store: sqlite({ path }), authenticate: as("a") });
+    const owner = randomUUID();
+    // Two cores on one directory would fail on its lock: these share one.
+    const [ready, rows, account, other] = await Promise.all([
+      jazz.ready(),
+      jazz.db.all(app.todos.where({ owner })),
+      jazz.accountFor(request),
+      createJazz({ app, permissions, store: sqlite({ path }), authenticate: as("a") }).ready(),
+    ]);
+    expect(other).toBe(ready);
+    expect(rows).toEqual([]);
+    expect(account).toBeTruthy();
+    // A createJazz while the close runs waits for it, not for a held lock.
+    const closing = jazz.close();
+    const next = createJazz({ app, permissions, store: sqlite({ path }) });
+    cleanups.push(() => next.close());
+    expect(next).not.toBe(jazz);
+    const [opened] = await Promise.all([next.ready(), closing]);
+    expect(opened.appId).toBe(ready.appId);
+  }, 60_000);
+
+  it("keeps the backend's session across a reload, and lets writes in flight finish", async () => {
+    const path = await tempDir();
+    const request = new Request("http://app.test/api");
+    const rules = () =>
+      s.definePermissions(app, ({ policy, session }) => {
+        policy.todos.allowRead.where({ owner: session.user.account });
+        policy.todos.allowInsert.where({ owner: session.user.account });
+      });
+    const jazz = createJazz({
+      app,
+      permissions: rules(),
+      store: sqlite({ path }),
+      authenticate: as("a"),
+    });
+    cleanups.push(() => jazz.close());
+    const owner = randomUUID();
+    const userDb = await jazz.forRequest(request);
+    const user = (await jazz.accountFor(request))!;
+    const inFlight = jazz.db.insert(app.todos, { title: "in flight", owner });
+
+    // A hot reload rebuilds equal permissions: the same bundle, the same session.
+    createJazz({ app, permissions: rules(), store: sqlite({ path }), authenticate: as("a") });
+    await jazz.ready();
+    await inFlight.wait({ tier: "global" });
+    await userDb.insert(app.todos, { title: "same bundle", owner: user }).wait({ tier: "global" });
+
+    // Changed permissions publish another bundle: what the old session had
+    // in flight, and a db a request still holds, still finish.
+    const pending = jazz.db.insert(app.todos, { title: "across bundles", owner });
+    const changed = s.definePermissions(app, ({ policy, session }) => {
+      policy.todos.allowRead.where({ owner: session.user.account });
+      policy.todos.allowInsert.where({ owner: session.user.account });
+      policy.todos.allowUpdate.where({ owner: session.user.account });
+    });
+    createJazz({ app, permissions: changed, store: sqlite({ path }), authenticate: as("a") });
+    await jazz.ready();
+    await pending.wait({ tier: "global" });
+    await userDb.insert(app.todos, { title: "old bundle", owner: user }).wait({ tier: "global" });
+    expect(
+      (await jazz.db.all(app.todos.where({ owner }))).map((todo) => todo.title).sort(),
+    ).toEqual(["across bundles", "in flight"]);
+  }, 60_000);
+
+  it("holds a bounded number of writes before the store opens", () => {
+    const early = earlyDb(
+      () => new Promise<never>(() => {}),
+      () => undefined,
+    );
+    for (let i = 0; i < MAX_EARLY_WRITES; i++) {
+      early.db.insert(app.todos, { title: `${i}`, owner: randomUUID() });
+    }
+    expect(() => early.db.insert(app.todos, { title: "one more", owner: randomUUID() })).toThrow(
+      /writes are already waiting for the store to open/,
+    );
+    early.abandon(new Error("test over"));
+  });
+
+  it("keeps memory stores apart, and retries an open that failed after a backoff", async () => {
     const one = createJazz({ app, permissions, store: memory() });
     const two = createJazz({ app, permissions, store: memory() });
     cleanups.push(
@@ -207,6 +313,9 @@ describe("createJazz, opened on first use", () => {
       if (previous === undefined) delete process.env.VERCEL;
       else process.env.VERCEL = previous;
     }
+    // Not at once: until its backoff passes, a use fails with the same error.
+    await expect(jazz.ready()).rejects.toThrow(/or remote\(/);
+    later(2_000);
     await jazz.ready();
   }, 60_000);
 

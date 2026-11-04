@@ -912,7 +912,7 @@ function wakingWebSocket(resolveOrigin: () => Promise<string>): WebSocketConstru
 }
 
 /** The core keeps its own app id; one passed from JavaScript is refused, not ignored. */
-function refuseVercelAppId(options: object): void {
+export function refuseVercelAppId(options: object): void {
   if ("appId" in options) {
     throw new Error(
       "vercel(): appId is not an option: the core keeps its own app id on its Drive.",

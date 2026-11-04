@@ -937,8 +937,9 @@ mod tests {
         }
     }
 
-    /// Without a prefix, each data dir gets its own under the app's, so two
-    /// stores sharing a bucket (preview and production) never share keys.
+    /// Without a prefix, each data dir gets its own (`jazz/<store id>/`,
+    /// naming no app), so two stores sharing a bucket (preview and
+    /// production) never share keys.
     #[tokio::test]
     async fn a_bucket_without_a_prefix_gets_one_per_data_dir() {
         let app = AppId::from_name("blob-store-prefix");

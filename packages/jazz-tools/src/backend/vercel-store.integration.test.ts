@@ -200,6 +200,9 @@ describe("vercel() store", () => {
 
     // The backend's own database reaches the core in the Sandbox.
     const row = await jazz.db.insert(app.notes, { text: "on vercel" }).wait({ tier: "global" });
+    // Another function instance (here: after this one's Jazz closed, or the
+    // same Jazz would answer) reaches the same core and its data.
+    await jazz.close();
     const again = await createJazz({
       app,
       permissions,
@@ -347,6 +350,8 @@ describe("vercel() store", () => {
     cleanups.push(() => upgraded.close());
     expect(older.calls.filter((call) => call.startsWith("start"))).toHaveLength(1);
     expect(older.state.running).not.toBe("1.0.0");
+    // The next deployment is another process: this one's Jazz closes first.
+    await upgraded.close();
 
     const newer = fakeVercel({ ...core, appId });
     Object.assign(newer.state, { exists: true, drive: true, status: "running", running: "99.0.0" });
