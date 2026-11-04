@@ -108,7 +108,8 @@ impl ServeCoreBlobs {
 }
 
 /// A core [`serve_core`] started. The host owns the process's signals and
-/// calls [`ServedCore::stop`] to drain it.
+/// calls [`ServedCore::stop`] to drain it; dropping it without a stop drains
+/// it too.
 #[napi]
 pub struct ServedCore {
     stop: tokio::sync::watch::Sender<bool>,
@@ -144,7 +145,8 @@ impl ServedCore {
 
 /// Serve a production core (the `jazz_server::run` shell: connection and
 /// memory limits, graceful drain) until [`ServedCore::stop`]. One per
-/// process.
+/// process at a time: the cores would share the process's storage cache
+/// budget, so a second call fails until the first core has stopped.
 #[napi(
     js_name = "serveCore",
     ts_args_type = "options: { appId: string; port: number; dataDir: string; blobs: { kind: \"sqlite\" } | { kind: \"files\"; dir?: string } | { kind: \"s3\"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: \"vercel-blob\"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; allowLocalFirstAuth?: boolean; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }"
@@ -171,6 +173,7 @@ pub fn serve_core(options: JsonValue) -> Result<ServedCore> {
         .into_options()
         .resolve()
         .map_err(Error::from_reason)?;
+    let serving = ServingCore::claim()?;
     let auth_config = jazz_server::AuthConfig {
         allow_local_first_auth: options.allow_local_first_auth.unwrap_or(false),
         backend_secret: options.backend_secret,
@@ -216,6 +219,7 @@ pub fn serve_core(options: JsonValue) -> Result<ServedCore> {
         )
         .await
         .map_err(|error| error.to_string());
+        drop(serving);
         let _ = closed_tx.send(result);
     });
     Ok(ServedCore {
@@ -224,9 +228,69 @@ pub fn serve_core(options: JsonValue) -> Result<ServedCore> {
     })
 }
 
+/// Whether this process serves a core now.
+static SERVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// This process's one serving core, released when the core has stopped.
+struct ServingCore;
+
+impl ServingCore {
+    fn claim() -> Result<Self> {
+        use std::sync::atomic::Ordering;
+        SERVING
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ServingCore)
+            .map_err(|_| {
+                Error::from_reason(
+                    "serveCore: serving more than one core per process is not supported yet",
+                )
+            })
+    }
+}
+
+impl Drop for ServingCore {
+    fn drop(&mut self) {
+        SERVING.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ServeCoreBlobs;
+    use super::{ServeCoreBlobs, ServingCore, serve_core};
+
+    #[test]
+    fn a_trusted_workload_takes_no_secrets() {
+        let refused = serve_core(serde_json::json!({
+            "appId": "00000000-0000-0000-0000-000000000001",
+            "port": 0,
+            "dataDir": "/nonexistent",
+            "blobs": { "kind": "sqlite" },
+            "trustedWorkload": { "issuer": "https://oidc.example", "audience": "a", "subject": "s" },
+            "backendSecret": "secret",
+        }))
+        .err()
+        .expect("secrets beside a trusted workload are refused");
+        assert!(
+            refused
+                .reason
+                .contains("a trustedWorkload replaces adminSecret and backendSecret")
+        );
+    }
+
+    #[test]
+    fn serves_one_core_per_process_at_a_time() {
+        let first = ServingCore::claim().unwrap();
+        let refused = ServingCore::claim()
+            .err()
+            .expect("a second core is refused");
+        assert!(
+            refused
+                .reason
+                .contains("more than one core per process is not supported yet")
+        );
+        drop(first);
+        let _again = ServingCore::claim().unwrap();
+    }
 
     #[test]
     fn claims_a_blob_store_for_its_environment() {

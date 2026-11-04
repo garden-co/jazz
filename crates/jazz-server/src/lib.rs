@@ -316,7 +316,10 @@ pub async fn run_until(
             ShutdownSignal::External(mut stop) => {
                 let shutdown = shutdown.clone();
                 Ok(tokio::spawn(async move {
-                    if stop.wait_for(|stop| *stop).await.is_ok() && shutdown.request_shutdown() {
+                    // A dropped sender stops it too: whoever held it can no
+                    // longer ask, so the core must not outlive it unstoppable.
+                    let _ = stop.wait_for(|stop| *stop).await;
+                    if shutdown.request_shutdown() {
                         info!("Asked to stop; starting controlled shutdown");
                     }
                 }))
@@ -555,7 +558,22 @@ fn percent_encode_fragment_value(input: &str) -> String {
 mod tests {
     use std::cell::RefCell;
 
-    use super::{build_inspector_link, install_signal_before_readiness};
+    use super::{BlobOptions, build_inspector_link, install_signal_before_readiness};
+
+    #[test]
+    fn refuses_a_blob_store_it_does_not_know() {
+        let error = BlobOptions {
+            kind: "ftp".to_owned(),
+            ..Default::default()
+        }
+        .resolve()
+        .err()
+        .expect("an unknown kind is refused");
+        assert_eq!(
+            error,
+            "blobs must be files, s3, vercel-blob or sqlite, not \"ftp\""
+        );
+    }
 
     #[test]
     fn signal_registration_precedes_readiness_publication() {

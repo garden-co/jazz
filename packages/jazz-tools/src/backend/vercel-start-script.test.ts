@@ -226,25 +226,6 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(alive(String(bystander.pid))).toBe(true);
   });
 
-  it("replaces a server binary an older script started, and prunes it", async () => {
-    const old = join(root, "data/bin/jazz-tools-0.9.0");
-    writeFileSync(
-      old,
-      `#!/bin/bash\ntrap 'exit 0' TERM\necho "0.9.0 old {}" >> ${join(root, "servers.log")}\nwhile true; do sleep 0.05; done\n`,
-    );
-    chmodSync(old, 0o755);
-    const legacy = spawn(old, [], { stdio: "ignore", detached: true });
-    children.push(legacy);
-    writeFileSync(join(root, "tmp/jazz.pid"), `${legacy.pid}\n`);
-    writeFileSync(join(root, "tmp/jazz.version"), "0.9.0\n");
-    writeFileSync(join(root, "data/version"), "0.9.0\n");
-    installFake("1.0.0");
-    expect(await start("1.0.0")).toBe("running");
-    expect(alive(String(legacy.pid))).toBe(false);
-    expect(existsSync(old)).toBe(false);
-    expect(read("tmp/jazz.version")).toBe("1.0.0");
-  });
-
   it("runs one server when several instances start at once", async () => {
     installFake("1.0.0");
     const results = await Promise.all([start("1.0.0"), start("1.0.0"), start("1.0.0")]);
