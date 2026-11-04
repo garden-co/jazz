@@ -472,7 +472,9 @@ describe("browser Jazz storage compatibility corpus", () => {
     ).rejects.toThrow("Storage: file is not a database");
     await shutdownTrackedDb(db, "damaged");
     await sleep(100);
-    expect((await rawBrowserStore(physicalDbName))[SQLITE_BLOCKS]).toEqual(damaged[SQLITE_BLOCKS]);
+    expect(
+      await digested({ [SQLITE_BLOCKS]: (await rawBrowserStore(physicalDbName))[SQLITE_BLOCKS]! }),
+    ).toEqual(await digested({ [SQLITE_BLOCKS]: damaged[SQLITE_BLOCKS]! }));
   }, 30_000);
 
   // Every Groove-era browser root declares Groove's codec families. The
@@ -809,20 +811,14 @@ async function rawRecords(name: string): Promise<Record<string, string>> {
 }
 
 /**
- * A clean foreground shutdown returns its node lease to the durable owner;
- * reopening claims it again. Only the opaque random lease token is expected
- * to change. Node identity, HLC high-water, and retired-node history remain
- * part of the durable compatibility surface.
- */
-/**
  * `records` with each long value (the SQLite blocks, page stores) replaced by
- * its length and SHA-256, so a mismatch fails at once naming the store that
+ * its length and SHA-256 (the storage manifest stays readable), so a mismatch fails at once naming the store that
  * differs instead of printing megabytes of base64.
  */
 async function digested(records: Record<string, string>): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(records)) {
-    if (value.length <= 512) {
+    if (value.length <= 4096) {
       out[key] = value;
       continue;
     }
@@ -831,6 +827,12 @@ async function digested(records: Record<string, string>): Promise<Record<string,
   return out;
 }
 
+/**
+ * A clean foreground shutdown returns its node lease to the durable owner;
+ * reopening claims it again. Only the opaque random lease token is expected
+ * to change. Node identity, HLC high-water, and retired-node history remain
+ * part of the durable compatibility surface.
+ */
 function normalizeRuntimeLeaseRecords(records: Record<string, string>): Record<string, string> {
   const manifest = rawManifest(records);
   return {
