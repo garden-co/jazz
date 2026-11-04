@@ -19,6 +19,18 @@ export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
      * backend's user (`linkWithBackend`).
      */
     initial?: "local-first" | "signed-out";
+    /**
+     * When a local-first guest is on this device and the user who signs in
+     * has no Jazz account yet (they just signed up, or they are an existing
+     * user signing in to Jazz for the first time), link the guest to them:
+     * the account and everything the guest wrote become theirs. On by
+     * default. Turn it off on shared devices, where the guest may be someone
+     * else's: the session then leaves such a guest as it is, and your app
+     * decides after its own sign-in, with `linkWithBackend()` (the guest's
+     * data becomes the user's) or `loginWithBackend()` (an account of the
+     * user's own; the guest stays on this device).
+     */
+    linkGuestOnSignUp?: boolean;
   };
 
 /** Prepare the host account store once and own client replacement across authentication. */
@@ -33,6 +45,7 @@ export async function createJazzSession(
     decorate: followUser({
       registry: accountRegistryUrl(config.serverUrl, clientScope(config)),
       events: nativeBackendWatchEvents,
+      linkGuest: config.linkGuestOnSignUp,
     }),
   });
 }
