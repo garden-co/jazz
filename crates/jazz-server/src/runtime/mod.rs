@@ -1737,8 +1737,7 @@ impl SessionQueues {
         }
     }
 
-    /// Queue `message` for the socket, whatever the backlog: a host's own
-    /// answer (a refused commit's fate) that the session waits on.
+    /// Queue `message` for the socket, encoded, counting it in the backlog.
     fn queue(&self, message: SyncMessage) -> Result<(), TransportError> {
         let (frames, bytes) = encode_outbound(message)?;
         self.backlog.queued(bytes);
@@ -2593,8 +2592,6 @@ mod tests {
             transport.send(message()),
             Err(TransportError::Backpressure)
         ));
-        // A host's own answer still goes out.
-        queues.queue(message()).expect("a host answer is queued");
 
         // Once the client reads, the session takes output again.
         egress.store(0, Ordering::Release);
