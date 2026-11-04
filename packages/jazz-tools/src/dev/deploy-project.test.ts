@@ -18,10 +18,6 @@ import { computeSchemaHash } from "./catalogue.js";
 import { deploy, validateProject } from "./catalogue-project.js";
 import { legacySchemaHash } from "./legacy-schema-hash.js";
 
-// Each test bundles and imports a real schema project, which takes seconds
-// on a loaded runner: give them room beyond vitest's 5s default.
-vi.setConfig({ testTimeout: 30_000 });
-
 const roots: string[] = [];
 const indexPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 const options = { appId: "test", serverUrl: "http://localhost:1625", adminSecret: "test" };
