@@ -10,7 +10,7 @@ function Data() {
 }
 export const expoApplication = (
   <JazzProvider
-    appId="expo-app"
+    scope="expo-app"
     serverUrl="https://sync.example.test"
     signedOut={null}
     error={({ retry }) => {

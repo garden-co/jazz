@@ -23,12 +23,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use jazz::account_registry::{AccountCommand, AccountRegistry, AccountState, Principal};
+use jazz_alpha59_dump as dump;
 use jazz_server::ServerState;
-use jazz_server::server::migrate_import::{migrate_import_account, migrate_import_login};
-use migrate_alpha59_dump as dump;
+use jazz_server::server::migrate_alpha59::{migrate_import_account, migrate_import_login};
 use serde_json::json;
 
-use crate::err;
+use super::err;
 
 /// The `createJazz` issuer of an app: its app id exactly as the app passes
 /// it to `remote()`, not canonicalized.
@@ -172,7 +172,7 @@ pub async fn apply(state: &Arc<ServerState>, app: &str, links: &[Link]) -> Resul
         let candidate = json!({ "issuer": issuer, "subject": link.subject });
         let existing = migrate_import_login(state, &candidate.to_string()).await?;
         if let Some(assignment) = existing.get("Ok") {
-            if assignment["account"].to_string() != link.account {
+            if serde_json::to_string(&assignment["account"]).map_err(err)? != link.account {
                 return Err(format!(
                     "a {issuer} identity is already on another account than the one it would link to"
                 ));

@@ -1,4 +1,4 @@
-//! `sqlite-import verify`: compare a migrated data dir with the dump it was
+//! `jazz-tools migrate-alpha59 verify`: compare a migrated data dir with the dump it was
 //! built from, through the new server's own read paths.
 //!
 //! - the bundle the one deployment published: schema and policies;
@@ -21,15 +21,15 @@ use jazz::ids::{AuthorSubject, RowUuid};
 use jazz::protocol::ReadViewSpec;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz_server::server::migrate_import::{
+use jazz_alpha59_dump as dump;
+use jazz_server::server::migrate_alpha59::{
     migrate_import_active_permissions, migrate_import_login,
 };
 use jazz_server::{ServerBuilder, ServerState, StorageBackend};
-use migrate_alpha59_dump as dump;
 use serde_json::{Value as Json, json};
 
-use crate::active::{ToHead, Translated};
-use crate::{
+use super::active::{ToHead, Translated};
+use super::{
     Args, active_deployment, convert_author, convert_value, err, match_schemas, uuid_string,
 };
 
@@ -221,14 +221,14 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
     }
     if args.link_backend_identities {
         let principals: Vec<String> = logins.iter().map(|(p, _)| p.clone()).collect();
-        let planned = crate::links::plan(&crate::links::identities(&accounts, &principals)?)?;
-        let issuer = crate::links::app_issuer(&args.app_id_text);
+        let planned = super::links::plan(&super::links::identities(&accounts, &principals)?)?;
+        let issuer = super::links::app_issuer(&args.app_id_text);
         for (index, link) in planned.iter().enumerate() {
             let candidate = json!({ "issuer": issuer, "subject": link.subject }).to_string();
             let login = migrate_import_login(&state, &candidate).await?;
-            let ok = login
-                .get("Ok")
-                .is_some_and(|assignment| assignment["account"].to_string() == link.account);
+            let ok = login.get("Ok").is_some_and(|assignment| {
+                serde_json::to_string(&assignment["account"]).ok().as_ref() == Some(&link.account)
+            });
             report.check("backend identity links", ok, || {
                 format!("link #{index}: the {issuer} identity does not open its account")
             });
