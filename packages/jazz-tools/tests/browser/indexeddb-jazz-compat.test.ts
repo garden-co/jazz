@@ -25,7 +25,12 @@ import lastGrooveCorpus from "../../fixtures/groove-linear-history-browser-jazz-
 import preLinearCorpus from "../../fixtures/pre-linear-browser-jazz-corpus.json?raw";
 import sqliteCorpus from "../../fixtures/sqlite-v1-browser-jazz-corpus.json?raw";
 import { jazzStorageCorpusBrowserCommands } from "./browser-commands.js";
-import { createAccountManager, ReadTier, schema as s, type DbConfig } from "../../src/index.js";
+import {
+  createAccountManager,
+  ReadTier,
+  schema as s,
+  type DbConfig,
+} from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { accountRegistryUrl } from "../../src/accounts/context.js";
 import { createBrowserPhysicalDatabaseName } from "../../src/runtime/browser-worker-config.js";
@@ -122,7 +127,8 @@ const corruptionApp = s.defineApp(
 );
 
 /** The producer's account; every pinned corpus was written under it. */
-const CORPUS_SECRET = "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+const CORPUS_SECRET =
+  "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
 const CORPUS_APP_ID = "ba96582c-7167-5f52-ba63-3ebefe1c2b96";
 const LARGE_BODY = "large value ".repeat(20_000);
 
@@ -141,7 +147,10 @@ describe("browser Jazz storage compatibility corpus", () => {
     console.info(`[jazz-browser-corpus-phase] ${stage}`);
   }
 
-  async function pinnedPhase<T>(stage: string, operation: () => Promise<T>): Promise<T> {
+  async function pinnedPhase<T>(
+    stage: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
     pinnedCorpusPhase = `${stage}:start`;
     receipt(pinnedCorpusPhase);
     try {
@@ -162,7 +171,11 @@ describe("browser Jazz storage compatibility corpus", () => {
 
   async function shutdownTrackedDb(db: Db, label: string): Promise<void> {
     receipt(`shutdown:${label}:start; pinned-phase=${pinnedCorpusPhase}`);
-    await withTimeout(db.shutdown(), 5_000, `browser corpus shutdown ${label} stalled`);
+    await withTimeout(
+      db.shutdown(),
+      5_000,
+      `browser corpus shutdown ${label} stalled`,
+    );
     receipt(`shutdown:${label}:done; pinned-phase=${pinnedCorpusPhase}`);
     openDbLabels.delete(db);
     openDbs.splice(openDbs.indexOf(db), 1);
@@ -177,7 +190,9 @@ describe("browser Jazz storage compatibility corpus", () => {
     await Promise.all(
       [...openDbs]
         .reverse()
-        .map((db) => shutdownTrackedDb(db, openDbLabels.get(db) ?? "unlabeled")),
+        .map((db) =>
+          shutdownTrackedDb(db, openDbLabels.get(db) ?? "unlabeled"),
+        ),
     );
     await transportCleanup.cleanup();
     receipt(`cleanup:dbs-done; pinned-phase=${pinnedCorpusPhase}`);
@@ -200,7 +215,10 @@ describe("browser Jazz storage compatibility corpus", () => {
       schema: app.wasmSchema,
       permissions,
     });
-    const server = await startJazzApp(core, { schema: app.wasmSchema, permissions });
+    const server = await startJazzApp(core, {
+      schema: app.wasmSchema,
+      permissions,
+    });
     const transport = transportCleanup.trackTransport(
       await createJazzServerTransportControl(server.serverUrl),
     );
@@ -215,12 +233,22 @@ describe("browser Jazz storage compatibility corpus", () => {
       const project = tx.insert(app.projects, { name: "corpus project" });
       const main = tx.insert(
         app.documents,
-        { branch: "main", title: "original title", projectId: project.id, body: LARGE_BODY },
+        {
+          branch: "main",
+          title: "original title",
+          projectId: project.id,
+          body: LARGE_BODY,
+        },
         { branch: "main" },
       );
       tx.insert(
         app.documents,
-        { branch: "draft", title: "draft override", projectId: project.id, body: LARGE_BODY },
+        {
+          branch: "draft",
+          title: "draft override",
+          projectId: project.id,
+          body: LARGE_BODY,
+        },
         { branch: "draft" },
       );
       return main.id;
@@ -232,13 +260,22 @@ describe("browser Jazz storage compatibility corpus", () => {
     );
     await withTimeout(
       db
-        .update(app.documents, initial.value, { title: "current title" }, { branch: "main" })
+        .update(
+          app.documents,
+          initial.value,
+          { title: "current title" },
+          { branch: "main" },
+        )
         .wait({ tier: "global" }),
       20_000,
       "corpus history update did not settle",
     );
-    expect(await db.all(app.documents, { tier: "remote", branch: "main" })).toHaveLength(1);
-    expect(await db.all(app.documents, { tier: "remote", branch: "draft" })).toHaveLength(1);
+    expect(
+      await db.all(app.documents, { tier: "remote", branch: "main" }),
+    ).toHaveLength(1);
+    expect(
+      await db.all(app.documents, { tier: "remote", branch: "draft" }),
+    ).toHaveLength(1);
     // A note the draft overrides with a version this replica may not read:
     // its view of the draft over main hides the note, and the replica keeps
     // a marker of it (`_jazz_withheld`).
@@ -247,7 +284,11 @@ describe("browser Jazz storage compatibility corpus", () => {
       { branch: "main", title: "shared note", secret: false },
       { branch: "main" },
     );
-    await withTimeout(note.wait({ tier: "global" }), 20_000, "corpus note did not settle");
+    await withTimeout(
+      note.wait({ tier: "global" }),
+      20_000,
+      "corpus note did not settle",
+    );
     let viewed: { title: string }[] | undefined;
     const unsubscribe = db.subscribe(
       app.notes,
@@ -256,9 +297,15 @@ describe("browser Jazz storage compatibility corpus", () => {
       },
       NOTES_VIEW,
     );
-    await waitForCondition(async () => viewed?.length === 1, 20_000, "the notes view did not open");
+    await waitForCondition(
+      async () => viewed?.length === 1,
+      20_000,
+      "the notes view did not open",
+    );
     await withTimeout(
-      db.update(app.notes, note.value.id, { secret: true }, NOTES_VIEW).wait({ tier: "global" }),
+      db
+        .update(app.notes, note.value.id, { secret: true }, NOTES_VIEW)
+        .wait({ tier: "global" }),
       20_000,
       "corpus secret note did not settle",
     );
@@ -272,7 +319,9 @@ describe("browser Jazz storage compatibility corpus", () => {
     await sleep(100);
     const candidate = await rawBrowserStore(physicalDbName);
     expect(
-      rawManifest(candidate).find(([key]) => key === INDEXEDDB_STORAGE_MANIFEST_KEY)?.[1],
+      rawManifest(candidate).find(
+        ([key]) => key === INDEXEDDB_STORAGE_MANIFEST_KEY,
+      )?.[1],
     ).toEqual(INDEXEDDB_STORAGE_MANIFEST);
     expect(JSON.parse(candidate[SQLITE_BLOCKS]!)).not.toHaveLength(0);
     // Validate the raw candidate through a real offline reopen before export.
@@ -281,17 +330,31 @@ describe("browser Jazz storage compatibility corpus", () => {
       db = await openPersistentDb(config, "producer-reopen");
       await db.disconnect();
       expect(
-        await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
-      ).toMatchObject([{ branch: "main", title: "current title", body: LARGE_BODY }]);
+        await db.all(app.documents, {
+          tier: ReadTier.LocalFirst,
+          branch: "main",
+        }),
+      ).toMatchObject([
+        { branch: "main", title: "current title", body: LARGE_BODY },
+      ]);
       expect(
-        await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
-      ).toMatchObject([{ branch: "draft", title: "draft override", body: LARGE_BODY }]);
-      expect(await db.all(app.notes, { tier: ReadTier.LocalFirst, ...NOTES_VIEW })).toEqual([]);
+        await db.all(app.documents, {
+          tier: ReadTier.LocalFirst,
+          branch: "draft",
+        }),
+      ).toMatchObject([
+        { branch: "draft", title: "draft override", body: LARGE_BODY },
+      ]);
+      expect(
+        await db.all(app.notes, { tier: ReadTier.LocalFirst, ...NOTES_VIEW }),
+      ).toEqual([]);
       await shutdownTrackedDb(db, "producer-reopen");
     } finally {
       await transport.unblock();
     }
-    await jazzStorageCorpusBrowserCommands().writeBrowserStorageCorpus(candidate);
+    await jazzStorageCorpusBrowserCommands().writeBrowserStorageCorpus(
+      candidate,
+    );
   }, 90_000);
 
   // `sqlite-v1-browser-jazz-corpus.json` is real output of the producer test
@@ -307,10 +370,16 @@ describe("browser Jazz storage compatibility corpus", () => {
       pinned,
       "browser-storage-compat-sqlite-v1",
     );
-    await pinnedPhase("install-pinned-records", () => installBrowserStore(physicalDbName, pinned));
-    expect(await rawBrowserStore(physicalDbName)).toEqual(pinned);
+    await pinnedPhase("install-pinned-records", () =>
+      installBrowserStore(physicalDbName, pinned),
+    );
+    expect(await digested(await rawBrowserStore(physicalDbName))).toEqual(
+      await digested(pinned),
+    );
 
-    let db = await pinnedPhase("readonly-open", () => openPersistentDb(config, "pinned-readonly"));
+    let db = await pinnedPhase("readonly-open", () =>
+      openPersistentDb(config, "pinned-readonly"),
+    );
     expect(await trackPhysicalDatabase(dbName)).toBe(physicalDbName);
     const rawWhileReopened = await rawBrowserStore(physicalDbName);
     // No serverUrl: every read and append is local, so no server can repair
@@ -327,31 +396,46 @@ describe("browser Jazz storage compatibility corpus", () => {
     expect(reopenedDraft).toMatchObject([
       { branch: "draft", title: "draft override", body: LARGE_BODY },
     ]);
-    const historicalProjects = await db.all(app.projects, { tier: ReadTier.LocalFirst });
+    const historicalProjects = await db.all(app.projects, {
+      tier: ReadTier.LocalFirst,
+    });
     expect(historicalProjects).toMatchObject([{ name: "corpus project" }]);
     // The draft's secret version still hides the note in the view.
-    expect(await db.all(app.notes, { tier: ReadTier.LocalFirst, ...NOTES_VIEW })).toEqual([]);
-    await pinnedPhase("readonly-shutdown", () => shutdownTrackedDb(db, "pinned-readonly"));
+    expect(
+      await db.all(app.notes, { tier: ReadTier.LocalFirst, ...NOTES_VIEW }),
+    ).toEqual([]);
+    await pinnedPhase("readonly-shutdown", () =>
+      shutdownTrackedDb(db, "pinned-readonly"),
+    );
     await sleep(100);
     const rawAfterReadOnly = await rawBrowserStore(physicalDbName);
     expectForegroundLeaseLifecycle(pinned, rawWhileReopened, rawAfterReadOnly);
     // Reading changes nothing durable but the opaque lease token.
-    expect(normalizeRuntimeLeaseRecords(rawAfterReadOnly)).toEqual(
-      normalizeRuntimeLeaseRecords(pinned),
-    );
     expect(
-      normalizeRuntimeLeaseRecords(corruptReusableLeaseHighWater(rawAfterReadOnly)),
+      await digested(normalizeRuntimeLeaseRecords(rawAfterReadOnly)),
+    ).toEqual(await digested(normalizeRuntimeLeaseRecords(pinned)));
+    expect(
+      normalizeRuntimeLeaseRecords(
+        corruptReusableLeaseHighWater(rawAfterReadOnly),
+      ),
     ).not.toEqual(normalizeRuntimeLeaseRecords(rawAfterReadOnly));
 
     // Append with today's writer; both generations survive a fresh open.
-    db = await pinnedPhase("writer-open", () => openPersistentDb(config, "pinned-writer"));
+    db = await pinnedPhase("writer-open", () =>
+      openPersistentDb(config, "pinned-writer"),
+    );
     expect(
-      await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
+      await db.all(app.documents, {
+        tier: ReadTier.LocalFirst,
+        branch: "main",
+      }),
     ).toMatchObject([{ title: "current title" }]);
     const currentBody = "current writer large value ".repeat(12_000);
     const currentWrite = await pinnedPhase("writer-transaction", () =>
       db.transaction((tx) => {
-        const project = tx.insert(app.projects, { name: "current writer project" });
+        const project = tx.insert(app.projects, {
+          name: "current writer project",
+        });
         tx.insert(
           app.documents,
           {
@@ -377,24 +461,39 @@ describe("browser Jazz storage compatibility corpus", () => {
         "current corpus write did not settle locally",
       ),
     );
-    await pinnedPhase("writer-shutdown", () => shutdownTrackedDb(db, "pinned-writer"));
+    await pinnedPhase("writer-shutdown", () =>
+      shutdownTrackedDb(db, "pinned-writer"),
+    );
     await sleep(100);
     const rawAfterWrite = await rawBrowserStore(physicalDbName);
     expect(rawAfterWrite[SQLITE_BLOCKS]).not.toEqual(pinned[SQLITE_BLOCKS]);
 
-    db = await pinnedPhase("offline-open", () => openPersistentDb(config, "pinned-offline"));
-    const mixedMain = await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" });
+    db = await pinnedPhase("offline-open", () =>
+      openPersistentDb(config, "pinned-offline"),
+    );
+    const mixedMain = await db.all(app.documents, {
+      tier: ReadTier.LocalFirst,
+      branch: "main",
+    });
     expect(mixedMain).toHaveLength(2);
     expect(mixedMain).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ title: "reopened writer", body: LARGE_BODY }),
-        expect.objectContaining({ title: "current writer document", body: currentBody }),
+        expect.objectContaining({
+          title: "current writer document",
+          body: currentBody,
+        }),
       ]),
     );
-    expect(await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" })).toEqual(
-      reopenedDraft,
-    );
-    const mixedProjects = await db.all(app.projects, { tier: ReadTier.LocalFirst });
+    expect(
+      await db.all(app.documents, {
+        tier: ReadTier.LocalFirst,
+        branch: "draft",
+      }),
+    ).toEqual(reopenedDraft);
+    const mixedProjects = await db.all(app.projects, {
+      tier: ReadTier.LocalFirst,
+    });
     expect(mixedProjects).toHaveLength(2);
     expect(mixedProjects).toEqual(expect.arrayContaining(historicalProjects));
     pinnedCorpusPhase = "pinned-test:complete";
@@ -414,7 +513,9 @@ describe("browser Jazz storage compatibility corpus", () => {
       ...pinned,
       [SQLITE_BLOCKS]: JSON.stringify(
         blocks.map(([offset, data]) =>
-          offset === 0 ? [offset, bytesToBase64(damagedHeader)] : [offset, data],
+          offset === 0
+            ? [offset, bytesToBase64(damagedHeader)]
+            : [offset, data],
         ),
       ),
     };
@@ -435,7 +536,9 @@ describe("browser Jazz storage compatibility corpus", () => {
     ).rejects.toThrow("Storage: file is not a database");
     await shutdownTrackedDb(db, "damaged");
     await sleep(100);
-    expect((await rawBrowserStore(physicalDbName))[SQLITE_BLOCKS]).toEqual(damaged[SQLITE_BLOCKS]);
+    expect((await rawBrowserStore(physicalDbName))[SQLITE_BLOCKS]).toEqual(
+      damaged[SQLITE_BLOCKS],
+    );
   }, 30_000);
 
   // Every Groove-era browser root declares Groove's codec families. The
@@ -455,7 +558,9 @@ describe("browser Jazz storage compatibility corpus", () => {
       if (digest) expect(await sha256Hex(corpus)).toBe(digest);
       const pinned = JSON.parse(corpus) as Record<string, string>;
       const declared = (
-        rawManifest(pinned).find(([key]) => key === INDEXEDDB_STORAGE_MANIFEST_KEY)![1] as {
+        rawManifest(pinned).find(
+          ([key]) => key === INDEXEDDB_STORAGE_MANIFEST_KEY,
+        )![1] as {
           requiredCodecIds: string[];
         }
       ).requiredCodecIds;
@@ -472,7 +577,9 @@ describe("browser Jazz storage compatibility corpus", () => {
         `unsupported storage format: this epoch-1 root lacks codec families ["jazz.sqlite-storage.v1"] required by this build and declares ${JSON.stringify(declared)} that this build does not read`,
       );
       expect(await rawRecords(physicalDbName)).toEqual(pinned);
-      expect(JSON.parse((await rawBrowserStore(physicalDbName))[SQLITE_BLOCKS]!)).toEqual([]);
+      expect(
+        JSON.parse((await rawBrowserStore(physicalDbName))[SQLITE_BLOCKS]!),
+      ).toEqual([]);
     }, 30_000);
   }
 
@@ -487,7 +594,11 @@ describe("browser Jazz storage compatibility corpus", () => {
     const historical = JSON.parse(historicalCorpus) as Record<string, string>;
     await installRawRecords(physicalDbName, historical);
     await expect(
-      withTimeout(createDb(config), 5_000, "retired profile open did not reject"),
+      withTimeout(
+        createDb(config),
+        5_000,
+        "retired profile open did not reject",
+      ),
     ).rejects.toThrow("Missing or invalid IndexedDB storage epoch manifest");
     expect(await rawRecords(physicalDbName)).toEqual(historical);
   }, 30_000);
@@ -509,7 +620,10 @@ describe("browser Jazz storage compatibility corpus", () => {
     const physicalDbName = await trackPhysicalDatabase(dbName);
     await withTimeout(
       db
-        .insert(corruptionApp.todos, { title: "corruption sentinel", done: false })
+        .insert(corruptionApp.todos, {
+          title: "corruption sentinel",
+          done: false,
+        })
         .wait({ tier: "local" }),
       5_000,
       "corruption fixture did not settle",
@@ -518,7 +632,10 @@ describe("browser Jazz storage compatibility corpus", () => {
     cleanup.untrack(db);
     await sleep(100);
 
-    await replaceManifest(physicalDbName, { ...INDEXEDDB_STORAGE_MANIFEST, storageEpoch: 2 });
+    await replaceManifest(physicalDbName, {
+      ...INDEXEDDB_STORAGE_MANIFEST,
+      storageEpoch: 2,
+    });
     const rawBeforeRejectedRead = await rawBrowserStore(physicalDbName);
     // Schema selection is lazy, but persistent construction must first obtain
     // a foreground-node lease. Its worker opens the physical root before it
@@ -527,9 +644,15 @@ describe("browser Jazz storage compatibility corpus", () => {
     // worker error or returning a handle backed by corrupt state.
     try {
       await expect(
-        withTimeout(createDb(config), 5_000, "corrupt epoch open did not reject"),
+        withTimeout(
+          createDb(config),
+          5_000,
+          "corrupt epoch open did not reject",
+        ),
       ).rejects.toThrow("Missing or invalid IndexedDB storage epoch manifest");
-      expect(await rawBrowserStore(physicalDbName)).toEqual(rawBeforeRejectedRead);
+      expect(await rawBrowserStore(physicalDbName)).toEqual(
+        rawBeforeRejectedRead,
+      );
     } finally {
       await cleanup.cleanup();
     }
@@ -552,13 +675,19 @@ describe("browser Jazz storage compatibility corpus", () => {
         ([key]) => key === INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY,
       )![1] as string,
     );
-    expect(owner).toMatchObject({ version: 1, env: "dev", auth: { kind: "account" } });
+    expect(owner).toMatchObject({
+      version: 1,
+      env: "dev",
+      auth: { kind: "account" },
+    });
     const registry = new URL(owner.auth.registry);
     const registrySuffix = `/apps/${owner.appId}/accounts`;
     expect(registry.pathname.endsWith(registrySuffix)).toBe(true);
     const serverBase = new URL(registry);
     serverBase.pathname = registry.pathname.slice(0, -registrySuffix.length);
-    expect(accountRegistryUrl(serverBase.href, owner.appId)).toBe(owner.auth.registry);
+    expect(accountRegistryUrl(serverBase.href, owner.appId)).toBe(
+      owner.auth.registry,
+    );
     const accounts = await createAccountManager({
       appId: owner.appId,
       serverUrl: serverBase.href,
@@ -574,7 +703,11 @@ describe("browser Jazz storage compatibility corpus", () => {
     // The root is named by the scope createDb resolves the account to,
     // which the owner record stores.
     const physicalDbName = createBrowserPhysicalDatabaseName(
-      { ...config, accountId: owner.auth.account, accountRegistryAuthority: owner.auth.registry },
+      {
+        ...config,
+        accountId: owner.auth.account,
+        accountRegistryAuthority: owner.auth.registry,
+      },
       base,
     );
     databaseNames.add(physicalDbName);
@@ -585,14 +718,20 @@ describe("browser Jazz storage compatibility corpus", () => {
     const prefix = `${logicalBase}::jazz-browser-v1::`;
     const names = (await indexedDB.databases())
       .map((database) => database.name)
-      .filter((name): name is string => typeof name === "string" && name.startsWith(prefix));
+      .filter(
+        (name): name is string =>
+          typeof name === "string" && name.startsWith(prefix),
+      );
     if (names.length !== 1) {
       throw new Error(
         `expected one physical Jazz IndexedDB root for ${logicalBase}, found ${names.length}`,
       );
     }
     const [name] = names;
-    if (!name) throw new Error(`missing physical Jazz IndexedDB root for ${logicalBase}`);
+    if (!name)
+      throw new Error(
+        `missing physical Jazz IndexedDB root for ${logicalBase}`,
+      );
     databaseNames.add(name);
     return name;
   }
@@ -614,7 +753,10 @@ describe("browser Jazz storage compatibility corpus", () => {
     };
   }
 
-  async function openPersistentDb(config: DbConfig, label = "unlabeled"): Promise<Db> {
+  async function openPersistentDb(
+    config: DbConfig,
+    label = "unlabeled",
+  ): Promise<Db> {
     const db = await createDb(config);
     openDbs.push(db);
     openDbLabels.set(db, label);
@@ -636,7 +778,10 @@ const SQLITE_BLOCKS = "jazz-idb/blocks";
  */
 async function sqliteFilePath(physicalDbName: string): Promise<string> {
   const digest = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(physicalDbName)),
+    await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(physicalDbName),
+    ),
   );
   return `/jazz-${Array.from(digest.slice(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join("")}.sqlite`;
 }
@@ -644,7 +789,9 @@ async function sqliteFilePath(physicalDbName: string): Promise<string> {
 function openSqliteVfsDatabase(): Promise<IDBDatabase> {
   const request = indexedDB.open(SQLITE_VFS_DATABASE, 1);
   request.onupgradeneeded = () => {
-    request.result.createObjectStore(SQLITE_VFS_STORE, { keyPath: ["path", "offset"] });
+    request.result.createObjectStore(SQLITE_VFS_STORE, {
+      keyPath: ["path", "offset"],
+    });
   };
   return requestResult(request);
 }
@@ -663,12 +810,18 @@ async function rawSqliteBlocks(path: string): Promise<string> {
   database.close();
   return JSON.stringify(
     blocks
-      .map((block) => [block.offset, bytesToBase64(new Uint8Array(block.data))] as const)
+      .map(
+        (block) =>
+          [block.offset, bytesToBase64(new Uint8Array(block.data))] as const,
+      )
       .sort(([left], [right]) => left - right),
   );
 }
 
-async function installSqliteBlocks(path: string, blocks: string): Promise<void> {
+async function installSqliteBlocks(
+  path: string,
+  blocks: string,
+): Promise<void> {
   const database = await openSqliteVfsDatabase();
   const transaction = database.transaction(SQLITE_VFS_STORE, "readwrite");
   const store = transaction.objectStore(SQLITE_VFS_STORE);
@@ -685,10 +838,14 @@ async function deleteSqliteBlocks(path: string): Promise<void> {
 }
 
 /** The page store's records plus the SQLite file's blocks. */
-async function rawBrowserStore(physicalDbName: string): Promise<Record<string, string>> {
+async function rawBrowserStore(
+  physicalDbName: string,
+): Promise<Record<string, string>> {
   return {
     ...(await rawRecords(physicalDbName)),
-    [SQLITE_BLOCKS]: await rawSqliteBlocks(await sqliteFilePath(physicalDbName)),
+    [SQLITE_BLOCKS]: await rawSqliteBlocks(
+      await sqliteFilePath(physicalDbName),
+    ),
   };
 }
 
@@ -715,7 +872,9 @@ function base64ToBytes(base64: string): Uint8Array {
 
 async function sha256Hex(text: string): Promise<string> {
   return Array.from(
-    new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))),
+    new Uint8Array(
+      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)),
+    ),
   )
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
@@ -745,7 +904,9 @@ async function rawRecords(name: string): Promise<Record<string, string>> {
         ]);
         return [
           storeName,
-          JSON.stringify(keys.map((key, index) => [key, serializeRawRecord(values[index])])),
+          JSON.stringify(
+            keys.map((key, index) => [key, serializeRawRecord(values[index])]),
+          ),
         ] as const;
       }),
     ),
@@ -761,7 +922,28 @@ async function rawRecords(name: string): Promise<Record<string, string>> {
  * to change. Node identity, HLC high-water, and retired-node history remain
  * part of the durable compatibility surface.
  */
-function normalizeRuntimeLeaseRecords(records: Record<string, string>): Record<string, string> {
+/**
+ * `records` with each long value (the SQLite blocks, page stores) replaced by
+ * its length and SHA-256, so a mismatch fails at once naming the store that
+ * differs instead of printing megabytes of base64.
+ */
+async function digested(
+  records: Record<string, string>,
+): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(records)) {
+    if (value.length <= 512) {
+      out[key] = value;
+      continue;
+    }
+    out[key] = `${value.length} chars, sha256 ${await sha256Hex(value)}`;
+  }
+  return out;
+}
+
+function normalizeRuntimeLeaseRecords(
+  records: Record<string, string>,
+): Record<string, string> {
   const manifest = rawManifest(records);
   return {
     ...records,
@@ -789,7 +971,9 @@ type RawForegroundNodeLeasePool = {
 };
 
 function rawManifest(records: Record<string, string>): [string, unknown][] {
-  const manifest = JSON.parse(records[INDEXEDDB_STORAGE_MANIFEST_STORE] ?? "[]") as unknown;
+  const manifest = JSON.parse(
+    records[INDEXEDDB_STORAGE_MANIFEST_STORE] ?? "[]",
+  ) as unknown;
   if (!Array.isArray(manifest) || !manifest.every(isRawManifestEntry)) {
     throw new Error("expected raw IndexedDB manifest entries");
   }
@@ -797,18 +981,26 @@ function rawManifest(records: Record<string, string>): [string, unknown][] {
 }
 
 function isRawManifestEntry(value: unknown): value is [string, unknown] {
-  return Array.isArray(value) && value.length === 2 && typeof value[0] === "string";
+  return (
+    Array.isArray(value) && value.length === 2 && typeof value[0] === "string"
+  );
 }
 
-function foregroundNodeLeasePool(records: Record<string, string>): RawForegroundNodeLeasePool {
-  const entry = rawManifest(records).find(([key]) => key === "foreground-node-leases-v1");
+function foregroundNodeLeasePool(
+  records: Record<string, string>,
+): RawForegroundNodeLeasePool {
+  const entry = rawManifest(records).find(
+    ([key]) => key === "foreground-node-leases-v1",
+  );
   if (!entry || !isRawForegroundNodeLeasePool(entry[1])) {
     throw new Error("expected a valid raw foreground-node lease pool");
   }
   return entry[1];
 }
 
-function isRawForegroundNodeLeasePool(value: unknown): value is RawForegroundNodeLeasePool {
+function isRawForegroundNodeLeasePool(
+  value: unknown,
+): value is RawForegroundNodeLeasePool {
   if (!value || typeof value !== "object") return false;
   const pool = value as Partial<RawForegroundNodeLeasePool>;
   return (
@@ -820,7 +1012,9 @@ function isRawForegroundNodeLeasePool(value: unknown): value is RawForegroundNod
   );
 }
 
-function isRawForegroundNodeLease(value: unknown): value is RawForegroundNodeLease {
+function isRawForegroundNodeLease(
+  value: unknown,
+): value is RawForegroundNodeLease {
   if (!value || typeof value !== "object") return false;
   const lease = value as Partial<RawForegroundNodeLease>;
   return (
@@ -830,11 +1024,16 @@ function isRawForegroundNodeLease(value: unknown): value is RawForegroundNodeLea
   );
 }
 
-function normalizeForegroundNodeLeasePool(value: unknown): RawForegroundNodeLeasePool {
+function normalizeForegroundNodeLeasePool(
+  value: unknown,
+): RawForegroundNodeLeasePool {
   if (!isRawForegroundNodeLeasePool(value)) {
     throw new Error("expected a valid raw foreground-node lease pool");
   }
-  const normalizeLease = ({ leaseId: _leaseId, ...lease }: RawForegroundNodeLease) => ({
+  const normalizeLease = ({
+    leaseId: _leaseId,
+    ...lease
+  }: RawForegroundNodeLease) => ({
     ...lease,
     leaseId: "<opaque-random-lease-id>",
   });
@@ -859,22 +1058,32 @@ function expectForegroundLeaseLifecycle(
   expect(active.reusable).toEqual([]);
   expect(active.active[0]!.leaseId).not.toBe(before.reusable[0]!.leaseId);
   expect(active.active[0]!.node).toEqual(before.reusable[0]!.node);
-  expect(active.active[0]!.confirmedTxTime).toBe(before.reusable[0]!.confirmedTxTime);
+  expect(active.active[0]!.confirmedTxTime).toBe(
+    before.reusable[0]!.confirmedTxTime,
+  );
   expect(active.retired).toEqual(before.retired);
 
   expect(after.active).toEqual([]);
   expect(after.reusable).toHaveLength(1);
   expect(after.reusable[0]!.leaseId).toBe(active.active[0]!.leaseId);
   expect(after.reusable[0]!.node).toEqual(active.active[0]!.node);
-  expect(after.reusable[0]!.confirmedTxTime).toBe(active.active[0]!.confirmedTxTime);
+  expect(after.reusable[0]!.confirmedTxTime).toBe(
+    active.active[0]!.confirmedTxTime,
+  );
   expect(after.retired).toEqual(active.retired);
 }
 
-function corruptReusableLeaseHighWater(records: Record<string, string>): Record<string, string> {
+function corruptReusableLeaseHighWater(
+  records: Record<string, string>,
+): Record<string, string> {
   const corrupted = { ...records };
   const manifest = rawManifest(corrupted);
   const entry = manifest.find(([key]) => key === "foreground-node-leases-v1");
-  if (!entry || !isRawForegroundNodeLeasePool(entry[1]) || entry[1].reusable.length !== 1) {
+  if (
+    !entry ||
+    !isRawForegroundNodeLeasePool(entry[1]) ||
+    entry[1].reusable.length !== 1
+  ) {
     throw new Error("expected one reusable foreground-node lease to corrupt");
   }
   entry[1].reusable[0]!.confirmedTxTime = "0";
@@ -884,7 +1093,10 @@ function corruptReusableLeaseHighWater(records: Record<string, string>): Record<
 
 async function replaceManifest(name: string, manifest: unknown): Promise<void> {
   const database = await requestResult(indexedDB.open(name));
-  const transaction = database.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
+  const transaction = database.transaction(
+    INDEXEDDB_STORAGE_MANIFEST_STORE,
+    "readwrite",
+  );
   transaction
     .objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE)
     .put(manifest, INDEXEDDB_STORAGE_MANIFEST_KEY);
@@ -892,7 +1104,10 @@ async function replaceManifest(name: string, manifest: unknown): Promise<void> {
   database.close();
 }
 
-async function installRawRecords(name: string, records: Record<string, string>): Promise<void> {
+async function installRawRecords(
+  name: string,
+  records: Record<string, string>,
+): Promise<void> {
   const request = indexedDB.open(name, INDEXEDDB_BTREE_DATABASE_VERSION);
   request.onupgradeneeded = () => {
     const database = request.result;
@@ -908,13 +1123,17 @@ async function installRawRecords(name: string, records: Record<string, string>):
   ];
   const transaction = database.transaction(names, "readwrite");
   for (const storeName of names) {
-    for (const [key, value] of JSON.parse(records[storeName] ?? "[]") as [IDBValidKey, unknown][]) {
+    for (const [key, value] of JSON.parse(records[storeName] ?? "[]") as [
+      IDBValidKey,
+      unknown,
+    ][]) {
       transaction
         .objectStore(storeName)
         .put(
           restoreStructuredCloneValue(
             value,
-            storeName === INDEXEDDB_BTREE_PAGES_STORE || key === "replica-node-v1",
+            storeName === INDEXEDDB_BTREE_PAGES_STORE ||
+              key === "replica-node-v1",
           ),
           key,
         );
@@ -924,9 +1143,14 @@ async function installRawRecords(name: string, records: Record<string, string>):
   database.close();
 }
 
-function restoreStructuredCloneValue(value: unknown, binary = false, property?: string): unknown {
+function restoreStructuredCloneValue(
+  value: unknown,
+  binary = false,
+  property?: string,
+): unknown {
   if (Array.isArray(value)) {
-    if (binary || property === "node") return Uint8Array.from(value as number[]).buffer;
+    if (binary || property === "node")
+      return Uint8Array.from(value as number[]).buffer;
     return value.map((nested) => restoreStructuredCloneValue(nested));
   }
   if (!value || typeof value !== "object") return value;
@@ -941,12 +1165,17 @@ function restoreStructuredCloneValue(value: unknown, binary = false, property?: 
 function serializeRawRecord(value: unknown): unknown {
   if (value instanceof ArrayBuffer) return Array.from(new Uint8Array(value));
   if (ArrayBuffer.isView(value)) {
-    return Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+    return Array.from(
+      new Uint8Array(value.buffer, value.byteOffset, value.byteLength),
+    );
   }
   if (Array.isArray(value)) return value.map(serializeRawRecord);
   if (value && typeof value === "object") {
     return Object.fromEntries(
-      Object.entries(value).map(([key, nested]) => [key, serializeRawRecord(nested)]),
+      Object.entries(value).map(([key, nested]) => [
+        key,
+        serializeRawRecord(nested),
+      ]),
     );
   }
   return value;
@@ -955,7 +1184,8 @@ function serializeRawRecord(value: unknown): unknown {
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("IndexedDB request failed"));
+    request.onerror = () =>
+      reject(request.error ?? new Error("IndexedDB request failed"));
   });
 }
 
