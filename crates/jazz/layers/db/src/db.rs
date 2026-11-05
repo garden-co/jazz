@@ -539,6 +539,11 @@ struct Inner {
             Rc<BTreeSet<String>>,
         )>,
     >,
+    /// [`Inner::retention_of`], by version.
+    retention_by_version: RefCell<HashMap<crate::ids::SchemaVersionId, Rc<BTreeSet<String>>>>,
+    /// What the write being applied prunes ([`Inner::writing_under`]):
+    /// `None` goes by the owner's schema.
+    writing: RefCell<Option<Rc<BTreeSet<String>>>>,
     /// Where each admitted version stores its tables and columns.
     names: crate::names::Names,
     views: BTreeMap<SchemaViewId, JazzSchema>,
@@ -1432,6 +1437,8 @@ impl Db {
                     admitted
                 },
                 retention: RefCell::default(),
+                retention_by_version: RefCell::default(),
+                writing: RefCell::default(),
                 names,
                 views: BTreeMap::new(),
                 bundles: HashMap::new(),
@@ -5864,18 +5871,18 @@ impl Inner {
         self.prune_history(&table.stored, row, key)
     }
 
-    /// Whether the owner's schema keeps only the latest version of stored
-    /// table `stored` (SPEC 4 §4.9). The owner's schema decides, so on the
-    /// authority the newest deploy does.
+    /// Whether stored table `stored` may have dropped history: some
+    /// admitted version, or the owner's schema, keeps only its latest
+    /// version (SPEC 4 §4.9). Reads that need history refuse such a table
+    /// and its writes count as blind, even once every bundle that declared
+    /// it so is rolled back: what was pruned stays pruned.
     pub(crate) fn latest_only(&self, stored: &str) -> bool {
         self.retention().contains(stored)
     }
 
-    /// The stored tables that keep only their latest version. The newest
-    /// admitted version that stores a table decides, activated or only
-    /// published as a bundle (the newest deploy wins); a table no admitted
-    /// version names goes by the owner's schema. Cached, keyed by what
-    /// was admitted: a version id names its schema's content.
+    /// The stored tables that may have dropped history: those any admitted
+    /// version, or the owner's schema, declares latest-only. Cached, keyed
+    /// by what was admitted: a version id names its schema's content.
     pub(crate) fn retention(&self) -> Rc<BTreeSet<String>> {
         let key = (self.names.len(), self.admitted.len(), self.owner_version);
         if let Some((cached, set)) = &*self.retention.borrow()
@@ -5883,31 +5890,87 @@ impl Inner {
         {
             return set.clone();
         }
-        let mut decided = BTreeSet::new();
-        let mut latest = BTreeSet::new();
-        for (version, names) in self.names.in_order().into_iter().rev() {
-            let Some((_, jazz)) = self.admitted.iter().find(|(id, _)| *id == version) else {
-                continue;
-            };
-            for table in jazz.tables() {
-                let Some((stored, _)) = names.tables.get(&table.name) else {
-                    continue;
-                };
-                if decided.insert(stored.clone())
-                    && table.history == jazz_model::schema::HistoryRetention::Latest
-                {
-                    latest.insert(stored.clone());
-                }
-            }
-        }
-        for table in self.owner.tables.values() {
-            if decided.insert(table.stored.clone()) && table.latest_only {
-                latest.insert(table.stored.clone());
-            }
+        let mut latest = (*self.retention_of(self.owner_version)).clone();
+        for (version, _) in &self.admitted {
+            latest.extend(self.retention_of(*version).iter().cloned());
         }
         let latest = Rc::new(latest);
         *self.retention.borrow_mut() = Some((key, latest.clone()));
         latest
+    }
+
+    /// The stored tables schema `version` declares latest-only: the ones a
+    /// write made under it prunes (SPEC 4 §4.9). The owner's version, and a
+    /// version this store has not admitted, go by the owner's schema.
+    pub(crate) fn retention_of(
+        &self,
+        version: crate::ids::SchemaVersionId,
+    ) -> Rc<BTreeSet<String>> {
+        if let Some(set) = self.retention_by_version.borrow().get(&version) {
+            return set.clone();
+        }
+        let admitted = match (
+            self.admitted.iter().find(|(id, _)| *id == version),
+            self.names.get(&version),
+        ) {
+            (Some((_, jazz)), Some(names)) if version != self.owner_version => Some(
+                jazz.tables()
+                    .iter()
+                    .filter(|table| table.history == jazz_model::schema::HistoryRetention::Latest)
+                    .filter_map(|table| {
+                        names
+                            .tables
+                            .get(&table.name)
+                            .map(|(stored, _)| stored.clone())
+                    })
+                    .collect::<BTreeSet<String>>(),
+            ),
+            _ => None,
+        };
+        let cached = admitted.is_some() || version == self.owner_version;
+        let declared = Rc::new(admitted.unwrap_or_else(|| {
+            self.owner
+                .tables
+                .values()
+                .filter(|table| table.latest_only)
+                .map(|table| table.stored.clone())
+                .collect()
+        }));
+        // A version's content is fixed, but one not admitted yet may be
+        // later: only an admitted version's (or the owner's) is kept.
+        if cached {
+            self.retention_by_version
+                .borrow_mut()
+                .insert(version, declared.clone());
+        }
+        declared
+    }
+
+    /// Whether the write being applied prunes stored table `stored`'s
+    /// history: the schema it was written under declares the table
+    /// latest-only. A session's commit is written under its declared
+    /// version, else its bundle's ([`Inner::writing`]); any other write
+    /// under the owner's schema.
+    pub(crate) fn prunes(&self, stored: &str) -> bool {
+        match &*self.writing.borrow() {
+            Some(set) => set.contains(stored),
+            None => self.retention_of(self.owner_version).contains(stored),
+        }
+    }
+
+    /// Apply what follows as writes made under schema `version` (`None`:
+    /// the owner's), which decides what they prune ([`Inner::prunes`]),
+    /// until [`Inner::restore_writing`] gets back what this returns.
+    pub(crate) fn set_writing(
+        &self,
+        version: Option<crate::ids::SchemaVersionId>,
+    ) -> Option<Rc<BTreeSet<String>>> {
+        let set = version.map(|version| self.retention_of(version));
+        self.writing.replace(set)
+    }
+
+    pub(crate) fn restore_writing(&self, prior: Option<Rc<BTreeSet<String>>>) {
+        *self.writing.borrow_mut() = prior;
     }
 
     /// For a latest-only table, drop the row's accepted versions in history
@@ -5923,7 +5986,7 @@ impl Inner {
         row: RowUuid,
         key: &[u8],
     ) -> Result<(), Error> {
-        if !self.latest_only(stored) {
+        if !self.prunes(stored) {
             return Ok(());
         }
         let history = quote(&format!("{stored}__h"));

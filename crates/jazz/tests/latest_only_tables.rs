@@ -214,33 +214,70 @@ fn the_authority_keeps_one_superseded_version_of_a_latest_only_row() {
     assert_eq!(history_rows(&path, "notes"), 9);
 }
 
-/// The authority's own schema keeps `presence`'s history, but a newer
-/// version that makes it latest-only is admitted (published by a deploy,
-/// not made current): the newest deploy decides, so its older versions
-/// go, and still do after a restart that opens with the older schema.
+/// The authority admits two versions of the schema: one keeps
+/// `presence`'s history, the other makes it latest-only. Lena's device
+/// runs the latest-only version, Fran's the full one (a deployment rolled
+/// back, say). Each write prunes by the version its writer runs: Lena's
+/// drop the versions they supersede, Fran's keep them, also after a
+/// restart. Reads of the table's history stay refused: what was pruned
+/// stays pruned.
+///
+/// ```
+/// lena (latest) ──a:0..4──► server ◄──a:5..8── fran (full)
+/// server history of row 1:  1 version     →   5 versions
+/// ```
 #[test]
-fn the_newest_admitted_version_decides_a_tables_retention() {
+fn each_write_prunes_by_the_version_its_writer_runs() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("authority.sqlite");
-    let db = open_with(0, &path, schema_with(false));
-    db.set_authority();
-    insert(&db, "presence", row(1), "a", "0");
+    let server = open_with(0, &path, schema_with(false));
+    server.set_authority();
+    block_on(server.admit_schema_with_lenses(schema(), &[])).unwrap();
+    let lena = open_with(1, &dir.path().join("lena.sqlite"), schema());
+    let fran = open_with(2, &dir.path().join("fran.sqlite"), schema_with(false));
+    let _lena_link = link(&lena, &server);
+    let _fran_link = link(&fran, &server);
+    let all = Query::from("presence");
+    let _lena_sub =
+        block_on(lena.subscribe(&lena.prepare_query(&all).unwrap(), ReadOpts::default())).unwrap();
+    let _fran_sub =
+        block_on(fran.subscribe(&fran.prepare_query(&all).unwrap(), ReadOpts::default())).unwrap();
+    pump(&server, &[&lena, &fran]);
+
+    insert(&lena, "presence", row(1), "a", "0");
+    pump(&server, &[&lena, &fran]);
     for step in 1..5 {
-        update(&db, "presence", row(1), "a", &step.to_string());
+        update(&lena, "presence", row(1), "a", &step.to_string());
+        pump(&server, &[&lena, &fran]);
     }
-    block_on(db.admit_schema_with_lenses(schema(), &[])).unwrap();
-    update(&db, "presence", row(1), "a", "5");
-    drop(db);
     assert_eq!(history_rows(&path, "presence"), 1);
 
-    let db = open_with(0, &path, schema_with(false));
-    db.set_authority();
-    for step in 6..9 {
-        update(&db, "presence", row(1), "a", &step.to_string());
+    for step in 5..9 {
+        update(&fran, "presence", row(1), "a", &step.to_string());
+        pump(&server, &[&lena, &fran]);
     }
-    assert_eq!(read(&db, "presence", None), [("a".into(), "8".into())]);
-    drop(db);
-    assert_eq!(history_rows(&path, "presence"), 1);
+    assert_eq!(history_rows(&path, "presence"), 5);
+    // The dedupe entries alike: Lena's device keeps its newest, Fran's all.
+    assert_eq!(transactions_of(&path, 1), 1);
+    assert_eq!(transactions_of(&path, 2), 4);
+    assert_eq!(read(&lena, "presence", None), [("a".into(), "8".into())]);
+
+    let history = Query::from("history.presence").filter(eq(col("id"), lit(Value::Uuid(row(1).0))));
+    let error = server
+        .prepare_query(&history)
+        .and_then(|prepared| block_on(server.all(&prepared, ReadOpts::default())))
+        .expect_err("a table some version keeps latest-only has no history to read");
+    assert!(
+        error.message.contains("latest-only table `presence`"),
+        "{}",
+        error.message
+    );
+    drop(server);
+    let server = open_with(0, &path, schema_with(false));
+    server.set_authority();
+    update(&server, "presence", row(1), "a", "9");
+    drop(server);
+    assert_eq!(history_rows(&path, "presence"), 6);
 }
 
 /// Alice watches the presence in doc `a` on the authority itself while her

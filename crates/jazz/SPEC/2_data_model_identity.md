@@ -193,8 +193,8 @@ A schema with a latest-only table (ch. 4 §4.9) is encoded under its own
 domain tag, `jazz-schema-latest-only-tables`: a `u64` count and each such
 table's length-prefixed name in name order, then the bytes the schema would
 have without it. A retention change is therefore a version of its own, which
-a store admits like any other, so the newest one it admitted can decide a
-table's retention; every schema that keeps full history keeps its id. The
+a store admits like any other, and a write prunes by the version it was
+written under; every schema that keeps full history keeps its id. The
 compatibility id leaves retention out, as it leaves out merge strategies: it
 does not change how a row is stored, so such versions share stored names and
 join by an empty lens. The public structural `SchemaHash` covers `history`

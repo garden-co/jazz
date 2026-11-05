@@ -183,16 +183,18 @@ fn switching_a_kept_table_to_latest_only_needs_an_explicit_flag() {
     )
     .expect("switching back to full history drops nothing");
 
-    // The newest admitted schema says how the store keeps the table now.
+    // Only the first version to make the table latest-only needs the
+    // flag: once one is admitted, republishing it or rolling back and
+    // forth does not.
     let published = |admitted: [&Schema; 2]| DeploymentCatalogue {
         schemas: vec![full.clone(), latest.clone()],
         admitted_schema_hashes: admitted.iter().map(|s| SchemaHash::compute(s)).collect(),
         ..Default::default()
     };
     prepare_deployment(&published([&full, &latest]), request(&latest, &[], vec![]))
-        .expect("the table already keeps only its latest version");
+        .expect("a latest-only version is already admitted");
     prepare_deployment(&published([&latest, &full]), request(&latest, &[], vec![]))
-        .expect_err("a newer bundle keeps it in full again");
+        .expect("returning to latest-only after a rollback is no first switch");
 }
 
 #[test]

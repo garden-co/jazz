@@ -5793,11 +5793,12 @@ impl Inner {
         )
         .map_err(storage)?;
         let code = self.node_code(node)?;
+        // The commit's own version decides, as for its history.
         let latest_only = !ops.is_empty()
             && ops.iter().all(|op| {
                 self.schema
                     .stored_table(op.table())
-                    .is_ok_and(|stored| self.latest_only(stored))
+                    .is_ok_and(|stored| self.prunes(stored))
             });
         let waiting: Option<i64> = self
             .conn
@@ -9094,6 +9095,18 @@ impl Inner {
         message
     }
 
+    /// The schema version session `index` writes under: the one it
+    /// declared, else its bundle's write version (`None`: the owner's).
+    pub(crate) fn written_version(&self, index: usize) -> Option<crate::ids::SchemaVersionId> {
+        let session = &self.sessions[index];
+        session.version.or_else(|| {
+            session
+                .bundle
+                .and_then(|bundle| self.bundles.get(&bundle))
+                .map(|(version, _)| *version)
+        })
+    }
+
     /// Whether this store admitted schema `version`.
     fn deployed(&self, version: crate::ids::SchemaVersionId) -> bool {
         version == self.owner_version || self.admitted.iter().any(|(id, _)| *id == version)
@@ -11801,91 +11814,100 @@ impl Db {
                     self.inner.borrow_mut().refuse_undeployed_commit(index, id);
                     return Ok(());
                 }
-                let (result, rows, echoable) = match known {
-                    // A resend's writer may not hold what the commit made of
-                    // its rows (its fate was lost, or it reopened while
-                    // waiting for rows it could not install): they ship as
-                    // they are, unless newer versions do.
-                    Some(result) => {
-                        let landed = match (&result, self.inner.borrow().settled(node, tx)?) {
-                            (Ok(()), Some(Some(at))) => Some(at),
-                            // Dropped: its rows ship as they are now.
-                            (Ok(()), None) => {
-                                let inner = self.inner.borrow();
-                                Some(Pos::at(inner.served_through()))
-                            }
-                            _ => None,
-                        };
-                        let rows = match landed {
-                            Some(at) => ops
-                                .into_iter()
-                                .map(from_wire)
-                                .collect::<Result<Vec<_>, _>>()
-                                .and_then(|ops| self.inner.borrow().resent_rows(&ops, at))
-                                .unwrap_or_default(),
-                            None => Vec::new(),
-                        };
-                        (result, rows, Vec::new())
-                    }
-                    None => match commit_who(policy, &acting)
-                        .map_err(|error| (error, Vec::new()))
-                        .and_then(|who| {
-                            self.inner
-                                .borrow()
-                                .check_acts_pinned(index, policy, who)
-                                .map_err(|error| (error, Vec::new()))?;
-                            let (ops, mut roots) = db
-                                .resolve_deltas(policy, ops)
-                                .map_err(|error| (error, Vec::new()))?;
-                            roots.extend(
-                                db.proof_roots(policy, &ops)
-                                    .map_err(|error| (error, Vec::new()))?,
-                            );
-                            let possession = crate::large::Possession {
-                                author: receipt_author(&identity),
-                                checked: policy.is_some(),
-                                roots,
-                                settle: Default::default(),
+                // What the commit prunes goes by the version its session
+                // wrote under (SPEC 4 §4.9): a rolled-back deployment's
+                // sessions prune nothing.
+                let written = self.inner.borrow().written_version(index);
+                let prior = self.inner.borrow().set_writing(written);
+                let decided = (|| -> Result<_, Error> {
+                    Ok(match known {
+                        // A resend's writer may not hold what the commit made of
+                        // its rows (its fate was lost, or it reopened while
+                        // waiting for rows it could not install): they ship as
+                        // they are, unless newer versions do.
+                        Some(result) => {
+                            let landed = match (&result, self.inner.borrow().settled(node, tx)?) {
+                                (Ok(()), Some(Some(at))) => Some(at),
+                                // Dropped: its rows ship as they are now.
+                                (Ok(()), None) => {
+                                    let inner = self.inner.borrow();
+                                    Some(Pos::at(inner.served_through()))
+                                }
+                                _ => None,
                             };
-                            let vouched = vouched(policy, who, acting);
-                            self.with_claims(vouched, || {
-                                db.authorize_commit(
-                                    who,
-                                    policy,
-                                    kind,
-                                    ops,
-                                    (node, tx),
-                                    clock,
-                                    possession,
-                                )
-                            })
-                        }) {
-                        // The accepted commit recorded its fate atomically.
-                        Ok((rows, echoable)) => (Ok(()), rows, echoable),
-                        // Its large values need nodes the chunk store is
-                        // still fetching: it is applied again once they
-                        // arrive, not refused.
-                        Err((error, _))
-                            if crate::large::is_missing(&error)
-                                && self.inner.borrow().chunks.has_fetch() =>
-                        {
-                            return Err(error);
-                        }
-                        Err((error, rows)) => {
-                            let inner = self.inner.borrow();
-                            // Read back by the names the current schema
-                            // gives what the commit named by stored ones.
-                            let error = Error {
-                                message: inner.by_current_names(&error.message),
-                                ..error
+                            let rows = match landed {
+                                Some(at) => ops
+                                    .into_iter()
+                                    .map(from_wire)
+                                    .collect::<Result<Vec<_>, _>>()
+                                    .and_then(|ops| self.inner.borrow().resent_rows(&ops, at))
+                                    .unwrap_or_default(),
+                                None => Vec::new(),
                             };
-                            let result = Err(wire_error(&error));
-                            inner.record_fate(node, tx, &result)?;
-                            inner.record_settled(node, tx, None)?;
                             (result, rows, Vec::new())
                         }
-                    },
-                };
+                        None => match commit_who(policy, &acting)
+                            .map_err(|error| (error, Vec::new()))
+                            .and_then(|who| {
+                                self.inner
+                                    .borrow()
+                                    .check_acts_pinned(index, policy, who)
+                                    .map_err(|error| (error, Vec::new()))?;
+                                let (ops, mut roots) = db
+                                    .resolve_deltas(policy, ops)
+                                    .map_err(|error| (error, Vec::new()))?;
+                                roots.extend(
+                                    db.proof_roots(policy, &ops)
+                                        .map_err(|error| (error, Vec::new()))?,
+                                );
+                                let possession = crate::large::Possession {
+                                    author: receipt_author(&identity),
+                                    checked: policy.is_some(),
+                                    roots,
+                                    settle: Default::default(),
+                                };
+                                let vouched = vouched(policy, who, acting);
+                                self.with_claims(vouched, || {
+                                    db.authorize_commit(
+                                        who,
+                                        policy,
+                                        kind,
+                                        ops,
+                                        (node, tx),
+                                        clock,
+                                        possession,
+                                    )
+                                })
+                            }) {
+                            // The accepted commit recorded its fate atomically.
+                            Ok((rows, echoable)) => (Ok(()), rows, echoable),
+                            // Its large values need nodes the chunk store is
+                            // still fetching: it is applied again once they
+                            // arrive, not refused.
+                            Err((error, _))
+                                if crate::large::is_missing(&error)
+                                    && self.inner.borrow().chunks.has_fetch() =>
+                            {
+                                return Err(error);
+                            }
+                            Err((error, rows)) => {
+                                let inner = self.inner.borrow();
+                                // Read back by the names the current schema
+                                // gives what the commit named by stored ones.
+                                let error = Error {
+                                    message: inner.by_current_names(&error.message),
+                                    ..error
+                                };
+                                let result = Err(wire_error(&error));
+                                inner.record_fate(node, tx, &result)?;
+                                inner.record_settled(node, tx, None)?;
+                                (result, rows, Vec::new())
+                            }
+                        },
+                    })
+                })();
+                self.inner.borrow().restore_writing(prior);
+                let (result, rows, echoable) = decided?;
                 let mut inner = self.inner.borrow_mut();
                 // An accepted commit's fate carries the seq it landed at (a
                 // resend gets the recorded one), so the replica learns it.

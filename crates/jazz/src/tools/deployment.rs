@@ -158,11 +158,9 @@ pub fn prepare_deployment(
         });
     }
     if !request.allow_dropping_history {
-        // Newest first.
         let deployed: Vec<&Schema> = stored
             .admitted_schema_hashes
             .iter()
-            .rev()
             .filter_map(|hash| schemas.get(&hash.0))
             .collect();
         let tables = drops_history(&deployed, &schemas[&request.target_schema_hash.0]);
@@ -280,19 +278,25 @@ pub fn prepare_deployment(
     })
 }
 
-/// The tables `target` keeps latest-only that the store keeps in full now,
-/// by name: switching them drops their past versions (SPEC 4 §4.9). The
-/// newest of `deployed` (newest first) that has a table says how the store
-/// keeps it. A table renamed in the same deploy is not caught.
+/// The tables `target` makes latest-only for the first time, by name: some
+/// of `deployed` keeps them in full and none latest-only yet, so writes
+/// under `target` start dropping past versions the store kept (SPEC 4
+/// §4.9). Once any deployed version made a table latest-only, publishing
+/// another such version, or rolling back to a full-history one, needs no
+/// confirmation. A table renamed in the same deploy is not caught.
 fn drops_history(deployed: &[&Schema], target: &Schema) -> Vec<TableName> {
     target
         .iter()
         .filter(|(name, table)| {
-            table.history == HistoryRetention::Latest
-                && deployed
+            let kept = |history| {
+                deployed
                     .iter()
-                    .find_map(|schema| schema.get(*name))
-                    .is_some_and(|before| before.history == HistoryRetention::Full)
+                    .filter_map(|schema| schema.get(*name))
+                    .any(|before| before.history == history)
+            };
+            table.history == HistoryRetention::Latest
+                && kept(HistoryRetention::Full)
+                && !kept(HistoryRetention::Latest)
         })
         .map(|(name, _)| name.clone())
         .collect()
