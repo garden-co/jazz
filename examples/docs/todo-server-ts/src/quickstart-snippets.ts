@@ -8,7 +8,7 @@ import permissions from "../permissions.js";
 // Your own auth decides who a request is (a session cookie, a header).
 declare function currentUser(request: Request): Promise<{ id: string } | null>;
 
-const jazz = await createJazz({
+const jazz = createJazz({
   app: schemaApp,
   permissions,
   store: sqlite({ path: "./data/jazz" }),

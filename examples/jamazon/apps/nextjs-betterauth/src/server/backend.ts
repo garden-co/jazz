@@ -38,7 +38,7 @@ export function backend(): Promise<Jazz> {
       // Signed out: a local-first guest shopper.
       return session ? { userId: session.user.id } : acceptLocalFirstAuth(request);
     },
-  }));
+  }).ready());
   // A failed start must not poison later requests.
   pending.catch(() => {
     if (globalThis.__jamazonJazz === pending) globalThis.__jamazonJazz = undefined;

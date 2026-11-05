@@ -31,7 +31,7 @@ let secondSession: { close(): Promise<void> } | undefined;
 async function secondBackend(): Promise<Db> {
   if (second) return second;
   const { createJazz, remote } = await import("jazz-tools/backend");
-  const jazz = await createJazz({
+  const jazz = createJazz({
     app,
     permissions,
     store: remote({ url: server.url, appId: server.appId, secret: server.adminSecret }),

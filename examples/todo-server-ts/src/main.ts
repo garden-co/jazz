@@ -141,7 +141,7 @@ export async function createServer(
   // the identity provider signed. Jazz gives each subject its own account.
   const authenticate = fromJWT({ jwksUrl, issuer: jwtIssuer, audience: jwtAudience ?? false });
 
-  const jazz = await createJazz({ app: schemaApp, permissions, store, authenticate });
+  const jazz = createJazz({ app: schemaApp, permissions, store, authenticate });
   // Preserve the programmatic administrative handle for embedding and tests.
   // Network routes below exclusively use request-scoped databases.
   const db = jazz.db;

@@ -129,7 +129,7 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
       permissions,
       store: remote({ url: core.url, appId: core.appId, secret: core.adminSecret }),
       authenticate: userFor,
-    });
+    }).ready();
   let jazz: Jazz;
   try {
     jazz = await boot(options.app, options.permissions);

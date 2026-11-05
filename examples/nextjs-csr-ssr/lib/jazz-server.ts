@@ -29,7 +29,7 @@ export function jazz(): Promise<Jazz> {
     // No sign-in: every browser is a guest, so let guests sync.
     authenticate: acceptLocalFirstAuth,
     store: process.env.JAZZ_IN_MEMORY === "1" ? memory() : sqlite({ path: ".jazz" }),
-  }));
+  }).ready());
   // A failed start must not poison every later request.
   pending.catch(() => {
     if (globalState.__jazzNextCsrSsr === pending) globalState.__jazzNextCsrSsr = undefined;

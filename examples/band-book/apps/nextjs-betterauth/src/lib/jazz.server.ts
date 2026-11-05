@@ -39,7 +39,7 @@ export function jazz(): Promise<Jazz> {
       const session = await auth.api.getSession({ headers: request.headers });
       return session ? { userId: session.user.id } : null;
     },
-  }));
+  }).ready());
   // A failed start must not poison every later request.
   pending.catch(() => {
     if (globalThis.__bandBookJazz === pending) globalThis.__bandBookJazz = undefined;
