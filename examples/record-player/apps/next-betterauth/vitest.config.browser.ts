@@ -38,7 +38,6 @@ export default defineConfig({
     include: ["react", "react-dom/client", "react/jsx-dev-runtime"],
   },
   define: {
-    "process.env.NEXT_PUBLIC_JAZZ_APP_ID": JSON.stringify("record-player-browser-tests"),
     "process.env.NEXT_PUBLIC_JAZZ_SERVER_URL": "undefined",
   },
   plugins: [wasm(), topLevelAwait(), react()],

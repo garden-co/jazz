@@ -390,7 +390,7 @@ fn an_upstream_of_another_app_is_refused() {
     pump(&bob, &[&client]);
     let mut rejected = None;
     while let Some(event) = stream.try_next_event() {
-        if let SubscriptionEvent::Rejected { reason } = event {
+        if let SubscriptionEvent::Rejected { reason, .. } = event {
             rejected = Some(reason);
         }
     }
@@ -535,7 +535,7 @@ fn remote_read_rejection(client: &Db, server: &Db) -> Option<String> {
     pump(server, &[client]);
     let mut rejected = None;
     while let Some(event) = stream.try_next_event() {
-        if let SubscriptionEvent::Rejected { reason } = event {
+        if let SubscriptionEvent::Rejected { reason, .. } = event {
             rejected = Some(reason);
         }
     }

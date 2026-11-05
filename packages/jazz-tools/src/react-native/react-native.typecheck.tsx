@@ -5,7 +5,6 @@ import {
   Db,
   JazzProvider,
   createDb,
-  createJazzClient,
   schema,
   useAll,
   useAllSuspense,
@@ -16,8 +15,8 @@ import {
   type AuthSecretStore,
   type DbConfig,
   type JazzClient,
-  type JazzClientConfig,
 } from "./index.js";
+import { openJazzClient, type OpenJazzClientConfig } from "./create-jazz-client.js";
 
 const app = schema.defineApp(
   {
@@ -44,7 +43,7 @@ const config: DbConfig = {
 // Persistent RN admission is intentionally a field on the ordinary public
 // client config. It does not expose JSI factories, byte encoders, or a
 // JavaScript-selectable durable path.
-const admittedConfig: JazzClientConfig = {
+const admittedConfig: OpenJazzClientConfig = {
   appId: "rn-native-relay-typecheck",
   nativeRelay: { capability: new Uint8Array(32) },
   account,
@@ -53,7 +52,7 @@ const admittedConfig: JazzClientConfig = {
 
 async function clientFactory(): Promise<JazzClient> {
   const db = await createDb(config);
-  const client = await createJazzClient(config);
+  const client = await openJazzClient(config);
   const rows = await db.all(app.todos);
   const one = await db.one(app.todos.where({ title: { eq: "milk" } }));
 
@@ -69,7 +68,6 @@ function Hooks({ children }: { children: ReactNode }) {
   const session = useSession();
   const auth = useLocalFirstAuth({
     key: "rn-auth-key",
-    appId: "rn-typecheck",
     store: authSecretStore,
   });
   const todos = useAll(app.todos);

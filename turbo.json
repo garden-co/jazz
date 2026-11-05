@@ -157,6 +157,7 @@
       ],
       "outputs": ["dist/**"],
       "passThroughEnv": [
+        "CI",
         "JAZZ_TEST_SEALED_TOOLS_DIST",
         "JAZZ_CORRECTNESS_ARTIFACT_RUN",
         "JAZZ_RN_TEST_BRIDGE",
@@ -171,6 +172,7 @@
         "package.json",
         "$TURBO_ROOT$/crates/jazz/**",
         "$TURBO_ROOT$/crates/jazz-text/**",
+        "$TURBO_ROOT$/crates/jazz-alpha59-dump/**",
         "$TURBO_ROOT$/crates/jazz-cli/**",
         "$TURBO_ROOT$/crates/jazz-compression/**",
         "$TURBO_ROOT$/vendor/ruzstd/**",
@@ -198,6 +200,7 @@
       "cache": false,
       "passThroughEnv": [
         "TMPDIR",
+        "CI",
         "JAZZ_TEST_SEALED_TOOLS_DIST",
         "JAZZ_CORRECTNESS_ARTIFACT_RUN",
         "JAZZ_RN_TEST_BRIDGE",

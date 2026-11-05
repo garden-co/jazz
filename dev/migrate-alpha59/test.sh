@@ -1,42 +1,47 @@
 #!/usr/bin/env bash
-# End-to-end check of the migration tool on a synthetic alpha.59 tenant:
-# build both binaries, produce a tenant through a real alpha.59 server,
-# export, import, verify, boot a real SQLite-engine server on the result,
-# and make sure verify catches a tampered cell.
+# End-to-end check of the alpha.59 migration on a synthetic tenant: build
+# the exporter (in an alpha.59 checkout) and this checkout's jazz-tools,
+# produce a tenant through a real alpha.59 server, export, import, verify,
+# boot this jazz-tools' server on the result, and make sure verify catches a
+# tampered cell.
 #
-#   dev/migrate-alpha59/test.sh            (clones .a59/ and .a60/ on first run)
-#   A59_DIR=... A60_DIR=... dev/migrate-alpha59/test.sh
+#   dev/migrate-alpha59/test.sh            (clones .a59/ on first run)
+#   A59_DIR=... dev/migrate-alpha59/test.sh
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 a59="${A59_DIR:-$here/.a59}"
-a60="${A60_DIR:-$here/.a60}"
+root="$(cd "$here/../.." && pwd)"
 t59="${A59_TARGET:-$a59/target}"
-t60="${A60_TARGET:-$a60/target}"
+t60="${A60_TARGET:-$root/target}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 app=0a590000-0000-4000-8000-000000000059
 
-"$here/prepare.sh" both
+"$here/prepare.sh"
 # `--bin` filters every listed package, so the tool crates build separately.
 (cd "$a59" && CARGO_TARGET_DIR="$t59" cargo build --release -p jazz-cli --bin jazz-tools &&
   CARGO_TARGET_DIR="$t59" cargo build --release -p migrate-alpha59-produce \
-    -p migrate-alpha59-export -p migrate-alpha59-dump)
-(cd "$a60" && CARGO_TARGET_DIR="$t60" cargo build --release -p jazz-cli --bin jazz-tools &&
-  CARGO_TARGET_DIR="$t60" cargo build --release -p migrate-alpha59-import)
+    -p jazz-alpha59-export -p jazz-alpha59-dump)
+(cd "$root" && CARGO_TARGET_DIR="$t60" cargo build --release -p jazz-cli --bin jazz-tools)
+import=("$t60/release/jazz-tools" migrate-alpha59)
 
 "$t59/release/a59-produce" --out "$work/a59" --server-bin "$t59/release/jazz-tools"
-"$t59/release/a59-export" --data-dir "$work/a59" --work "$work/copy" --out "$work/dump"
-"$t59/release/a59-export" --data-dir "$work/a59" --work "$work/copy2" --out "$work/census" --catalogue-only
+"$t59/release/jazz-alpha59-export" --data-dir "$work/a59" --work "$work/copy" --out "$work/dump"
+"$t59/release/jazz-alpha59-export" --data-dir "$work/a59" --work "$work/copy2" --out "$work/census" --catalogue-only
 "$t59/release/dump-census" "$work/census" | tee "$work/census.json"
 grep -q '"unsupported_by_sqlite":\[\]' "$work/census.json"
 
-(cd "$a60" && CARGO_TARGET_DIR="$t60" cargo test --release -p migrate-alpha59-import)
-"$t60/release/sqlite-import" --dump "$work/dump" --data-dir "$work/a60" --app-id "$app" |
+(cd "$root" && CARGO_TARGET_DIR="$t60" cargo test --release -p jazz-cli --lib migrate_alpha59)
+"${import[@]}" import --dump "$work/dump" --data-dir "$work/a60" --app-id "$app" |
   tee "$work/import.json"
 # user-1, user-2 and user-9 link as createJazz users; revoked user-3 does not.
 grep -q '"backend_identities_linked":3' "$work/import.json"
-"$t60/release/sqlite-import" verify --dump "$work/dump" --data-dir "$work/a60" --app-id "$app"
+# The row settled out of order keeps its update as the winner, with the
+# creation of the insert that settled after it.
+# (Repeated deletes need two alpha.59 clients; unit tests cover them.)
+grep -q '"inserts_with_their_own_creation":1' "$work/import.json"
+"${import[@]}" verify --dump "$work/dump" --data-dir "$work/a60" --app-id "$app"
 
 # Only the active schema came over, and rows written under v1 read under
 # v2's names: no `title` column, every document has a `heading`.
@@ -52,7 +57,7 @@ missing = c.execute(f'select count(*) from documents where "{heading}" is null')
 assert missing == 0, f"{missing} documents lost their title"
 PY
 
-# Boot check: the real alpha.60 server starts on the migrated dir and serves
+# Boot check: the server starts on the migrated dir and serves
 # the migrated permissions.
 cp -R "$work/a60" "$work/boot"
 port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
@@ -81,7 +86,7 @@ col = next(r[1] for r in c.execute("pragma table_info(projects)") if r[1].split(
 c.execute(f'update projects set "{col}" = \'tampered\' where rowid = (select min(rowid) from projects)')
 c.commit()
 PY
-if "$t60/release/sqlite-import" verify --dump "$work/dump" --data-dir "$work/tampered" --app-id "$app"; then
+if "${import[@]}" verify --dump "$work/dump" --data-dir "$work/tampered" --app-id "$app"; then
   echo "verify missed a tampered cell" >&2
   exit 1
 fi

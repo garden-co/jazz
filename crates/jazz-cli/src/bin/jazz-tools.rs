@@ -88,6 +88,14 @@ struct Cli {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
+    /// Import an alpha.59 server data dir into a new one, from the dump that
+    /// `jazz-alpha59-export` writes (`import`), and check the result
+    /// (`verify`). Run `jazz-tools migrate-alpha59` for its usage.
+    #[command(name = "migrate-alpha59")]
+    MigrateAlpha59 {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Create a new resource
     Create {
         #[command(subcommand)]
@@ -301,10 +309,10 @@ fn main() {
 }
 
 async fn run() {
-    // Initialize tracing with layered subscriber
-    init_tracing();
-
     let cli = Cli::parse();
+    // migrate-alpha59 prints its JSON summary on stdout, so its logs go to
+    // stderr.
+    init_tracing(matches!(cli.command, Commands::MigrateAlpha59 { .. }));
     if let Err(error) = validate_server_cli_options(&cli.command) {
         eprintln!("Server error: {error}");
         shutdown_tracing();
@@ -312,6 +320,11 @@ async fn run() {
     }
 
     match cli.command {
+        Commands::MigrateAlpha59 { args } => {
+            let code = jazz_cli::migrate_alpha59::main(args).await;
+            shutdown_tracing();
+            std::process::exit(code);
+        }
         Commands::Create { resource } => match resource {
             CreateResource::App { name } => {
                 let app_id = name.map_or_else(AppId::random, |name| AppId::from_name(&name));
@@ -375,59 +388,26 @@ async fn run() {
                 }),
                 ..Default::default()
             };
-            let blobs = match blobs.as_str() {
-                "sqlite" => jazz_server::BlobStore::Sqlite,
-                "s3" => {
-                    let options = jazz_server::s3::S3Options::from_env(
-                        s3_bucket,
-                        s3_region,
-                        s3_endpoint,
-                        s3_prefix,
-                    )
-                    .and_then(|mut options| {
-                        options.environment = blobs_environment.clone();
-                        if s3_role_from_workload {
-                            let jazz_server::s3::S3Credentials::WebIdentity { token, .. } =
-                                &mut options.credentials
-                            else {
-                                return Err("--s3-role-from-workload needs AWS_ROLE_ARN".to_owned());
-                            };
-                            *token = jazz_server::s3::WebIdentityToken::Workload;
-                        }
-                        Ok(options)
-                    });
-                    match options {
-                        Ok(options) => jazz_server::BlobStore::S3(options),
-                        Err(error) => {
-                            eprintln!("Error: {error}");
-                            std::process::exit(1);
-                        }
-                    }
+            let blobs = match (jazz_server::BlobOptions {
+                kind: blobs,
+                dir: blobs_dir,
+                s3_bucket,
+                s3_region,
+                s3_endpoint,
+                s3_prefix,
+                s3_role_from_workload,
+                vercel_blob_store_id,
+                vercel_blob_prefix,
+                vercel_blob_token_from_workload,
+                environment: blobs_environment,
+            })
+            .resolve()
+            {
+                Ok(blobs) => blobs,
+                Err(error) => {
+                    eprintln!("Error: {error}");
+                    std::process::exit(1);
                 }
-                "vercel-blob" => {
-                    let options = jazz_server::vercel_blob::VercelBlobOptions::from_env(
-                        vercel_blob_store_id,
-                        vercel_blob_prefix,
-                        vercel_blob_token_from_workload.then_some(
-                            jazz_server::vercel_blob::VercelBlobCredentials::Oidc(
-                                jazz_server::s3::WebIdentityToken::Workload,
-                            ),
-                        ),
-                    );
-                    match options {
-                        Ok(mut options) => {
-                            options.environment = blobs_environment;
-                            jazz_server::BlobStore::VercelBlob(options)
-                        }
-                        Err(error) => {
-                            eprintln!("Error: {error}");
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                _ => jazz_server::BlobStore::Files {
-                    dir: blobs_dir.map(Into::into),
-                },
             };
             if let Err(e) = jazz_server::run(
                 &app_id,
@@ -534,11 +514,17 @@ static OTEL_LOGGER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLog
 static OTEL_METER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::metrics::SdkMeterProvider> =
     std::sync::OnceLock::new();
 
-fn init_tracing() {
+fn init_tracing(to_stderr: bool) {
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let fmt_layer = tracing_subscriber::fmt::layer();
+    let writer = if to_stderr {
+        BoxMakeWriter::new(std::io::stderr)
+    } else {
+        BoxMakeWriter::new(std::io::stdout)
+    };
+    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(writer);
 
     #[cfg(feature = "otel")]
     {

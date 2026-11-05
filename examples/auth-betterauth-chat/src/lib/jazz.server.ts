@@ -8,7 +8,7 @@ import { createRequire as createRequireFromModule } from "node:module";
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
 const nodeRequire = createRequire(import.meta.url);
-const { createJazz, memory, sqlite } = nodeRequire(
+const { acceptLocalFirstAuth, createJazz, memory, sqlite } = nodeRequire(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
@@ -23,21 +23,22 @@ export function jazz(): Promise<Jazz> {
     permissions,
     store:
       process.env.NODE_ENV === "test"
-        ? memory({ appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID! })
-        : sqlite({ path: ".jazz", appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID! }),
+        ? memory({ appId: process.env.JAZZ_APP_ID! })
+        : sqlite({ path: ".jazz", appId: process.env.JAZZ_APP_ID! }),
     // Better Auth's session cookie decides who the user is; its `role`
     // becomes the claim the chat permissions check.
     authenticate: async (request) => {
       const { auth } = await import("./auth");
       const session = await (await auth).api.getSession({ headers: request.headers });
-      if (!session) return null;
+      // Signed out: a local-first guest, until sign-up links its account.
+      if (!session) return acceptLocalFirstAuth(request);
       const role = (session.user as { role?: string | string[] | null }).role;
       return {
         userId: session.user.id,
         claims: { role: Array.isArray(role) ? role[0] : (role ?? "") },
       };
     },
-  }));
+  }).ready());
   // A failed start must not poison every later request.
   pending.catch(() => {
     if (globalThis.__authBetterAuthChatJazz === pending)

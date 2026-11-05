@@ -1454,7 +1454,30 @@ function rejectIncompleteDependencies(
   }
 }
 
-function reserveRowId(): string {
+/**
+ * @internal The row an insert or restore of `data` as row `id` writes, as
+ * the table's schema alone decides it: for writes made before a client
+ * exists (`createJazz`'s `db` while its store opens).
+ */
+export function previewWrittenRow<T, Init>(
+  table: TableProxy<T, Init>,
+  operation: "Insert" | "Restore",
+  id: string,
+  data: Init,
+): T {
+  assertWritableTable(table);
+  const transformedData = table._columnTransforms
+    ? transformInputColumns(table, data, { id }, true)
+    : (data as Record<string, unknown>);
+  return immediateWriteRow(
+    table,
+    id,
+    toWriteRecordForOperation(operation, transformedData, table._schema, table._table),
+  );
+}
+
+/** @internal A fresh row id, as an insert without one would get. */
+export function reserveRowId(): string {
   const hex = createOpenTransactionId();
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
@@ -4395,7 +4418,7 @@ async function openDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
 export function assertNoClientBackendSecret(config: object): void {
   if (Object.hasOwn(config, "backendSecret")) {
     throw new Error(
-      "DbConfig does not accept backendSecret. Use createJazzContext() from jazz-tools/backend on a trusted server instead.",
+      "DbConfig does not accept backendSecret. Run Jazz in your backend with createJazz() from jazz-tools/backend instead.",
     );
   }
 }

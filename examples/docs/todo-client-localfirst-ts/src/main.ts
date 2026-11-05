@@ -1,6 +1,6 @@
 import { createDb, type DbConfig, type Db } from "jazz-tools";
 import { sessionConfig } from "./account.js";
-import { createJazzSession } from "jazz-tools/client";
+import { createJazzClient } from "jazz-tools/client";
 import { authSessionExamples } from "./auth-session-snippets.js";
 import { app, type Todo } from "../schema.js";
 
@@ -55,7 +55,7 @@ function orderTodosWithDepth(todos: Todo[]): { todo: Todo; depth: number }[] {
 
 // #region context-setup-ts-client
 async function openLocalFirst(config?: Partial<DbConfig>) {
-  const session = await createJazzSession(sessionConfig(config));
+  const session = await createJazzClient(sessionConfig(config));
   // Read the current client from session.getSnapshot(); close the session on teardown.
   return session;
 }

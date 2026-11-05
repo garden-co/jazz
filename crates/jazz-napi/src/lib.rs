@@ -38,6 +38,7 @@
 //! callback that frees through mimalloc instead.
 
 mod e2ee_crypto;
+mod serve_core;
 mod text;
 
 #[cfg(feature = "rn-test-bridge")]

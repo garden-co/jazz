@@ -65,7 +65,7 @@ function setCookie(res: Response, sealed: string) {
 // #region workos-jazz-server
 // Jazz runs inside this server; `authenticate` reads the AuthKit cookie, and
 // the organization role becomes the claim the chat permissions check.
-const jazz = await createJazz({
+const jazz = createJazz({
   app: schema,
   permissions,
   store: sqlite({ path: ".jazz", appId: APP_ID }),

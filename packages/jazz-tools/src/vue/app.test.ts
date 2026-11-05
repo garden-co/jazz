@@ -17,7 +17,7 @@ import { JazzProvider, useJazzAuth, type UseJazzAuth } from "./app.js";
 import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 import type { JazzClient } from "./create-jazz-client.js";
 const mocks = vi.hoisted(() => ({ factory: vi.fn() }));
-vi.mock("../session/create-jazz-session.js", () => ({ createJazzSession: mocks.factory }));
+vi.mock("../session/create-jazz-session.js", () => ({ createJazzClient: mocks.factory }));
 vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
 const flush = async () => {
   for (let i = 0; i < 20; i++) {
@@ -57,7 +57,7 @@ async function fixture(fail: false | "unknown" | "graceful" = false) {
 describe("Vue ergonomic app", () => {
   it("is inert in SSR and supplies default loading", async () => {
     mocks.factory.mockReset();
-    const app = createSSRApp({ render: () => h(JazzProvider, { appId: "test" }) });
+    const app = createSSRApp({ render: () => h(JazzProvider, { scope: "test" }) });
     expect(await renderToString(app)).toContain("Loading Jazz");
     expect(mocks.factory).not.toHaveBeenCalled();
   });
@@ -72,7 +72,7 @@ describe("Vue ergonomic app", () => {
       render: () =>
         h(
           JazzProvider,
-          { appId: "test", autoAttachDevTools: false },
+          { scope: "test", autoAttachDevTools: false },
           { default: () => h("p", "active") },
         ),
     });
@@ -94,7 +94,7 @@ describe("Vue ergonomic app", () => {
     const app = createApp({
       render: () =>
         h(JazzProvider, {
-          appId: `test-${version.value}`,
+          scope: `test-${version.value}`,
           initial: "signed-out",
           autoAttachDevTools: false,
         }),
@@ -104,7 +104,7 @@ describe("Vue ergonomic app", () => {
     version.value++;
     await flush();
     expect(mocks.factory).toHaveBeenCalledTimes(1);
-    expect(mocks.factory.mock.calls[0][0].appId).toBe("test-0");
+    expect(mocks.factory.mock.calls[0][0].scope).toBe("test-0");
     expect(mocks.factory.mock.calls[0][0].initial).toBe("signed-out");
     app.unmount();
     await flush();
@@ -128,7 +128,7 @@ describe("Vue ergonomic app", () => {
         render: () =>
           h(
             JazzProvider,
-            { appId: "test", autoAttachDevTools: false },
+            { scope: "test", autoAttachDevTools: false },
             { default: () => h(Child), signedOut: () => h("p", "signed out") },
           ),
       });

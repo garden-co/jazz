@@ -1,4 +1,4 @@
-//! `a59-export`: read one alpha.59 server data dir and write a dump.
+//! `jazz-alpha59-export`: read one alpha.59 server data dir and write a dump.
 //!
 //! It opens a private copy of the data dir (never the original: opening a
 //! RocksDB root can run recovery, which writes) and reads it with alpha.59's
@@ -15,7 +15,7 @@ use jazz::node::NodeState;
 use jazz::node::migrate_export::ExportedVersion;
 use jazz::schema::JazzSchema;
 use jazz::tx::{DeletionEvent, Fate};
-use migrate_alpha59_dump as dump;
+use jazz_alpha59_dump as dump;
 
 /// The node id every alpha.59 server shell runs as.
 const SERVER_NODE: [u8; 16] = [0x5e; 16];
@@ -63,9 +63,9 @@ fn main() -> ExitCode {
     let args = match parse_args() {
         Ok(args) => args,
         Err(error) => {
-            eprintln!("a59-export: {error}");
+            eprintln!("jazz-alpha59-export: {error}");
             eprintln!(
-                "usage: a59-export --data-dir <alpha.59 data dir> --work <empty dir> --out <dump> [--catalogue-only]"
+                "usage: jazz-alpha59-export --data-dir <alpha.59 data dir> --work <empty dir> --out <dump> [--catalogue-only]"
             );
             return ExitCode::from(2);
         }
@@ -85,7 +85,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("a59-export: {error}");
+            eprintln!("jazz-alpha59-export: {error}");
             ExitCode::FAILURE
         }
     }
@@ -229,20 +229,19 @@ async fn export_versions<W: std::io::Write>(
     });
     // What alpha.59 reads as each row's current state, so verify can check
     // the import against alpha.59 itself rather than against its own replay.
-    let rows: Vec<_> = versions
-        .iter()
-        .map(|version| (version.schema, version.table.clone(), version.row))
-        .collect();
     let tx_ref = |tx: jazz::tx::TxId| dump::TxRef {
         node: *tx.node.as_bytes(),
         time: tx.time.0,
     };
-    for (row, content, deletion) in node.migrate_export_current(&rows).await.map_err(err)? {
+    for current in node.migrate_export_current(&versions).await.map_err(err)? {
         writer
             .write(&dump::Record::Current(dump::Current {
-                row: *row.0.as_bytes(),
-                content: content.map(tx_ref),
-                deletion: deletion.map(tx_ref),
+                schema: *current.schema.0.as_bytes(),
+                table: current.table,
+                row: *current.row.0.as_bytes(),
+                content: current.content.map(tx_ref),
+                deletion: current.deletion.map(tx_ref),
+                created: current.created.map(|(by, at)| (convert_author(&by), at.0)),
             }))
             .map_err(err)?;
     }
@@ -331,6 +330,14 @@ fn convert_version(version: ExportedVersion) -> Result<dump::Version, String> {
         row: *version.row.0.as_bytes(),
         tx_node: *version.tx.node.as_bytes(),
         tx_time: version.tx.time.0,
+        parents: version
+            .parents
+            .iter()
+            .map(|tx| dump::TxRef {
+                node: *tx.node.as_bytes(),
+                time: tx.time.0,
+            })
+            .collect(),
         global_time: version.global_time.map(|time| time.0),
         fate: match &version.fate {
             Fate::Accepted => "accepted".to_owned(),

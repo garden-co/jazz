@@ -178,7 +178,7 @@ export * from "./accounts/exports.js";
 
 export { accountRegistryUrl } from "./accounts/context.js";
 
-export { createJazzSession, type JazzSessionConfig } from "./session/create-jazz-session.js";
+export { createJazzClient, type JazzClientConfig } from "./session/create-jazz-session.js";
 export type {
   JazzSession,
   JazzSessionActions,

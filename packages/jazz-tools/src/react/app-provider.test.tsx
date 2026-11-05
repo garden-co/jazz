@@ -5,7 +5,7 @@ import { createJazzSessionOwner } from "../session/state.js";
 import { makeFakeAccount, makeFakeClient } from "../react-core/test-utils.js";
 import { useJazzAuth } from "../react-core/app.js";
 const host = vi.hoisted(() => ({ create: vi.fn() }));
-vi.mock("../session/create-jazz-session.js", () => ({ createJazzSession: host.create }));
+vi.mock("../session/create-jazz-session.js", () => ({ createJazzClient: host.create }));
 import { JazzProvider } from "./provider.js";
 afterEach(() => {
   cleanup();
@@ -14,7 +14,7 @@ afterEach(() => {
 it("starts signed out by default and supplies built-in loading and safe retry UI", async () => {
   host.create.mockRejectedValue(new Error("unavailable"));
   const view = render(
-    <JazzProvider appId="app" serverUrl="https://sync.example.test" autoAttachDevTools={false}>
+    <JazzProvider scope="app" serverUrl="https://sync.example.test" autoAttachDevTools={false}>
       <p>data</p>
     </JazzProvider>,
   );
@@ -54,7 +54,7 @@ it("provides logout in the data tree without an application auth context", async
   }
   const view = render(
     <JazzProvider
-      appId="app"
+      scope="app"
       serverUrl="https://sync.example.test"
       autoAttachDevTools={false}
       signedOut={<SignedOut />}
@@ -114,7 +114,7 @@ it("starts signed out with `initial`, then follows the backend's user on reauthe
   }
   const view = render(
     <JazzProvider
-      appId="app"
+      scope="app"
       serverUrl="https://sync.example.test"
       initial="signed-out"
       autoAttachDevTools={false}
@@ -131,7 +131,7 @@ it("starts signed out with `initial`, then follows the backend's user on reauthe
   });
   await waitFor(() => expect(view.getByText("private data")).toBeDefined());
   expect(cloned).toEqual([
-    { appId: "app", serverUrl: "https://sync.example.test", initial: "signed-out" },
+    { scope: "app", serverUrl: "https://sync.example.test", initial: "signed-out" },
   ]);
   backend.signedIn = false;
   await act(async () => {
