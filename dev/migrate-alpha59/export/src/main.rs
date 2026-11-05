@@ -188,9 +188,8 @@ fn export_runtime_catalogue<W: std::io::Write>(
                 ops_json: table
                     .ops
                     .iter()
-                    .map(serde_json::to_string)
-                    .collect::<Result<_, _>>()
-                    .map_err(err)?,
+                    .map(lens_op_json)
+                    .collect::<Result<_, _>>()?,
             });
         }
         writer
@@ -374,6 +373,23 @@ fn convert_author(author: &AuthorSubject) -> dump::Author {
             subject,
         },
     }
+}
+
+/// A lens op as alpha.59's serde JSON, with its default written as a
+/// `dump::Value`: alpha.59's own JSON of a value (a UUID as a string, say)
+/// is not the dump's.
+fn lens_op_json(op: &jazz::protocol::LensOp) -> Result<String, String> {
+    let mut json = serde_json::to_value(op).map_err(err)?;
+    for (kind, field) in [
+        ("AddColumn", "default"),
+        ("DropColumn", "backwards_default"),
+    ] {
+        if let Some(default) = json.get_mut(kind).and_then(|body| body.get_mut(field)) {
+            let value: Value = serde_json::from_value(default.take()).map_err(err)?;
+            *default = serde_json::to_value(convert_value(&value)?).map_err(err)?;
+        }
+    }
+    serde_json::to_string(&json).map_err(err)
 }
 
 fn convert_value(value: &Value) -> Result<dump::Value, String> {

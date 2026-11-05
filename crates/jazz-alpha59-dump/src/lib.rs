@@ -121,7 +121,8 @@ pub struct Lens {
 pub struct TableLens {
     pub source_table: String,
     pub target_table: String,
-    /// Each op as alpha.59's serde JSON of `protocol::LensOp`.
+    /// Each op as alpha.59's serde JSON of `protocol::LensOp`, except that
+    /// its default (`default`, `backwards_default`) is a [`Value`].
     pub ops_json: Vec<String>,
 }
 

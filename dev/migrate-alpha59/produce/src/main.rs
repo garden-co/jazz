@@ -69,7 +69,9 @@ fn documents(title: &str, pinned: bool) -> TableSchemaBuilder {
         .nullable_column("blob", ColumnType::Bytea)
         .nullable_column("rank", ColumnType::Integer);
     if pinned {
-        table.column("pinned", ColumnType::Boolean)
+        table
+            .column("pinned", ColumnType::Boolean)
+            .column("owner", ColumnType::Uuid)
     } else {
         table
     }
@@ -469,6 +471,7 @@ fn v2_rows(db: &Db) {
             ("blob", Value::Nullable(None)),
             ("rank", Value::Nullable(Some(Box::new(Value::I32(-1))))),
             ("pinned", Value::Bool(false)),
+            ("owner", Value::Uuid(row(1, 4).0)),
         ],
     );
     // Clear a nullable cell: the import must write the null, not keep 5.
@@ -510,6 +513,7 @@ fn v2_rows(db: &Db) {
             ("blob", Value::Nullable(None)),
             ("rank", Value::Nullable(None)),
             ("pinned", Value::Bool(false)),
+            ("owner", Value::Uuid(row(1, 4).0)),
         ],
     );
     update(
@@ -641,7 +645,7 @@ fn main() {
     block_on(db.close()).expect("close");
     drop(db);
 
-    // v2: documents.title -> heading, and a defaulted `pinned`.
+    // v2: documents.title -> heading, and a defaulted `pinned` and `owner`.
     let server = Server::start(&bin, &out);
     publish_schema(&server, &v2);
     server.admin(
@@ -660,6 +664,16 @@ fn main() {
                             "column": "pinned",
                             "column_type": ColumnType::Boolean,
                             "value": jazz::tools::public_schema::Value::Boolean(false),
+                        },
+                        // alpha.59's lens op JSON spells a UUID default
+                        // as a string, which the dump's values are not.
+                        {
+                            "type": "introduce",
+                            "column": "owner",
+                            "column_type": ColumnType::Uuid,
+                            "value": jazz::tools::public_schema::Value::Uuid(
+                                jazz::object::ObjectId::from_uuid(uuid::Uuid::nil()),
+                            ),
                         },
                     ],
                 },

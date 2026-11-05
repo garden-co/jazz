@@ -85,12 +85,18 @@ ids, table and column names only, never values or authors.
 Branched rows, schemas published but never activated, rows with no lens
 path to the active schema, TransformColumn lens ops (no shipped alpha.59
 tool creates them; `dump-census` reports them under `unsupported_by_sqlite`),
-versions not yet settled by the authority (`pending`), content written while
-a row was deleted (alpha.59 keeps it under the deletion; the current engine
-cannot), and transaction metadata, which the current engine does not have:
+versions not yet settled by the authority (`pending`), and transaction
+metadata, which the current engine does not have:
 `--drop-transaction-metadata` imports those versions without it and counts
 them. Verify does not yet compare history depth per row or permissions as
 seen by each account.
+
+Content written while a row was deleted is kept under the deletion by
+alpha.59 and shown once the row is restored. The current engine keeps a
+deleted row's content fixed, so the import writes that content with the
+row's next restore (`contents_written_while_deleted_restored`). If the row
+stays deleted, its content stays as it was when deleted, and the later
+content is dropped (`contents_written_while_deleted_dropped`).
 
 ## Layout
 

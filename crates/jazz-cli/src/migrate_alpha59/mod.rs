@@ -347,6 +347,8 @@ async fn run(args: &Args) -> Result<Json, String> {
         "repeated_deletions_coalesced": rows.coalesced,
         "inserts_with_their_own_creation": rows.created_apart,
         "versions_settled_after_a_newer_one": rows.superseded,
+        "contents_written_while_deleted_restored": rows.hidden_restored,
+        "contents_written_while_deleted_dropped": rows.hidden_dropped,
         "transaction_metadata_dropped": rows.metadata_dropped,
         "shutdown": format!("{phase:?}"),
     }))
@@ -519,6 +521,11 @@ struct RowImport {
     /// clients deleting one row) replaces the one it repeats rather than
     /// being written onto a row already deleted.
     pending: HashMap<RowKey, Write>,
+    /// Per row, its latest content written while it was deleted. alpha.59
+    /// keeps it under the deletion and shows it once the row is restored;
+    /// the SQLite engine keeps a deleted row's content fixed, so it goes
+    /// with the next restore, and is dropped if the row stays deleted.
+    hidden: HashMap<RowKey, Write>,
     /// Per row, its creation as alpha.59 reads it.
     creations: HashMap<RowKey, (dump::Author, u64)>,
     /// Per row and layer (content, deletion), the write time and node of
@@ -531,6 +538,8 @@ struct RowImport {
     coalesced: u64,
     created_apart: u64,
     superseded: u64,
+    hidden_restored: u64,
+    hidden_dropped: u64,
 }
 
 impl RowImport {
@@ -563,7 +572,7 @@ impl RowImport {
 
     /// Queue `pending`'s write for `key` when it changes the stored row.
     fn release(&mut self, key: &RowKey, writes: &mut Vec<Write>) {
-        let Some(write) = self.pending.remove(key) else {
+        let Some(mut write) = self.pending.remove(key) else {
             return;
         };
         let deleting = matches!(write.op, Op::Delete);
@@ -576,6 +585,11 @@ impl RowImport {
             self.stored_deleted.insert(key.clone());
         } else {
             self.stored_deleted.remove(key);
+            if let Some(content) = self.hidden.remove(key) {
+                self.hidden_restored += 1;
+                write.schema = content.schema;
+                write.cells = content.cells;
+            }
         }
         writes.push(write);
     }
@@ -601,6 +615,10 @@ impl RowImport {
         for key in keys {
             self.release(&key, &mut writes);
         }
+        // Rows still deleted: the new store keeps their content as it was
+        // when they were deleted.
+        self.hidden_dropped += self.hidden.len() as u64;
+        self.hidden.clear();
         writes
     }
 
@@ -701,7 +719,8 @@ impl RowImport {
             };
             // alpha.59 keeps content and deletion apart: content written
             // while a row is deleted stays under the deletion. The SQLite
-            // engine keeps a deleted row's content fixed until a restore.
+            // engine keeps a deleted row's content fixed until a restore,
+            // which can bring new content.
             match version.deletion {
                 Some(deletion) => {
                     let (op, deleted) = match deletion {
@@ -725,11 +744,10 @@ impl RowImport {
                     self.pending.insert(key, event);
                 }
                 None if self.deleted.contains(&key) => {
-                    return Err(format!(
-                        "row {} of {} has content written while it was deleted: not supported yet",
-                        uuid_string(version.row),
-                        version.table
-                    ));
+                    let cells = full_cells(&schema, &version.table, version.cells.clone())?;
+                    let content =
+                        write(Op::Update, &version.updated_by, version.updated_at, cells)?;
+                    self.hidden.insert(key, content);
                 }
                 None => {
                     self.release(&key, &mut writes);
@@ -831,7 +849,7 @@ impl RowImport {
                         Op::Restore => block_on(view.restore(
                             table,
                             row,
-                            None,
+                            (!write.cells.is_empty()).then_some(write.cells),
                             RestoreOptions {
                                 identity,
                                 updated_at_ms: at,
@@ -1128,21 +1146,49 @@ mod tests {
     }
 
     #[test]
-    fn content_written_while_deleted_is_refused() {
+    fn content_written_while_deleted_goes_with_the_restore() {
+        let deleted = Some(dump::Deletion::Deleted);
+        let restored = Some(dump::Deletion::Restored);
+        let versions = vec![
+            version(1, "creator", None),
+            version(2, "a", deleted),
+            version(3, "b", None),
+            version(4, "c", None),
+            version(5, "d", restored),
+        ];
+        let (rows, writes) = replay(versions.clone());
+        assert_eq!(
+            writes,
+            [
+                op("insert", "creator", 1),
+                op("delete", "a", 2),
+                op("restore", "d", 5)
+            ]
+        );
+        assert_eq!((rows.hidden_restored, rows.hidden_dropped), (1, 0));
+        // The restore carries the last content written under the deletion.
         let mut rows = replay(vec![]).0;
         let views = views();
-        let error = rows
-            .plan(
-                &views,
-                vec![
-                    version(1, "creator", None),
-                    version(2, "a", Some(dump::Deletion::Deleted)),
-                    version(3, "b", None),
-                ],
-            )
-            .err()
-            .expect("refused");
-        assert!(error.contains("written while it was deleted"), "{error}");
+        let mut planned = rows.plan(&views, versions).unwrap();
+        planned.extend(rows.plan_flush());
+        let restore = planned.last().expect("a restore");
+        assert!(matches!(restore.op, Op::Restore));
+        assert_eq!(
+            restore.cells.get("body"),
+            Some(&convert_value(dump::Value::String("v4".to_owned())))
+        );
+    }
+
+    #[test]
+    fn content_written_under_a_lasting_deletion_is_dropped() {
+        let deleted = Some(dump::Deletion::Deleted);
+        let (rows, writes) = replay(vec![
+            version(1, "creator", None),
+            version(2, "a", deleted),
+            version(3, "b", None),
+        ]);
+        assert_eq!(writes, [op("insert", "creator", 1), op("delete", "a", 2)]);
+        assert_eq!((rows.hidden_restored, rows.hidden_dropped), (0, 1));
     }
 
     #[test]

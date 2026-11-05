@@ -51,10 +51,37 @@ struct DeletionRuns {
     runs: HashMap<RowKey, DeletionRun>,
     /// Whether the row was deleted when its last run was closed by content.
     stored_deleted: HashMap<RowKey, bool>,
+    /// Per row, the content the new store holds, with its position in
+    /// commit order. Content written while a row is deleted is held apart
+    /// in `hidden`: the import writes it with the next restore, and drops it
+    /// if the row stays deleted.
+    stored: HashMap<RowKey, (u64, dump::Version)>,
+    hidden: HashMap<RowKey, (u64, dump::Version)>,
 }
 
 impl DeletionRuns {
-    /// Records a version that won its layer of the row.
+    /// Records content that won its layer of the row.
+    fn accept_content(&mut self, key: &RowKey, position: u64, content: dump::Version) {
+        let held = if self.deleted(key) {
+            &mut self.hidden
+        } else {
+            &mut self.stored
+        };
+        held.insert(key.clone(), (position, content));
+        self.accept(key, None);
+    }
+
+    /// Records a deletion event that won its layer of the row.
+    fn accept_event(&mut self, key: &RowKey, event: dump::Deletion) {
+        if event == dump::Deletion::Restored
+            && self.deleted(key)
+            && let Some(content) = self.hidden.remove(key)
+        {
+            self.stored.insert(key.clone(), content);
+        }
+        self.accept(key, Some(event));
+    }
+
     fn accept(&mut self, key: &RowKey, deletion: Option<dump::Deletion>) {
         match deletion {
             None => {
@@ -79,6 +106,14 @@ impl DeletionRuns {
                     );
                 }
             }
+        }
+    }
+
+    /// Whether the row is deleted after the events so far.
+    fn deleted(&self, key: &RowKey) -> bool {
+        match self.runs.get(key) {
+            Some(run) => run.deleting,
+            None => self.stored_deleted.get(key).copied().unwrap_or(false),
         }
     }
 
@@ -193,7 +228,23 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
                     )
                 {
                     layer_winners.insert((key.clone(), version.deletion.is_some()), tx);
-                    runs.accept(&key, version.deletion);
+                    match version.deletion {
+                        None => {
+                            let kept = match to_head.translate(version.clone())? {
+                                Translated::Kept(kept) => kept,
+                                Translated::TableGone => {
+                                    return Err(format!(
+                                        "{} row {}: its table is in the active schema, but its \
+                                         version translates to none",
+                                        key.0,
+                                        uuid_string(key.1)
+                                    ));
+                                }
+                            };
+                            runs.accept_content(&key, position, kept);
+                        }
+                        Some(event) => runs.accept_event(&key, event),
+                    }
                 }
                 let Some(current) = currents.get(&key) else {
                     continue;
@@ -265,6 +316,14 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
                 (event.updated_by.clone(), event.updated_at)
             }
             _ => (content.updated_by.clone(), content.updated_at),
+        };
+        // Content written under a deletion that lasts: the new store keeps
+        // the content from before it, and the deletion as the last write.
+        let (content, updated_by, updated_at) = match (runs.stored.remove(key), &deletion) {
+            (Some((at, kept)), Some((_, event))) if at != content_at => {
+                (kept, event.updated_by.clone(), event.updated_at)
+            }
+            _ => (content, updated_by, updated_at),
         };
         rows.insert(
             key.clone(),
@@ -548,12 +607,46 @@ mod tests {
         ("notes".to_owned(), [1; 16])
     }
 
-    fn replay(events: &[Option<dump::Deletion>]) -> bool {
-        let mut runs = DeletionRuns::default();
-        for event in events {
-            runs.accept(&key(), *event);
+    fn content(n: u8) -> dump::Version {
+        dump::Version {
+            table: "notes".to_owned(),
+            schema: [7; 16],
+            branch: Vec::new(),
+            row: [1; 16],
+            tx_node: [9; 16],
+            tx_time: u64::from(n),
+            parents: Vec::new(),
+            global_time: Some(u64::from(n)),
+            fate: "accepted".to_owned(),
+            made_by: dump::Author::System,
+            created_by: dump::Author::System,
+            created_at: 1,
+            updated_by: dump::Author::System,
+            updated_at: u64::from(n),
+            deletion: None,
+            cells: BTreeMap::new(),
+            user_metadata_json: None,
         }
-        runs.live_restore(&key())
+    }
+
+    fn runs(events: &[Option<dump::Deletion>]) -> DeletionRuns {
+        let mut runs = DeletionRuns::default();
+        for (position, event) in events.iter().enumerate() {
+            match event {
+                None => runs.accept_content(&key(), position as u64, content(position as u8)),
+                Some(event) => runs.accept_event(&key(), *event),
+            }
+        }
+        runs
+    }
+
+    fn replay(events: &[Option<dump::Deletion>]) -> bool {
+        runs(events).live_restore(&key())
+    }
+
+    /// The position of the content the new store holds.
+    fn stored(events: &[Option<dump::Deletion>]) -> Option<u64> {
+        runs(events).stored.get(&key()).map(|(at, _)| *at)
     }
 
     #[test]
@@ -580,5 +673,23 @@ mod tests {
             None,
             Some(Restored)
         ]));
+    }
+
+    #[test]
+    fn content_written_while_deleted_is_stored_only_with_a_restore() {
+        use dump::Deletion::{Deleted, Restored};
+        assert_eq!(stored(&[None, None]), Some(1));
+        // Written under the deletion, then restored: the restore brings it.
+        assert_eq!(
+            stored(&[None, Some(Deleted), None, None, Some(Restored)]),
+            Some(3)
+        );
+        assert_eq!(
+            stored(&[None, Some(Deleted), None, Some(Restored), Some(Deleted)]),
+            Some(2)
+        );
+        // The row stays deleted: the store keeps the content before it.
+        assert_eq!(stored(&[None, Some(Deleted), None]), Some(0));
+        assert_eq!(stored(&[None, Some(Deleted), None, Some(Deleted)]), Some(0));
     }
 }
