@@ -94,6 +94,12 @@ impl LargeValueFormat {
 }
 /// Logical scalar size above which ordinary writes use indirect storage.
 pub const INLINE_VALUE_MAX_BYTES: usize = 64 * 1024;
+/// The inline threshold of a text-merge (`text`, `markdown`, `html`)
+/// column. Editors write such a column on every keystroke, and a chunked
+/// value takes an edit as a few bytes in its epoch, where an inline one is
+/// stored again whole; a lower threshold keeps typing into all but short
+/// documents cheap on the wire and in history.
+pub const TEXT_MERGE_INLINE_MAX_BYTES: usize = 4 * 1024;
 /// Frozen V1 content-defined leaf profile. These values, masks, and the gear
 /// mixer below are format data: changing any of them requires a new immutable
 /// format, not a tuning-only release.
