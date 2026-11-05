@@ -125,6 +125,8 @@ mod relay_policy_subscriptions;
 mod relay_serves_on_arrival;
 #[path = "../reopened_admitted_versions.rs"]
 mod reopened_admitted_versions;
+#[path = "../same_version_bundles.rs"]
+mod same_version_bundles;
 #[path = "../schema_activation.rs"]
 mod schema_activation;
 #[path = "../schema_renames.rs"]
