@@ -1,4 +1,4 @@
-//! `jazz-tools migrate-alpha59`: build a new server data dir from a dump of
+//! `jazz-alpha59-import`: build a new server data dir from a dump of
 //! an alpha.59 server data dir, and verify it. The dump comes from
 //! `jazz-alpha59-export`, a separate binary built against alpha.59 (see
 //! `dev/migrate-alpha59/`).
@@ -80,32 +80,34 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     })
 }
 
-const USAGE: &str = "usage: jazz-tools migrate-alpha59 (import | verify) --dump <dump> \
-    --data-dir <dir> --app-id <app id> [--no-backend-identity-links] [--drop-transaction-metadata]";
+const USAGE_ARGS: &str = "(import | verify) --dump <dump> --data-dir <dir> --app-id <app id> \
+    [--no-backend-identity-links] [--drop-transaction-metadata]";
 
-/// Run `jazz-tools migrate-alpha59 <args>`; the process exit code.
-pub async fn main(args: Vec<String>) -> i32 {
+/// Run the importer as `program` (`jazz-alpha59-import`, or `jazz-tools
+/// migrate-alpha59` in a dev build) with `args`; the process exit code.
+pub async fn main(program: &str, args: Vec<String>) -> i32 {
+    let usage = format!("usage: {program} {USAGE_ARGS}");
     let mut args = args.into_iter();
     let verifying = match args.next().as_deref() {
         Some("import") => false,
         Some("verify") => true,
         _ => {
-            eprintln!("{USAGE}");
+            eprintln!("{usage}");
             return 2;
         }
     };
     let args = match parse_args(args) {
         Ok(args) => args,
         Err(error) => {
-            eprintln!("jazz-tools migrate-alpha59: {error}");
-            eprintln!("{USAGE}");
+            eprintln!("{program}: {error}");
+            eprintln!("{usage}");
             return 2;
         }
     };
     let result = if verifying {
         verify::verify(&args).await
     } else {
-        import(&args).await
+        import(program, &args).await
     };
     match result {
         Ok(summary) => {
@@ -116,7 +118,7 @@ pub async fn main(args: Vec<String>) -> i32 {
             0
         }
         Err(error) => {
-            eprintln!("jazz-tools migrate-alpha59: {error}");
+            eprintln!("{program}: {error}");
             1
         }
     }
@@ -177,7 +179,7 @@ pub(crate) fn keyed_currents(
 /// Import into a new, empty data dir; a failed import removes what it built,
 /// so a half-built dir is never left to boot. A dir that existed beforehand
 /// (a mount point, say) is kept, emptied.
-async fn import(args: &Args) -> Result<Json, String> {
+async fn import(program: &str, args: &Args) -> Result<Json, String> {
     let existed = args.data_dir.exists();
     if existed
         && std::fs::read_dir(&args.data_dir)
@@ -194,7 +196,7 @@ async fn import(args: &Args) -> Result<Json, String> {
         && let Err(error) = remove_built(&args.data_dir, existed)
     {
         eprintln!(
-            "jazz-tools migrate-alpha59: could not remove the half-built {}: {error}",
+            "{program}: could not remove the half-built {}: {error}",
             args.data_dir.display()
         );
     }

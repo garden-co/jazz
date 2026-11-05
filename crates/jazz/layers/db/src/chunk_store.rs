@@ -238,8 +238,34 @@ pub struct ChunkIo {
     pub(crate) puts: Vec<(NodeKey, Vec<u8>)>,
     pub(crate) deletes: Vec<NodeKey>,
     /// The store's claim on this batch; `None` for the fetches a read
-    /// runs itself, which no host sees.
+    /// runs itself, which no host sees, and for fetches run beside a batch.
     pub(crate) lease: Option<Lease>,
+    /// For fetches run beside a batch: what goes back to the store's
+    /// wanted nodes if they are dropped unanswered.
+    pub(crate) refetch: Option<Refetch>,
+}
+
+/// Fetches run beside a batch ([`crate::db::Db::take_chunk_fetches`]):
+/// dropped unanswered, the reads they were for want them again.
+pub(crate) struct Refetch {
+    pub(crate) chunks: std::sync::Weak<crate::large::Chunks>,
+    pub(crate) unfetched: Vec<ChunkRequest>,
+}
+
+impl std::fmt::Debug for Refetch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Refetch")
+            .field("nodes", &self.unfetched.len())
+            .finish()
+    }
+}
+
+impl Drop for Refetch {
+    fn drop(&mut self) {
+        if let Some(chunks) = self.chunks.upgrade() {
+            chunks.want_again(std::mem::take(&mut self.unfetched));
+        }
+    }
 }
 
 /// A batch's hold on the store that handed it out: dropping it ends the
@@ -274,6 +300,28 @@ pub struct ChunkIoDone {
     pub(crate) deleted: Vec<Result<(), Error>>,
 }
 
+impl ChunkIoDone {
+    /// Whether the store failed any of the fetches in this outcome (an
+    /// error, no object where one was moved, or an object that is not the
+    /// one asked for): `None` when it held no
+    /// fetches. A host backing fetches off reads it before handing the
+    /// outcome back, whichever lane ran it.
+    pub fn fetches_failed(&self) -> Option<bool> {
+        (!self.fetched.is_empty()).then(|| {
+            self.io
+                .fetch
+                .iter()
+                .zip(&self.fetched)
+                .any(|(request, fetched)| match fetched {
+                    Ok(Some(bytes)) => {
+                        jazz_types::large_values::object_hash(bytes).0 != request.object_hash
+                    }
+                    _ => true,
+                })
+        })
+    }
+}
+
 impl ChunkIo {
     /// Fetches a read runs itself, outside any batch.
     pub(crate) fn unleased(fetch: Vec<ChunkRequest>) -> Self {
@@ -282,6 +330,7 @@ impl ChunkIo {
             puts: Vec::new(),
             deletes: Vec::new(),
             lease: None,
+            refetch: None,
         }
     }
 
