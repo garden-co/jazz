@@ -8729,6 +8729,12 @@ impl Db {
         // was recreated, or another app's, would otherwise take commits of
         // the old history before this store refuses it (INV-SYNC-54). What
         // was asked after those commits waits with them.
+        //
+        // The hold costs one round trip: a replica that reconnects with
+        // unsent commits uploads them (and the reads behind them) only after
+        // the `Welcome`, where before it sent them with its `Join`. A
+        // replica with nothing unsent, or one that mirrored no authority
+        // yet, sends as before.
         let client = inner.client.as_ref().expect("client");
         let hold = !client.catalogued && !client.unsent.is_empty() && inner.namespace()?.is_some();
         let client = inner.client.as_mut().expect("client");

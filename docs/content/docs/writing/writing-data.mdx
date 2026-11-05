@@ -318,6 +318,10 @@ is reset automatically. To sync with the new server, reset the local store: in t
 `await db.deleteClientStorage()`; in Node, delete the client's data directory and open
 it again. Writes that never reached the old server are lost with the store.
 
+In the browser, tabs that sync through a shared worker may not yet see this: a tab's `global` waits
+can keep waiting after the worker's link was refused. Treat `authority-changed` in a multi-tab app as
+best effort for now.
+
 A brief drop shows as `connecting`, not `offline`, so a status badge doesn't flicker. `synced` is
 `true` when nothing waits for upload and the link is `connected` (or `local-only`).
 

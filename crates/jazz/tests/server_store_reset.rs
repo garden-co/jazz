@@ -317,10 +317,83 @@ fn the_old_server_back_behind_the_link_syncs_again() {
         .expect("the write settles against its own authority");
     assert_eq!(waited.unwrap(), tx);
     assert_eq!(rejection(&mut stream), None);
-    let mut want = server_ids(&server1);
+    let want = server_ids(&server1);
     assert!(want.contains(&row(9, 0)), "uploaded");
-    want.insert(row(9, 0));
     assert_eq!(local_ids(&alice), want);
+}
+
+fn file_alice(path: &std::path::Path) -> Db {
+    block_on(Db::open_at(
+        config(0x61, AuthorSubject::for_test_bytes([0x61; 16])),
+        path,
+        jazz::db::FileOptions::default(),
+    ))
+    .expect("open file-backed alice")
+}
+
+/// A file-backed replica reopened after `AuthorityChanged` keeps the
+/// namespace it mirrored: its next link to the recreated server is refused
+/// the same way, and the commits it resends on that link (the write from
+/// before the refusal and one made after the reopen) are held for the
+/// `Welcome`, so none reaches the new history and both stay local.
+///
+/// ```text
+/// alice(file) ── server₁ ── settles ── ╳ ── writes g9-0
+/// alice ── server₂ (recreated) ── AuthorityChanged
+/// alice closed and reopened from its file; writes g9-1
+/// alice ── server₂ ── AuthorityChanged again; g9-0, g9-1 kept, not uploaded
+/// ```
+#[test]
+fn a_file_backed_replica_reopened_after_the_refusal_is_refused_again_and_uploads_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice.sqlite");
+    let server1 = server_with(1, 4);
+    let alice = file_alice(&path);
+    let first = connect(&alice, &server1);
+    let stream = subscribe(&alice);
+    pump(&alice, &server1);
+    assert_eq!(local_ids(&alice), server_ids(&server1), "synced");
+    assert!(alice.detach_connection(&first));
+    drop(stream);
+    insert(&alice, 9, 0);
+
+    let server2 = server_with(2, 6);
+    let second = connect(&alice, &server2);
+    pump(&alice, &server2);
+    assert_eq!(
+        alice.upstream_refusal(&second).map(|e| e.code),
+        Some(ErrorCode::AuthorityChanged)
+    );
+    block_on(alice.close()).unwrap();
+    drop(alice);
+
+    let alice = file_alice(&path);
+    let offline = insert(&alice, 9, 1);
+    let mut want = server_ids(&server1);
+    want.extend([row(9, 0), row(9, 1)]);
+    assert_eq!(local_ids(&alice), want, "the reopened store keeps its rows");
+    let third = connect(&alice, &server2);
+    let mut stream = subscribe(&alice);
+    pump(&alice, &server2);
+    assert_eq!(
+        alice.upstream_refusal(&third).map(|e| e.code),
+        Some(ErrorCode::AuthorityChanged),
+        "the refusal is detected again after the reopen"
+    );
+    assert_eq!(rejection(&mut stream), Some(ErrorCode::AuthorityChanged));
+    let waited = global_wait(&alice, offline, 1, || pump(&alice, &server2))
+        .expect("the Global wait ends at once");
+    assert_eq!(
+        waited.expect_err("nothing uploads").code,
+        ErrorCode::AuthorityChanged
+    );
+    let uploaded = server_ids(&server2);
+    assert!(
+        !uploaded.contains(&row(9, 0)) && !uploaded.contains(&row(9, 1)),
+        "the held commits never reach the recreated server"
+    );
+    assert_eq!(local_ids(&alice), want, "local rows kept");
+    assert_eq!(alice.pending_upload_count(), 2, "both writes are kept");
 }
 
 fn file_server(path: &std::path::Path) -> Db {
