@@ -2064,7 +2064,7 @@ export class Spaces {
     secret: Uint8Array,
     device: LocalDevice,
   ) {
-    let wrote = false;
+    const writes: (() => void)[] = [];
     const { root, keyRoot, members, rotationRequired, position } = await this.validate(
       snapshot,
       address,
@@ -2159,12 +2159,13 @@ export class Spaces {
           );
           this.assertOpen();
           const { id, ...values } = row;
-          wrote = true;
-          tx.insert(
-            this.tables.__e2ee_space_recovery_deliveries,
-            { ...values, envelope, signature },
-            { id },
-          );
+          writes.push(() => {
+            tx.insert(
+              this.tables.__e2ee_space_recovery_deliveries,
+              { ...values, envelope, signature },
+              { id },
+            );
+          });
         }
       }
       for (const recipientDeviceId of recipients.active) {
@@ -2201,11 +2202,20 @@ export class Spaces {
         );
         this.assertOpen();
         const { id, ...values } = row;
-        wrote = true;
-        tx.insert(this.tables.__e2ee_space_deliveries, { ...values, envelope, signature }, { id });
+        writes.push(() => {
+          tx.insert(
+            this.tables.__e2ee_space_deliveries,
+            { ...values, envelope, signature },
+            { id },
+          );
+        });
       }
     }
-    return wrote ? undefined : snapshot;
+    // Keep every recovery predicate, including empty coverage, in this batch's
+    // accepted read set before any recipient's envelope physically stages.
+    this.assertOpen();
+    for (const write of writes) write();
+    return writes.length ? undefined : snapshot;
   }
 
   private async confirm(
