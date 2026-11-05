@@ -4680,6 +4680,9 @@ impl Inner {
         drop(inserts);
         self.exec(&sql, params_from_iter(values.iter()))
             .map_err(storage)?;
+        if history {
+            self.prune_history(&image.table, RowUuid::from_bytes(image.id), &image.key)?;
+        }
         Ok(())
     }
 
@@ -5930,6 +5933,137 @@ impl Inner {
         Ok(())
     }
 
+    /// Whether `node`'s commit `tx`, which this authority keeps no entry
+    /// for, is one it accepted and dropped the entry of: it writes only
+    /// latest-only tables, and its tx is at or below the newest tx this
+    /// store dropped an entry of for the node (`through`). A node's commits
+    /// arrive in order (`INV-HIST-23`), so such a tx came before; a rejected
+    /// commit's entry is never dropped. Fails closed where order does not
+    /// hold: a cross-shard part this shard still awaits lands instead, even
+    /// below `through`, as its other parts reached other shards first.
+    /// A replica's new commit numbered at or below `through` would be
+    /// taken for a resend: only if its clock went back past commits whose
+    /// entries were dropped (a lost tail alone does not, INV-EDGE-28), as
+    /// exact dedupe would on a reused id; a latest-only row's next write
+    /// overwrites what was lost (known limit).
+    pub(crate) fn dropped(&self, node: [u8; 16], tx: u64, ops: &[WireOp]) -> Result<bool, Error> {
+        if self.client.is_some()
+            || ops.is_empty()
+            || self.shard.awaits(crate::db::shard::CommitRef { node, tx })
+            || !ops.iter().all(|op| {
+                self.schema
+                    .stored_table(op.table())
+                    .is_ok_and(|stored| self.latest_only(stored))
+            })
+            || !self.has_pruned_txs()?
+        {
+            return Ok(false);
+        }
+        self.conn
+            .cached_row(
+                "SELECT p.through FROM _jazz_pruned_txs AS p JOIN _jazz_nodes AS n ON n.n = p.n \
+                 WHERE n.node = ?1",
+                [node.to_vec()],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .map(|through| through.is_some_and(|through| tx as i64 <= through))
+            .map_err(storage)
+    }
+
+    fn has_pruned_txs(&self) -> Result<bool, Error> {
+        self.conn
+            .cached_row(
+                "SELECT count(*) > 0 FROM sqlite_master \
+                 WHERE type = 'table' AND name = '_jazz_pruned_txs'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(storage)
+    }
+
+    /// Drop the dedupe entries of accepted commits that wrote only tables
+    /// their version declares latest-only (SPEC 4 §4.9), keeping each
+    /// node's newest. An entry stays until the same node's next commit is
+    /// accepted: it then holds the node's counter and answers the resend
+    /// most likely to come. Each node's newest such commit waits in
+    /// `_jazz_pruned_txs` (`waiting`), beside the newest tx whose entry was
+    /// dropped (`through`). A resend of a dropped commit is answered as
+    /// accepted ([`Self::dropped`]); a later write built on one counts as
+    /// blind (`resolve_bases`). A cross-shard part's entry is never
+    /// dropped: it is its cross-shard commit's recorded fate. A store with
+    /// no latest-only table never creates the table.
+    pub(crate) fn prune_transactions(
+        &self,
+        (node, tx): ([u8; 16], u64),
+        ops: &[StagedOp],
+    ) -> Result<(), Error> {
+        if self.retention().is_empty() {
+            return Ok(());
+        }
+        self.exec(
+            "CREATE TABLE IF NOT EXISTS _jazz_pruned_txs \
+             (n INTEGER PRIMARY KEY, waiting INTEGER, through INTEGER NOT NULL)",
+            [],
+        )
+        .map_err(storage)?;
+        let code = self.node_code(node)?;
+        // The commit's own version decides, as for its history.
+        let latest_only = !ops.is_empty()
+            && !self.shard.awaits(crate::db::shard::CommitRef { node, tx })
+            && ops.iter().all(|op| {
+                self.schema
+                    .stored_table(op.table())
+                    .is_ok_and(|stored| self.prunes(stored))
+            });
+        let waiting: Option<i64> = self
+            .conn
+            .cached_row(
+                "SELECT waiting FROM _jazz_pruned_txs WHERE n = ?1",
+                [code],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?
+            .flatten();
+        let forget = |tx: i64| {
+            self.exec(
+                "DELETE FROM _jazz_transactions \
+                 WHERE n = ?1 AND tx = ?2 AND t BETWEEN 0 AND ?3",
+                rusqlite::params![code, tx, MAX_SEQ as i64],
+            )
+            .map_err(storage)?;
+            self.exec(
+                "INSERT INTO _jazz_pruned_txs (n, waiting, through) VALUES (?1, NULL, ?2) \
+                 ON CONFLICT (n) DO UPDATE SET through = max(through, excluded.through)",
+                rusqlite::params![code, tx],
+            )
+            .map_err(storage)
+        };
+        match waiting {
+            // An older commit than the waiting one, which stays the
+            // node's newest (a dropped one's resend never gets here).
+            Some(newest) if newest > tx as i64 => {
+                if latest_only {
+                    forget(tx as i64)?;
+                }
+                return Ok(());
+            }
+            Some(older) => {
+                forget(older)?;
+            }
+            None => {}
+        }
+        let waiting = latest_only.then_some(tx as i64);
+        self.exec(
+            "INSERT INTO _jazz_pruned_txs (n, waiting, through) VALUES (?1, ?2, -1) \
+             ON CONFLICT (n) DO UPDATE SET waiting = excluded.waiting",
+            rusqlite::params![code, waiting],
+        )
+        .map_err(storage)?;
+        Ok(())
+    }
+
     /// Where a commit landed: `Some(at)` once accepted (in the authority's
     /// order, or a relay's own commit carrying it), `None` once rejected.
     /// Kept by the authority for every upload and by a replica for its
@@ -6066,11 +6200,13 @@ impl Inner {
             return Cow::Borrowed(read);
         };
         // A frozen read is its own cut; a branch view reads its branches
-        // current (known limit).
+        // current (known limit), and so does a read of a latest-only table,
+        // which keeps no version to cut back to (INV-HIST-29).
         if read.position == Position::Current
             || client.no_server()
             || read.cut.is_some()
             || read.view.is_some()
+            || tables.iter().any(|table| self.latest_only(table))
         {
             return Cow::Borrowed(read);
         }
@@ -6295,6 +6431,11 @@ impl Inner {
         }
         // A branch view's prior result reads its head (and live base) as
         // of `since`; a frozen base keeps its own cut.
+        // Its prior result would read a latest-only input as of `since`,
+        // a version that table may have dropped: it opens fresh instead.
+        if moved && inputs.iter().any(|table| self.latest_only(table)) {
+            return Ok(None);
+        }
         let prior = if moved {
             let read = ReadSpec {
                 cut: Some(Cut::at(Pos::at(since))),
@@ -9338,6 +9479,18 @@ impl Inner {
         message
     }
 
+    /// The schema version session `index` writes under: the one it
+    /// declared, else its bundle's write version (`None`: the owner's).
+    pub(crate) fn written_version(&self, index: usize) -> Option<crate::ids::SchemaVersionId> {
+        let session = &self.sessions[index];
+        session.version.or_else(|| {
+            session
+                .bundle
+                .and_then(|bundle| self.bundles.get(&bundle))
+                .map(|(version, _)| *version)
+        })
+    }
+
     /// Whether this store admitted schema `version`.
     fn deployed(&self, version: crate::ids::SchemaVersionId) -> bool {
         version == self.owner_version || self.admitted.iter().any(|(id, _)| *id == version)
@@ -12039,8 +12192,13 @@ impl Db {
                 // view, and one naming what this store does not hold was
                 // written under a version it has not deployed.
                 let db = self.stored_db_for(index);
-                // A resend after a reconnect gets the recorded fate.
-                let known = self.inner.borrow().applied_fate(node, tx)?;
+                // A resend after a reconnect gets the recorded fate, or for
+                // a latest-only commit whose entry was dropped, the accepted
+                // fate it had (SPEC 4 §4.9).
+                let known = match self.inner.borrow().applied_fate(node, tx)? {
+                    None if self.inner.borrow().dropped(node, tx, &ops)? => Some(Ok(())),
+                    known => known,
+                };
                 let resent = known.is_some();
                 // A cross-shard part that already landed holds nothing (its
                 // gateway may hold it again for the resend).
@@ -12060,86 +12218,102 @@ impl Db {
                     self.inner.borrow_mut().refuse_undeployed_commit(index, id);
                     return Ok(());
                 }
-                let (result, rows, echoable) = match known {
-                    // A resend's writer may not hold what the commit made of
-                    // its rows (its fate was lost, or it reopened while
-                    // waiting for rows it could not install): they ship as
-                    // they are, unless newer versions do.
-                    Some(result) => {
-                        let landed = match (&result, self.inner.borrow().settled(node, tx)?) {
-                            (Ok(()), Some(Some(at))) => Some(at),
-                            _ => None,
-                        };
-                        let rows = match landed {
-                            Some(at) => ops
-                                .into_iter()
-                                .map(from_wire)
-                                .collect::<Result<Vec<_>, _>>()
-                                .and_then(|ops| self.inner.borrow().resent_rows(&ops, at))
-                                .unwrap_or_default(),
-                            None => Vec::new(),
-                        };
-                        (result, rows, Vec::new())
-                    }
-                    None => match commit_who(policy, &acting)
-                        .map_err(|error| (error, Vec::new()))
-                        .and_then(|who| {
-                            self.inner
-                                .borrow()
-                                .check_acts_pinned(index, policy, who)
-                                .map_err(|error| (error, Vec::new()))?;
-                            let (ops, mut roots) = db
-                                .resolve_deltas(policy, ops)
-                                .map_err(|error| (error, Vec::new()))?;
-                            roots.extend(
-                                db.proof_roots(policy, &ops)
-                                    .map_err(|error| (error, Vec::new()))?,
-                            );
-                            let possession = crate::large::Possession {
-                                author: receipt_author(&identity),
-                                checked: policy.is_some(),
-                                roots,
-                                settle: Default::default(),
+                // What the commit prunes goes by the version its session
+                // wrote under (SPEC 4 §4.9): a rolled-back deployment's
+                // sessions prune nothing. A relay's link carries its
+                // sessions' commits, which prune by the link's version (a
+                // known limit: a relay serves one deployment's schema).
+                let written = self.inner.borrow().written_version(index);
+                let prior = self.inner.borrow().set_writing(written);
+                let decided = (|| -> Result<_, Error> {
+                    Ok(match known {
+                        // A resend's writer may not hold what the commit made of
+                        // its rows (its fate was lost, or it reopened while
+                        // waiting for rows it could not install): they ship as
+                        // they are, unless newer versions do.
+                        Some(result) => {
+                            let landed = match (&result, self.inner.borrow().settled(node, tx)?) {
+                                (Ok(()), Some(Some(at))) => Some(at),
+                                // Dropped: its rows ship as they are now.
+                                (Ok(()), None) => {
+                                    let inner = self.inner.borrow();
+                                    Some(Pos::at(inner.served_through()))
+                                }
+                                _ => None,
                             };
-                            let vouched = vouched(policy, who, acting);
-                            self.with_claims(vouched, || {
-                                db.authorize_commit(
-                                    who,
-                                    policy,
-                                    kind,
-                                    ops,
-                                    (node, tx),
-                                    clock,
-                                    possession,
-                                )
-                            })
-                        }) {
-                        // The accepted commit recorded its fate atomically.
-                        Ok((rows, echoable)) => (Ok(()), rows, echoable),
-                        // Its large values need nodes the chunk store is
-                        // still fetching: it is applied again once they
-                        // arrive, not refused.
-                        Err((error, _))
-                            if crate::large::is_missing(&error)
-                                && self.inner.borrow().chunks.has_fetch() =>
-                        {
-                            return Err(error);
-                        }
-                        Err((error, rows)) => {
-                            let inner = self.inner.borrow();
-                            // Read back by the names the current schema
-                            // gives what the commit named by stored ones.
-                            let error = Error {
-                                message: inner.by_current_names(&error.message),
-                                ..error
+                            let rows = match landed {
+                                Some(at) => ops
+                                    .into_iter()
+                                    .map(from_wire)
+                                    .collect::<Result<Vec<_>, _>>()
+                                    .and_then(|ops| self.inner.borrow().resent_rows(&ops, at))
+                                    .unwrap_or_default(),
+                                None => Vec::new(),
                             };
-                            let result = Err(wire_error(&error));
-                            inner.record_fate(node, tx, &result)?;
-                            inner.record_settled(node, tx, None)?;
                             (result, rows, Vec::new())
                         }
-                    },
-                };
+                        None => match commit_who(policy, &acting)
+                            .map_err(|error| (error, Vec::new()))
+                            .and_then(|who| {
+                                self.inner
+                                    .borrow()
+                                    .check_acts_pinned(index, policy, who)
+                                    .map_err(|error| (error, Vec::new()))?;
+                                let (ops, mut roots) = db
+                                    .resolve_deltas(policy, ops)
+                                    .map_err(|error| (error, Vec::new()))?;
+                                roots.extend(
+                                    db.proof_roots(policy, &ops)
+                                        .map_err(|error| (error, Vec::new()))?,
+                                );
+                                let possession = crate::large::Possession {
+                                    author: receipt_author(&identity),
+                                    checked: policy.is_some(),
+                                    roots,
+                                    settle: Default::default(),
+                                };
+                                let vouched = vouched(policy, who, acting);
+                                self.with_claims(vouched, || {
+                                    db.authorize_commit(
+                                        who,
+                                        policy,
+                                        kind,
+                                        ops,
+                                        (node, tx),
+                                        clock,
+                                        possession,
+                                    )
+                                })
+                            }) {
+                            // The accepted commit recorded its fate atomically.
+                            Ok((rows, echoable)) => (Ok(()), rows, echoable),
+                            // Its large values need nodes the chunk store is
+                            // still fetching: it is applied again once they
+                            // arrive, not refused.
+                            Err((error, _))
+                                if crate::large::is_missing(&error)
+                                    && self.inner.borrow().chunks.has_fetch() =>
+                            {
+                                return Err(error);
+                            }
+                            Err((error, rows)) => {
+                                let inner = self.inner.borrow();
+                                // Read back by the names the current schema
+                                // gives what the commit named by stored ones.
+                                let error = Error {
+                                    message: inner.by_current_names(&error.message),
+                                    ..error
+                                };
+                                let result = Err(wire_error(&error));
+                                inner.record_fate(node, tx, &result)?;
+                                inner.record_settled(node, tx, None)?;
+                                (result, rows, Vec::new())
+                            }
+                        },
+                    })
+                })();
+                self.inner.borrow().restore_writing(prior);
+                let (result, rows, echoable) = decided?;
                 let mut inner = self.inner.borrow_mut();
                 // An accepted commit's fate carries the seq it landed at (a
                 // resend gets the recorded one), so the replica learns it.
@@ -12843,7 +13017,11 @@ impl Db {
             }
             let recorded = inner
                 .record_fate(id.0, id.1, &Ok(()))
-                .and_then(|()| inner.record_settled(id.0, id.1, Some(inner.own_pos(seq))));
+                .and_then(|()| inner.record_settled(id.0, id.1, Some(inner.own_pos(seq))))
+                .and_then(|()| match relay {
+                    true => Ok(()),
+                    false => inner.prune_transactions(id, &ops),
+                });
             if let Err(error) = recorded {
                 inner.changed.borrow_mut().truncate(mark);
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;

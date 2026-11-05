@@ -412,6 +412,22 @@ impl Inner {
         let mut built = HashMap::new();
         for (op, base) in bases {
             let (table, row) = self.based_row(ops, *op)?;
+            if self.latest_only(table) {
+                // A latest-only write is blind (SPEC 4 §4.9), and the
+                // dedupe entry of the commit it names may be gone: only a
+                // base on the sender's own rejected commit rejects it.
+                let own = match base.on {
+                    BuiltOn::Own { back } => sender.1.checked_sub(back),
+                    BuiltOn::Commit { node, tx } if node == sender.0 => Some(tx),
+                    _ => None,
+                };
+                if let Some(tx) = own
+                    && self.settled(sender.0, tx)? == Some(None)
+                {
+                    return Err(predecessor_rejected());
+                }
+                continue;
+            }
             let on = match base.on {
                 BuiltOn::Seq(seq) => Built::Seq(seq),
                 BuiltOn::Own { back } => {
@@ -586,12 +602,16 @@ impl Inner {
             .map(|(at, node, tx)| (at.seq, (node, tx)))
             .collect();
         let writer = |seq: u64| writers.get(&seq).copied().unwrap_or(([0; 16], seq));
+        // A latest-only table dropped the versions a writer may have
+        // missed, so each of its writes reads as blind (SPEC 4 §4.9).
+        let blind = self.latest_only(table);
         let mut conflicts = Vec::with_capacity(history.len());
         for (index, version) in history.iter().enumerate() {
             let earlier = &history[..index];
             let previous = earlier.last().map(|v| v.seq);
-            let Some(built) = version.built else {
-                // An insert, a blind write, or the authority's own.
+            let Some(built) = version.built.filter(|_| !blind) else {
+                // An insert, a blind write, the authority's own, or any
+                // write to a latest-only table.
                 conflicts.push(WriteConflict {
                     seq: version.seq,
                     writer: writer(version.seq),

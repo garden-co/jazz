@@ -120,7 +120,8 @@ const schema = {
     .indexOnly(["pageId"]),
   // Who has a song sheet open and where their cursor is: one row per open
   // editor, overwritten a few times a second and refreshed while it stays
-  // open. Readers ignore rows whose `seenAt` is old.
+  // open. Readers ignore rows whose `seenAt` is old. Latest-only: a cursor's
+  // past positions are worth nothing, so nodes keep no history of them.
   sheetPresence: s
     .table(
       {
@@ -133,6 +134,7 @@ const schema = {
       },
       { workspace: s.rel("workspaces", "workspaceId"), page: s.rel("pages", "pageId") },
     )
+    .history("latest")
     .indexOnly(["pageId"]),
   // #endregion rich-text-schema
   // Attachment bytes are a large value written with `insertStreaming`. List

@@ -580,6 +580,11 @@ impl Names {
             .map(|(version, _)| *version)
     }
 
+    /// How many versions are named.
+    pub(crate) fn len(&self) -> usize {
+        self.versions.len()
+    }
+
     pub(crate) fn get(&self, version: &SchemaVersionId) -> Option<&StoredNames> {
         self.versions.get(version).map(|(_, names)| names)
     }

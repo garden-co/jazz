@@ -2911,6 +2911,7 @@ mod tests {
                 }],
                 migrations: Vec::new(),
                 permissions,
+                allow_dropping_history: false,
             },
         )
         .await
