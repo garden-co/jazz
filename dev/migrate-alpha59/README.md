@@ -32,7 +32,9 @@ next to the exporter rather than in it.)
    case included: it names the `createJazz` identity of every returning
    user (see below).
 
-5. Start the new server on `./data-new`. Keep `./data` until you are happy.
+5. Serve `./data-new` from your backend with
+   `createJazz({ store: sqlite({ path: "./data-new" }) })`. Keep `./data` until
+   you are happy.
 
 The dump holds all of the app's data: keep it where the data dir is, and
 delete it when done.
@@ -110,7 +112,8 @@ declare `links = "sqlite3"`. `prepare.sh` checks out alpha.59 (or uses
 `A59_DIR`), copies small read-only hook modules and the dump crate into it,
 and adds the exporter and fixture to that checkout's workspace. The
 `alpha.59 exporter` workflow does the same in CI, builds the importer from
-the release's own tag, and attaches both to the release.
+its `ref` input (the release's tag when left empty), and attaches both to the
+release.
 
 ```sh
 dev/migrate-alpha59/test.sh      # end to end on a synthetic tenant

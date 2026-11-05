@@ -123,9 +123,10 @@ release (`npm i jazz-tools@<current>`) and one with the candidate's packed
 candidate packages win over the registry). Pair each with its native server
 binary. For alpha.59 or older it is
 `node_modules/jazz-tools/bin/native/jazz-tools-linux-x64` (chmod +x). From
-alpha.60 jazz-tools ships no server binary: build it from the version's tag with
-`cargo build --release -p jazz-cli --bin jazz-tools`, the internal build Jazz
-Cloud runs.
+alpha.60 jazz-tools ships no server binary: take `jazz-tools-linux-<arch>` from
+the version's GitHub release (checked against its `SHA256SUMS`), the internal
+`jazz-cli` build Jazz Cloud runs, or build it from the version's tag with
+`cargo build --release -p jazz-cli --bin jazz-tools`.
 
 ```json
 {
@@ -159,7 +160,8 @@ which restart the old server as the new version on the same store and port;
 in-place upgrade applies to any version pair.
 
 Each cell uses a fresh server store and deploys schema (mixed cells deploy with
-the other version's CLI). It then drives two client processes through
+the other version's CLI, which from alpha.60 is the internal `jazz-cli` build
+above). It then drives two client processes through
 global-tier insert/update/delete, remote point reads, subscriptions in both
 directions, 800KB chunked values, disconnect/offline write/reconnect, a server
 restart or in-place server upgrade on the same store with a write made while it

@@ -743,9 +743,11 @@ jobs:
 
   # Jazz Cloud's images run the Linux server binary from the GitHub release:
   # npm's jazz-tools carries no native binary. Attach both builds with their
-  # SHA256SUMS to the version's draft (creating a bare one if "GitHub
-  # release" hasn't drafted it yet); "GitHub release" refuses to publish
-  # without them. A published release's assets are never replaced.
+  # SHA256SUMS to the version's draft; "GitHub release" refuses to publish
+  # without them. Only "GitHub release" creates the draft (with its notes),
+  # so the two never race to create two: without one, this job fails and is
+  # re-run once the draft exists. A published release's assets are never
+  # replaced.
   attach-server-binaries:
     name: Attach server binaries to the GitHub release
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -797,13 +799,13 @@ jobs:
           set -euo pipefail
           VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
           TAG="v${VERSION}"
-          if is_draft=$(gh release view "${TAG}" --json isDraft --jq .isDraft 2>/dev/null); then
-            if [ "${is_draft}" != true ]; then
-              echo "::error::${TAG} is published; its server binaries are never replaced."
-              exit 1
-            fi
-          else
-            gh release create "${TAG}" --draft --verify-tag --title "Jazz ${VERSION}" --notes ""
+          if ! is_draft=$(gh release view "${TAG}" --json isDraft --jq .isDraft 2>/dev/null); then
+            echo "::error::No draft for ${TAG}. Create it with \"GitHub release\" (publish: false, with the notes), then re-run this job."
+            exit 1
+          fi
+          if [ "${is_draft}" != true ]; then
+            echo "::error::${TAG} is published; its server binaries are never replaced."
+            exit 1
           fi
           gh release upload "${TAG}" dist/jazz-tools-linux-x64 dist/jazz-tools-linux-arm64 dist/SHA256SUMS --clobber
 
