@@ -23,8 +23,9 @@ app=0a590000-0000-4000-8000-000000000059
 (cd "$a59" && CARGO_TARGET_DIR="$t59" cargo build --release -p jazz-cli --bin jazz-tools &&
   CARGO_TARGET_DIR="$t59" cargo build --release -p migrate-alpha59-produce \
     -p jazz-alpha59-export -p jazz-alpha59-dump)
-(cd "$root" && CARGO_TARGET_DIR="$t60" cargo build --release -p jazz-cli --bin jazz-tools)
-import=("$t60/release/jazz-tools" migrate-alpha59)
+# The importer as self-hosters download it.
+(cd "$root" && CARGO_TARGET_DIR="$t60" cargo build --release -p jazz-cli --bin jazz-alpha59-import)
+import=("$t60/release/jazz-alpha59-import")
 
 "$t59/release/a59-produce" --out "$work/a59" --server-bin "$t59/release/jazz-tools"
 "$t59/release/jazz-alpha59-export" --data-dir "$work/a59" --work "$work/copy" --out "$work/dump"

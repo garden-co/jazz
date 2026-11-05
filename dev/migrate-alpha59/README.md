@@ -2,15 +2,18 @@
 
 Moves an alpha.59 server data dir (RocksDB) to the current server format.
 Self-hosters running alpha.59 use it to upgrade. It stays released: the
-exporter binaries stay attached to the release they shipped with, and the
-import side ships in `jazz-tools` until a release removes it.
+exporter and importer binaries stay attached to the release they shipped
+with. (The npm `jazz-tools` carries no native binary, so the importer ships
+next to the exporter rather than in it.)
 
 ## For self-hosters
 
 1. Stop the alpha.59 server. Keep its data dir; nothing below writes to it.
-2. Download `jazz-alpha59-export-<platform>` (Linux x64/arm64, macOS arm64)
-   from the GitHub release you upgrade to, and check it against
-   `jazz-alpha59-export.sha256`.
+2. Download `jazz-alpha59-export-<platform>` and
+   `jazz-alpha59-import-<platform>` (Linux x64/arm64, macOS arm64) from the
+   GitHub release you upgrade to, check them against
+   `jazz-alpha59-export.sha256` and `jazz-alpha59-import.sha256`, and make
+   them executable.
 3. Export. `--work` is an empty scratch dir: the exporter reads a private
    copy of the data dir, never the original.
 
@@ -18,11 +21,11 @@ import side ships in `jazz-tools` until a release removes it.
    jazz-alpha59-export --data-dir ./data --work ./export-work --out app.dump
    ```
 
-4. Import into a new, empty dir with the new `jazz-tools`, then verify:
+4. Import into a new, empty dir, then verify:
 
    ```sh
-   npx jazz-tools@<version> migrate-alpha59 import --dump app.dump --data-dir ./data-new --app-id <app id>
-   npx jazz-tools@<version> migrate-alpha59 verify --dump app.dump --data-dir ./data-new --app-id <app id>
+   jazz-alpha59-import import --dump app.dump --data-dir ./data-new --app-id <app id>
+   jazz-alpha59-import verify --dump app.dump --data-dir ./data-new --app-id <app id>
    ```
 
    `--app-id` must be the app id your app passes to `remote()`, exactly,
@@ -90,20 +93,20 @@ seen by each account.
 
 ## Layout
 
-| piece                             | built                                 | does                                                                   |
-| --------------------------------- | ------------------------------------- | ---------------------------------------------------------------------- |
-| `jazz-alpha59-export` (`export/`) | in a `v2.0.0-alpha.59` checkout       | copies the data dir, reads the copy with alpha.59's decoders, dumps it |
-| `crates/jazz-alpha59-dump`        | in both                               | the dump format, plus `dump-show` and `dump-census`                    |
-| `jazz-tools migrate-alpha59`      | with `jazz-tools` (`crates/jazz-cli`) | `import` builds a new data dir from a dump, `verify` checks it         |
-| `produce/`                        | in the alpha.59 checkout              | the synthetic tenant `test.sh` migrates                                |
+| piece                             | built                                | does                                                                   |
+| --------------------------------- | ------------------------------------ | ---------------------------------------------------------------------- |
+| `jazz-alpha59-export` (`export/`) | in a `v2.0.0-alpha.59` checkout      | copies the data dir, reads the copy with alpha.59's decoders, dumps it |
+| `crates/jazz-alpha59-dump`        | in both                              | the dump format, plus `dump-show` and `dump-census`                    |
+| `jazz-alpha59-import`             | in this checkout (`crates/jazz-cli`) | `import` builds a new data dir from a dump, `verify` checks it         |
+| `produce/`                        | in the alpha.59 checkout             | the synthetic tenant `test.sh` migrates                                |
 
-The exporter must link alpha.59 itself, and can't share a build with
-`jazz-tools`: the two pull different libsqlite3-sys versions, which both
+The exporter must link alpha.59 itself, and can't share a build with the
+importer: the two pull different libsqlite3-sys versions, which both
 declare `links = "sqlite3"`. `prepare.sh` checks out alpha.59 (or uses
 `A59_DIR`), copies small read-only hook modules and the dump crate into it,
 and adds the exporter and fixture to that checkout's workspace. The
-`alpha.59 exporter` workflow does the same in CI and attaches the binaries to
-a release.
+`alpha.59 exporter` workflow does the same in CI, builds the importer from
+the release's own tag, and attaches both to the release.
 
 ```sh
 dev/migrate-alpha59/test.sh      # end to end on a synthetic tenant

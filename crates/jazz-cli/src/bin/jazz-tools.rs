@@ -321,7 +321,7 @@ async fn run() {
 
     match cli.command {
         Commands::MigrateAlpha59 { args } => {
-            let code = jazz_cli::migrate_alpha59::main(args).await;
+            let code = jazz_cli::migrate_alpha59::main("jazz-tools migrate-alpha59", args).await;
             shutdown_tracing();
             std::process::exit(code);
         }
