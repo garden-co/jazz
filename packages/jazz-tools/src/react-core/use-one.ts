@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { limitQueryToOne, type Db, type QueryBuilder, type QueryOptions } from "../runtime/db.js";
-import { useAll, useAllSuspense } from "./use-all.js";
+import { suspenseResult, useAll, useAllSuspense } from "./use-all.js";
 
 export type UseOneResult<T extends { id: string }> =
   | UseOneLoadingResult
@@ -72,7 +72,7 @@ export function useOneSuspense<T extends { id: string }>(
   options?: QueryOptions,
 ): UseOneSuspenseResult<T> {
   const limitedQuery = useMemo(() => (query ? limitQueryToOne(query) : undefined), [query]);
+  // No hooks after `useAllSuspense`: it may suspend via `use()` (see there).
   const { data, db } = useAllSuspense(limitedQuery, options);
-  const row = data[0] ?? null;
-  return useMemo(() => ({ data: row, db }), [row, db]);
+  return suspenseResult(data[0] ?? null, db);
 }
