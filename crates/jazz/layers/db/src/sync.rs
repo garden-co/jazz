@@ -5941,6 +5941,11 @@ impl Inner {
     /// commit's entry is never dropped. Fails closed where order does not
     /// hold: a cross-shard part this shard still awaits lands instead, even
     /// below `through`, as its other parts reached other shards first.
+    /// A replica's new commit numbered at or below `through` would be
+    /// taken for a resend: only if its clock went back past commits whose
+    /// entries were dropped (a lost tail alone does not, INV-EDGE-28), as
+    /// exact dedupe would on a reused id; a latest-only row's next write
+    /// overwrites what was lost (known limit).
     pub(crate) fn dropped(&self, node: [u8; 16], tx: u64, ops: &[WireOp]) -> Result<bool, Error> {
         if self.client.is_some()
             || ops.is_empty()

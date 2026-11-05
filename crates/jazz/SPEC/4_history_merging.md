@@ -868,7 +868,12 @@ below the newest one whose entry the store dropped for that node: a
 node's commits arrive in order (`INV-HIST-23`), so it came first. Across
 shards they do not: a cross-shard part the shard still holds or fixed a
 position for is applied even below that tx, and a part's entry is never
-dropped, since it records its cross-shard commit's fate. A rejected commit's entry is
+dropped, since it records its cross-shard commit's fate. A replica that
+loses the tail of its file numbers its next commits past its clock
+(`INV-EDGE-28`), above every dropped one; only a clock moved back past
+dropped commits could have a new commit taken for a resend, as a reused
+id would be under exact dedupe (a known limit: that latest-only row's
+next write overwrites what was lost). A rejected commit's entry is
 never dropped, and a later write built on a dropped commit counts as blind
 (`INV-HIST-28`).
 

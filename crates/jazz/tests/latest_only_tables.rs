@@ -845,3 +845,59 @@ fn a_late_cross_shard_part_is_applied_not_taken_for_a_dropped_resend() {
     // The part's entry, and Alice's newest commit's.
     assert_eq!(transactions_of(&path, 1), 2);
 }
+
+/// Alice's device loses the tail of its file: it reopens from a copy made
+/// before her last few cursor moves, whose dedupe entries the authority
+/// had dropped. Her next move is numbered past them all, by her clock
+/// (INV-EDGE-28), so it is applied rather than taken for a resend of a
+/// dropped commit.
+#[test]
+fn a_write_after_a_lost_tail_is_not_taken_for_a_dropped_resend() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(&dir.path().join("server.sqlite"));
+    let alice_path = dir.path().join("alice.sqlite");
+    let backup = dir.path().join("backup");
+    std::fs::create_dir(&backup).unwrap();
+    let copy = |from: &Path, to: &Path| {
+        for suffix in ["", "-wal", "-shm"] {
+            let source = Path::new(&format!("{}{suffix}", from.display())).to_path_buf();
+            let target = Path::new(&format!("{}{suffix}", to.display())).to_path_buf();
+            let _ = std::fs::remove_file(&target);
+            if source.exists() {
+                std::fs::copy(&source, &target).unwrap();
+            }
+        }
+    };
+    let alice = open_at(1, &alice_path);
+    let link_alice = link(&alice, &server);
+    insert(&alice, "presence", row(1), "a", "0");
+    pump(&server, &[&alice]);
+    drop((link_alice, alice));
+    copy(&alice_path, &backup.join("alice.sqlite"));
+
+    let alice = open_at(1, &alice_path);
+    let link_alice = link(&alice, &server);
+    for step in 1..5 {
+        update(&alice, "presence", row(1), "a", &step.to_string());
+        pump(&server, &[&alice]);
+    }
+    assert_eq!(read(&server, "presence", None), [("a".into(), "4".into())]);
+    drop((link_alice, alice));
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    copy(&backup.join("alice.sqlite"), &alice_path);
+    let alice = open_at(1, &alice_path);
+    let _link = link(&alice, &server);
+    let all = Query::from("presence");
+    let _sub = block_on(alice.subscribe(&alice.prepare_query(&all).unwrap(), ReadOpts::default()))
+        .unwrap();
+    pump(&server, &[&alice]);
+    update(&alice, "presence", row(1), "a", "after");
+    pump(&server, &[&alice]);
+
+    assert_eq!(
+        read(&server, "presence", None),
+        [("a".into(), "after".into())]
+    );
+    assert_eq!(alice.pending_upload_count(), 0);
+}
