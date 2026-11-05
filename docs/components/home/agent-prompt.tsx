@@ -1,9 +1,11 @@
 "use client";
 
 import { Fragment, type ReactNode, useState } from "react";
+import { track } from "@vercel/analytics";
 import { Check, Copy } from "lucide-react";
 import { Icon } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
+import { copyEvent } from "@/lib/copy-analytics";
 
 const placeholder = "[describe your project first, or drop into an ongoing chat]";
 
@@ -96,7 +98,7 @@ export function AgentPrompt({ quickstart, display }: { quickstart: string; displ
     <div className="home-agent-prompt-wrap">
       <p className="home-agent-prompt-placeholder">{placeholder}</p>
       <div className="home-agent-prompt">
-        <pre tabIndex={0} aria-label="Agent quickstart">
+        <pre tabIndex={0} aria-label="Agent quickstart" data-agent-quickstart="">
           {highlightMarkdown(display)}
         </pre>
         <div className="home-agent-prompt-copy">
@@ -107,6 +109,8 @@ export function AgentPrompt({ quickstart, display }: { quickstart: string; displ
             icon={<Icon icon={copied ? Check : Copy} size="sm" />}
             onClick={() => {
               void navigator.clipboard.writeText(quickstart).then(() => {
+                const event = copyEvent("quickstart", "button");
+                track(event.name, event.properties);
                 setCopied(true);
                 window.setTimeout(() => setCopied(false), 1500);
               });

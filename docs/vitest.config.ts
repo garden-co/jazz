@@ -9,6 +9,7 @@ export default defineConfig({
       "components/**/*.test.ts",
       "lib/agent-search.test.ts",
       "lib/search-analytics.test.ts",
+      "lib/copy-analytics.test.ts",
     ],
     exclude: ["**/node_modules/**", "**/.next/**"],
   },
