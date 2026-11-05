@@ -69,6 +69,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-51`: A store that committed writes before it became a replica MUST keep them and refuse every upstream, saying why.
 - `INV-SYNC-52`: A replica MUST upload each commit's ops by stored names, as the schema view that wrote them stores them, keeping it pending while offline; a server MUST refuse a commit naming a stored table or column of a version it has not deployed, at once, with reason `schema_version_not_deployed`.
 - `INV-SYNC-53`: The authority MUST NOT name a writer's own row as written (instead of shipping it) unless the commit applied unmerged over the very version the writer built on and that version is still current (§8.3); every other row ships, and a writer whose image differs from the digest asks for the row whole.
+- `INV-SYNC-54`: An authority MUST mint its namespace when it is opened as the authority and keep it in its store. A replica that keeps another namespace than its upstream's MUST refuse that link with `AuthorityChanged`, upload nothing to it, fail its remote reads and its `Global` waits on writes still pending with that error, and keep its local rows and pending writes; only a new link tries again (§8.10).
 - `INV-TX-2`, `INV-TX-11`, `INV-TX-23`: commit, seq and relay rules (ch. 3).
 - `INV-WIRE-1`, `INV-WIRE-2`: exact postcard frames and Hello version negotiation (§8.1.1).
 
@@ -133,28 +134,29 @@ delta's or an access proof's version, and a `BuiltOn::Seq`.
 
 Messages, with their postcard variant tags:
 
-| Tag | Message              | Direction       | Purpose                                                          |
-| --- | -------------------- | --------------- | ---------------------------------------------------------------- |
-| 0   | `Read`               | client → server | A read, live or once (§8.4)                                      |
-| 1   | `Unsubscribe`        | client → server | End a live read (§8.5)                                           |
-| 2   | `ResendWhole`        | client → server | Rows whose shipped deltas did not apply: ship them whole (§8.12) |
-| 3   | `Settled`            | server → client | A read is complete through positions (§8.4)                      |
-| 4   | `Commit`             | client → server | One transaction's writes (§8.2)                                  |
-| 5   | `ChunkRequests`      | client → server | Pull large-value nodes (§8.12)                                   |
-| 6   | `PushChunks`         | client → server | Large-value nodes ahead of a commit (§8.12)                      |
-| 7   | `Chunks`             | server → client | Pulled nodes, and the ones the server cannot answer              |
-| 8   | `Rows`               | server → client | Row images, with the tx ids of history versions                  |
-| 9   | `AccessLost`         | server → client | Drop a row the reader may no longer read                         |
-| 10  | `Refused`            | server → client | A read the server cannot serve, with why                         |
-| 11  | `Fate`               | server → client | A commit's outcome (§8.3)                                        |
-| 12  | `CheckAllowed`       | client → server | Permission preflight                                             |
-| 13  | `CheckAllowedResult` | server → client | Its answer: `Allowed`, `Denied` or `Unknown`                     |
-| 14  | `SchemaAdmission`    | server → client | That version's admission changed (§8.9)                          |
-| 15  | `Stored`             | relay → session | A relay holds the session's commit and uploads it (§8.3)         |
-| 16  | `Join`               | client → server | Open: the session's version and the catalogue it keeps (§8.9)    |
-| 17  | `Catalogue`          | server → client | Admitted versions, stored names and lens cells (§8.10)           |
-| 18  | `Welcome`            | server → client | The answer to `Join`: admission and catalogue (§8.9, §8.10)      |
-| 19  | `ConnectionSettled`  | server → client | The position the whole connection is settled through (§8.4)      |
+| Tag | Message              | Direction       | Purpose                                                           |
+| --- | -------------------- | --------------- | ----------------------------------------------------------------- |
+| 0   | `Read`               | client → server | A read, live or once (§8.4)                                       |
+| 1   | `Unsubscribe`        | client → server | End a live read (§8.5)                                            |
+| 2   | `ResendWhole`        | client → server | Rows whose shipped deltas did not apply: ship them whole (§8.12)  |
+| 3   | `Settled`            | server → client | A read is complete through positions (§8.4)                       |
+| 4   | `Commit`             | client → server | One transaction's writes (§8.2)                                   |
+| 5   | `ChunkRequests`      | client → server | Pull large-value nodes (§8.12)                                    |
+| 6   | `PushChunks`         | client → server | Large-value nodes ahead of a commit (§8.12)                       |
+| 7   | `Chunks`             | server → client | Pulled nodes, and the ones the server cannot answer               |
+| 8   | `Rows`               | server → client | Row images, with the tx ids of history versions                   |
+| 9   | `AccessLost`         | server → client | Drop a row the reader may no longer read                          |
+| 10  | `Refused`            | server → client | A read the server cannot serve, with why                          |
+| 11  | `Fate`               | server → client | A commit's outcome (§8.3)                                         |
+| 12  | `CheckAllowed`       | client → server | Permission preflight                                              |
+| 13  | `CheckAllowedResult` | server → client | Its answer: `Allowed`, `Denied` or `Unknown`                      |
+| 14  | `SchemaAdmission`    | server → client | That version's admission changed (§8.9)                           |
+| 15  | `Stored`             | relay → session | A relay holds the session's commit and uploads it (§8.3)          |
+| 16  | `Join`               | client → server | Open: the session's version and the catalogue it keeps (§8.9)     |
+| 17  | `Catalogue`          | server → client | Admitted versions, stored names and lens cells (§8.10)            |
+| 18  | `Welcome`            | server → client | The answer to `Join`: admission and catalogue (§8.9, §8.10)       |
+| 19  | `ConnectionSettled`  | server → client | The position the whole connection is settled through (§8.4)       |
+| 20  | `Holds`              | server → client | Rows a live read holds: all with its opening, then changes (§8.4) |
 
 A replica stores pending uploads as rows of their parts, never as encoded
 messages (§8.3), so no tag needs to stay put for storage. No server-sent message has tag 0 or 1, which lets a client tell a
@@ -472,6 +474,15 @@ always present for a one-shot read, and for a live read's opening and window
 changes when the read is limited or the opening could not tell what left it.
 Cached rows `members` leaves out are no longer in that result; the replica
 evicts them (a row a pending write touches waits for the server's word on it).
+A row is evicted only when no live read on the replica holds it: the server
+also sends each live read's held rows (its results and the rows that support
+them, union arms and policy rows included) as `Holds { id, added, removed }`.
+A read's first `Holds` on a connection is its whole set and goes with its
+opening, never before it; later ones carry only changes, after the tick's
+`Rows` and `AccessLost` and before its `Settled`. The replica keeps each live
+read's set in memory and across reconnects, replacing it with the read's
+first `Holds` on the new connection; neither side stores it. A row a
+replacing `Holds` drops stays cached until a later `members` leaves it out.
 `global` says the answer is the global authority's (directly, or through
 relays that settle by their upstream), not a relay's own store.
 
@@ -745,8 +756,13 @@ catalogue.
   `source`, or a dropped column's backwards default, from version `since` on.
 - `namespace` is the authority's, once the sender knows it. Table and column
   identities are UUIDs derived from it and the stored names, so the authority
-  mints them and replicas only mirror them. A replica that keeps another
-  namespace is another app's store and refuses the upstream.
+  mints them and replicas only mirror them. An authority mints its namespace
+  when it is opened as the authority (a store from before that mints it then,
+  or when it first serves), so a copy of its store taken before any replica
+  connected carries it (`INV-SYNC-54`). A replica that keeps another
+  namespace follows another history than the upstream's: the upstream's
+  store was recreated, or it is another app's. Nothing on the wire tells
+  these apart. The replica refuses the link with `AuthorityChanged` (below).
 - `confirmed` lists the versions whose names are the authority's, each with its
   names' digest: every version the authority admitted, or, from a relay, those
   its upstream confirmed. Only a confirmed version's tables and columns have an
@@ -767,6 +783,25 @@ under the name the upstream stores another table as, another app's namespace,
 or a stored column it keeps with another type than the upstream's (each added
 a column again under the same fresh stored name while apart): values of one
 type are never read as another's.
+
+A replica that keeps another namespace than its upstream's refuses that link
+with `ErrorCode::AuthorityChanged` (`INV-SYNC-54`). Its rows, watermarks and
+pending writes belong to the history it followed, so:
+
+- it uploads none of its pending writes to that upstream: a replica that
+  already keeps a namespace sends commits on a new link only once its
+  `Welcome` mirrored;
+- its remote reads (those open and those opened later) fail with the error,
+  and so do `Global` waits on its writes still pending; `Local` waits and
+  local reads are served as before, and the pending writes are kept;
+- the link reports the refusal to its host (`Db::upstream_refusal`), which
+  stops it instead of retrying: a retry would be refused the same way. Only
+  a new link (an explicit reconnect) tries again, so the old authority back
+  behind the URL syncs as before.
+
+Nothing resets the replica's store on its own: an app syncs with the new
+authority once it resets the store (`deleteClientStorage()` in jazz-tools),
+which discards the writes that never reached the old one.
 
 ### 8.11 Resuming reads from `since`
 

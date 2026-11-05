@@ -591,6 +591,15 @@ pub enum ErrorCode {
     /// An existing local store was written with a storage format this build
     /// does not read.
     UnsupportedStorageCodecs,
+    /// The upstream serves another authority history than the one this
+    /// store mirrors (its namespace differs): the server's store was
+    /// recreated (a deleted data directory, a restarted in-memory server, a
+    /// new environment behind the same URL), or it is another app's. This
+    /// store's rows, watermarks and unsynced writes belong to the old
+    /// history, so the link stops: nothing syncs with that server until the
+    /// local store is reset (`deleteClientStorage()` in jazz-tools) or the
+    /// old server is back.
+    AuthorityChanged,
 }
 
 impl ErrorCode {
@@ -612,6 +621,7 @@ impl ErrorCode {
             ErrorCode::NotObserved => "not_observed",
             ErrorCode::HistoricalReadRequiresServer => "historical_read_requires_server",
             ErrorCode::UnsupportedStorageCodecs => "unsupported_storage_codecs",
+            ErrorCode::AuthorityChanged => "authority_changed",
         }
     }
 }

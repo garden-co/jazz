@@ -45,6 +45,13 @@ pub fn merge3(format: TextFormat, base: &str, held: &str, incoming: &str) -> Str
     merge3_within(format, base, held, incoming, MERGE_WORK_BUDGET)
 }
 
+/// [`merge3`], or `None` past [`MERGE_WORK_BUDGET`]: a caller that stands
+/// `incoming` as sent then (as [`merge3`] does) can tell that it did, and
+/// that the held side's concurrent edits are not in the result.
+pub fn try_merge3(format: TextFormat, base: &str, held: &str, incoming: &str) -> Option<String> {
+    try_merge3_within(format, base, held, incoming, MERGE_WORK_BUDGET)
+}
+
 /// [`merge3`] within `budget` diff steps: past them the merge stops and
 /// `incoming` stands as sent, as for overlapping replacements.
 pub fn merge3_within(
@@ -54,11 +61,22 @@ pub fn merge3_within(
     incoming: &str,
     budget: u64,
 ) -> String {
+    try_merge3_within(format, base, held, incoming, budget).unwrap_or_else(|| incoming.to_owned())
+}
+
+/// [`try_merge3`] within `budget` diff steps.
+pub fn try_merge3_within(
+    format: TextFormat,
+    base: &str,
+    held: &str,
+    incoming: &str,
+    budget: u64,
+) -> Option<String> {
     if held == base {
-        return incoming.to_owned();
+        return Some(incoming.to_owned());
     }
     if incoming == base || held == incoming {
-        return held.to_owned();
+        return Some(held.to_owned());
     }
     let base_tokens = tokenize(format, base);
     let held_tokens = tokenize(format, held);
@@ -68,7 +86,7 @@ pub fn merge3_within(
         diff(&base_tokens, &held_tokens, &mut work),
         diff(&base_tokens, &incoming_tokens, &mut work),
     ) else {
-        return incoming.to_owned();
+        return None;
     };
     // A change both made applies once. Hunks of one diff never share a base
     // span (touching ones are coalesced), so each has at most one twin.
@@ -86,7 +104,7 @@ pub fn merge3_within(
         moves(&base_tokens, &held_tokens, &ours, &mut work),
         moves(&base_tokens, &incoming_tokens, &theirs, &mut work),
     ) else {
-        return incoming.to_owned();
+        return None;
     };
     for (held, hunks, tokens, own_moves, other_moves, other_hunks, other_tokens) in [
         (
@@ -170,7 +188,7 @@ pub fn merge3_within(
     if format == TextFormat::Html {
         out = balance_tags(&out, &[&base_tokens, &held_tokens, &incoming_tokens]);
     }
-    out
+    Some(out)
 }
 
 /// A block of base tokens `old` that one side deleted there and inserted,

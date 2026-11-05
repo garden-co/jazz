@@ -19,7 +19,7 @@ heap-profiling = ["dep:flate2", "dep:libc", "dep:mappings", "dep:prost", "dep:ru
 [dependencies]
 jazz = { workspace = true, default-features = false, features = ["runtime"] }
 jazz-server = { path = "../jazz-server" }
-jazz-alpha59-dump = { path = "../jazz-alpha59-dump" }
+jazz-alpha59-alpha60-dump = { path = "../jazz-alpha59-alpha60-dump" }
 serde_json = "1.0"
 mimalloc = { version = "0.1", default-features = false }
 jazz-otel = { workspace = true, optional = true }
@@ -67,6 +67,10 @@ tungstenite = { version = "0.29", default-features = false, features = ["handsha
 [[bin]]
 name = "jazz-tools"
 path = "src/bin/jazz-tools.rs"
+
+[[bin]]
+name = "jazz-alpha59-alpha60-import"
+path = "src/bin/jazz-alpha59-alpha60-import.rs"
 
 [[test]]
 name = "client_restart_integration"

@@ -210,7 +210,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
         res.status(403).json({ error: "Account mismatch" });
         return;
       }
-      const userDb = await jazz.forRequest(request);
+      const userDb = await jazz.forReqUser(request);
       const todos = await userDb.all(schemaApp.todos);
       res.json(todos);
     } catch (e) {

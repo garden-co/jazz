@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -86,12 +85,63 @@ function memoryStore(): AccountStore {
 }
 
 describe("browser session against the app's backend", () => {
+  // A returning user has no account stored on this device: the backend names
+  // them. Until it has answered, the session must not say "signed-out", or
+  // every app shows its sign-in screen for a moment on each page load.
+  it("opens a signed-in user's session without reporting signed-out first", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz);
+    signInAs(origin, "alice");
+
+    const session = await createJazzClient({
+      serverUrl: `${origin}/jazz`,
+      store: memoryStore(),
+      driver: { type: "memory" },
+    });
+    cleanups.push(() => session.close());
+
+    const snapshot = session.getSnapshot();
+    expect(snapshot.status).toBe("ready");
+    expect(snapshot.client?.session?.user?.identity).toEqual({
+      issuer: "jazz:backend",
+      subject: "alice",
+    });
+  }, 30_000);
+
+  it("opens signed out once the backend says no one is signed in", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz);
+
+    const session = await createJazzClient({
+      serverUrl: `${origin}/jazz`,
+      store: memoryStore(),
+      driver: { type: "memory" },
+    });
+    cleanups.push(() => session.close());
+
+    expect(session.getSnapshot().status).toBe("signed-out");
+  }, 30_000);
+
+  it("opens signed out when the backend can't be reached", async () => {
+    // Nothing listens here: the first check fails fast and the session opens
+    // as before rather than waiting on it.
+    const session = await createJazzClient({
+      serverUrl: "http://127.0.0.1:9/jazz",
+      store: memoryStore(),
+      driver: { type: "memory" },
+    });
+    cleanups.push(() => session.close());
+
+    expect(session.getSnapshot().status).toBe("signed-out");
+  }, 30_000);
+
   it("signs in on the thin client and upgrades with a client loader", async () => {
-    const appId = randomUUID();
     const jazz = await createJazz({
       app,
       permissions,
-      store: memory({ appId }),
+      store: memory(),
       authenticate,
     }).ready();
     cleanups.push(() => jazz.close());
@@ -116,7 +166,7 @@ describe("browser session against the app's backend", () => {
     await session.loginWithBackend();
     const thin = session.getSnapshot().client!;
     expect(isThinDb(thin.db)).toBe(true);
-    expect(thin.session?.user?.identity).toEqual({ issuer: `jazz:app:${appId}`, subject: "alice" });
+    expect(thin.session?.user?.identity).toEqual({ issuer: "jazz:backend", subject: "alice" });
     const owner = thin.session!.user!.account;
 
     await thin.db.insert(app.todos, { title: "thin", owner }).wait({ tier: "global" });

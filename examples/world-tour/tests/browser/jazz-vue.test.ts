@@ -22,11 +22,10 @@ import {
   JazzClientProvider,
   createJazzClient,
   useAll,
-  useDb,
   useSession,
 } from "jazz-tools/vue";
 import { app } from "../../schema.js";
-import { APP_ID, SERVER_URL } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 
 interface Scope {
   marker: string;
@@ -104,7 +103,7 @@ afterEach(async () => {
 
 async function mount(child: ReturnType<typeof defineComponent>): Promise<Mounted> {
   const session = await createJazzClient({
-    scope: APP_ID,
+    scope: SCOPE,
     serverUrl: SERVER_URL,
     driver: { type: "memory" },
     initial: "local-first",
@@ -279,9 +278,8 @@ describe("world-tour Jazz + Vue integration", () => {
     const s = scope("inserter");
     const Inserter = defineComponent({
       setup() {
-        const db = useDb();
         const session = useSession();
-        const { data: venues } = useAll(s.queries.venues);
+        const { data: venues, db } = useAll(s.queries.venues);
         function add() {
           db.insert(
             app.venues,

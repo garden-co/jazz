@@ -3,6 +3,7 @@ import type { QueryBuilder, QueryOptions, UseAllState } from "../shared/index.js
 import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { useJazzClient } from "./provider.js";
 import { toError } from "../runtime/util.js";
+import type { Db } from "../runtime/db.js";
 
 type UseAllOptions = {
   suspense?: boolean;
@@ -17,24 +18,34 @@ type UseAllLoadingResult = {
   data: undefined;
   isLoading: true;
   error: null;
+  db: Db;
 };
 
 type UseAllFulfilledResult<T extends { id: string }> = {
   data: T[];
   isLoading: false;
   error: null;
+  db: Db;
 };
 
 type UseAllErrorResult = {
   data: undefined;
   isLoading: false;
   error: Error;
+  db: Db;
 };
 
 type UseAllNoQueryResult = {
   data: undefined;
   isLoading: false;
   error: null;
+  db: Db;
+};
+
+/** Result of {@link useAllSuspense}: the matching rows plus the {@link Db} handle. */
+export type UseAllSuspenseResult<T extends { id: string }> = {
+  data: T[];
+  db: Db;
 };
 
 // A query that never arrives has nothing to fetch, so the suspense variant
@@ -49,7 +60,9 @@ function useAllBase<T extends { id: string }>(
   options?: UseAllOptions,
 ): T[] | UseAllResult<T> | UseAllNoQueryResult {
   const { suspense = false } = options ?? {};
-  const store = getSubscriptionStore(useJazzClient());
+  const client = useJazzClient();
+  const db = client.db as unknown as Db;
+  const store = getSubscriptionStore(client);
 
   // Pure, render-safe key: computeKey neither registers the query nor opens a
   // subscription, so the render phase stays side-effect free (concurrent/strict
@@ -96,19 +109,19 @@ function useAllBase<T extends { id: string }>(
 
   const result = useMemo<UseAllResult<T> | UseAllNoQueryResult>(() => {
     if (key === null) {
-      return { data: undefined, isLoading: false, error: null };
+      return { data: undefined, isLoading: false, error: null, db };
     }
 
     if (status === "fulfilled") {
-      return { data: data!, isLoading: false, error: null };
+      return { data: data!, isLoading: false, error: null, db };
     }
 
     if (status === "rejected") {
-      return { data: undefined, isLoading: false, error: toError(stateError) };
+      return { data: undefined, isLoading: false, error: toError(stateError), db };
     }
 
-    return { data: undefined, isLoading: true, error: null };
-  }, [data, key, stateError, status]);
+    return { data: undefined, isLoading: true, error: null, db };
+  }, [data, db, key, stateError, status]);
 
   if (suspense) {
     if (!query || key === null) {
@@ -147,11 +160,13 @@ function useAllBase<T extends { id: string }>(
  *
  * @param query - the database query (e.g. `app.todos.where({done: false})`)
  *
- * @returns `{ data, isLoading, error }`
+ * @returns `{ data, isLoading, error, db }`
  * - `data` is `undefined` until the query resolves or if the query fails.
  * - `isLoading` is `true` before the first result is available.
  * - `error` is `null` unless there was a problem setting up the subscription
  *   and no results could be loaded.
+ * - `db` is the {@link Db} handle for writes (`db.insert`, `db.update`, ...),
+ *   so components don't need a separate `useDb()`.
  *
  * Use {@link useAllSuspense} when you want loading and errors to flow through
  * Suspense and an error boundary instead.
@@ -188,11 +203,13 @@ export function useAll<T extends { id: string }>(
  *
  * @param query - the database query (e.g. `app.todos.where({done: false})`)
  *
- * @returns the matching rows
+ * @returns `{ data, db }`: the matching rows and the {@link Db} handle for writes
  */
 export function useAllSuspense<T extends { id: string }>(
   query?: QueryBuilder<T>,
   options?: QueryOptions,
-): T[] {
-  return useAllBase(query, options, { suspense: true }) as T[];
+): UseAllSuspenseResult<T> {
+  const db = useJazzClient().db as unknown as Db;
+  const data = useAllBase(query, options, { suspense: true }) as T[];
+  return useMemo(() => ({ data, db }), [data, db]);
 }

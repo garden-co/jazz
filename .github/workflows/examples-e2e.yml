@@ -162,16 +162,6 @@ jobs:
           run-id: ${{ steps.preview.outputs.run_id }}
           github-token: ${{ github.token }}
 
-      - name: Restore executable permissions on CLI binaries
-        # Artifact downloads drop the mode bits; publish restores them the same way.
-        if: env.REUSE_PREVIEW == 'true'
-        run: |
-          chmod 755 \
-            packages/jazz-tools/bin/native/jazz-tools-darwin-arm64 \
-            packages/jazz-tools/bin/native/jazz-tools-darwin-x64 \
-            packages/jazz-tools/bin/native/jazz-tools-linux-arm64 \
-            packages/jazz-tools/bin/native/jazz-tools-linux-x64
-
       - name: Pack workspace tarballs
         # Mirrors PACKAGES_TO_PACK in dev/examples-e2e/run.mjs. The harness picks
         # these up via `--tarball-dir` and pins them as overrides in each staged

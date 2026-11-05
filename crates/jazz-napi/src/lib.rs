@@ -1085,10 +1085,31 @@ impl Transport {
         Ok(self.link.outbound_len() as u32)
     }
 
+    /// Why the database dropped this upstream link on its own, with the
+    /// core's stable `code` (`authority_changed` for a server whose store
+    /// was recreated), or `null` while the link stands. The host stops the
+    /// link with it rather than retry.
+    #[napi(js_name = "upstreamRefusal")]
+    pub fn upstream_refusal(&self) -> Option<UpstreamRefusal> {
+        self.link.upstream_refusal().map(|error| UpstreamRefusal {
+            code: error.code.as_str().to_owned(),
+            message: error.to_string(),
+        })
+    }
+
     #[napi]
     pub fn close(&mut self) -> bool {
         self.link.close()
     }
+}
+
+/// Why the database dropped an upstream link (see `Transport.upstreamRefusal`).
+#[napi(object)]
+pub struct UpstreamRefusal {
+    /// The core's stable error code.
+    pub code: String,
+    /// What the core said, as an error's message.
+    pub message: String,
 }
 
 // ---- the database --------------------------------------------------------------

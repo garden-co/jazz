@@ -1,5 +1,9 @@
 import { createJazzSessionOwner } from "../session/state.js";
-import { followUser, type UserFollowingSession } from "../session/follow-user.js";
+import {
+  firstBackendAnswer,
+  followUser,
+  type UserFollowingSession,
+} from "../session/follow-user.js";
 import { nativeBackendWatchEvents } from "../session/native-backend-watch.js";
 import { clientRegistryUrl } from "../accounts/account-manager-core.js";
 import { createAccountManager, type AccountManagerConfig } from "./create-account-manager.js";
@@ -14,7 +18,7 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
   Omit<AccountManagerConfig, "appId"> & {
     /**
      * Not for a client: the app id belongs to your backend's store
-     * (`remote({ appId })`, `sqlite({ appId })`). A client is scoped by its
+     * (`remote({ appId })`, or the id a store keeps). A client is scoped by its
      * `serverUrl`; use `scope` to keep local-first users created under an
      * app id.
      */
@@ -63,7 +67,7 @@ export async function createJazzClient(
       decorate: () => ({ reauthenticate: async () => {} }),
     });
   }
-  return createJazzSessionOwner({
+  const session = await createJazzSessionOwner({
     accounts,
     initial: config.initial,
     openClient: (account) => openJazzClient({ ...config, serverUrl, account }),
@@ -73,4 +77,6 @@ export async function createJazzClient(
       linkGuest: config.linkGuestOnSignUp,
     }),
   });
+  await firstBackendAnswer(session);
+  return session;
 }

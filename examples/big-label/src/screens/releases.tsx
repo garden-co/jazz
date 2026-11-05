@@ -17,7 +17,7 @@ import {
   Text,
   VStack,
 } from "@astryxdesign/core";
-import { useAll, useDb, useOne } from "jazz-tools/react";
+import { useAll, useOne } from "jazz-tools/react";
 import { app } from "../../schema";
 import { ReleaseDialog } from "../components/forms";
 import {
@@ -175,11 +175,14 @@ export function ReleasePage({ id }: { id: string }) {
   const canEdit = useCan("editCatalogue");
   const canAssign = useCan("assignReleases");
   const canDelete = useCan("deleteCatalogue");
-  const db = useDb();
   const write = useWrite();
   const [isEditing, setIsEditing] = useState(false);
   const [teamId, setTeamId] = useState<string | null>(null);
-  const { data: release, isLoading } = useOne(
+  const {
+    data: release,
+    isLoading,
+    db,
+  } = useOne(
     app.releases
       .where({ id, organizationId: organization.id })
       .include({ artist: true, catalogue: true }),

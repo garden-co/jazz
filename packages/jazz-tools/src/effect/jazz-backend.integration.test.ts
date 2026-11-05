@@ -65,11 +65,11 @@ describe("JazzBackend Effect layer", () => {
 
           // The same handler runs with the user's identity from a plain request...
           const fromRequest = yield* createPost("from request").pipe(
-            JazzBackend.forRequest(request()),
+            JazzBackend.forReqUser(request()),
           );
           // ...and from an `effect/http` request in the handler's context.
           const fromHttp = yield* createPost("from http").pipe(
-            JazzBackend.forCurrentRequest(),
+            JazzBackend.forCurrentReqUser(),
             Effect.provideService(
               HttpServerRequest.HttpServerRequest,
               HttpServerRequest.fromWeb(request()),
@@ -80,7 +80,7 @@ describe("JazzBackend Effect layer", () => {
           const denied = yield* Effect.gen(function* () {
             const jazz = yield* Jazz;
             return yield* jazz.insert(app.notes, { text: "denied" }, { wait: "global" });
-          }).pipe(JazzBackend.forRequest(request()), Effect.flip);
+          }).pipe(JazzBackend.forReqUser(request()), Effect.flip);
 
           return { fromRequest, fromHttp, denied, seenByClient: yield* Fiber.join(seenByClient) };
         }).pipe(Effect.provide(Layer.mergeAll(backendLayer, clientLayer))),
@@ -91,7 +91,7 @@ describe("JazzBackend Effect layer", () => {
           _tag: "Some",
           value: {
             $createdBy: {
-              identity: { issuer: `jazz:app:${server.appId}`, subject: "effect-reader" },
+              identity: { issuer: "jazz:backend", subject: "effect-reader" },
             },
           },
         });
@@ -127,7 +127,7 @@ describe("JazzBackend Effect layer", () => {
       const seen = await Effect.runPromise(
         Effect.all(
           users.map((user, index) =>
-            writeThenRead(`${user} entry`).pipe(JazzBackend.forRequest(requests[index]!)),
+            writeThenRead(`${user} entry`).pipe(JazzBackend.forReqUser(requests[index]!)),
           ),
           { concurrency: "unbounded" },
         ).pipe(Effect.provide(backendLayer)),

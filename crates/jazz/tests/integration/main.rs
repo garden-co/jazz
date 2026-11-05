@@ -125,6 +125,12 @@ mod relay_local_seqs;
 mod relay_policy_subscriptions;
 #[path = "../relay_serves_on_arrival.rs"]
 mod relay_serves_on_arrival;
+#[path = "../reopened_admitted_versions.rs"]
+mod reopened_admitted_versions;
+#[path = "../replica_lost_tail.rs"]
+mod replica_lost_tail;
+#[path = "../same_version_bundles.rs"]
+mod same_version_bundles;
 #[path = "../schema_activation.rs"]
 mod schema_activation;
 #[path = "../schema_renames.rs"]
@@ -135,6 +141,8 @@ mod serializable_relay;
 mod serializable_sqlite;
 #[path = "../serializable_sync.rs"]
 mod serializable_sync;
+#[path = "../server_store_reset.rs"]
+mod server_store_reset;
 #[path = "../session_policy_values.rs"]
 mod session_policy_values;
 #[path = "../session_write_checks.rs"]

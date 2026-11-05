@@ -1,4 +1,8 @@
-/** Stable IDs, not display names. Unused optional fields encode as empty. */
+/**
+ * Stable IDs, not display names. Unused optional fields encode as empty.
+ *
+ * @experimental
+ */
 export type CryptoContext = Readonly<{
   application: string;
   policy: string;
@@ -25,7 +29,11 @@ const FIELDS = [
 const FIELD_NAMES = new Set<string>(FIELDS);
 const REQUIRED = new Set<string>(["application", "policy", "scope", "identifier", "epoch"]);
 
-/** Canonical context format 1; semantic field selection belongs to the common E2EE layer. */
+/**
+ * Canonical context format 1; semantic field selection belongs to the common E2EE layer.
+ *
+ * @experimental
+ */
 export function encodeCryptoContext(context: CryptoContext): Uint8Array {
   if (
     Reflect.ownKeys(context).some((field) => typeof field !== "string" || !FIELD_NAMES.has(field))

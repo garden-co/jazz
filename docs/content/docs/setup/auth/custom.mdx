@@ -99,7 +99,7 @@ fetched throws instead, so clients retry rather than signing out.
 1. The user signs in with your auth library, which sets its own session cookie.
 2. The client calls `loginWithBackend()`. Your backend runs `authenticate` and returns the user id.
 3. Jazz gives that user an account the first time, and the same account every time after. The
-   identity is `{ issuer: "jazz:app:<appId>", subject: userId }`.
+   identity is `{ issuer: "jazz:backend", subject: userId }`.
 4. Every sync connection asks `authenticate` again, so a sign-out or changed claims apply on the
    next reconnect.
 
@@ -196,7 +196,7 @@ Public sessions and author columns expose the same structured value:
 ```ts
 {
   account: "00000000-0000-4000-8000-000000000001",
-  identity: { issuer: "jazz:app:my-app", subject: "alice" },
+  identity: { issuer: "jazz:backend", subject: "alice" },
 }
 ```
 
@@ -207,8 +207,8 @@ share account ownership while keeping distinct authorship.
 
 Apps on alpha.59 signed users in with JWTs, so their accounts belong to identities like
 `{ issuer: "https://idp.example.com", subject: "user_01" }`. `createJazz` names users
-`{ issuer: "jazz:app:<appId>", subject: userId }` instead. The alpha.59 import
-(`jazz-tools migrate-alpha59 import`) links each user's `jazz:app:<appId>` identity to their existing account. Its
+`{ issuer: "jazz:backend", subject: userId }` instead. The alpha.59 import
+(`jazz-alpha59-alpha60-import import`, a binary on the release's GitHub page) links each user's `jazz:backend` identity to their existing account. Its
 `--app-id` must be exactly the `appId` you pass to `remote()`. If your
 `authenticate` returns the old token's `sub` as `userId` (which `fromJWT` does), returning users
 open their old accounts and keep all their data. Pass `--no-backend-identity-links` to skip this.

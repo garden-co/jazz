@@ -455,7 +455,7 @@ async fn ws_admission(
             credential: WebSocketCredential::Backend,
             requested_link: RequestedWebSocketLink::OrdinarySession,
             // The backend's own link: the sessions it acts for (its
-            // `forRequest` reads and writes) are governed by its bundle.
+            // `forReqUser` reads and writes) are governed by its bundle.
             bundle,
         });
     }

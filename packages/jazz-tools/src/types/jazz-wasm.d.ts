@@ -83,6 +83,8 @@ declare module "jazz-wasm" {
     auxiliaryOutboundReady(): Promise<void>;
     tick(): Promise<number>;
     updateAuthenticatedClaims(claims: Record<string, unknown>): Promise<void>;
+    /** Why the core dropped this upstream link on its own, or `null`. */
+    upstreamRefusal(): (Error & { code: string }) | null;
     close(): boolean;
   }
 

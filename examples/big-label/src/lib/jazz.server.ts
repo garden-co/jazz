@@ -21,7 +21,7 @@ declare global {
  * BigLabel's Jazz, inside this Next app, mounted under `/jazz` (see
  * app/jazz/[...path]/route.ts). Its `db` holds backend authority: Better Auth
  * persists its rows through it, and the API routes bootstrap labels with it.
- * `forRequest` reads as the signed-in user, under their permissions. Shared
+ * `forReqUser` reads as the signed-in user, under their permissions. Shared
  * across concurrent requests and Next hot reloads.
  */
 export function jazz(): Promise<Jazz> {
@@ -32,8 +32,8 @@ export function jazz(): Promise<Jazz> {
     store: config.remote
       ? remote({ ...config.remote, appId: config.appId })
       : process.env.NODE_ENV === "test"
-        ? memory({ appId: config.appId })
-        : sqlite({ path: config.dataPath!, appId: config.appId }),
+        ? memory()
+        : sqlite({ path: config.dataPath! }),
     // Better Auth's session cookie decides who the user is.
     authenticate: async (request) => {
       const { auth } = await import("./auth");

@@ -866,3 +866,89 @@ async fn the_latest_bundle_is_the_last_one_published() {
     assert_eq!(latest(router.clone()).await, hash(&base));
     server.shutdown().await;
 }
+
+/// A deployment that only adds an index publishes a new bundle for the
+/// version the core admitted already (an index does not change it). The
+/// core builds the index, and a session pinned to either deployment's
+/// bundle opens, before and after the core restarts: publishing the new
+/// bundle ends the old one's sessions, which reconnect pinned to it, so
+/// refusing that pin locked every user out.
+///
+/// ```text
+/// deploy {notes(title)}                -> bundle A
+/// deploy {notes(title) + index(title)} -> bundle B (same version), index built
+/// pin A, pin B: ok;  restart;  pin A, pin B: ok
+/// ```
+#[tokio::test]
+async fn an_index_only_deployment_pins_both_bundles_across_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = schema(&[]);
+    let indexed = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("notes")
+                .column("title", ColumnType::Text)
+                .index_only(["title"]),
+        )
+        .build();
+    let with_read = |mut request: Value| {
+        request["permissions"] = serde_json::to_value(HashMap::from([(
+            TableName::new("notes"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]))
+        .unwrap();
+        request
+    };
+    let pins = |server: &super::super::builder::BuiltServer, bundles: [String; 2]| {
+        let runtime = server.state.runtime().unwrap();
+        async move {
+            runtime
+                .with_db_for_test(move |db| {
+                    Ok(bundles
+                        .iter()
+                        .map(|bundle| {
+                            let bundle = jazz::catalogue::BundleId::from_hex(bundle).unwrap();
+                            db.check_session_pin(
+                                jazz::ids::AuthorSubject::for_test_bytes([0xa1; 16]),
+                                Some(&bundle),
+                            )
+                            .map_err(|error| error.to_string())
+                        })
+                        .collect::<Vec<_>>())
+                })
+                .await
+                .unwrap()
+        }
+    };
+    let bundles = {
+        let server = builder(Some(dir.path())).build().await.unwrap();
+        let router = create_router(server.state.clone());
+        let a = publish_ok(&router, with_read(request(&plain, &[&plain], vec![]))).await;
+        let b = publish_ok(&router, with_read(request(&indexed, &[&indexed], vec![]))).await;
+        assert_eq!(b["changed"], true, "{b}");
+        let bundles = [
+            a["bundle"].as_str().unwrap().to_owned(),
+            b["bundle"].as_str().unwrap().to_owned(),
+        ];
+        assert_ne!(bundles[0], bundles[1]);
+        assert_eq!(pins(&server, bundles.clone()).await, vec![Ok(()), Ok(())]);
+        server.shutdown().await;
+        bundles
+    };
+    let conn = rusqlite::Connection::open(dir.path().join("jazz.sqlite")).unwrap();
+    let indexes: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index' \
+             AND name LIKE 'notes\\_\\_ix(%' ESCAPE '\\'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    drop(conn);
+    assert_eq!(
+        indexes, 1,
+        "the core built the index-only deployment's index"
+    );
+    let server = builder(Some(dir.path())).build().await.unwrap();
+    assert_eq!(pins(&server, bundles).await, vec![Ok(()), Ok(())]);
+    server.shutdown().await;
+}

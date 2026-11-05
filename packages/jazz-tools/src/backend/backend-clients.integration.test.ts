@@ -101,16 +101,15 @@ async function serve(jazz: Jazz): Promise<string> {
 }
 
 async function appWith(backendClients: Parameters<typeof createJazz>[0]["backendClients"]) {
-  const appId = randomUUID();
   const jazz = await createJazz({
     app,
     permissions,
-    store: memory({ appId }),
+    store: memory(),
     authenticate,
     backendClients,
   }).ready();
   cleanups.push(() => jazz.close());
-  return { appId, jazz, origin: await serve(jazz) };
+  return { appId: jazz.appId, jazz, origin: await serve(jazz) };
 }
 
 const signIn = (origin: string, appId: string, headers: Record<string, string>) =>
@@ -151,7 +150,7 @@ describe("scoped backend clients", () => {
     const signedIn = await signIn(origin, appId, { authorization: `Bearer ${good}` });
     expect(signedIn.status).toBe(200);
     expect(await signedIn.json()).toMatchObject({
-      identity: { issuer: `jazz:app:${appId}`, subject: "machine:worker" },
+      identity: { issuer: "jazz:backend", subject: "machine:worker" },
       claims: { machine: true },
     });
 
@@ -213,7 +212,7 @@ describe("scoped backend clients", () => {
     if (status !== "ready") throw error ?? new Error(status);
     const account = client!.session!.user!.account;
     expect(client!.session!.user!.identity).toEqual({
-      issuer: `jazz:app:${appId}`,
+      issuer: "jazz:backend",
       subject: "machine:worker",
     });
 
@@ -351,7 +350,7 @@ describe("trusted backend clients", () => {
           peer_identity: "x",
           backend_secret: "stand-in",
           backend_session: {
-            issuer: `jazz:app:${appId}`,
+            issuer: "jazz:backend",
             user_id: "alice",
             account_id: alice,
             claims: {},
@@ -380,7 +379,7 @@ describe("trusted backend clients", () => {
     cleanups.push(() => session.close());
     const { client } = session.getSnapshot();
     const asAlice = backendDbForSession(client!, {
-      issuer: `jazz:app:${appId}`,
+      issuer: "jazz:backend",
       user_id: "alice",
       account_id: alice!,
       claims: {},
@@ -405,7 +404,7 @@ describe("trusted backend clients", () => {
         JSON.stringify({
           peer_identity: "x",
           backend_secret: "stand-in",
-          backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
+          backend_session: { issuer: "jazz:backend", user_id: "alice" },
         }),
       ),
     );

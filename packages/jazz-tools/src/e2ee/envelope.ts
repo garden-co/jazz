@@ -1,4 +1,8 @@
-/** Stable identifier of an installed cryptographic adapter and its wire format. */
+/**
+ * Stable identifier of an installed cryptographic adapter and its wire format.
+ *
+ * @experimental
+ */
 export type CryptoMechanism = Readonly<{ id: string; version: number }>;
 
 function validateMechanism({ id, version }: CryptoMechanism): void {
@@ -13,7 +17,11 @@ function validateMechanism({ id, version }: CryptoMechanism): void {
   }
 }
 
-/** Encode the common header specified in E2EE_CRYPTO_FORMAT.md, not plaintext. */
+/**
+ * Encode the common header specified in E2EE_CRYPTO_FORMAT.md, not plaintext.
+ *
+ * @experimental
+ */
 export function encodeEnvelope(mechanism: CryptoMechanism, payload: Uint8Array): Uint8Array {
   validateMechanism(mechanism);
   const id = new TextEncoder().encode(mechanism.id);
@@ -25,7 +33,11 @@ export function encodeEnvelope(mechanism: CryptoMechanism, payload: Uint8Array):
   return result;
 }
 
-/** Validate routing metadata. The adapter must still authenticate the payload. */
+/**
+ * Validate routing metadata. The adapter must still authenticate the payload.
+ *
+ * @experimental
+ */
 export function decodeEnvelope(mechanism: CryptoMechanism, envelope: Uint8Array): Uint8Array {
   validateMechanism(mechanism);
   if (

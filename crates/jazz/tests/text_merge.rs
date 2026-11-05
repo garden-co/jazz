@@ -860,3 +860,35 @@ fn a_chain_that_clears_then_writes_lands_its_last_write() {
     net.settle(0, fresh);
     net.assert_summary_everywhere(row, Some("Fresh."));
 }
+
+/// Past its work budget a merge stops and the later write stands as sent,
+/// as for overlapping replacements: the earlier write's concurrent edit
+/// leaves the current text. The authority's host is told which column of
+/// which row, so it can say so.
+#[test]
+fn a_merge_past_its_budget_is_reported_to_the_host() {
+    let mut net = Net::new(2);
+    let row = net.seed(0, &[("body", "The cat sat.")]);
+    net.core.set_merge_budget_for_test(1);
+    net.offline(0);
+    net.offline(1);
+    let alice = net.edit(0, row, &[("body", "The black cat sat.")]);
+    let bob = net.edit(1, row, &[("body", "The cat slept.")]);
+    net.online(0);
+    net.settle(0, alice);
+    assert_eq!(net.core.take_merge_fallbacks(), (Vec::new(), 0));
+    net.online(1);
+    net.settle(1, bob);
+    net.assert_everywhere(row, "body", "The cat slept.");
+    let (fallbacks, dropped) = net.core.take_merge_fallbacks();
+    assert_eq!(dropped, 0);
+    assert_eq!(fallbacks.len(), 1, "{fallbacks:?}");
+    assert!(fallbacks[0].table.starts_with("docs"), "{fallbacks:?}");
+    assert_eq!(fallbacks[0].row, row);
+    assert!(fallbacks[0].column.starts_with("body"), "{fallbacks:?}");
+    assert_eq!(
+        net.core.take_merge_fallbacks(),
+        (Vec::new(), 0),
+        "taken once"
+    );
+}

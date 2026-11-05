@@ -4,10 +4,9 @@ import topLevelAwait from "vite-plugin-top-level-await";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { playwright } from "@vitest/browser-playwright";
 import { jazzBackend } from "./jazz.server.js";
-import { APP_ID } from "./tests/browser/test-constants.js";
 
 export default defineConfig({
-  plugins: [wasm(), topLevelAwait(), svelte(), jazzBackend({ appId: APP_ID })],
+  plugins: [wasm(), topLevelAwait(), svelte(), jazzBackend()],
   worker: {
     plugins: () => [wasm(), topLevelAwait()],
   },
