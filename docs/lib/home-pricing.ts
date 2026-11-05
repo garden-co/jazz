@@ -195,7 +195,7 @@ const globalParams = [
   param("global.idleGraceMinutes", "Idle time before sleeping (min)", 5, 0, 60, 1),
 ];
 
-type PlatformId = "vercel" | "cloudflare" | "server";
+type PlatformId = "vercel" | "cloudflare" | "server" | "aws";
 
 /** One instance size a platform offers. */
 export type Size = { label: string; vcpus: number; memoryGb: number };
@@ -332,6 +332,43 @@ export const platforms: Platform[] = [
     },
     costNote:
       "Dedicated servers with backups, volumes past the included disk, Object Storage for large values, and traffic past each server's included allowance.",
+  },
+  {
+    id: "aws",
+    name: "AWS EC2",
+    params: [
+      ...engineParams("aws", 2, 110, 3.5),
+      param("aws.maxVcpus", "Largest instance (vCPUs)", 48, 2, 48, 2),
+      param("aws.perVcpuHour", "On-demand ($/vCPU-hour, 4 GB each, m7g)", 0.0408, 0.01, 0.1, 0.001),
+      param("aws.discount", "Savings Plan discount", 0, 0, 0.6, 0.05),
+      param("aws.ebsGb", "EBS gp3 ($/GB-month)", 0.08, 0, 0.3, 0.01),
+      param("aws.snapshotGb", "Snapshots ($/GB-month)", 0.05, 0, 0.2, 0.01),
+      param("aws.s3Gb", "S3 ($/GB-month)", 0.023, 0, 0.1, 0.001),
+      param("aws.egressGb", "Data transfer out ($/GB)", 0.09, 0, 0.2, 0.005),
+      param("aws.includedEgressGb", "Free transfer out (GB)", 100, 0, 1000, 10),
+    ],
+    sizes: (a) =>
+      [2, 4, 8, 16, 32, 48]
+        .filter((vcpus) => vcpus <= a["aws.maxVcpus"])
+        .map((vcpus) => ({
+          label: `${vcpus} vCPU / ${vcpus * 4} GB EC2 instance`,
+          vcpus,
+          memoryGb: vcpus * 4 - 2,
+        })),
+    // EBS volumes grow with the data.
+    diskGb: () => Infinity,
+    cost: (d, a, size, shards) => {
+      const instances =
+        shards * size.vcpus * a["aws.perVcpuHour"] * HOURS_PER_MONTH * (1 - a["aws.discount"]);
+      // Each shard keeps its data on EBS with room to grow, plus snapshots.
+      const ebsGb = Math.max(d.structuredGb * 1.5, shards * 20);
+      const storage = ebsGb * a["aws.ebsGb"] + d.structuredGb * a["aws.snapshotGb"];
+      const s3 = d.blobGb * a["aws.s3Gb"];
+      const egress = over(d.egressGb, a["aws.includedEgressGb"]) * a["aws.egressGb"];
+      return instances + storage + s3 + egress;
+    },
+    costNote:
+      "Always-on Graviton instances (on-demand unless discounted), EBS with snapshots, S3 for large values, and data transfer out. Any region.",
   },
 ];
 

@@ -345,7 +345,7 @@ export function PricingCalculator() {
       </div>
       {/* The results sit right under the sliders, so on phones both stay in
           view together. */}
-      <div className="grid gap-8 sm:grid-cols-3">
+      <div className="grid gap-8 sm:grid-cols-2 xl:grid-cols-4">
         {estimates.map((estimate) => (
           <PlatformResult key={estimate.platform.id} estimate={estimate} />
         ))}
