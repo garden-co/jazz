@@ -297,7 +297,7 @@ export interface CreateJazzOptions {
   /**
    * Decide who sent `request`, with your app's own session (a cookie, a
    * header). Return null for a signed-out request. Jazz calls it when a
-   * browser signs in or opens a sync session, and in `forRequest`.
+   * browser signs in or opens a sync session, and in `forReqUser`.
    *
    * Local-first guests are refused unless it returns
    * `acceptLocalFirstAuth(request)` for them; an app with no sign-in passes
@@ -431,7 +431,7 @@ export interface Jazz {
    */
   readonly db: Db;
   /** The database as the request's user, judged by your permissions. */
-  forRequest(request: Request): Promise<Db>;
+  forReqUser(request: Request): Promise<Db>;
   /**
    * The Jazz account of the request's signed-in user (created on first use),
    * or null when `authenticate` names no user. For API routes that act on
@@ -1138,7 +1138,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     const settings = jazzSettings(next);
     // The same app and permissions (a reload of a module that imports them
     // unchanged, or a hot reload that rebuilt equal ones): the bundle, and
-    // the backend's session with its writes and `forRequest` dbs, stay.
+    // the backend's session with its writes and `forReqUser` dbs, stay.
     if (next.app !== options.app || next.permissions !== options.permissions) {
       const published = await publish(next);
       if (published !== pin) {
@@ -1163,7 +1163,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   /**
    * Sessions a reload replaced. Each stays open for
    * `RETIRED_SESSION_GRACE_MS`, so the writes it has in flight and the
-   * `forRequest` dbs requests still hold finish, then closes (draining its
+   * `forReqUser` dbs requests still hold finish, then closes (draining its
    * writes); a close of this Jazz closes those left.
    */
   const retiring = new Set<() => Promise<void>>();
@@ -2252,9 +2252,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       return backend.db;
     },
     linkIdentity,
-    async forRequest(request) {
+    async forReqUser(request) {
       const user = await authenticate(request);
-      if (!user) throw new Error("forRequest: the request has no signed-in user");
+      if (!user) throw new Error("forReqUser: the request has no signed-in user");
       return backendDbForSession(backend, await sessionFor(user));
     },
     async withAttribution(request) {
@@ -2684,7 +2684,7 @@ function facade(entry: Entry): Jazz {
         .finally(() => heldSockets--);
     },
     db,
-    forRequest: async (request) => (await use()).forRequest(request),
+    forReqUser: async (request) => (await use()).forReqUser(request),
     withAttribution: async (request) => (await use()).withAttribution(request),
     accountFor: async (request) => (await use()).accountFor(request),
     linkIdentity: async (link) => (await use()).linkIdentity(link),

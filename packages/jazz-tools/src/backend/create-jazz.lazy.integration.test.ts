@@ -169,7 +169,7 @@ describe("createJazz, opened on first use", () => {
     const asBob = (store: ReturnType<typeof sqlite>, rules: typeof permissions) =>
       createJazz({ app, permissions: rules, store, authenticate: as("bob") });
     const insertAsBob = async (jazz: Jazz) =>
-      (await jazz.forRequest(request))
+      (await jazz.forReqUser(request))
         .insert(app.todos, { title: "bob's", owner: bob! })
         .wait({ tier: "global" });
     await expect(insertAsBob(asBob(sqlite({ path }), permissions))).resolves.toBeTruthy();
@@ -252,7 +252,7 @@ describe("createJazz, opened on first use", () => {
     });
     cleanups.push(() => jazz.close());
     const owner = randomUUID();
-    const userDb = await jazz.forRequest(request);
+    const userDb = await jazz.forReqUser(request);
     const user = (await jazz.accountFor(request))!;
     const inFlight = jazz.db.insert(app.todos, { title: "in flight", owner });
 

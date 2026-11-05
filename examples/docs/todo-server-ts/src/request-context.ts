@@ -10,7 +10,7 @@ function queryError(): Response {
 // #region backend-request-handler-ts
 export async function listTodosForRequester(request: Request): Promise<Response> {
   try {
-    const requester = await jazz.forRequest(request);
+    const requester = await jazz.forReqUser(request);
     const rows = await requester.all(schemaApp.todos.where({ done: true }));
     return Response.json(rows);
   } catch {
@@ -22,7 +22,7 @@ export async function listTodosForRequester(request: Request): Promise<Response>
 // #region permissions-simple-ts
 export async function listTodosWithSimplePolicy(request: Request): Promise<Response> {
   try {
-    const requester = await jazz.forRequest(request);
+    const requester = await jazz.forReqUser(request);
     const rows = await requester.all(schemaApp.todos.where({ done: false }));
     return Response.json(rows);
   } catch {
@@ -37,7 +37,7 @@ export async function listTodosWithInheritedPolicy(
   projectId: string,
 ): Promise<Response> {
   try {
-    const requester = await jazz.forRequest(request);
+    const requester = await jazz.forReqUser(request);
     const rows = await requester.all(schemaApp.todos.where({ projectId }));
     return Response.json(rows);
   } catch {
@@ -50,7 +50,7 @@ export async function listTodosWithInheritedPolicy(
 export async function createAttributedHandles(request: Request) {
   return {
     backendDb: jazz.db,
-    requesterDb: await jazz.forRequest(request),
+    requesterDb: await jazz.forReqUser(request),
     attributedRequestDb: await jazz.withAttribution(request),
   };
 }
