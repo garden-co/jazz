@@ -179,7 +179,7 @@ fires, a `deadline` failure and `results.json` are written before exit.
 Results are written to `<output>/results.json`; set `JAZZ_MIXED_TRACE=1` for
 per-command client traces and `RUST_LOG` for server logs.
 
-The client driver and CLI calls assume the current API: `createJazzSession`
+The client driver and CLI calls assume the current API: `createJazzClient`
 with a persistent driver, the `"global"` durability tier,
 `jazz-tools server --bound-port-file --allow-local-first-auth` and
 the `deploy-fixture.mjs` catalogue deploy. A release that renames any of these needs

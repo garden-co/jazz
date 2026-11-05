@@ -13,13 +13,13 @@ import {
   type ShallowRef,
 } from "vue";
 import { createJazzAppOwner, type JazzAppSnapshot } from "../session/app.js";
-import { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
+import { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
 import type { JazzSessionActions } from "../session/state.js";
 import type { AccountDbConfig } from "../accounts/context.js";
 import type { JazzClient } from "./create-jazz-client.js";
 import { JazzClientProvider, LegacyJazzProvider } from "./provider.js";
 
-export type JazzProviderProps = Partial<JazzSessionConfig> & {
+export type JazzProviderProps = Partial<JazzClientConfig> & {
   config?: AccountDbConfig;
   autoAttachDevTools?: boolean;
 };
@@ -50,7 +50,7 @@ export const JazzProvider = defineComponent({
     config: Object as PropType<AccountDbConfig>,
     scope: String,
     serverUrl: { type: String as PropType<string | null>, default: undefined },
-    initial: [String, Object] as PropType<JazzSessionConfig["initial"]>,
+    initial: [String, Object] as PropType<JazzClientConfig["initial"]>,
     autoAttachDevTools: { type: Boolean, default: true },
   },
   setup(props, { slots, attrs }) {
@@ -70,8 +70,8 @@ export const JazzProvider = defineComponent({
       scope: props.scope,
       serverUrl: props.serverUrl,
       initial: props.initial,
-    } as JazzSessionConfig;
-    const app = createJazzAppOwner(config, createJazzSession, { start: false });
+    } as JazzClientConfig;
+    const app = createJazzAppOwner(config, createJazzClient, { start: false });
     const snapshot = shallowRef(app.getSnapshot());
     const lease = app.attachConsumer();
     const auth: UseJazzAuth = {

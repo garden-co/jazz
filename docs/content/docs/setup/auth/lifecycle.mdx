@@ -8,9 +8,9 @@ A Jazz session owns the selected account and its client. Configure it once; use 
 ## Starting a session
 
 ```ts
-import { createJazzSession } from "jazz-tools/client";
+import { createJazzClient } from "jazz-tools/client";
 
-const jazz = await createJazzSession({
+const jazz = await createJazzClient({
   serverUrl: "/jazz",
   initial: "local-first",
   client: () => import("jazz-tools/local-first"),
@@ -86,7 +86,7 @@ Call `await jazz.close()` when retiring an imperatively owned session. Ordinary 
 
 ## Lower-level composition
 
-`createAccountManager`, opaque `AccountHandle`, and `createJazzClient` remain available for applications that intentionally own their lifecycle. The manager handles credentials and registry operations only. Contexts accept valid handles and never change identity; low-level callers must arrange graceful shutdown before linking or replacing contexts themselves. The session abstraction composes these primitives in shared TypeScript; framework adapters only observe state and acknowledge consumer cleanup.
+`createJazzClient` owns every client's account lifecycle: it shuts the open client down gracefully before linking or replacing it, and a client never changes identity. Framework providers only observe its state and acknowledge consumer cleanup.
 
 ## Storage reset
 

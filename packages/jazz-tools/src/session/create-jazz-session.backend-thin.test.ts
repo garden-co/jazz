@@ -7,7 +7,7 @@ import { createJazz, memory, type Jazz } from "../backend/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { createJazzSession } from "./create-jazz-session.js";
+import { createJazzClient } from "./create-jazz-session.js";
 
 // The browser session against an app's own backend (`createJazz`), which
 // signs users in from their cookies: the hero examples' setup.
@@ -88,7 +88,12 @@ function memoryStore(): AccountStore {
 describe("browser session against the app's backend", () => {
   it("signs in on the thin client and upgrades with a client loader", async () => {
     const appId = randomUUID();
-    const jazz = await createJazz({ app, permissions, store: memory({ appId }), authenticate });
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory({ appId }),
+      authenticate,
+    }).ready();
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz);
     signInAs(origin, "alice");
@@ -97,7 +102,7 @@ describe("browser session against the app's backend", () => {
     const loaderCalled = new Promise<void>((resolve) => (upgrade = resolve));
     let release!: () => void;
     const released = new Promise<void>((resolve) => (release = resolve));
-    const session = await createJazzSession({
+    const session = await createJazzClient({
       serverUrl: `${origin}/jazz`,
       store: memoryStore(),
       driver: { type: "memory" },

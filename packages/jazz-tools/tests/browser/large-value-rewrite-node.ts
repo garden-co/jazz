@@ -15,7 +15,7 @@ function backendDb(appId: string) {
 }
 
 export async function largeValueRewriteBackendOpen(info: JazzServerInfo): Promise<void> {
-  const jazz = await createJazz({
+  const jazz = createJazz({
     app,
     permissions: largeValueRewritePermissions,
     store: remote({ url: info.serverUrl, appId: info.appId, secret: info.adminSecret }),

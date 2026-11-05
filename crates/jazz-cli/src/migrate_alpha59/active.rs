@@ -64,44 +64,96 @@ impl ToHead {
         })
     }
 
+    /// The active-schema table that rows of `table` under `schema` land in,
+    /// or `None` when the active schema dropped it.
+    pub fn head_table(&self, schema: [u8; 16], table: &str) -> Result<Option<String>, String> {
+        let (mut schema, mut table) = (schema, table.to_owned());
+        let mut steps = 0;
+        while schema != self.head {
+            match self.step(schema, &table, &mut steps)? {
+                Step::Next {
+                    target,
+                    table: next,
+                    ..
+                } => {
+                    schema = target;
+                    table = next;
+                }
+                Step::Gone => return Ok(None),
+            }
+        }
+        Ok(Some(table))
+    }
+
     pub fn translate(&self, mut version: dump::Version) -> Result<Translated, String> {
         let mut steps = 0;
         while version.schema != self.head {
-            steps += 1;
-            let lens = self
-                .lenses
-                .get(&version.schema)
-                .filter(|_| steps <= self.lenses.len())
-                .ok_or(format!(
-                    "{} rows under schema {} have no lens path to the active schema: not supported yet",
-                    version.table,
-                    uuid_string(version.schema)
-                ))?;
-            match lens
-                .tables
-                .iter()
-                .find(|table| table.source_table == version.table)
-            {
-                Some(table) => {
-                    version.table = table.target_table.clone();
-                    for op in &table.ops_json {
+            match self.step(version.schema, &version.table, &mut steps)? {
+                Step::Next { target, table, ops } => {
+                    for op in ops {
                         apply(&mut version.cells, op)?;
                     }
+                    version.schema = target;
+                    version.table = table;
                 }
-                None => {
-                    let in_target = self
-                        .tables
-                        .get(&lens.target)
-                        .is_some_and(|tables| tables.contains(&version.table));
-                    if !in_target {
-                        return Ok(Translated::TableGone);
-                    }
-                }
+                Step::Gone => return Ok(Translated::TableGone),
             }
-            version.schema = lens.target;
         }
         Ok(Translated::Kept(version))
     }
+
+    /// One lens forward from `schema`, for rows of `table`.
+    fn step<'a>(
+        &'a self,
+        schema: [u8; 16],
+        table: &str,
+        steps: &mut usize,
+    ) -> Result<Step<'a>, String> {
+        *steps += 1;
+        let lens = self
+            .lenses
+            .get(&schema)
+            .filter(|_| *steps <= self.lenses.len())
+            .ok_or(format!(
+                "{table} rows under schema {} have no lens path to the active schema: not supported yet",
+                uuid_string(schema)
+            ))?;
+        match lens
+            .tables
+            .iter()
+            .find(|candidate| candidate.source_table == table)
+        {
+            Some(lensed) => Ok(Step::Next {
+                target: lens.target,
+                table: lensed.target_table.clone(),
+                ops: &lensed.ops_json,
+            }),
+            None => {
+                let in_target = self
+                    .tables
+                    .get(&lens.target)
+                    .is_some_and(|tables| tables.contains(table));
+                if in_target {
+                    Ok(Step::Next {
+                        target: lens.target,
+                        table: table.to_owned(),
+                        ops: &[],
+                    })
+                } else {
+                    Ok(Step::Gone)
+                }
+            }
+        }
+    }
+}
+
+enum Step<'a> {
+    Next {
+        target: [u8; 16],
+        table: String,
+        ops: &'a [String],
+    },
+    Gone,
 }
 
 /// Apply one of alpha.59's runtime `LensOp`s, as its serde JSON.
