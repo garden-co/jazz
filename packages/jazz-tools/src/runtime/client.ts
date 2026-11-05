@@ -996,8 +996,9 @@ export class WriteResult<T> extends WriteHandle<T, T> {
 /**
  * Returned by explicitly-committed serializable transactions.
  *
- * Serializable transactions are accepted or rejected by the global authority, so
- * callers do not choose a durability tier when waiting for confirmation.
+ * Callers may wait for Local persistence or Global authority confirmation.
+ * Without an explicit tier, use Global when a server URL or native upstream is
+ * configured, and Local otherwise. Local persistence is not authority acceptance.
  */
 export class SerializableWriteHandle extends WriteHandle<void> {
   /**
