@@ -37,20 +37,20 @@ It contains no device private key and uses no recovery password derivation.
 
 Material import accepts equivalent JSON whitespace and field ordering; the text
 is not a signed transcript. It rejects unknown or missing fields, other format
-versions, non-UUIDv4 root IDs, a different account-context scope, incompatible
-mechanisms and malformed or oversized byte arrays. Input is limited to two
-million JavaScript string code units before parsing. Both restored keypairs must
-pass seal/open and sign/verify checks. Parsed private-key arrays and failed
-imports' private buffers are cleared. This includes temporary arrays created
-when reading only the embedded root ID for protector creation or selection;
-that metadata read does not establish recovery authority. A successful import
-transfers owned private buffers to the recovery operation, which must clear
-them afterwards. Importing material alone does not establish recovery authority:
-use must match both public keys to an accepted root and validate its history
-before enrolling a device.
-Both recovery use and status inspection report material-import failures as
-`E2eeRecoveryError` with code `recovery-material-unusable`. Parser and private-key
-adapter diagnostics are replaced, without retaining their messages or causes.
+versions, root IDs that are neither UUIDv4 nor UUIDv7, a different
+account-context scope, incompatible mechanisms and malformed or oversized byte
+arrays. Input is limited to two million JavaScript string code units before
+parsing. Both restored keypairs must pass seal/open and sign/verify checks.
+Parsed private-key arrays and failed imports' private buffers are cleared. This
+includes temporary arrays created when reading only the embedded root ID for
+protector creation or selection; that metadata read does not establish recovery
+authority. A successful import transfers owned private buffers to the recovery
+operation, which must clear them afterwards. Importing material alone does not
+establish recovery authority: use must match both public keys to an accepted
+root and validate its history before enrolling a device. Both recovery use and
+status inspection report material-import failures as `E2eeRecoveryError` with
+code `recovery-material-unusable`. Parser and private-key adapter diagnostics
+are replaced, without retaining their messages or causes.
 
 `__e2ee_recovery_deliveries` has ordinary named columns `rootId`, `epochId` and
 `envelope`, plus an independent row ID. The envelope seals the 32-byte account
@@ -140,8 +140,9 @@ accepted root and delivery; resumable publication remains unfinished.
 `recovery.use()` without material explicitly opens account-private protectors
 with the retained local-first account secret, checks the embedded root ID and
 runs the ordinary recovery-material and historical-authority checks. It tries
-later candidates when material is unusable, the root does not match, or a
-delivery is missing or unusable, and reports failure if none works.
+later candidates when material is unusable, the root does not match, or an
+account or group delivery is missing or unusable, and reports failure if none
+works. Only a recovery owner's candidate classification permits fallback.
 Operational signature-verifier errors while checking accepted membership or
 history abort the operation without trying another delivery or protector. An adapter throwing
 a public recovery error code does not itself make that error a candidate

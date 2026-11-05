@@ -33,10 +33,15 @@ it("protects recovery material with account, application and root binding", asyn
   const envelope = await protectRecoveryMaterial(cellCipher, secret, target, material);
   expect(new TextDecoder().decode(envelope)).not.toContain(material);
   expect(await openRecoveryMaterial(cellCipher, secret, target, envelope)).toBe(material);
+  const v7Target = { ...target, rootId: "11111111-1111-7111-8111-111111111111" };
+  const v7Envelope = await protectRecoveryMaterial(cellCipher, secret, v7Target, material);
+  expect(await openRecoveryMaterial(cellCipher, secret, v7Target, v7Envelope)).toBe(material);
+  await expect(openRecoveryMaterial(cellCipher, secret, target, v7Envelope)).rejects.toThrow();
   for (const altered of [
     { ...target, application: "other-app" },
     { ...target, accountId: "other-account" },
     { ...target, rootId: "22222222-2222-4222-8222-222222222222" },
+    v7Target,
   ])
     await expect(openRecoveryMaterial(cellCipher, secret, altered, envelope)).rejects.toThrow();
   await expect(

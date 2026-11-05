@@ -3,6 +3,8 @@ const messages = {
   "recovery-root-mismatch": "Recovery material does not match an accepted recovery root",
   "recovery-delivery-missing": "No authenticated recovery delivery for the current account epoch",
   "recovery-delivery-unusable": "No authenticated recovery delivery for the current account epoch",
+  "recovery-group-delivery-unavailable":
+    "No authenticated group recovery delivery for the current epoch",
   "recovery-protector-missing": "No usable local-first recovery protector",
   "recovery-protector-unusable": "No usable local-first recovery protector",
   "recovery-state-changed": "Account epoch changed during recovery inspection; retry",
@@ -25,7 +27,8 @@ export class RecoveryCandidateError extends E2eeRecoveryError {
       | "recovery-material-unusable"
       | "recovery-root-mismatch"
       | "recovery-delivery-missing"
-      | "recovery-delivery-unusable",
+      | "recovery-delivery-unusable"
+      | "recovery-group-delivery-unavailable",
   ) {
     super(code);
   }

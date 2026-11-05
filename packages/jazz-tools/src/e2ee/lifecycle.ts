@@ -23,7 +23,10 @@ import {
   readPublicMembershipHistory,
   replayAccountMembership,
 } from "./public-membership.js";
-import type { JazzCrypto } from "./types.js";
+import { Groups } from "./group-lifecycle.js";
+import type { GroupRecoveryPath } from "./group-lifecycle.js";
+import { groupSchema, type GroupMember, type GroupTables } from "./groups.js";
+import type { DeviceSigner, JazzCrypto, KeyEnvelope } from "./types.js";
 
 export type E2eeConfig = {
   /** Explicit application including the lifecycle managed tables. */
@@ -54,6 +57,7 @@ export type RecoveryStatus = Readonly<{
     validation: "not-checked" | "validated";
     validatedRootId?: string;
   };
+  groups: { validation: "not-checked" } | { validation: "checked"; paths: GroupRecoveryPath[] };
 }>;
 
 /** @internal Only verified account-context creation binds lifecycle state. */
@@ -71,13 +75,54 @@ export function e2eeForDb(db: Db): E2ee {
 /** First-device activation; approval and rotation are separate lifecycle operations. */
 export class E2ee {
   private approval: DeviceApproval | undefined;
-  private recoveryReader: DeviceApproval | undefined;
+  private recoveryReader:
+    | { approval: DeviceApproval; keys: KeyEnvelope; signer: DeviceSigner }
+    | undefined;
+  private groupLifecycle: Groups | undefined;
   private closed = false;
   private readonly deviceKeys = new DeviceKeyLifetime();
   private preparation: Promise<void> | undefined;
   private readonly scope: string;
   private readonly app: DeviceTables;
+  readonly groups = {
+    leave: (groupId: string): { wait(): Promise<void> } =>
+      this.groups.remove(groupId, { kind: "account", id: this.account.id }),
+    remove: (groupId: string, member: GroupMember): { wait(): Promise<void> } => {
+      const completion = (async () => {
+        await this.prepare();
+        return this.requireGroups().remove(groupId, member);
+      })();
+      completion.catch(() => {});
+      return { wait: () => completion };
+    },
+    add: (groupId: string, member: GroupMember): { wait(): Promise<void> } => {
+      const completion = (async () => {
+        await this.prepare();
+        return this.requireGroups().add(groupId, member);
+      })();
+      completion.catch(() => {});
+      return { wait: () => completion };
+    },
+    create: (): { id: string; wait(): Promise<{ id: string }> } => {
+      const id = crypto.randomUUID();
+      const completion = (async () => {
+        await this.prepare();
+        return this.requireGroups().create(id);
+      })();
+      completion.catch(() => {});
+      return { id, wait: () => completion };
+    },
+  };
 
+  async explain(target: { groupId: string }) {
+    await this.prepare();
+    return this.requireGroups().explain(target.groupId);
+  }
+
+  private requireGroups(): Groups {
+    if (!this.groupLifecycle) throw new Error("E2EE groups require groupSchema in the application");
+    return this.groupLifecycle;
+  }
   readonly recovery = {
     status: async (material?: string): Promise<RecoveryStatus> => {
       this.assertOpen();
@@ -110,6 +155,7 @@ export class E2ee {
           recoveryRootIds: membership?.recoveryRoots.map((root) => root.id).sort() ?? [],
           validation: "not-checked",
         },
+        groups: { validation: "not-checked" },
       };
     },
     use: (material?: string): { wait(): Promise<void> } => {
@@ -117,6 +163,7 @@ export class E2ee {
         await this.prepare();
         if (material !== undefined) {
           await this.approval!.useRecovery(material);
+          await this.groupLifecycle?.restoreRecovery(material);
         } else await this.restoreProtectedRecovery();
       })();
       completion.catch(() => {});
@@ -126,6 +173,7 @@ export class E2ee {
       const completion = (async () => {
         await this.prepare();
         const result = await this.approval!.createRecovery();
+        await this.groupLifecycle?.protectRecovery(result.material);
         if (this.account.identity.issuer === "urn:jazz:local-first") {
           const secret = parseAuthSecret(exportLocalFirstSecret(this.account));
           try {
@@ -173,7 +221,7 @@ export class E2ee {
       this.assertOpen();
       // No device, responder or retained recovery key. Avoid repeating the initial prefetch;
       // every inspection still reads and accepts a fresh transaction snapshot.
-      reader = this.recoveryReader = new DeviceApproval(
+      const approval = new DeviceApproval(
         this.db,
         this.account.id,
         this.scope,
@@ -182,16 +230,35 @@ export class E2ee {
         () => this.assertOpen(),
         this.app,
       );
+      reader = this.recoveryReader = { approval, keys, signer };
     }
-    const account = await reader.inspectRecovery(material);
+    const account = await reader.approval.inspectRecovery(material);
     this.assertOpen();
-    return { configured: true, account };
+    let groups: Groups | undefined;
+    let groupCoverage: RecoveryStatus["groups"] = { validation: "not-checked" };
+    if ("__e2ee_groups" in this.app && "__e2ee_group_recovery_deliveries" in this.app) {
+      groups = new Groups(
+        this.db,
+        this.account.id,
+        this.scope,
+        this.app as DeviceTables & GroupTables,
+        reader.keys,
+        reader.signer,
+        () => this.assertOpen(),
+        (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
+      );
+      const paths = await groups.inspectRecovery(material, account.epochId);
+      this.assertOpen();
+      groupCoverage = { validation: "checked", paths };
+    }
+    return { configured: true, account, groups: groupCoverage };
   }
 
   private restoreProtectedRecovery(): Promise<void> {
     return this.withProtectedRecovery(async (material) => {
       await this.approval!.useRecovery(material);
       this.assertOpen();
+      await this.groupLifecycle?.restoreRecovery(material);
     });
   }
 
@@ -229,7 +296,8 @@ export class E2ee {
             (error.code !== "recovery-material-unusable" &&
               error.code !== "recovery-root-mismatch" &&
               error.code !== "recovery-delivery-missing" &&
-              error.code !== "recovery-delivery-unusable")
+              error.code !== "recovery-delivery-unusable" &&
+              error.code !== "recovery-group-delivery-unavailable")
           )
             throw error;
           failure = error;
@@ -291,6 +359,14 @@ export class E2ee {
       // uses the same builders against its full schema, including user tables.
       tables[name] =
         name in app ? (app as DeviceTables)[name] : new TypedTableQueryBuilder(name, schema!);
+    }
+    for (const name of Object.keys(groupSchema) as (keyof GroupTables)[]) {
+      if (schema ? name in schema : name in app) {
+        tables[name] =
+          name in app
+            ? (app as DeviceTables & Partial<GroupTables>)[name]
+            : new TypedTableQueryBuilder(name, schema!);
+      }
     }
     this.app = tables as DeviceTables;
     this.scope = JSON.stringify([accountRegistry(account), env, account.id]);
@@ -449,6 +525,27 @@ export class E2ee {
           this.app,
           provider,
         );
+        if ("__e2ee_groups" in this.app && "__e2ee_group_deliveries" in this.app) {
+          this.groupLifecycle = new Groups(
+            this.db,
+            this.account.id,
+            this.scope,
+            this.app as DeviceTables & GroupTables,
+            envelope,
+            signer,
+            () => this.assertOpen(),
+            (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
+            {
+              id: provider.id,
+              store: this.config.store,
+              isKnownRevoked: () => this.approval!.isKnownRevoked(),
+              load: provider.load,
+              release: provider.release,
+              keyLifetime: this.deviceKeys,
+              states: (transaction) => this.approval!.deviceStates(transaction),
+            },
+          );
+        }
       } catch (error) {
         this.deviceKeys.release(retainedKey);
         if (retainedSigningKey) this.deviceKeys.release(retainedSigningKey);
