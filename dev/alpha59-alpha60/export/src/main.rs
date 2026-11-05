@@ -59,14 +59,22 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
+const USAGE: &str = "usage: jazz-alpha59-alpha60-export --data-dir <alpha.59 data dir> \
+    --work <empty dir> --out <dump> [--catalogue-only]";
+
 fn main() -> ExitCode {
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--help" || arg == "-h")
+    {
+        println!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
     let args = match parse_args() {
         Ok(args) => args,
         Err(error) => {
             eprintln!("jazz-alpha59-alpha60-export: {error}");
-            eprintln!(
-                "usage: jazz-alpha59-alpha60-export --data-dir <alpha.59 data dir> --work <empty dir> --out <dump> [--catalogue-only]"
-            );
+            eprintln!("{USAGE}");
             return ExitCode::from(2);
         }
     };
