@@ -54,13 +54,15 @@ export const metadata: Metadata = {
   title: "Jazz - The database that syncs.",
 };
 
-const serverCode = `import { createJazz, sqlite } from "jazz-tools/backend";
+const serverCode = `import { createJazz, vercel } from "jazz-tools/backend";
 import { app, permissions } from "./schema";
 
 export const jazz = createJazz({
   app,
   permissions,
-  store: sqlite({ path: "./data/jazz" }),
+  // Also: cloudflare() (coming soon), and plain sqlite()
+  // for local dev and your own servers
+  store: vercel(),
   // Your own auth: return { userId } or null
   authenticate: (request) => getSignedInUser(request),
 });`;
