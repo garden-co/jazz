@@ -1,4 +1,5 @@
 import { sha256 } from "@noble/hashes/sha2.js";
+import { maintainSpaceMember, initialisePermissionSpace } from "./current-membership.js";
 import {
   beginDbTransactionAfter,
   serializableE2eeTransaction,
@@ -198,7 +199,11 @@ export function initialRecipientIds(ids: readonly string[]): string[] {
 
 /** Opaque, Db-bound unpublished key ownership. No key is exposed on this token. */
 export type InitialSpaceSeed = Readonly<{ readonly kind: "initial-space-seed" }>;
-export type StreamingSpaceOptions = { newScope?: boolean; initialRecipients?: readonly string[] };
+export type StreamingSpaceOptions = {
+  newScope?: boolean;
+  initialRecipients?: readonly string[];
+  requireAccepted?: boolean;
+};
 export type StreamingSpacePlan = {
   readonly initialSeed?: InitialSpaceSeed;
   validate(tx: E2eeTransactionScope): Promise<void>;
@@ -278,8 +283,20 @@ export class Spaces {
     scope: TableProxy<T, Init>,
     identifier: string,
     kind: "mergeable" | "serializable",
+    requireAccepted = false,
   ): Promise<void> {
     const address = await this.address(scope, identifier, true);
+    if (requireAccepted) {
+      const roots = this.tables.__e2ee_spaces.where({ id: spaceRootId(address) });
+      const accepted = () =>
+        observeE2eeHistory(this.db, (reader) => reader.allSettledForE2ee(roots));
+      let snapshot = await accepted();
+      if (!snapshot.rows.length && !(await this.db.e2eeIsExplicitlyOffline())) {
+        await this.db.one(roots, { tier: "remote" });
+        snapshot = await accepted();
+      }
+      if (!snapshot.rows.length) throw new E2eeDataError("space-not-initialised");
+    }
     const pending = await this.device?.journal?.space(spaceRootId(address));
     if (pending && kind !== "serializable") throw new ProvisionalSpaceRequiresExclusive();
   }
@@ -688,7 +705,7 @@ export class Spaces {
       const roots = this.tables.__e2ee_spaces.where({ id: spaceRootId(address) });
       const observed = await this.db.one(roots, { tier: "remote" });
       if (observed) {
-        await this.changeRecipient(address, observed, recipientId, "add");
+        await this.changeRecipient(scope._table, address, observed, recipientId, "add");
         await this.explain(scope, identifier);
         return;
       }
@@ -1003,6 +1020,18 @@ export class Spaces {
       await insertInitializationRow(tx, this.tables.__e2ee_space_grants, grantValues, {
         id: grantId,
       });
+    initialisePermissionSpace(tx, scope._schema, scope._table, identifier);
+    for (const grant of initialGrants)
+      maintainSpaceMember(
+        tx,
+        scope._schema,
+        scope._table,
+        address.scopeId,
+        identifier,
+        grant.recipientKind as "account" | "group",
+        grant.recipientId,
+        "add",
+      );
     journal.stage(tx, { kind: "space", id, root: signedRoot, grants: initialGrants });
     return signedRoot;
   }
@@ -1192,6 +1221,8 @@ export class Spaces {
     options: StreamingSpaceOptions,
     stage: (secret: Uint8Array, root: Readonly<SpaceRoot>) => Promise<R>,
   ): Promise<{ value: R; plan: StreamingSpacePlan }> {
+    if (options.requireAccepted)
+      await this.assertWriteTransaction(scope, identifier, "serializable", true);
     const retainedScopeId = await this.db.authenticatedTableIdentity(scope);
     const address = await this.address(scope, identifier, retainedScopeId !== null);
     const newScope = options.newScope === true;
@@ -1437,7 +1468,7 @@ export class Spaces {
         { tier: "remote" },
       );
       if (!root) throw new Error("E2EE space not found");
-      await this.changeRecipient(address, root, recipientId, "remove");
+      await this.changeRecipient(scope._table, address, root, recipientId, "remove");
       for (let attempt = 0; ; attempt++) {
         try {
           await this.explain(scope, identifier);
@@ -1576,6 +1607,7 @@ export class Spaces {
   }
 
   private async changeRecipient(
+    scope: string,
     address: Address,
     observed: SpaceRoot,
     recipientId: string,
@@ -1646,6 +1678,16 @@ export class Spaces {
         this.assertOpen();
         const { id, ...values } = record;
         tx.insert(this.tables.__e2ee_space_grants, { ...values, signature }, { id });
+        maintainSpaceMember(
+          tx,
+          this.tables.__e2ee_spaces._schema,
+          scope,
+          address.scopeId,
+          address.identifier,
+          recipientKind,
+          recipientId,
+          operation,
+        );
       });
       // Administration is decided by Jazz, not by possession of the space key.
       await proposal.wait({ tier: "global" });

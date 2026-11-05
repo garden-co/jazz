@@ -16,6 +16,7 @@ export { deviceRequestSchema, deviceRequestPermissions } from "./device-requests
 export { groupSchema } from "./groups.js";
 export type { GroupMember } from "./groups.js";
 export { spaceSchema } from "./spaces.js";
+export { encryptionSpacePolicySchema } from "./current-membership-schema.js";
 export { withGroupTopologyPermissions } from "./group-topology.js";
 export { E2eeRecoveryError } from "./recovery-error.js";
 export type { E2eeRecoveryErrorCode } from "./recovery-error.js";

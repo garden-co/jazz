@@ -2,7 +2,7 @@ import { serializableE2eeTransaction } from "../runtime/db.js";
 import { configureAcceptedHistory } from "./accepted-history.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import type { WasmSchema } from "../drivers/types.js";
-import { encryptedSchemas } from "./encrypted-schema.js";
+import { encryptedSchemas, assertEncryptionPoliciesRegistered } from "./encrypted-schema.js";
 import {
   accountRegistry,
   exportLocalFirstSecret,
@@ -94,6 +94,7 @@ const startupPreparers = new WeakMap<Db, () => Promise<void>>();
 /** @internal Encrypted application factories finish readiness before exposing the Db. */
 export async function prepareE2eeStartup(db: Db): Promise<void> {
   const schema = configuredSchemas.get(db);
+  if (schema) assertEncryptionPoliciesRegistered(schema);
   if (schema && encryptedSchemas.has(schema)) await startupPreparers.get(db)!();
 }
 
@@ -193,9 +194,10 @@ export async function assertSpaceWriteTransaction<T, Init>(
   scope: TableProxy<T, Init>,
   identifier: string,
   kind: "mergeable" | "serializable",
+  requireAccepted = false,
 ): Promise<void> {
   e2eeForDb(db);
-  await spaceWriteAdmissions.get(db)!(scope, identifier, kind);
+  await spaceWriteAdmissions.get(db)!(scope, identifier, kind, requireAccepted);
 }
 const initialSpacePrerequisites = new WeakMap<
   Db,
