@@ -422,7 +422,7 @@ describe("Inspector UI", () => {
     expect(posted.status).toBe(405);
   });
 
-  it("serves the page unframeable and only the build's assets", async () => {
+  it("serves the page unframeable, the overlay framed by its own origin, and only the build's assets", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-inspect-ui-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     await mkdir(join(dir, "assets"));
@@ -445,8 +445,14 @@ describe("Inspector UI", () => {
     expect(asset.headers.get("content-type")).toMatch(/^text\/javascript/);
     expect(asset.headers.get("cache-control")).toContain("immutable");
 
+    // The overlay page: framed by this origin's pages, nobody else's.
+    const overlay = (await serve(request, "/embedded.html"))!;
+    expect(await overlay.text()).toBe("overlay");
+    expect(overlay.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
+    expect(overlay.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+    expect(overlay.headers.get("cache-control")).toBe("no-store");
+
     for (const path of [
-      "/embedded.html",
       "/secret.txt",
       "/assets/../secret.txt",
       "/assets/%2e%2e/secret.txt",

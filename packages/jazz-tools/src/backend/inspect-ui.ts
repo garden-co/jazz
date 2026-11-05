@@ -1,5 +1,6 @@
 // The Inspector UI an app's backend serves at `<basePath>/inspect/`: the
-// inspector package's `backend.html` build. Published jazz-tools carries it
+// inspector package's `backend.html` build, and at
+// `<basePath>/inspect/embedded.html` the overlay for local-first pages. Published jazz-tools carries it
 // in its own dist (staged with the overlay's embedded build, see
 // scripts/stage-inspector-overlay.mjs); in this monorepo it is read from the
 // inspector package's build output.
@@ -13,6 +14,9 @@ import { dirname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PAGE = "backend.html";
+// The overlay a local-first page frames (`jazz-tools/inspector`). It reads only
+// the framing page's own Db, through the window, never this backend's API.
+const OVERLAY_PAGE = "embedded.html";
 
 const TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -46,6 +50,13 @@ const PAGE_HEADERS = {
   "X-Content-Type-Options": "nosniff",
 };
 
+/** Headers for the overlay page: framed only by pages on this origin. */
+const OVERLAY_HEADERS = {
+  ...PAGE_HEADERS,
+  "Content-Security-Policy": "frame-ancestors 'self'; base-uri 'none'; object-src 'none'",
+  "X-Frame-Options": "SAMEORIGIN",
+};
+
 export function createInspectorUi(dir: string | null = resolveInspectorUiDir()) {
   /** The file for `path` below `/inspect` (`/` is the page), or null. */
   return async function serveUi(_request: Request, path: string): Promise<Response | null> {
@@ -53,6 +64,17 @@ export function createInspectorUi(dir: string | null = resolveInspectorUiDir()) 
     if (path === "/" || path === "") {
       return new Response(new Uint8Array(await readFile(join(dir, PAGE))), {
         headers: { "Content-Type": TYPES[".html"]!, ...PAGE_HEADERS },
+      });
+    }
+    if (path === `/${OVERLAY_PAGE}`) {
+      let body: Uint8Array<ArrayBuffer>;
+      try {
+        body = new Uint8Array(await readFile(join(dir, OVERLAY_PAGE)));
+      } catch {
+        return null;
+      }
+      return new Response(body, {
+        headers: { "Content-Type": TYPES[".html"]!, ...OVERLAY_HEADERS },
       });
     }
     // Only the build's hashed assets, nothing else in the directory.
