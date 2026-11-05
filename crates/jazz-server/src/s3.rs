@@ -778,10 +778,12 @@ impl Inner {
             .map(Some)
     }
 
-    /// A successful GET's response, or `None` if the object is absent. A
-    /// key that is missing answers 403 AccessDenied rather than 404 to keys
-    /// without s3:ListBucket; reading is allowed under the prefix (or the
-    /// owner object could not have been read), so that is absence too.
+    /// A successful GET's response, or `None` on a 404. A 403 is an error,
+    /// not absence: only nodes this store put are read, so with the store's
+    /// own keys a denied read is a permission problem (a role or bucket
+    /// policy edited, an SSE-KMS key it may not use) that a fix ends. Keys
+    /// without s3:ListBucket also answer 403 for a missing key; the error
+    /// says so.
     async fn found(
         &self,
         response: reqwest::Response,
@@ -792,12 +794,19 @@ impl Inner {
         if status.is_success() {
             return Ok(Some(response));
         }
-        let body = response.text().await.unwrap_or_default();
-        if status == reqwest::StatusCode::NOT_FOUND
-            || (status == reqwest::StatusCode::FORBIDDEN
-                && xml_field(&body, "Code").as_deref() == Some("AccessDenied"))
-        {
+        if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
+        }
+        let body = response.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::FORBIDDEN
+            && xml_field(&body, "Code").as_deref() == Some("AccessDenied")
+        {
+            return Err(format!(
+                "s3 blobs: reading s3://{}/{}{name} was denied (AccessDenied). Check that the \
+                 credentials may s3:GetObject under the prefix, and kms:Decrypt for an SSE-KMS \
+                 bucket; without s3:ListBucket S3 also answers so for a missing object",
+                self.options.bucket, self.options.prefix
+            ));
         }
         Err(self.failure(status, &body, what, name).await)
     }
@@ -1270,18 +1279,28 @@ mod tests {
         assert!(bucket.names("a/").is_empty());
     }
 
-    /// Without s3:ListBucket a missing key answers 403: it reads as absent.
-    /// A body larger than any node is refused.
+    /// A 404 is absence. A 403 is an error, not absence, whether the keys
+    /// lack s3:ListBucket or the permission went away: once it is back,
+    /// the same store reads again. A body larger than any node is refused.
     #[test]
-    fn reads_of_missing_or_oversized_objects() {
+    fn reads_of_missing_denied_or_oversized_objects() {
         let bucket = mock::MockS3::start();
         let store = S3ChunkStore::new(bucket.options("app/"), "me".to_owned()).unwrap();
+        let (key, bytes) = node(4);
+        assert_eq!(block(store.get(&key)).unwrap(), None);
         bucket
             .state
             .deny_missing
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let (key, _) = node(4);
-        assert_eq!(block(store.get(&key)).unwrap(), None);
+        let error = block(store.get(&key)).unwrap_err();
+        assert!(error.message.contains("AccessDenied"), "{error}");
+        assert!(error.message.contains("s3:ListBucket"), "{error}");
+        block(store.put(&key, &bytes)).unwrap();
+        *bucket.state.only_prefix_reads.lock().unwrap() = Some("elsewhere/".to_owned());
+        let error = block(store.get(&key)).unwrap_err();
+        assert!(error.message.contains("s3:GetObject"), "{error}");
+        *bucket.state.only_prefix_reads.lock().unwrap() = None;
+        assert_eq!(block(store.get(&key)).unwrap().as_deref(), Some(&bytes[..]));
         let (big, _) = node(5);
         bucket.state.objects.lock().unwrap().insert(
             format!("bucket/app/{}", big.object_name()),
