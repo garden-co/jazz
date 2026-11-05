@@ -35,7 +35,7 @@ vi.mock("../subscriptions-orchestrator.js", () => ({
   trackPromise: <T>(promise: Promise<T>) => promise,
 }));
 
-import { createJazzClient } from "./create-jazz-client.js";
+import { openJazzClient } from "./create-jazz-client.js";
 
 it("continues React Native database teardown after orchestrator shutdown fails", async () => {
   const managerError = new Error("orchestrator shutdown failed");
@@ -49,9 +49,7 @@ it("continues React Native database teardown after orchestrator shutdown fails",
   };
   mocks.createDb.mockResolvedValueOnce(db);
 
-  const client = await createJazzClient(
-    await enrolledAccountConfig("react-native-shutdown-failure"),
-  );
+  const client = await openJazzClient(await enrolledAccountConfig("react-native-shutdown-failure"));
   const manager = mocks.orchestratorInstances[0]!;
   manager.shutdown.mockRejectedValueOnce(managerError);
 

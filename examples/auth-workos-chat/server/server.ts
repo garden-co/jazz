@@ -2,7 +2,7 @@ import express from "express";
 import type { Request, Response } from "express";
 import { createServer } from "node:http";
 import { WorkOS } from "@workos-inc/node";
-import { APP_ID, WORKOS_CLIENT_ID } from "../constants.js";
+import { WORKOS_CLIENT_ID } from "../constants.js";
 import { app as schema } from "../schema.js";
 import permissions from "../permissions.js";
 
@@ -65,10 +65,10 @@ function setCookie(res: Response, sealed: string) {
 // #region workos-jazz-server
 // Jazz runs inside this server; `authenticate` reads the AuthKit cookie, and
 // the organization role becomes the claim the chat permissions check.
-const jazz = await createJazz({
+const jazz = createJazz({
   app: schema,
   permissions,
-  store: sqlite({ path: ".jazz", appId: APP_ID }),
+  store: sqlite({ path: ".jazz" }),
   authenticate: async (request) => {
     const session = await readSession(readCookie(request.headers.get("cookie")));
     return session ? { userId: session.user.id, claims: { role: session.role ?? "" } } : null;

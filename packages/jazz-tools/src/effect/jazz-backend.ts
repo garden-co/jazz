@@ -58,7 +58,21 @@ export class JazzBackend extends Context.Service<JazzBackend, JazzBackendService
       JazzBackend,
       Effect.gen(function* () {
         const jazz = yield* Effect.acquireRelease(
-          Effect.tryPromise({ try: () => createJazz(options), catch: toJazzError("open") }),
+          Effect.tryPromise({
+            // createJazz opens on first use; the layer opens it up front so
+            // a store that cannot open fails the layer, not a later request.
+            try: async () => {
+              const jazz = createJazz(options);
+              try {
+                await jazz.ready();
+              } catch (error) {
+                await jazz.close().catch(() => undefined);
+                throw error;
+              }
+              return jazz;
+            },
+            catch: toJazzError("open"),
+          }),
           (jazz) => Effect.ignore(Effect.tryPromise(() => jazz.close())),
         );
         return makeJazzBackend(jazz);

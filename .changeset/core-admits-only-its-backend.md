@@ -13,5 +13,5 @@
 ### Migrating
 
 - A web or React Native app: add `createJazz` to your backend with `remote({ url, appId, secret })` (your sync server, your app id and its admin secret), mount it at `/jazz`, and point the client's `serverUrl` there. Sign users in with your backend's own session (`authenticate`), as the client-signs-in-through-backend changeset describes.
-- A Rust or other native service that held a user JWT: it is the app's backend now. Give it the core's backend secret and state the user it acts for (`AppContext { backend_secret, backend_session: Some(Session::new(format!("jazz:app:{app_id}"), user_id)), .. }`), after resolving that user's account at `/admin/accounts/login-or-register`. `examples/todo-server-rs` shows this.
+- A Rust or other native service that held a user JWT: it is the app's backend now. Give it the core's backend secret and state the user it acts for (`AppContext { backend_secret, backend_session: Some(Session::new("jazz:backend", user_id)), .. }`), after resolving that user's account at `/admin/accounts/login-or-register`. `examples/todo-server-rs` shows this.
 - Drop `--jwks-url` and the other JWT settings from your sync server's command line and environment; it fails to start while they are set.

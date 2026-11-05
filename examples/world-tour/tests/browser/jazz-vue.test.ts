@@ -20,14 +20,13 @@ import { type App, createApp, defineComponent, h } from "vue";
 import {
   type JazzClient,
   JazzClientProvider,
-  createAccountManager,
   createJazzClient,
   useAll,
   useDb,
   useSession,
 } from "jazz-tools/vue";
 import { app } from "../../schema.js";
-import { APP_ID, SERVER_URL } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 
 interface Scope {
   marker: string;
@@ -88,6 +87,7 @@ function sessionUser(client: JazzClient): string {
 interface Mounted {
   el: HTMLDivElement;
   client: JazzClient;
+  close(): Promise<void>;
   vueApp: App;
 }
 
@@ -98,18 +98,19 @@ afterEach(async () => {
     const m = mounts.pop()!;
     m.vueApp.unmount();
     m.el.remove();
-    await m.client.shutdown();
+    await m.close();
   }
 });
 
 async function mount(child: ReturnType<typeof defineComponent>): Promise<Mounted> {
-  const accounts = await createAccountManager({ appId: APP_ID, serverUrl: SERVER_URL });
-  const client = await createJazzClient({
-    appId: APP_ID,
+  const session = await createJazzClient({
+    scope: SCOPE,
     serverUrl: SERVER_URL,
     driver: { type: "memory" },
-    account: accounts.createLocalFirst(),
+    initial: "local-first",
   });
+  const client = session.getSnapshot().client;
+  if (!client) throw new Error("the session opened no client");
 
   const el = document.createElement("div");
   document.body.appendChild(el);
@@ -137,7 +138,7 @@ async function mount(child: ReturnType<typeof defineComponent>): Promise<Mounted
     "JazzClientProvider should resolve and render its default slot",
   );
 
-  const m = { el, client, vueApp };
+  const m = { el, client, close: () => session.close(), vueApp };
   mounts.push(m);
   return m;
 }

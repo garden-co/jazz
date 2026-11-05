@@ -23,7 +23,7 @@
 //! file on tick; their metadata stays.
 
 use crate::values::CachedRow;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -544,8 +544,17 @@ struct State {
     /// Offloaded nodes a statement needed that the chunk store could not
     /// answer at once: the next fetch reads them.
     fetch: BTreeSet<ChunkRequest>,
-    /// Offloaded nodes the chunk store answered it does not hold.
-    lost: BTreeSet<ChunkRequest>,
+    /// Offloaded nodes a fetch is out for, in either of a host's lanes or
+    /// a read's own: not handed to another fetch until it lands
+    /// ([`Chunks::landed`]) or is dropped ([`Chunks::want_again`]). A read
+    /// that waits on one while it is out keeps it in `fetch`.
+    in_flight: BTreeSet<ChunkRequest>,
+    /// Offloaded nodes the host's last batch failed to fetch, with why:
+    /// reads that need them are refused with that error rather than left
+    /// waiting, until the next batch starts and asks again. A store that
+    /// failed for a while (a token, a permission, the network) serves
+    /// again once it is fixed.
+    failed: BTreeMap<ChunkRequest, Error>,
     /// The batch of chunk-store work that is out, if one is: one at a
     /// time, so a delete never overtakes the put it undoes.
     batch: Option<u64>,
@@ -616,7 +625,8 @@ impl Chunks {
                 demand: BTreeSet::new(),
                 spans: HashMap::new(),
                 fetch: BTreeSet::new(),
-                lost: BTreeSet::new(),
+                in_flight: BTreeSet::new(),
+                failed: BTreeMap::new(),
                 batch: None,
             }),
             store,
@@ -664,45 +674,68 @@ impl Chunks {
         self.store.as_ref().filter(|_| !self.in_memory())
     }
 
+    /// Want `requests` again: their fetch was dropped before it was
+    /// answered.
+    pub(crate) fn want_again(&self, requests: Vec<ChunkRequest>) {
+        let mut state = self.state.lock().expect("chunk cache");
+        for request in &requests {
+            state.in_flight.remove(request);
+        }
+        state.fetch.extend(requests);
+    }
+
+    /// The fetches of `requests` were answered (installed, or failed): they
+    /// are no longer out, and what waited on them has its answer.
+    pub(crate) fn landed(&self, requests: &[ChunkRequest]) {
+        let mut state = self.state.lock().expect("chunk cache");
+        for request in requests {
+            state.in_flight.remove(request);
+            state.fetch.remove(request);
+        }
+    }
+
     /// Record that a read waits on an offloaded node.
     fn want(&self, request: &ChunkRequest) {
         let mut state = self.state.lock().expect("chunk cache");
         state.fetch.insert(request.clone());
     }
 
-    /// Whether reads wait on nodes only the chunk store can answer.
+    /// Whether reads wait on nodes only the chunk store can answer, to be
+    /// fetched or out.
     pub(crate) fn has_fetch(&self) -> bool {
-        !self.state.lock().expect("chunk cache").fetch.is_empty()
+        let state = self.state.lock().expect("chunk cache");
+        !state.fetch.is_empty() || !state.in_flight.is_empty()
     }
 
     /// Start a batch: its id and the nodes reads are waiting on, or `None`
     /// if another batch is out. With nothing waiting, nodes kept for
     /// earlier waiting reads may be evicted again.
-    pub(crate) fn begin_fetch(&self) -> Option<(u64, Vec<ChunkRequest>)> {
+    /// `fetches: false` takes none of them (the host holds its fetches
+    /// back), and keeps what was kept.
+    pub(crate) fn begin_fetch(&self, fetches: bool) -> Option<(u64, Vec<ChunkRequest>)> {
         let mut state = self.state.lock().expect("chunk cache");
         if state.batch.is_some() {
             return None;
         }
         let batch = NEXT_BATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         state.batch = Some(batch);
-        if state.fetch.is_empty() {
+        if !fetches {
+            return Some((batch, Vec::new()));
+        }
+        if state.fetch.is_empty() && state.in_flight.is_empty() {
             for node in state.nodes.values_mut() {
                 node.held = false;
             }
             state.evict();
         }
-        Some((
-            batch,
-            std::mem::take(&mut state.fetch).into_iter().collect(),
-        ))
+        Some((batch, state.take_wanted()))
     }
 
     /// The nodes reads wait on, for a read that fetches them itself. Unlike
     /// [`Self::begin_fetch`] this runs beside a host's batch: a fetch never
     /// reorders a put and the delete that undoes it.
     pub(crate) fn take_fetch(&self) -> Vec<ChunkRequest> {
-        let mut state = self.state.lock().expect("chunk cache");
-        std::mem::take(&mut state.fetch).into_iter().collect()
+        self.state.lock().expect("chunk cache").take_wanted()
     }
 
     /// The batch that is out, if one is.
@@ -719,21 +752,40 @@ impl Chunks {
         let mut state = self.state.lock().expect("chunk cache");
         if state.batch == Some(batch) {
             state.batch = None;
+            for request in &unfetched {
+                state.in_flight.remove(request);
+            }
             state.fetch.extend(unfetched);
         }
     }
 
-    /// Install what the chunk store answered for an offloaded node.
+    /// Forget the last batch's failed fetches, so reads of them ask again;
+    /// whether there were any.
+    pub(crate) fn clear_failed(&self) -> bool {
+        let mut state = self.state.lock().expect("chunk cache");
+        let any = !state.failed.is_empty();
+        state.failed.clear();
+        any
+    }
+
+    /// Refuse reads of `request` with `error` until the next batch starts:
+    /// the host's batch failed to fetch it.
+    pub(crate) fn fetch_failed(&self, request: &ChunkRequest, error: Error) {
+        let mut state = self.state.lock().expect("chunk cache");
+        state.failed.insert(request.clone(), error);
+    }
+
+    /// Install what the chunk store answered for an offloaded node; one it
+    /// answered it does not hold is data loss.
     pub(crate) fn install_from_store(
         &self,
         request: &ChunkRequest,
         bytes: Option<Bytes>,
     ) -> Result<(), Error> {
-        let mut state = self.state.lock().expect("chunk cache");
         let Some(bytes) = bytes else {
-            state.lost.insert(request.clone());
-            return Ok(());
+            return Err(lost());
         };
+        let mut state = self.state.lock().expect("chunk cache");
         if lv::object_hash(&bytes).0 != request.object_hash {
             return Err(corrupt(lv::Error::ObjectHashMismatch));
         }
@@ -976,18 +1028,15 @@ impl Chunks {
         }
         let bytes = if bytes.is_empty() {
             // Offloaded: its bytes are in the chunk store.
-            if state.lost.contains(request) {
-                return Err(lost());
+            if let Some(error) = state.failed.get(request) {
+                return Err(error.clone());
             }
             let Some(store) = &self.store else {
                 return Err(unconfigured());
             };
             match store.get_now(&NodeKey::from(request)) {
                 None => return Ok(Local::Fetching),
-                Some(Ok(None)) => {
-                    state.lost.insert(request.clone());
-                    return Err(lost());
-                }
+                Some(Ok(None)) => return Err(lost()),
                 Some(Err(error)) => return Err(error),
                 Some(Ok(Some(bytes))) => bytes,
             }
@@ -1114,6 +1163,18 @@ impl Chunks {
 }
 
 impl State {
+    /// The nodes reads want that no fetch is out for, now out. Those
+    /// already out stay wanted: they are answered when theirs lands.
+    fn take_wanted(&mut self) -> Vec<ChunkRequest> {
+        let in_flight = &self.in_flight;
+        let (out, wanted): (BTreeSet<_>, BTreeSet<_>) = std::mem::take(&mut self.fetch)
+            .into_iter()
+            .partition(|request| in_flight.contains(request));
+        self.fetch = out;
+        self.in_flight.extend(wanted.iter().cloned());
+        wanted.into_iter().collect()
+    }
+
     /// Widen the span the next pull of `root`'s tree asks for.
     fn note_span(&mut self, root: [u8; 32], span: std::ops::Range<u64>) {
         self.spans

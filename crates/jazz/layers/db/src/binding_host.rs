@@ -1839,7 +1839,7 @@ pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
             tier: format!("{tier:?}"),
         },
         SubscriptionEvent::Closed => EventChunk::Closed,
-        SubscriptionEvent::Rejected { reason } => EventChunk::Rejected { detail: reason },
+        SubscriptionEvent::Rejected { reason, .. } => EventChunk::Rejected { detail: reason },
     })
 }
 

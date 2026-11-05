@@ -1,7 +1,6 @@
 import { textAnchorsFrom, type TextAnchors } from "../runtime/text-anchors.js";
 import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
 import { clientScope } from "../runtime/client-scope.js";
-import { accountRegistryUrl } from "../accounts/context.js";
 import {
   NapiDb,
   captureTextAnchor,
@@ -12,12 +11,7 @@ import {
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { CompiledPermissions } from "../permissions/index.js";
-import {
-  JazzClient,
-  type MutationErrorEvent,
-  type RequestLike,
-  type Runtime,
-} from "../runtime/client.js";
+import { JazzClient, type MutationErrorEvent, type Runtime } from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { Db, type DbConfig } from "../runtime/db.js";
@@ -35,9 +29,8 @@ import {
   type SchemaSourceInput,
   type WasmSchemaSource,
 } from "../schema-source.js";
-import { resolveRequestSession, verifiedLocalFirstRequestProof } from "./request-auth.js";
+import { verifiedLocalFirstRequestProof } from "./request-auth.js";
 import { deterministicBytes } from "../runtime/deterministic-bytes.js";
-import { resolveAllowLocalFirstAuth } from "./local-first-auth.js";
 
 export type BackendSchemaSource = WasmSchemaSource;
 export type BackendQuerySchemaSource = QuerySchemaSource;
@@ -68,15 +61,6 @@ type BackendContextSchemaConfig =
 export type BackendContextConfig = Omit<AppContext, "schema" | "driver"> & {
   /** Server runtime driver mode and storage location. */
   driver: BackendDriver;
-  /**
-   * Whether request verification accepts local-first bearer JWTs, including in
-   * `forRequest()` and `withAttributionForRequest()`. Defaults to `false` when
-   * `NODE_ENV` is `production` (case-insensitive), and `true` otherwise.
-   * Explicit `true` or `false` overrides the default. The sync server must also
-   * accept the token and verify its account. This does not control whether the
-   * backend can create local-first accounts.
-   */
-  allowLocalFirstAuth?: boolean;
   /** @internal How the runtime opens its server socket (a backend client's credentialed one). */
   webSocket?: WebSocketConstructor;
   /**
@@ -87,10 +71,6 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver"> & {
    */
   bundle?: string;
 } & BackendContextSchemaConfig;
-
-type ResolvedBackendContextConfig = BackendContextConfig & {
-  allowLocalFirstAuth: boolean;
-};
 
 /**
  * @internal A memory handle retains its node, and that node's clock, across
@@ -156,7 +136,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   private droppedMutationErrorEvents = 0;
 
   constructor(
-    private readonly config: ResolvedBackendContextConfig,
+    private readonly config: BackendContextConfig,
     private readonly nodeIdentityScope: string,
     private readonly nodeIdentity?: Uint8Array,
     private readonly nodeClock?: BackendNodeClock,
@@ -529,7 +509,7 @@ class BackendDb extends Db implements BackendMutationErrorSink {
    * active {@link WriteHandle.wait} call.
    *
    * On a backend context this is **context-wide**: every `Db` from the same
-   * context (`db()`, `asBackend()`, `forRequest()`, `forSession()`, ...)
+   * context (`db()`, `asBackend()`, `forSession()`, ...)
    * shares one runtime, so a listener sees rejections of writes made through
    * any of them, for any session. A per-request handler must match events
    * against its own transaction ids. Rejections that arrived before any
@@ -587,13 +567,13 @@ function assertValidBackendConfig(config: BackendContextConfig): void {
 /**
  * Server-side Jazz context with lazy runtime setup.
  *
- * The first call to `db()`, `asBackend()`, `forRequest()`, or `forSession()`
+ * The first call to `db()`, `asBackend()`, or `forSession()`
  * initializes a NAPI runtime and backing client using the provided app/schema
  * source plus any compiled permissions.
  * Later calls reuse the same initialized runtime.
  */
 export class JazzContext {
-  private readonly config: ResolvedBackendContextConfig;
+  private readonly config: BackendContextConfig;
   private readonly defaultSchemaInput?: BackendSchemaInput;
   private readonly nodeIdentityScope: string;
   private readonly coreSource: BackendRuntimeSource;
@@ -604,10 +584,7 @@ export class JazzContext {
     nodeClock?: BackendNodeClock,
   ) {
     assertValidBackendConfig(config);
-    this.config = {
-      ...config,
-      allowLocalFirstAuth: resolveAllowLocalFirstAuth(config.allowLocalFirstAuth),
-    };
+    this.config = config;
     this.defaultSchemaInput = config.app;
     this.nodeIdentityScope =
       config.driver.type === "persistent"
@@ -631,7 +608,7 @@ export class JazzContext {
     const selected = source ?? this.defaultSchemaInput;
     if (!selected) {
       throw new Error(
-        "No schema source provided. Pass `app` to createJazzContext or provide a schema source when calling db()/asBackend()/forRequest()/forSession().",
+        "No schema source provided. Pass `app` to createJazzContext or provide a schema source when calling db()/asBackend()/forSession().",
       );
     }
     const schema = resolveSchemaSource(selected);
@@ -751,29 +728,6 @@ export class JazzContext {
     this.coreSource.enableBackendSync(client);
   }
 
-  private async resolveRequestSession(request: RequestLike): Promise<Session> {
-    if (!this.config.serverUrl) {
-      throw new Error("forRequest requires a configured core serverUrl for account admission");
-    }
-    return await resolveRequestSession(request, {
-      appId: this.config.appId,
-      accountRegistry: accountRegistryUrl(this.config.serverUrl, this.config.appId),
-      backendSecret: this.config.backendSecret,
-      allowLocalFirstAuth: this.config.allowLocalFirstAuth,
-    });
-  }
-
-  /**
-   * Verify a local-first guest's bearer and resolve its core account before
-   * building a requester-scoped `Db`.
-   */
-  async forRequest(request: RequestLike, source?: BackendSchemaInput): Promise<Db> {
-    const session = await this.resolveRequestSession(request);
-    const { client, schema } = this.getClientAndSchema(source);
-    this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, schema, DbAccessContext.forSession(session), true);
-  }
-
   /**
    * Build a backend-scoped `Db` that stamps write provenance using the
    * principal in `session` without switching permission evaluation to it.
@@ -790,14 +744,6 @@ export class JazzContext {
       ),
       true,
     );
-  }
-
-  /**
-   * Build a backend-scoped `Db` that stamps write provenance using the
-   * authenticated principal from `request` without switching permissions.
-   */
-  async withAttributionForRequest(request: RequestLike, source?: BackendSchemaInput): Promise<Db> {
-    return this.withAttributionForSession(await this.resolveRequestSession(request), source);
   }
 
   /**

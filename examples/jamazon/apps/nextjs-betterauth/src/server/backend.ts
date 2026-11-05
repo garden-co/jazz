@@ -29,7 +29,7 @@ export function backend(): Promise<Jazz> {
     permissions,
     store: sync
       ? remote({ ...sync, appId: serverConfig.appId })
-      : sqlite({ path: serverConfig.dataPath, appId: serverConfig.appId }),
+      : sqlite({ path: serverConfig.dataPath }),
     // Better Auth's session cookie decides who the shopper is. Guests have
     // no Better Auth session: they stay on their local-first account.
     authenticate: async (request) => {
@@ -38,7 +38,7 @@ export function backend(): Promise<Jazz> {
       // Signed out: a local-first guest shopper.
       return session ? { userId: session.user.id } : acceptLocalFirstAuth(request);
     },
-  }));
+  }).ready());
   // A failed start must not poison later requests.
   pending.catch(() => {
     if (globalThis.__jamazonJazz === pending) globalThis.__jamazonJazz = undefined;

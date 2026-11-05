@@ -133,7 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jwt_token: None,
         backend_secret: Some(backend_secret),
         // The user this service acts as, named as `createJazz` names its users.
-        backend_session: Some(Session::new(format!("jazz:app:{app_id}"), user_id)),
+        backend_session: Some(Session::new("jazz:backend", user_id)),
         bundle: Some(bundle),
         admin_secret: None,
         migrations,

@@ -12,7 +12,7 @@ let jazz: Jazz;
 let db: Db;
 
 beforeAll(async () => {
-  jazz = await createJazz({ app, permissions, store: memory() });
+  jazz = createJazz({ app, permissions, store: memory() });
   db = jazz.db;
 }, 120_000);
 

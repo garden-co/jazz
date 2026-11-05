@@ -10,19 +10,15 @@ import permissions from "./permissions.js";
 
 /**
  * Serve Jazz from the Vite server. Data stays in `dataDir`, or in memory.
- * `appId` names the app for clients that pass one (the tests do); the app's
- * own pages don't need it.
  */
-export function jazzBackend(options: { dataDir?: string; appId?: string } = {}): Plugin {
+export function jazzBackend(options: { dataDir?: string } = {}): Plugin {
   async function mount(server: ViteDevServer | PreviewServer) {
-    const jazz = await createJazz({
+    const jazz = createJazz({
       app,
       permissions,
       // No sign-in: every browser is a guest, so let guests sync.
       authenticate: acceptLocalFirstAuth,
-      store: options.dataDir
-        ? sqlite({ path: options.dataDir, appId: options.appId })
-        : memory({ appId: options.appId }),
+      store: options.dataDir ? sqlite({ path: options.dataDir }) : memory(),
     });
     server.middlewares.use((req, res, next) => jazz.nodeHandler(req, res, next));
     const http = server.httpServer as Server | null;

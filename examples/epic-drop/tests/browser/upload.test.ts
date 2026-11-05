@@ -3,7 +3,7 @@ import { createAccountManager, createDb, generateAuthSecret, type Db } from "jaz
 import { prepareTestAccount } from "../../../testing/accounts.js";
 import { app } from "../../schema.js";
 import { fileTableQuery } from "../../src/file-list-query.js";
-import { APP_ID, SERVER_URL } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 
 const dbs: Db[] = [];
 
@@ -13,8 +13,8 @@ afterEach(async () => {
 
 async function openDb(label: string): Promise<Db> {
   const db = await createDb({
-    appId: APP_ID,
-    account: await prepareTestAccount(createAccountManager, APP_ID, SERVER_URL),
+    appId: SCOPE,
+    account: await prepareTestAccount(createAccountManager, SCOPE, SERVER_URL),
     driver: { type: "persistent", dbName: `epic-drop-${label}-${crypto.randomUUID()}` },
   });
   dbs.push(db);
@@ -23,9 +23,9 @@ async function openDb(label: string): Promise<Db> {
 
 async function openRemoteDb(label: string, secret: string): Promise<Db> {
   const db = await createDb({
-    appId: APP_ID,
+    appId: SCOPE,
     serverUrl: SERVER_URL,
-    account: await prepareTestAccount(createAccountManager, APP_ID, SERVER_URL, secret),
+    account: await prepareTestAccount(createAccountManager, SCOPE, SERVER_URL, secret),
     driver: { type: "persistent", dbName: `epic-drop-${label}-${crypto.randomUUID()}` },
   });
   dbs.push(db);

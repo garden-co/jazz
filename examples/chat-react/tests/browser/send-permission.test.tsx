@@ -32,7 +32,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_SERVER_URL, APP_ID, testAccount } from "./test-constants.js";
+import { TEST_SERVER_URL, SCOPE, testAccount } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -79,7 +79,7 @@ describe("Send permission — private chat INSERT policy", () => {
     const r = createRoot(el);
     mounts.push({ root: r, container: el });
 
-    const appId = APP_ID;
+    const appId = SCOPE;
     const account = config.account ?? (await testAccount(crypto.randomUUID(), appId));
 
     r.render(<App config={{ account, appId, dbName: crypto.randomUUID(), ...config }} />);

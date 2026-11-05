@@ -183,7 +183,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
-    });
+    }).ready();
     cleanups.push(() => jazz.close());
     const name = defaultCoreName("prj_test", { VERCEL_ENV: "preview" });
     expect(fake.calls.slice(0, 2)).toEqual([`drive ${name}-data`, `create ${name}`]);
@@ -200,11 +200,14 @@ describe("vercel() store", () => {
 
     // The backend's own database reaches the core in the Sandbox.
     const row = await jazz.db.insert(app.notes, { text: "on vercel" }).wait({ tier: "global" });
+    // Another function instance (here: after this one's Jazz closed, or the
+    // same Jazz would answer) reaches the same core and its data.
+    await jazz.close();
     const again = await createJazz({
       app,
       permissions,
       store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
-    });
+    }).ready();
     cleanups.push(() => again.close());
     const seen = await again.db.all(app.notes.where({ id: row.id }));
     expect(seen.map((note) => note.text)).toEqual(["on vercel"]);
@@ -224,7 +227,7 @@ describe("vercel() store", () => {
         app,
         permissions,
         store: vercel({ sdk: fresh.sdk, backendCredential: preview }),
-      }),
+      }).ready(),
     ).rejects.toThrow(/401/);
 
     // No secret gets past it either: only the token's stated access counts.
@@ -243,20 +246,22 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
-    });
+    }).ready();
     cleanups.push(() => jazz.close());
     const pinned = fake.files.get("/data/trust")?.toString();
     expect(pinned).toContain(SUBJECT);
 
-    // A preview deployment that reaches the production Sandbox (a shared
-    // name) finds it pinned, and its start leaves the pin alone.
+    // A preview deployment (another process: this one's Jazz closes first)
+    // that reaches the production Sandbox (a shared name) finds it pinned,
+    // and its start leaves the pin alone.
+    await jazz.close();
     const preview = () => oidcToken(core.issuer, "owner:garden-co:project:app:environment:preview");
     await expect(
       createJazz({
         app,
         permissions,
         store: vercel({ sdk: fake.sdk, backendCredential: preview }),
-      }),
+      }).ready(),
     ).rejects.toThrow(/trusts .*environment:production, not this deployment/);
     expect(fake.files.get("/data/trust")?.toString()).toBe(pinned);
   }, 60_000);
@@ -275,7 +280,7 @@ describe("vercel() store", () => {
         app,
         permissions,
         store: vercel({ sdk: fake.sdk, backendCredential: preview }),
-      }),
+      }).ready(),
     ).rejects.toThrow(/delete \/data\/trust/);
     expect(Date.now() - started).toBeLessThan(5_000);
   }, 60_000);
@@ -288,7 +293,7 @@ describe("vercel() store", () => {
       delete process.env.VERCEL_OIDC_TOKEN;
     });
     await expect(
-      createJazz({ app, permissions, store: vercel({ sdk: fake.sdk }) }),
+      createJazz({ app, permissions, store: vercel({ sdk: fake.sdk }) }).ready(),
     ).rejects.toThrow(/preview deployment's OIDC token is for .*environment:production/);
     expect(fake.calls).toEqual([]);
   }, 60_000);
@@ -305,7 +310,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
-    });
+    }).ready();
     cleanups.push(() => jazz.close());
     expect(fake.calls).toContain("resume jazz-prj-test-production");
     expect(fake.calls.some((call) => call.startsWith("create"))).toBe(false);
@@ -324,7 +329,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({ sdk: fake.sdk, local: memory() }),
-    });
+    }).ready();
     cleanups.push(() => jazz.close());
     await jazz.db.insert(app.notes, { text: "local" }).wait({ tier: "global" });
     expect(fake.calls).toEqual([]);
@@ -341,10 +346,12 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({ sdk: older.sdk, backendCredential: core.credential }),
-    });
+    }).ready();
     cleanups.push(() => upgraded.close());
     expect(older.calls.filter((call) => call.startsWith("start"))).toHaveLength(1);
     expect(older.state.running).not.toBe("1.0.0");
+    // The next deployment is another process: this one's Jazz closes first.
+    await upgraded.close();
 
     const newer = fakeVercel({ ...core, appId });
     Object.assign(newer.state, { exists: true, drive: true, status: "running", running: "99.0.0" });
@@ -352,7 +359,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({ sdk: newer.sdk, backendCredential: core.credential }),
-    });
+    }).ready();
     cleanups.push(() => old.close());
     expect(newer.calls.some((call) => call.startsWith("start"))).toBe(false);
     expect(newer.state.running).toBe("99.0.0");
@@ -388,25 +395,9 @@ describe("vercel() store", () => {
     expect(newerVersion("2.0.0", "2.0.0")).toBe(false);
   });
 
-  it("refuses a Sandbox that holds another app's core", async () => {
-    const appId = randomUUID();
-    const core = await startTrustedCore(appId);
-    const fake = fakeVercel({ ...core, appId: randomUUID() });
-    fake.state.exists = true;
-    fake.state.drive = true;
-    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
-    await expect(
-      createJazz({
-        app,
-        permissions,
-        store: vercel({ sdk: fake.sdk, backendCredential: core.credential, appId }),
-      }),
-    ).rejects.toThrow(/belongs to app/);
-  }, 60_000);
-
-  it("generates the app id on the Drive unless one is given", () => {
+  it("generates the app id on the Drive", () => {
     const trust = { issuer: "https://oidc.vercel.com/t", audience: AUDIENCE, subject: SUBJECT };
-    const script = startScript(undefined, "2.0.0-alpha.60", "https://example.invalid/t.tgz", trust);
+    const script = startScript("2.0.0-alpha.60", "https://example.invalid/t.tgz", trust);
     expect(script).toContain("app_id=$(cat /proc/sys/kernel/random/uuid)");
     expect(script).toContain("exec node -e 'const [addon, appId, options]");
     expect(script).toContain('"$addon" "$app_id"');
@@ -417,7 +408,6 @@ describe("vercel() store", () => {
   it("installs the core addon for the running version once, and the app id once", () => {
     const trust = { issuer: "https://oidc.vercel.com/t", audience: AUDIENCE, subject: SUBJECT };
     const script = startScript(
-      "app'1",
       "2.0.0-alpha.60",
       "https://registry.npmjs.org/@garden-co/jazz-napi-linux-x64-gnu/-/jazz-napi-linux-x64-gnu-2.0.0-alpha.60.tgz",
       trust,
@@ -425,7 +415,6 @@ describe("vercel() store", () => {
     expect(script).toContain("version='2.0.0-alpha.60'");
     expect(script).toContain("addon=$data/bin/jazz-napi-$version.node");
     expect(script).toContain(`if [ ! -s "$data/app-id" ]`);
-    expect(script).toContain(`app_id='app'\\''1'`);
   });
 
   it("lets a custom environment reach its own core", () => {

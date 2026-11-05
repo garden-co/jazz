@@ -32,15 +32,15 @@ export function jazz(): Promise<Jazz> {
     store: config.remote
       ? remote({ ...config.remote, appId: config.appId })
       : process.env.NODE_ENV === "test"
-        ? memory({ appId: config.appId })
-        : sqlite({ path: config.dataPath!, appId: config.appId }),
+        ? memory()
+        : sqlite({ path: config.dataPath! }),
     // Better Auth's session cookie decides who the user is.
     authenticate: async (request) => {
       const { auth } = await import("./auth");
       const session = await auth.api.getSession({ headers: request.headers });
       return session ? { userId: session.user.id } : null;
     },
-  }));
+  }).ready());
   // A failed start must not poison every later request.
   pending.catch(() => {
     if (globalThis.__bigLabelJazz === pending) globalThis.__bigLabelJazz = undefined;
