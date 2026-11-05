@@ -42,6 +42,8 @@ export function followUser(options: {
   fetch?: typeof fetch;
   /** See `linkGuestOnSignUp` on `createJazzClient`. Default true. */
   linkGuest?: boolean;
+  /** Receives a promise that settles once the backend's first answer is followed. */
+  onStart?(started: Promise<void>): void;
 }) {
   return <Client>(session: JazzSession<Client>) => decorate(session, options);
 }
@@ -53,6 +55,7 @@ function decorate<Client>(
     events: BackendWatchEvents;
     fetch?: typeof fetch;
     linkGuest?: boolean;
+    onStart?(started: Promise<void>): void;
   },
 ): Pick<UserFollowingSession<Client>, "reauthenticate" | "linkWithBackend" | "close"> {
   const watch = watchBackendUser(
@@ -67,6 +70,7 @@ function decorate<Client>(
           .catch(() => {}),
     },
   );
+  options.onStart?.(watch.started);
   // A sync server that refuses the sign-in (the backend's re-check ended it,
   // and reconnecting with fresh cookies failed) asks the backend again.
   let observed: unknown;

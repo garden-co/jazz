@@ -162,6 +162,7 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
     return openThin(account);
   };
 
+  let backendAnswered: Promise<void> | undefined;
   session = await createJazzSessionOwner({
     accounts,
     initial,
@@ -172,9 +173,16 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
       registry,
       events: browserBackendWatchEvents(`jazz-account:${registry}`),
       linkGuest: linkGuestOnSignUp,
+      onStart: (started) => (backendAnswered = started),
     }),
   });
   if (loadLocalFirst) upgradeInBackground(session, loadLocalFirst);
+  // With no account on this device (a returning backend user keeps none),
+  // the session opens signed out until the backend names its user. Wait for
+  // that first answer, so apps don't show their sign-in screen to a user who
+  // is signed in. An account already on this device opens at once (offline
+  // too), and a failed or timed-out check opens signed out as before.
+  if (session.getSnapshot().status === "signed-out") await backendAnswered;
   return session;
 }
 

@@ -42,6 +42,11 @@ export interface BackendWatch {
    * itself after its sign-up can then join the link the watch already made.
    */
   readonly linking: { done: Promise<void>; result: unknown } | undefined;
+  /**
+   * Settles once the check on start has finished and the session follows its
+   * answer (or it failed, or the watch stopped). Never rejects.
+   */
+  readonly started: Promise<void>;
   stop(): void;
 }
 
@@ -350,7 +355,13 @@ export function watchBackendUser<Client>(
   const stopFocus = events.onFocus(() => check());
   const stopCrossTab = events.crossTab?.listen(() => check());
   // Ask on start, once the host has finished setting up.
-  const start = setTimeout(() => check(), 0);
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => (markStarted = resolve));
+  const start = setTimeout(() => {
+    check();
+    // The check this started, or one already running that answers for it.
+    void (checking ?? Promise.resolve()).finally(markStarted);
+  }, 0);
   const watch: BackendWatch = {
     authRefused() {
       refusedPending = true;
@@ -360,6 +371,7 @@ export function watchBackendUser<Client>(
     get linking() {
       return linking;
     },
+    started,
     reauthenticate() {
       const done = new Promise<void>((resolve, reject) => waiters.push({ resolve, reject }));
       whenSettled(() => check(false, true));
@@ -370,6 +382,7 @@ export function watchBackendUser<Client>(
       stopped = true;
       settle(waiters.splice(0));
       clearTimeout(start);
+      markStarted();
       resetRefusal();
       unsubscribe();
       stopFocus();
