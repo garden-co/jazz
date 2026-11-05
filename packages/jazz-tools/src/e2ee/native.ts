@@ -1,3 +1,11 @@
+/**
+ * @packageDocumentation
+ * Experimental: low-level crypto building blocks for end-to-end encryption.
+ * Not audited, not yet an end-to-end encrypted app, and the API may change in
+ * any release.
+ *
+ * @experimental
+ */
 import { createRequire } from "node:module";
 import type * as JazzNapi from "jazz-napi";
 import { resolveCrypto } from "./crypto.js";
@@ -11,6 +19,7 @@ import {
 import type { SodiumKeyPrimitives } from "./sodium.js";
 import type { CellCipher, CryptoAdapters, DeviceSigner, JazzCrypto, KeyEnvelope } from "./types.js";
 
+/** @experimental */
 export async function createNativeCrypto(overrides: JazzCrypto = {}): Promise<CryptoAdapters> {
   return resolveCrypto(overrides, {
     cellCipher: createNativeCellCipher,
@@ -21,10 +30,12 @@ export async function createNativeCrypto(overrides: JazzCrypto = {}): Promise<Cr
   });
 }
 
+/** @experimental */
 export async function createNativeEqualityIndex() {
   return createSodiumEqualityIndex(nativeSodium());
 }
 
+/** @experimental */
 export async function createNativeLargeValueCipher() {
   const { E2EeSodiumStream, e2eeSodiumHash } = createRequire(import.meta.url)(
     "jazz-napi",
@@ -52,15 +63,21 @@ export async function createNativeLargeValueCipher() {
   });
 }
 
-/** Native Rust/libsodium implementation; no browser-crypto fallback. */
+/**
+ * Native Rust/libsodium implementation; no browser-crypto fallback.
+ *
+ * @experimental
+ */
 export async function createNativeCellCipher(): Promise<CellCipher> {
   return createSodiumCellCipher(nativeSodium());
 }
 
+/** @experimental */
 export async function createNativeKeyEnvelope(): Promise<KeyEnvelope> {
   return createSodiumKeyEnvelope(nativeSodium());
 }
 
+/** @experimental */
 export async function createNativeDeviceSigner(): Promise<DeviceSigner> {
   const { e2eeSodiumSigningKeyPair, e2eeSodiumSign, e2eeSodiumVerify } = createRequire(
     import.meta.url,
