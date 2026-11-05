@@ -62,16 +62,18 @@ sites.
 An agent gets access only when a person approves it in the browser:
 
 ```bash title="Terminal"
-npx jazz-tools@alpha inspect login https://my-app.com/jazz
+npx jazz-tools@alpha inspect login --app https://my-app.com
 ```
 
 This opens the Inspector on an approval page. Once you approve, the browser hands the token straight
-to the waiting command on your machine, so nothing goes into `.env`. When the agent runs elsewhere,
+to the waiting command on your machine, which keeps it in `~/.config/jazz/inspect-tokens.json`,
+so nothing goes into `.env`. When the agent runs elsewhere,
 the page shows the token to paste instead.
 
 - `jazz-tools inspect <whoami|schema|query|get|history|insert|update|delete|sessions|link>` prints
   JSON.
-- `jazz-tools inspect mcp` serves the same operations as MCP tools over stdio. An agent without a
+- `jazz-tools inspect mcp --app <url>` serves the same operations as MCP tools over stdio, for
+  example `claude mcp add jazz -- npx jazz-tools inspect mcp --app <url>`. An agent without a
   token calls the `request_access` tool, which starts the same approval.
 
 Tokens are read-only unless you allow writes, can be limited to some tables, and expire (after a day
