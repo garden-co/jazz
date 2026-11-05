@@ -4162,17 +4162,7 @@ impl Inner {
                             format!("large value from upstream: {e}"),
                         )
                     })?;
-                // A column the current schema no longer has keeps the
-                // general threshold.
-                let inline_max = self
-                    .owner
-                    .by_stored(&image.table)
-                    .and_then(|table| table.by_stored_column(name))
-                    .map_or(
-                        jazz_types::large_values::INLINE_VALUE_MAX_BYTES,
-                        crate::large::inline_max,
-                    );
-                cells.push((name.clone(), self.large_cell(&value, inline_max)?));
+                cells.push((name.clone(), self.received_cell(&value)?));
                 continue;
             }
             // An enum cell travels by variant name (see `portable_enums`).

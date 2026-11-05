@@ -508,10 +508,10 @@ impl Inner {
     /// makes it: the one splice between the held value and the new one,
     /// which costs its epoch a few bytes and travels as an edit, where the
     /// whole value would be a new tree. `None` keeps the write whole: the
-    /// held value is inline, unchanged, or cannot be read here (its chunks
-    /// not fetched, a branched table), or the change inserts more than an
-    /// epoch edit holds. The edit's derived value and any nodes it wrote are
-    /// left in `derived` and `pending_nodes` for the caller to take.
+    /// held value is inline or cannot be read here (its chunks not fetched,
+    /// a branched table), or the change inserts more than an epoch edit
+    /// holds. The edit's derived value and any nodes it wrote are left in
+    /// `derived` and `pending_nodes` for the caller to take.
     pub(crate) fn whole_write_as_edit(
         &mut self,
         table: &str,
@@ -523,12 +523,28 @@ impl Inner {
         let (col, cell) = self
             .physical_cell(table, row, &column.name, identity_of(identity))
             .ok()?;
+        self.as_edit_of(table, &col, cell, logical)
+    }
+
+    /// `logical` as an edit of the chunked `cell` ([`Self::whole_write_as_edit`]);
+    /// a value equal to the held one is the held value, so rewriting a
+    /// document unchanged costs nothing.
+    pub(crate) fn as_edit_of(
+        &mut self,
+        table: &str,
+        column: &crate::values::Column,
+        cell: Sql,
+        logical: &[u8],
+    ) -> Option<Value> {
         let Ok(Logical::Chunked(held)) = self.chunks.logical(cell.as_ref()) else {
             return None;
         };
         let current = self.chunks.value_bytes(&held).ok()?;
-        let text = crate::large::kind(&col) != lv::LargeValueKind::Bytes;
-        let splice = byte_splices(&current, logical, text).pop()?;
+        let text = crate::large::kind(column) != lv::LargeValueKind::Bytes;
+        let Some(splice) = byte_splices(&current, logical, text).pop() else {
+            self.derived.push((*held).clone());
+            return Some(Value::Large(held));
+        };
         // A longer insertion materializes a new tree either way (SPEC 19.4),
         // which the whole write builds as well.
         if splice.insert.len() > lv::epoch::EPOCH_INSERT_BYTES {
@@ -539,7 +555,7 @@ impl Inner {
             delete: splice.delete,
             insert: splice.insert,
         };
-        self.edited(table, &col, cell, edit).ok()
+        self.edited(table, column, cell, edit).ok()
     }
 
     /// The value `edit` makes of the current cell. A chunked value gains a

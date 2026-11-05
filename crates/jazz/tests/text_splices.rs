@@ -405,3 +405,180 @@ fn text_merge_columns_chunk_over_four_kib() {
     );
     assert!(INLINE_VALUE_MAX_BYTES > long.len());
 }
+
+fn nodes(db: &Db) -> (u64, u64) {
+    db.large_value_nodes_for_test().unwrap()
+}
+
+fn open_file(dir: &Path, node: u8) -> Db {
+    block_on(Db::open_at(
+        config(node),
+        &dir.join("store.sqlite"),
+        FileOptions::default(),
+    ))
+    .unwrap()
+}
+
+/// Multibyte text keeps its characters whole: a whole write that adds or
+/// removes characters of every width next to others is stored as the
+/// splice between them, on character boundaries, and reads back exactly.
+#[test]
+fn whole_writes_of_multibyte_text_splice_on_character_boundaries() {
+    let db = block_on(Db::open(config(0x52))).unwrap();
+    let mut expected = "aé€🙂".repeat(1200);
+    insert(&db, &expected);
+    let (stored, roots) = nodes(&db);
+    assert_eq!(roots, 1);
+    // Each edit shares a prefix and suffix that end inside a character of
+    // the other value's bytes.
+    for (at, typed) in [(4, "é"), (9, "€"), (13, "🙂"), (20, "e"), (27, "€é")] {
+        let at = expected.char_indices().nth(at).unwrap().0;
+        expected.insert_str(at, typed);
+        write_whole(&db, &expected);
+        assert_eq!(body(&db), expected);
+    }
+    let at = expected.char_indices().nth(30).unwrap().0;
+    let next = expected[at..].chars().next().unwrap().len_utf8();
+    expected.replace_range(at..at + next, "");
+    write_whole(&db, &expected);
+    assert_eq!(body(&db), expected);
+    assert_eq!(nodes(&db), (stored, 1), "edits share the value's one tree");
+}
+
+/// Writing the document whole without a change keeps the held value: no
+/// new tree, no new edit.
+#[test]
+fn an_unchanged_whole_write_keeps_the_held_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_file(dir.path(), 0x53);
+    let doc = text(12 * 1024, 5);
+    insert(&db, &doc);
+    let held = nodes(&db);
+    let size = store_bytes(dir.path());
+    for _ in 0..20 {
+        write_whole(&db, &doc);
+    }
+    assert_eq!(nodes(&db), held);
+    assert_eq!(body(&db), doc);
+    drop(db);
+    let grown = store_bytes(dir.path()).saturating_sub(size);
+    assert!(
+        grown < 20 * 1024,
+        "twenty unchanged writes grew the store {grown} bytes"
+    );
+}
+
+/// A document that grows past 4 KiB is chunked and stops matching
+/// `contains`; shrinking under it again makes it inline and searchable.
+#[test]
+fn whole_writes_cross_the_threshold_both_ways() {
+    let db = block_on(Db::open(config(0x54))).unwrap();
+    let found = || {
+        let query = db
+            .prepare_query(
+                &Query::from("docs")
+                    .filter(contains(col("body"), lit(Value::String("needle".into())))),
+            )
+            .unwrap();
+        block_on(db.all(&query, ReadOpts::default())).unwrap().len()
+    };
+    let small = format!("{} needle", text(2 * 1024, 9));
+    insert(&db, &small);
+    assert_eq!((found(), nodes(&db).1), (1, 0), "inline under 4 KiB");
+    let large = format!("{small}{}", text(4 * 1024, 10));
+    write_whole(&db, &large);
+    assert_eq!(body(&db), large);
+    assert_eq!((found(), nodes(&db).1), (0, 1), "chunked over 4 KiB");
+    let edited = format!("{large}!");
+    write_whole(&db, &edited);
+    assert_eq!(body(&db), edited);
+    assert_eq!(nodes(&db).1, 1, "an edit of the chunked value");
+    write_whole(&db, &small);
+    assert_eq!(body(&db), small);
+    // History still names the chunked versions; the current one is inline.
+    assert_eq!(found(), 1, "inline again");
+}
+
+/// Whole writes in a transaction are edits of what the transaction sees:
+/// its own earlier writes, never another open transaction's. Here B
+/// rewrites most of the document (a new tree its batch alone holds) and is
+/// abandoned, while A, open at the same time, edits the committed value and
+/// commits; A's row names only nodes the store keeps, across a restart.
+#[test]
+fn transaction_whole_writes_edit_what_the_transaction_sees() {
+    use jazz::tools::OpenTransactionId;
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_file(dir.path(), 0x55);
+    let doc = text(12 * 1024, 13);
+    insert(&db, &doc);
+
+    let update = |tx: OpenTransactionId, body: &str| {
+        block_on(db.tx_ref(tx).update(
+            "docs",
+            row(),
+            BTreeMap::from([("body".to_owned(), Value::String(body.to_owned()))]),
+            UpdateOptions::default(),
+        ))
+        .unwrap();
+    };
+
+    // An abandoned transaction leaves the value as it was.
+    let rolled = OpenTransactionId::new();
+    block_on(db.begin_mergeable(rolled)).unwrap();
+    update(rolled, &format!("x{doc}"));
+    db.abandon_transaction_handle(rolled).unwrap();
+    assert_eq!(body(&db), doc);
+
+    let a = OpenTransactionId::new();
+    let b = OpenTransactionId::new();
+    block_on(db.begin_mergeable(a)).unwrap();
+    block_on(db.begin_mergeable(b)).unwrap();
+    let mut rewritten = doc.clone();
+    rewritten.insert_str(6 * 1024, &text(2 * 1024, 14));
+    update(b, &rewritten);
+    let mut first = doc.clone();
+    first.insert(100, 'a');
+    update(a, &first);
+    // A second write in A edits A's first.
+    let mut second = first.clone();
+    second.insert_str(9000, "aa");
+    update(a, &second);
+    db.abandon_transaction_handle(b).unwrap();
+    block_on(db.commit_mergeable_handle(a)).unwrap();
+    assert_eq!(body(&db), second);
+    assert_eq!(nodes(&db).1, 1);
+
+    drop(db);
+    let db = open_file(dir.path(), 0x55);
+    assert_eq!(body(&db), second, "the committed value survives a restart");
+    let mut third = second.clone();
+    third.insert_str(50, "after restart");
+    write_whole(&db, &third);
+    assert_eq!(body(&db), third);
+    assert_eq!(nodes(&db).1, 1);
+}
+
+/// Keystrokes on a file store, closed and reopened between them: the
+/// reopened store edits the value it held.
+#[test]
+fn whole_writes_edit_the_held_value_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut expected = text(12 * 1024, 17);
+    {
+        let db = open_file(dir.path(), 0x56);
+        insert(&db, &expected);
+    }
+    let held = {
+        let db = open_file(dir.path(), 0x56);
+        nodes(&db)
+    };
+    for key in 0..5 {
+        let db = open_file(dir.path(), 0x56);
+        expected.insert(4000 + key, 'k');
+        write_whole(&db, &expected);
+        assert_eq!(body(&db), expected);
+        assert_eq!(nodes(&db), held, "an edit adds no nodes");
+    }
+    let db = open_file(dir.path(), 0x56);
+    assert_eq!(body(&db), expected);
+}
