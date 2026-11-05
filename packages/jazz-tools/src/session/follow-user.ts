@@ -113,9 +113,17 @@ async function signedInIdentity(
     const answer = (await requestBackendUser(registry, fetcher)) as {
       identity?: AccountIdentity;
       account?: string | null;
+      claims?: unknown;
     };
     if (!answer.identity) return null;
-    return { ...answer.identity, hasAccount: answer.account != null };
+    const { claims } = answer;
+    return {
+      ...answer.identity,
+      hasAccount: answer.account != null,
+      ...(claims && typeof claims === "object" && !Array.isArray(claims)
+        ? { claims: claims as Record<string, unknown> }
+        : {}),
+    };
   } catch (cause) {
     if (cause instanceof AccountAuthError && cause.status === 401) return null;
     throw cause;

@@ -67,6 +67,27 @@ type ClientReplacer = (
   open: (current: unknown, account: AccountHandle) => Promise<unknown>,
 ) => Promise<void>;
 const replacers = new WeakMap<object, ClientReplacer>();
+const switchers = new WeakMap<object, (from: AccountHandle) => Promise<boolean>>();
+
+/**
+ * @internal Sign the current account out and the user the backend names now
+ * in, as one transition: the session stays `transitioning` from the first
+ * account to the next and never publishes `signed-out` in between. The first
+ * account is torn down as on `logout` (its credentials revoked and, with
+ * `clearOnSignOut`, its storage wiped). If the sign-in fails, the session
+ * ends signed out with that error: the first account is gone either way.
+ *
+ * It waits for an operation still finishing, and resolves false without
+ * switching when the session no longer holds `from` by then.
+ */
+export function switchJazzSessionUser<Client>(
+  session: JazzSession<Client>,
+  from: AccountHandle,
+): Promise<boolean> {
+  const switchUser = switchers.get(session);
+  if (!switchUser) return Promise.reject(new Error("Unknown Jazz session"));
+  return switchUser(from);
+}
 
 /**
  * @internal Swap the signed-in account's client for another one for the same
@@ -164,9 +185,12 @@ export async function createJazzSessionOwner<
     mutate: () => AccountHandle | undefined | Promise<AccountHandle | undefined>,
     token: number,
     detached?: Promise<void>,
+    // The current account is signed out first (a switch to another user).
+    signsOut = operation === "logout",
   ) => {
     if (token !== generation) throw superseded();
-    const previous = selected;
+    // A switch has signed the previous account out: a failed sign-in can't reopen it.
+    const previous = signsOut ? undefined : selected;
     await (detached ??
       detach({ status: "transitioning", account: selected, pending: operation }).done);
     if (token !== generation) throw superseded();
@@ -174,7 +198,7 @@ export async function createJazzSessionOwner<
       if (client) {
         // A thin client keeps nothing in the browser, so there is nothing to wipe.
         const thin = isThinDb((client as WipeableClient).db as Db);
-        if (operation === "logout" && options.clearOnSignOut && !thin) {
+        if (signsOut && options.clearOnSignOut && !thin) {
           const db = (client as WipeableClient).db;
           // Upload what the server still accepts before wiping the rest.
           await db?.waitForSync?.({ timeoutMs: 5_000 }).catch(() => {});
@@ -247,6 +271,7 @@ export async function createJazzSessionOwner<
   const run = (
     operation: JazzSessionOperation,
     mutate: () => AccountHandle | undefined | Promise<AccountHandle | undefined>,
+    signsOut?: boolean,
   ): Promise<void> => {
     if (closed) return Promise.reject(new Error("Jazz session is closed"));
     if (busy || loggingOut)
@@ -257,7 +282,9 @@ export async function createJazzSessionOwner<
     // is busy before listeners hear of it, so one that starts an operation
     // of its own is refused rather than racing this one.
     let detached!: { done: Promise<void> };
-    const task = Promise.resolve().then(() => perform(operation, mutate, token, detached.done));
+    const task = Promise.resolve().then(() =>
+      perform(operation, mutate, token, detached.done, signsOut),
+    );
     busy = task;
     detached = detach({ status: "transitioning", account: selected, pending: operation });
     void task
@@ -321,6 +348,23 @@ export async function createJazzSessionOwner<
       return closing;
     },
   };
+  switchers.set(session, async (from) => {
+    // An operation that published its outcome may still be finishing.
+    while (busy || loggingOut) {
+      await busy?.catch(() => {});
+      await loggingOut?.catch(() => {});
+    }
+    if (closed || selected !== from) return false;
+    await run(
+      "loginWithBackend",
+      () => {
+        accounts.logout();
+        return accounts.loginWithBackend();
+      },
+      true,
+    );
+    return true;
+  });
   replacers.set(session, async (open) => {
     if (closed) throw new Error("Jazz session is closed");
     await busy?.catch(() => {});
