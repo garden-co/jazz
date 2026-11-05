@@ -33,8 +33,8 @@ use std::time::{Duration, Instant};
 
 use jazz::binding_host::{self, Binding, EventChunk, HostError, Link};
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, LargeValueUpdate, RemoteLinkHint, SubscriptionStream,
-    block_on,
+    Db, DbConfig, DbIdentity, FileOptions, LargeValueUpdate, Migrations, RemoteLinkHint,
+    SubscriptionStream, block_on,
 };
 use jazz::ids::{AuthorSubject, RowUuid};
 use jazz::link::{
@@ -133,6 +133,9 @@ pub struct RelayOpenConfig {
     /// interpolates auth tokens or untrusted strings into a filesystem path.
     pub sqlite_path: PathBuf,
     pub schema: JazzSchema,
+    /// The app's earlier schema versions and the lenses between them, as it
+    /// ships them: the store keeps each column where the authority does.
+    pub migrations: Migrations,
     pub identity: DbIdentity,
 }
 
@@ -808,6 +811,7 @@ fn poll_once<T>(future: &mut Pin<Box<dyn Future<Output = T>>>) -> Poll<T> {
 
 pub(crate) struct RelayWorker {
     schema: JazzSchema,
+    migrations: Migrations,
     persistent: Binding,
     persistent_dirty: Rc<Cell<bool>>,
     upstream: Option<UpstreamConnection>,
@@ -862,7 +866,10 @@ impl RelayWorker {
                 .map_err(|error| RelayError::Storage(error.to_string()))?;
         }
         let db = block_on(Db::open_at(
-            DbConfig::new(config.schema.clone(), config.identity),
+            DbConfig::new(config.schema.clone(), config.identity).with_migrations(
+                config.migrations.schemas.clone(),
+                config.migrations.lenses.clone(),
+            ),
             &config.sqlite_path,
             FileOptions::default(),
         ))
@@ -871,6 +878,7 @@ impl RelayWorker {
         let persistent_dirty = hook(&persistent);
         Ok(Self {
             schema: config.schema,
+            migrations: config.migrations,
             persistent,
             persistent_dirty,
             upstream: None,
@@ -966,8 +974,13 @@ impl RelayWorker {
             .db
             .check_serves(identity.author)
             .map_err(|error| RelayError::Host(error.into()))?;
-        let db = block_on(Db::open(DbConfig::new(self.schema.clone(), identity)))
-            .map_err(|error| RelayError::Host(error.into()))?;
+        let db = block_on(Db::open(
+            DbConfig::new(self.schema.clone(), identity).with_migrations(
+                self.migrations.schemas.clone(),
+                self.migrations.lenses.clone(),
+            ),
+        ))
+        .map_err(|error| RelayError::Host(error.into()))?;
         // Continue after the node's previous holder: its transaction ids
         // were (seq, node), and the relay deduplicates by them.
         if high_water > 0 {

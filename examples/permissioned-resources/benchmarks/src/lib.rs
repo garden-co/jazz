@@ -1148,6 +1148,7 @@ fn run_cold_via_relay(
         },
         sqlite_path: dir.path().join("relay.sqlite"),
         schema: schema.clone(),
+        migrations: Default::default(),
         identity: DbIdentity {
             node: node(2),
             author,
