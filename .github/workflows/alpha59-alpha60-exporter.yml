@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release to attach the exporter and importer to, e.g. 2.0.0-alpha.60 (tag v<version>). It must still be a draft."
+        description: "Release to attach the exporter and importer to, e.g. 2.0.0-alpha.60 or 2.0.0-alpha.60-preview.1 (tag v<version>). It must still be a draft."
         required: true
         type: string
       ref:
@@ -57,8 +57,10 @@ jobs:
     steps:
       - name: Validate inputs
         run: |
-          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+$ ]]; then
-            echo "::error::version must look like 2.0.0-alpha.N, got '${VERSION}'"
+          # A preview (2.0.0-alpha.N-preview.M, published as a prerelease)
+          # lets hosts try the upgrade before 2.0.0-alpha.N ships.
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+(-preview\.[0-9]+)?$ ]]; then
+            echo "::error::version must look like 2.0.0-alpha.N or 2.0.0-alpha.N-preview.M, got '${VERSION}'"
             exit 1
           fi
 
