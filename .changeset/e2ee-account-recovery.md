@@ -15,7 +15,3 @@ Clear temporary private-key arrays when inspecting recovery-material metadata,
 and propagate operational history-verifier failures instead of hiding them by
 trying another recovery delivery or protector. Invalid-candidate fallback and
 sanitised material-import errors remain supported.
-
-Correctness WASM builds retain development safety checks with basic optimization.
-Bound worker and browser-package concurrency so multi-client lifecycle tests keep
-their existing deadlines; the complete CI job has a separate execution budget.
