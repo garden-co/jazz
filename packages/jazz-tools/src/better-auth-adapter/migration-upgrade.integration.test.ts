@@ -108,6 +108,13 @@ it("upgrades an existing issuer-era account through createJazz and signs in afte
       userId: expectedUser,
       password: digest,
     });
+    // Backend Db is bound to its configured bundle; a table from oldApp does
+    // not switch a current Db to a legacy view. Close each owner before using
+    // public createJazz to republish the legacy/current bundle on this store.
+    // Both handles use this same current runtime/library, not a package downgrade.
+    await jazz.close();
+    jazz = undefined;
+    jazz = await createJazz({ app: oldApp, permissions, store });
     // The backwards projection retains a previously stored issuer verbatim.
     expect(
       await jazz.db.one(oldApp.better_auth_account.where({ id: expectedAccount })),
@@ -131,6 +138,9 @@ it("upgrades an existing issuer-era account through createJazz and signs in afte
     const added = await auth.api.signUpEmail({
       body: { name: "New fixture", email: "new-upgrade@example.test", password },
     });
+    await jazz.close();
+    jazz = undefined;
+    jazz = await createJazz({ app: oldApp, permissions, store });
     const newAccount = await jazz.db.one(
       oldApp.better_auth_account.where({ userId: added.user.id }),
     );
@@ -139,6 +149,9 @@ it("upgrades an existing issuer-era account through createJazz and signs in afte
       providerId: "credential",
       accountId: added.user.id,
     });
+    await jazz.close();
+    jazz = undefined;
+    jazz = await createJazz({ app: newApp, permissions, store });
     expect(
       await jazz.db.one(newApp.better_auth_account.where({ id: expectedAccount })),
     ).toMatchObject({ password: digest });
