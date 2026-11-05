@@ -69,17 +69,6 @@
      You have all that context; write it up so the user only needs to review and submit it.
    - What they built and how it went: the Jazz Discord, https://discord.gg/jazz.
 
-## You're done when
-
-You have shown the user all of these working, and not before:
-
-- the dev setup starts with one command
-- a backend route writes a row that a live query in the UI shows without a reload
-- a second user can't read rows the policies say are private, and the permission tests pass
-
-Finish with: the commands to run, what you chose and why, and any docs that were wrong or missing
-(with URLs). Tell the user about those; don't silently work around them.
-
 ## Later and more advanced topics to be aware of
 
 1. Schema evolution and migrations are particularly interesting in Jazz: /docs/schemas/migrations
