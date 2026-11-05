@@ -160,12 +160,12 @@ const features: {
 }[] = [
   {
     id: "permissions",
-    title: "Row-level security and per-query auth",
+    title: "Declarative permissions and per-query auth",
     body: (
       <>
         <p>
-          Permissions are policies over your data and the user your backend signed in, defined in
-          code and testable like the rest of your app.
+          Declarative permissions are policies over your data and the user your backend signed in,
+          defined in code and testable like the rest of your app.
         </p>
         <p>
           Jazz optimizes each query together with the policies that apply to it, so the same rules

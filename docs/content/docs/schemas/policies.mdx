@@ -1,10 +1,12 @@
 ---
-title: Permissions
-description: "Learn how to write row-level permissions, from simple ownership to relationship-based access, and how to test them."
+title: Declarative Permissions
+description: "Learn how to write declarative permissions, from simple ownership to relationship-based access, and how to test them."
 reviewedAt: "b29b48d1a"
 ---
 
-Permissions control who can read, insert, update, and delete rows. Jazz enforces them server-side using row-level policies defined in `permissions.ts`. Clients that fail a policy check have their writes rejected and their reads filtered.
+Declarative permissions control who can read, insert, update, and delete rows. You declare them as policies in `permissions.ts`, and Jazz enforces them server-side. Clients that fail a policy check have their writes rejected and their reads filtered.
+
+If you know Postgres row-level security (RLS), declarative permissions are similar: rules over rows and the signed-in user. In Jazz they are typed TypeScript next to your schema, every operation is denied until a policy grants it, and you test them like the rest of your app.
 
 Jazz decides permissions per table:
 

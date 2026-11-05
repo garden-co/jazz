@@ -856,7 +856,7 @@ export function BackendDiagram() {
   ];
   const jazz = [
     "sync + live queries",
-    "row-level permissions",
+    "declarative permissions",
     "durable streams",
     "files + blobs",
     "database",

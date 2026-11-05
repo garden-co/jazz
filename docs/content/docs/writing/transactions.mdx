@@ -12,7 +12,7 @@ sees the rows the transaction creates or updates, so you can create a row and th
 on it for permissions in one transaction. A row the transaction deletes is still seen as it was
 before the transaction. Each write must also be allowed by the state the whole transaction
 leaves behind, whatever order you made the writes in. Writes from other transactions stay
-invisible until they are accepted. See [Permissions](/docs/schemas/policies#share-based-access).
+invisible until they are accepted. See [Declarative Permissions](/docs/schemas/policies#share-based-access).
 
 Jazz has two transaction types. The difference is how they handle concurrent changes:
 

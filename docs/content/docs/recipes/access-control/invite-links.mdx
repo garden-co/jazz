@@ -19,7 +19,7 @@ and write run under different credentials.
 
 ## Schema
 
-Keep invite codes in their own table, not on the resource row. Jazz permissions are row-level, so a
+Keep invite codes in their own table, not on the resource row. Jazz permissions apply to whole rows, so a
 `joinCode` on the chat would be visible to every chat member. This table has no client read rule;
 only the backend checks its code. The members table records which invite each user used to join, so
 you can audit or revoke individual memberships later.
@@ -40,7 +40,7 @@ on their behalf after validating the join code.
   ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-permissions
 </include>
 
-See [Permissions](/docs/schemas/policies) for more on `exists.where`, `allOf`, and `anyOf`, and [Acting for a user in your backend](/docs/setup/auth/backend#acting-for-a-user-in-your-backend) for how the backend stamps the user as the row's author while keeping backend permissions.
+See [Declarative Permissions](/docs/schemas/policies) for more on `exists.where`, `allOf`, and `anyOf`, and [Acting for a user in your backend](/docs/setup/auth/backend#acting-for-a-user-in-your-backend) for how the backend stamps the user as the row's author while keeping backend permissions.
 
 ## Generating a link
 
