@@ -857,6 +857,26 @@ h6 {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.home-agent-prompt .md-heading {
+  color: var(--color-syntax-keyword);
+  font-weight: 700;
+}
+.home-agent-prompt .md-marker {
+  color: var(--color-syntax-number);
+}
+.home-agent-prompt .md-code {
+  color: var(--color-syntax-string);
+}
+.home-agent-prompt .md-strong {
+  color: var(--color-syntax-property);
+  font-weight: 700;
+}
+.home-agent-prompt .md-link {
+  color: var(--color-syntax-function);
+}
+.home-agent-prompt .md-url {
+  color: var(--color-syntax-comment);
+}
 .home-agent-prompt-copy {
   position: absolute;
   top: var(--spacing-2);
