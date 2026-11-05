@@ -49,6 +49,29 @@ fn schema() -> JazzSchema {
                         vec![outer_eq("room", "room"), session_eq("member", &ME)],
                     ))),
             )
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .fk_column("room", "rooms")
+                    .column("body", ColumnType::Text)
+                    .array_fk_column("stickers", "stickers")
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("reactions")
+                    .fk_column("note", "notes")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("stickers")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("likes")
+                    .fk_column("sticker", "stickers")
+                    .policies(allow_all_policies()),
+            )
             .build(),
     )
 }
@@ -1161,4 +1184,517 @@ fn a_one_shot_remote_read_after_a_delete_sees_another_replicas_restore() {
         "the resumed one-shot Remote read ships the restore"
     );
     assert_eq!(ids(&a, None), [id(3, 0)], "and installs it locally");
+}
+
+/// Two subscriptions over one row, where it leaves one of them while the
+/// client is away without changing (its membership input did): the row
+/// stays on the replica for the other, whichever reopens first.
+fn a_row_one_subscription_lost_stays_for_the_other(lost_first: bool) {
+    let server = seeded(1);
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    // Rooms alice is a member of, and every room.
+    let member_of = client
+        .prepare_query(&Query::from("rooms").join_via("memberships", "room", []))
+        .unwrap();
+    let every = client.prepare_query(&Query::from("rooms")).unwrap();
+    let (first, second) = if lost_first {
+        (&member_of, &every)
+    } else {
+        (&every, &member_of)
+    };
+    let _first = block_on(client.subscribe(first, ReadOpts::default())).unwrap();
+    let _second = block_on(client.subscribe(second, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    let rooms = |db: &Db| {
+        let prepared = db.prepare_query(&Query::from("rooms")).unwrap();
+        let opts = ReadOpts {
+            tier: ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        };
+        let mut rows: Vec<RowUuid> = block_on(db.all(&prepared, opts))
+            .unwrap()
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect();
+        rows.sort();
+        rows
+    };
+    assert_eq!(rooms(&client), [id(1, 0), id(1, 1)]);
+
+    // Away, alice leaves room 0: it leaves the first query unchanged.
+    assert!(client.detach_connection(&upstream));
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        rooms(&client),
+        [id(1, 0), id(1, 1)],
+        "every room is still the second query's"
+    );
+}
+
+#[test]
+fn a_row_one_subscription_lost_stays_when_the_losing_one_reopens_first() {
+    a_row_one_subscription_lost_stays_for_the_other(true);
+}
+
+#[test]
+fn a_row_one_subscription_lost_stays_when_the_holding_one_reopens_first() {
+    a_row_one_subscription_lost_stays_for_the_other(false);
+}
+
+/// The rooms `db` holds, read locally.
+fn local_rooms(db: &Db) -> Vec<RowUuid> {
+    let prepared = db.prepare_query(&Query::from("rooms")).unwrap();
+    let opts = ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let mut rows: Vec<RowUuid> = block_on(db.all(&prepared, opts))
+        .unwrap()
+        .iter()
+        .map(|row| row.row_uuid())
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// A row one subscription lost while the client was away, which another
+/// holds only as an included row (a note's room), stays on the replica for
+/// it: the server holds it for that one and would not ship it again.
+fn an_included_row_one_subscription_lost_stays_for_the_other(lost_first: bool) {
+    let server = seeded(1);
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "notes",
+            id(4, 0),
+            AuthorSubject::SYSTEM,
+            cells(&[
+                ("room", Value::Uuid(id(1, 0).0)),
+                ("body", Value::String("n0".into())),
+                ("stickers", Value::Array(Vec::new())),
+            ]),
+        )
+        .unwrap();
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    // Rooms alice is a member of, and every note with its room.
+    let member_of = client
+        .prepare_query(&Query::from("rooms").join_via("memberships", "room", []))
+        .unwrap();
+    let notes = client
+        .prepare_query(&Query::from("notes").include("room"))
+        .unwrap();
+    let (first, second) = if lost_first {
+        (&member_of, &notes)
+    } else {
+        (&notes, &member_of)
+    };
+    let _first = block_on(client.subscribe(first, ReadOpts::default())).unwrap();
+    let _second = block_on(client.subscribe(second, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(local_rooms(&client), [id(1, 0)]);
+
+    // Away, alice leaves room 0: the note still includes it, unchanged.
+    assert!(client.detach_connection(&upstream));
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        local_rooms(&client),
+        [id(1, 0)],
+        "room 0 is still the note's included room"
+    );
+}
+
+#[test]
+fn an_included_row_one_subscription_lost_stays_when_the_losing_one_reopens_first() {
+    an_included_row_one_subscription_lost_stays_for_the_other(true);
+}
+
+#[test]
+fn an_included_row_one_subscription_lost_stays_when_the_including_one_reopens_first() {
+    an_included_row_one_subscription_lost_stays_for_the_other(false);
+}
+
+/// A row that left the other subscription through a live delta is no
+/// longer that one's to keep, though its last listing still names it: the
+/// first subscription's listing evicts it.
+#[test]
+fn a_row_that_left_the_other_subscription_live_is_evicted_by_a_listing() {
+    use jazz::query::{col, eq, lit};
+    let server = seeded(1);
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    // Rooms alice is a member of (reopens first), and room 0 by name.
+    let member_of = client
+        .prepare_query(&Query::from("rooms").join_via("memberships", "room", []))
+        .unwrap();
+    let named = client
+        .prepare_query(
+            &Query::from("rooms").filter(eq(col("name"), lit(Value::String("room 0".into())))),
+        )
+        .unwrap();
+    let _member_of = block_on(client.subscribe(&member_of, ReadOpts::default())).unwrap();
+    let _named = block_on(client.subscribe(&named, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(local_rooms(&client), [id(1, 0)]);
+
+    // Room 0 is renamed while connected: it leaves the named query live.
+    block_on(server.update(
+        "rooms",
+        id(1, 0),
+        cells(&[("name", Value::String("renamed".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &client);
+    // Away, alice leaves room 0.
+    assert!(client.detach_connection(&upstream));
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    pump(&server, &client);
+    assert!(
+        local_rooms(&client).is_empty(),
+        "no live read holds room 0 any more"
+    );
+}
+
+/// A client-to-server duplex that never delivers the client's commits: its
+/// writes stay pending for as long as the test needs.
+struct HoldCommits(Box<dyn Transport>);
+
+impl Transport for HoldCommits {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        if matches!(message, SyncMessage::Commit { .. }) {
+            return Ok(());
+        }
+        self.0.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.0.try_recv()
+    }
+}
+
+/// Support is followed from the row the server settled, not from a
+/// pending local write: a note moved to another room, its write not yet
+/// settled, still keeps the room the server holds for it (were the write
+/// rejected, the server would never send that room again).
+fn a_pending_write_does_not_move_what_another_read_holds(member_of_first: bool) {
+    let server = seeded(1);
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "notes",
+            id(4, 0),
+            AuthorSubject::SYSTEM,
+            cells(&[
+                ("room", Value::Uuid(id(1, 0).0)),
+                ("body", Value::String("n0".into())),
+                ("stickers", Value::Array(Vec::new())),
+            ]),
+        )
+        .unwrap();
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    let member_of = client
+        .prepare_query(&Query::from("rooms").join_via("memberships", "room", []))
+        .unwrap();
+    let notes = client
+        .prepare_query(&Query::from("notes").include("room"))
+        .unwrap();
+    let (first, second) = if member_of_first {
+        (&member_of, &notes)
+    } else {
+        (&notes, &member_of)
+    };
+    let _first = block_on(client.subscribe(first, ReadOpts::default())).unwrap();
+    let _second = block_on(client.subscribe(second, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(local_rooms(&client), [id(1, 0)]);
+
+    // Away, the note moves to room 1 locally and alice leaves room 0.
+    assert!(client.detach_connection(&upstream));
+    block_on(client.update(
+        "notes",
+        id(4, 0),
+        cells(&[("room", Value::Uuid(id(1, 1).0))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(Box::new(HoldCommits(client_side))));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        client.pending_upload_count(),
+        1,
+        "the move is still pending"
+    );
+    assert_eq!(
+        local_rooms(&client),
+        [id(1, 0)],
+        "room 0 is the settled note's room, which the server holds for it"
+    );
+}
+
+#[test]
+fn a_pending_write_does_not_move_what_another_read_holds_losing_one_first() {
+    a_pending_write_does_not_move_what_another_read_holds(true);
+}
+
+#[test]
+fn a_pending_write_does_not_move_what_another_read_holds_holding_one_first() {
+    a_pending_write_does_not_move_what_another_read_holds(false);
+}
+
+/// The reactions `db` holds, read locally.
+fn local_reactions(db: &Db) -> Vec<RowUuid> {
+    let prepared = db.prepare_query(&Query::from("reactions")).unwrap();
+    let opts = ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let mut rows: Vec<RowUuid> = block_on(db.all(&prepared, opts))
+        .unwrap()
+        .iter()
+        .map(|row| row.row_uuid())
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// Every hop of another read's support is followed as the server settled
+/// it: a pending write that moves a note out of a room's relation does not
+/// stop the note's reactions from being that read's, two hops down.
+fn a_pending_write_does_not_move_support_below_the_first_hop(joined_first: bool) {
+    use jazz::query::{ArraySubquery, col, eq, lit};
+    let server = seeded(1);
+    let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
+        server
+            .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
+            .unwrap();
+    };
+    seed(
+        "notes",
+        id(4, 0),
+        cells(&[
+            ("room", Value::Uuid(id(1, 0).0)),
+            ("body", Value::String("n0".into())),
+            ("stickers", Value::Array(Vec::new())),
+        ]),
+    );
+    seed(
+        "reactions",
+        id(5, 1),
+        cells(&[
+            ("note", Value::Uuid(id(4, 0).0)),
+            ("body", Value::String("b".into())),
+        ]),
+    );
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    // Reactions to the note whose body is n0, and room 0 with its notes'
+    // reactions.
+    let joined = client
+        .prepare_query(&Query::from("reactions").join_via_column(
+            "notes",
+            "id",
+            "note",
+            [eq(col("body"), lit(Value::String("n0".into())))],
+        ))
+        .unwrap();
+    let mut notes = ArraySubquery::new("notes", "notes", "room", "id");
+    notes
+        .nested_arrays
+        .push(ArraySubquery::new("reactions", "reactions", "note", "id"));
+    let room = client
+        .prepare_query(
+            &Query::from("rooms")
+                .filter(eq(col("name"), lit(Value::String("room 0".into()))))
+                .array_subquery(notes),
+        )
+        .unwrap();
+    let (first, second) = if joined_first {
+        (&joined, &room)
+    } else {
+        (&room, &joined)
+    };
+    let _first = block_on(client.subscribe(first, ReadOpts::default())).unwrap();
+    let _second = block_on(client.subscribe(second, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(local_reactions(&client), [id(5, 1)]);
+
+    // Away, the note moves to room 1 locally, and the server renames it:
+    // reaction 1 leaves the joined read unchanged.
+    assert!(client.detach_connection(&upstream));
+    block_on(client.update(
+        "notes",
+        id(4, 0),
+        cells(&[("room", Value::Uuid(id(1, 1).0))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(server.update(
+        "notes",
+        id(4, 0),
+        cells(&[("body", Value::String("renamed".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(Box::new(HoldCommits(client_side))));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        client.pending_upload_count(),
+        1,
+        "the move is still pending"
+    );
+    assert_eq!(
+        local_reactions(&client),
+        [id(5, 1)],
+        "reaction 1 is still the settled note's, which the room's read holds"
+    );
+}
+
+#[test]
+fn a_pending_write_does_not_move_support_below_the_first_hop_joined_first() {
+    a_pending_write_does_not_move_support_below_the_first_hop(true);
+}
+
+#[test]
+fn a_pending_write_does_not_move_support_below_the_first_hop_room_first() {
+    a_pending_write_does_not_move_support_below_the_first_hop(false);
+}
+
+/// The stickers `db` holds, read locally.
+fn local_stickers(db: &Db) -> Vec<RowUuid> {
+    let prepared = db.prepare_query(&Query::from("stickers")).unwrap();
+    let opts = ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let mut rows: Vec<RowUuid> = block_on(db.all(&prepared, opts))
+        .unwrap()
+        .iter()
+        .map(|row| row.row_uuid())
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// A support hop below the first follows the value the server settled: a
+/// pending write that empties a note's stickers does not stop room 0's
+/// read from holding the sticker the settled note names, when the read
+/// that held it too loses it.
+fn a_pending_write_does_not_drop_a_sticker_the_settled_note_names(liked_first: bool) {
+    use jazz::query::{ArraySubquery, col, eq, lit};
+    let server = seeded(1);
+    let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
+        server
+            .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
+            .unwrap();
+    };
+    seed(
+        "stickers",
+        id(6, 0),
+        cells(&[("body", Value::String("s0".into()))]),
+    );
+    seed(
+        "notes",
+        id(4, 0),
+        cells(&[
+            ("room", Value::Uuid(id(1, 0).0)),
+            ("body", Value::String("n0".into())),
+            ("stickers", Value::Array(vec![Value::Uuid(id(6, 0).0)])),
+        ]),
+    );
+    seed(
+        "likes",
+        id(7, 0),
+        cells(&[("sticker", Value::Uuid(id(6, 0).0))]),
+    );
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    // Liked stickers, and room 0 with its notes' stickers.
+    let liked = client
+        .prepare_query(&Query::from("stickers").join_via("likes", "sticker", []))
+        .unwrap();
+    let mut notes = ArraySubquery::new("notes", "notes", "room", "id");
+    notes
+        .nested_arrays
+        .push(ArraySubquery::new("stickers", "stickers", "id", "stickers"));
+    let room = client
+        .prepare_query(
+            &Query::from("rooms")
+                .filter(eq(col("name"), lit(Value::String("room 0".into()))))
+                .array_subquery(notes),
+        )
+        .unwrap();
+    let (first, second) = if liked_first {
+        (&liked, &room)
+    } else {
+        (&room, &liked)
+    };
+    let _first = block_on(client.subscribe(first, ReadOpts::default())).unwrap();
+    let _second = block_on(client.subscribe(second, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(local_stickers(&client), [id(6, 0)]);
+
+    // Away, the note's stickers are emptied locally, and the server
+    // deletes the like: the liked read loses sticker 0.
+    assert!(client.detach_connection(&upstream));
+    block_on(client.update(
+        "notes",
+        id(4, 0),
+        cells(&[("stickers", Value::Array(Vec::new()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(server.delete("likes", id(7, 0), Default::default())).unwrap();
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(Box::new(HoldCommits(client_side))));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        client.pending_upload_count(),
+        1,
+        "the edit is still pending"
+    );
+    assert_eq!(
+        local_stickers(&client),
+        [id(6, 0)],
+        "sticker 0 is the settled note's, which the room's read holds"
+    );
+}
+
+#[test]
+fn a_pending_write_does_not_drop_a_sticker_the_settled_note_names_liked_first() {
+    a_pending_write_does_not_drop_a_sticker_the_settled_note_names(true);
+}
+
+#[test]
+fn a_pending_write_does_not_drop_a_sticker_the_settled_note_names_room_first() {
+    a_pending_write_does_not_drop_a_sticker_the_settled_note_names(false);
 }
