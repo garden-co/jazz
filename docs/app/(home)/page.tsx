@@ -350,7 +350,7 @@ export default function HomePage() {
           <Figure
             className="home-figure-wide mt-6"
             number={1}
-            caption="Jazz runs inside your backend, wherever you deploy it, and keeps its data on that platform's storage. Browsers, mobile apps and backend clients sync with it on your own origin. Local-first clients run the same Rust engine on the device."
+            caption="Jazz runs inside your backend, wherever you deploy it, and keeps its data on that platform's storage. Traditional clients call your API routes as usual; browsers, mobile apps and backend clients can also live-sync with it on your own origin. Local-first clients run the same Rust engine on the device."
           >
             <DeploymentCarousel />
           </Figure>

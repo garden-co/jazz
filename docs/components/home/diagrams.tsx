@@ -264,7 +264,7 @@ const deploymentScenarios: Record<
 > = {
   vercel: {
     label:
-      "On Vercel: web apps, mobile apps and backend clients sync with Jazz inside your Next.js app's functions, on your own origin. The data lives in a Vercel Sandbox that starts on demand and sleeps when idle, with large values in Vercel Blob.",
+      "On Vercel: traditional clients call your API routes, while web apps, mobile apps and backend clients live-sync with Jazz inside your Next.js app's functions, on your own origin. The data lives in a Vercel Sandbox that starts on demand and sleeps when idle, with large values in Vercel Blob.",
     backend: {
       title: "your app on vercel",
       note: "createJazz() in your functions",
@@ -281,7 +281,7 @@ const deploymentScenarios: Record<
   },
   cloudflare: {
     label:
-      "On Cloudflare, coming soon: web apps, mobile apps and backend clients sync with Jazz inside your Worker, on your own origin. The data lives in Durable Objects, one per shard, with large values in R2.",
+      "On Cloudflare, coming soon: traditional clients call your API routes, while web apps, mobile apps and backend clients live-sync with Jazz inside your Worker, on your own origin. The data lives in Durable Objects, one per shard, with large values in R2.",
     backend: {
       title: "your worker",
       note: "createJazz()",
@@ -298,7 +298,7 @@ const deploymentScenarios: Record<
   },
   server: {
     label:
-      "On your own server: web apps, mobile apps and backend clients sync with Jazz inside your long-running backend process, on your own origin. The data lives in SQLite on its disk, with large values in files or an S3-compatible bucket.",
+      "On your own server: traditional clients call your API routes, while web apps, mobile apps and backend clients live-sync with Jazz inside your long-running backend process, on your own origin. The data lives in SQLite on its disk, with large values in files or an S3-compatible bucket.",
     backend: {
       title: "your server",
       note: "createJazz() in a long-running process",
@@ -321,80 +321,38 @@ export const deploymentScenarioNames: Record<DeploymentScenario, string> = {
 /** Clients sync with Jazz inside your backend, which keeps its data on the platform's storage. */
 export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }) {
   const { label, backend, stores, footer } = deploymentScenarios[scenario];
-  const w = 252;
-  const clientY = 16;
-  const clientH = 98;
-  const backendY = 176;
-  const backendH = 82;
-  const storeY = 318;
+  // Platform storage on top, your backend in the middle, clients at the bottom.
+  const storeY = 16;
   const storeH = 82;
-  const xs = [8, 274, 540];
   const storeW = 386;
   const storeXs = [8, 406];
+  const backendY = 158;
+  const backendH = 82;
+  const clientY = 320;
+  const clientH = 98;
+  const w = 188;
+  const xs = [8, 206, 404, 602];
   const clients = [
+    {
+      title: "traditional client",
+      lines: ["calls your api routes", "fetch · forms · ssr", "any framework"],
+    },
     {
       title: "web app",
       lines: [
         "thin client, or",
-        { text: "local-first copy (on disk)", tone: "blue" as const },
+        { text: "local-first copy", tone: "blue" as const },
         "react · svelte · vue · …",
       ],
     },
     {
       title: "mobile app",
-      lines: [{ text: "local-first copy (on disk)", tone: "blue" as const }, "react native"],
+      lines: [{ text: "local-first copy", tone: "blue" as const }, "(on disk)", "react native"],
     },
     { title: "backend clients", lines: ["trusted machines", "jobs · agents · scripts"] },
   ];
   return (
-    <Diagram viewBox="0 0 800 440" label={label}>
-      {clients.map((client, index) => (
-        <Box
-          key={client.title}
-          x={xs[index]}
-          y={clientY}
-          w={w}
-          h={clientH}
-          title={client.title}
-          lines={client.lines}
-        />
-      ))}
-      {xs.map((x) => (
-        <Wire
-          key={`c${x}`}
-          points={[
-            [x + w / 2, clientY + clientH],
-            [x + w / 2, backendY],
-          ]}
-          start
-        />
-      ))}
-      <Label x={xs[0] + w / 2 + 10} y={clientY + clientH + 34}>
-        sync over /jazz, same origin
-      </Label>
-      <Box
-        x={8}
-        y={backendY}
-        w={784}
-        h={backendH}
-        tone="mint"
-        title={backend.title}
-        note={backend.note}
-        lines={[
-          { text: "authenticate · permissions · live queries", tone: "mint" },
-          backend.frameworks,
-        ]}
-      />
-      {storeXs.map((x) => (
-        <Wire
-          key={`s${x}`}
-          points={[
-            [x + storeW / 2, backendY + backendH],
-            [x + storeW / 2, storeY],
-          ]}
-          start
-        />
-      ))}
+    <Diagram viewBox="0 0 800 450" label={label}>
       {stores.map((store, index) => (
         <Box
           key={store.title}
@@ -406,7 +364,68 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
           lines={store.lines}
         />
       ))}
-      <Label x={8} y={430} tone="muted">
+      {storeXs.map((x) => (
+        <Wire
+          key={`s${x}`}
+          points={[
+            [x + storeW / 2, storeY + storeH],
+            [x + storeW / 2, backendY],
+          ]}
+          start
+        />
+      ))}
+      <Box
+        x={8}
+        y={backendY}
+        w={784}
+        h={backendH}
+        tone="mint"
+        title={backend.title}
+        note={backend.note}
+        lines={[
+          { text: "your api routes · authenticate · permissions · live queries", tone: "mint" },
+          backend.frameworks,
+        ]}
+      />
+      {/* The traditional client makes ordinary requests (and streams) to your
+          API routes; every other client keeps a live sync connection. */}
+      <Wire
+        points={[
+          [xs[0] + w / 2, clientY],
+          [xs[0] + w / 2, backendY + backendH],
+        ]}
+        tone="periwinkle"
+        dashed
+        start
+      />
+      <Label x={xs[0] + w / 2 + 10} y={backendY + backendH + 34} tone="periwinkle">
+        requests · streams
+      </Label>
+      {xs.slice(1).map((x) => (
+        <Wire
+          key={`c${x}`}
+          points={[
+            [x + w / 2, clientY],
+            [x + w / 2, backendY + backendH],
+          ]}
+          start
+        />
+      ))}
+      <Label x={xs[1] + w / 2 + 10} y={backendY + backendH + 34}>
+        live sync over /jazz, same origin
+      </Label>
+      {clients.map((client, index) => (
+        <Box
+          key={client.title}
+          x={xs[index]}
+          y={clientY}
+          w={w}
+          h={clientH}
+          title={client.title}
+          lines={client.lines}
+        />
+      ))}
+      <Label x={8} y={442} tone="muted">
         {footer}
       </Label>
     </Diagram>
