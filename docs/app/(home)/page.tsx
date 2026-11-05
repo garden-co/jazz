@@ -406,9 +406,9 @@ export default function HomePage() {
           <div className="home-code-grid mt-6">
             <CodeWindow
               files={[
-                { name: "jazz.server.ts", language: "ts", code: serverCode },
-                { name: "schema.ts", language: "ts", code: schemaCode },
                 { name: "api/todos/route.ts", language: "ts", code: routeCode },
+                { name: "schema.ts", language: "ts", code: schemaCode },
+                { name: "jazz.server.ts", language: "ts", code: serverCode },
                 {
                   name: "jazz/[...path]/route.ts",
                   language: "ts",
