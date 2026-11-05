@@ -13,6 +13,7 @@ export type LocalFirstTokenMinter = (secret: string, audience: string) => string
 export async function createAccountManagerWithMinter(
   config: AccountManagerConfig,
   mintToken: LocalFirstTokenMinter,
+  options: { rememberBackendUser?: boolean } = {},
 ) {
   const registry = clientRegistryUrl(config);
   const scope = clientScope({ ...config, serverUrl: resolvedServerUrl(config) });
@@ -23,6 +24,7 @@ export async function createAccountManagerWithMinter(
     store,
     mintToken,
     fetch: config.serverUrl === null ? deviceOnlyFetch : config.fetch,
+    rememberBackendUser: options.rememberBackendUser,
   });
 }
 
