@@ -300,6 +300,20 @@ pub struct ChunkIoDone {
     pub(crate) deleted: Vec<Result<(), Error>>,
 }
 
+impl ChunkIoDone {
+    /// Whether the store failed any of the fetches in this outcome (an
+    /// error, or no object where one was moved): `None` when it held no
+    /// fetches. A host backing fetches off reads it before handing the
+    /// outcome back, whichever lane ran it.
+    pub fn fetches_failed(&self) -> Option<bool> {
+        (!self.fetched.is_empty()).then(|| {
+            self.fetched
+                .iter()
+                .any(|fetched| !matches!(fetched, Ok(Some(_))))
+        })
+    }
+}
+
 impl ChunkIo {
     /// Fetches a read runs itself, outside any batch.
     pub(crate) fn unleased(fetch: Vec<ChunkRequest>) -> Self {

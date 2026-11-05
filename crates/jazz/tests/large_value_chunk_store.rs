@@ -1093,6 +1093,7 @@ fn a_leaf_is_fetched_once_while_both_lanes_are_busy() {
         // Each lane's work is held out for a tick before it is finished,
         // so both are out at once.
         let (mut batch, mut fetches) = (None, None);
+        let mut by_lane = [0, 0];
         for tick in 0..32 {
             block_on(server.tick()).unwrap();
             match batch.take() {
@@ -1100,14 +1101,20 @@ fn a_leaf_is_fetched_once_while_both_lanes_are_busy() {
                     .finish_chunk_io(run_elsewhere(io, store.clone()))
                     .unwrap(),
                 Some(io) => batch = Some(io),
-                None => batch = server.take_chunk_io().unwrap(),
+                None => {
+                    batch = server.take_chunk_io().unwrap();
+                    by_lane[0] += batch.as_ref().map_or(0, |io| io.counts().0);
+                }
             }
             match fetches.take() {
                 Some(io) if (tick + offset) % 2 == 1 => server
                     .finish_chunk_fetches(run_elsewhere(io, store.clone()))
                     .unwrap(),
                 Some(io) => fetches = Some(io),
-                None => fetches = server.take_chunk_fetches().unwrap(),
+                None => {
+                    fetches = server.take_chunk_fetches().unwrap();
+                    by_lane[1] += fetches.as_ref().map_or(0, |io| io.counts().0);
+                }
             }
         }
         if let Some(io) = batch {
@@ -1139,10 +1146,50 @@ fn a_leaf_is_fetched_once_while_both_lanes_are_busy() {
         let got = remote.objects().got.clone();
         assert!(!got.is_empty());
         assert!(
+            by_lane.iter().all(|&fetched| fetched > 0),
+            "both lanes fetched (offset {offset}): {by_lane:?}"
+        );
+        assert!(
             got.values().all(|&gets| gets == 1),
             "each leaf asked of the store once (offset {offset}): {got:?}"
         );
     }
+}
+
+/// A batch whose fetches fail says so in its outcome, as the fetch lane's
+/// does, for the host to hold fetches back; one without fetches says
+/// nothing of them.
+#[test]
+fn a_batch_reports_the_fetches_it_failed() {
+    let (_dir, path) = scratch();
+    let remote = Remote::default();
+    let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
+    let value = text(74, LARGE);
+    moved_to(&path, &store, &value);
+    let server = open_host_io(&path, store.clone());
+    let sub = subscribe_to(&server);
+    remote.objects().failing_gets = true;
+    let mut reported = None;
+    for _ in 0..16 {
+        block_on(sub.alice.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+        if let Some(io) = server.take_chunk_io().unwrap() {
+            let done = run_elsewhere(io, store.clone());
+            let failed = done.fetches_failed();
+            let finished = server.finish_chunk_io(done);
+            if failed.is_some() {
+                assert!(finished.is_err());
+                reported = failed;
+                break;
+            }
+        }
+    }
+    assert_eq!(reported, Some(true));
+    remote.objects().failing_gets = false;
+    insert(&server, 2, &text(75, LARGE));
+    block_on(server.tick()).unwrap();
+    let uploads = server.take_chunk_io_holding_fetches().unwrap().unwrap();
+    assert_eq!(run_elsewhere(uploads, store.clone()).fetches_failed(), None);
 }
 
 /// A batch that holds fetches back (the host's fetches are backing off)

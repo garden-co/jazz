@@ -608,6 +608,16 @@ impl ChunkIoRunner {
         self.backoff.ended(failed)
     }
 
+    /// [`Self::returned`] for a batch whose fetches (`None`: it had none)
+    /// failed or not: they delay fetches in both lanes, as the fetch
+    /// lane's do.
+    fn returned_with(&self, failed: bool, fetches_failed: Option<bool>) -> bool {
+        if let Some(fetches_failed) = fetches_failed {
+            self.fetch_backoff.ended(fetches_failed);
+        }
+        self.returned(failed)
+    }
+
     /// Fetches came back; `failed` delays the next, in both lanes. Returns
     /// whether to log the failure, as [`Self::returned`] does.
     fn fetched(&self, failed: bool) -> bool {
@@ -2394,9 +2404,12 @@ impl Owner {
     }
 
     fn finish_chunk_io(&mut self, done: jazz::chunk_store::ChunkIoDone) {
+        // Fetches that failed in a batch hold fetches back as the fetch
+        // lane's do, so the next batch does not ask again at once.
+        let fetches_failed = done.fetches_failed();
         let finished = self.db.finish_chunk_io(done);
         let log = match &self.chunk_io {
-            Some(runner) => runner.returned(finished.is_err()),
+            Some(runner) => runner.returned_with(finished.is_err(), fetches_failed),
             None => finished.is_err(),
         };
         if let Err(error) = finished
@@ -3197,10 +3210,25 @@ mod tests {
         assert!(!runner.fetched(false));
         assert_eq!(runner.fetch_backoff.failures.get(), 0);
 
-        // A failed batch waits, and fetches go on beside it.
+        // A failed batch whose fetches succeeded (its puts failed) waits,
+        // and fetches go on beside it.
         runner.out.set(true);
-        assert!(runner.returned(true));
+        assert!(runner.returned_with(true, Some(false)));
         assert_eq!(runner.plan(), plan(false, true, true));
+
+        // A batch whose fetches failed holds fetches back in both lanes,
+        // as failed fetches on their own lane do.
+        runner.backoff.not_before.set(None);
+        runner.out.set(true);
+        runner.returned_with(true, Some(true));
+        runner.backoff.not_before.set(None);
+        assert_eq!(runner.plan(), plan(true, false, false));
+        // One with no fetches says nothing of them.
+        runner.fetch_backoff.not_before.set(None);
+        runner.out.set(true);
+        runner.returned_with(true, None);
+        runner.backoff.not_before.set(None);
+        assert_eq!(runner.plan(), plan(true, true, true));
     }
 
     /// A backoff after failures ends once a fresh workload token arrives,
