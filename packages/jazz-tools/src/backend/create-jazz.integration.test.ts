@@ -448,6 +448,76 @@ describe("createJazz", () => {
     expect(upgrades).toBe(refused);
   }, 30_000);
 
+  it("ends a user's open sync session once their claims change, so policies see the new ones", async () => {
+    // Anyone reads their own todos; only an admin (a claim) may create one.
+    const byRole = s.definePermissions(app, ({ policy, session }) => {
+      policy.todos.allowRead.where({ owner: session.user.account });
+      policy.todos.allowInsert.where(session.where({ "claims.role": "admin" }));
+      policy.todos.allowUpdate.never();
+      policy.todos.allowDelete.never();
+    });
+    const roles = new Map([["alice", "admin"]]);
+    const jazz = await createJazz({
+      app,
+      permissions: byRole,
+      store: memory(),
+      authenticate: (request) => {
+        const userId = request.headers.get("x-test-user");
+        return userId ? { userId, claims: { role: roles.get(userId) ?? "none" } } : null;
+      },
+      recheckSeconds: 0.05,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    let upgrades = 0;
+    const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
+    signInAs(origin, "alice");
+    const session = await createJazzClient({
+      appId: jazz.appId,
+      app,
+      permissions: byRole,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+    });
+    cleanups.push(() => session.close());
+    await session.loginWithBackend();
+    const alice = session.getSnapshot().client!;
+    const owner = alice.session!.user!.account;
+    const outcome = (write: { wait(options: { tier: "global" }): Promise<unknown> }) =>
+      write.wait({ tier: "global" }).then(
+        () => "accepted",
+        (error: { code?: string; message?: string }) => error.code ?? error.message,
+      );
+    expect(await outcome(alice.db.insert(app.todos, { title: "as admin", owner }))).toBe(
+      "accepted",
+    );
+
+    // Checks that name her with the same claims leave her session open.
+    const opened = upgrades;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(upgrades).toBe(opened);
+
+    // The app demotes her: her open session ends, and the client reconnects
+    // with the claims authenticate names now, as forRequest already sees.
+    roles.set("alice", "viewer");
+    const scoped = await jazz.forRequest(
+      new Request(`${origin}/`, { headers: { "x-test-user": "alice" } }),
+    );
+    expect(await outcome(scoped.insert(app.todos, { title: "forRequest", owner }))).toBe(
+      "permission_denied",
+    );
+    await expect.poll(() => upgrades, { timeout: 5_000, interval: 50 }).toBeGreaterThan(opened);
+    await expect
+      .poll(() => alice.db.getSyncStatus().link, { timeout: 10_000, interval: 50 })
+      .toEqual({ state: "connected" });
+    expect(await outcome(alice.db.insert(app.todos, { title: "after demotion", owner }))).toBe(
+      "permission_denied",
+    );
+    // Still signed in: one reconnect, not a loop.
+    const reconnected = upgrades;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(upgrades).toBe(reconnected);
+  }, 60_000);
+
   it("refuses local-first guests unless authenticate accepts them", async () => {
     const jazz = await createJazz({
       app,

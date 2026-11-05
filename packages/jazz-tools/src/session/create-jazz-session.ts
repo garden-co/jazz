@@ -102,6 +102,8 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
   const accounts = await createAccountManagerWithMinter(
     { ...config, serverUrl },
     mintLocalFirstTokenInJs,
+    // A shared device: never reopen the last user before the backend answers.
+    { rememberBackendUser: !clearOnSignOut },
   );
   const registry = clientRegistryUrl({ ...config, serverUrl });
   const upgrades = localFirstMemory(registry);

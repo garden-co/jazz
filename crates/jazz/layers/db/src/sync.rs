@@ -6440,7 +6440,9 @@ impl Inner {
         // server seqs, so the stored versions no longer show the seqs
         // handed out. The fates recorded for this node do: the next commit
         // continues after them, or it would reuse a transaction id the
-        // authority dedupes away.
+        // authority dedupes away. Its file may also have lost commits it
+        // uploaded (a lost tail, a restored backup): `next_seq` numbers a
+        // file's commits after its wall clock too, past those (INV-EDGE-28).
         let me = *self.identity.node.as_bytes();
         self.me = self.own_code()?;
         let (tx, hlc) = self.own_high_water()?;
