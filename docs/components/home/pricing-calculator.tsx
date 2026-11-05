@@ -336,7 +336,7 @@ export function PricingCalculator() {
   const [mauLogValue, setMauLogValue] = useState(3);
   const [frequencyIndex, setFrequencyIndex] = useState(2);
   const [realtimeIndex, setRealtimeIndex] = useState(1);
-  const [blobLogMb, setBlobLogMb] = useState(Math.log10(32));
+  const [blobLogMb, setBlobLogMb] = useState(0);
   const [licensePro, setLicensePro] = useState(LICENSE.pro);
   const [licenseScaleBase, setLicenseScaleBase] = useState(LICENSE.scaleBase);
   const [licensePer1k, setLicensePer1k] = useState(LICENSE.per1k);
