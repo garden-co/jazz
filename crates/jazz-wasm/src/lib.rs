@@ -25,6 +25,7 @@ use jazz::binding_host::{
 use jazz::db::{block_on, Error, LargeValueUpdate, SubscriptionEvent, SubscriptionStream};
 use jazz::ids::AuthorSubject;
 use jazz::tx::DurabilityTier;
+use serde::Serialize;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::future_to_promise;
@@ -1567,10 +1568,15 @@ impl WasmDb {
         })
     }
 
-    /// How many local commits still wait for the server's verdict.
-    #[wasm_bindgen(js_name = pendingUploadCount)]
-    pub fn pending_upload_count(&self) -> Result<u32, JsValue> {
-        Ok(self.binding()?.pending_upload_count() as u32)
+    /// This store's uploads: how many still wait for the server's verdict
+    /// and since when, and what the server refused since it opened
+    /// (`{ pending, oldestPendingAt, rejected, lastRejection }`).
+    #[wasm_bindgen(js_name = uploadStatus)]
+    pub fn upload_status(&self) -> Result<JsValue, JsValue> {
+        self.binding()?
+            .upload_status()
+            .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+            .map_err(|error| JsValue::from_str(&error.to_string()))
     }
 
     /// The optimistic in-memory side of a browser client/worker pair: its

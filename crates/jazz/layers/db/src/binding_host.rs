@@ -1518,6 +1518,11 @@ impl Binding {
         self.db.pending_upload_count()
     }
 
+    /// See [`crate::db::Db::upload_status`].
+    pub fn upload_status(&self) -> crate::db::UploadStatus {
+        self.db.upload_status()
+    }
+
     /// Apply received frames and send what is due; waits wake.
     pub async fn tick(&self) -> HostResult<()> {
         let result = self.db.tick().await;

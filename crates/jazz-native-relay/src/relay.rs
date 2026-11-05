@@ -1637,6 +1637,10 @@ fn foreground_command(
         Request::PendingUploadCount => Response::PendingUploadCount {
             count: binding.pending_upload_count() as u64,
         },
+        Request::UploadStatus => Response::UploadStatus {
+            status_json: serde_json::to_string(&binding.upload_status())
+                .expect("an upload status serializes"),
+        },
         Request::BeginStreamingMutation {
             mutation,
             table,

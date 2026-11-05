@@ -261,8 +261,8 @@ declare module "jazz-wasm" {
     onMutationError(callback: (event: any) => void): void;
     tick(): Promise<void>;
     setNonDurableClient(): void;
-    /** How many local commits still wait for the server's verdict. */
-    pendingUploadCount(): number;
+    /** This store's uploads; see `UploadStatus` in runtime/sync-status.ts. */
+    uploadStatus(): import("../runtime/sync-status.js").UploadStatus;
     /** @internal Foreground node-lease handoff only. */
     foregroundTxTimeHighWater(): Promise<bigint>;
     /** @internal Foreground node-lease bootstrap only. */

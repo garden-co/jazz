@@ -63,6 +63,7 @@ export type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 export type { ClientMigrations } from "./client-migrations.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
 export type { LinkStatus, SyncStatus } from "./sync-status.js";
+export type { JazzPageHandle, PageDbInfo } from "./page-handle.js";
 export {
   fetchPublishedBundles,
   fetchSchemaHashes,

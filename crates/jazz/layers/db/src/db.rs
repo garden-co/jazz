@@ -57,9 +57,9 @@ pub use sync::{
     ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
     FrameJoiner, Image, MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction,
     RelationSnapshot, RemoteLinkHint, SerializedReadResult, Since, SubscriberId, SyncMessage,
-    Transport, TransportError, TxName, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta,
-    WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport, WireTransportAdapter,
-    WireWrite, WriteConflict, decode_message, duplex, encode_frames,
+    Transport, TransportError, TxName, UploadRefusal, UploadStatus, Upstream, WireBase, WireChunk,
+    WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport,
+    WireTransportAdapter, WireWrite, WriteConflict, decode_message, duplex, encode_frames,
     validate_frame_batch_for_corpus,
 };
 
@@ -608,6 +608,9 @@ struct Inner {
     /// Uploads the authority refused, by commit seq, kept for a host that
     /// reports them (see [`Db::track_upstream_rejections`]).
     upstream_rejections: Option<Vec<UpstreamRejection>>,
+    /// The upstream's refusals of this store's own commits, counted for
+    /// [`Db::upload_status`].
+    refusals: sync::Refusals,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
     /// Each stored table's column positions, the codes authored-column
@@ -1461,6 +1464,7 @@ impl Db {
                 authority: false,
                 pins_required: false,
                 upstream_rejections: None,
+                refusals: sync::Refusals::default(),
                 sessions: Vec::new(),
                 column_codes: RefCell::default(),
                 closed: None,

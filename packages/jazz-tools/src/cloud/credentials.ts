@@ -38,7 +38,7 @@ interface CredentialsFile {
   profiles: Record<string, CloudProfile>;
 }
 
-export function configDir(env: NodeJS.ProcessEnv = process.env): string {
+export function configDir(env: Readonly<Record<string, string | undefined>> = process.env): string {
   if (env.JAZZ_CONFIG_DIR?.trim()) return env.JAZZ_CONFIG_DIR.trim();
   if (process.platform === "win32" && env.APPDATA) return join(env.APPDATA, "jazz");
   const base = env.XDG_CONFIG_HOME?.trim() || join(homedir(), ".config");

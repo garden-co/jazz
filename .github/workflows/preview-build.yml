@@ -122,6 +122,7 @@ jobs:
           test "${#TARBALLS[@]}" -eq 1
           tar -tf "${TARBALLS[0]}" > "${PACK_DIRECTORY}/contents.txt"
           grep -Fxq 'package/dist/dev/inspector-overlay/embedded/embedded.html' "${PACK_DIRECTORY}/contents.txt"
+          grep -Fxq 'package/dist/dev/inspector-overlay/embedded/backend.html' "${PACK_DIRECTORY}/contents.txt"
 
       - name: Publish to pkg.pr.new
         env:

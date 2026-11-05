@@ -25,7 +25,7 @@ import { getTrustedReservedSession, setTrustedReservedSession } from "./db-inter
 import { isRenewableAuthFailure, mapAuthReason } from "./auth-state.js";
 import { httpUrlToWs } from "./url.js";
 import type { RemoteLinkState } from "./remote-link-state.js";
-import type { LinkStatus } from "./sync-status.js";
+import type { LinkFailure, LinkStatus, UploadStatus } from "./sync-status.js";
 import { toError } from "./util.js";
 import { parseUuidBytes } from "./hex.js";
 
@@ -188,9 +188,11 @@ export interface Runtime {
   setRemoteLinkHint?(state: RemoteLinkState): void;
   /** @internal The upstream link as the app sees it. */
   upstreamLinkStatus?(): LinkStatus;
-  /** @internal How many local commits still wait for the server's verdict. */
-  pendingUploadCount?(): number;
-  /** @internal Observe changes of the link status or the pending count. */
+  /** @internal This client's uploads: pending, since when, and refusals. */
+  uploadStatus?(): UploadStatus;
+  /** @internal The latest link failure this client saw, if any. */
+  lastLinkFailure?(): LinkFailure | null;
+  /** @internal Observe changes of the link status or the upload status. */
   onSyncStatusChange?(listener: () => void, signal: AbortSignal): void;
   /** @internal Construct a provisional row without staging or accepting a write. */
   previewInsert?(table: string, values: InsertValues, objectId?: string): Row;

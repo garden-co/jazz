@@ -14,6 +14,7 @@ import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { useHostSubscriptions } from "../../contexts/host-link.js";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
 import { LiveQueryFilters } from "./LiveQueryFilters.js";
+import { BackendSessions } from "../../backend/pages.js";
 import styles from "./index.module.css";
 
 const SERVER_SUBSCRIPTIONS_POLL_MS = 20_000;
@@ -398,6 +399,9 @@ export function LiveQuery() {
 
   if (runtime === "standalone") {
     return <StandaloneLiveQuery />;
+  }
+  if (runtime === "backend") {
+    return <BackendSessions />;
   }
 
   return <OverlayLiveQuery />;

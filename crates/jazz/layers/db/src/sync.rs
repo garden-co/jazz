@@ -82,6 +82,51 @@ pub use conflicts::WriteConflict;
 pub use large_delta::{CellDelta, WireDelta};
 pub(crate) use pending::PENDING_DDL;
 
+/// What [`Db::upload_status`] reports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadStatus {
+    /// Commits awaiting the upstream's verdict (see
+    /// [`Db::pending_upload_count`]).
+    pub pending: usize,
+    /// When the oldest of them was committed, in Unix ms.
+    pub oldest_pending_at: Option<u64>,
+    /// This store's own commits the upstream refused since it opened.
+    pub rejected: u64,
+    /// The latest of those refusals.
+    pub last_rejection: Option<UploadRefusal>,
+}
+
+/// One refused upload, as [`UploadStatus`] names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadRefusal {
+    /// The public error code (`permission_denied`, ...).
+    pub code: String,
+    pub message: String,
+    /// When the refusal arrived, in Unix ms.
+    pub at: u64,
+}
+
+/// The upstream's refusals of this store's own commits since it opened.
+#[derive(Debug, Default)]
+pub(crate) struct Refusals {
+    count: u64,
+    last: Option<UploadRefusal>,
+}
+
+impl Refusals {
+    fn record(&mut self, error: &Error) {
+        let (code, message) = crate::binding_host::mutation_error_parts(error, true);
+        self.count += 1;
+        self.last = Some(UploadRefusal {
+            code: code.to_owned(),
+            message,
+            at: now_ms().max(0) as u64,
+        });
+    }
+}
+
 /// Wall-clock Unix ms.
 fn now_ms() -> i64 {
     web_time::SystemTime::now()
@@ -7869,6 +7914,30 @@ impl Db {
             .map_or(0, |client| client.pending.len())
     }
 
+    /// This replica's uploads as its host reports them: what still awaits
+    /// the upstream's verdict, since when, and what the upstream refused
+    /// since the store opened. Refusals of the sessions it relays are
+    /// theirs to count, not this store's.
+    pub fn upload_status(&self) -> UploadStatus {
+        let inner = self.inner.borrow();
+        let (pending, oldest_pending_at) = inner.client.as_ref().map_or((0, None), |client| {
+            (
+                client.pending.len(),
+                client
+                    .pending
+                    .iter()
+                    .map(|pending| crate::db::shard::hlc_ms(pending.clock))
+                    .min(),
+            )
+        });
+        UploadStatus {
+            pending,
+            oldest_pending_at,
+            rejected: inner.refusals.count,
+            last_rejection: inner.refusals.last.clone(),
+        }
+    }
+
     /// Whether chunks this replica requested may still arrive: it is
     /// connected to an upstream that may answer, with requests outstanding
     /// (sent, or recorded by a read for the next send). A non-durable
@@ -8498,6 +8567,9 @@ impl Db {
                                 let refused = Err(wire_error(error));
                                 inner.record_fate(node, session_tx, &refused)?;
                                 inner.record_settled(node, session_tx, None)?;
+                            }
+                            if !relayed && origins.is_empty() {
+                                inner.refusals.record(error);
                             }
                             let me = *inner.identity.node.as_bytes();
                             if let (Some(rejections), false) =

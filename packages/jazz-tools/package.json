@@ -110,6 +110,14 @@
       "types": "./dist/dev/index.d.ts",
       "default": "./dist/dev/index.js"
     },
+    "./inspect": {
+      "types": "./dist/inspect/protocol.d.ts",
+      "default": "./dist/inspect/protocol.js"
+    },
+    "./inspector": {
+      "types": "./dist/inspector/index.d.ts",
+      "default": "./dist/inspector/index.js"
+    },
     "./_dev/inspector-client": {
       "types": "./dist/_dev/inspector-client.d.ts",
       "default": "./dist/_dev/inspector-client.js"
