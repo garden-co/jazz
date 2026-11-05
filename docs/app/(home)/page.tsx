@@ -488,7 +488,7 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="hosting" title="Priced for flexible self-hosting">
+          <SectionHeader id="pricing" title="Priced for flexible self-hosting">
             <Text as="p" display="block" type="large" color="secondary" weight="normal">
               Jazz deploys with your backend, on your own cloud account. On a single instance it is
               open source under MIT and free, however much you use it: you only pay your platform.
@@ -536,9 +536,7 @@ export default function HomePage() {
             ))}
           </div>
           <div className="mt-12 grid gap-8">
-            <Heading level={3} id="pricing" className="home-anchor">
-              What it costs on each platform
-            </Heading>
+            <Heading level={3}>What it costs on each platform</Heading>
             {/* Not ported to Astryx yet. A data-astryx-theme attribute ends the
                 theme's @scope, so its element resets (p, h1-h6, code) leave the
                 calculator's Tailwind typography alone. */}
