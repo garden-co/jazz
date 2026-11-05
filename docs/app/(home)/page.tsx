@@ -494,9 +494,10 @@ export default function HomePage() {
               open source under MIT and free, however much you use it: you only pay your platform.
             </Text>
             <Text as="p" display="block" type="large" color="secondary" weight="normal">
-              When an app outgrows one instance, Jazz shards it across many. Jazz Scale is licensed
-              on peak active sessions, so as Jazz gets faster your platform bill shrinks while the
-              license stays the same.
+              When an app outgrows one instance, Jazz shards it across many. Jazz Pro lets you trial
+              sharding at small scale, and Jazz Scale lets you take your database to millions of
+              users, globally distributed. Jazz Scale is licensed on peak active sessions, so as
+              Jazz gets faster your platform bill shrinks while the license stays the same.
             </Text>
           </SectionHeader>
           <div className="mt-8 grid gap-6 border-t pt-6 sm:grid-cols-3">
