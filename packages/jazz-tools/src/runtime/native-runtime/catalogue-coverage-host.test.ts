@@ -201,13 +201,26 @@ for (const host of ["NAPI", "WASM"] as const) {
         await new Promise((resolve) => setTimeout(resolve, 0));
         await transport.tick();
         const issued = transport.recvWireFrames() as Uint8Array[];
-        expect(issued.filter((frame) => frame[0] === 0)).toHaveLength(1);
+        const requests = issued.filter((frame) => frame[0] === 0);
+        expect(requests).toHaveLength(1);
+        // This fresh fixture's request id is one complete postcard varint byte.
+        const requestId = requests[0]![1]!;
+        expect(requestId).toBeLessThan(128);
         await adapter[stop]();
         expect(await result).toMatch(/shutdown|closed/i);
-        await transport.tick();
+        // Close performs the final tick before retiring the owner. Drain its
+        // queued cancellation without asking the retired owner to progress.
+        // Discard leaves storage live and still needs ordinary progression.
+        if (stop === "discard") await transport.tick();
         const cleanup = transport.recvWireFrames() as Uint8Array[];
         expect(cleanup.filter((frame) => frame[0] === 0)).toHaveLength(0);
         expect(cleanup.some((frame) => frame[0] === 1)).toBe(true);
+        const unsubscribes = cleanup.filter((frame) => frame[0] === 1);
+        expect(unsubscribes).toHaveLength(1);
+        expect(Array.from(unsubscribes[0]!)).toEqual([1, requestId]);
+        if (stop === "close" && host === "WASM") {
+          await expect(transport.tick()).rejects.toThrow(/storage owner is retired/i);
+        }
       } finally {
         await adapter.close();
       }
