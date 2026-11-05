@@ -1,5 +1,5 @@
 import { createJazzSessionOwner } from "../session/state.js";
-import { followUser, type UserFollowingSession } from "../session/follow-user.js";
+import { followUser, untilFirstAnswer, type UserFollowingSession } from "../session/follow-user.js";
 import { nativeBackendWatchEvents } from "../session/native-backend-watch.js";
 import { clientRegistryUrl } from "../accounts/account-manager-core.js";
 import { createAccountManager, type AccountManagerConfig } from "./create-account-manager.js";
@@ -63,7 +63,8 @@ export async function createJazzClient(
       decorate: () => ({ reauthenticate: async () => {} }),
     });
   }
-  return createJazzSessionOwner({
+  let backendAnswered: Promise<void> | undefined;
+  const session = await createJazzSessionOwner({
     accounts,
     initial: config.initial,
     openClient: (account) => openJazzClient({ ...config, serverUrl, account }),
@@ -71,6 +72,10 @@ export async function createJazzClient(
       registry: clientRegistryUrl(config),
       events: nativeBackendWatchEvents,
       linkGuest: config.linkGuestOnSignUp,
+      onStart: (started) => (backendAnswered = started),
     }),
   });
+  // Don't open signed out before the backend has named its user.
+  await untilFirstAnswer(session, backendAnswered);
+  return session;
 }

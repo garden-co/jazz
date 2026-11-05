@@ -23,7 +23,7 @@ import {
 import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
 import { DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
-import { followUser, type UserFollowingSession } from "./follow-user.js";
+import { followUser, untilFirstAnswer, type UserFollowingSession } from "./follow-user.js";
 
 export type { LocalFirstLoader };
 
@@ -177,12 +177,8 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
     }),
   });
   if (loadLocalFirst) upgradeInBackground(session, loadLocalFirst);
-  // With no account on this device (a returning backend user keeps none),
-  // the session opens signed out until the backend names its user. Wait for
-  // that first answer, so apps don't show their sign-in screen to a user who
-  // is signed in. An account already on this device opens at once (offline
-  // too), and a failed or timed-out check opens signed out as before.
-  if (session.getSnapshot().status === "signed-out") await backendAnswered;
+  // Don't open signed out before the backend has named its user.
+  await untilFirstAnswer(session, backendAnswered);
   return session;
 }
 

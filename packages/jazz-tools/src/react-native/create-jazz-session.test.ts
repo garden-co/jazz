@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AccountManager } from "../accounts/state.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AccountManager, type AccountHandle } from "../accounts/state.js";
+import { FIRST_ANSWER_DEADLINE_MS } from "../session/follow-user.js";
 import { makeFakeAccount } from "../react-core/test-utils.js";
 import { createJazzClient as createNativeSession } from "./create-jazz-session.js";
 import { createJazzClient as createExpoSession } from "../expo/create-jazz-session.js";
@@ -13,8 +14,38 @@ vi.mock("./create-account-manager.js", () => ({ createAccountManager: mocks.nati
 vi.mock("../expo/create-account-manager.js", () => ({ createAccountManager: mocks.expoAccounts }));
 vi.mock("./create-jazz-client.js", () => ({ openJazzClient: mocks.client }));
 
+const alice = Object.freeze({
+  id: "11111111-1111-4111-8111-111111111111",
+  identity: { issuer: "jazz:backend", subject: "alice" },
+}) as AccountHandle;
+
+// The backend's answer to "who is signed in": alice, or no one (a 401).
+const backendNames = (user: AccountHandle | null) =>
+  user
+    ? new Response(JSON.stringify({ identity: user.identity, account: user.id }), { status: 200 })
+    : new Response("unauthenticated", { status: 401 });
+
+function signedInAsAlice() {
+  return new AccountManager({
+    createLocalFirst: () => {
+      throw new Error("unused");
+    },
+    loginWithBackend: async () => alice,
+    logout() {},
+  });
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
+  // No one is signed in unless a test says otherwise.
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => backendNames(null)),
+  );
+});
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 for (const [host, create, prepare] of [
   ["React Native", createNativeSession, mocks.nativeAccounts],
@@ -116,6 +147,97 @@ for (const [host, create, prepare] of [
         create({ appId: "app-1", serverUrl: "https://jazz.example.com", store } as never),
       ).rejects.toThrow(/takes no appId/);
       expect(prepare).not.toHaveBeenCalled();
+    });
+
+    // A returning user keeps no account on the device: the backend names
+    // them. Until it has answered, the session must not say "signed-out", or
+    // the app shows its sign-in screen for a moment on every start.
+    it("opens a signed-in user's session without reporting signed-out first", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => backendNames(alice)),
+      );
+      prepare.mockResolvedValue(signedInAsAlice());
+      mocks.client.mockResolvedValue({ shutdown: vi.fn(async () => {}) });
+      const session = await create({
+        serverUrl: "https://jazz.example.com",
+        store: { read: async () => null, update: async () => {} },
+      });
+      const opened = session.getSnapshot();
+      await session.close();
+      expect(opened.status).toBe("ready");
+      expect(opened.account?.identity.subject).toBe("alice");
+    });
+
+    it("opens signed out when the backend can't be reached", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw new TypeError("Network request failed");
+        }),
+      );
+      prepare.mockResolvedValue(signedInAsAlice());
+      const session = await create({
+        serverUrl: "https://jazz.example.com",
+        store: { read: async () => null, update: async () => {} },
+      });
+      expect(session.getSnapshot().status).toBe("signed-out");
+      expect(mocks.client).not.toHaveBeenCalled();
+      await session.close();
+    });
+
+    it("opens an account kept on the device at once, without asking the backend first", async () => {
+      // Offline: the backend never answers.
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(() => new Promise<Response>(() => {})),
+      );
+      const kept = makeFakeAccount();
+      prepare.mockResolvedValue(
+        new AccountManager(
+          {
+            createLocalFirst: () => kept,
+            restoreLocalFirst: () => kept,
+            loginWithBackend: async () => kept,
+            logout: vi.fn(),
+          },
+          kept,
+        ),
+      );
+      mocks.client.mockResolvedValue({ shutdown: vi.fn(async () => {}) });
+      vi.useFakeTimers();
+      const session = await create({
+        serverUrl: "https://jazz.example.com",
+        initial: "local-first",
+        store: { read: async () => null, update: async () => {} },
+      });
+      expect(session.getSnapshot().status).toBe("ready");
+      expect(session.getSnapshot().account).toBe(kept);
+      await session.close();
+    });
+
+    it("opens signed out once a slow backend passes the start deadline, then follows its answer", async () => {
+      let answer!: (response: Response) => void;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(() => new Promise<Response>((resolve) => (answer = resolve))),
+      );
+      prepare.mockResolvedValue(signedInAsAlice());
+      mocks.client.mockResolvedValue({ shutdown: vi.fn(async () => {}) });
+      vi.useFakeTimers();
+      let opened = false;
+      const opening = create({
+        serverUrl: "https://jazz.example.com",
+        store: { read: async () => null, update: async () => {} },
+      }).finally(() => (opened = true));
+      await vi.advanceTimersByTimeAsync(FIRST_ANSWER_DEADLINE_MS - 1);
+      expect(opened).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const session = await opening;
+      expect(session.getSnapshot().status).toBe("signed-out");
+      answer(backendNames(alice));
+      await vi.waitFor(() => expect(session.getSnapshot().account?.identity.subject).toBe("alice"));
+      await session.close();
     });
   });
 }

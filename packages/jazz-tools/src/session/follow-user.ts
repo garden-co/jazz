@@ -24,6 +24,36 @@ export interface UserFollowingSession<Client> extends JazzSession<Client> {
   reauthenticate(): Promise<void>;
 }
 
+/**
+ * How long opening a session waits for the backend's first answer before it
+ * opens signed out anyway. Shorter than the request deadline, so a slow
+ * backend costs an app at most this long on start; the check keeps running
+ * and the session follows its answer when it comes.
+ */
+export const FIRST_ANSWER_DEADLINE_MS = 5_000;
+
+/**
+ * Opening a session with no account on this device (a returning backend user
+ * keeps none): wait for the backend's first answer (`started`, from
+ * `followUser`'s `onStart`), so apps don't show their sign-in screen to a
+ * user who is signed in. An account already on this device opens at once
+ * (offline too), and a failed check, or one slower than `deadlineMs`, opens
+ * signed out as before. Never rejects.
+ */
+export async function untilFirstAnswer<Client>(
+  session: JazzSession<Client>,
+  started: Promise<void> | undefined,
+  deadlineMs = FIRST_ANSWER_DEADLINE_MS,
+): Promise<void> {
+  if (!started || session.getSnapshot().status !== "signed-out") return;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    started,
+    new Promise<void>((resolve) => (deadline = setTimeout(resolve, deadlineMs))),
+  ]);
+  clearTimeout(deadline);
+}
+
 type ObservedClient = {
   db?: {
     onSyncStatusChange?(listener: (status: SyncStatus) => void): () => void;
