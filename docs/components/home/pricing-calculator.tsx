@@ -236,7 +236,7 @@ function PlatformResult({
             {formatCurrency(totalCost)}
           </p>
         </div>
-        <div>
+        <div className="text-right">
           <p className="text-sm text-fd-muted-foreground">Per MAU / mo</p>
           <p className="font-display mt-1 text-3xl font-black tracking-[-0.03em]">
             {formatCurrency(costPerMau)}
