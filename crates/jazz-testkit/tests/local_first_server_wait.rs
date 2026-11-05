@@ -61,7 +61,9 @@ async fn first_delta(stream: &mut SubscriptionStream, within: Duration) -> Order
         .expect("subscription stream stays open");
     match item {
         SubscriptionStreamItem::Delta(delta) => delta,
-        SubscriptionStreamItem::Rejected { reason } => panic!("subscription rejected: {reason:?}"),
+        SubscriptionStreamItem::Rejected { reason, .. } => {
+            panic!("subscription rejected: {reason:?}")
+        }
     }
 }
 

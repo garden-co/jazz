@@ -92,7 +92,7 @@ async fn wait_for_bodies(
                 )
             })
             .unwrap_or_else(|| panic!("{description}: subscription stream closed"));
-        if let SubscriptionStreamItem::Rejected { reason } = item {
+        if let SubscriptionStreamItem::Rejected { reason, .. } = item {
             panic!("{description}: subscription rejected: {reason:?}");
         }
         events += 1;

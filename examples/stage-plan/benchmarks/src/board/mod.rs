@@ -677,7 +677,9 @@ fn event_row_count(event: SubscriptionEvent) -> usize {
             removed,
             ..
         } => added.len() + updated.len() + removed.len(),
-        SubscriptionEvent::Rejected { reason } => panic!("W1 subscription rejected: {reason:?}"),
+        SubscriptionEvent::Rejected { reason, .. } => {
+            panic!("W1 subscription rejected: {reason:?}")
+        }
         SubscriptionEvent::Closed => panic!("W1 subscription closed"),
     }
 }
