@@ -17,7 +17,7 @@ mod links;
 mod replay;
 mod verify;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -300,6 +300,19 @@ async fn run(args: &Args) -> Result<Json, String> {
             .collect();
         rows.to_head = Some(to_head);
         rows.drop_transaction_metadata = args.drop_transaction_metadata;
+        // alpha.59 keeps a variant a later schema removed in rows written
+        // before; the store keeps it too, and only such a variant.
+        rows.removed_variants = kept_variants(
+            rows.to_head.as_ref().expect("set above"),
+            &head.runtime_schemas,
+        )?;
+        let kept = rows.removed_variants.clone();
+        runtime
+            .migrate_import_with_db(move |db| {
+                db.keep_variants_for_import(kept);
+                Ok(())
+            })
+            .await?;
         let mut batch = vec![first];
         while let Some(record) = reader.next_record().map_err(err)? {
             match record {
@@ -342,6 +355,7 @@ async fn run(args: &Args) -> Result<Json, String> {
         "versions_in_dump": footer.versions,
         "versions_written": rows.written,
         "versions_skipped_rejected": rows.rejected,
+        "versions_keeping_a_removed_enum_variant": rows.removed_variants_kept,
         "versions_dropped_with_their_table": rows.table_gone,
         "deletion_events_coalesced": rows.rows.coalesced,
         "inserts_with_their_own_creation": rows.created_apart,
@@ -487,6 +501,71 @@ fn match_schemas(
     Ok(out)
 }
 
+/// Every enum variant some alpha.59 version declares and the active schema
+/// does not, by the active table and column its values land in.
+fn kept_variants(
+    to_head: &active::ToHead,
+    schemas: &[dump::Schema],
+) -> Result<BTreeMap<(String, String), BTreeSet<String>>, String> {
+    let mut kept: BTreeMap<(String, String), (BTreeSet<String>, BTreeSet<String>)> =
+        BTreeMap::new();
+    for schema in schemas {
+        let public: jazz::tools::public_schema::Schema =
+            serde_json::from_str(&schema.public_schema_json).map_err(err)?;
+        for (table, declared) in public.iter() {
+            for column in &declared.columns.columns {
+                let variants = enum_variants(&column.column_type);
+                if variants.is_empty() {
+                    continue;
+                }
+                let Some((head_table, head_columns)) =
+                    to_head.head_columns(schema.id, table.as_str(), column.name.as_str())?
+                else {
+                    continue;
+                };
+                for head_column in head_columns {
+                    let (declared, earlier) =
+                        kept.entry((head_table.clone(), head_column)).or_default();
+                    let into = if schema.id == to_head.head {
+                        declared
+                    } else {
+                        earlier
+                    };
+                    into.extend(variants.iter().cloned());
+                }
+            }
+        }
+    }
+    Ok(kept
+        .into_iter()
+        .filter_map(|(key, (declared, earlier))| {
+            let removed: BTreeSet<String> = earlier.difference(&declared).cloned().collect();
+            (!removed.is_empty()).then_some((key, removed))
+        })
+        .collect())
+}
+
+/// Whether `value` (an enum cell, an array of them, or a nullable one)
+/// holds one of `names`.
+fn holds_any(value: &Value, names: &BTreeSet<String>) -> bool {
+    match value {
+        Value::String(name) => names.contains(name),
+        Value::Array(items) => items.iter().any(|item| holds_any(item, names)),
+        Value::Nullable(Some(inner)) => holds_any(inner, names),
+        _ => false,
+    }
+}
+
+/// The variants of an enum column, or of an array of enum values.
+fn enum_variants(ty: &jazz::tools::public_schema::ColumnType) -> &[String] {
+    use jazz::tools::public_schema::ColumnType;
+    match ty {
+        ColumnType::Enum { variants } => variants,
+        ColumnType::Array { element } => enum_variants(element),
+        _ => &[],
+    }
+}
+
 enum Op {
     Insert,
     Update,
@@ -521,6 +600,11 @@ struct RowImport {
     table_gone: u64,
     metadata_dropped: u64,
     created_apart: u64,
+    /// Enum variants earlier versions declared and the active one does
+    /// not, by active table and column (see [`kept_variants`]).
+    removed_variants: BTreeMap<(String, String), BTreeSet<String>>,
+    /// Versions written holding such a variant.
+    removed_variants_kept: u64,
 }
 
 impl RowImport {
@@ -746,11 +830,18 @@ impl RowImport {
         writes: Vec<Write>,
     ) -> Result<(), String> {
         self.written += writes.len() as u64;
+        self.removed_variants_kept += writes
+            .iter()
+            .filter(|write| {
+                write.cells.iter().any(|(column, value)| {
+                    self.removed_variants
+                        .get(&(write.table.clone(), column.clone()))
+                        .is_some_and(|removed| holds_any(value, removed))
+                })
+            })
+            .count() as u64;
         runtime
             .migrate_import_with_db(move |db| {
-                // alpha.59 keeps a variant a later schema removed in rows
-                // written before; the store keeps it too.
-                db.keep_undeclared_variants_for_import();
                 let mut views: HashMap<jazz::ids::SchemaVersionId, Db> = HashMap::new();
                 for write in writes {
                     let id = write.schema.version_id();
@@ -1161,6 +1252,61 @@ mod tests {
         assert_eq!(
             planned.last().and_then(|restore| restore.cells.get("body")),
             Some(&convert_value(dump::Value::String("v3".to_owned())))
+        );
+    }
+
+    /// The variants earlier alpha.59 versions declare and the active one
+    /// does not are kept under the active column their values land in,
+    /// following renames and copies.
+    #[test]
+    fn kept_variants_follow_the_lenses_to_the_active_columns() {
+        use jazz::tools::public_schema::{ColumnType, SchemaBuilder, TableSchema};
+        let enumeration = |variants: &[&str]| ColumnType::Enum {
+            variants: variants.iter().map(|v| (*v).to_owned()).collect(),
+        };
+        let old = SchemaBuilder::new()
+            .table(TableSchema::builder("tasks").column("status", enumeration(&["todo", "paused"])))
+            .build();
+        let head = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("tasks")
+                    .column("state", enumeration(&["todo"]))
+                    .column("was", enumeration(&["todo"])),
+            )
+            .build();
+        const OLD: [u8; 16] = [6; 16];
+        let schemas = [
+            dump::Schema {
+                id: OLD,
+                public_schema_json: serde_json::to_string(&old).unwrap(),
+            },
+            dump::Schema {
+                id: HEAD,
+                public_schema_json: serde_json::to_string(&head).unwrap(),
+            },
+        ];
+        let lens = dump::Lens {
+            id: [5; 16],
+            source: OLD,
+            target: HEAD,
+            tables: vec![dump::TableLens {
+                source_table: "tasks".to_owned(),
+                target_table: "tasks".to_owned(),
+                ops_json: vec![
+                    r#"{"CopyColumn":{"from":"status","to":"was"}}"#.to_owned(),
+                    r#"{"RenameColumn":{"from":"status","to":"state"}}"#.to_owned(),
+                ],
+            }],
+        };
+        let to_head = active::ToHead::new(HEAD, &schemas, vec![lens]).unwrap();
+        let kept = kept_variants(&to_head, &schemas).unwrap();
+        let removed: BTreeSet<String> = ["paused".to_owned()].into();
+        assert_eq!(
+            kept,
+            BTreeMap::from([
+                (("tasks".to_owned(), "state".to_owned()), removed.clone()),
+                (("tasks".to_owned(), "was".to_owned()), removed),
+            ])
         );
     }
 

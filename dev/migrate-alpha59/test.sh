@@ -50,6 +50,9 @@ grep -q '"inserts_with_their_own_creation":1' "$work/import.json"
 grep -q '"versions_written_while_deleted":2' "$work/import.json"
 grep -q '"restores_bringing_content_written_while_deleted":1' "$work/import.json"
 grep -q '"deleted_rows_dropping_content_written_while_deleted":1' "$work/import.json"
+# No version was refused: the v1 project keeps `paused`, which v2 dropped.
+grep -q '"versions_skipped_rejected":0' "$work/import.json"
+grep -q '"versions_keeping_a_removed_enum_variant":1' "$work/import.json"
 "${import[@]}" verify --dump "$work/dump" --data-dir "$work/a60" --app-id "$app"
 
 # Only the active schema came over, and rows written under v1 read under
@@ -64,6 +67,14 @@ assert "title" not in cols and "heading" in cols, cols
 heading = next(r[1] for r in c.execute("pragma table_info(documents)") if r[1].split("~")[0] == "heading")
 missing = c.execute(f'select count(*) from documents where "{heading}" is null').fetchone()[0]
 assert missing == 0, f"{missing} documents lost their title"
+# The project written under v1 keeps `paused`, though v2 dropped it.
+table = next(r[0] for r in c.execute("select name from sqlite_master where type = 'table'")
+             if r[0].split("~")[0] == "projects" and not r[0].endswith("__h"))
+status = next(r[1] for r in c.execute(f'pragma table_info("{table}")') if r[1].split("~")[0] == "status")
+paused = c.execute(f'select count(*) from "{table}" join _jazz_enum_tags e '
+                   f'on e.tbl = ? and e.col = ? and e.tag = "{table}"."{status}" '
+                   "where e.name = 'paused'", (table, status)).fetchone()[0]
+assert paused == 1, f"{paused} projects kept `paused`"
 PY
 
 # Boot check: the server starts on the migrated dir and serves

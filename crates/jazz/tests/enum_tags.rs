@@ -477,18 +477,36 @@ fn a_replica_tags_variants_itself_and_rows_travel_by_name() {
 }
 
 /// An import of rows another store kept (alpha.59 keeps a variant a later
-/// schema removed) writes such a variant rather than refusing it; it reads
-/// back, and sorts after the declared ones.
+/// schema removed) writes a variant it names as an earlier version's
+/// rather than refusing it; it reads back, and sorts after the declared
+/// ones. Any other undeclared name is still refused.
 #[test]
 fn an_import_keeps_a_variant_its_schema_no_longer_declares() {
     let dir = tempfile::tempdir().unwrap();
     let db = authority_at(v1(), &dir.path().join("authority.sqlite"));
+    let dropped = tasks(&["todo", "done"]);
+    block_on(db.activate_schema_with_lenses(dropped.clone(), &[lens(&v1(), &dropped, vec![])]))
+        .unwrap();
     insert(&db, 1, "done");
-    db.keep_undeclared_variants_for_import();
-    try_insert(&db, 2, &[("title", name("t")), ("status", name("later"))]).unwrap();
+    let doing = [("title", name("t")), ("status", name("doing"))];
+    let refused = try_insert(&db, 2, &doing).unwrap_err();
+    assert!(
+        refused.to_string().contains("not one of its variants"),
+        "{refused}"
+    );
+    db.keep_variants_for_import(
+        [(("tasks".into(), "status".into()), ["doing".into()].into())].into(),
+    );
+    try_insert(&db, 2, &doing).unwrap();
+    let refused =
+        try_insert(&db, 3, &[("title", name("t")), ("status", name("later"))]).unwrap_err();
+    assert!(
+        refused.to_string().contains("not one of its variants"),
+        "{refused}"
+    );
     assert_eq!(
         statuses(&db, by_status()),
-        [(1, "done".into()), (2, "later".into())]
+        [(1, "done".into()), (2, "doing".into())]
     );
 }
 

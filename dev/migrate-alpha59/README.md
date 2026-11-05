@@ -104,6 +104,12 @@ stays deleted, its content stays as it was when deleted, and the later
 content is dropped (`deleted_rows_dropping_content_written_while_deleted`).
 `versions_written_while_deleted` counts every such version.
 
+alpha.59 keeps a value of an enum variant a later schema removed in rows
+written before. The import keeps it too, and only a variant some earlier
+version declared for the column its values land in; the store sorts it
+after the declared ones. `versions_keeping_a_removed_enum_variant` counts
+the versions written holding one.
+
 ## Layout
 
 | piece                             | built                                 | does                                                                   |

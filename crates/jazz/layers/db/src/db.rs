@@ -468,9 +468,10 @@ struct Inner {
     conn: Connection,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
-    /// Writes keep an enum variant their schema does not declare rather
-    /// than refusing it: only an import of rows another store kept does.
-    keep_undeclared_variants: bool,
+    /// Enum variants a write may hold though its schema does not declare
+    /// them, by table and column: only an import of rows another store
+    /// kept sets any ([`Db::keep_variants_for_import`]).
+    kept_variants: BTreeMap<(String, String), BTreeSet<String>>,
     /// Errors the next ticks fail with, for tests of a tick driver.
     #[cfg(any(test, feature = "testing"))]
     failing_ticks: VecDeque<ErrorCode>,
@@ -1401,7 +1402,7 @@ impl Db {
             inner: Rc::new(Store::new(Inner {
                 conn,
                 mutation_admission_closed: false,
-                keep_undeclared_variants: false,
+                kept_variants: BTreeMap::new(),
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),
                 chunks,
@@ -2070,13 +2071,16 @@ impl Db {
         }
     }
 
-    /// From now on, writes keep an enum variant their schema no longer
-    /// declares instead of refusing it, as rows a lens or merge carries
-    /// already can. Only for importing rows another store kept: alpha.59
-    /// keeps a variant a later schema removed in rows written before.
+    /// From now on, a write may hold the variants `kept` names for its
+    /// table and column (by the names the write's schema gives them)
+    /// though its schema does not declare them, as rows a lens or merge
+    /// carries already can; any other undeclared name is still refused.
+    /// Only for importing rows another store kept: alpha.59 keeps a
+    /// variant a later schema removed in rows written before, and the
+    /// import names the variants its earlier versions declared.
     #[doc(hidden)]
-    pub fn keep_undeclared_variants_for_import(&self) {
-        self.inner().keep_undeclared_variants = true;
+    pub fn keep_variants_for_import(&self, kept: BTreeMap<(String, String), BTreeSet<String>>) {
+        self.inner().kept_variants = kept;
     }
 
     /// Run this store's wall clock at `ms` (Unix ms) from now on, or the
@@ -5211,11 +5215,14 @@ impl Inner {
             let Some(column) = table.column(name) else {
                 return Err(rejected(format!("unknown column `{}.{name}`", table.name)));
             };
-            if let Some(variants) = &column.variants
-                && !self.keep_undeclared_variants
-            {
+            if let Some(variants) = &column.variants {
                 for variant in crate::values::enum_names(&cells[name]) {
-                    if !variants.iter().any(|v| v == variant) {
+                    if !variants.iter().any(|v| v == variant)
+                        && !self
+                            .kept_variants
+                            .get(&(table.name.clone(), name.clone()))
+                            .is_some_and(|kept| kept.contains(variant))
+                    {
                         return Err(rejected(format!(
                             "`{}.{name}`: `{variant}` is not one of its variants",
                             table.name
