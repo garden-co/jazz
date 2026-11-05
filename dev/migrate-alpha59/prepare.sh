@@ -6,7 +6,8 @@
 # The exporter has to link alpha.59 itself: it reads the store with
 # alpha.59's own decoders. It can't share a build with `jazz-tools` either:
 # the two pull different libsqlite3-sys versions, which both declare
-# `links = "sqlite3"`. The import side is `jazz-tools migrate-alpha59`.
+# `links = "sqlite3"`. The import side is `jazz-alpha59-import`
+# (crates/jazz-cli).
 #
 #   dev/migrate-alpha59/prepare.sh
 #   A59_DIR=...  use an existing checkout instead of cloning into .a59/.
@@ -57,7 +58,7 @@ hook "$here/export/hooks/server_migrate_export.rs" "$dir/crates/jazz-server/src/
   "$dir/crates/jazz-server/src/server/mod.rs" "pub mod routes;"
 hook "$here/export/hooks/account_migrate_export.rs" "$dir/crates/jazz/layers/types/src/account_registry/migrate_export.rs" \
   "$dir/crates/jazz/layers/types/src/account_registry.rs" "pub mod storage;"
-# The dump format, shared with `jazz-tools migrate-alpha59`.
+# The dump format, shared with `jazz-alpha59-import`.
 rm -rf "$dir/crates/jazz-alpha59-dump"
 cp -R "$crates/jazz-alpha59-dump" "$dir/crates/jazz-alpha59-dump"
 install_tool "$dir" export
