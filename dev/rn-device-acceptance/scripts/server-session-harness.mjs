@@ -269,6 +269,9 @@ export async function startDeviceBackend({
   let stderr = "";
   child.stderr.on("data", (chunk) => {
     stderr = retainHarnessOutput(stderr, chunk);
+    // The backend's warnings (a refused guest, say) explain a device failure
+    // that the device alone can't: show them as they happen, redacted.
+    process.stderr.write(`device backend: ${boundedHarnessOutput(String(chunk))}`);
   });
   const ready = await new Promise((resolveReady, rejectReady) => {
     let settled = false;
