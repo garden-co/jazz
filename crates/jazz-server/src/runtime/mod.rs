@@ -412,10 +412,10 @@ impl Backoff {
 
     /// [`Self::waiting`] with the workload token generation now.
     fn waiting_at(&self, generation: u64) -> bool {
-        if !self
+        if self
             .not_before
             .get()
-            .is_some_and(|at| std::time::Instant::now() < at)
+            .is_none_or(|at| std::time::Instant::now() >= at)
         {
             return false;
         }
