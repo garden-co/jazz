@@ -178,7 +178,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
       await immediateWriter.shutdown();
       clients.splice(clients.indexOf(immediateWriter), 1);
 
-      const wrongSecretResponse = await fetch(`${server.url}/apps/${appId}/admin/deploy`, {
+      const wrongSecretResponse = await fetch(`${server.url}/apps/${appId}/admin/bundles`, {
         method: "POST",
         headers: {
           "content-type": "application/json",

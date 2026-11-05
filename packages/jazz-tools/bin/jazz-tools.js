@@ -144,6 +144,7 @@ function printWrapperHelp() {
   );
   console.log("  create                Create a new resource");
   console.log("  server                Run a Jazz server");
+  console.log("  migrate-alpha59       Import an alpha.59 server data dir (import | verify)");
   console.log("  help                  Print this message");
   console.log("");
   console.log("Options:");

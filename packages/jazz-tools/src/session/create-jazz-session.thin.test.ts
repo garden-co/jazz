@@ -4,7 +4,7 @@ import { definePermissions } from "../permissions/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
+import { startTestJazz, type TestJazz } from "../testing/index.js";
 import { createJazzSession, type BrowserJazzSession } from "./create-jazz-session.js";
 
 const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
@@ -13,7 +13,7 @@ const permissions = definePermissions(app, ({ policy, session }) => {
   policy.notes.allowInsert.always();
 });
 
-let server: LocalJazzServerHandle | undefined;
+let server: TestJazz | undefined;
 const sessions: BrowserJazzSession[] = [];
 
 afterEach(async () => {
@@ -23,14 +23,11 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-async function startServer(): Promise<LocalJazzServerHandle> {
-  server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  await deploy({
-    serverUrl: server.url,
-    appId: server.appId,
-    adminSecret: server.adminSecret,
-    schema: app,
-    permissions,
+async function startServer(): Promise<TestJazz> {
+  server = await startTestJazz({
+    app: app,
+    permissions: permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
   });
   return server;
 }
@@ -59,12 +56,12 @@ function memoryLocalStorage() {
 const loadLocalFirst: LocalFirstLoader = async () => ({ createClient: createLocalFirstDb });
 
 async function open(
-  server: LocalJazzServerHandle,
+  server: TestJazz,
   store: AccountStore,
   client?: LocalFirstLoader,
 ): Promise<BrowserJazzSession> {
   const session = await createJazzSession({
-    appId: server.appId,
+    scope: server.appId,
     serverUrl: server.url,
     store,
     initial: "local-first",

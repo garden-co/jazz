@@ -5,7 +5,7 @@ import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js"
 import type { Db } from "../runtime/db.js";
 import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
-import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
+import { startTestJazz, type TestJazz } from "../testing/index.js";
 import { createAccountManager, createClient, upgradeToLocalFirst } from "./index.js";
 import { ThinRuntime } from "./thin-runtime.js";
 import { JazzClient } from "../runtime/client.js";
@@ -34,7 +34,7 @@ const permissions = definePermissions(app, ({ policy, session }) => {
 });
 
 const opened: Db[] = [];
-let server: LocalJazzServerHandle | undefined;
+let server: TestJazz | undefined;
 
 afterEach(async () => {
   for (const db of opened.splice(0)) await db.shutdown();
@@ -42,19 +42,16 @@ afterEach(async () => {
   server = undefined;
 });
 
-async function startServer(): Promise<LocalJazzServerHandle> {
-  server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  await deploy({
-    serverUrl: server.url,
-    appId: server.appId,
-    adminSecret: server.adminSecret,
-    schema: app,
-    permissions,
+async function startServer(): Promise<TestJazz> {
+  server = await startTestJazz({
+    app: app,
+    permissions: permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
   });
   return server;
 }
 
-async function thinDb(server: LocalJazzServerHandle, secret?: string): Promise<Db> {
+async function thinDb(server: TestJazz, secret?: string): Promise<Db> {
   let stored: string | null = null;
   const accounts = await createAccountManager({
     appId: server.appId,

@@ -34,9 +34,6 @@ struct JazzCoreOpenOptions {
     s3_region: Option<String>,
     s3_endpoint: Option<String>,
     s3_prefix: Option<String>,
-    jwt_public_key: Option<String>,
-    jwt_issuer: Option<String>,
-    jwt_audience: Option<String>,
     allow_local_first_auth: Option<bool>,
     telemetry_collector_url: Option<String>,
 }
@@ -70,7 +67,7 @@ impl JazzCore {
     /// Open the core's storage and serve it in this process.
     #[napi(
         factory,
-        ts_args_type = "options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: \"files\" | \"s3\" | \"sqlite\"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; jwtPublicKey?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }",
+        ts_args_type = "options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: \"files\" | \"s3\" | \"sqlite\"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }",
         ts_return_type = "Promise<JazzCore>"
     )]
     pub async fn open(options: serde_json::Value) -> napi::Result<Self> {
@@ -81,9 +78,6 @@ impl JazzCore {
         let app_id =
             AppId::from_string(&opts.app_id).unwrap_or_else(|_| AppId::from_name(&opts.app_id));
         let auth_config = AuthConfig {
-            jwt_public_key: opts.jwt_public_key,
-            jwt_issuer: opts.jwt_issuer,
-            jwt_audience: opts.jwt_audience,
             allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
             backend_secret: Some(opts.backend_secret),
             admin_secret: Some(opts.admin_secret),
@@ -274,8 +268,11 @@ impl JazzCoreSocket {
 fn lock_data_dir(dir: &std::path::Path) -> napi::Result<std::fs::File> {
     jazz_server::lock_data_dir(dir).map_err(|error| match error {
         jazz_server::DataDirLockError::Held(holder) => napi::Error::from_reason(format!(
-            "sqlite(): {} is already open{}. One core per directory: create Jazz once and reuse it \
-             (cache it on globalThis across hot reloads), and give each process its own directory or use remote().",
+            "sqlite(): {} is already open{}. Another core holds its jazz.lock: a second dev server, a build \
+             or dev worker that imported a module calling createJazz at module scope, or a second \
+             createJazz in this process. \
+             Create Jazz lazily on the first request and cache it on globalThis across hot reloads, \
+             and give each server its own directory or use remote().",
             dir.display(),
             if holder.is_empty() {
                 String::new()

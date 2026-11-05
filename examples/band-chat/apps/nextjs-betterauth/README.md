@@ -14,9 +14,9 @@ product slice, not another generic Todo tutorial.
 - **Jazz runs inside the Next app.** `src/lib/jazz.server.ts` calls
   `createJazz`, and `app/jazz/[...path]/route.ts` mounts it under `/jazz`, so
   browsers sync with BandChat's own origin. Better Auth owns the browser
-  session; `authenticate` reads it, and the client follows Better Auth's
-  session with `betterAuth(authClient)`. There are no JWTs, JWKS or token
-  routes. Sign-up and sign-in only call Better Auth.
+  session; `authenticate` reads it, and the client asks the backend who is
+  signed in (on start, after signing out, on focus and across tabs). There are
+  no JWTs, JWKS or token routes. Sign-up and sign-in only call Better Auth.
 - Better Auth's generated tables are persisted through the backend's own Jazz
   database (`jazz.db`) and carry explicit deny-all client policies. Read hooks do not create
   accounts, profiles, rooms, or memberships: a profile is created on an explicit

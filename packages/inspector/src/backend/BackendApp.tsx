@@ -4,7 +4,7 @@
 // on whatever a deep link names: `#q=` (a query), `#table=`, `#row=`, `#as=`,
 // or `#grant=` (an agent's request for a token).
 
-import type { WasmSchema } from "jazz-tools";
+import type { TablePolicies, WasmSchema } from "jazz-tools";
 import {
   decodeGrant,
   parseInspectorLink,
@@ -25,14 +25,19 @@ import { BackendProvider, type BackendContextValue } from "./backend-context.js"
 
 interface SchemaAnswer {
   tables: Record<string, WasmSchema[string] & { redacted?: string[] }>;
-  permissions?: unknown;
+  permissions?: Record<string, TablePolicies>;
 }
 
 type Boot =
   | { kind: "loading" }
   | { kind: "refused"; message: string }
   | { kind: "failed"; message: string }
-  | { kind: "ready"; whoami: InspectWhoami; schema: WasmSchema; permissions: unknown };
+  | {
+      kind: "ready";
+      whoami: InspectWhoami;
+      schema: WasmSchema;
+      permissions: Record<string, TablePolicies> | null;
+    };
 
 /** Where a deep link opens the data explorer. */
 export function initialRouteFor(link: InspectorLinkTarget, schema: WasmSchema): string {
@@ -191,10 +196,7 @@ export function BackendApp({
       <InspectorDataProvider source={data!}>
         <DevtoolsProvider
           wasmSchema={boot.schema}
-          storedPermissions={{
-            head: null,
-            permissions: boot.permissions as never,
-          }}
+          backendPermissions={boot.permissions}
           runtime="backend"
         >
           <MemoryRouter initialEntries={[initialRouteFor(link, boot.schema)]}>

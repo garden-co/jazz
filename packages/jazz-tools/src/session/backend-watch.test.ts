@@ -1,7 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle, type AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
-import { connectAuthProvider, rememberProviderKeys } from "./auth-provider.js";
 import { watchBackendUser } from "./backend-watch.js";
 import { followUser } from "./follow-user.js";
 import { createJazzSessionOwner } from "./state.js";
@@ -22,6 +21,8 @@ async function setup(
 ) {
   let backendUser: AccountHandle | null = null;
   const events: string[] = [];
+  let openFails = false;
+  let openGate: Promise<void> | undefined;
   const loginWithBackend = vi.fn(async () => {
     if (!backendUser) throw new Error("signed_out");
     return backendUser;
@@ -38,12 +39,16 @@ async function setup(
   const session = await createJazzSessionOwner({
     accounts,
     clearOnSignOut: options.clearOnSignOut,
-    openClient: async (account) => ({
-      db: {
-        deleteClientStorage: async () => void events.push(`wipe:${account.identity.subject}`),
-      },
-      shutdown: async () => void events.push(`close:${account.identity.subject}`),
-    }),
+    openClient: async (account) => {
+      await openGate;
+      if (openFails) throw new Error("open failed");
+      return {
+        db: {
+          deleteClientStorage: async () => void events.push(`wipe:${account.identity.subject}`),
+        },
+        shutdown: async () => void events.push(`close:${account.identity.subject}`),
+      };
+    },
   });
   let focus: (() => void) | undefined;
   const posts = vi.fn();
@@ -84,6 +89,16 @@ async function setup(
     focus: () => focus?.(),
     otherTab: () => otherTab?.(),
     hasListeners: () => !!focus || !!otherTab,
+    failOpen: (fails: boolean) => (openFails = fails),
+    /** Hold opening clients until the returned release is called. */
+    holdOpen() {
+      let release!: () => void;
+      openGate = new Promise((resolve) => (release = resolve));
+      return () => {
+        openGate = undefined;
+        release();
+      };
+    },
   };
 }
 
@@ -156,32 +171,134 @@ it("doesn't sign out, or wipe with clearOnSignOut, on one signed-out answer", as
   await t.session.close();
 });
 
-it("stays quiet while a `user` prop or setUser drives the session, and only reconnects on a refusal", async () => {
+it("follows the backend at once on reauthenticate, and only reconnects on a refusal", async () => {
   const t = await setup(user("alice"));
   t.signIn(user("alice"));
-  const connection = connectAuthProvider(t.session);
   await settle();
-  // The provider attached before the first check.
-  expect(t.probe).not.toHaveBeenCalled();
-  t.signIn(user("bob"));
-  t.focus();
-  t.otherTab();
-  await settle();
-  expect(t.probe).not.toHaveBeenCalled();
+  expect(t.probe).toHaveBeenCalledOnce();
   expect(t.loginWithBackend).not.toHaveBeenCalled();
 
   // The sync server refused the sign-in and the backend still names her: reconnect.
-  t.signIn(user("alice"));
   t.watch.authRefused();
   await settle();
   expect(t.reconnect).toHaveBeenCalledOnce();
-  // Refused, and the backend says no one is signed in: the provider decides.
+  // Refused, and the backend says no one is signed in: a refusal alone signs no one out.
   t.signIn(null);
   t.watch.authRefused();
   await settle(30);
   expect(t.session.getSnapshot().status).toBe("ready");
-  connection.dispose();
+
+  // The app signed out and says so: no second answer is needed.
+  await t.watch.reauthenticate();
+  expect(t.session.getSnapshot().status).toBe("signed-out");
+  expect(t.events).toEqual(["close:alice"]);
+  // The app signed someone in.
+  t.signIn(user("bob"));
+  await t.watch.reauthenticate();
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("bob");
   t.watch.stop();
+  // A stopped watch answers at once.
+  await t.watch.reauthenticate();
+  await t.session.close();
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+it("answers a reauthenticate with a probe made after it, not a running check's stale one", async () => {
+  const t = await setup(undefined);
+  await settle();
+  // A focus check asks before the app signs in, and its answer arrives late.
+  const stale = deferred<AccountIdentity | null>();
+  t.probe.mockReturnValueOnce(stale.promise);
+  t.focus();
+  t.signIn(user("alice"));
+  let answered = false;
+  const asked = t.watch.reauthenticate().then(() => (answered = true));
+  await settle();
+  expect(answered).toBe(false);
+  stale.resolve(null);
+  await asked;
+  expect(t.probe).toHaveBeenCalledTimes(3);
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("alice");
+  expect(t.loginWithBackend).toHaveBeenCalledOnce();
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("follows a reauthenticate asked mid-transition once the session settles", async () => {
+  const t = await setup(undefined);
+  await settle();
+  t.signIn(user("alice"));
+  const release = t.holdOpen();
+  const signingIn = t.session.loginWithBackend();
+  await settle();
+  expect(t.session.getSnapshot().status).toBe("transitioning");
+  // A focus check finishing meanwhile doesn't answer the waiting reauthenticate.
+  t.focus();
+  t.signIn(user("bob"));
+  let answered = false;
+  const asked = t.watch.reauthenticate().then(() => (answered = true));
+  await settle();
+  expect(answered).toBe(false);
+  release();
+  await signingIn;
+  await asked;
+  expect(t.session.getSnapshot()).toMatchObject({ status: "ready" });
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("bob");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("recovers a session left in error for the same user on reauthenticate", async () => {
+  const t = await setup(undefined);
+  await settle();
+  t.signIn(user("alice"));
+  t.failOpen(true);
+  await expect(t.watch.reauthenticate()).rejects.toThrow("open failed");
+  expect(t.session.getSnapshot()).toMatchObject({ status: "error" });
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("alice");
+  t.failOpen(false);
+  await t.watch.reauthenticate();
+  expect(t.session.getSnapshot()).toMatchObject({ status: "ready" });
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("alice");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("rejects a reauthenticate when the backend can't be asked", async () => {
+  const t = await setup(undefined);
+  await settle();
+  t.signIn(user("alice"));
+  t.probe.mockRejectedValueOnce(new AccountAuthError("unavailable", 503));
+  const failed = t.watch.reauthenticate();
+  await expect(failed).rejects.toThrow("Jazz could not ask your backend who is signed in");
+  await expect(failed).rejects.toMatchObject({ cause: expect.any(AccountAuthError) });
+  expect(t.session.getSnapshot().status).toBe("signed-out");
+  // The next one asks again.
+  await t.watch.reauthenticate();
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("alice");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("answers a reauthenticate waiting on a transition when the watch stops", async () => {
+  const t = await setup(undefined);
+  await settle();
+  t.signIn(user("alice"));
+  const release = t.holdOpen();
+  const signingIn = t.session.loginWithBackend();
+  await settle();
+  const probes = t.probe.mock.calls.length;
+  const asked = t.watch.reauthenticate();
+  t.watch.stop();
+  await asked;
+  expect(t.probe).toHaveBeenCalledTimes(probes);
+  release();
+  await signingIn;
   await t.session.close();
 });
 
@@ -192,10 +309,25 @@ it("stops when there is no backend to ask", async () => {
   await t.session.close();
 });
 
-it("setUser signs users in and out, and clearOnSignOut wipes on a direct switch", async () => {
+it("fails running and queued reauthenticates alike when there is no backend", async () => {
+  const t = await setup(undefined, { noBackend: true });
+  const running = t.watch.reauthenticate();
+  const queued = t.watch.reauthenticate();
+  await expect(running).rejects.toThrow("Jazz could not ask your backend who is signed in");
+  await expect(queued).rejects.toThrow("Jazz found no backend to ask who is signed in");
+  // A stopped watch answers later ones at once.
+  await t.watch.reauthenticate();
+  await t.session.close();
+});
+
+it("reauthenticate signs users in and out, and clearOnSignOut wipes on a direct switch", async () => {
   let backendUser: AccountHandle | null = null;
   const events: string[] = [];
-  const fetch = vi.fn(async () => new Response("signed_out", { status: 401 }));
+  const fetch = vi.fn(async () =>
+    backendUser
+      ? Response.json({ account: backendUser.id, identity: backendUser.identity })
+      : new Response("signed_out", { status: 401 }),
+  );
   const following = await createJazzSessionOwner({
     accounts: new AccountManager({
       createLocalFirst: () => guest,
@@ -215,25 +347,21 @@ it("setUser signs users in and out, and clearOnSignOut wipes on a direct switch"
       shutdown: async () => void events.push(`close:${account.identity.subject}`),
     }),
   });
-  following.setUser(undefined);
   await settle();
-  // setUser took over before the first check.
-  expect(fetch).not.toHaveBeenCalled();
+  expect(fetch).toHaveBeenCalledOnce();
   expect(following.getSnapshot().status).toBe("signed-out");
 
   backendUser = user("alice");
-  following.setUser("alice");
-  await settle();
+  await following.reauthenticate();
   expect(following.getSnapshot().account?.identity.subject).toBe("alice");
 
   backendUser = user("bob");
-  following.setUser("bob");
-  await settle();
+  await following.reauthenticate();
   expect(following.getSnapshot().account?.identity.subject).toBe("bob");
   expect(events).toEqual(["wipe:alice", "close:alice"]);
 
-  following.setUser(null);
-  await settle();
+  backendUser = null;
+  await following.reauthenticate();
   expect(following.getSnapshot().status).toBe("signed-out");
   expect(events).toEqual(["wipe:alice", "close:alice", "wipe:bob", "close:bob"]);
   await following.close();
@@ -269,35 +397,6 @@ it("signs out after a refusal only once a check after focus agrees, and backs of
   await t.session.close();
 });
 
-it("doesn't sign a reloaded user out when the provider's id isn't the backend's", async () => {
-  const restored = user("internal-42");
-  let backendUser: AccountHandle = restored;
-  const events: string[] = [];
-  const session = await createJazzSessionOwner({
-    accounts: new AccountManager(
-      { createLocalFirst: () => guest, logout() {}, loginWithBackend: async () => backendUser },
-      restored,
-    ),
-    clearOnSignOut: true,
-    openClient: async (account) => ({
-      db: { deleteClientStorage: async () => void events.push(`wipe:${account.identity.subject}`) },
-      shutdown: async () => void events.push(`close:${account.identity.subject}`),
-    }),
-  });
-  const connection = connectAuthProvider(session);
-  connection.update({ key: "alice@example.com" });
-  await settle();
-  expect(session.getSnapshot().account?.identity.subject).toBe("internal-42");
-  expect(events).toEqual(["close:internal-42"]);
-  // A real switch between provider keys does sign out first.
-  backendUser = user("internal-43");
-  connection.update({ key: "bob@example.com" });
-  await settle();
-  expect(events).toEqual(["close:internal-42", "wipe:internal-42", "close:internal-42"]);
-  connection.dispose();
-  await session.close();
-});
-
 it("signs out a revoked user in a visible tab once a later check agrees", async () => {
   const t = await setup(user("alice"), { visible: true });
   t.signIn(user("alice"));
@@ -331,30 +430,433 @@ it("runs a focus check that arrives during a refused check as its own check", as
   await t.session.close();
 });
 
-it("treats a reload whose first provider key differs from the remembered one as a switch", async () => {
-  const restored = user("internal-42");
-  let backendUser: AccountHandle = restored;
-  const events: string[] = [];
+it("links a guest to a user who has no account yet, however the watch finds out", async () => {
+  for (const trigger of ["start", "focus", "reauthenticate"] as const) {
+    let backendUser: AccountHandle | null = trigger === "start" ? user("alice") : null;
+    const linkWithBackend = vi.fn(async () => user("alice"));
+    const loginWithBackend = vi.fn(async () => backendUser!);
+    let focus: (() => void) | undefined;
+    const accounts = new AccountManager(
+      { createLocalFirst: () => guest, loginWithBackend, linkWithBackend, logout() {} },
+      guest,
+    );
+    const session = await createJazzSessionOwner({
+      accounts,
+      openClient: async () => ({ shutdown: async () => {} }),
+    });
+    const watch = watchBackendUser(
+      session,
+      async () => (backendUser ? { ...backendUser.identity, hasAccount: false } : null),
+      {
+        onFocus(check) {
+          focus = check;
+          return () => (focus = undefined);
+        },
+      },
+    );
+    await settle();
+    backendUser = user("alice");
+    if (trigger === "focus") focus?.();
+    if (trigger === "reauthenticate") await watch.reauthenticate();
+    await settle();
+    expect(linkWithBackend, trigger).toHaveBeenCalledOnce();
+    expect(loginWithBackend, trigger).not.toHaveBeenCalled();
+    expect(session.getSnapshot().account?.identity.subject).toBe("alice");
+    watch.stop();
+    await session.close();
+  }
+});
+
+it("signs a guest in as a user who already has an account, without linking", async () => {
+  const linkWithBackend = vi.fn(async () => user("alice"));
+  const loginWithBackend = vi.fn(async () => user("alice"));
   const session = await createJazzSessionOwner({
     accounts: new AccountManager(
-      { createLocalFirst: () => guest, logout() {}, loginWithBackend: async () => backendUser },
-      restored,
+      { createLocalFirst: () => guest, loginWithBackend, linkWithBackend, logout() {} },
+      guest,
     ),
-    clearOnSignOut: true,
-    openClient: async (account) => ({
-      db: { deleteClientStorage: async () => void events.push(`wipe:${account.identity.subject}`) },
-      shutdown: async () => void events.push(`close:${account.identity.subject}`),
-    }),
+    openClient: async () => ({ shutdown: async () => {} }),
   });
-  let stored: string | null | undefined = "alice@example.com";
-  rememberProviderKeys(session, { get: () => stored, set: (key) => (stored = key) });
-  backendUser = user("internal-43");
-  const connection = connectAuthProvider(session);
-  connection.update({ key: "bob@example.com" });
+  const watch = watchBackendUser(
+    session,
+    async () => ({ ...user("alice").identity, hasAccount: true }),
+    { onFocus: () => () => {} },
+  );
   await settle();
-  expect(session.getSnapshot().account?.identity.subject).toBe("internal-43");
-  expect(events).toEqual(["wipe:internal-42", "close:internal-42"]);
-  expect(stored).toBe("bob@example.com");
-  connection.dispose();
+  expect(loginWithBackend).toHaveBeenCalledOnce();
+  expect(linkWithBackend).not.toHaveBeenCalled();
+  watch.stop();
   await session.close();
+});
+
+it("an app's own linkWithBackend after sign-up joins the link the watch started", async () => {
+  let signedUp = false;
+  let releaseLink!: () => void;
+  const linkWithBackend = vi.fn(
+    () => new Promise<AccountHandle>((resolve) => (releaseLink = () => resolve(user("alice")))),
+  );
+  const fetch = vi.fn(async (url: string) => {
+    expect(url).toMatch(/\/backend-user$/);
+    return signedUp
+      ? Response.json({ account: null, identity: user("alice").identity })
+      : new Response("signed_out", { status: 401 });
+  });
+  let focus: (() => void) | undefined;
+  const following = await createJazzSessionOwner({
+    accounts: new AccountManager(
+      {
+        createLocalFirst: () => guest,
+        logout() {},
+        loginWithBackend: async () => user("alice"),
+        linkWithBackend,
+      },
+      guest,
+    ),
+    decorate: followUser({
+      registry: "https://app.example.test/jazz/apps/x/accounts",
+      events: {
+        onFocus(check) {
+          focus = check;
+          return () => (focus = undefined);
+        },
+      },
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    }),
+    openClient: async () => ({ shutdown: async () => {} }),
+  });
+  await settle();
+  // The sign-up's popup closes: focus returns and the watch starts the link.
+  signedUp = true;
+  focus?.();
+  await settle();
+  expect(linkWithBackend).toHaveBeenCalledOnce();
+  // The app's own call after its sign-up joins it instead of failing as busy.
+  const joined = following.linkWithBackend();
+  releaseLink();
+  await joined;
+  expect(following.getSnapshot().account?.identity.subject).toBe("alice");
+  // And once it is done, a late call is a no-op too.
+  await following.linkWithBackend();
+  expect(linkWithBackend).toHaveBeenCalledOnce();
+  await following.close();
+});
+
+/** A guest's session whose backend names `backend` (and whether they have an account). */
+async function guestSetup(options: {
+  linkWithBackend: () => Promise<AccountHandle>;
+  loginWithBackend?: () => Promise<AccountHandle>;
+  linkGuest?: boolean;
+  initial?: AccountHandle;
+}) {
+  let backend: { user: AccountHandle; hasAccount: boolean } | null = null;
+  let focus: (() => void) | undefined;
+  let otherTab: (() => void) | undefined;
+  const opened: string[] = [];
+  const linkWithBackend = vi.fn(options.linkWithBackend);
+  const loginWithBackend = vi.fn(
+    options.loginWithBackend ??
+      (async () => {
+        if (!backend) throw new AccountAuthError("signed_out", 401);
+        return backend.user;
+      }),
+  );
+  const session = await createJazzSessionOwner({
+    accounts: new AccountManager(
+      { createLocalFirst: () => guest, loginWithBackend, linkWithBackend, logout() {} },
+      options.initial ?? guest,
+    ),
+    openClient: async (account) => {
+      opened.push(account.identity.subject);
+      return { shutdown: async () => {} };
+    },
+  });
+  const probe = vi.fn(async () =>
+    backend ? { ...backend.user.identity, hasAccount: backend.hasAccount } : null,
+  );
+  const watch = watchBackendUser(
+    session,
+    probe,
+    {
+      onFocus(check) {
+        focus = check;
+        return () => (focus = undefined);
+      },
+      crossTab: {
+        post() {},
+        listen(check) {
+          otherTab = check;
+          return () => (otherTab = undefined);
+        },
+      },
+    },
+    { linkGuest: options.linkGuest },
+  );
+  await settle();
+  return {
+    session,
+    watch,
+    probe,
+    opened,
+    linkWithBackend,
+    loginWithBackend,
+    backendNames: (user: AccountHandle | null, hasAccount = false) =>
+      (backend = user ? { user, hasAccount } : null),
+    focus: () => focus?.(),
+    otherTab: () => otherTab?.(),
+    subject: () => session.getSnapshot().account?.identity.subject,
+    async close() {
+      watch.stop();
+      await session.close();
+    },
+  };
+}
+
+it("a link that fails to reach the backend clears, rejects reauthenticate, and a retry links", async () => {
+  let reachable = false;
+  const t = await guestSetup({
+    linkWithBackend: async () => {
+      if (!reachable) throw new AccountAuthError("account_request_failed", 503);
+      return user("alice");
+    },
+  });
+  t.backendNames(user("alice"));
+  await expect(t.watch.reauthenticate()).rejects.toThrow("account_request_failed");
+  expect(t.watch.linking).toBeUndefined();
+  expect(t.subject()).toBe("guest");
+  // Not a refusal: the next check links again, and doesn't sign alice in instead.
+  reachable = true;
+  await t.watch.reauthenticate();
+  expect(t.linkWithBackend).toHaveBeenCalledTimes(2);
+  expect(t.loginWithBackend).not.toHaveBeenCalled();
+  expect(t.subject()).toBe("alice");
+  await t.close();
+});
+
+it("signs the user in instead, once, when the backend refuses the guest's link", async () => {
+  for (const refusal of [
+    new AccountAuthError("link_refused", 409),
+    new AccountAuthError("invalid_local_first_proof", 401),
+  ]) {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let logins = 0;
+    const t = await guestSetup({
+      linkWithBackend: async () => {
+        throw refusal;
+      },
+      // The first sign-in fails too, so the guest stays and focus keeps checking.
+      loginWithBackend: async () => {
+        if (logins++ === 0) throw new AccountAuthError("account_request_failed", 503);
+        return user("alice");
+      },
+    });
+    t.backendNames(user("alice"));
+    t.focus();
+    await settle();
+    expect(t.subject(), refusal.code).toBe("guest");
+    for (let i = 0; i < 3; i++) {
+      t.focus();
+      await settle();
+    }
+    // One link, never repeated for the same guest and user; the sign-in that
+    // replaced it retried until it worked.
+    expect(t.linkWithBackend, refusal.code).toHaveBeenCalledOnce();
+    expect(t.loginWithBackend, refusal.code).toHaveBeenCalledTimes(2);
+    expect(t.subject(), refusal.code).toBe("alice");
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+    await t.close();
+  }
+});
+
+it("reauthenticate resolves once a refused link falls back to signing in", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const t = await guestSetup({
+    linkWithBackend: async () => {
+      throw new AccountAuthError("link_refused", 409);
+    },
+  });
+  t.backendNames(user("alice"));
+  await t.watch.reauthenticate();
+  expect(t.subject()).toBe("alice");
+  expect(t.loginWithBackend).toHaveBeenCalledOnce();
+  warn.mockRestore();
+  await t.close();
+});
+
+it("signs in to the account that appeared while the link ran (409)", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  // Alice signed in elsewhere between the probe and the link: the core has
+  // her account by now and refuses to give her the guest's.
+  const t = await guestSetup({
+    linkWithBackend: async () => {
+      t.backendNames(user("alice"), true);
+      throw new AccountAuthError("link_refused", 409);
+    },
+  });
+  t.backendNames(user("alice"), false);
+  await t.watch.reauthenticate();
+  expect(t.subject()).toBe("alice");
+  expect(t.linkWithBackend).toHaveBeenCalledOnce();
+  expect(t.loginWithBackend).toHaveBeenCalledOnce();
+  warn.mockRestore();
+  await t.close();
+});
+
+it("keeps the guest when the user signs out while the link runs", async () => {
+  const t = await guestSetup({
+    linkWithBackend: async () => {
+      t.backendNames(null);
+      throw new AccountAuthError("signed_out", 401);
+    },
+  });
+  t.backendNames(user("alice"));
+  // The session follows the backend's newer answer: no one signed in.
+  await t.watch.reauthenticate();
+  expect(t.subject()).toBe("guest");
+  expect(t.session.getSnapshot().status).toBe("ready");
+  expect(t.loginWithBackend).not.toHaveBeenCalled();
+  // Not a refusal: once alice signs in again, the guest links to her.
+  t.linkWithBackend.mockImplementation(async () => user("alice"));
+  t.backendNames(user("alice"));
+  t.focus();
+  await settle();
+  expect(t.subject()).toBe("alice");
+  expect(t.linkWithBackend).toHaveBeenCalledTimes(2);
+  await t.close();
+});
+
+it("with linkGuest off, leaves a guest whose user has no account to the app", async () => {
+  const t = await guestSetup({ linkWithBackend: async () => user("alice"), linkGuest: false });
+  t.backendNames(user("alice"));
+  await t.watch.reauthenticate();
+  t.focus();
+  await settle();
+  expect(t.linkWithBackend).not.toHaveBeenCalled();
+  expect(t.loginWithBackend).not.toHaveBeenCalled();
+  expect(t.subject()).toBe("guest");
+  // So the app's own link after its sign-up still goes through.
+  await t.session.linkWithBackend();
+  expect(t.subject()).toBe("alice");
+  // A user who already has an account is still signed in.
+  const u = await guestSetup({ linkWithBackend: async () => user("bob"), linkGuest: false });
+  u.backendNames(user("bob"), true);
+  await u.watch.reauthenticate();
+  expect(u.loginWithBackend).toHaveBeenCalledOnce();
+  expect(u.subject()).toBe("bob");
+  await t.close();
+  await u.close();
+});
+
+it("keeps linking, never signs in instead, when the link fails for a reason that may pass", async () => {
+  for (const failure of [
+    new AccountAuthError("account_registry_unavailable", 503),
+    new AccountAuthError("invalid_link_challenge", 400),
+    new AccountAuthError("account_request_timeout"),
+  ]) {
+    let fails = true;
+    const t = await guestSetup({
+      linkWithBackend: async () => {
+        if (fails) throw failure;
+        return user("alice");
+      },
+    });
+    t.backendNames(user("alice"));
+    await expect(t.watch.reauthenticate(), failure.code).rejects.toThrow(failure.code);
+    t.focus();
+    await settle();
+    expect(t.loginWithBackend, failure.code).not.toHaveBeenCalled();
+    expect(t.subject(), failure.code).toBe("guest");
+    fails = false;
+    t.focus();
+    await settle();
+    expect(t.subject(), failure.code).toBe("alice");
+    await t.close();
+  }
+});
+
+it("re-checks once when the link says signed out, and stops if the backend keeps disagreeing", async () => {
+  // The probe keeps naming alice while every link answers signed out.
+  const t = await guestSetup({
+    linkWithBackend: async () => {
+      throw new AccountAuthError("signed_out", 401);
+    },
+  });
+  t.backendNames(user("alice"));
+  await expect(t.watch.reauthenticate()).rejects.toThrow("signed_out");
+  expect(t.linkWithBackend).toHaveBeenCalledTimes(2);
+  expect(t.loginWithBackend).not.toHaveBeenCalled();
+  expect(t.subject()).toBe("guest");
+  await t.close();
+});
+
+it("two tabs of one guest linking at once both end on the guest's account", async () => {
+  // The backend's link is idempotent for one guest and one user: the second
+  // tab's link answers with the account the first one linked.
+  let linked: AccountHandle | undefined;
+  const guestAccount = handle("urn:jazz:local-first", "guest");
+  const linkedAccount = Object.freeze({
+    id: guestAccount.id,
+    identity: user("alice").identity,
+  }) as AccountHandle;
+  const link = async () => {
+    await settle();
+    linked ??= linkedAccount;
+    return linked;
+  };
+  const tabs = [
+    await guestSetup({ linkWithBackend: link }),
+    await guestSetup({ linkWithBackend: link }),
+  ];
+  for (const tab of tabs) tab.backendNames(user("alice"));
+  await Promise.all(tabs.map((tab) => tab.watch.reauthenticate()));
+  for (const tab of tabs) {
+    expect(tab.linkWithBackend).toHaveBeenCalledOnce();
+    expect(tab.loginWithBackend).not.toHaveBeenCalled();
+    expect(tab.session.getSnapshot().account?.id).toBe(guestAccount.id);
+  }
+  // A tab that checks after the link sees alice with an account: it signs in, no second link.
+  const late = await guestSetup({ linkWithBackend: link, loginWithBackend: async () => linked! });
+  late.backendNames(user("alice"), true);
+  late.otherTab();
+  await settle();
+  expect(late.linkWithBackend).not.toHaveBeenCalled();
+  expect(late.session.getSnapshot().account?.id).toBe(guestAccount.id);
+  for (const tab of [...tabs, late]) await tab.close();
+});
+
+it("an app's linkWithBackend a moment before the watch's own doesn't fail the watch's check", async () => {
+  let release!: () => void;
+  const t = await guestSetup({
+    linkWithBackend: () =>
+      new Promise<AccountHandle>((resolve) => (release = () => resolve(user("alice")))),
+  });
+  t.backendNames(user("alice"));
+  // The app links first; its operation is pending before the watch's check
+  // gets its answer, so the check waits instead of failing as busy.
+  const own = t.session.linkWithBackend();
+  expect(t.session.getSnapshot().status).toBe("transitioning");
+  const asked = t.watch.reauthenticate();
+  await settle();
+  release();
+  await own;
+  await asked;
+  expect(t.subject()).toBe("alice");
+  expect(t.linkWithBackend).toHaveBeenCalledOnce();
+  await t.close();
+});
+
+it("gives each user their own re-check when links keep answering signed out", async () => {
+  const t = await guestSetup({
+    linkWithBackend: async () => {
+      throw new AccountAuthError("signed_out", 401);
+    },
+  });
+  t.backendNames(user("alice"));
+  await expect(t.watch.reauthenticate()).rejects.toThrow("signed_out");
+  expect(t.linkWithBackend).toHaveBeenCalledTimes(2);
+  // Bob signs in next, with no signed-out answer between: he gets his own re-check.
+  t.backendNames(user("bob"));
+  await expect(t.watch.reauthenticate()).rejects.toThrow("signed_out");
+  expect(t.linkWithBackend).toHaveBeenCalledTimes(4);
+  await t.close();
 });

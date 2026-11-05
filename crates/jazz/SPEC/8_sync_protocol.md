@@ -156,9 +156,8 @@ Messages, with their postcard variant tags:
 | 18  | `Welcome`            | server → client | The answer to `Join`: admission and catalogue (§8.9, §8.10)      |
 | 19  | `ConnectionSettled`  | server → client | The position the whole connection is settled through (§8.4)      |
 
-Tags before `Commit` keep their numbers: a replica stores each pending
-upload's header as an encoded `Commit` message (`_jazz_pending`, see §8.3),
-so `Commit` stays tag 4 across stores. No server-sent message has tag 0 or 1, which lets a client tell a
+A replica stores pending uploads as rows of their parts, never as encoded
+messages (§8.3), so no tag needs to stay put for storage. No server-sent message has tag 0 or 1, which lets a client tell a
 sync frame from a `WireFrame::Hello` (tag 0) or `WireFrame::Error` (tag 1) by
 its first byte.
 
@@ -259,14 +258,31 @@ first identity to send one under a node claims it); a trusted link may send
 any.
 
 A replica keeps every unsettled commit and uploads it in order on each
-connection. It is stored a row per op, not as one encoded message:
+connection. It is stored in tables shaped like the rows it writes, not as
+an encoded message, so a change to how commits travel never strands a
+write a user made offline:
 
-- `_jazz_pending (tx, header)`: the `Commit` with its ops and reads left
-  out.
-- `_jazz_pending_items (tx, part, n, item)`: each op (with its bases, deltas
-  and access proof) and serializable read, by list (`part`) and position
-  (`n`).
+- `_jazz_pending (tx, node, seq, clock, snapshot, own, acting, author,
+claims)`: the commit's writer and HLC, a serializable commit's snapshot
+  and own commits (NULL when mergeable), and who it acts as.
+- `_jazz_pending_ops (tx, n, op, tbl, id, target, move_from, move_to, at,
+has_cells, bases, proof_key, proof_seq)`: each op, by position `n`.
+- `_jazz_pending_cells (tx, n, list, col, ty, nulls, value)`: each cell an op
+  writes (`list` 0) or an upsert creates its row with (`list` 1): the kind
+  of value (`ty`), how many present-nullable wrappers hold it (`nulls`), and
+  the value as a native SQLite value. An `f64` is its 8 bits (so NaN and
+  -0.0 survive), a `u64` its bits as an integer, and a composite value
+  (array, tuple, record, enum, large-value descriptor) JSON (`ty` `json`).
+- `_jazz_pending_deltas (tx, n, i, col, depth, key, seq, base, edits)`: each
+  chunked cell that travels as edits.
+- `_jazz_pending_reads (tx, n, version, query, binding, include_deleted)` and
+  `_jazz_pending_read_rows (tx, n, i, id, node, t)`: a serializable commit's
+  reads and the row versions each listed.
 - `_jazz_pending_rows (tx, n, tbl, id, key)`: the local rows it wrote.
+
+Branch targets, bases, claims, own commits, and a read's query and binding
+are JSON with named fields. A value JSON cannot hold (NaN or an infinity in
+a claim, a binding or a composite cell) is refused when the write is made.
 
 What each commit wrote stays in the store at the commit's local seq (the
 row's current version, or history under a later pending write), so a
@@ -279,7 +295,8 @@ it can hold, even one that travels in several frames. An op is bounded by
 its row, not by a limit of its own: a row of 33 or more inline cells near
 64 KiB each is over 2 MiB, and such a store refuses it as a row too. A refused commit moves
 to the retry store, `_jazz_rejected (tx, error, serializable)` with its ops
-in `_jazz_rejected_ops (tx, n, op)`, until the host discards it. A build
+in `_jazz_rejected_ops`, `_jazz_rejected_cells` and `_jazz_rejected_deltas`
+(the op tables' layout), until the host discards it. A build
 from before this layout cannot open a store written by one after it, nor the
 other way around. That is acceptable only because the SQLite store format
 has not shipped (alpha.60).
@@ -927,8 +944,6 @@ connection that sends any other frame after its `Hello` ends with
   naming an open transaction stages the row write in it instead
   (`FinishStream` answers `Staged`). A stream is named by its `BeginStream`
   request id and ends with its connection.
-- While no permissions head is published, an untrusted thin session's
-  requests are answered `NotReady`.
 - A thin session's answers share its connection's egress budget: a live
   query's events wait on the owner while the budget is spent.
 

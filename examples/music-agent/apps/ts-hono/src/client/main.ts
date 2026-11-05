@@ -1,7 +1,7 @@
 import "@garden-co/design/jazz/tokens.css";
 import "@garden-co/design/jazz/fonts.css";
 import "./styles.css";
-import { betterAuth, createJazzApp } from "jazz-tools/client";
+import { createJazzApp } from "jazz-tools/client";
 import { bootstrapWorkspace } from "@/src/lib/account-enrollment";
 import { authClient } from "./auth-client";
 import { chatScreen } from "./chat";
@@ -9,7 +9,6 @@ import { h } from "./dom";
 import { signInScreen } from "./sign-in";
 
 const root = document.getElementById("app")!;
-const appId = import.meta.env.VITE_JAZZ_APP_ID;
 
 const status = (message: string, error = false) =>
   h(
@@ -20,7 +19,7 @@ const status = (message: string, error = false) =>
 
 // Better Auth's session drives sign-in; the server's Jazz (`createJazz` in
 // src/lib/backend-jazz-client.ts) reads it in `authenticate`.
-const jazz = createJazzApp({ appId, serverUrl: "/jazz", auth: betterAuth(authClient) });
+const jazz = createJazzApp({ serverUrl: "/jazz" });
 
 let shown: { key: string; dispose?(): void } | undefined;
 function show(key: string, render: () => HTMLElement | { element: HTMLElement; dispose(): void }) {
@@ -59,15 +58,21 @@ function prepare(userId: string) {
 }
 
 async function signOut() {
-  // Signs out of Jazz first (flushing local writes), then of Better Auth.
-  await jazz.logout();
+  // Signs out of Better Auth, then Jazz follows the backend's answer.
+  await authClient.signOut();
+  // A failure shows as Jazz's error state; leave the page either way.
+  await jazz.reauthenticate().catch(() => {});
   window.location.assign("/");
 }
 
 function update() {
   const session = authClient.$store.atoms.session!.get();
   if (session.isPending) return show("loading", () => status("Opening MusicAgent…"));
-  if (!session.data) return show("signed-out", signInScreen);
+  if (!session.data)
+    return show("signed-out", () =>
+      // A failure shows as Jazz's error state below.
+      signInScreen(() => jazz.reauthenticate().catch(() => {})),
+    );
   const user = session.data.user as { id: string; name: string };
   const snapshot = jazz.getSnapshot();
   if (snapshot.status === "error")

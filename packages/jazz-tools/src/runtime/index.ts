@@ -65,13 +65,13 @@ export type { AuthFailureReason, AuthState } from "./auth-state.js";
 export type { LinkStatus, SyncStatus } from "./sync-status.js";
 export type { JazzPageHandle, PageDbInfo } from "./page-handle.js";
 export {
-  fetchStoredPermissions,
+  fetchPublishedBundles,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
-  type FetchStoredPermissionsOptions,
+  type FetchPublishedBundlesOptions,
   type FetchStoredWasmSchemaOptions,
+  type PublishedBundle,
   type StoredSchemaHash,
-  type StoredPermissionsResponse,
 } from "../dev/catalogue-api.js";
 export {
   fetchServerSubscriptions,

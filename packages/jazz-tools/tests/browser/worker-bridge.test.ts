@@ -40,7 +40,7 @@ import { setBrowserFollowerProbeTimingForTest } from "../../src/runtime/native-r
 import { createOpenTransactionId } from "../../src/runtime/client.js";
 import { loadWasmModule } from "../../src/runtime/wasm-loader.js";
 import { createBrowserStorageOwner } from "../../src/runtime/browser-worker-config.js";
-import { getJazzServerJwtForUser } from "./testing-server.js";
+import { jazzAppUser } from "./testing-server.js";
 import {
   createRemoteBrowserDb,
   deleteRemoteBrowserIndexedDbAndWaitForReload,
@@ -1465,18 +1465,11 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const dbName = uniqueDbName("catalogue-current-schema-rehydrate");
     const testingServer = await publishCatalogueSchemaFamily("catalogue-current-schema-rehydrate");
-    const jwtToken = await getJazzServerJwtForUser(
-      "catalogue-current-schema-rehydrate",
-      undefined,
-      testingServer.appId,
-    );
+    const user = await jazzAppUser(testingServer, "catalogue-current-schema-rehydrate");
 
     const seeded = track(
       await createDb({
-        appId: testingServer.appId,
-        serverUrl: testingServer.serverUrl,
-        jwtToken,
-        registerJwt: true,
+        ...user,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -1503,10 +1496,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const reopened = track(
       await createDb({
-        appId: testingServer.appId,
-        serverUrl: testingServer.serverUrl,
-        jwtToken,
-        registerJwt: true,
+        ...user,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -1522,10 +1512,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const remote = track(
       await createDb({
-        appId: testingServer.appId,
-        serverUrl: testingServer.serverUrl,
-        jwtToken,
-        registerJwt: true,
+        ...user,
         driver: { type: "persistent", dbName: uniqueDbName("catalogue-remote-authority") },
       }),
     );

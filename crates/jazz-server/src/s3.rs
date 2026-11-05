@@ -126,6 +126,12 @@ pub struct S3Options {
     /// The STS endpoint web identity roles are assumed at
     /// (`AWS_ENDPOINT_URL_STS`); `None` is AWS's, in `region`.
     pub sts_endpoint: Option<String>,
+    /// The deployment environment (`production`, `preview`, …) this
+    /// store runs in. When set, the bucket is claimed for that environment
+    /// by a marker at its root, and a store of any other environment is
+    /// refused: one environment's credentials then never reach another's
+    /// large values (a `vercel()` core sets it).
+    pub environment: Option<String>,
 }
 
 impl S3Options {
@@ -179,6 +185,7 @@ impl S3Options {
             prefix: prefix.unwrap_or_default(),
             credentials,
             sts_endpoint: env("AWS_ENDPOINT_URL_STS"),
+            environment: None,
         })
     }
 
@@ -200,6 +207,19 @@ const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 const ASSUME_FAILURE_HOLD: Duration = Duration::from_secs(5);
 /// Under the prefix: the id of the store that owns it.
 const OWNER_OBJECT: &str = ".jazz-owner";
+/// At the bucket's root: the one environment (production, preview, …)
+/// whose stores may use the bucket.
+pub(crate) const ENVIRONMENT_OBJECT: &str = ".jazz-environment";
+
+/// What reading a marker object found.
+enum Marker {
+    Found(String),
+    /// 404: no such object.
+    Missing,
+    /// 403 AccessDenied: absent to keys without s3:ListBucket, or not
+    /// readable with these keys.
+    Denied,
+}
 
 /// Large-value bytes in an S3-compatible bucket ([`S3Options`]).
 pub struct S3ChunkStore {
@@ -263,7 +283,31 @@ impl S3ChunkStore {
                 claim_failed: Mutex::new(None),
             }),
             runtime: Some(runtime),
-        })
+        }
+        .claiming_now())
+    }
+
+    /// Check the store's claims (environment, then prefix) right away, so
+    /// a refused store says so at startup rather than at its first large
+    /// value. A core whose only credential is a workload token that has not
+    /// arrived yet checks them on first use instead.
+    fn claiming_now(self) -> Self {
+        let inner = Arc::clone(&self.inner);
+        let waits_for_token = matches!(
+            &inner.options.credentials,
+            S3Credentials::WebIdentity {
+                token: WebIdentityToken::Workload,
+                ..
+            }
+        ) && crate::middleware::workload::latest_workload_token().is_none();
+        if !waits_for_token && let Some(runtime) = &self.runtime {
+            runtime.spawn(async move {
+                if let Err(error) = inner.claim().await {
+                    tracing::error!(%error, "s3 blobs: checking the large-value store at startup failed");
+                }
+            });
+        }
+        self
     }
 
     pub fn options(&self) -> &S3Options {
@@ -339,13 +383,19 @@ struct Request<'a> {
     body_hash: Option<[u8; 32]>,
     /// Put only if nothing is stored under the name.
     if_none_match: bool,
+    /// `name` is at the bucket's root, not under the prefix.
+    rooted: bool,
 }
 
 impl Inner {
     /// The object's URL and host, and its path as signed.
-    fn locate(&self, name: &str) -> (String, String, String) {
+    fn locate(&self, name: &str, rooted: bool) -> (String, String, String) {
         let o = &self.options;
-        let key = format!("{}{name}", o.prefix);
+        let key = if rooted {
+            name.to_owned()
+        } else {
+            format!("{}{name}", o.prefix)
+        };
         let base = o
             .endpoint
             .clone()
@@ -460,7 +510,7 @@ impl Inner {
     }
 
     async fn send(&self, request: Request<'_>) -> Result<reqwest::Response, String> {
-        let (url, host, path) = self.locate(request.name);
+        let (url, host, path) = self.locate(request.name, request.rooted);
         let keys = self.keys().await?;
         let payload = hex::encode(
             request
@@ -527,6 +577,7 @@ impl Inner {
                         self.owner
                     )
                 };
+                self.claim_environment().await?;
                 match self.read_owner().await? {
                     Some(owner) if owner == self.owner => return Ok(()),
                     Some(owner) => return Err(refused(&owner)),
@@ -540,6 +591,7 @@ impl Inner {
                         body_hash: Some(Sha256::digest(&body).into()),
                         body: Some(body),
                         if_none_match: true,
+                        rooted: false,
                     })
                     .await?;
                 if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
@@ -561,12 +613,127 @@ impl Inner {
     }
 
     async fn read_owner(&self) -> Result<Option<String>, String> {
-        let response = self.request(reqwest::Method::GET, OWNER_OBJECT).await?;
-        let Some(response) = self.found(response, "read", OWNER_OBJECT).await? else {
-            return Ok(None);
+        self.read_marker(OWNER_OBJECT, false).await
+    }
+
+    /// A small marker object's contents, or `None` if there is none.
+    async fn read_marker(&self, name: &str, rooted: bool) -> Result<Option<String>, String> {
+        Ok(match self.read_marker_status(name, rooted).await? {
+            Marker::Found(contents) => Some(contents),
+            Marker::Missing | Marker::Denied => None,
+        })
+    }
+
+    /// A small marker object's contents, or which answer said it is absent:
+    /// a 404, or a 403 AccessDenied (absence to keys without s3:ListBucket,
+    /// or a key that may not read it).
+    async fn read_marker_status(&self, name: &str, rooted: bool) -> Result<Marker, String> {
+        let response = self
+            .send(Request {
+                method: reqwest::Method::GET,
+                name,
+                body: None,
+                body_hash: None,
+                if_none_match: false,
+                rooted,
+            })
+            .await?;
+        let status = response.status();
+        if status.is_success() {
+            let body = read_bounded(response, 1024, name).await?;
+            return Ok(Marker::Found(
+                String::from_utf8_lossy(&body).trim().to_owned(),
+            ));
+        }
+        let body = response.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Marker::Missing);
+        }
+        if status == reqwest::StatusCode::FORBIDDEN
+            && xml_field(&body, "Code").as_deref() == Some("AccessDenied")
+        {
+            return Ok(Marker::Denied);
+        }
+        Err(self.failure(status, &body, "read", name).await)
+    }
+
+    /// With [`S3Options::environment`] set, check that the bucket serves
+    /// that environment only, claiming it for it if none has yet: a bucket
+    /// another environment claimed is refused. The marker sits at the
+    /// bucket's root, not under the prefix, since the whole bucket is what
+    /// one environment's credentials reach.
+    async fn claim_environment(&self) -> Result<(), String> {
+        let Some(environment) = &self.options.environment else {
+            return Ok(());
         };
-        let body = read_bounded(response, 1024, OWNER_OBJECT).await?;
-        Ok(Some(String::from_utf8_lossy(&body).trim().to_owned()))
+        let unreachable_marker = || {
+            format!(
+                "s3 blobs: cannot claim bucket {bucket} for the {environment} environment: \
+                 the credentials may not read or write s3://{bucket}/{ENVIRONMENT_OBJECT}. \
+                 Allow s3:GetObject and s3:PutObject on arn:aws:s3:::{bucket}/{ENVIRONMENT_OBJECT} \
+                 as well as on the prefix",
+                bucket = self.options.bucket,
+            )
+        };
+        let refused = |other: &str| {
+            format!(
+                "s3 blobs: bucket {} serves the {other} environment, not {environment}; \
+                 give each environment its own bucket",
+                self.options.bucket
+            )
+        };
+        match self.read_marker(ENVIRONMENT_OBJECT, true).await? {
+            Some(claimed) if &claimed == environment => return Ok(()),
+            Some(claimed) => return Err(refused(&claimed)),
+            None => {}
+        }
+        let body = Bytes::from(format!("{environment}\n"));
+        let response = self
+            .send(Request {
+                method: reqwest::Method::PUT,
+                name: ENVIRONMENT_OBJECT,
+                body_hash: Some(Sha256::digest(&body).into()),
+                body: Some(body),
+                if_none_match: true,
+                rooted: true,
+            })
+            .await?;
+        if response.status() == reqwest::StatusCode::FORBIDDEN {
+            // A policy scoped to the prefix (`prefix/*`) reaches every
+            // object but this one: its read answered AccessDenied, which
+            // reads as absent, and its put is refused.
+            let body = response.text().await.unwrap_or_default();
+            if xml_field(&body, "Code").as_deref() == Some("AccessDenied") {
+                return Err(unreachable_marker());
+            }
+            return Err(self
+                .failure(
+                    reqwest::StatusCode::FORBIDDEN,
+                    &body,
+                    "claim",
+                    ENVIRONMENT_OBJECT,
+                )
+                .await);
+        }
+        if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
+            return match self.read_marker_status(ENVIRONMENT_OBJECT, true).await? {
+                Marker::Found(claimed) if &claimed == environment => Ok(()),
+                Marker::Found(claimed) => Err(refused(&claimed)),
+                // Its put says it exists, and its read was denied: the keys
+                // may not read it (s3:GetObject).
+                Marker::Denied => Err(unreachable_marker()),
+                // Its put says it exists, and its read found none: deleted
+                // in between. A later claim starts over.
+                Marker::Missing => Err(format!(
+                    "s3 blobs: the environment marker s3://{}/{ENVIRONMENT_OBJECT} vanished \
+                     while claiming it for the {environment} environment",
+                    self.options.bucket
+                )),
+            };
+        }
+        self.expect_ok(response, "claim", ENVIRONMENT_OBJECT)
+            .await
+            .map(|_| ())
     }
 
     async fn request(
@@ -580,6 +747,7 @@ impl Inner {
             body: None,
             body_hash: None,
             if_none_match: false,
+            rooted: false,
         })
         .await
     }
@@ -595,6 +763,7 @@ impl Inner {
                 // The node's hash is the SHA-256 of its bytes.
                 body_hash: Some(node.hash),
                 if_none_match: false,
+                rooted: false,
             })
             .await?;
         self.expect_ok(response, "put", &name).await.map(|_| ())
@@ -998,6 +1167,112 @@ mod tests {
         assert_eq!(block(again.get(&key)).unwrap().as_deref(), Some(&bytes[..]));
     }
 
+    /// A bucket serves one environment: the first store with an
+    /// environment claims it at the bucket's root (create-if-absent), and
+    /// a store of another environment is refused under any prefix.
+    #[test]
+    fn a_bucket_serves_one_environment() {
+        let bucket = mock::MockS3::start();
+        let (key, bytes) = node(5);
+        let in_env = |prefix: &str, environment: &str| {
+            let mut options = bucket.options(prefix);
+            options.environment = Some(environment.to_owned());
+            options
+        };
+        let production =
+            S3ChunkStore::new(in_env("prod/", "production"), "store-a".to_owned()).unwrap();
+        block(production.put(&key, &bytes)).unwrap();
+        assert_eq!(
+            bucket
+                .state
+                .objects
+                .lock()
+                .unwrap()
+                .get(&format!("bucket/{ENVIRONMENT_OBJECT}"))
+                .map(|b| b.as_slice()),
+            Some(&b"production\n"[..])
+        );
+        let preview =
+            S3ChunkStore::new(in_env("preview/", "preview"), "store-b".to_owned()).unwrap();
+        let error = block(preview.get(&key)).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("serves the production environment, not preview"),
+            "{error}"
+        );
+        assert!(bucket.names("preview/").is_empty(), "nothing written");
+        // Without an environment, nothing is checked (self-hosted stores).
+        let plain = S3ChunkStore::new(bucket.options("plain/"), "store-c".to_owned()).unwrap();
+        block(plain.put(&key, &bytes)).unwrap();
+        let other =
+            S3ChunkStore::new(in_env("other/", "production"), "store-d".to_owned()).unwrap();
+        block(other.put(&key, &bytes)).unwrap();
+    }
+
+    /// Keys scoped to the prefix cannot reach the environment marker at
+    /// the bucket's root: the claim says which permission is missing.
+    #[test]
+    fn a_prefix_scoped_policy_names_the_marker_it_cannot_reach() {
+        let bucket = mock::MockS3::start();
+        *bucket.state.only_prefix.lock().unwrap() = Some("prod/".to_owned());
+        let mut options = bucket.options("prod/");
+        options.environment = Some("production".to_owned());
+        let store = S3ChunkStore::new(options, "store-a".to_owned()).unwrap();
+        let (key, bytes) = node(6);
+        let error = block(store.put(&key, &bytes)).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("s3:GetObject and s3:PutObject on arn:aws:s3:::bucket/.jazz-environment"),
+            "{error}"
+        );
+        assert!(bucket.names("prod/").is_empty());
+    }
+
+    /// Keys that may put the root marker but not read it see an existing
+    /// marker as absent and their create-if-absent refused: the claim says
+    /// which permission is missing, not that the marker vanished.
+    #[test]
+    fn a_marker_that_cannot_be_read_names_the_missing_permission() {
+        let bucket = mock::MockS3::start();
+        let in_env = |prefix: &str| {
+            let mut options = bucket.options(prefix);
+            options.environment = Some("production".to_owned());
+            options
+        };
+        let (key, bytes) = node(7);
+        let first = S3ChunkStore::new(in_env("a/"), "store-a".to_owned()).unwrap();
+        block(first.put(&key, &bytes)).unwrap();
+        *bucket.state.only_prefix_reads.lock().unwrap() = Some("b/".to_owned());
+        let second = S3ChunkStore::new(in_env("b/"), "store-b".to_owned()).unwrap();
+        let error = block(second.put(&key, &bytes)).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("s3:GetObject and s3:PutObject on arn:aws:s3:::bucket/.jazz-environment"),
+            "{error}"
+        );
+        assert!(bucket.names("b/").is_empty());
+    }
+
+    /// A marker created by someone else and deleted before our read: the
+    /// claim says it vanished, not that a permission is missing.
+    #[test]
+    fn a_marker_deleted_while_claiming_says_it_vanished() {
+        let bucket = mock::MockS3::start();
+        let mut options = bucket.options("a/");
+        options.environment = Some("production".to_owned());
+        *bucket.state.conflict_then_vanish.lock().unwrap() =
+            Some("bucket/.jazz-environment".to_owned());
+        let store = S3ChunkStore::new(options, "store-a".to_owned()).unwrap();
+        let (key, bytes) = node(8);
+        let error = block(store.put(&key, &bytes)).unwrap_err();
+        assert!(error.message.contains("vanished"), "{error}");
+        assert!(!error.message.contains("s3:GetObject"), "{error}");
+        assert!(bucket.names("a/").is_empty());
+    }
+
     /// Without s3:ListBucket a missing key answers 403: it reads as absent.
     /// A body larger than any node is refused.
     #[test]
@@ -1051,16 +1326,17 @@ mod tests {
                 session_token: None,
             }),
             sts_endpoint: None,
+            environment: None,
         };
         let node = NodeKey { hash: [0xab; 32] }.object_name();
         let store = S3ChunkStore::new(options(None), "me".to_owned()).unwrap();
-        let (url, host, path) = store.inner.locate(&node);
+        let (url, host, path) = store.inner.locate(&node, false);
         assert_eq!(host, "jazz-app.s3.us-east-1.amazonaws.com");
         assert_eq!(path, format!("/blobs/{}", "ab".repeat(32)));
         assert_eq!(url, format!("https://{host}{path}"));
         let store =
             S3ChunkStore::new(options(Some("http://127.0.0.1:9000/")), "me".to_owned()).unwrap();
-        let (url, host, path) = store.inner.locate(&node);
+        let (url, host, path) = store.inner.locate(&node, false);
         assert_eq!(host, "127.0.0.1:9000");
         assert_eq!(path, format!("/jazz-app/blobs/{}", "ab".repeat(32)));
         assert_eq!(url, format!("http://{host}{path}"));
@@ -1068,7 +1344,7 @@ mod tests {
         let mut dotted = options(None);
         dotted.bucket = "jazz.app".to_owned();
         let store = S3ChunkStore::new(dotted, "me".to_owned()).unwrap();
-        let (_, host, path) = store.inner.locate(&node);
+        let (_, host, path) = store.inner.locate(&node, false);
         assert_eq!(host, "s3.us-east-1.amazonaws.com");
         assert!(path.starts_with("/jazz.app/blobs/"), "{path}");
     }
@@ -1101,6 +1377,15 @@ pub(crate) mod mock {
         pub failing: AtomicBool,
         /// A missing key answers 403 AccessDenied, as without s3:ListBucket.
         pub deny_missing: AtomicBool,
+        /// Set: the keys may only touch objects under this prefix (an IAM
+        /// policy on `bucket/prefix/*`); anything else answers 403.
+        pub only_prefix: Mutex<Option<String>>,
+        /// Set: reads (GET) only under this prefix; puts anywhere.
+        pub only_prefix_reads: Mutex<Option<String>>,
+        /// Set: a create-if-absent put of this key answers 412 while the key
+        /// stays absent, as when another writer created it and it was
+        /// deleted before our read.
+        pub conflict_then_vanish: Mutex<Option<String>>,
         /// Keys by access key id; `test`/`test` is always valid.
         issued: Mutex<BTreeMap<String, (String, String)>>,
         /// What STS was last asked to accept.
@@ -1149,6 +1434,7 @@ pub(crate) mod mock {
                     session_token: None,
                 }),
                 sts_endpoint: Some(format!("{}/sts", self.endpoint)),
+                environment: None,
             }
         }
 
@@ -1191,6 +1477,17 @@ pub(crate) mod mock {
             return error(StatusCode::FORBIDDEN, code);
         }
         let key = parts.uri.path().trim_start_matches('/').to_owned();
+        if let Some(prefix) = state.only_prefix.lock().unwrap().as_deref()
+            && !key.starts_with(&format!("bucket/{prefix}"))
+        {
+            return error(StatusCode::FORBIDDEN, "AccessDenied");
+        }
+        if parts.method == axum::http::Method::GET
+            && let Some(prefix) = state.only_prefix_reads.lock().unwrap().as_deref()
+            && !key.starts_with(&format!("bucket/{prefix}"))
+        {
+            return error(StatusCode::FORBIDDEN, "AccessDenied");
+        }
         let header = |name: &str| {
             parts
                 .headers
@@ -1205,6 +1502,11 @@ pub(crate) mod mock {
                     base64::engine::general_purpose::STANDARD.encode(Sha256::digest(&body));
                 if header("x-amz-checksum-sha256") != Some(digest.as_str()) {
                     return error(StatusCode::BAD_REQUEST, "BadDigest");
+                }
+                if header("if-none-match") == Some("*")
+                    && state.conflict_then_vanish.lock().unwrap().as_deref() == Some(key.as_str())
+                {
+                    return error(StatusCode::PRECONDITION_FAILED, "PreconditionFailed");
                 }
                 if header("if-none-match") == Some("*") && objects.contains_key(&key) {
                     return error(StatusCode::PRECONDITION_FAILED, "PreconditionFailed");

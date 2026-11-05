@@ -2,7 +2,6 @@ import { signChallenge } from "../local-first-auth/index.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import {
   AccountAuthError,
-  requestAccountRegistry,
   requestBackendLinkChallenge,
   requestBackendSignIn,
   readAccountAssignment,
@@ -36,11 +35,17 @@ interface HandleCredentials {
    * Signed in through the app's own backend (`createJazz`): the backend states
    * the identity and its claims; the client holds no credential.
    */
-  delegated?: Readonly<{ claims: Record<string, unknown> }>;
+  delegated?: Readonly<{ claims: Record<string, unknown>; bearer?: AppBearer }>;
   localFirstSecret?: string;
   invalidated: Set<() => void>;
 }
 const credentials = new WeakMap<AccountHandle, HandleCredentials>();
+
+/**
+ * The app's own credential for its backend, for a client that sends no
+ * cookie (a native app): its current bearer token, or null when signed out.
+ */
+export type AppBearer = () => string | null | Promise<string | null>;
 
 const ACCOUNT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const NIL_ACCOUNT_ID = "00000000-0000-0000-0000-000000000000";
@@ -92,11 +97,14 @@ async function tokenFor(auth: JWTAuth): Promise<string> {
 }
 class EnrolledAccount {
   readonly identity: AccountIdentity;
+  readonly claims?: Readonly<Record<string, unknown>>;
   constructor(
     readonly id: string,
     identity: AccountIdentity,
+    claims?: Readonly<Record<string, unknown>>,
   ) {
     this.identity = Object.freeze({ ...identity });
+    if (claims) this.claims = claims;
     Object.freeze(this);
   }
 }
@@ -152,6 +160,20 @@ export function delegatedAccountClaims(
   return material.delegated?.claims;
 }
 
+/**
+ * @internal The app's bearer an account signed in through the app's backend
+ * was signed in with, for a host whose sync connection sends no cookie.
+ */
+export function delegatedAccountBearer(
+  handle: AccountHandle,
+  registry: string,
+): AppBearer | undefined {
+  const material = credentials.get(handle);
+  if (!material || material.registry !== registry)
+    throw new AccountAuthError("invalid_account_handle");
+  return material.delegated?.bearer;
+}
+
 /** @internal Opaque backend material, accessible only to a supported host adapter. */
 export function getBackendAuth(
   handle: AccountHandle,
@@ -190,8 +212,19 @@ export function createAccountManagerWithRuntime(options: {
   restoredLocalFirstSecret?: string;
   selectionDurability?: AccountSelectionDurability;
   fetch?: typeof fetch;
+  /** Sent as `Authorization: Bearer` on sign-in requests to the app's backend. */
+  bearer?: AppBearer;
 }): AccountManager<JWTAuth> {
   const registry = options.registry.replace(/\/$/, "");
+  const bearer = options.bearer;
+  const backendFetch: typeof fetch | undefined = bearer
+    ? async (input, init) => {
+        const token = await bearer();
+        const headers = new Headers(init?.headers);
+        if (token) headers.set("Authorization", `Bearer ${token}`);
+        return (options.fetch ?? fetch)(input, { ...init, headers });
+      }
+    : options.fetch;
   const issued = new Set<AccountHandle>();
   let epoch = 0;
   const assertCurrent = (started: number) => {
@@ -200,25 +233,6 @@ export function createAccountManagerWithRuntime(options: {
   const retain = (handle: AccountHandle) => {
     issued.add(handle);
     return handle;
-  };
-  // Test fixtures only: enroll with a JWT the test's core trusts. Apps sign
-  // in through their backend (`loginWithBackend`) or stay local-first.
-  const enrollJWT = async (operation: string, auth: JWTAuth): Promise<AccountHandle> => {
-    const started = epoch;
-    const token = await tokenFor(auth);
-    assertCurrent(started);
-    const identity = identityFromToken(token);
-    if (isReservedJazzIssuer(identity.issuer))
-      throw new AccountAuthError("external_identity_required");
-    const response = await requestAccountRegistry(
-      registry,
-      operation,
-      token,
-      undefined,
-      options.fetch,
-    );
-    assertCurrent(started);
-    return retain(mintHandle(registry, readAccountAssignment(response, identity), identity, auth));
   };
   if (options.restoredLocalFirstSecret !== undefined)
     parseAuthSecret(options.restoredLocalFirstSecret);
@@ -260,7 +274,7 @@ export function createAccountManagerWithRuntime(options: {
         if (!local) throw new AccountAuthError("local_first_restore_unavailable");
         return retain(mintHandle(registry, local.accountId, local.identity, local.auth, secret));
       },
-      async becomeBackend(auth) {
+      async admitBackend(auth) {
         const started = epoch;
         if (!options.backend) throw new AccountAuthError("backend_host_unavailable");
         if (typeof auth?.backendSecret !== "string" || !auth.backendSecret)
@@ -281,10 +295,7 @@ export function createAccountManagerWithRuntime(options: {
         });
         return retain(handle);
       },
-      registerJWT: (auth) => enrollJWT("register", auth),
-      loginJWT: (auth) => enrollJWT("login", auth),
-      loginOrRegisterJWT: (auth) => enrollJWT("login-or-register", auth),
-      loginWithBackend: () => backendAccount(() => requestBackendSignIn(registry, options.fetch)),
+      loginWithBackend: () => backendAccount(() => requestBackendSignIn(registry, backendFetch)),
       async linkWithBackend(account) {
         // The guest proves itself by signing a challenge the backend issued
         // for the signed-in user, never with its sync token: a proof links
@@ -302,10 +313,10 @@ export function createAccountManagerWithRuntime(options: {
           ? parseJwtPayload(await tokenFor(material.auth))?.aud
           : undefined;
         const linked = await backendAccount(async () => {
-          const challenge = await requestBackendLinkChallenge(registry, options.fetch);
+          const challenge = await requestBackendLinkChallenge(registry, backendFetch);
           if (credentials.get(account) !== material)
             throw new AccountAuthError("account_logged_out");
-          return requestBackendSignIn(registry, options.fetch, {
+          return requestBackendSignIn(registry, backendFetch, {
             link: {
               challenge,
               proof: signChallenge(secret, challenge),
@@ -349,14 +360,16 @@ export function createAccountManagerWithRuntime(options: {
     )
       throw new AccountAuthError("invalid_account_response");
     const id = readAccountAssignment(value, identity);
-    const handle = new EnrolledAccount(id, identity) as AccountHandle;
+    const delegatedClaims =
+      claims && typeof claims === "object" && !Array.isArray(claims)
+        ? Object.freeze({ ...(claims as Record<string, unknown>) })
+        : Object.freeze({});
+    const handle = new EnrolledAccount(id, identity, delegatedClaims) as AccountHandle;
     credentials.set(handle, {
       registry,
       delegated: Object.freeze({
-        claims:
-          claims && typeof claims === "object" && !Array.isArray(claims)
-            ? Object.freeze({ ...(claims as Record<string, unknown>) })
-            : Object.freeze({}),
+        claims: delegatedClaims,
+        ...(bearer ? { bearer } : {}),
       }),
       invalidated: new Set(),
     });

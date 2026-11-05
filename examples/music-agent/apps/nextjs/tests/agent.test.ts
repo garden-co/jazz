@@ -13,7 +13,7 @@ beforeAll(async () => {
   // The app's Jazz fronts this test server with remote().
   process.env.JAZZ_SERVER_URL = server.url;
   process.env.JAZZ_ADMIN_SECRET = server.adminSecret;
-  process.env.NEXT_PUBLIC_JAZZ_APP_ID = server.appId;
+  process.env.JAZZ_APP_ID = server.appId;
   process.env.BACKEND_SECRET = server.backendSecret;
   process.env.BETTER_AUTH_SECRET = "music-agent-test-better-auth-secret-0123456789";
   process.env.MUSIC_AGENT_PROVIDER = "scripted";
@@ -30,19 +30,14 @@ let second: Db | undefined;
 let secondSession: { close(): Promise<void> } | undefined;
 async function secondBackend(): Promise<Db> {
   if (second) return second;
-  const { createJazzSession } = await import("jazz-tools/backend");
-  const session = await createJazzSession({
+  const { createJazz, remote } = await import("jazz-tools/backend");
+  const jazz = await createJazz({
     app,
     permissions,
-    appId: server.appId,
-    driver: { type: "memory" },
-    serverUrl: server.url,
-    initial: { backendSecret: server.backendSecret },
+    store: remote({ url: server.url, appId: server.appId, secret: server.adminSecret }),
   });
-  secondSession = session;
-  const client = session.getSnapshot().client;
-  if (!client) throw new Error("second backend session is not ready");
-  second = client.db;
+  secondSession = jazz;
+  second = jazz.db;
   return second;
 }
 

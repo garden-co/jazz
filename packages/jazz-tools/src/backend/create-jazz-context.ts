@@ -9,7 +9,6 @@ import {
   resolveTextAnchor,
   resolveTextRange,
 } from "jazz-napi";
-import type { JWK } from "jose";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { CompiledPermissions } from "../permissions/index.js";
@@ -36,18 +35,13 @@ import {
   type SchemaSourceInput,
   type WasmSchemaSource,
 } from "../schema-source.js";
-import {
-  resolveRequestSession,
-  verifiedLocalFirstRequestProof,
-  type BackendRequestOptions,
-} from "./request-auth.js";
+import { resolveRequestSession, verifiedLocalFirstRequestProof } from "./request-auth.js";
 import { deterministicBytes } from "../runtime/deterministic-bytes.js";
 import { resolveAllowLocalFirstAuth } from "./local-first-auth.js";
 
 export type BackendSchemaSource = WasmSchemaSource;
 export type BackendQuerySchemaSource = QuerySchemaSource;
 export type BackendSchemaInput = SchemaSourceInput;
-export type BackendJwtPublicKey = JWK | string;
 
 export type BackendDriver =
   | {
@@ -75,21 +69,6 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver"> & {
   /** Server runtime driver mode and storage location. */
   driver: BackendDriver;
   /**
-   * Direct JWKS endpoint used to verify external bearer JWTs in `forRequest()`.
-   * Requires HTTPS, except development HTTP whose WHATWG-canonical hostname is
-   * localhost, [::1], or an IPv4 address in 127/8.
-   * HTTP with the trailing-dot spelling localhost., other schemes, and remote
-   * HTTP are rejected before fetching. Redirects are
-   * rejected, including redirects to HTTPS; configure the final URL directly.
-   */
-  jwksUrl?: string;
-  /** Single JWK object or PEM/JWK string used to verify external bearer JWTs in `forRequest()`. */
-  jwtPublicKey?: BackendJwtPublicKey;
-  /** Required issuer for external bearer JWTs accepted by `forRequest()`. */
-  jwtIssuer?: string;
-  /** Required audience, or audiences, for external bearer JWTs accepted by `forRequest()`. */
-  jwtAudience?: string | readonly string[];
-  /**
    * Whether request verification accepts local-first bearer JWTs, including in
    * `forRequest()` and `withAttributionForRequest()`. Defaults to `false` when
    * `NODE_ENV` is `production` (case-insensitive), and `true` otherwise.
@@ -100,6 +79,13 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver"> & {
   allowLocalFirstAuth?: boolean;
   /** @internal How the runtime opens its server socket (a backend client's credentialed one). */
   webSocket?: WebSocketConstructor;
+  /**
+   * The id of the published permissions bundle this backend's link is
+   * pinned to (what `deploy()` returned), as createJazz pins its own. The
+   * users it acts for are checked by that bundle's permissions; an unpinned
+   * link can only act as itself.
+   */
+  bundle?: string;
 } & BackendContextSchemaConfig;
 
 type ResolvedBackendContextConfig = BackendContextConfig & {
@@ -405,6 +391,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
       jwt_token: undefined,
       backend_secret: this.config.backendSecret,
       backend_session: this.config.cookieSession,
+      ...(this.config.bundle === undefined ? {} : { bundle: this.config.bundle }),
     });
   }
 
@@ -595,12 +582,6 @@ function assertValidBackendConfig(config: BackendContextConfig): void {
   if (config.driver.type === "memory" && !config.serverUrl) {
     throw new Error("driver.type='memory' requires serverUrl.");
   }
-
-  if (config.jwksUrl !== undefined && config.jwtPublicKey !== undefined) {
-    throw new Error(
-      "Backend auth config cannot set both jwksUrl and jwtPublicKey. Pick one external JWT verification mode.",
-    );
-  }
 }
 
 /**
@@ -770,38 +751,24 @@ export class JazzContext {
     this.coreSource.enableBackendSync(client);
   }
 
-  private async resolveRequestSession(
-    request: RequestLike,
-    options?: BackendRequestOptions,
-  ): Promise<Session> {
+  private async resolveRequestSession(request: RequestLike): Promise<Session> {
     if (!this.config.serverUrl) {
       throw new Error("forRequest requires a configured core serverUrl for account admission");
     }
-    return await resolveRequestSession(
-      request,
-      {
-        appId: this.config.appId,
-        accountRegistry: accountRegistryUrl(this.config.serverUrl, this.config.appId),
-        jwksUrl: this.config.jwksUrl,
-        jwtPublicKey: this.config.jwtPublicKey,
-        jwtIssuer: this.config.jwtIssuer,
-        jwtAudience: this.config.jwtAudience,
-        allowLocalFirstAuth: this.config.allowLocalFirstAuth,
-      },
-      options,
-    );
+    return await resolveRequestSession(request, {
+      appId: this.config.appId,
+      accountRegistry: accountRegistryUrl(this.config.serverUrl, this.config.appId),
+      backendSecret: this.config.backendSecret,
+      allowLocalFirstAuth: this.config.allowLocalFirstAuth,
+    });
   }
 
   /**
-   * Verify the original bearer and resolve its active core account before
-   * building a requester-scoped `Db`. Registration requires an explicit request option.
+   * Verify a local-first guest's bearer and resolve its core account before
+   * building a requester-scoped `Db`.
    */
-  async forRequest(
-    request: RequestLike,
-    source?: BackendSchemaInput,
-    options?: BackendRequestOptions,
-  ): Promise<Db> {
-    const session = await this.resolveRequestSession(request, options);
+  async forRequest(request: RequestLike, source?: BackendSchemaInput): Promise<Db> {
+    const session = await this.resolveRequestSession(request);
     const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
     return this.wrapDb(client, schema, DbAccessContext.forSession(session), true);

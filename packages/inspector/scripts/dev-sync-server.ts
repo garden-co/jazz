@@ -7,7 +7,7 @@ import {
   TEST_PORT,
 } from "../tests/browser/test-constants.js";
 import { app, permissions } from "../tests/browser/schema.ts";
-import { createJazzSession } from "jazz-tools/backend";
+import { createJazz, remote, type Jazz } from "jazz-tools/backend";
 
 const SEED_BATCH_SIZE = 50;
 
@@ -19,10 +19,9 @@ export default async function runServer({
     appId: APP_ID,
     port,
     adminSecret: ADMIN_SECRET,
-    backendSecret: "test",
   });
 
-  let session: Awaited<ReturnType<typeof createJazzSession>> | undefined;
+  let jazz: Jazz | undefined;
   try {
     await deploy({
       serverUrl: serverHandle.url,
@@ -32,20 +31,17 @@ export default async function runServer({
       permissions: serverPermissions,
     });
 
-    session = await createJazzSession({
-      appId: serverHandle.appId,
-      app: app,
+    // Seed through the app's backend, as the app writes its own data.
+    jazz = await createJazz({
+      app,
       permissions: serverPermissions,
-      driver: { type: "memory" },
-      serverUrl: serverHandle.url,
-      initial: { backendSecret: serverHandle.backendSecret },
+      store: remote({
+        url: serverHandle.url,
+        appId: serverHandle.appId,
+        secret: serverHandle.adminSecret,
+      }),
     });
-
-    const snapshot = session.getSnapshot();
-    if (snapshot.status !== "ready" || !snapshot.client) {
-      throw snapshot.error ?? new Error("Backend session is not ready");
-    }
-    const sessionedClient = snapshot.client.db;
+    const sessionedClient = jazz.db;
 
     const seedTitles = buildSeedTodoTitles(SEEDED_TODO_COUNT);
     for (let offset = 0; offset < seedTitles.length; offset += SEED_BATCH_SIZE) {
@@ -63,12 +59,12 @@ export default async function runServer({
       );
     }
 
-    await session.close();
+    await jazz.close();
     return {
       serverHandle,
     };
   } catch (error) {
-    await Promise.all([session?.close(), serverHandle.stop()]).catch((cleanupError) => {
+    await Promise.all([jazz?.close(), serverHandle.stop()]).catch((cleanupError) => {
       console.error("Inspector seed cleanup after setup failure failed", cleanupError);
     });
     throw error;

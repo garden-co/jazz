@@ -17,6 +17,7 @@ import {
   createWasmPackageStage,
   publishWasmPackage,
   recoverWasmPackageTransaction,
+  requireWasmPack,
   wasmPackageFiles,
   writeWasmStageManifest,
 } from "./build.mjs";
@@ -49,6 +50,18 @@ function withLock(lock, run) {
     else process.env.JAZZ_TEST_ARTIFACT_LOCK_PATH = previous;
   }
 }
+
+test("WASM builds name the wasm-pack install step when it is missing", () => {
+  const missing = () => ({
+    error: Object.assign(new Error("spawnSync wasm-pack ENOENT"), { code: "ENOENT" }),
+  });
+  assert.throws(
+    () => requireWasmPack(process.env, { run: missing }),
+    /wasm-pack on PATH[\s\S]*pnpm run ensure:rust-toolchain/,
+  );
+  assert.throws(() => requireWasmPack(process.env, { run: () => ({ status: 127 }) }), /wasm-pack/);
+  assert.doesNotThrow(() => requireWasmPack(process.env, { run: () => ({ status: 0 }) }));
+});
 
 test("WASM producer rejects an incomplete staged generation without touching the prior package", () => {
   const { root, pkg, lock } = fixture();

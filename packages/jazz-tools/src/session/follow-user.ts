@@ -1,28 +1,27 @@
-import { AccountAuthError, requestBackendSignIn } from "../accounts/registry-client.js";
+import { AccountAuthError, requestBackendUser } from "../accounts/registry-client.js";
 import type { AccountIdentity } from "../accounts/state.js";
 import type { SyncStatus } from "../runtime/sync-status.js";
-import {
-  connectAuthProvider,
-  rememberProviderKeys,
-  type AuthProviderConnection,
-  type ProviderKeyMemory,
-} from "./auth-provider.js";
-import { watchBackendUser, type BackendWatchEvents } from "./backend-watch.js";
+import { watchBackendUser, type BackendUser, type BackendWatchEvents } from "./backend-watch.js";
 import type { JazzSession } from "./state.js";
 
-/** A Jazz session that follows your auth's signed-in user. */
+/**
+ * A Jazz session that follows the user your backend names. Jazz asks your
+ * backend (its `authenticate`) who is signed in on start, on focus and when
+ * another tab signs in or out.
+ */
 export interface UserFollowingSession<Client> extends JazzSession<Client> {
   /**
-   * Tell Jazz who your auth says is signed in: `undefined` while it loads,
-   * `null` when signed out, and the user's stable id when signed in. Each
-   * change signs in again through your backend, whose `authenticate` decides
-   * who the user is; `null` closes the account's client. Without it, Jazz
-   * asks your backend who is signed in on start, on focus and when another
-   * tab signs in or out. Auth libraries that refresh their session cookie in
-   * the browser (Clerk, for example) should use this (or the provider's
-   * `user` prop): a check on focus may run before they have refreshed it.
+   * Your auth changed: call this after your own sign-in, sign-out or account
+   * switch, once your session cookie (or bearer) is fresh. Jazz asks your
+   * backend who is signed in now and follows its answer: another user signs
+   * in, and no one signs the current user out. Resolves once the session
+   * follows that answer, and rejects when your backend can't be asked (a
+   * network error or a 5xx) or following it fails. A session left in error
+   * for the same user (its client failed to open) retries. The user's
+   * claims are as of their sign-in; reauthenticating as the same user
+   * doesn't update them.
    */
-  setUser(user: string | null | undefined): void;
+  reauthenticate(): Promise<void>;
 }
 
 type ObservedClient = {
@@ -33,16 +32,16 @@ type ObservedClient = {
 };
 
 /**
- * A `decorate` for `createJazzSessionOwner`: give the session `setUser`, and
- * without it keep it in step with the backend at `registry` (see
- * `watchBackendUser`).
+ * A `decorate` for `createJazzSessionOwner`: keep the session in step with
+ * the backend at `registry` (see `watchBackendUser`), and give it
+ * `reauthenticate`.
  */
 export function followUser(options: {
   registry: string;
   events: BackendWatchEvents;
   fetch?: typeof fetch;
-  /** Durable memory of the last admitted provider key (see `rememberProviderKeys`). */
-  providerKeys?: ProviderKeyMemory;
+  /** See `linkGuestOnSignUp` on `createJazzSession`. Default true. */
+  linkGuest?: boolean;
 }) {
   return <Client>(session: JazzSession<Client>) => decorate(session, options);
 }
@@ -53,16 +52,15 @@ function decorate<Client>(
     registry: string;
     events: BackendWatchEvents;
     fetch?: typeof fetch;
-    providerKeys?: ProviderKeyMemory;
+    linkGuest?: boolean;
   },
-): Pick<UserFollowingSession<Client>, "setUser" | "close"> {
-  if (options.providerKeys) rememberProviderKeys(session, options.providerKeys);
-  let connection: AuthProviderConnection | undefined;
+): Pick<UserFollowingSession<Client>, "reauthenticate" | "linkWithBackend" | "close"> {
   const watch = watchBackendUser(
     session,
     () => signedInIdentity(options.registry, options.fetch),
     options.events,
     {
+      linkGuest: options.linkGuest,
       reconnect: () =>
         void (session.getSnapshot().client as ObservedClient | undefined)?.db
           ?.reconnect?.()
@@ -86,17 +84,22 @@ function decorate<Client>(
   const unsubscribe = session.subscribe(followClient);
   followClient();
   const close = session.close;
+  const link = session.linkWithBackend;
   return {
-    setUser(user: string | null | undefined) {
-      connection ??= connectAuthProvider(session);
-      connection.update({ key: user ?? null, isPending: user === undefined });
+    reauthenticate: () => watch.reauthenticate(),
+    // The watch links a guest to a user who just signed up as soon as it
+    // sees them (see `watchBackendUser`). An app that also calls this after
+    // its sign-up joins that link instead of failing on it.
+    async linkWithBackend() {
+      const joined = watch.linking;
+      if (joined && joined.result === undefined) return joined.done;
+      if (joined && session.getSnapshot().account === joined.result) return;
+      return link();
     },
     close() {
       watch.stop();
       unsubscribe();
       stopStatus?.();
-      connection?.dispose();
-      connection = undefined;
       return close();
     },
   };
@@ -105,39 +108,16 @@ function decorate<Client>(
 async function signedInIdentity(
   registry: string,
   fetcher?: typeof fetch,
-): Promise<AccountIdentity | null> {
+): Promise<BackendUser | null> {
   try {
-    const answer = (await requestBackendSignIn(registry, fetcher)) as {
+    const answer = (await requestBackendUser(registry, fetcher)) as {
       identity?: AccountIdentity;
+      account?: string | null;
     };
-    return answer.identity ?? null;
+    if (!answer.identity) return null;
+    return { ...answer.identity, hasAccount: answer.account != null };
   } catch (cause) {
     if (cause instanceof AccountAuthError && cause.status === 401) return null;
     throw cause;
   }
-}
-
-/** The last admitted provider key in this browser's localStorage, per registry. */
-export function browserProviderKeyMemory(registry: string): ProviderKeyMemory | undefined {
-  let storage: Storage | undefined;
-  try {
-    storage = typeof localStorage === "undefined" ? undefined : localStorage;
-  } catch {
-    return undefined;
-  }
-  if (!storage) return undefined;
-  const key = `jazz-provider-key-v1:${registry}`;
-  return {
-    get() {
-      try {
-        const value = storage.getItem(key);
-        return value === null ? undefined : (JSON.parse(value) as string | null);
-      } catch {
-        return undefined;
-      }
-    },
-    set(value) {
-      storage.setItem(key, JSON.stringify(value));
-    },
-  };
 }

@@ -12,6 +12,7 @@ import {
   requestApproval,
   resolveEndpoint,
   tokenStore,
+  type InspectEnv,
   type PendingApproval,
 } from "./client.js";
 import { InspectError, type InspectRequest } from "./protocol.js";
@@ -166,7 +167,7 @@ type Json = Record<string, unknown>;
 /** Serve MCP on `input`/`output` (stdio by default) until `input` ends. */
 export async function runMcpServer(options: {
   app?: string;
-  env?: NodeJS.ProcessEnv;
+  env?: InspectEnv;
   input?: NodeJS.ReadableStream;
   output?: (line: string) => void;
   fetch?: typeof fetch;

@@ -73,10 +73,14 @@ pub use crate::options::{FirstLoad, RemoteLinkHint};
 
 #[path = "sync_conflicts.rs"]
 mod conflicts;
+
+#[path = "sync_pending.rs"]
+mod pending;
 pub use crate::wire::TransportError;
 pub(crate) use conflicts::Built;
 pub use conflicts::WriteConflict;
 pub use large_delta::{CellDelta, WireDelta};
+pub(crate) use pending::PENDING_DDL;
 
 /// Wall-clock Unix ms.
 fn now_ms() -> i64 {
@@ -1181,8 +1185,6 @@ impl Acting {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SyncMessage {
     // client → server
-    // Variants before `Commit` keep their wire tags: a replica stores its
-    // pending uploads as `Commit` frames.
     /// A read of `query`, kept current until `Unsubscribe` or answered
     /// once (see [`ReadSpan`]). Either way the server ships the result's
     /// rows and supporting rows, then `Settled` (or `Refused`).
@@ -4896,14 +4898,13 @@ impl Inner {
 /// transaction as the rows it describes, so a crash never separates a local
 /// write from its upload record, or a server commit from its dedupe entry.
 ///
-/// A pending commit is stored a row per op, not as one encoded message:
-/// `_jazz_pending` keeps its `Commit` with its ops and reads left out,
-/// `_jazz_pending_items` each op (with its bases, access proof and deltas) and
-/// serializable read (by [`PendingPart`]), and `_jazz_pending_rows` the
-/// local rows it wrote. Ops name tables and columns by stored names, so a
-/// commit is the same whichever schema version wrote it or the store
-/// reopens under. Deleting a commit's `_jazz_pending`
-/// row once it settles deletes the rest with it.
+/// A pending commit is stored in tables shaped like the rows it writes,
+/// not as an encoded message, so that a change to how commits travel never
+/// strands an offline write (see `sync_pending.rs` for the layout), and
+/// `_jazz_pending_rows` holds the local rows it wrote. Ops name tables and
+/// columns by stored names, so a commit is the same whichever schema
+/// version wrote it or the store reopens under. Deleting a commit's
+/// `_jazz_pending` row once it settles deletes the rest with it.
 /// A row's values over the inline limit live in large-value storage, so a
 /// stored op is about the size of the row it writes, however large the
 /// commit: a store with a small value limit (a Durable Object's 2 MiB)
@@ -4919,11 +4920,13 @@ impl Inner {
 /// fate this store recorded for it as a server (NULL when it only learned
 /// where the commit landed).
 pub(crate) const SYNC_DDL: &str = "\
-    CREATE TABLE IF NOT EXISTS _jazz_pending (tx INTEGER PRIMARY KEY, header BLOB NOT NULL);\
-    CREATE TABLE IF NOT EXISTS _jazz_pending_items (tx INTEGER NOT NULL, part INTEGER NOT NULL, n INTEGER NOT NULL, item BLOB NOT NULL, PRIMARY KEY (tx, part, n));\
     CREATE TABLE IF NOT EXISTS _jazz_pending_rows (tx INTEGER NOT NULL, n INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL, key BLOB NOT NULL, PRIMARY KEY (tx, n));\
     CREATE TRIGGER IF NOT EXISTS _jazz_pending_forget AFTER DELETE ON _jazz_pending BEGIN \
-     DELETE FROM _jazz_pending_items WHERE tx = OLD.tx; \
+     DELETE FROM _jazz_pending_ops WHERE tx = OLD.tx; \
+     DELETE FROM _jazz_pending_cells WHERE tx = OLD.tx; \
+     DELETE FROM _jazz_pending_deltas WHERE tx = OLD.tx; \
+     DELETE FROM _jazz_pending_reads WHERE tx = OLD.tx; \
+     DELETE FROM _jazz_pending_read_rows WHERE tx = OLD.tx; \
      DELETE FROM _jazz_pending_rows WHERE tx = OLD.tx; END;\
     CREATE TABLE IF NOT EXISTS _jazz_meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_authors (n INTEGER PRIMARY KEY, account BLOB NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, UNIQUE (account, issuer, subject));\
@@ -4932,36 +4935,12 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE INDEX IF NOT EXISTS _jazz_transactions_by_t ON _jazz_transactions (t);";
 
 /// The retry store for refused commits, with each one's ops in
-/// `_jazz_rejected_ops`. It is created by the first refusal it keeps, not
+/// `_jazz_rejected_ops` and its cell and delta tables, laid out as the
+/// pending ones are. It is created by the first refusal it keeps, not
 /// on open, so that opening an existing store without writing leaves the
 /// file byte-identical.
-const REJECTED_DDL: [&str; 2] = [
-    "CREATE TABLE IF NOT EXISTS _jazz_rejected \
-     (tx INTEGER PRIMARY KEY, error BLOB NOT NULL, serializable INTEGER NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS _jazz_rejected_ops \
-     (tx INTEGER NOT NULL, n INTEGER NOT NULL, op BLOB NOT NULL, PRIMARY KEY (tx, n))",
-];
-
-/// Which list of a pending `Commit` a `_jazz_pending_items` row belongs to.
-#[derive(Clone, Copy)]
-enum PendingPart {
-    Op = 0,
-    Read = 1,
-}
-
-impl PendingPart {
-    fn from_stored(part: i64) -> Result<Self, Error> {
-        Ok(match part {
-            0 => Self::Op,
-            1 => Self::Read,
-            _ => {
-                return Err(crate::format::unsupported(format_args!(
-                    "unknown part {part} in _jazz_pending_items"
-                )));
-            }
-        })
-    }
-}
+const REJECTED_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_rejected \
+     (tx INTEGER PRIMARY KEY, error BLOB NOT NULL, serializable INTEGER NOT NULL)";
 
 /// Rows a replica holds no image of because it may not read their current
 /// version, by (stored table, id, branch key): in a branch view over a
@@ -5226,67 +5205,7 @@ impl Inner {
     }
 
     fn persist_pending(&self, tx: u64, commit: &SyncMessage, rows: &[RowKey]) -> Result<(), Error> {
-        let SyncMessage::Commit {
-            id,
-            clock,
-            kind,
-            ops,
-            acting,
-        } = commit
-        else {
-            return Err(Error::new(ErrorCode::Storage, "only a Commit is pending"));
-        };
-        let (kind, reads) = match kind {
-            WireKind::Mergeable => (WireKind::Mergeable, &[][..]),
-            WireKind::Serializable {
-                snapshot,
-                reads,
-                own,
-            } => (
-                WireKind::Serializable {
-                    snapshot: *snapshot,
-                    reads: Vec::new(),
-                    own: own.clone(),
-                },
-                reads.as_slice(),
-            ),
-        };
-        let header = SyncMessage::Commit {
-            id: *id,
-            clock: *clock,
-            kind,
-            ops: Vec::new(),
-            acting: acting.clone(),
-        };
-        self.exec(
-            "INSERT INTO _jazz_pending (tx, header) VALUES (?1, ?2)",
-            rusqlite::params![tx as i64, encode(&header)],
-        )
-        .map_err(storage)?;
-        let items = (ops.iter().map(encode).map(|item| (PendingPart::Op, item)))
-            .chain(reads.iter().map(|item| (PendingPart::Read, encode(item))));
-        let mut n = 0i64;
-        let mut last = None;
-        for (part, item) in items {
-            if last != Some(part as i64) {
-                last = Some(part as i64);
-                n = 0;
-            }
-            self.exec(
-                "INSERT INTO _jazz_pending_items (tx, part, n, item) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![tx as i64, part as i64, n, item],
-            )
-            .map_err(storage)?;
-            n += 1;
-        }
-        for (n, (table, row, key)) in rows.iter().enumerate() {
-            self.exec(
-                "INSERT INTO _jazz_pending_rows (tx, n, tbl, id, key) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![tx as i64, n as i64, table, row.0.as_bytes().as_slice(), key],
-            )
-            .map_err(storage)?;
-        }
-        Ok(())
+        pending::write(&self.conn, tx, commit, rows)
     }
 
     /// Where a remote query's result was last settled through.
@@ -5404,7 +5323,8 @@ impl Inner {
     /// Move refused commit `tx`'s payload from the upload queue into the
     /// retry store.
     fn retain_rejected(&self, tx: u64, error: &Error, serializable: bool) -> Result<(), Error> {
-        for ddl in REJECTED_DDL {
+        self.exec(REJECTED_DDL, []).map_err(storage)?;
+        for ddl in pending::REJECTED_OPS_DDL {
             self.exec(ddl, []).map_err(storage)?;
         }
         self.exec(
@@ -5413,14 +5333,20 @@ impl Inner {
         )
         .map_err(storage)?;
         // A commit refused again replaces its ops whole.
-        self.exec("DELETE FROM _jazz_rejected_ops WHERE tx = ?1", [tx as i64])
+        for table in pending::OP_TABLES {
+            self.exec(
+                &format!("DELETE FROM _jazz_rejected_{table} WHERE tx = ?1"),
+                [tx as i64],
+            )
             .map_err(storage)?;
-        self.exec(
-            "INSERT INTO _jazz_rejected_ops (tx, n, op) \
-             SELECT tx, n, item FROM _jazz_pending_items WHERE tx = ?1 AND part = ?2",
-            rusqlite::params![tx as i64, PendingPart::Op as i64],
-        )
-        .map_err(storage)?;
+            self.exec(
+                &format!(
+                    "INSERT INTO _jazz_rejected_{table} SELECT * FROM _jazz_pending_{table} WHERE tx = ?1"
+                ),
+                [tx as i64],
+            )
+            .map_err(storage)?;
+        }
         Ok(())
     }
 
@@ -5447,15 +5373,7 @@ impl Inner {
         drop(statement);
         rows.into_iter()
             .map(|(seq, error, serializable)| {
-                let mut statement = self
-                    .conn
-                    .prepare_cached("SELECT op FROM _jazz_rejected_ops WHERE tx = ?1 ORDER BY n")
-                    .map_err(storage)?;
-                let ops = statement
-                    .query_map([seq as i64], |r| r.get::<_, Vec<u8>>(0))
-                    .map_err(storage)?
-                    .map(|op| decode_stored(&op.map_err(storage)?))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let ops = pending::ops(&self.conn, "_jazz_rejected", seq)?;
                 Ok(RejectedTransaction {
                     seq,
                     error: from_wire_error(decode_stored(&error)?),
@@ -5471,7 +5389,12 @@ impl Inner {
         if !self.has_rejected_store()? {
             return Ok(());
         }
-        for table in ["_jazz_rejected", "_jazz_rejected_ops"] {
+        for table in [
+            "_jazz_rejected",
+            "_jazz_rejected_ops",
+            "_jazz_rejected_cells",
+            "_jazz_rejected_deltas",
+        ] {
             self.exec(&format!("DELETE FROM {table} WHERE tx = ?1"), [tx as i64])
                 .map_err(storage)?;
         }
@@ -5494,43 +5417,6 @@ impl Inner {
         self.exec("DELETE FROM _jazz_pending WHERE tx = ?1", [tx as i64])
             .map_err(storage)?;
         Ok(())
-    }
-
-    /// Pending commit `tx` as `persist_pending` stored it: its header
-    /// with its lists filled from `_jazz_pending_items`.
-    fn pending_commit(&self, tx: u64, header: &[u8]) -> Result<SyncMessage, Error> {
-        let mut commit: SyncMessage = decode_stored(header)?;
-        let SyncMessage::Commit { kind, ops, .. } = &mut commit else {
-            return Err(crate::format::unsupported(
-                "a pending upload is not a Commit",
-            ));
-        };
-        let mut statement = self
-            .conn
-            .prepare_cached(
-                "SELECT part, item FROM _jazz_pending_items WHERE tx = ?1 ORDER BY part, n",
-            )
-            .map_err(storage)?;
-        let items = statement
-            .query_map([tx as i64], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
-            })
-            .map_err(storage)?;
-        for item in items {
-            let (part, item) = item.map_err(storage)?;
-            match PendingPart::from_stored(part)? {
-                PendingPart::Op => ops.push(decode_stored(&item)?),
-                PendingPart::Read => match kind {
-                    WireKind::Serializable { reads, .. } => reads.push(decode_stored(&item)?),
-                    WireKind::Mergeable => {
-                        return Err(crate::format::unsupported(
-                            "a mergeable pending commit has reads",
-                        ));
-                    }
-                },
-            }
-        }
-        Ok(commit)
     }
 
     /// The local rows pending commit `tx` wrote, in order.
@@ -6385,20 +6271,8 @@ impl Inner {
         client.stranded = self.meta("stranded")?.is_some();
         client.known = self.meta("known")?.unwrap_or(0);
         client.persisted_known = client.known;
-        let mut statement = self
-            .conn
-            .prepare("SELECT tx, header FROM _jazz_pending ORDER BY tx")
-            .map_err(storage)?;
-        let pending = statement
-            .query_map([], |r| {
-                Ok((r.get::<_, i64>(0)? as u64, r.get::<_, Vec<u8>>(1)?))
-            })
-            .map_err(storage)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(storage)?;
-        drop(statement);
-        for (tx, header) in pending {
-            let commit = self.pending_commit(tx, &header)?;
+        for tx in pending::txs(&self.conn)? {
+            let commit = pending::read(&self.conn, tx)?;
             let rows = self.pending_rows(tx)?;
             let SyncMessage::Commit {
                 id,
@@ -9025,6 +8899,31 @@ impl Inner {
         governed
     }
 
+    /// Refuse a trusted link that acts for a user (`who` is a session it
+    /// vouches for) while unpinned on a store that serves bundles: nothing
+    /// deploys this store's own permissions any more, so that user would be
+    /// checked by permissions no deployment chose. A backend pins its link
+    /// to the bundle it deployed (createJazz does).
+    fn check_acts_pinned(
+        &self,
+        index: usize,
+        policy: Option<AuthorSubject>,
+        who: Who,
+    ) -> Result<(), Error> {
+        if policy.is_none()
+            && matches!(who, Who::Session(_))
+            && self.sessions[index].bundle.is_none()
+            && (self.pins_required || crate::catalogue::serves_bundles(&self.conn)?)
+        {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "an unpinned backend link cannot act for a user: pin the link to the \
+                 bundle the backend deployed",
+            ));
+        }
+        Ok(())
+    }
+
     /// Whether session `index` declared a schema version this store has
     /// not admitted.
     fn session_unadmitted(&self, index: usize) -> bool {
@@ -9167,6 +9066,22 @@ impl Inner {
     /// schema's policies.
     pub(crate) fn governed(&self, version: crate::ids::SchemaVersionId) -> Option<Rc<Schema>> {
         self.governed_by(version, self.owner.clone())
+    }
+
+    /// Admitted `version` governed again by `policies`, a schema that
+    /// governed it before a reset: a published bundle's policies are kept
+    /// (the schema names its bundle), any other schema's give way to the
+    /// current one's.
+    pub(crate) fn regoverned(
+        &self,
+        version: crate::ids::SchemaVersionId,
+        policies: &Rc<Schema>,
+    ) -> Option<Rc<Schema>> {
+        if policies.bundle.is_some() {
+            self.governed_by(version, policies.clone())
+        } else {
+            self.governed(version)
+        }
     }
 
     /// Admitted `version` under its stored names, governed by `policies`'
@@ -9503,13 +9418,13 @@ impl Db {
                 },
             ));
         }
-        // Once createJazz publishes bundles here, its backend pins every
-        // session it opens. An unpinned policy session would be governed by
-        // the current permissions, which createJazz no longer advances, so
-        // a later tightening or rollback would never reach it.
+        // A core's backend (createJazz) pins every session it opens. An
+        // unpinned policy session would be governed by this store's own
+        // permissions, which nothing deploys, so a tightening or rollback
+        // would never reach it.
         if bundle.is_none()
             && identity != AuthorSubject::SYSTEM
-            && crate::catalogue::serves_bundles(&inner.conn)?
+            && (inner.pins_required || crate::catalogue::serves_bundles(&inner.conn)?)
         {
             return Err(Error::new(
                 ErrorCode::Protocol,
@@ -11339,7 +11254,12 @@ impl Db {
             SyncMessage::CheckAllowed { id, action, acting } => {
                 // As for a commit: a trusted link may ask for a session it
                 // vouches for; a session link only for its own.
-                let result = match commit_who(policy, &acting) {
+                let result = match commit_who(policy, &acting).and_then(|who| {
+                    self.inner
+                        .borrow()
+                        .check_acts_pinned(index, policy, who)
+                        .map(|()| who)
+                }) {
                     Ok(who) => {
                         let identity = match who {
                             Who::Session(author) => Some(author),
@@ -11782,6 +11702,10 @@ impl Db {
                     None => match commit_who(policy, &acting)
                         .map_err(|error| (error, Vec::new()))
                         .and_then(|who| {
+                            self.inner
+                                .borrow()
+                                .check_acts_pinned(index, policy, who)
+                                .map_err(|error| (error, Vec::new()))?;
                             let (ops, mut roots) = db
                                 .resolve_deltas(policy, ops)
                                 .map_err(|error| (error, Vec::new()))?;
@@ -13008,7 +12932,6 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::NodeUuid;
 
     #[test]
     fn replace_name_rewrites_only_whole_names() {
@@ -13024,67 +12947,6 @@ mod tests {
             replace_name("xtitle~ab12cd", "title~ab12cd", "name"),
             "xtitle~ab12cd"
         );
-    }
-
-    /// A pending `Commit` header in the layout before `acting` (separate
-    /// `author` and `session`), with its lists empty as `persist_pending`
-    /// stores them.
-    fn pre_acting_header(
-        author: Option<&str>,
-        session: Option<BTreeMap<String, Value>>,
-        origin: Option<([u8; 16], u64)>,
-    ) -> Vec<u8> {
-        const COMMIT: u32 = 4;
-        postcard::to_allocvec(&(
-            COMMIT,
-            [7u8; 16],
-            1u64,
-            WireKind::Mergeable,
-            Vec::<WireOp>::new(),
-            author.map(str::to_owned),
-            session,
-            Vec::<()>::new(),
-            origin,
-        ))
-        .unwrap()
-    }
-
-    #[test]
-    fn a_pending_header_from_before_acting_is_refused_not_misread() {
-        let author = AuthorSubject::system_at(NodeUuid::from_bytes([9; 16]));
-        let headers = [
-            pre_acting_header(None, None, None),
-            pre_acting_header(None, None, Some(([8; 16], 3))),
-            pre_acting_header(Some(author.canonical()), None, Some(([8; 16], 3))),
-            pre_acting_header(Some(author.canonical()), Some(BTreeMap::new()), None),
-        ];
-        for header in headers {
-            let error = decode_stored::<SyncMessage>(&header)
-                .expect_err("an old pending header must not decode");
-            assert_eq!(error.code, ErrorCode::UnsupportedStorageCodecs, "{error:?}");
-            assert!(error.message.contains("resync"), "{error:?}");
-        }
-    }
-
-    #[test]
-    fn a_current_pending_header_round_trips() {
-        let header = SyncMessage::Commit {
-            // A commit HLC that is not the default, so a header that lost
-            // it would not round-trip.
-            clock: crate::db::shard::hlc(1_800_000_000_000) + 3,
-            id: tx_id([7; 16], 1),
-            kind: WireKind::Mergeable,
-            ops: Vec::new(),
-            acting: Acting::Session {
-                author: AuthorSubject::system_at(NodeUuid::from_bytes([9; 16]))
-                    .canonical()
-                    .to_owned(),
-                claims: BTreeMap::from([("role".to_owned(), Value::String("admin".to_owned()))]),
-            },
-        };
-        let bytes = encode(&header);
-        let decoded: SyncMessage = decode_stored(&bytes).unwrap();
-        assert_eq!(encode(&decoded), bytes);
     }
 
     fn image(id: u8, seq: u64, body: usize) -> Image {

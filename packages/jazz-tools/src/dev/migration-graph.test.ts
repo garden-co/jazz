@@ -15,16 +15,16 @@ const [a, b, c, d] = ["a", "b", "c", "d"].map((char) => char.repeat(64)) as [
 const graph = (
   schemas: string[],
   pairs: [string, string][],
-  activeSchemaHash: string | null = null,
+  latestBundleSchemaHash: string | null = null,
 ): MigrationGraph => ({
   schemas,
   migrations: pairs.map(([fromHash, toHash]) => ({ fromHash, toHash })),
-  activeSchemaHash,
+  latestBundleSchemaHash,
 });
 afterEach(() => vi.unstubAllGlobals());
 
 describe("migration graph", () => {
-  it("renders a linear history and highlights the active schema, even when it is not terminal", () => {
+  it("renders a linear history and highlights the latest bundle's schema, even when it is not terminal", () => {
     const history = graph(
       [c, a, b],
       [
@@ -34,12 +34,18 @@ describe("migration graph", () => {
       b,
     );
     expect(renderMigrationGraph(history)).toBe(
-      ["● aaaaaaaaaaaa", "│", "▼", "● bbbbbbbbbbbb (current)", "│", "▼", "● cccccccccccc"].join(
-        "\n",
-      ),
+      [
+        "● aaaaaaaaaaaa",
+        "│",
+        "▼",
+        "● bbbbbbbbbbbb (latest bundle)",
+        "│",
+        "▼",
+        "● cccccccccccc",
+      ].join("\n"),
     );
     expect(renderMigrationGraph(history, true)).toContain(
-      "\x1b[1;36mbbbbbbbbbbbb (current)\x1b[0m",
+      "\x1b[1;36mbbbbbbbbbbbb (latest bundle)\x1b[0m",
     );
   });
 
@@ -63,11 +69,11 @@ describe("migration graph", () => {
         "├─▶ ● bbbbbbbbbbbb",
         "│   │",
         "│   ▼",
-        "│   ● dddddddddddd (current)",
+        "│   ● dddddddddddd (latest bundle)",
         "└─▶ ● cccccccccccc",
         "    │",
         "    ▼",
-        "    ● dddddddddddd (current) (shown above)",
+        "    ● dddddddddddd (latest bundle) (shown above)",
         "",
         "Repeated labels refer to the same schema.",
       ].join("\n"),
@@ -88,7 +94,7 @@ describe("migration graph", () => {
     expect(text.match(/aaaaaaaaaaaa/g)).toHaveLength(2);
     expect(text.match(/bbbbbbbbbbbb/g)).toHaveLength(1);
     expect(text).toContain("● aaaaaaaaaaaa (shown above)");
-    expect(text).toContain("No schema is currently active.");
+    expect(text).toContain("No bundle is published yet.");
     expect(text.split("\n").length).toBeLessThan(20);
   });
 
@@ -160,7 +166,7 @@ describe("migration graph", () => {
   it("distinguishes colliding short hashes and handles empty catalogues", () => {
     const collision = "a".repeat(12) + "b".repeat(52);
     const text = renderMigrationGraph(graph([a, collision], [], a));
-    expect(text).toContain("aaaaaaaaaaaaa (current)");
+    expect(text).toContain("aaaaaaaaaaaaa (latest bundle)");
     expect(text).toContain("aaaaaaaaaaaab");
     expect(renderMigrationGraph(graph([], []))).toBe("No local or server schemas found.");
   });
@@ -202,7 +208,7 @@ describe("migration graph", () => {
       ]),
     );
     const text = renderMigrationGraph(combined);
-    expect(text).toContain("bbbbbbbbbbbb (current)");
+    expect(text).toContain("bbbbbbbbbbbb (latest bundle)");
     expect(text).toContain("cccccccccccc [server only]");
     expect(text).toContain("dddddddddddd (schema.ts) [local only]");
     expect(text).toContain("├─▶ [server only] ● cccccccccccc [server only]");
@@ -231,6 +237,17 @@ describe("migration graph", () => {
     );
   });
 
+  it("reads an older core's active schema as its latest bundle's schema", async () => {
+    const older = {
+      activeSchemaHash: b,
+      schemas: [a, b],
+      migrations: [{ fromHash: a, toHash: b }],
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json(older)));
+    const options = { appId: "app", serverUrl: "https://example.test", adminSecret: "secret" };
+    await expect(fetchMigrationGraph(options)).resolves.toEqual(graph([a, b], [[a, b]], b));
+  });
+
   it("reports HTTP failures and malformed graphs instead of drawing misleading output", async () => {
     const fetch = vi
       .fn()
@@ -249,12 +266,14 @@ it("labels inferred identity connections without suggesting a missing local migr
   const merged = combineMigrationGraphs(
     {
       schemas: [a, b],
-      activeSchemaHash: b,
+      latestBundleSchemaHash: b,
       migrations: [{ fromHash: a, toHash: b, automatic: true }],
     },
     { schemas: [a, b], currentSchemaHash: b, migrations: [] },
   );
   expect(renderMigrationGraph(merged)).toBe(
-    ["● aaaaaaaaaaaa", "│ [automatic]", "▼", "● bbbbbbbbbbbb (current) (schema.ts)"].join("\n"),
+    ["● aaaaaaaaaaaa", "│ [automatic]", "▼", "● bbbbbbbbbbbb (latest bundle) (schema.ts)"].join(
+      "\n",
+    ),
   );
 });

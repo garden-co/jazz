@@ -1,5 +1,5 @@
 import { ensureAutomaticLocalFirst } from "../accounts/persistence.js";
-import type { AccountHandle, AccountManager } from "../accounts/state.js";
+import { admitBackendAccount, type AccountHandle, type AccountManager } from "../accounts/state.js";
 import type { JWTAuth, BackendAuth } from "../accounts/enrollment.js";
 import {
   GracefulShutdownSyncError,
@@ -22,7 +22,6 @@ type WipeableClient = {
 export type JazzSessionOperation =
   | "createLocalFirst"
   | "restoreLocalFirst"
-  | "becomeBackend"
   | "loginWithBackend"
   | "linkWithBackend"
   | "logout"
@@ -39,7 +38,6 @@ export interface JazzSessionSnapshot<Client> {
 export interface JazzSessionActions {
   createLocalFirst(): Promise<void>;
   restoreLocalFirst(secret: string): Promise<void>;
-  becomeBackend(auth: BackendAuth): Promise<void>;
   /**
    * Sign in as whoever the app's own backend says is signed in. For apps that
    * mount Jazz with `createJazz`: the backend's `authenticate` decides, from
@@ -102,20 +100,27 @@ export async function createJazzSessionOwner<
 >(options: {
   accounts: AccountManager<JWTAuth>;
   openClient(account: AccountHandle): Promise<Client>;
-  initial?: "local-first" | BackendAuth;
+  initial?: "local-first" | "signed-out";
+  /**
+   * @internal Open as the backend this core admits with `auth`: only the
+   * Node host passes it, for the session `createJazz` opens on its own core
+   * and for a backend client its main backend trusts as a machine.
+   */
+  backend?: BackendAuth;
   /**
    * Wipe the signed-out account's local storage, unsynced writes included,
    * instead of keeping it for that user's next sign-in (shared devices).
    */
   clearOnSignOut?: boolean;
-  /** Add host methods (e.g. `setUser`) to the session before it is sealed. */
+  /** Add host methods (e.g. `reauthenticate`) to the session before it is sealed. */
   decorate?(session: JazzSession<Client>): Extra;
 }): Promise<JazzSession<Client> & Extra> {
   const { accounts, openClient } = options;
   let selected = accounts.getLoggedIn();
   if (!selected && options.initial === "local-first")
     selected = await ensureAutomaticLocalFirst(accounts);
-  if (typeof options.initial === "object") selected = await accounts.becomeBackend(options.initial);
+  if (options.backend)
+    selected = await admitBackendAccount(accounts as AccountManager<unknown>, options.backend);
   await accounts.settleSelection();
   let client = selected ? await openClient(selected) : undefined;
   let snapshot: JazzSessionSnapshot<Client> = Object.freeze({
@@ -158,10 +163,12 @@ export async function createJazzSessionOwner<
     operation: JazzSessionOperation,
     mutate: () => AccountHandle | undefined | Promise<AccountHandle | undefined>,
     token: number,
+    detached?: Promise<void>,
   ) => {
     if (token !== generation) throw superseded();
     const previous = selected;
-    await detach({ status: "transitioning", account: selected, pending: operation }).done;
+    await (detached ??
+      detach({ status: "transitioning", account: selected, pending: operation }).done);
     if (token !== generation) throw superseded();
     try {
       if (client) {
@@ -245,8 +252,14 @@ export async function createJazzSessionOwner<
     if (busy || loggingOut)
       return Promise.reject(new Error("A Jazz session operation is already pending"));
     const token = ++generation;
-    const task = Promise.resolve().then(() => perform(operation, mutate, token));
+    // Publish "transitioning" as the operation becomes pending, so no one
+    // sees a settled session that would refuse their operation as busy. It
+    // is busy before listeners hear of it, so one that starts an operation
+    // of its own is refused rather than racing this one.
+    let detached!: { done: Promise<void> };
+    const task = Promise.resolve().then(() => perform(operation, mutate, token, detached.done));
     busy = task;
+    detached = detach({ status: "transitioning", account: selected, pending: operation });
     void task
       .finally(() => {
         if (busy === task) busy = undefined;
@@ -260,7 +273,6 @@ export async function createJazzSessionOwner<
     createLocalFirst: () => run("createLocalFirst", () => accounts.createLocalFirst()),
     restoreLocalFirst: (secret) =>
       run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret)),
-    becomeBackend: (auth) => run("becomeBackend", () => accounts.becomeBackend(auth)),
     loginWithBackend: () => run("loginWithBackend", () => accounts.loginWithBackend()),
     linkWithBackend: () => run("linkWithBackend", () => accounts.linkWithBackend()),
     retry: () => run("retry", () => selected),

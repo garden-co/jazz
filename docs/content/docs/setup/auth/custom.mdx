@@ -14,11 +14,11 @@ import { app, permissions } from "./schema";
 import { getUser } from "./your-auth";
 
 export const jazz = await createJazz({
-  appId: "my-app",
   app,
   permissions,
   store: remote({
     url: process.env.JAZZ_SERVER_URL!,
+    appId: "my-app",
     secret: process.env.JAZZ_ADMIN_SECRET!,
   }),
   authenticate: async (request) => {
@@ -31,6 +31,45 @@ export const jazz = await createJazz({
 Mount it under `/jazz` (see [Backend](/docs/setup/backend#mount-it)). The browser talks only to your
 backend; the core behind `remote()` trusts your backend to say who the user is, and never sees your
 users' credentials.
+
+## Tokens from your identity provider
+
+If your provider gives you a JWT (WorkOS access tokens, Auth0, Clerk, Supabase, any OIDC issuer),
+`fromJWT` is a ready-made `authenticate`. It verifies the token's signature, expiry, issuer and
+audience, names the user by its `sub`, and passes the token's other claims through:
+
+```ts title="jazz.server.ts"
+import { createJazz, fromJWT, remote } from "jazz-tools/backend";
+
+export const jazz = await createJazz({
+  app,
+  permissions,
+  store: remote({ url, appId, secret }),
+  authenticate: fromJWT({
+    jwksUrl: "https://idp.example.com/.well-known/jwks.json",
+    issuer: "https://idp.example.com",
+    audience: "my-app",
+  }),
+});
+```
+
+- **Where the token comes from:** by default the `Authorization: Bearer` header. Pass
+  `token: (request) => ...` to read it from a cookie or your session instead.
+- **Which claims your policies see:** by default every claim except the registered ones (`iss`,
+  `sub`, `aud`, `exp`, `nbf`, `iat`, `jti`). Pass `claims: (payload) => ({ role: payload.role })`
+  to choose.
+- **Audience:** required. Name the audience your provider puts in `aud` for this app, so a token
+  issued to another app on the same tenant is refused. Pass `audience: false` only when your
+  issuer is already specific to this app and its tokens carry no `aud` (WorkOS, for example).
+  Write `false` literally: a computed value such as `isProd && "my-app"` turns the check off
+  outside production.
+- **Expiry:** tokens must carry `exp`. `exp` and `nbf` are checked with 60 seconds of leeway for
+  clock skew; change it with `clockToleranceSeconds`.
+- **Keys:** pass `publicKey` (PEM, X.509 or a JWK) instead of `jwksUrl` if your provider gives you
+  a key rather than a JWKS endpoint.
+
+A request with no token, or with one that doesn't verify, is signed out. A JWKS that can't be
+fetched throws instead, so clients retry rather than signing out.
 
 ## How it works
 
@@ -66,34 +105,32 @@ users' credentials.
 
 ## In the client
 
-With React, pass `backendAuth` to `JazzProvider`:
+With React, `JazzProvider` follows whoever your backend names. After your own sign-in or sign-out,
+call `reauthenticate()` from `useJazzAuth()`:
 
 ```tsx
-import { JazzProvider, backendAuth } from "jazz-tools/react";
+import { JazzProvider, useJazzAuth } from "jazz-tools/react";
 
-<JazzProvider
-  appId="my-app"
-  serverUrl="/jazz"
-  auth={backendAuth({ key: user?.id ?? null, isPending, logout: () => signOut() })}
-  signedOut={<SignIn />}
->
+<JazzProvider serverUrl="/jazz" signedOut={<SignIn />}>
   <App />
 </JazzProvider>;
+
+function SignOutButton() {
+  const { reauthenticate } = useJazzAuth();
+  return <button onClick={async () => (await signOut(), await reauthenticate())}>Sign out</button>;
+}
 ```
 
-`key` is whatever identifies the signed-in user on the client, or `null`; when it changes, Jazz
-signs in again through your backend. `logout` signs out of your auth; your source must then report
-`key: null`. For Better Auth, `betterAuth(authClient)` does all of this for you.
+Jazz also asks your backend when the app starts, when the page regains focus and when another tab
+signs in or out.
 
 Without React, own the session yourself:
 
 ```ts
 import { createJazzSession } from "jazz-tools/client";
 
-const jazz = await createJazzSession({ appId: "my-app", serverUrl: "/jazz" });
-await jazz.loginWithBackend(); // after your own sign-in
-// ...
-await jazz.logout(); // before your own sign-out
+const jazz = await createJazzSession({ serverUrl: "/jazz" });
+await jazz.reauthenticate(); // after your own sign-in or sign-out
 ```
 
 Svelte, Solid, Vue and React Native expose the same actions through their bindings.
@@ -101,7 +138,17 @@ Svelte, Solid, Vue and React Native expose the same actions through their bindin
 ## Guests who sign up
 
 An app can start every visitor as a [local-first](/docs/setup/auth/local-first) guest
-(`initial: "local-first"`). When the guest signs up, call `linkWithBackend()` instead of
+(`initial: "local-first"`). Its backend lets guests sync by returning `acceptLocalFirstAuth(request)`
+from `authenticate` for signed-out requests; guests are refused otherwise:
+
+```ts
+authenticate: async (request) => {
+  const user = await yourAuth.userFor(request);
+  return user ? { userId: user.id } : acceptLocalFirstAuth(request);
+},
+```
+
+When the guest signs up, call `linkWithBackend()` instead of
 `loginWithBackend()`:
 
 ```ts
@@ -113,6 +160,21 @@ The guest proves itself with its own local-first key; your backend checks that t
 `authenticate` names has no Jazz account yet and links the two. From then on, signing in as that
 user opens the guest's account and everything it wrote. An identity belongs to one account only,
 so linking a user who already has an account fails: Jazz doesn't merge accounts.
+
+The session links the guest on its own too, whenever it finds a signed-in user who has no Jazz
+account yet: after `reauthenticate()`, when the page regains focus after a sign-up popup, or on the
+first check after a sign-up redirect. Asking who is signed in never creates an account, so a sign-up
+can't race the link. A `linkWithBackend()` call that arrives while that link runs, or after it, joins
+it. If your backend refuses the link (the guest's key was retired, or the user got an account of
+their own meanwhile), the session signs the user in to their own account instead and never retries
+that link; the guest stays on this device.
+
+"No Jazz account yet" includes an existing user of your app who signs in to Jazz for the first time.
+On a shared device, where the guest may be someone else's, that user would get the guest's data.
+Pass `linkGuestOnSignUp: false` to `createJazzSession` (or `<JazzProvider>`) to stop the session
+linking on its own. It then leaves such a guest as it is, and your app decides after its own sign-in:
+`linkWithBackend()` to give the user the guest's data, or `loginWithBackend()` for an account of
+their own (the guest stays on this device).
 
 To link from your own backend code instead (a second sign-in method, an anonymous id your app
 issued), call `jazz.linkIdentity({ from, to })`.
@@ -140,6 +202,20 @@ Public sessions and author columns expose the same structured value:
 
 Compare `.account` for account-owned data. Two linked identities (a guest and the user it became)
 share account ownership while keeping distinct authorship.
+
+## Users from alpha.59
+
+Apps on alpha.59 signed users in with JWTs, so their accounts belong to identities like
+`{ issuer: "https://idp.example.com", subject: "user_01" }`. `createJazz` names users
+`{ issuer: "jazz:app:<appId>", subject: userId }` instead. The alpha.59 import
+(`jazz-tools migrate-alpha59 import`) links each user's `jazz:app:<appId>` identity to their existing account. Its
+`--app-id` must be exactly the `appId` you pass to `remote()`. If your
+`authenticate` returns the old token's `sub` as `userId` (which `fromJWT` does), returning users
+open their old accounts and keep all their data. Pass `--no-backend-identity-links` to skip this.
+
+Two issuers that used the same `sub` for different accounts can't both map to one `userId`. The
+import then stops and names the issuers that conflict. Your provider's `sub` must stay the same for
+each user: `fromJWT` checks that every token comes from the one `issuer` you configured.
 
 ## Backend request contexts
 

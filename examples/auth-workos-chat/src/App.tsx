@@ -1,6 +1,6 @@
 import * as React from "react";
-import { JazzProvider, backendAuth, useJazzAuth, useAuthState } from "jazz-tools/react";
-import { ANNOUNCEMENTS_CHAT_ID, APP_ID, CHAT_ID } from "../constants.js";
+import { JazzProvider, useJazzAuth, useAuthState } from "jazz-tools/react";
+import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "../constants.js";
 import { type WorkOSUser, useWorkOSSession } from "./session.js";
 import { ChatPanel } from "./ChatPanel.js";
 import { AuthCard } from "./AuthCard.js";
@@ -50,26 +50,39 @@ function ChatShell({ user, onSignIn, onSignOut }: ChatShellProps) {
 }
 
 export function App() {
-  const { isLoading, user, signIn, signOut } = useWorkOSSession();
+  const { user, signIn, signOut } = useWorkOSSession();
   return (
     // Jazz runs in the backend (server/server.ts) under /jazz; its
     // `authenticate` reads the AuthKit session cookie.
     <JazzProvider
-      appId={APP_ID}
       serverUrl="/jazz"
-      auth={backendAuth({
-        key: user?.email ?? null,
-        isPending: isLoading,
-        logout: signOut,
-      })}
       signedOut={<button onClick={() => void signIn()}>Sign in with WorkOS</button>}
     >
-      <SignedInChat user={user} onSignIn={signIn} />
+      <SignedInChat user={user} onSignIn={signIn} onSignOut={signOut} />
     </JazzProvider>
   );
 }
 
-function SignedInChat({ user, onSignIn }: Pick<ChatShellProps, "user" | "onSignIn">) {
-  const { logout } = useJazzAuth();
-  return <ChatShell user={user} onSignIn={onSignIn} onSignOut={logout} />;
+function SignedInChat({ user, onSignIn, onSignOut }: ChatShellProps) {
+  const { reauthenticate } = useJazzAuth();
+  // AuthKit's cookie changes outside Jazz: when the WorkOS user changes, ask
+  // the backend again so Jazz follows it.
+  const email = user?.email ?? null;
+  const seen = React.useRef(email);
+  React.useEffect(() => {
+    if (seen.current === email) return;
+    seen.current = email;
+    void reauthenticate();
+  }, [email, reauthenticate]);
+  return (
+    <ChatShell
+      user={user}
+      onSignIn={onSignIn}
+      onSignOut={async () => {
+        // Clears the AuthKit cookie and heads to WorkOS's logout page.
+        await onSignOut();
+        await reauthenticate();
+      }}
+    />
+  );
 }

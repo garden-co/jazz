@@ -17,7 +17,7 @@ export type E2eeSodiumStream = E2EeSodiumStream
 
 export declare class JazzCore {
   /** Open the core's storage and serve it in this process. */
-  static open(options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; jwtPublicKey?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  static open(options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }): Promise<JazzCore>
   /**
    * Route one HTTP request. `url` is the path and query, as the core's
    * router sees them (`/apps/<appId>/...` or `/health`).
@@ -41,7 +41,7 @@ export declare class JazzCoreSocket {
 }
 
 export declare class JazzServer {
-  static start(options: { appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }): Promise<JazzServer>
+  static start(options: { appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }): Promise<JazzServer>
   get appId(): string
   get url(): string
   get port(): number
@@ -234,6 +234,21 @@ export declare class PendingNativeRead {
   cancel(): void
 }
 
+/**
+ * A core [`serve_core`] started. The host owns the process's signals and
+ * calls [`ServedCore::stop`] to drain it; dropping it without a stop drains
+ * it too.
+ */
+export declare class ServedCore {
+  /** Start the controlled shutdown: refuse new work, drain, then close. */
+  stop(): void
+  /**
+   * Resolves once the core has stopped; rejects if it failed. Only one
+   * caller may wait.
+   */
+  closed(): Promise<void>
+}
+
 /** A large value uploaded in chunks, then published as one row mutation. */
 export declare class StreamingMutation {
   push(chunk: Uint8Array): void
@@ -251,15 +266,6 @@ export declare class Subscription {
   readAll(): Array<SubscriptionEvent>
   drain(): Array<SubscriptionEvent>
   close(): boolean
-}
-
-export declare class TestJwtIssuer {
-  static start(): Promise<TestJwtIssuer>
-  get jwksUrl(): string
-  get issuer(): string
-  get audience(): string
-  jwtForUser(userId: string, claims?: Record<string, unknown> | undefined, options?: { expiresInSeconds?: number; issuer?: string } | undefined): string
-  stop(): Promise<void>
 }
 
 /**
@@ -417,6 +423,14 @@ export interface RestoreOptions {
   branch?: JsonValue
   updatedAtMs?: number
 }
+
+/**
+ * Serve a production core (the `jazz_server::run` shell: connection and
+ * memory limits, graceful drain) until [`ServedCore::stop`]. One per
+ * process at a time: the cores would share the process's storage cache
+ * budget, so a second call fails until the first core has stopped.
+ */
+export declare function serveCore(options: { appId: string; port: number; dataDir: string; blobs: { kind: "sqlite" } | { kind: "files"; dir?: string } | { kind: "s3"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: "vercel-blob"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; allowLocalFirstAuth?: boolean; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }): ServedCore
 
 /** Owned libsodium device encryption keys. */
 export interface SodiumDeviceKeyPair {

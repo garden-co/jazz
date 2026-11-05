@@ -8,9 +8,10 @@ permissions; this app shows the Effect bindings.
   (`jazz-tools/effect`): creating a show with its chief and invite, adding and
   moving tasks, and adding the standard pre-show checklist, each one
   transaction.
-- The browser (`src/main.ts`, `src/planner.ts`) follows Better Auth's session
-  with `createJazzApp({ serverUrl: "/jazz", auth: betterAuth(authClient) })`,
-  wraps the client's database with `Jazz.fromDb`, and draws each live query
+- The browser (`src/main.ts`, `src/planner.ts`) opens Jazz with
+  `createJazzApp({ serverUrl: "/jazz" })`, which starts signed out and asks
+  the backend who is signed in, calls `jazz.reauthenticate()` after signing in
+  or out with Better Auth, wraps the client's database with `Jazz.fromDb`, and draws each live query
   from `jazz.stream(...)` with plain DOM.
 - The Hono server (`server/index.ts`) mounts the app's Jazz (`createJazz` in
   `server/jazz.ts`) under `/jazz` and Better Auth under `/api/auth`.
@@ -23,10 +24,10 @@ jazz.forRequest(request))`), so permissions.ts decides, exactly as for the
 
 ```sh
 pnpm dev          # http://127.0.0.1:3000, data in .jazz/
-pnpm build        # builds dist/ (needs VITE_JAZZ_APP_ID)
+pnpm build        # builds dist/ (needs JAZZ_APP_ID)
 pnpm start        # production server on APP_ORIGIN's port (or PORT)
 pnpm test:e2e     # Playwright smoke against `pnpm dev`
 ```
 
-Production sets `APP_ORIGIN`, `VITE_JAZZ_APP_ID` and `BETTER_AUTH_SECRET`, and
+Production sets `APP_ORIGIN`, `JAZZ_APP_ID` and `BETTER_AUTH_SECRET`, and
 optionally `JAZZ_SERVER_URL` with `JAZZ_ADMIN_SECRET`.

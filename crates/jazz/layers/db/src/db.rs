@@ -590,6 +590,9 @@ struct Inner {
     pub(crate) as_written_mismatches: u64,
     /// The global authority: what it settles is durable at `Global`.
     authority: bool,
+    /// Every session but SYSTEM's must be pinned to a published bundle
+    /// (see [`Db::require_session_pins`]).
+    pub(crate) pins_required: bool,
     /// Uploads the authority refused, by commit seq, kept for a host that
     /// reports them (see [`Db::track_upstream_rejections`]).
     upstream_rejections: Option<Vec<UpstreamRejection>>,
@@ -811,6 +814,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
         jazz: jazz.clone(),
         version: jazz.version_id(),
         policies_from: None,
+        bundle: None,
         stored_names: false,
     })
 }
@@ -1326,6 +1330,7 @@ impl Db {
                 jazz: config.schema.clone(),
                 version: config.schema.version_id(),
                 policies_from: None,
+                bundle: None,
                 stored_names: false,
             };
             physical.union(&schema)?;
@@ -1337,6 +1342,7 @@ impl Db {
             physical
         };
         names.admit(&conn, &schema)?;
+        conn.execute_batch(sync::PENDING_DDL).map_err(storage)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
         let withheld: i64 = conn
             .query_row(
@@ -1441,6 +1447,7 @@ impl Db {
                 non_durable: false,
                 as_written_mismatches: 0,
                 authority: false,
+                pins_required: false,
                 upstream_rejections: None,
                 sessions: Vec::new(),
                 column_codes: RefCell::default(),
@@ -1561,6 +1568,14 @@ impl Db {
     /// store without the role (a relay with no upstream) settles at `Local`.
     pub fn set_authority(&self) {
         self.inner.borrow_mut().authority = true;
+    }
+
+    /// Refuse every session but SYSTEM's that is not pinned to a published
+    /// bundle: a core serves its app only through createJazz, which pins
+    /// each session it opens, so no session is governed by this store's
+    /// own permissions.
+    pub fn require_session_pins(&self) {
+        self.inner.borrow_mut().pins_required = true;
     }
 
     /// Whether this store is the global authority.
@@ -3495,7 +3510,9 @@ impl Inner {
                 format!("bundle {id} does not compile: {error}"),
             )
         })?;
-        let resolved = (*version, Rc::new(self.named(&governing)));
+        let mut named = self.named(&governing);
+        named.bundle = Some(*id);
+        let resolved = (*version, Rc::new(named));
         self.bundles.insert(*id, resolved.clone());
         Ok(Some(resolved))
     }

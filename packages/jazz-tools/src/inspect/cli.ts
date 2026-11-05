@@ -12,6 +12,7 @@ import {
   requestApproval,
   resolveEndpoint,
   tokenStore,
+  type InspectEnv,
   type StoredToken,
 } from "./client.js";
 import { InspectError, INSPECT_TOKEN_PREFIX, type InspectRequest } from "./protocol.js";
@@ -19,7 +20,7 @@ import { InspectError, INSPECT_TOKEN_PREFIX, type InspectRequest } from "./proto
 export interface InspectCliIo {
   stdout: (text: string) => void;
   stderr: (text: string) => void;
-  env: NodeJS.ProcessEnv;
+  env: InspectEnv;
   fetch?: typeof fetch;
   openBrowser?: (url: string) => void;
 }

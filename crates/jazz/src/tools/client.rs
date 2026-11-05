@@ -141,8 +141,11 @@ struct State {
     /// upstream starts it with its first subscription; until then its
     /// calls tick inline, so it needs no `LocalSet`.
     driven: bool,
-    /// Failed upstream connect attempts so far, and the last one's error.
-    connect_failures: (u64, Option<String>),
+    /// The last upstream connect attempt the keeper started. Attempt ids
+    /// rise, so a waiter judges only attempts started after it looked.
+    connect_started: u64,
+    /// The last upstream connect attempt that failed, and its error.
+    connect_failed: Option<(u64, String)>,
     /// The upstream link's last published status; `None` without a server.
     link_status: Option<LinkStatus>,
     /// Consecutive recoverable tick failures.
@@ -218,6 +221,31 @@ impl Shared {
         self.state.borrow_mut()
     }
 
+    /// Drop the engine subscriptions whose public streams were dropped.
+    /// Dropping one queues its unsubscription on the connection, so doing it
+    /// as the public stream drops orders the unsubscription ahead of
+    /// anything the caller asks next on the same connection.
+    fn drop_cancelled(&self) {
+        let cancelled: Vec<Forwarder> = {
+            // A stream dropped while the state is borrowed is dropped by
+            // the next tick instead.
+            let Ok(mut state) = self.state.try_borrow_mut() else {
+                return;
+            };
+            let mut cancelled = Vec::new();
+            for mut forwarder in std::mem::take(&mut state.forwarders) {
+                if forwarder.cancelled() {
+                    cancelled.push(forwarder);
+                } else {
+                    state.forwarders.push(forwarder);
+                }
+            }
+            cancelled
+        };
+        // Outside the state borrow: dropping each runs engine cleanup.
+        drop(cancelled);
+    }
+
     fn ensure_open(&self) -> Result<()> {
         let state = self.state.borrow();
         if state.closed {
@@ -284,6 +312,9 @@ impl Shared {
         if self.state.borrow().stopped.is_some() {
             return;
         }
+        // Before the tick flushes the connection: a stream dropped since the
+        // last one unsubscribes in this flush, not the next.
+        self.drop_cancelled();
         let result = self.db.tick().await;
         {
             let mut state = self.state();
@@ -316,11 +347,7 @@ impl Shared {
     fn forward(&self) {
         let mut state = self.state();
         state.forwarders.retain_mut(|forwarder| {
-            if !matches!(
-                forwarder.cancellation.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ) || forwarder.sender.is_closed()
-            {
+            if forwarder.cancelled() {
                 return false;
             }
             while let Some(event) = forwarder.stream.try_next_event() {
@@ -368,6 +395,14 @@ impl Shared {
 }
 
 impl Forwarder {
+    /// Its public stream was dropped.
+    fn cancelled(&mut self) -> bool {
+        !matches!(
+            self.cancellation.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ) || self.sender.is_closed()
+    }
+
     fn delta(
         &mut self,
         schema: &Schema,
@@ -510,6 +545,9 @@ async fn keep_upstream(
         for action in std::mem::take(&mut keeper.actions) {
             match action {
                 LinkAction::Connect { attempt, .. } => {
+                    if let Some(shared) = shared.upgrade() {
+                        shared.state().connect_started = attempt.0;
+                    }
                     connecting = Some((attempt, connector.connect(request.clone())));
                 }
                 LinkAction::Close(attempt) => {
@@ -565,9 +603,7 @@ async fn keep_upstream(
                     Err(error) => {
                         tracing::debug!(%error, "jazz client upstream connect failed");
                         if let Some(shared) = shared.upgrade() {
-                            let mut state = shared.state();
-                            let failures = state.connect_failures.0 + 1;
-                            state.connect_failures = (failures, Some(error.to_string()));
+                            shared.state().connect_failed = Some((attempt.0, error.to_string()));
                         }
                         LinkInput::Ended(attempt, link_failure(error))
                     }
@@ -737,6 +773,15 @@ impl JazzClient {
                 ));
             }
         };
+        // A core governs a stated session only by the bundle it is pinned
+        // to, and refuses one without: say so here, not as a refusal later.
+        if has_server && context.backend_session.is_some() && context.bundle.is_none() {
+            return Err(JazzError::Connection(
+                "a backend_session needs `bundle`: the published permissions bundle \
+                 (as deploying the app returns it) its user is checked by"
+                    .to_owned(),
+            ));
+        }
         let default_session = default_session_from_context(&context);
         let core_schema = crate::schema::JazzSchema::new(&context.schema)
             .map_err(|error| JazzError::Schema(error.to_string()))?;
@@ -774,18 +819,23 @@ impl JazzClient {
             progress,
             upstream_paused: watch::channel(false).0,
             credentials: watch::channel(AuthConfig {
-                jwt_token: if context.backend_secret.is_some() {
+                // With the backend secret, a client's own proof is the
+                // backend relaying that client (a local-first guest).
+                jwt_token: if context.backend_session.is_some() {
                     None
                 } else {
                     context.jwt_token.clone()
                 },
                 backend_secret: context.backend_secret.clone(),
                 admin_secret: context.admin_secret.clone(),
-                backend_session: None,
+                backend_session: stated_session(&context)?,
             })
             .0,
             serverless: connector.is_none(),
-            trusted: context.backend_secret.is_some() || context.admin_secret.is_some(),
+            trusted: context.admin_secret.is_some()
+                || (context.backend_secret.is_some()
+                    && context.backend_session.is_none()
+                    && context.jwt_token.is_none()),
             state: RefCell::new(State::default()),
         });
 
@@ -804,6 +854,8 @@ impl JazzClient {
                 app_id: context.app_id,
                 peer_identity: identity.author,
                 auth: credentials.borrow_and_update().clone(),
+                authorization: None,
+                bundle: context.bundle.clone(),
                 wake: Arc::new(move || wake.notify_one()),
             };
             // The first attempt decides whether the server admits this
@@ -1100,7 +1152,17 @@ impl JazzClient {
         });
         self.shared.ensure_driven();
         self.shared.tick_soon();
-        Ok(SubscriptionStream::new(receiver, cancel))
+        let shared = Rc::downgrade(&self.shared);
+        Ok(SubscriptionStream::new(
+            receiver,
+            cancel,
+            Box::new(move || {
+                if let Some(shared) = shared.upgrade() {
+                    shared.drop_cancelled();
+                    shared.tick_soon();
+                }
+            }),
+        ))
     }
 
     fn open_core_subscription(
@@ -1711,6 +1773,11 @@ impl JazzClient {
         self.shared.db.sync_debug()
     }
 
+    /// Engine subscriptions this client still holds for public streams.
+    pub(crate) fn live_subscriptions_for_test(&self) -> usize {
+        self.shared.state().forwarders.len()
+    }
+
     pub(crate) fn disconnect_upstream_for_test(&self) -> bool {
         self.shared.upstream_paused.send_replace(true);
         let detached = detach(&self.shared);
@@ -1734,9 +1801,12 @@ impl JazzClient {
     /// Let the keeper open a fresh link for the preserved client state and
     /// wait until it is attached.
     pub(crate) async fn reconnect_upstream_for_test(&self) -> Result<bool> {
-        let (failed, attached) = {
+        // An attempt the keeper started before this call (a retry during an
+        // outage) may still fail after it: only attempts started from here
+        // on answer it.
+        let (started, attached) = {
             let state = self.shared.state.borrow();
-            (state.connect_failures.0, state.upstream.is_some())
+            (state.connect_started, state.upstream.is_some())
         };
         // Neither detached nor reconnecting: nothing to reattach.
         let resumed = self
@@ -1754,10 +1824,10 @@ impl JazzClient {
                 if state.upstream.is_some() {
                     return Some(Ok(true));
                 }
-                match &state.connect_failures {
-                    (n, error) if *n > failed => Some(Err(JazzError::Connection(
-                        error.clone().unwrap_or_default(),
-                    ))),
+                match &state.connect_failed {
+                    Some((attempt, error)) if *attempt > started => {
+                        Some(Err(JazzError::Connection(error.clone())))
+                    }
                     _ => None,
                 }
             })
@@ -1906,8 +1976,26 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
     })
 }
 
+/// The session a backend client states for its user, as the core reads it.
+fn stated_session(context: &AppContext) -> Result<Option<serde_json::Value>> {
+    let Some(session) = context.backend_session.as_ref() else {
+        return Ok(None);
+    };
+    if context.backend_secret.is_none() || context.admin_secret.is_some() {
+        return Err(JazzError::Connection(
+            "a backend_session is stated with the backend secret alone".to_owned(),
+        ));
+    }
+    serde_json::to_value(session)
+        .map(Some)
+        .map_err(|error| JazzError::Connection(error.to_string()))
+}
+
 fn default_session_from_context(context: &AppContext) -> Option<Session> {
-    if context.backend_secret.is_some() || context.admin_secret.is_some() {
+    if let Some(session) = context.backend_session.as_ref() {
+        return Some(session.clone());
+    }
+    if context.admin_secret.is_some() {
         return None;
     }
     context
@@ -2347,5 +2435,113 @@ fn provenance(row: &CurrentRow) -> crate::model::metadata::RowProvenance {
         updated_by: author("$updatedBy").unwrap_or_else(|| created_by.clone()),
         created_by,
         created_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::native_transport_connector::ConnectedNativeTransport;
+    use crate::tools::public_schema::{ColumnType, SchemaBuilder, TableSchema};
+    use crate::wire::{TransportError, WireTransport};
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+    use tokio::sync::oneshot;
+
+    struct NoopTransport;
+
+    impl WireTransport for NoopTransport {
+        fn send_frame(&mut self, _frame: Vec<u8>) -> std::result::Result<(), TransportError> {
+            Ok(())
+        }
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    type Outcome = std::result::Result<(), String>;
+
+    /// Each attempt takes the next scripted outcome; an attempt past the
+    /// script attaches a link that never speaks.
+    struct ScriptedConnector {
+        attempts: Mutex<VecDeque<oneshot::Receiver<Outcome>>>,
+        started: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl NativeTransportConnector for ScriptedConnector {
+        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
+            self.started
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let outcome = self.attempts.lock().unwrap().pop_front();
+            Box::pin(async move {
+                let outcome = match outcome {
+                    Some(outcome) => outcome.await.unwrap_or(Ok(())),
+                    None => Ok(()),
+                };
+                match outcome {
+                    Ok(()) => Ok(ConnectedNativeTransport {
+                        transport: Box::new(NoopTransport),
+                        protocol_version: crate::wire::WIRE_PROTOCOL_VERSION,
+                        features: 0,
+                        terminal: Box::pin(std::future::pending()),
+                    }),
+                    Err(error) => Err(NativeTransportError::Retryable(error)),
+                }
+            })
+        }
+    }
+
+    /// A retry the keeper started before the reconnect call fails after it:
+    /// the call waits for an attempt of its own instead of reporting that
+    /// stale failure (`replica_settlement::connect_failure_keeps_authority_
+    /// subscription_held_until_upstream_returns` raced on it).
+    #[tokio::test]
+    async fn reconnect_ignores_a_failure_from_an_attempt_started_before_it() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (first_tx, first) = oneshot::channel();
+                let (retry_tx, retry) = oneshot::channel();
+                first_tx.send(Err("server down".to_owned())).unwrap();
+                let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let connector = Arc::new(ScriptedConnector {
+                    attempts: Mutex::new(VecDeque::from([first, retry])),
+                    started: started.clone(),
+                });
+                let schema = SchemaBuilder::new()
+                    .table(TableSchema::builder("notes").column("title", ColumnType::Text))
+                    .build();
+                let mut context = AppContext::test(schema);
+                context.server_url = "http://upstream.invalid".to_owned();
+                context.admin_secret = Some("admin-secret".to_owned());
+                let client = JazzClient::connect_with_native_transport(context, connector)
+                    .await
+                    .expect("an unreachable server starts the client offline");
+
+                // The keeper's own retry is in flight when the call starts.
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    while started.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("the keeper retries");
+                let reconnect = {
+                    let client = client.clone();
+                    tokio::task::spawn_local(
+                        async move { client.reconnect_upstream_for_test().await },
+                    )
+                };
+                tokio::task::yield_now().await;
+                retry_tx.send(Err("stale outage".to_owned())).unwrap();
+
+                let attached = tokio::time::timeout(Duration::from_secs(30), reconnect)
+                    .await
+                    .expect("a later attempt answers the call")
+                    .expect("reconnect task")
+                    .expect("the stale failure is not this call's");
+                assert!(attached);
+                assert!(started.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+            })
+            .await;
     }
 }

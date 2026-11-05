@@ -518,6 +518,8 @@ test("CI uses the correctness artifact path while package builds keep release WA
       `${task} must preserve the sealed shared test surface for child package scripts`,
     );
   assert.deepEqual(turbo.tasks["jazz-tools#build"].passThroughEnv, [
+    // build:runtime refuses to build missing native inputs implicitly in CI.
+    "CI",
     "JAZZ_TEST_SEALED_TOOLS_DIST",
     "JAZZ_CORRECTNESS_ARTIFACT_RUN",
     "JAZZ_RN_TEST_BRIDGE",

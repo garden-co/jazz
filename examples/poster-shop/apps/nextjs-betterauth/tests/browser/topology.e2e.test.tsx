@@ -1,7 +1,4 @@
-import {
-  createAccountManager,
-  type AccountHandle,
-} from "../../../../../../packages/jazz-tools/src/index.js";
+import type { AccountHandle } from "../../../../../../packages/jazz-tools/src/index.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
 import type { Db } from "../../../../../../packages/jazz-tools/src/runtime/index.js";
@@ -22,7 +19,10 @@ import {
   createJazzServerTransportControl,
   type JazzServerTransportControl,
   getJazzServerInfo,
-  getJazzServerJwtForUser,
+  insertAsJazzAppBackend,
+  jazzAppUserUrl,
+  loginAtJazzAppUser,
+  startJazzApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
@@ -38,9 +38,7 @@ const peerCommands = commands as unknown as {
     table: string;
     queryJson?: string;
     schemaJson: string;
-    serverUrl: string;
-    jwtToken?: string;
-    adminSecret?: string;
+    userUrl: string;
   }): Promise<void>;
   posterShopQueryConnectedPeer(id: string): Promise<Record<string, unknown>[]>;
   posterShopInsertConnectedPeer(
@@ -63,13 +61,13 @@ describe("PosterShop cross-topology recovery", () => {
   it("replays an offline canvas edit across restart and rejects a revoked editor", async () => {
     const requestedSeed = Number(__JAZZ_EXAMPLE_TOPOLOGY_SEED__);
     const seed = Number.isSafeInteger(requestedSeed) ? requestedSeed : 47;
-    let server: Awaited<ReturnType<typeof getJazzServerInfo>>;
+    let server: Awaited<ReturnType<typeof startJazzApp>>;
     let owner: Db;
     let ownerTransport: JazzServerTransportControl;
     let ownerAccount: AccountHandle;
     let editor: Db;
     let reader: Db;
-    let ownerToken: string;
+    let ownerUrl: string;
     let ownerDbName: string;
     let canvas: { id: string };
     let layer: { id: string };
@@ -109,7 +107,6 @@ describe("PosterShop cross-topology recovery", () => {
                 server.appId,
                 ownerTransport.url,
                 "owner",
-                ownerToken,
                 ownerDbName,
                 ownerAccount,
               );
@@ -117,12 +114,11 @@ describe("PosterShop cross-topology recovery", () => {
           },
           authorization: {
             failure: async () => {
-              const token = await getJazzServerJwtForUser(
-                "poster-outsider",
-                undefined,
+              const outsider = await openClient(
                 server.appId,
+                await jazzAppUserUrl(server, "poster-outsider"),
+                "outsider",
               );
-              const outsider = await openClient(server.appId, server.serverUrl, "outsider", token);
               await expect(
                 outsider
                   .insert(app.shapes, shape(canvas.id, layer.id, 99))
@@ -135,49 +131,46 @@ describe("PosterShop cross-topology recovery", () => {
           {
             name: "owner bootstrap and editor admission",
             run: async () => {
-              server = await getJazzServerInfo(uniqueDbName("poster-shop-topology"));
+              const core = await getJazzServerInfo(uniqueDbName("poster-shop-topology"));
               await deploy({
-                appId: server.appId,
-                serverUrl: server.serverUrl,
-                adminSecret: server.adminSecret,
+                appId: core.appId,
+                serverUrl: core.serverUrl,
+                adminSecret: core.adminSecret,
                 schema: app,
                 permissions,
               });
-              const [issuedOwnerToken, editorToken, readerToken] = await Promise.all([
-                getJazzServerJwtForUser("poster-owner", undefined, server.appId),
-                getJazzServerJwtForUser("poster-editor", undefined, server.appId),
-                getJazzServerJwtForUser("poster-reader", undefined, server.appId),
+              server = await startJazzApp(core, { schema: app, permissions });
+              const [editorUrl, readerUrl] = await Promise.all([
+                jazzAppUserUrl(server, "poster-editor"),
+                jazzAppUserUrl(server, "poster-reader"),
               ]);
-              ownerTransport = ctx.trackTransport(
-                await createJazzServerTransportControl(server.serverUrl),
-              );
-              const ownerAccounts = await createAccountManager({
-                appId: server.appId,
-                serverUrl: ownerTransport.url,
-              });
-              ownerAccount = await ownerAccounts.registerJWT(issuedOwnerToken);
-              ownerToken = issuedOwnerToken;
+              ownerUrl = await jazzAppUserUrl(server, "poster-owner");
+              // The owner's faults partition only the owner: a proxy in front
+              // of their own origin, signed in as them.
+              ownerTransport = ctx.trackTransport(await createJazzServerTransportControl(ownerUrl));
+              ownerAccount = await loginAtJazzAppUser(server.appId, ownerTransport.url);
               ownerDbName = uniqueDbName("poster-shop-owner");
               owner = await openClient(
                 server.appId,
                 ownerTransport.url,
                 "owner",
-                ownerToken,
                 ownerDbName,
                 ownerAccount,
               );
-              editor = await openClient(server.appId, server.serverUrl, "editor", editorToken);
-              reader = await openClient(server.appId, server.serverUrl, "reader", readerToken);
-              canvas = await owner
-                .insert(app.canvases, { title: "Midnight", width: 1080, height: 1350 })
-                .wait({ tier: "global" });
-              await owner
-                .insert(app.canvasMembers, {
-                  canvasId: canvas.id,
-                  memberAuthor: accountFromDb(owner),
-                  role: "admin",
-                })
-                .wait({ tier: "global" });
+              editor = await openClient(server.appId, editorUrl, "editor");
+              reader = await openClient(server.appId, readerUrl, "reader");
+              // Only the backend creates a canvas and its first admin, as the
+              // app's bootstrap route does.
+              canvas = await insertAsJazzAppBackend(server, app.canvases, {
+                title: "Midnight",
+                width: 1080,
+                height: 1350,
+              });
+              await insertAsJazzAppBackend(server, app.canvasMembers, {
+                canvasId: canvas.id,
+                memberAuthor: accountFromDb(owner),
+                role: "admin",
+              });
               editorMembership = await owner
                 .insert(app.canvasMembers, {
                   canvasId: canvas.id,
@@ -229,8 +222,7 @@ describe("PosterShop cross-topology recovery", () => {
                 table: "shapes",
                 queryJson: canvasQueries(canvas.id).shapes._build(),
                 schemaJson: JSON.stringify(app.wasmSchema),
-                serverUrl: server.serverUrl,
-                jwtToken: readerToken,
+                userUrl: readerUrl,
               };
               await peerCommands.posterShopOpenConnectedPeer(connectedPeerInput);
               await peerCommands.posterShopOpenConnectedPeer({
@@ -239,8 +231,8 @@ describe("PosterShop cross-topology recovery", () => {
                 dbName: uniqueDbName("poster-shop-connected-writer-store"),
                 table: "shapes",
                 schemaJson: JSON.stringify(app.wasmSchema),
-                serverUrl: server.serverUrl,
-                adminSecret: server.adminSecret,
+                // The control write comes from the owner, on another connection.
+                userUrl: ownerUrl,
               });
             },
             faultsAfter: [{ kind: "failure", target: "authorization" }],
@@ -400,9 +392,8 @@ describe("PosterShop cross-topology recovery", () => {
             run: async () => {
               const coreEditor = await openClient(
                 server.appId,
-                server.serverUrl,
+                await jazzAppUserUrl(server, "poster-editor"),
                 "revoked-core-editor",
-                await getJazzServerJwtForUser("poster-editor", undefined, server.appId),
               );
               await expect(
                 coreEditor
@@ -461,21 +452,19 @@ function canvasQueries(canvasId: string) {
   };
 }
 
+/** A client syncing as the user whose own origin is `userUrl` (from `jazzAppUserUrl`). */
 async function openClient(
   appId: string,
-  serverUrl: string,
+  userUrl: string,
   label: string,
-  jwtToken: string,
   dbName = uniqueDbName(`poster-shop-${label}`),
   account?: AccountHandle,
 ): Promise<Db> {
   return ctx.track(
     await createBrowserTestDb({
       appId,
-      serverUrl,
-      jwtToken: account ? undefined : jwtToken,
-      registerJwt: !account,
-      account,
+      serverUrl: userUrl,
+      account: account ?? (await loginAtJazzAppUser(appId, userUrl)),
       driver: { type: "persistent", dbName },
     }),
   );

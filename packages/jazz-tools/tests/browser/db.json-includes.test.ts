@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { schema as s, generateAuthSecret } from "../../src/index.js";
 import { createBrowserTestDb } from "./support.js";
 import { deploy } from "../../src/dev/catalogue.js";
-import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp, stopJazzServer } from "./testing-server.js";
 
 const app = s.defineApp(
   {
@@ -30,7 +30,7 @@ const app = s.defineApp(
 );
 
 it("reads JSON forward and reverse includes offline before and after persistent reopen", async () => {
-  const server = await getJazzServerInfo(crypto.randomUUID());
+  const core = await getJazzServerInfo(crypto.randomUUID());
   const permissions = s.definePermissions(app, ({ policy }) => [
     policy.parents.allowRead.always(),
     policy.parents.allowInsert.always(),
@@ -39,7 +39,8 @@ it("reads JSON forward and reverse includes offline before and after persistent 
     policy.children.allowRead.always(),
     policy.children.allowInsert.always(),
   ]);
-  await deploy({ ...server, schema: app, permissions });
+  await deploy({ ...core, schema: app, permissions });
+  const server = await startJazzApp(core, { schema: app, permissions });
   const config = {
     appId: server.appId,
     serverUrl: server.serverUrl,

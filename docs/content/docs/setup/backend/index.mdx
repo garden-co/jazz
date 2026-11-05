@@ -15,7 +15,6 @@ import { app, permissions } from "./schema";
 import { getUserFromCookie } from "./auth";
 
 export const jazz = await createJazz({
-  appId: "my-app",
   app,
   permissions,
   store: sqlite({ path: "./data/jazz" }),
@@ -114,7 +113,7 @@ all it needs. It never holds a Jazz credential:
 ```ts title="src/jazz.ts"
 import { createJazzSession } from "jazz-tools/client";
 
-export const session = await createJazzSession({ appId: "my-app", serverUrl: "/jazz" });
+export const session = await createJazzSession({ serverUrl: "/jazz" });
 await session.loginWithBackend();
 ```
 
@@ -183,7 +182,7 @@ See the [Cloudflare Wrangler example](https://github.com/garden-co/jazz/tree/mai
 
 ## How it fits with the rest
 
-- **Auth:** which tokens `forRequest` accepts and how to link accounts. See [Auth](/docs/setup/auth).
+- **Auth:** how `authenticate` decides who `forRequest` acts as, and how to link accounts. See [Auth](/docs/setup/auth).
 - **Permissions:** user-scoped queries run your [policies](/docs/schemas/policies); backend authority skips them.
 - **Reads and writes:** the same query and write API as clients. See [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data), including when a write counts as durable.
 - **Clients:** browsers and apps sync through the same `/jazz` mount, under the same policies. See [Browser](/docs/setup/web-client).

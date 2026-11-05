@@ -29,6 +29,9 @@ layers, WASM + NAPI + React Native bindings.
   `node dev/gates/local-ci-equivalent.mjs --ci-equivalent` may be described as
   CI-equivalent.
 - **Backlog.** Follow-ups go in GitHub Issues, not in specs or docs.
+- **Changesets.** Name only published packages. Rust-facing notes go under
+  `jazz-tools` (the crates ship at its version); private `@jazz/rust` makes
+  `changeset version` fail.
 
 ## Performance work
 

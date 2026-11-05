@@ -42,4 +42,4 @@ export {
 } from "./session.js";
 
 export { JazzProvider, useJazzAuth, type JazzProviderProps, type UseJazzAuth } from "./app.js";
-export { backendAuth, betterAuth, type JazzAuth } from "../session/app.js";
+export type { JazzUser } from "../session/app.js";

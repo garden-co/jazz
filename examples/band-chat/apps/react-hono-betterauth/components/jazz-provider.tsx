@@ -1,42 +1,31 @@
-import { JazzProvider as Jazz, betterAuth, useJazzAuth } from "jazz-tools/react";
+import { JazzProvider as Jazz, useJazzAuth } from "jazz-tools/react";
 import { Banner, Button, Center, Spinner } from "@astryxdesign/core";
 import { authClient } from "@/src/lib/auth-client";
 
-const APP_ID: string | undefined = import.meta.env.VITE_JAZZ_APP_ID;
-// Better Auth's session drives sign-in; BandChat's backend (`createJazz` in
-// server/jazz.ts) reads it in `authenticate`.
-const auth = betterAuth(authClient);
+// Start on the thin client; load the local-first one (WASM, local storage,
+// offline writes) in its own chunk once the page has loaded.
+const loadLocalFirst = () => import("jazz-tools/local-first");
 
+// Better Auth signs users in; BandChat's backend (`createJazz` in
+// server/jazz.ts) reads its session in `authenticate`.
 type AuthActions = { signOut(): Promise<void> };
 export function useBandChatLifecycle(): AuthActions {
-  const { logout } = useJazzAuth();
+  const { reauthenticate } = useJazzAuth();
   return {
     async signOut() {
-      // Signs out of Jazz first (flushing local writes), then of Better Auth.
-      await logout();
+      // Signs out of Better Auth, then Jazz follows the backend's answer.
+      await authClient.signOut();
+      await reauthenticate();
       window.location.assign("/");
     },
   };
 }
 
 export function JazzProvider({ children }: React.PropsWithChildren) {
-  // Fail closed: vite.config.ts sets it from the checked configuration.
-  if (!APP_ID)
-    return (
-      <StatusScreen>
-        <Banner
-          status="error"
-          collapsible={false}
-          title="BandChat is not configured"
-          description="Set VITE_JAZZ_APP_ID."
-        />
-      </StatusScreen>
-    );
   return (
     <Jazz
-      appId={APP_ID}
       serverUrl="/jazz"
-      auth={auth}
+      client={loadLocalFirst}
       loading={<LoadingScreen label="Connecting BandChat…" />}
       signedOut={<LoadingScreen label="Signing in…" />}
       error={(state) => (

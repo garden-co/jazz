@@ -41,7 +41,7 @@ import type { JazzSession } from "../session/state.js";
 import {
   backendDbAttributedTo,
   backendDbForSession,
-  createJazzSession,
+  openJazzSession,
   type JazzClient,
 } from "./create-jazz-session.js";
 import type { BackendSchemaInput } from "./create-jazz-context.js";
@@ -100,7 +100,10 @@ export type JazzStore =
   | {
       readonly kind: "vercel";
       readonly options: VercelStoreOptions;
-      /** What runs outside a Vercel deployment, e.g. under `next dev`. */
+      /**
+       * What runs outside a Vercel deployment, e.g. under `next dev`
+       * (default: `sqlite({ path: ".jazz/local" })`).
+       */
       readonly local: Extract<JazzStore, { kind: "sqlite" | "memory" }>;
     };
 
@@ -109,6 +112,11 @@ export type JazzStore =
  * its app id on first start and keeps it beside its data; set `appId` only
  * to keep the id of an existing app. Large values' bytes go to `blobs`,
  * by default `files()` in `<path>/blobs`.
+ *
+ * Only one process can open `path` at a time (it holds `<path>/jazz.lock`
+ * while the core is open); a second one fails with "already open". It
+ * refuses to start on serverless hosts with no lasting disk (Vercel, AWS
+ * Lambda, Netlify): use `vercel()` or `remote()` there.
  */
 export function sqlite(options: {
   path: string;
@@ -186,8 +194,13 @@ export function remote(
 }
 
 /**
- * A core in a persistent Vercel Sandbox in your own Vercel project, with its
- * data on a Drive: one for production and one per Git branch for previews.
+ * The store for apps deployed on Vercel. Use it in dev too: outside a
+ * production or preview deployment (`next dev`, `vercel dev`, tests) it runs
+ * `local`, by default `sqlite({ path: ".jazz/local" })`.
+ *
+ * Deployed, it runs a core in a persistent Vercel Sandbox in your own Vercel
+ * project, with its data on a Drive: one for production and one per Git
+ * branch for previews.
  * It is created on first use, wakes when a request needs it (about a second)
  * and stops after `idleMs` without requests or sockets. The function's Vercel
  * OIDC token is its only credential, so there are no secrets and no env vars:
@@ -203,9 +216,7 @@ export function remote(
  * the Sandbox to re-pin the core. Install `@vercel/sandbox` and
  * `@vercel/functions` next to `jazz-tools`. A deployment of a newer jazz-tools
  * restarts the core on its version, and an older deployment never moves it
- * back. Outside a production or preview deployment (`next dev`, `vercel dev`,
- * tests) it runs `local` instead: by default a SQLite core in `.jazz/local`.
- * Branch cores are not deleted when a branch merges yet: each keeps its
+ * back. Branch cores are not deleted when a branch merges yet: each keeps its
  * Sandbox and a Drive of up to `maxDriveBytes` until you remove them.
  */
 export function vercel(
@@ -236,6 +247,44 @@ function blobOptions(blobs: BlobStore): {
   return { blobs: "files", ...(blobs.dir === undefined ? {} : { blobsDir: blobs.dir }) };
 }
 
+declare const localFirstGuestBrand: unique symbol;
+
+/**
+ * `authenticate`'s answer for a request from a local-first guest: an account
+ * a browser made on its own, before (or without) signing in. Return
+ * {@link acceptLocalFirstAuth} for the requests you let guests make; any other
+ * answer refuses a guest.
+ */
+export interface LocalFirstGuest {
+  readonly [localFirstGuestBrand]: true;
+}
+
+const LOCAL_FIRST_GUEST = Object.freeze({
+  kind: "jazz:local-first-guest",
+}) as unknown as LocalFirstGuest;
+
+/**
+ * Let this request through as a local-first guest, when it comes from one.
+ * Guests are refused unless `authenticate` returns this: a guest has no user
+ * in your auth, so only your permissions stand between it and your data.
+ *
+ * ```ts
+ * authenticate: async (request) => {
+ *   const session = await auth.api.getSession({ headers: request.headers });
+ *   return session ? { userId: session.user.id } : acceptLocalFirstAuth(request);
+ * },
+ * ```
+ *
+ * An app with no sign-in of its own, where every browser is a guest, passes
+ * it as is: `authenticate: acceptLocalFirstAuth`.
+ *
+ * For a request that is not a guest's, it means the same as `null`: no one
+ * is signed in.
+ */
+export function acceptLocalFirstAuth(_request: Request): LocalFirstGuest {
+  return LOCAL_FIRST_GUEST;
+}
+
 /** Who the request's user is, as the app's own auth decides. */
 export interface JazzUser {
   /** Stable user id in your auth system. Becomes the identity's `sub`. */
@@ -252,8 +301,15 @@ export interface CreateJazzOptions {
    * Decide who sent `request`, with your app's own session (a cookie, a
    * header). Return null for a signed-out request. Jazz calls it when a
    * browser signs in or opens a sync session, and in `forRequest`.
+   *
+   * Local-first guests are refused unless it returns
+   * `acceptLocalFirstAuth(request)` for them; an app with no sign-in passes
+   * `authenticate: acceptLocalFirstAuth`. Without `authenticate`, only
+   * backend code reaches the data.
    */
-  authenticate?: (request: Request) => JazzUser | null | Promise<JazzUser | null>;
+  authenticate?: (
+    request: Request,
+  ) => JazzUser | LocalFirstGuest | null | Promise<JazzUser | LocalFirstGuest | null>;
   /** The path Jazz is mounted under. Defaults to `/jazz`. */
   basePath?: string;
   /**
@@ -357,7 +413,21 @@ export interface Jazz {
   readonly basePath: string;
   /** Answer one request under `basePath` (sync, sign-in, the HTTP stream). */
   handle(request: Request): Promise<Response>;
-  /** Route handlers for a Next.js catch-all route (`app/jazz/[...path]/route.ts`). */
+  /**
+   * Route handlers for a Next.js catch-all route. Create Jazz on the first
+   * request, not at module scope (see `createJazz`):
+   *
+   * ```ts
+   * // app/jazz/[...path]/route.ts
+   * import { getJazz } from "@/lib/jazz.server"; // returns a cached createJazz promise
+   *
+   * let handlers: Promise<ReturnType<Jazz["next"]>> | undefined;
+   * const get = () => (handlers ??= getJazz().then((jazz) => jazz.next()));
+   * export const GET = async (request: Request) => (await get()).GET(request);
+   * export const POST = async (request: Request) => (await get()).POST(request);
+   * export const DELETE = async (request: Request) => (await get()).DELETE(request);
+   * ```
+   */
   next(): {
     GET(request: Request): Promise<Response>;
     POST(request: Request): Promise<Response>;
@@ -628,7 +698,6 @@ async function applyBundle(
       forward: edge.forward as PublishedTableLens[],
     })),
     permissions: options.permissions,
-    activate: false,
   }).catch((error: unknown) => {
     // A core without `/bundles` predates per-deployment permissions; it
     // must not be handed a deployment it would activate for every backend.
@@ -640,6 +709,7 @@ async function applyBundle(
     }
     throw error;
   });
+  // An older core answers a publish without the bundle it made.
   if (!deployed.bundle) {
     throw new Error("createJazz: the core did not publish a permissions bundle; upgrade it");
   }
@@ -817,7 +887,8 @@ function refuseServerlessDisk(dir: string): void {
   if (!host) return;
   throw new Error(
     `sqlite({ path: ${JSON.stringify(dir)} }) can't keep data on ${host}: its functions have no lasting disk. ` +
-      "Use remote({ url, appId, secret }) to a sync server or Jazz Cloud.",
+      (host === "Vercel" ? "Use vercel(), whose local store runs sqlite() in dev, or " : "Use ") +
+      "remote({ url, appId, secret }) to a sync server or Jazz Cloud.",
   );
 }
 
@@ -980,11 +1051,28 @@ function openRemoteCore(
   return core;
 }
 
+/** How long `close()` waits for pending writes to reach the core. */
+const CLOSE_SYNC_TIMEOUT_MS = 10_000;
+
 /**
  * Run Jazz inside your backend. It applies the schema, migrations and
  * permissions your code declares to its core (in this process, or a remote
  * one), and serves sync on your own origin under `basePath`. There is no
  * separate deploy step: a rollback of your backend rolls Jazz back with it.
+ *
+ * Create it once per process, on the first request, not at module scope:
+ * frameworks import route modules in other processes too (Next.js build and
+ * dev workers), and each import would open the store. Cache the promise on
+ * `globalThis` so dev hot reloads reuse it, and drop it if it rejects:
+ *
+ * ```ts
+ * const cached = globalThis as { jazz?: Promise<Jazz> };
+ * export function getJazz() {
+ *   const pending = (cached.jazz ??= createJazz({ app, permissions, store, authenticate }));
+ *   pending.catch(() => { if (cached.jazz === pending) cached.jazz = undefined; });
+ *   return pending;
+ * }
+ * ```
  */
 export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   const basePath = (options.basePath ?? DEFAULT_BASE_PATH).replace(/\/+$/, "");
@@ -1047,7 +1135,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   let session: JazzSession<JazzClient>;
   try {
     pin = await applyBundle(core.serverUrl, { ...options, appId, adminSecret: core.adminSecret });
-    session = await createJazzSession({
+    session = await openJazzSession({
       appId,
       app: options.app,
       permissions: options.permissions,
@@ -1077,8 +1165,26 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   async function authenticate(request: Request): Promise<JazzUser | null> {
     const client = await backendClients.resolve(request);
     if (client !== null) return client !== "refused" && client.kind === "user" ? client.user : null;
+    const answer = await askAuthenticate(request);
+    return answer === LOCAL_FIRST_GUEST ? null : (answer as JazzUser | null);
+  }
+
+  async function askAuthenticate(request: Request): Promise<JazzUser | LocalFirstGuest | null> {
     if (!options.authenticate) return null;
     return (await options.authenticate(request)) ?? null;
+  }
+
+  /** Whether the app lets `request` in as a local-first guest (`acceptLocalFirstAuth`). */
+  let warnedGuestsOff = false;
+  async function acceptsGuest(request: Request): Promise<boolean> {
+    if ((await askAuthenticate(request)) === LOCAL_FIRST_GUEST) return true;
+    if (!warnedGuestsOff) {
+      warnedGuestsOff = true;
+      console.warn(
+        "createJazz: refused a local-first guest. To let guests sync, return acceptLocalFirstAuth(request) from authenticate for them.",
+      );
+    }
+    return false;
   }
 
   /** One admin account request to the core: this backend vouches for the identities. */
@@ -1159,6 +1265,39 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     const expiresAt = Math.floor(Date.now() / 1000) + (options.sessionTtlSeconds ?? 3600);
     return Response.json(
       { account, identity: identity(user.userId), claims: user.claims ?? {}, expiresAt },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
+  /**
+   * Who `request`'s user is, without changing anything: the user
+   * `authenticate` names, and whether the core already holds an account for
+   * them. A browser's session asks this to follow the backend; only a sign-in
+   * (`backend-sign-in`) or a link (`backend-link`) assigns an account, so a
+   * local-first guest whose user has none yet can still link to them.
+   */
+  async function backendUser(request: Request): Promise<Response> {
+    if (request.method !== "POST") return new Response(null, { status: 405 });
+    const user = await authenticate(request);
+    if (!user) return new Response("signed_out", { status: 401 });
+    let account: string | null;
+    const cached = accounts.get(user.userId);
+    if (cached && cached.until > Date.now()) {
+      account = cached.account;
+    } else {
+      try {
+        ({ account } = await adminAccounts("resolve", { identity: identity(user.userId) }));
+      } catch (error) {
+        const status = (error as { status?: number }).status;
+        // The core refuses this identity (it was revoked): say so, as the
+        // core does, rather than fail as a server error.
+        if (status === 403) return new Response("identity_not_authorized", { status: 403 });
+        if (status !== 404) throw error;
+        account = null;
+      }
+    }
+    return Response.json(
+      { account, identity: identity(user.userId), claims: user.claims ?? {} },
       { headers: { "Cache-Control": "no-store" } },
     );
   }
@@ -1274,17 +1413,29 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         } catch (error) {
           // Linking is idempotent for this guest and this user: when the user
           // already belongs to the guest's account (an earlier link went
-          // through, then perhaps its revoke failed), this link is done. A
+          // through, then perhaps its revoke failed, or another tab's link
+          // won the race and revoked the key since), this link is done. A
           // used challenge (the core refuses its nonce first) and a user of
           // another account are still refused.
-          if ((error as { status?: number }).status !== 409 || !(await userIs(account)))
-            throw error;
+          const status = (error as { status?: number }).status;
+          if ((status !== 409 && status !== 403) || !(await userIs(account))) throw error;
+          // Refused for a retired key: the link that won already retired it.
+          if (status === 403) guestRevoked = true;
         }
       }
-    } catch {
-      // The core's reason (e.g. the identity already belongs to another
-      // account, or the challenge was used) stays on the backend.
-      return new Response("link_refused", { status: 409 });
+    } catch (error) {
+      const status = (error as { status?: number }).status;
+      // Only the core's own refusals refuse the link for good: an invalid
+      // link intent (400), a retired or foreign identity (403), a user with
+      // no account to check (404), an identity of another account (409).
+      // Its reason stays on the backend.
+      if (status === 400 || status === 403 || status === 404 || status === 409)
+        return new Response("link_refused", { status: 409 });
+      // Anything else (the core down or failing, its credential check
+      // refusing this backend mid-rotation, a proxy's 408 or 429) may pass on
+      // a retry, so say so rather than strand the guest.
+      console.error("Jazz: linking a guest failed on the core", error);
+      return new Response("account_registry_unavailable", { status: 503 });
     }
     if (options.guestKeyAfterLink === "revoke" && !guestRevoked) {
       // The link already stands. If the revoke fails, the guest key stays
@@ -1422,6 +1573,26 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
             });
         }, every);
         (recheck as unknown as { unref?: () => void }).unref?.();
+      } else if (admitted.guest && every > 0) {
+        // The app may stop letting guests in (or this one): ask again, as for users.
+        let checking = false;
+        recheck = setInterval(() => {
+          if (checking || ended) return;
+          checking = true;
+          void acceptsGuest(request)
+            .then(
+              (accepted) => {
+                if (ended || accepted) return;
+                onEvent(null, { kind: "close", code: 1008, reason: "authenticate again" });
+                end();
+              },
+              () => {},
+            )
+            .finally(() => {
+              checking = false;
+            });
+        }, every);
+        (recheck as unknown as { unref?: () => void }).unref?.();
       }
       socket = core.openSocket(headerPairs(request.headers), onEvent, admitted.access);
       return socket.send(admitted.prelude);
@@ -1433,8 +1604,21 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         if (ended) return false;
         chain = chain
           ? chain.then((ok) => ok && !ended && !!socket?.send(data))
-          : admit(data).catch(() => {
-              onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
+          : admit(data).catch((error: unknown) => {
+              if (!ended && isRefusal(error)) {
+                // The core refused this identity (revoked, local-first auth
+                // disabled, invalid): an auth failure the client must not
+                // retry, reported as a sign-in refusal is.
+                onEvent(null, {
+                  kind: "message",
+                  data: authFailedBatch(`session refused: ${refusalCode(error)}`),
+                });
+                onEvent(null, { kind: "close", code: 1008, reason: "sign-in refused" });
+              } else {
+                // The core is unreachable or failed (5xx), or the app's own
+                // `authenticate` threw: the client tries again later.
+                onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
+              }
               end();
               return false;
             });
@@ -1469,6 +1653,8 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     access: BackendAccess;
     trusted: boolean;
     expiresAt?: number;
+    /** A local-first guest, let in by `acceptLocalFirstAuth`. */
+    guest?: true;
   } | null> {
     let parsed: Record<string, unknown>;
     try {
@@ -1515,6 +1701,8 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       if (client) return null;
       const audience = guestAudience(request, token);
       if (!audience) return null;
+      // Guests are off unless the app's `authenticate` lets this one in.
+      if (!(await acceptsGuest(request))) return null;
       if (audience.endpoint === undefined) {
         // Its own token decides who it is; the backend's secret only vouches
         // for the bundle this socket is pinned to (see `pinnedSocket`).
@@ -1524,6 +1712,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
           userId: undefined,
           access: "session",
           trusted: false,
+          guest: true,
         };
       }
       // Signed for this endpoint, which the core can't know: vouch for it.
@@ -1539,6 +1728,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         userId: undefined,
         access: "backend",
         trusted: false,
+        guest: true,
       };
     }
     const stated = auth.backend_session as { user_id?: unknown } | undefined;
@@ -1907,6 +2097,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     if (/^\/apps\/[^/]+\/accounts\/backend-sign-in$/.test(path)) {
       return backendSignIn(request);
     }
+    if (/^\/apps\/[^/]+\/accounts\/backend-user$/.test(path)) {
+      return backendUser(request);
+    }
     if (/^\/apps\/[^/]+\/backend\/admit$/.test(path)) {
       return admitBackendClient(request);
     }
@@ -2135,12 +2328,36 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       closing ??= (async () => {
         for (const { session: stream } of streams.values()) stream.close();
         streams.clear();
+        // Writes that resolved at the "local" tier may still be on their way
+        // to the core. Hand them over before closing it, so a close right
+        // after a write never loses it.
+        const timer = setTimeout(() => backend.db.abortGracefulShutdown(), CLOSE_SYNC_TIMEOUT_MS);
+        await backend
+          .shutdown({ waitForSync: true })
+          .catch((error: unknown) => {
+            console.warn("Jazz backend closed before every write reached the core.", error);
+          })
+          .finally(() => clearTimeout(timer));
         await session.close();
         await core.close();
       })();
       return closing;
     },
   };
+}
+
+/** An account request the core answered with a 4xx: a refusal, not an outage. */
+function isRefusal(error: unknown): boolean {
+  const status = (error as { status?: unknown } | null)?.status;
+  // Timeouts and throttling are 4xx too, but pass.
+  if (status === 408 || status === 425 || status === 429) return false;
+  return typeof status === "number" && status >= 400 && status < 500;
+}
+
+function refusalCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  const code = /: ([a-z_]{1,80})$/.exec(message)?.[1];
+  return code ?? "refused";
 }
 
 /** A WireFrame::Error batch with code AuthFailed and retry Never. */

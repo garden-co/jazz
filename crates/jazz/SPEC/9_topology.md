@@ -282,11 +282,35 @@ If the note is forbidden, none of the otherwise permitted siblings is admitted.
 
 ### 9.7 Server readiness
 
-A dynamically catalogued Core must have a published permissions head selecting
-its write schema and policies before accepting uploads (`INV-EDGE-19`). Missing
-permissions must produce the existing actionable permissions-head error rather
-than silently accepting a write. Schema and permission publication, account
-registry operations, and query authorization all terminate at Core.
+A Core serves a user's session only pinned to a published bundle, which
+selects its write schema and policies (`INV-EDGE-19`): the app's backend
+(`createJazz`) publishes its bundle and pins every session it opens to it,
+including the users a trusted link acts for. An unpinned user session, or an
+unpinned trusted link acting for a user, is refused with an actionable error
+rather than checked by permissions no deployment chose. Schema and bundle
+publication, account registry operations, and query authorization all
+terminate at Core.
+
+Permissions changes reach every session at once (`INV-EDGE-27`). When a
+backend publishes a bundle new to the Core, the job that commits it also ends
+every session pinned to another bundle with a close asking it to reconnect
+later (`NotReady`, `Later`); each reconnects through whichever backend serves
+it now and is pinned again by that backend. Because the end runs in the commit's
+own job, a publish that commits has always ended them, even when the deployment
+request then fails and a retry finds nothing to change. Publishing a bundle the
+Core already has ends no one: a cold start, a rollback to an earlier bundle,
+or a deployment publishing the same permissions as another. A preview or canary
+deployment that publishes new permissions therefore reconnects the sessions of
+every other deployment of the app, which pin themselves to their own bundle
+again. Unpinned links (`SYSTEM`, an admin's) are pinned to no bundle and are
+never ended by a publish. Schema-only changes need no reconnect: lenses carry
+sessions across schema versions.
+
+Retiring a bundle is the app's own job: there is no revocation list. A bundle
+stays pinnable for as long as a deployment that publishes it is reachable, so a
+deployment whose permissions leak is stopped by deleting every deployment that
+still serves it; its sessions drop with their backend and reconnect through one
+that serves other permissions.
 
 The historical `INV-EDGE` identifiers retained above describe client-relay and
 session boundaries; their names do not imply a remaining semantic edge role.

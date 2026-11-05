@@ -66,7 +66,10 @@ interface TokenFile {
   tokens: Record<string, StoredToken>;
 }
 
-export function tokenStorePath(env: NodeJS.ProcessEnv = process.env): string {
+/** The environment variables the inspect tools read. */
+export type InspectEnv = Readonly<Record<string, string | undefined>>;
+
+export function tokenStorePath(env: InspectEnv = process.env): string {
   return join(configDir(env), "inspect-tokens.json");
 }
 
@@ -91,7 +94,7 @@ async function writeTokenFile(path: string, file: TokenFile): Promise<void> {
 }
 
 /** Agent tokens on this machine, by endpoint. */
-export function tokenStore(env: NodeJS.ProcessEnv = process.env, now: () => number = Date.now) {
+export function tokenStore(env: InspectEnv = process.env, now: () => number = Date.now) {
   const path = tokenStorePath(env);
   return {
     path,
