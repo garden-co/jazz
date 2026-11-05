@@ -13,7 +13,7 @@ mod merge;
 mod range;
 
 pub use anchor::{Anchor, CONTEXT_UNITS, Resolved, Side};
-pub use merge::{MERGE_WORK_BUDGET, merge3, merge3_within};
+pub use merge::{MERGE_WORK_BUDGET, merge3, merge3_within, try_merge3, try_merge3_within};
 pub use range::{Range, ResolvedRange};
 
 /// How a text-merging column's values are cut into the units a merge never
