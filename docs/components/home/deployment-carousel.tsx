@@ -1,5 +1,7 @@
 "use client";
 
+import { Server } from "lucide-react";
+import { siCloudflare, siVercel } from "simple-icons";
 import { useEffect, useRef, useState } from "react";
 import {
   DeploymentDiagram,
@@ -65,6 +67,7 @@ export function DeploymentCarousel() {
               setPicked(true);
             }}
           >
+            <ScenarioIcon scenario={scenario} />
             {deploymentScenarioNames[scenario]}
           </button>
         ))}
@@ -84,5 +87,17 @@ export function DeploymentCarousel() {
         ))}
       </div>
     </div>
+  );
+}
+
+function ScenarioIcon({ scenario }: { scenario: DeploymentScenario }) {
+  if (scenario === "server") {
+    return <Server aria-hidden className="home-carousel-tab-icon" strokeWidth={1.75} />;
+  }
+  const icon = scenario === "vercel" ? siVercel : siCloudflare;
+  return (
+    <svg aria-hidden className="home-carousel-tab-icon" viewBox="0 0 24 24" fill="currentColor">
+      <path d={icon.path} />
+    </svg>
   );
 }

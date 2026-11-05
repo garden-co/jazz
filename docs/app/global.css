@@ -775,21 +775,38 @@ h6 {
 .home-carousel-tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--spacing-1);
-  margin-bottom: var(--spacing-4);
+  gap: var(--spacing-2);
+  margin-bottom: var(--spacing-6);
 }
 .home-carousel-tab {
-  padding: var(--spacing-1) var(--spacing-3);
-  border: 1px solid transparent;
-  border-radius: var(--radius-element);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  padding: var(--spacing-2) var(--spacing-4);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background-color: var(--color-background-card);
   color: var(--color-text-secondary);
-  font-family: var(--font-family-code);
-  font-size: 0.8125rem;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  transition:
+    background-color 200ms,
+    border-color 200ms,
+    color 200ms;
+}
+.home-carousel-tab:hover {
+  color: var(--color-text-primary);
+  border-color: var(--color-text-secondary);
 }
 .home-carousel-tab[aria-selected="true"] {
-  border-color: var(--color-border);
-  background-color: var(--color-background-card);
-  color: var(--color-text-primary);
+  border-color: #146aff;
+  background-color: #146aff;
+  color: #fff;
+}
+.home-carousel-tab-icon {
+  width: 1rem;
+  height: 1rem;
+  flex: none;
 }
 /* All slides share one grid cell, so the tallest sets the height and they
    cross-fade in place. */
