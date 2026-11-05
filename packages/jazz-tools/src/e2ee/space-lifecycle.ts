@@ -664,6 +664,18 @@ export class Spaces {
     await this.groups?.warmMembership({ groupIds: ids });
   }
 
+  /** Capture membership predicates before the caller stages its new scope row. */
+  async prepareInitialAuthority(
+    tx: AcceptedDeviceTransactionScope,
+    recipientIds: readonly string[] = [this.accountId],
+  ): Promise<void> {
+    const ids = initialRecipientIds(recipientIds);
+    const state = await this.requireDevice().states(tx);
+    await this.groups?.readMembership(tx, { groupIds: ids }, state.publicHistory);
+    for (const id of ids)
+      if (id !== this.accountId) await readPublicMembershipHistory(tx, id, this.tables);
+  }
+
   /** Internal preparation only: the caller owns the enclosing transaction and acceptance. */
   async prepareInitial<T, Init>(
     tx: AcceptedDeviceTransactionScope,
@@ -760,7 +772,14 @@ export class Spaces {
     const scopeRow = new TypedTableQueryBuilder(scope._table, scope._schema)
       .where({ id: identifier })
       .select("id");
-    if (!(await tx.one(scopeRow, { tier: "local-first" })))
+    // The ordinary transaction view includes a newly staged scope row. If it
+    // cannot find an existing row, request its actual same-cut authority proof.
+    // The core refuses that request after writes; no memo can invent coverage
+    // for an unknown existing scope at that point.
+    const scopeExists =
+      (await tx.one(scopeRow, { tier: "local-first" })) ??
+      (await readSpaceRows(tx, scopeRow)).rows[0];
+    if (!scopeExists)
       throw new Error("Explicit space initialisation requires an existing scope row");
     if (await tx.one(roots, { tier: "local-first" })) throw new Error("E2EE space already exists");
     const root = {

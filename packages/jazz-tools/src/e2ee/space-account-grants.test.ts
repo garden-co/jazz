@@ -70,6 +70,8 @@ it("shares a space only after an authorised account grant, excluding pending dev
         __e2ee_space_deliveries: policies.__e2ee_space_deliveries!,
       },
     });
+    alice.serverUrl = server.url;
+    bob.serverUrl = server.url;
     expect(alice.account.id).not.toBe(bob.account.id);
     const crypto = await createNativeCrypto();
     let failureMode: "reject" | "throw" | undefined;

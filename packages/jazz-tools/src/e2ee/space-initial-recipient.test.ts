@@ -71,6 +71,8 @@ it("completes uninterrupted and resumed recipient handoffs without implicit crea
         __e2ee_space_successors: policies.__e2ee_space_successors!,
       },
     });
+    alice.serverUrl = server.url;
+    bob.serverUrl = server.url;
     expect(alice.account.id).not.toBe(bob.account.id);
     const keys = await createBrowserKeyEnvelope();
     let interruptDelivery = false;

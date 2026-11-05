@@ -8,7 +8,14 @@ import { E2eeRecoveryError, RecoveryCandidateError } from "./recovery-error.js";
 import { recoveryMaterialRootId } from "./recovery-format.js";
 import type { AccountHandle } from "../accounts/state.js";
 import { beginDbTransactionAfter, prepareDbTransaction } from "../runtime/db.js";
-import type { Db, TableProxy, Transaction, PreparedTransactionScope } from "../runtime/db.js";
+import type {
+  Db,
+  TableProxy,
+  Transaction,
+  PreparedTransactionScope,
+  QueryBuilder,
+} from "../runtime/db.js";
+import type { AcceptedRows } from "../runtime/accepted-read.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
 import { deviceRequestApp, deviceRequestSchema } from "./device-requests.js";
@@ -52,6 +59,9 @@ export type DeviceInfo = Readonly<{
 const contexts = new WeakMap<Db, E2ee>();
 
 const initialSpacePreparers = new WeakMap<Db, Spaces["prepareInitial"]>();
+const initialSpaceAuthorityPreparers = new WeakMap<Db, Spaces["prepareInitialAuthority"]>();
+type InitialAuthorityMemo = WeakMap<WasmSchema, Map<string, AcceptedRows<unknown>>>;
+const initialAuthorityMemos = new WeakMap<Transaction<"serializable">, InitialAuthorityMemo>();
 const initialSpacePrerequisites = new WeakMap<
   Db,
   (recipientIds?: readonly string[]) => Promise<void>
@@ -63,7 +73,7 @@ export function beginInitialSpaceTransaction(
   recipientIds?: readonly string[],
 ): Transaction<"serializable"> {
   const recipients = recipientIds?.slice();
-  return beginDbTransactionAfter(
+  const transaction = beginDbTransactionAfter(
     db,
     async () => {
       e2eeForDb(db);
@@ -71,6 +81,29 @@ export function beginInitialSpaceTransaction(
     },
     "accepted-evidence",
   );
+  const memo: InitialAuthorityMemo = new WeakMap();
+  initialAuthorityMemos.set(transaction, memo);
+  // Register before returning: even an immediate caller insert remains behind
+  // this authority-only prefix in the normal FIFO preparation queue.
+  const preparing = prepareDbTransaction(transaction, async (scope) => {
+    await initialSpaceAuthorityPreparers.get(db)!(
+      {
+        ...scope,
+        async readAccepted(query) {
+          const result = await scope.readAccepted(query);
+          scope.assertActive();
+          let queries = memo.get(query._schema);
+          if (!queries) memo.set(query._schema, (queries = new Map()));
+          queries.set(query._build(), structuredClone(result));
+          return result;
+        },
+      },
+      recipients,
+    );
+  });
+  // The registered queue owns this error and poisons commit if the prefix fails.
+  preparing.catch(() => {});
+  return transaction;
 }
 
 /** @internal Not exported from the package API; used by transaction preparation. */
@@ -85,7 +118,29 @@ export async function prepareInitialSpaceForTransaction<T, Init>(
   const recipients = recipientIds?.slice();
   try {
     await prepareDbTransaction(tx, async (prepared) => {
-      await prepareInitialSpaceRows(db, prepared, scope, identifier, prepareData, recipients);
+      const memo = initialAuthorityMemos.get(tx);
+      if (!memo) throw new Error("Initial space authority was not registered before staging");
+      await prepareInitialSpaceRows(
+        db,
+        {
+          ...prepared,
+          async readAccepted<T>(query: QueryBuilder<T>): Promise<AcceptedRows<T>> {
+            prepared.assertActive();
+            const result = memo.get(query._schema)?.get(query._build());
+            // A no-write preparation can still request a real same-cut scope
+            // predicate. After any staged operation the existing core guard
+            // rejects an uncaptured read; never synthesize a cached answer.
+            if (!result) return prepared.readAccepted(query);
+            // These are exact responses from this transaction's authority
+            // prefix, not local-cache evidence or a later independent cut.
+            return structuredClone(result) as AcceptedRows<T>;
+          },
+        },
+        scope,
+        identifier,
+        prepareData,
+        recipients,
+      );
     });
   } catch (error) {
     try {
@@ -509,6 +564,10 @@ export class E2ee {
     initialSpacePreparers.set(db, async (...args) => {
       await this.prepare();
       await this.requireSpaces().prepareInitial(...args);
+    });
+    initialSpaceAuthorityPreparers.set(db, async (...args) => {
+      await this.prepare();
+      await this.requireSpaces().prepareInitialAuthority(...args);
     });
     db.onShutdown(() => {
       this.closed = true;
