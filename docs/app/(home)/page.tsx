@@ -17,6 +17,7 @@ import { AdopterQuotes } from "@/components/home/adopter-quotes";
 import { DeploymentCarousel } from "@/components/home/deployment-carousel";
 import { CodeWindow } from "@/components/home/code-window";
 import { PricingCalculator } from "@/components/home/pricing-calculator";
+import { jazzTiers } from "@/lib/home-pricing";
 import { AgentPrompt } from "@/components/home/agent-prompt";
 import { FrameworkLogos } from "@/components/home/framework-logos";
 import { WalkthroughVideo } from "@/components/showcase/walkthrough-video";
@@ -461,20 +462,35 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="hosting" title="Runs where your app runs">
+          <SectionHeader id="hosting" title="Priced for flexible self-hosting">
             <Text as="p" display="block" type="large" color="secondary" weight="normal">
               Jazz deploys with your backend, on your own cloud account. On a single instance it is
               open source under MIT and free, however much you use it: you only pay your platform.
             </Text>
             <Text as="p" display="block" type="large" color="secondary" weight="normal">
-              When an app outgrows one instance, Jazz Pro shards it across many. It is licensed on
-              peak active sessions, so as Jazz gets faster your platform bill shrinks while the
+              When an app outgrows one instance, Jazz shards it across many. Jazz Scale is licensed
+              on peak active sessions, so as Jazz gets faster your platform bill shrinks while the
               license stays the same.
             </Text>
           </SectionHeader>
+          <div className="mt-8 grid gap-6 border-t pt-6 sm:grid-cols-3">
+            {(["oss", "pro", "scale"] as const).map((id) => (
+              <div key={id} className="grid content-start gap-2">
+                <Text as="p" display="block" weight="semibold">
+                  {jazzTiers[id].name}
+                </Text>
+                <Text as="p" display="block" type="large">
+                  {jazzTiers[id].price}
+                </Text>
+                <Text as="p" display="block" color="secondary">
+                  {jazzTiers[id].summary}
+                </Text>
+              </div>
+            ))}
+          </div>
           <div className="mt-6 flex flex-wrap gap-3">
             <Button
-              label={"Talk to us about Jazz\u00a0Pro"}
+              label={"Talk to us about Jazz\u00a0Scale"}
               variant="secondary"
               href="https://cal.com/anselm-io/cloud-pro-intro"
             />

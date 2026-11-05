@@ -11,14 +11,15 @@ import {
   type Assumptions,
   type Param,
   type PlatformEstimate,
+  jazzTiers,
   traitRows,
 } from "@/lib/home-pricing";
 
 /** Flip to true to show the license sliders and every model assumption. */
 const SHOW_MODEL_DETAILS = false;
 
-/** Jazz Pro list price, used while the details are hidden. */
-const JAZZ_PRO = { per1k: 50, minimum: 199 };
+/** License list prices, used while the details are hidden. */
+const LICENSE = { pro: 20, scaleBase: 199, per1k: 49 };
 
 const compactFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 1,
@@ -172,6 +173,7 @@ function PlatformResult({
     instances,
     requiredShards,
     platformCost,
+    tier,
     licenseCost,
     totalCost,
     costPerMau,
@@ -234,11 +236,9 @@ function PlatformResult({
         <dd className="text-right">{formatCurrency(platformCost)}</dd>
         <dt className="text-fd-muted-foreground">Jazz</dt>
         <dd className="text-right">
-          {!sharded
-            ? "Free (MIT)"
-            : licenseCost > 0
-              ? `Jazz Pro ${formatCurrency(licenseCost)}`
-              : `Free (under ${assumptions["global.freeRamGb"]} GB)`}
+          {tier === "oss"
+            ? "Jazz OSS, free"
+            : `${jazzTiers[tier].name} $${Math.round(licenseCost).toLocaleString("en-US")}`}
         </dd>
       </dl>
       <div>
@@ -256,9 +256,9 @@ function PlatformResult({
               ? `Sharded: even the largest size needs ${formatCount(requiredShards)} shards.`
               : "Sharded: cheaper than one larger instance with headroom."}{" "}
             <span className="text-fd-muted-foreground">
-              {licenseCost > 0
-                ? `Jazz Pro is billed on ${formatCount(peakActiveSessions)} peak active sessions.`
-                : `Jazz Pro stays free while all shards together have ${assumptions["global.freeRamGb"]} GB of RAM or less.`}
+              {tier === "scale"
+                ? `Jazz Scale is billed on ${formatCount(peakActiveSessions)} peak active sessions.`
+                : `Jazz Pro covers shards with up to ${assumptions["global.proRamGb"]} GB of RAM in total.`}
             </span>
           </>
         ) : null}
@@ -320,8 +320,9 @@ export function PricingCalculator() {
   const [frequencyIndex, setFrequencyIndex] = useState(2);
   const [realtimeIndex, setRealtimeIndex] = useState(1);
   const [blobLogMb, setBlobLogMb] = useState(Math.log10(32));
-  const [licensePer1k, setLicensePer1k] = useState(JAZZ_PRO.per1k);
-  const [licenseMinimum, setLicenseMinimum] = useState(JAZZ_PRO.minimum);
+  const [licensePro, setLicensePro] = useState(LICENSE.pro);
+  const [licenseScaleBase, setLicenseScaleBase] = useState(LICENSE.scaleBase);
+  const [licensePer1k, setLicensePer1k] = useState(LICENSE.per1k);
   const [overrides, setOverrides] = useState<Assumptions>({});
 
   const mau = Math.max(1, Math.round(10 ** mauLogValue));
@@ -345,8 +346,9 @@ export function PricingCalculator() {
       frequency: selectedFrequency.value,
       realtime: selectedRealtime.value,
       blobStoragePerUserMb,
+      licensePro,
+      licenseScaleBase,
       licensePer1k,
-      licenseMinimum,
     },
     assumptions,
   );
@@ -395,7 +397,17 @@ export function PricingCalculator() {
         {SHOW_MODEL_DETAILS ? (
           <>
             <TickSlider
-              label="Jazz Pro per 1,000 peak active sessions (draft)"
+              label="Jazz Pro per month (draft)"
+              max={100}
+              min={0}
+              step={1}
+              ticks={[0, 20, 40, 60, 80, 100].map((value) => ({ value, label: `$${value}` }))}
+              value={licensePro}
+              valueLabel={`$${licensePro} / mo`}
+              onChange={setLicensePro}
+            />
+            <TickSlider
+              label="Jazz Scale per 1,000 peak active sessions (draft)"
               max={50}
               min={1}
               step={1}
@@ -405,14 +417,14 @@ export function PricingCalculator() {
               onChange={setLicensePer1k}
             />
             <TickSlider
-              label="Jazz Pro minimum when sharded (draft)"
+              label="Jazz Scale base price (draft)"
               max={1000}
               min={0}
               step={10}
               ticks={[0, 250, 500, 750, 1000].map((value) => ({ value, label: `$${value}` }))}
-              value={licenseMinimum}
-              valueLabel={`$${licenseMinimum} / mo`}
-              onChange={setLicenseMinimum}
+              value={licenseScaleBase}
+              valueLabel={`$${licenseScaleBase} / mo`}
+              onChange={setLicenseScaleBase}
             />
           </>
         ) : null}
@@ -431,12 +443,12 @@ export function PricingCalculator() {
       </div>
       <p className="max-w-[40rem] text-sm leading-relaxed text-fd-muted-foreground">
         Very rough estimates from our example-app benchmarks and each platform&apos;s list prices.
-        Each platform picks the cheapest size and shard count, license included. One instance of any
-        size is free under MIT. Sharding with Jazz Pro is free while all shards together have{" "}
-        {assumptions["global.freeRamGb"]} GB of RAM or less, then ${licensePer1k} a month per 1,000
-        peak active sessions (sessions that wrote, subscribed or got an update in the busiest
-        minute), from ${licenseMinimum}. Vercel cold wakes are from our October measurements (0.6 to
-        1 s); Cloudflare&apos;s are estimates until its runtime ships.
+        Each platform picks the cheapest size and shard count, license included: Jazz OSS for one
+        instance, Jazz Pro (${licensePro}/mo) for shards with up to {assumptions["global.proRamGb"]}{" "}
+        GB of RAM in total, and Jazz Scale (${licenseScaleBase}/mo plus ${licensePer1k} per 1,000
+        peak active sessions) beyond that. A session is active in a minute when it writes,
+        subscribes or gets an update. Vercel cold wakes are from our October measurements (0.6 to 1
+        s); Cloudflare&apos;s are estimates until its runtime ships.
       </p>
       {SHOW_MODEL_DETAILS ? (
         <details open className="border-t pt-6">

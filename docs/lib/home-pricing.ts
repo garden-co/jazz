@@ -193,7 +193,7 @@ const globalParams = [
   param("global.kbPerWatchedRow", "Memory per watched row (KB)", 1.25, 0.05, 10, 0.05),
   param("global.rowsPerWrite", "Rows per write", 10, 1, 100, 1),
   param("global.idleGraceMinutes", "Idle time before sleeping (min)", 5, 0, 60, 1),
-  param("global.freeRamGb", "Jazz Pro free up to total RAM (GB)", 4, 0, 192, 1),
+  param("global.proRamGb", "Jazz Pro up to total RAM (GB)", 4, 0, 192, 1),
 ];
 
 type PlatformId = "vercel" | "cloudflare" | "server" | "aws";
@@ -483,10 +483,12 @@ export type Usage = {
   frequency: FrequencyOption;
   realtime: RealtimeOption;
   blobStoragePerUserMb: number;
-  /** Jazz Pro, for sharded apps: price per 1,000 peak active sessions per month. */
+  /** Jazz Pro: shards up to `global.proRamGb` of RAM in total, per month. */
+  licensePro: number;
+  /** Jazz Scale: base price per month. */
+  licenseScaleBase: number;
+  /** Jazz Scale: price per 1,000 peak active sessions per month, on top of the base. */
   licensePer1k: number;
-  /** Jazz Pro's smallest monthly price. */
-  licenseMinimum: number;
 };
 
 function nonNegative(value: number) {
@@ -578,14 +580,34 @@ function shardsFor(platform: Platform, size: Size, d: Demand, a: Assumptions, li
   return high;
 }
 
-/**
- * Jazz Pro is free on one instance of any size, and for any number of shards
- * whose RAM adds up to no more than the free threshold.
- */
-export function licenseCost(d: Demand, usage: Usage, size: Size, shards: number, a: Assumptions) {
-  if (shards <= 1 || shards * size.ramGb <= a["global.freeRamGb"]) return 0;
-  const billed = Math.ceil(d.peakActiveSessions / 1000) * usage.licensePer1k;
-  return Math.max(usage.licenseMinimum, billed);
+export type TierId = "oss" | "pro" | "scale";
+
+/** The three ways to license Jazz, as the homepage lists them. */
+export const jazzTiers: Record<TierId, { name: string; price: string; summary: string }> = {
+  oss: { name: "Jazz OSS (MIT)", price: "Free", summary: "A single server instance of any size" },
+  pro: {
+    name: "Jazz Pro",
+    price: "$20/mo",
+    summary: "Several sharded instances, up to 4 GB of RAM in total",
+  },
+  scale: {
+    name: "Jazz Scale",
+    price: "$199/mo + $49/mo per 1,000 peak active sessions",
+    summary: "Unlimited sharded instances",
+  },
+};
+
+/** One instance is OSS; shards with little RAM in total are Pro; the rest is Scale. */
+export function licenseTier(size: Size, shards: number, a: Assumptions): TierId {
+  if (shards <= 1) return "oss";
+  if (shards * size.ramGb <= a["global.proRamGb"]) return "pro";
+  return "scale";
+}
+
+export function licenseCost(d: Demand, usage: Usage, tier: TierId) {
+  if (tier === "oss") return 0;
+  if (tier === "pro") return usage.licensePro;
+  return usage.licenseScaleBase + Math.ceil(d.peakActiveSessions / 1000) * usage.licensePer1k;
 }
 
 export type PlatformEstimate = {
@@ -596,6 +618,7 @@ export type PlatformEstimate = {
   /** Shards the largest size needs to run at all. */
   requiredShards: number;
   platformCost: number;
+  tier: TierId;
   licenseCost: number;
   totalCost: number;
   costPerMau: number;
@@ -628,22 +651,29 @@ export function estimatePlatforms(
   return platforms.map((platform) => {
     const sizes = platform.sizes(a);
     const largest = sizes[sizes.length - 1];
-    let best: { size: Size; instances: number; platformCost: number; license: number } | null =
-      null;
+    let best: {
+      size: Size;
+      instances: number;
+      platformCost: number;
+      tier: TierId;
+      license: number;
+    } | null = null;
     for (const size of sizes) {
       const instances = shardsFor(platform, size, d, a, a["global.comfortable"]);
       if (!Number.isFinite(instances)) continue;
       const cpu = utilization(platform, size, d, a, instances).cpu;
       const platformCost = platform.cost(d, a, size, instances, cpu);
-      const license = licenseCost(d, usage, size, instances, a);
+      const tier = licenseTier(size, instances, a);
+      const license = licenseCost(d, usage, tier);
       if (!best || platformCost + license < best.platformCost + best.license) {
-        best = { size, instances, platformCost, license };
+        best = { size, instances, platformCost, tier, license };
       }
     }
     const chosen = best ?? {
       size: largest,
       instances: Infinity,
       platformCost: Infinity,
+      tier: "scale" as TierId,
       license: Infinity,
     };
     const totalCost = chosen.platformCost + chosen.license;
@@ -653,6 +683,7 @@ export function estimatePlatforms(
       instances: chosen.instances,
       requiredShards: shardsFor(platform, largest, d, a, 1),
       platformCost: chosen.platformCost,
+      tier: chosen.tier,
       licenseCost: chosen.license,
       totalCost,
       costPerMau: usage.mau > 0 ? totalCost / usage.mau : 0,
