@@ -1238,9 +1238,10 @@ pub enum SyncMessage {
     /// `members`: the result's rows, in order: always for a one-shot
     /// read, and for a live one's opening and window changes when it is
     /// limited or its opening could not tell what left it; the replica
-    /// drops cached rows `members` leaves out. `global`: the result is the
-    /// global authority's (directly, or through relays that settle by
-    /// their upstream), not a relay's own store.
+    /// drops cached rows `members` leaves out that no live read holds
+    /// (see [`SyncMessage::Holds`]). `global`: the result is the global
+    /// authority's (directly, or through relays that settle by their
+    /// upstream), not a relay's own store.
     Settled {
         id: u64,
         through: u64,
@@ -1396,6 +1397,18 @@ pub enum SyncMessage {
     ConnectionSettled {
         through: u64,
     },
+    /// Server → client: the rows live read `id` holds changed, as results
+    /// or as supporting rows (stored table and id): `added` it holds now,
+    /// `removed` it holds no more. A read's first `Holds` on a connection
+    /// lists all it holds. The replica keeps each live read's rows and
+    /// drops a row a listing leaves out only when no live read holds it
+    /// (see [`SyncMessage::Settled`]): the server keeps it current for
+    /// the read that does, and would not ship it again.
+    Holds {
+        id: u64,
+        added: Vec<(String, [u8; 16])>,
+        removed: Vec<(String, [u8; 16])>,
+    },
 }
 
 /// The catalogue entries a [`SyncMessage::Catalogue`] or
@@ -1463,6 +1476,7 @@ impl SyncMessage {
             Self::Rows { .. } => "Rows",
             Self::AccessLost { .. } => "AccessLost",
             Self::Settled { .. } => "Settled",
+            Self::Holds { .. } => "Holds",
             Self::Refused { .. } => "Refused",
             Self::Fate { .. } => "Fate",
             Self::CheckAllowed { .. } => "CheckAllowed",
@@ -1689,10 +1703,14 @@ struct LiveRead {
     /// results read as of it (or the connection's, when that is further),
     /// see `Inner::visible_read`. Kept across reconnects.
     visible: Option<Pos>,
-    /// The rows the upstream last listed as this read's result (its last
-    /// listing settle), kept across reconnects: another read's listing
-    /// leaves them on the replica for this one to judge.
-    listed: HashSet<[u8; 16]>,
+    /// The rows the upstream says this read holds, as results or as
+    /// supporting rows ([`SyncMessage::Holds`]): no other read's listing
+    /// drops them. Kept across reconnects until the read's first `Holds`
+    /// on the new connection replaces them, so a resumed read the server
+    /// answers from what the replica held finds them still there.
+    holds: HashSet<(String, [u8; 16])>,
+    /// Whether this connection told the read what it holds yet.
+    told: bool,
 }
 
 enum ReadLifetime {
@@ -2353,9 +2371,78 @@ impl Session {
 struct Watches {
     holders: HashMap<u64, u32>,
     by_owner: HashMap<u64, HashSet<u64>>,
+    /// The row each row watch names (stored table and id): what a
+    /// subscription holds, as the replica is told it (see
+    /// [`SyncMessage::Holds`]).
+    names: HashMap<u64, RowName>,
+    /// The named rows each subscription was last told it holds.
+    told: HashMap<u64, HashMap<u64, RowName>>,
+    /// Subscriptions whose holds changed since they were last told.
+    dirty: HashSet<u64>,
 }
 
+/// A row by stored table and id.
+type RowName = (String, [u8; 16]);
+
 impl Watches {
+    /// The watch on row `id` of stored table `table`, named so a
+    /// subscription's rows can be told to the replica.
+    fn row(&mut self, table: &str, id: [u8; 16]) -> u64 {
+        let key = id_watch(table, id);
+        self.names
+            .entry(key)
+            .or_insert_with(|| (table.to_owned(), id));
+        key
+    }
+
+    /// What each subscription whose held rows changed holds now that it
+    /// was not told, and what it was told that it holds no more.
+    fn take_holds(&mut self) -> Vec<SyncMessage> {
+        let mut dirty: Vec<u64> = self.dirty.drain().collect();
+        dirty.sort_unstable();
+        let mut out = Vec::new();
+        for owner in dirty {
+            let now: HashMap<u64, RowName> = self
+                .by_owner
+                .get(&owner)
+                .into_iter()
+                .flatten()
+                .filter_map(|key| Some((*key, self.names.get(key)?.clone())))
+                .collect();
+            // A read's first word on a connection is all it holds, even
+            // nothing: it replaces what the replica kept from before.
+            let first = !self.told.contains_key(&owner);
+            let told = self.told.entry(owner).or_default();
+            let mut added: Vec<RowName> = now
+                .iter()
+                .filter(|(key, _)| !told.contains_key(key))
+                .map(|(_, name)| name.clone())
+                .collect();
+            let mut removed: Vec<RowName> = told
+                .iter()
+                .filter(|(key, _)| !now.contains_key(key))
+                .map(|(_, name)| name.clone())
+                .collect();
+            *told = now;
+            if !first && added.is_empty() && removed.is_empty() {
+                continue;
+            }
+            added.sort_unstable();
+            removed.sort_unstable();
+            out.push(SyncMessage::Holds {
+                id: owner,
+                added,
+                removed,
+            });
+        }
+        out
+    }
+
+    /// `key` is held no more: its row name goes too.
+    fn unwatched(&mut self, key: u64) {
+        self.names.remove(&key);
+    }
+
     fn contains(&self, key: &u64) -> bool {
         self.holders.contains_key(key)
     }
@@ -2376,6 +2463,7 @@ impl Watches {
         let new = self.by_owner.entry(owner).or_default().insert(key);
         if new {
             *self.holders.entry(key).or_default() += 1;
+            self.dirty.insert(owner);
         }
         (fresh, new)
     }
@@ -2400,12 +2488,16 @@ impl Watches {
             .get_mut(&owner)
             .is_some_and(|keys| keys.remove(&key))
         {
+            self.dirty.insert(owner);
             self.drop_hold(key);
         }
     }
 
-    /// Everything `owner` held.
+    /// Everything `owner` held: it ended, so the replica drops what it
+    /// was told along with the read.
     fn release(&mut self, owner: u64) {
+        self.told.remove(&owner);
+        self.dirty.remove(&owner);
         for key in self.by_owner.remove(&owner).unwrap_or_default() {
             self.drop_hold(key);
         }
@@ -2414,10 +2506,13 @@ impl Watches {
     /// An evicted row: the replica holds no copy, so nobody watches it.
     fn forget(&mut self, key: u64) {
         if self.holders.remove(&key).is_some() {
-            for keys in self.by_owner.values_mut() {
-                keys.remove(&key);
+            for (owner, keys) in self.by_owner.iter_mut() {
+                if keys.remove(&key) {
+                    self.dirty.insert(*owner);
+                }
             }
         }
+        self.unwatched(key);
     }
 
     fn drop_hold(&mut self, key: u64) {
@@ -2425,6 +2520,7 @@ impl Watches {
             *count -= 1;
             if *count == 0 {
                 self.holders.remove(&key);
+                self.unwatched(key);
             }
         }
     }
@@ -2532,10 +2628,6 @@ struct Follow<'w> {
     /// eviction.
     gone: &'w mut Vec<RowKey>,
     followed: &'w mut HashSet<(usize, u64)>,
-    /// Follow rows as the server settled them through this position, not
-    /// as they stand with pending local writes: a replica judging what
-    /// the server holds for a read (see `Db::held_by_other_reads`).
-    settled: Option<u64>,
 }
 
 /// The watch on row `id` of stored table `table`.
@@ -3497,13 +3589,7 @@ impl Inner {
         } else {
             format!("{} = ?1", quote(column))
         };
-        let found = match follow.settled {
-            Some(through) => {
-                self.settled_where(table, &filter, column, &value, contains, through)?
-            }
-            None => self.images_where(table, false, &filter, &[&value])?,
-        };
-        for found in found {
+        for found in self.images_where(table, false, &filter, &[&value])? {
             let row = RowUuid::from_bytes(found.id);
             let can = readable(
                 self,
@@ -3523,14 +3609,8 @@ impl Inner {
                 }
                 continue;
             }
-            let (unwatched, _) = follow.watch.hold(
-                follow.owner,
-                wk((
-                    table.to_owned(),
-                    "id".to_owned(),
-                    watch_key(&Sql::Blob(found.id.to_vec())),
-                )),
-            );
+            let row_key = follow.watch.row(table, found.id);
+            let (unwatched, _) = follow.watch.hold(follow.owner, row_key);
             // Not watched yet, so the replica does not hold it current; or
             // a new correlation's row.
             let ship = self.ships(
@@ -3584,13 +3664,7 @@ impl Inner {
             } else {
                 format!("{} = ?1", quote(reach.member))
             };
-            let found = match follow.settled {
-                Some(through) => {
-                    self.settled_where(reach.edges, &filter, reach.member, &value, false, through)?
-                }
-                None => self.images_where(reach.edges, false, &filter, &[&value])?,
-            };
-            for found in found {
+            for found in self.images_where(reach.edges, false, &filter, &[&value])? {
                 let row = RowUuid::from_bytes(found.id);
                 let can = readable(
                     self,
@@ -3616,14 +3690,8 @@ impl Inner {
                 if let Some(parent) = image_cell(&found, reach.parent) {
                     frontier.push(parent);
                 }
-                let (unwatched, _) = follow.watch.hold(
-                    follow.owner,
-                    wk((
-                        reach.edges.to_owned(),
-                        "id".to_owned(),
-                        watch_key(&Sql::Blob(found.id.to_vec())),
-                    )),
-                );
+                let row_key = follow.watch.row(reach.edges, found.id);
+                let (unwatched, _) = follow.watch.hold(follow.owner, row_key);
                 if self.ships(
                     reach.edges,
                     &found,
@@ -4241,98 +4309,6 @@ impl Inner {
             .filter_map(|id| id.ok().and_then(|id| id.try_into().ok()))
             .collect();
         Ok(ids)
-    }
-
-    /// Each of `rows`' images in `table` as the server settled it through
-    /// `through`: the current version when it is accepted at or below
-    /// `through`, otherwise the newest such version in history.
-    fn settled_images(
-        &self,
-        table: &str,
-        rows: Vec<RowUuid>,
-        through: u64,
-    ) -> Result<Vec<Image>, Error> {
-        let settled = |image: &Image| image.at.accepted() && image.at.seq <= through;
-        let mut out = Vec::new();
-        // The slots (row and branch key) whose current version is not
-        // settled: only they are looked up in history.
-        let mut unsettled: HashSet<([u8; 16], Vec<u8>)> = HashSet::new();
-        for image in self.images_of(table, false, rows)? {
-            if settled(&image) {
-                out.push(image);
-            } else {
-                unsettled.insert((image.id, image.key.clone()));
-            }
-        }
-        if unsettled.is_empty() {
-            return Ok(out);
-        }
-        let mut ids: Vec<RowUuid> = unsettled
-            .iter()
-            .map(|(id, _)| RowUuid::from_bytes(*id))
-            .collect();
-        ids.sort();
-        ids.dedup();
-        let mut newest: HashMap<([u8; 16], Vec<u8>), Image> = HashMap::new();
-        for image in self.images_of(table, true, ids)? {
-            let slot = (image.id, image.key.clone());
-            if !settled(&image) || !unsettled.contains(&slot) {
-                continue;
-            }
-            match newest.get(&slot) {
-                Some(kept) if kept.at.seq >= image.at.seq => {}
-                _ => {
-                    newest.insert(slot, image);
-                }
-            }
-        }
-        out.extend(newest.into_values());
-        Ok(out)
-    }
-
-    /// The images of `table` that match `filter` (on `column`, against
-    /// `value`) as the server settled them through `through`: a row a
-    /// pending write moved out of the match still matches, one it moved in
-    /// does not.
-    #[allow(clippy::too_many_arguments)]
-    fn settled_where(
-        &self,
-        table: &str,
-        filter: &str,
-        column: &str,
-        value: &Sql,
-        contains: bool,
-        through: u64,
-    ) -> Result<Vec<Image>, Error> {
-        // History only holds a settled match at or below `through`.
-        let settled_clock = Pos::at(through.min(MAX_SEQ)).t();
-        let mut ids: Vec<RowUuid> = self
-            .images_where(table, false, filter, &[value])?
-            .into_iter()
-            .chain(self.images_where(
-                table,
-                true,
-                &format!("({filter}) AND _clock <= ?2"),
-                &[value, &settled_clock],
-            )?)
-            .map(|image| RowUuid::from_bytes(image.id))
-            .collect();
-        ids.sort();
-        ids.dedup();
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        Ok(self
-            .settled_images(table, ids, through)?
-            .into_iter()
-            .filter(|image| match image_cell(image, column) {
-                Some(cell) if contains => {
-                    array_elements(&cell).is_some_and(|elements| elements.contains(value))
-                }
-                Some(cell) => cell == *value,
-                None => false,
-            })
-            .collect())
     }
 
     /// Every image of each of `rows` in `table` (or its history).
@@ -7015,139 +6991,6 @@ impl Db {
         Ok(Some((prepared, read)))
     }
 
-    /// The rows of stored `table` that live reads other than this one
-    /// (`query` with `binding`, `include_deleted` and `view`) hold, as the
-    /// server holds them for each: the rows it last listed for the read that
-    /// its settled view still holds, and the rows those reach as support
-    /// (includes, relations, joins, policy inputs), followed as the server
-    /// follows them. A row that left a read through a live delta is no
-    /// longer in its view, so its last listing does not keep it.
-    fn held_by_other_reads(
-        &self,
-        table: &str,
-        query: &Query,
-        binding: &BTreeMap<String, Value>,
-        include_deleted: bool,
-        view: &ReadViewSourceSpec,
-    ) -> Result<HashSet<[u8; 16]>, Error> {
-        let reads: Vec<_> = {
-            let inner = self.inner.borrow();
-            let Some(client) = inner.client.as_ref() else {
-                return Ok(HashSet::new());
-            };
-            client
-                .reads
-                .values()
-                .filter(|other| {
-                    !(other.query == *query
-                        && other.binding == *binding
-                        && other.include_deleted == include_deleted
-                        && other.view == *view)
-                })
-                .filter_map(|other| {
-                    let live = other.live()?;
-                    let through = other.through?;
-                    Some((
-                        other.query.clone(),
-                        other.binding.clone(),
-                        other.include_deleted,
-                        other.view.clone(),
-                        through,
-                        live.listed.clone(),
-                    ))
-                })
-                .collect()
-        };
-        let mut held = HashSet::new();
-        for (other, binding, include_deleted, view, through, listed) in reads {
-            if listed.is_empty() {
-                continue;
-            }
-            // A read that touches `table` neither as its root nor through
-            // its support holds none of its rows: skip it before reading.
-            let (root, support) = {
-                let inner = self.inner.borrow();
-                let other = remote_query(&other);
-                if history_source_table(&other.table).is_some() || other.flat_join.is_some() {
-                    continue;
-                }
-                // A union's rows carry their arm, and its listing names
-                // rows by id alone: no listing judges them (see
-                // `evict_unanswered`), and its plan is not followed for
-                // support, so it holds nothing here.
-                if crate::db::union_plan(&other, &inner.schema)?.is_some() {
-                    continue;
-                }
-                let support = inner.support_of(&other)?;
-                let root = inner.schema.table(&other.table)?.stored.clone();
-                (root, support)
-            };
-            let mut support_tables_read = Vec::new();
-            support_tables(&support, &mut support_tables_read);
-            let follows = support_tables_read.iter().any(|read| read == table);
-            if root != table && !follows {
-                continue;
-            }
-            let Some((prepared, read)) =
-                self.listed_view(&other, &binding, include_deleted, &view, through)?
-            else {
-                continue;
-            };
-            let inner = self.inner.borrow();
-            let rows: Vec<RowUuid> = match inner.run(&prepared, None, &read) {
-                // Its view cannot be read yet: keep all it was listed with.
-                Err(error) if crate::large::is_missing(&error) => {
-                    listed.iter().map(|id| RowUuid::from_bytes(*id)).collect()
-                }
-                rows => rows?
-                    .into_iter()
-                    .filter(|row| listed.contains(row.id.0.as_bytes()))
-                    .map(|row| row.id)
-                    .collect(),
-            };
-            if rows.is_empty() {
-                continue;
-            }
-            if root == table {
-                held.extend(rows.iter().map(|row| *row.0.as_bytes()));
-            }
-            if !follows {
-                continue;
-            }
-            let mut out = Vec::new();
-            let (mut watch, mut kept, mut gone, mut followed) = (
-                Watches::default(),
-                Kept::default(),
-                Vec::new(),
-                HashSet::new(),
-            );
-            let mut follow = Follow {
-                owner: 0,
-                identity: None,
-                policies: inner.owner.clone(),
-                out: &mut out,
-                watch: &mut watch,
-                held: &mut kept,
-                gone: &mut gone,
-                followed: &mut followed,
-                settled: Some(through),
-            };
-            // Followed from each row as the server settled it through
-            // `through`, as its view was read: a pending local write's
-            // references are not the server's, and a rejected one would
-            // leave the row it moved away from evicted and never re-sent.
-            for image in inner.settled_images(&root, rows, through)? {
-                inner.follow_support(&support, &image, None, &mut follow)?;
-            }
-            held.extend(
-                out.into_iter()
-                    .filter(|image| image.table == table)
-                    .map(|image| image.id),
-            );
-        }
-        Ok(held)
-    }
-
     /// Evict the cached rows of a remote query's settled view that its
     /// answer, listing `listed`, left out: the server's result no longer
     /// holds them for this reader. The answer judges only the rows its read
@@ -7170,10 +7013,6 @@ impl Db {
             return Ok(());
         };
         let listed: HashSet<[u8; 16]> = listed.iter().copied().collect();
-        // Rows another live read holds are that read's to judge: evicted
-        // here, the server (which still holds them for it) never ships them
-        // again. Read once, and only when a pass finds a stale row.
-        let mut others: Option<HashSet<[u8; 16]>> = None;
         let (table, head, base) = {
             let inner = self.inner.borrow();
             let schema = inner.schema.clone();
@@ -7204,18 +7043,17 @@ impl Db {
                 .filter(|row| row.union_arm.is_none() && !listed.contains(row.id.0.as_bytes()))
                 .map(|row| row.id)
                 .collect();
-            if !stale.is_empty() {
-                let others = match &mut others {
-                    Some(others) => others,
-                    None => others.insert(self.held_by_other_reads(
-                        &table,
-                        &query,
-                        &binding,
-                        include_deleted,
-                        view,
-                    )?),
-                };
-                stale.retain(|row| !others.contains(row.0.as_bytes()));
+            // A row a live read holds stays: the server keeps it current
+            // for that read and would not ship it again.
+            if let Some(client) = inner.client.as_ref() {
+                stale.retain(|row| {
+                    let name = (table.clone(), *row.0.as_bytes());
+                    !client
+                        .reads
+                        .values()
+                        .filter_map(ActiveRead::live)
+                        .any(|live| live.holds.contains(&name))
+                });
             }
             if stale.is_empty() || stale == previous {
                 return Ok(());
@@ -7730,7 +7568,8 @@ impl Inner {
                 refused: refused.clone(),
                 global: global.clone(),
                 visible: None,
-                listed: HashSet::new(),
+                holds: HashSet::new(),
+                told: false,
             }),
         );
         let client = self.client.as_mut().expect("client");
@@ -8536,9 +8375,6 @@ impl Db {
                                 ReadLifetime::Live(live) => {
                                     live.answered.set(true);
                                     live.global.set(global);
-                                    if let Some(members) = &members {
-                                        live.listed = members.iter().copied().collect();
-                                    }
                                     if live.visible.is_none_or(|v| v.n != at.n || v.seq < at.seq) {
                                         live.visible = Some(at);
                                         client.visibility_moved = true;
@@ -8810,6 +8646,21 @@ impl Db {
                                     global,
                                 });
                             }
+                        }
+                    }
+                    SyncMessage::Holds { id, added, removed } => {
+                        let client = inner.client.as_mut().expect("client");
+                        if let Some(live) = client.reads.get_mut(&id).and_then(|read| match &mut read.lifetime {
+                            ReadLifetime::Live(live) => Some(live),
+                            ReadLifetime::Once { .. } => None,
+                        }) {
+                            if !std::mem::replace(&mut live.told, true) {
+                                live.holds.clear();
+                            }
+                            for row in removed {
+                                live.holds.remove(&row);
+                            }
+                            live.holds.extend(added);
                         }
                     }
                     SyncMessage::ConnectionSettled { through } => {
@@ -9200,8 +9051,12 @@ impl Inner {
         // Nothing settles at the server's tier while detached: a
         // subscription (or one opened meanwhile) is held until the next
         // upstream answers it again.
-        for remote in client.reads.values().filter_map(ActiveRead::live) {
-            remote.answered.set(false);
+        for read in client.reads.values_mut() {
+            if let ReadLifetime::Live(remote) = &mut read.lifetime {
+                remote.answered.set(false);
+                // What it holds stands until the next upstream says.
+                remote.told = false;
+            }
         }
     }
 
@@ -10589,14 +10444,8 @@ impl Db {
                     }
                     // A row that joins a watched correlation (a new child)
                     // is watched for whoever watches the correlation.
-                    watch.share(
-                        &keys[1..],
-                        wk((
-                            table.clone(),
-                            "id".to_owned(),
-                            watch_key(&Sql::Blob(row.0.as_bytes().to_vec())),
-                        )),
-                    );
+                    let row_key = watch.row(table, *row.0.as_bytes());
+                    watch.share(&keys[1..], row_key);
                 }
             }
             let mut evictions = Vec::new();
@@ -10780,11 +10629,7 @@ impl Db {
                             .stored_table(history.unwrap_or(&row.table))?
                             .to_owned();
                         let unchanged = history.is_none() && held_as_of(row, reset);
-                        let id_key = wk((
-                            table.clone(),
-                            "id".to_owned(),
-                            watch_key(&Sql::Blob(row.id.0.as_bytes().to_vec())),
-                        ));
+                        let id_key = watch.row(&table, *row.id.0.as_bytes());
                         watch.hold(id, id_key);
                         if unchanged && support.is_none() {
                             continue;
@@ -10827,14 +10672,8 @@ impl Db {
                     }
                 }
                 for image in &images[first..] {
-                    watch.hold(
-                        id,
-                        wk((
-                            image.table.clone(),
-                            "id".to_owned(),
-                            watch_key(&Sql::Blob(image.id.to_vec())),
-                        )),
-                    );
+                    let row_key = watch.row(&image.table, image.id);
+                    watch.hold(id, row_key);
                 }
                 // Rows the client held in the result as of `since` that are
                 // in it no more, though they need not have changed (their
@@ -10892,7 +10731,6 @@ impl Db {
                         held: &mut held_rows,
                         gone: &mut gone,
                         followed: &mut followed,
-                        settled: None,
                     };
                     // A shipped row may point at rows the client never had:
                     // its support is followed whole. A held one's changed
@@ -10954,6 +10792,10 @@ impl Db {
                         members: window,
                         global,
                     });
+                    // Its first `Holds` on this connection goes with its
+                    // opening, even if it holds nothing: not before, so
+                    // what the replica kept stands until then.
+                    watch.dirty.insert(id);
                     // The settled opening listed the result.
                     if let Some((.., opened)) = inner.sessions[index].subs.get_mut(&id) {
                         *opened = true;
@@ -11178,6 +11020,9 @@ impl Db {
             }
             out.extend(rows_messages(images, tx_ids, ROWS_MESSAGE_BYTES));
             out.extend(evictions);
+            // What each read holds reaches the replica before any listing
+            // that would drop a row it holds.
+            out.extend(session.watch.take_holds());
             out.extend(std::mem::take(&mut session.outbox));
             out.extend(settled);
             // The connection's position follows the tick's rows, settles
@@ -12052,7 +11897,6 @@ impl Db {
                     held: &mut held,
                     gone: &mut gone,
                     followed: &mut followed,
-                    settled: None,
                 };
                 for image in &images {
                     let floor = unchanged
