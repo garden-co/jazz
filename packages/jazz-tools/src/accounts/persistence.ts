@@ -40,6 +40,9 @@ type StoredBackendUser = RememberedBackendUser & { format: typeof BACKEND_USER_F
 function decodeBackendUser(value: unknown): StoredBackendUser | undefined {
   if (value === undefined || value === null) return undefined;
   const user = value as Partial<StoredBackendUser>;
+  // Another version's record (a newer bundle in another tab, or one this
+  // device rolled back from): the remembered user is a cache, so it is absent.
+  if (typeof user.format === "string" && user.format !== BACKEND_USER_FORMAT) return undefined;
   if (
     user.format !== BACKEND_USER_FORMAT ||
     typeof user.account !== "string" ||
@@ -103,8 +106,17 @@ export async function prepareAccountManager(options: {
   fetch?: typeof fetch;
   bearer?: AppBearer;
   backend?: BackendAccountHost;
+  /**
+   * Remember the user the backend signed in, so a reload reopens them before
+   * the backend answers (default). Off for `clearOnSignOut`: on a shared
+   * device the next person must not open the previous user's account while
+   * the backend is unreachable. A record already stored is then dropped.
+   */
+  rememberBackendUser?: boolean;
 }) {
+  const remembers = options.rememberBackendUser ?? true;
   const stored = decode(await options.store.read());
+  if (!remembers) delete stored.backendUser;
   let writes = Promise.resolve();
   let adoptingSecret: string | undefined;
   const save = () => {
@@ -150,7 +162,7 @@ export async function prepareAccountManager(options: {
         // A user the backend signed in is remembered without any credential,
         // so a reload reopens their account. Other accounts (the Node host's
         // own) are never serialized here.
-        const remembered = next && rememberBackendUser(next);
+        const remembered = remembers && next ? rememberBackendUser(next) : undefined;
         if (remembered) stored.backendUser = { format: BACKEND_USER_FORMAT, ...remembered };
         else delete stored.backendUser;
         // Construction does not publish a selection, and this promise callback runs

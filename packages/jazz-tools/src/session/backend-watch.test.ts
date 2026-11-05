@@ -398,6 +398,33 @@ it("started waits past a refused check for one that may sign someone in", async 
   await t.session.close();
 });
 
+it("a refused check leaves a remembered user's claims refresh to the next check", async () => {
+  // Reopened from this device's memory, with the claims of an earlier sign-in.
+  const remembered = Object.freeze({
+    ...user("alice"),
+    claims: { role: "viewer" },
+  }) as AccountHandle;
+  const t = await setup(remembered);
+  t.signIn(user("alice"));
+  const answer = { ...user("alice").identity, claims: { role: "editor" } };
+  // The check on start can't reach the backend.
+  t.probe.mockRejectedValueOnce(new Error("offline"));
+  await settle();
+  expect(t.loginWithBackend).not.toHaveBeenCalled();
+  // A refused check only reconnects, so it doesn't refresh the claims...
+  t.probe.mockResolvedValue(answer);
+  t.watch.authRefused();
+  await settle();
+  expect(t.reconnect).toHaveBeenCalledOnce();
+  expect(t.loginWithBackend).not.toHaveBeenCalled();
+  // ...and the next check still does.
+  t.focus();
+  await settle();
+  expect(t.loginWithBackend).toHaveBeenCalledOnce();
+  t.watch.stop();
+  await t.session.close();
+});
+
 it("stops only once the backend keeps answering 404, asking again with backoff", async () => {
   const t = await setup(undefined, { noBackend: true });
   await settle();

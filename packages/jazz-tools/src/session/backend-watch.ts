@@ -271,12 +271,13 @@ export function watchBackendUser<Client>(
         // how it recovers.
         if (asked && session.getSnapshot().status === "error") return attempt(session.retry());
         const account = session.getSnapshot().account;
-        if (account === remembered) {
+        if (account === remembered && !refused) {
           remembered = undefined;
           // Reopened from this device's memory: the claims are as of an
           // earlier sign-in. Sign in again (one transition, never signed
-          // out) when the backend states others now.
-          if (!refused && signedIn.claims && !sameClaims(account?.claims ?? {}, signedIn.claims))
+          // out) when the backend states others now. A refused check leaves
+          // that to the next one.
+          if (signedIn.claims && !sameClaims(account?.claims ?? {}, signedIn.claims))
             return attempt(session.loginWithBackend());
         }
         // Still signed in: the refusal came from expired cookies on the old socket.

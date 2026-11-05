@@ -417,12 +417,6 @@ it("reads stores written before backendUser existed, and refuses a malformed one
     (await prepareAccountManager({ appId: "test", registry, store: old, mintToken })).getLoggedIn(),
   ).toBeUndefined();
   for (const backendUser of [
-    {
-      format: "jazz-backend-user-v2",
-      account: ACCOUNT,
-      identity: { issuer: "a", subject: "b" },
-      claims: {},
-    },
     { format: "jazz-backend-user-v1", account: ACCOUNT, identity: { issuer: "a" }, claims: {} },
     {
       format: "jazz-backend-user-v1",
@@ -443,4 +437,46 @@ it("reads stores written before backendUser existed, and refuses a malformed one
       prepareAccountManager({ appId: "test", registry, store, mintToken }),
     ).rejects.toThrow();
   }
+});
+
+it("treats another version's remembered user as absent, and keeps working", async () => {
+  // A newer bundle in another tab, or a rollback: the record is a cache.
+  const store = storeWith(
+    JSON.stringify({
+      format: "jazz-account-selection-v1",
+      roots: [],
+      selected: null,
+      backendUser: { format: "jazz-backend-user-v2", user: "alice" },
+    }),
+  );
+  const accounts = await prepareAccountManager({
+    appId: "test",
+    registry,
+    store,
+    mintToken,
+    fetch: signInFetch,
+  });
+  expect(accounts.getLoggedIn()).toBeUndefined();
+  await accounts.loginWithBackend();
+  await accounts.settleSelection();
+  expect(store.value()).toBe(REMEMBERED_FIXTURE);
+});
+
+it("never remembers the backend user with rememberBackendUser: false (clearOnSignOut)", async () => {
+  const store = storeWith(REMEMBERED_FIXTURE);
+  const options = {
+    appId: "test",
+    registry,
+    store,
+    mintToken,
+    fetch: signInFetch,
+    rememberBackendUser: false,
+  };
+  const accounts = await prepareAccountManager(options);
+  // A record from before the app turned clearOnSignOut on is not reopened.
+  expect(accounts.getLoggedIn()).toBeUndefined();
+  await accounts.loginWithBackend();
+  await accounts.settleSelection();
+  expect(JSON.parse(store.value()!).backendUser).toBeUndefined();
+  expect((await prepareAccountManager(options)).getLoggedIn()).toBeUndefined();
 });
