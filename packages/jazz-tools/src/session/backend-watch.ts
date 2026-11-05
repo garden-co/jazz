@@ -42,6 +42,13 @@ export interface BackendWatch {
    * itself after its sign-up can then join the link the watch already made.
    */
   readonly linking: { done: Promise<void>; result: unknown } | undefined;
+  /**
+   * Settles once the first check that may sign someone in (the one on start,
+   * or a focus or reauthenticate check that ran before it) has finished and
+   * the session follows its answer, or that check failed, or the watch
+   * stopped. A refused check doesn't count: it only reconnects. Never rejects.
+   */
+  readonly started: Promise<void>;
   stop(): void;
 }
 
@@ -140,6 +147,10 @@ export function watchBackendUser<Client>(
   // called, and settles them once it has followed (or failed to follow) it.
   type Waiter = { resolve(): void; reject(error: Error): void };
   let waiters: Waiter[] = [];
+  // Settles once a check that may sign someone in (not a refused one) has
+  // followed the backend's answer, or the watch stopped.
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => (markStarted = resolve));
   let announced = session.getSnapshot().account;
 
   const settled = () => {
@@ -331,6 +342,9 @@ export function watchBackendUser<Client>(
         again = undefined;
         if (retry) waiters.unshift(...batch);
         else settle(batch, failure);
+        // A refused check only reconnects, and one that asks again hasn't
+        // followed an answer yet: neither tells who is signed in.
+        if (!refused && !retry) markStarted();
         // An asked check answers a plain one too. It waits for the session
         // to settle, so it follows the backend instead of finding the
         // session busy.
@@ -360,6 +374,7 @@ export function watchBackendUser<Client>(
     get linking() {
       return linking;
     },
+    started,
     reauthenticate() {
       const done = new Promise<void>((resolve, reject) => waiters.push({ resolve, reject }));
       whenSettled(() => check(false, true));
@@ -370,6 +385,7 @@ export function watchBackendUser<Client>(
       stopped = true;
       settle(waiters.splice(0));
       clearTimeout(start);
+      markStarted();
       resetRefusal();
       unsubscribe();
       stopFocus();
