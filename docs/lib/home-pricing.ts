@@ -289,7 +289,7 @@ export const platforms: Platform[] = [
       idle: "Idle WebSockets are parked at no Durable Object cost",
       security: "Cloudflare WAF and DDoS protection, with a fast-patching security team",
       durability: "Every write stored across multiple data centers before it's acknowledged",
-      regions: "Global; each object runs near its first user",
+      regions: "Global; rows and shards can have region affinity",
       scale: "128 MB memory / 10 GB per object",
       transfer: "Free",
       operations: "Nothing beyond your Workers project",
