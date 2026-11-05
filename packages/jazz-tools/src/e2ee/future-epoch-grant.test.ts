@@ -187,6 +187,7 @@ it.each(["before", "same transaction"])(
       const proposal = {
         ...coordinates,
         signerId: signer.id,
+        action: "remove-device" as const,
         removedDeviceId: secondId,
         membership: encodeEpochIds([signer.id]),
         revision: encodeEpochIds(revision),
@@ -232,6 +233,7 @@ it.each(["before", "same transaction"])(
       const publicSuccessor = {
         ...coordinates,
         signerId: signer.id,
+        action: "remove-device" as const,
         removedDeviceId: secondId,
         membership: proposal.membership,
         revision: encodePublicApprovalRevision(
