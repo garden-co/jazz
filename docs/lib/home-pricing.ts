@@ -248,6 +248,53 @@ const engineParams = (id: PlatformId, writeMs: number, recipientUs: number, sess
 const over = (value: number, included: number) => Math.max(value - included, 0);
 const HOURS_PER_MONTH = 730;
 
+/**
+ * What a Vercel deployment uses in a month, and the bill on the plan it needs.
+ *
+ * The Sandbox bills memory while it is up and active CPU while it works. The
+ * sync proxy is a Fluid function: it holds the websockets while sessions are
+ * connected, which is the same active window, and bills its configured memory
+ * for that time plus a sliver of active CPU per message. Fluid runs many
+ * connections in one instance, so the proxy grows with sessions, not shards.
+ *
+ * Small apps that sleep when idle fit Hobby's allowances (Sandbox: 5 CPU
+ * hours, 420 GB-hours, 45-minute sessions; functions: 4 CPU hours,
+ * 360 GB-hours; 100 GB transfer) and pay nothing. Everything else is Pro,
+ * whose $20 includes $20 of usage.
+ */
+function vercelBill(d: Demand, a: Assumptions, size: Size, shards: number, cpu: number) {
+  const hibernate = a["vercel.hibernate"] >= 0.5;
+  const sandboxHours = hibernate ? d.upHours : HOURS_PER_MONTH;
+  const sandboxGbHours = shards * size.ramGb * sandboxHours;
+  const sandboxCpuHours = shards * size.vcpus * Math.max(cpu * 0.4, 0.01) * d.upHours;
+
+  const proxies = Math.max(1, Math.ceil(d.peakSessions / a["vercel.proxySessions"]));
+  const proxyGbHours = proxies * a["vercel.proxyMemoryGb"] * d.upHours;
+  const messages = d.monthlyWrites * (1 + d.recipientsPerWrite);
+  const proxyCpuHours = (messages * a["vercel.proxyMsPerMessage"]) / 3_600_000;
+
+  const fitsHobby =
+    hibernate &&
+    size.vcpus <= 4 &&
+    sandboxCpuHours <= 5 &&
+    sandboxGbHours <= 420 &&
+    proxyCpuHours <= 4 &&
+    proxyGbHours <= 360 &&
+    d.structuredGb <= 15 &&
+    d.blobGb <= a["vercel.hobbyBlobGb"] &&
+    d.egressGb <= 100;
+  if (fitsHobby) return { plan: "Hobby" as const, cost: 0 };
+
+  const usage =
+    sandboxGbHours * a["vercel.memoryGbHour"] +
+    (sandboxCpuHours + proxyCpuHours) * a["vercel.cpuHour"] +
+    proxyGbHours * a["vercel.fluidMemoryGbHour"] +
+    d.structuredGb * a["vercel.driveGb"] +
+    d.blobGb * a["vercel.blobGb"] +
+    over(d.egressGb, a["vercel.includedEgressGb"]) * a["vercel.egressGb"];
+  return { plan: "Pro" as const, cost: Math.max(a["vercel.plan"], usage) };
+}
+
 export const platforms: Platform[] = [
   {
     id: "cloudflare",
@@ -307,11 +354,15 @@ export const platforms: Platform[] = [
       ...engineParams("vercel", 2, 110, 3.5),
       param("vercel.maxVcpus", "Largest Sandbox (vCPUs)", 8, 1, 8, 1),
       param("vercel.hibernate", "Hibernate when idle (1 = yes)", 1, 0, 1, 1),
-      param("vercel.plan", "Pro plan ($/mo)", 20, 0, 100, 1),
-      param("vercel.memoryGbHour", "Memory ($/GB-hour)", 0.0106, 0, 0.05, 0.0002),
+      param("vercel.plan", "Pro plan ($/mo, usage credit included)", 20, 0, 100, 1),
+      param("vercel.memoryGbHour", "Sandbox memory ($/GB-hour)", 0.0212, 0, 0.05, 0.0002),
       param("vercel.cpuHour", "Active CPU ($/vCPU-hour)", 0.128, 0, 0.5, 0.002),
-      param("vercel.proxy", "Sync proxy ($/instance-month)", 12, 0, 50, 1),
-      param("vercel.driveGb", "Drive storage ($/GB-month)", 0.08, 0, 0.5, 0.01),
+      param("vercel.proxyMemoryGb", "Sync proxy function memory (GB)", 1, 0.5, 4, 0.5),
+      param("vercel.fluidMemoryGbHour", "Function memory ($/GB-hour)", 0.0106, 0, 0.05, 0.0002),
+      param("vercel.proxySessions", "Sessions per proxy instance", 2000, 100, 20000, 100),
+      param("vercel.proxyMsPerMessage", "Proxy CPU per message (ms)", 0.1, 0, 2, 0.05),
+      param("vercel.driveGb", "Drive storage ($/GB-month)", 0.05, 0, 0.5, 0.01),
+      param("vercel.hobbyBlobGb", "Hobby Blob storage (GB)", 1, 0, 10, 0.5),
       param("vercel.blobGb", "Blob storage ($/GB-month)", 0.023, 0, 0.2, 0.001),
       param("vercel.egressGb", "Transfer ($/GB)", 0.15, 0, 0.5, 0.01),
       param("vercel.includedEgressGb", "Included transfer (GB)", 1024, 0, 5000, 64),
@@ -326,21 +377,9 @@ export const platforms: Platform[] = [
           memoryGb: vcpus * 2 - 0.5,
         })),
     diskGb: () => Infinity,
-    cost: (d, a, size, shards, cpu) => {
-      // Memory bills while the Sandbox is up; active CPU only while it works,
-      // which is the busy hours either way. The proxy holds the websockets,
-      // so it runs all month even while the Sandbox sleeps.
-      const hours = a["vercel.hibernate"] >= 0.5 ? d.upHours : HOURS_PER_MONTH;
-      const memory = shards * size.vcpus * 2 * a["vercel.memoryGbHour"] * hours;
-      const activeCpu =
-        shards * size.vcpus * Math.max(cpu * 0.4, 0.05) * d.upHours * a["vercel.cpuHour"];
-      const proxy = shards * a["vercel.proxy"];
-      const storage = d.structuredGb * a["vercel.driveGb"] + d.blobGb * a["vercel.blobGb"];
-      const egress = over(d.egressGb, a["vercel.includedEgressGb"]) * a["vercel.egressGb"];
-      return a["vercel.plan"] + memory + activeCpu + proxy + storage + egress;
-    },
+    cost: (d, a, size, shards, cpu) => vercelBill(d, a, size, shards, cpu).cost,
     costNote:
-      "Pro plan, Sandbox memory (2 GB per vCPU) and active CPU while awake, the sync proxy, Drive and Blob storage, and transfer.",
+      "Hobby (free) while the app fits its allowances and sleeps when idle, otherwise Pro: $20 a month, which includes $20 of usage. Usage is Sandbox memory (2 GB per vCPU) and active CPU while awake, the sync proxy function, Drive and Blob storage, and transfer.",
     traits: {
       coldWake: "~0.75 s / ~1 s",
       idle: "Active-CPU pricing; Jazz hibernates a Sandbox after a few idle minutes",
