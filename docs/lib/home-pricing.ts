@@ -583,7 +583,16 @@ function shardsFor(platform: Platform, size: Size, d: Demand, a: Assumptions, li
 export type TierId = "oss" | "pro" | "scale";
 
 /** The three ways to license Jazz, as the homepage lists them. */
-export const jazzTiers: Record<TierId, { name: string; price: string; summary: string }> = {
+export const jazzTiers: Record<
+  TierId,
+  {
+    name: string;
+    price: string;
+    /** A second price line, such as a usage charge. */
+    priceExtra?: string;
+    summary: string;
+  }
+> = {
   oss: { name: "Jazz OSS (MIT)", price: "Free", summary: "A single server instance of any size" },
   pro: {
     name: "Jazz Pro",
@@ -592,7 +601,8 @@ export const jazzTiers: Record<TierId, { name: string; price: string; summary: s
   },
   scale: {
     name: "Jazz Scale",
-    price: "$200/mo + $50/mo per 1,000 peak active sessions",
+    price: "$200/mo",
+    priceExtra: "+ $50/mo per 1,000 peak active sessions",
     summary: "Unlimited sharded instances",
   },
 };

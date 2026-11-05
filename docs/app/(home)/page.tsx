@@ -507,6 +507,12 @@ export default function HomePage() {
                 </Text>
                 <Text as="p" display="block" type="large">
                   {jazzTiers[id].price}
+                  {jazzTiers[id].priceExtra ? (
+                    <>
+                      <br />
+                      {jazzTiers[id].priceExtra}
+                    </>
+                  ) : null}
                 </Text>
                 <Text as="p" display="block" color="secondary">
                   {jazzTiers[id].summary}
