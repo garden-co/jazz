@@ -33,7 +33,7 @@ export async function acceptedDeviceTransaction<T>(
     const committed = await transaction.commit();
     return {
       // Serializable confirmation always waits for the authority's Global fate.
-      async wait(options: { timeoutMs?: number } = {}) {
+      async wait(options: { tier?: "global"; timeoutMs?: number } = {}) {
         await committed.wait(options);
         return value;
       },
