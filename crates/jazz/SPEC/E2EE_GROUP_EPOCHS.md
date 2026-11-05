@@ -32,7 +32,7 @@ fixture pins literal transcript bytes, signature binding and canonical metadata
 rejection.
 
 Signature validity alone does not activate an epoch. Reconciliation must read
-the accepted predecessor and complete membership history in an exclusive
+the accepted predecessor and complete membership history in an serializable
 transaction, derive the exact effective membership, and verify an active signing
 device belonging to a remaining member. A stale revision or competing successor
 must not activate. Readers independently validate the same accepted chain.
@@ -119,7 +119,7 @@ apply to every effective account recipient.
 
 Cycle and eight-edge depth validation must include the graph affected by an
 addition, including incoming ancestor paths. Read predicates must participate
-in exclusive acceptance so competing additions cannot both validate against
+in serializable acceptance so competing additions cannot both validate against
 an incomplete graph. Signed raw candidates must undergo the same semantic
 validation during replay; a valid device signature is not proof of a valid DAG.
 Do not recursively trust unvalidated candidate edges to discover recipients.
@@ -129,7 +129,7 @@ including removed or invalid candidate edges. Group operations seed the target;
 group-recipient additions and removals also seed the selected child. Account
 recovery seeds creator-owned roots and direct account-membership candidates,
 then discovers inherited ancestors. Every boundary predicate is reread inside
-the exclusive transaction, including empty results; warming is not authority.
+the serializable transaction, including empty results; warming is not authority.
 Only authenticated replay determines effective recipients. This bounds the
 history materialised and verified by the SDK, not underlying database scan
 work: frozen-snapshot source reads can still scan unrelated table history.
