@@ -51,11 +51,12 @@ const firstAnswers = new WeakMap<object, Promise<void>>();
 
 /**
  * @internal For hosts, before they hand out a session `followUser`
- * decorated. A session with no account on this device (a backend user keeps
- * none: the backend names them) opens signed out until the backend has
+ * decorated. A session with no account on this device (no user remembered
+ * here yet: the backend names them) opens signed out until the backend has
  * answered who is signed in, and an app would show its sign-in screen to a
  * user who is signed in. So when it opened signed out, wait for that first
- * answer. An account already on this device opens at once (offline too), and
+ * answer. An account already on this device (a guest, or a backend user it
+ * remembers) opens at once (offline too), and
  * a failed or timed-out check (the auth request deadline) opens signed out as
  * before. Never rejects.
  */
@@ -132,9 +133,17 @@ async function signedInIdentity(
     const answer = (await requestBackendUser(registry, fetcher)) as {
       identity?: AccountIdentity;
       account?: string | null;
+      claims?: unknown;
     };
     if (!answer.identity) return null;
-    return { ...answer.identity, hasAccount: answer.account != null };
+    const { claims } = answer;
+    return {
+      ...answer.identity,
+      hasAccount: answer.account != null,
+      ...(claims && typeof claims === "object" && !Array.isArray(claims)
+        ? { claims: claims as Record<string, unknown> }
+        : {}),
+    };
   } catch (cause) {
     if (cause instanceof AccountAuthError && cause.status === 401) return null;
     throw cause;

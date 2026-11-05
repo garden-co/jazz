@@ -330,3 +330,153 @@ it("keeps the durable automatic selection when a persistence error is reported d
   expect(exportLocalFirstSecret(adopted)).toBe(automaticSecret);
   expect(JSON.parse(value!)).toMatchObject({ selected: 0, roots: [automaticSecret] });
 });
+
+// ---- the remembered backend user (`backendUser`, jazz-backend-user-v1) ----
+
+const ACCOUNT = "11111111-1111-4111-8111-111111111111";
+// Byte fixture: a store whose selection is a user the backend signed in.
+const REMEMBERED_FIXTURE =
+  '{"format":"jazz-account-selection-v1","roots":[],"selected":null,' +
+  '"backendUser":{"format":"jazz-backend-user-v1","account":"11111111-1111-4111-8111-111111111111",' +
+  '"identity":{"issuer":"jazz:backend","subject":"alice"},"claims":{"role":"editor"}}}';
+
+function storeWith(initial: string | null) {
+  let value = initial;
+  return {
+    value: () => value,
+    read: async () => value,
+    update: async (transform: (current: string | null) => string) => {
+      value = transform(value);
+    },
+  };
+}
+const signInFetch = (async () =>
+  Response.json({
+    account: ACCOUNT,
+    identity: { issuer: "jazz:backend", subject: "alice" },
+    claims: { role: "editor" },
+  })) as unknown as typeof fetch;
+
+it("remembers a backend-signed-in user as jazz-backend-user-v1, with no credential", async () => {
+  const store = storeWith(null);
+  const accounts = await prepareAccountManager({
+    appId: "test",
+    registry,
+    store,
+    mintToken,
+    fetch: signInFetch,
+    bearer: () => "app-bearer-token",
+  });
+  await accounts.loginWithBackend();
+  await accounts.settleSelection();
+  expect(store.value()).toBe(REMEMBERED_FIXTURE);
+  expect(store.value()).not.toContain("app-bearer-token");
+});
+
+it("reopens the remembered user from the fixture bytes, and forgets them on logout", async () => {
+  const store = storeWith(REMEMBERED_FIXTURE);
+  const accounts = await prepareAccountManager({ appId: "test", registry, store, mintToken });
+  const remembered = accounts.getLoggedIn()!;
+  expect(remembered.id).toBe(ACCOUNT);
+  expect(remembered.identity).toEqual({ issuer: "jazz:backend", subject: "alice" });
+  expect(remembered.claims).toEqual({ role: "editor" });
+  // Delegated, like a fresh sign-in: no token to hand out.
+  await expect(accountToken(remembered, registry)).rejects.toThrow(
+    "backend_signed_in_account_has_no_token",
+  );
+  accounts.logout();
+  await accounts.settleSelection();
+  // The bytes a store without a remembered user always had.
+  expect(store.value()).toBe('{"format":"jazz-account-selection-v1","roots":[],"selected":null}');
+});
+
+it("a local-first selection replaces the remembered user", async () => {
+  const store = storeWith(REMEMBERED_FIXTURE);
+  const accounts = await prepareAccountManager({ appId: "test", registry, store, mintToken });
+  const guest = accounts.createLocalFirst();
+  await accountToken(guest, registry);
+  const stored = JSON.parse(store.value()!);
+  expect(stored).toMatchObject({ selected: 0 });
+  expect(stored.backendUser).toBeUndefined();
+  expect(
+    (await prepareAccountManager({ appId: "test", registry, store, mintToken })).getLoggedIn()?.id,
+  ).toBe(guest.id);
+});
+
+it("an automatic local-first start keeps a remembered user instead of minting a guest", async () => {
+  const store = storeWith(REMEMBERED_FIXTURE);
+  const accounts = await prepareAccountManager({ appId: "test", registry, store, mintToken });
+  const selected = await ensureAutomaticLocalFirst(accounts);
+  expect(selected.identity.subject).toBe("alice");
+  expect(JSON.parse(store.value()!).roots).toEqual([]);
+});
+
+it("reads stores written before backendUser existed, and refuses a malformed one", async () => {
+  const old = storeWith('{"format":"jazz-account-selection-v1","roots":[],"selected":null}');
+  expect(
+    (await prepareAccountManager({ appId: "test", registry, store: old, mintToken })).getLoggedIn(),
+  ).toBeUndefined();
+  for (const backendUser of [
+    { format: "jazz-backend-user-v1", account: ACCOUNT, identity: { issuer: "a" }, claims: {} },
+    {
+      format: "jazz-backend-user-v1",
+      account: "not-an-account",
+      identity: { issuer: "a", subject: "b" },
+      claims: {},
+    },
+  ]) {
+    const store = storeWith(
+      JSON.stringify({
+        format: "jazz-account-selection-v1",
+        roots: [],
+        selected: null,
+        backendUser,
+      }),
+    );
+    await expect(
+      prepareAccountManager({ appId: "test", registry, store, mintToken }),
+    ).rejects.toThrow();
+  }
+});
+
+it("treats another version's remembered user as absent, and keeps working", async () => {
+  // A newer bundle in another tab, or a rollback: the record is a cache.
+  const store = storeWith(
+    JSON.stringify({
+      format: "jazz-account-selection-v1",
+      roots: [],
+      selected: null,
+      backendUser: { format: "jazz-backend-user-v2", user: "alice" },
+    }),
+  );
+  const accounts = await prepareAccountManager({
+    appId: "test",
+    registry,
+    store,
+    mintToken,
+    fetch: signInFetch,
+  });
+  expect(accounts.getLoggedIn()).toBeUndefined();
+  await accounts.loginWithBackend();
+  await accounts.settleSelection();
+  expect(store.value()).toBe(REMEMBERED_FIXTURE);
+});
+
+it("never remembers the backend user with rememberBackendUser: false (clearOnSignOut)", async () => {
+  const store = storeWith(REMEMBERED_FIXTURE);
+  const options = {
+    appId: "test",
+    registry,
+    store,
+    mintToken,
+    fetch: signInFetch,
+    rememberBackendUser: false,
+  };
+  const accounts = await prepareAccountManager(options);
+  // A record from before the app turned clearOnSignOut on is not reopened.
+  expect(accounts.getLoggedIn()).toBeUndefined();
+  await accounts.loginWithBackend();
+  await accounts.settleSelection();
+  expect(JSON.parse(store.value()!).backendUser).toBeUndefined();
+  expect((await prepareAccountManager(options)).getLoggedIn()).toBeUndefined();
+});
