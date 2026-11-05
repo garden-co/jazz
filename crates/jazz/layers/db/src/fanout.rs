@@ -73,10 +73,11 @@ pub(super) struct Group {
     pub(super) rows: Vec<CurrentRow>,
     members: Vec<Member>,
     watches: Vec<Watch>,
-    /// A single-table result (unbounded or a first page) whose rows'
+    /// A single-root result (unbounded or a first page) whose rows'
     /// membership depends only on the rows themselves: a commit that
     /// changes only root rows is applied by re-checking those ids, not by
-    /// re-running the query.
+    /// re-running the query. Optional reverse arrays are refreshed with
+    /// their parent only after their dependency paths have been checked.
     recheck: bool,
     /// Every order column is projected, so sort keys come from the rows.
     projected: bool,
@@ -88,6 +89,9 @@ pub(super) struct Group {
     /// reads: (target, root column). A change to a target row cannot move
     /// the result, only refresh the rows that reference it.
     includes: Vec<(String, String)>,
+    /// Direct optional reverse arrays whose changes can only affect their
+    /// parent. None keeps the conservative full-result refresh.
+    arrays: Option<Vec<OutputArray>>,
     /// The last run needed large-value chunks this replica does not hold
     /// yet: the run is retried when chunks arrive, and nothing (opening,
     /// delta or settlement) is published meanwhile.
@@ -111,6 +115,12 @@ pub(super) struct Group {
 }
 
 type SortKey = Vec<(Sql, bool)>;
+
+struct OutputArray {
+    table: String,
+    column: String,
+    dependencies: BTreeSet<String>,
+}
 
 impl Group {
     /// Under a branch view over a base: what its head rows mask.
@@ -394,7 +404,9 @@ impl Inner {
                 Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
                 Err(error) => return Err(error),
             };
-        let watches = self.watches(prepared, identity, &read, &compiled)?;
+        let arrays = self.output_only_arrays(prepared, identity, &read)?;
+        let watches =
+            self.array_watches(prepared, identity, &read, &compiled, arrays.as_deref())?;
         let root = prepared
             .schema
             .as_ref()
@@ -403,7 +415,7 @@ impl Inner {
                 history_source_table(&prepared.query.table).unwrap_or(&prepared.query.table),
             )?
             .to_owned();
-        let recheck = recheckable(&prepared.query, &root, &read, &compiled);
+        let recheck = arrays.is_some() && recheckable(&prepared.query, &root, &read, &compiled);
         let branches = view_branches(
             prepared.schema.as_ref().unwrap_or(&self.owner),
             &read,
@@ -441,6 +453,7 @@ impl Inner {
             projected,
             keys: Vec::new(),
             includes,
+            arrays,
             awaiting,
             opened: !awaiting,
             branches,
@@ -491,6 +504,119 @@ impl Inner {
             }
         }
         Ok(out)
+    }
+
+    /// Only reverse arrays over a parent's id are routed here. Requirements,
+    /// nested arrays and additional reads of an array source keep the normal
+    /// refresh: changing one child could otherwise affect other parents.
+    fn output_only_arrays(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+    ) -> Result<Option<Vec<OutputArray>>, Error> {
+        use crate::query::ArraySubqueryRequirement;
+        let query = &prepared.query;
+        if query.array_subqueries.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let schema = self.read_schema(prepared, read);
+        let root = schema.stored_table(&query.table)?;
+        let mut bare = prepared.clone();
+        bare.query.array_subqueries.clear();
+        let base = self.compile(&bare, identity, read)?;
+        if !recheckable(query, root, read, &base) {
+            return Ok(None);
+        }
+        let (policy, claims) = self.read_sessions(prepared, identity);
+        let mut arrays = Vec::new();
+        for array in &query.array_subqueries {
+            if array.outer_column != "id"
+                || array.requirement != ArraySubqueryRequirement::Optional
+                || !array.nested_arrays.is_empty()
+            {
+                return Ok(None);
+            }
+            let child = schema.table(&array.table)?;
+            let column = child.stored_name(&array.inner_column);
+            if child.stored == root
+                || crate::compile::is_array(child, &array.inner_column)
+                || base.tables.contains(&child.stored)
+                || child
+                    .references
+                    .get(&array.inner_column)
+                    .and_then(|target| schema.stored_table(target).ok())
+                    != Some(root)
+            {
+                return Ok(None);
+            }
+            let compiled = self
+                .read_ctx(prepared, &schema, policy.as_ref(), &claims, read)
+                .compile_children(array, &Value::Uuid(uuid::Uuid::nil()))?;
+            if compiled.sql.matches(&quote(&child.stored)).count() != 1 {
+                return Ok(None);
+            }
+            if compiled.tables.contains(root) {
+                // BandChat reactions inherit their own message's permission.
+                // A different root row cannot affect that check. Other root
+                // dependencies (including another root read by its policy)
+                // must refresh the whole result.
+                let policies = read.governance.policies(self);
+                let governing = policies.by_stored(&child.stored);
+                let parent_gate = governing.is_some_and(|table| {
+                    matches!(
+                        table.policy(Operation::Select),
+                        Some(PolicyExpr::Inherits { operation: Operation::Select, via_column, .. })
+                            if table.stored_name(via_column) == column
+                    )
+                });
+                if !parent_gate || compiled.sql.matches(&quote(root)).count() != 1 {
+                    return Ok(None);
+                }
+            }
+            arrays.push(OutputArray {
+                table: child.stored.clone(),
+                column: column.to_owned(),
+                dependencies: compiled.tables,
+            });
+        }
+        if arrays.iter().any(|array| {
+            arrays.iter().any(|other| {
+                array.table != other.table && array.dependencies.contains(&other.table)
+            })
+        }) {
+            return Ok(None);
+        }
+        Ok(Some(arrays))
+    }
+
+    fn array_watches(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        compiled: &Compiled,
+        arrays: Option<&[OutputArray]>,
+    ) -> Result<Vec<Watch>, Error> {
+        let mut watches = self.watches(prepared, identity, read, compiled)?;
+        if let Some(arrays) = arrays {
+            for table in arrays.iter().flat_map(|array| &array.dependencies) {
+                // Preserve the root's keyed watch; its scoped policy reads
+                // were checked when classifying the arrays. Every other
+                // child dependency needs its own whole-table watch: a key
+                // proved for the root policy need not cover a child's reads.
+                if table
+                    != self
+                        .read_schema(prepared, read)
+                        .stored_table(&prepared.query.table)?
+                {
+                    watches.push(Watch::Table(table.clone()));
+                }
+            }
+        }
+        watches.sort();
+        watches.dedup();
+        Ok(watches)
     }
 
     /// Tables a read and its policies depend on under its execution context.
@@ -683,7 +809,12 @@ impl Inner {
         // Per woken group: include targets that changed, as (root column, id).
         let mut targets: BTreeMap<u64, BTreeSet<(String, RowUuid)>> = BTreeMap::new();
         let groups = &self.fan.groups;
-        let mut wake = |gids: &BTreeSet<u64>, table: &str, row: RowUuid, key: &[u8]| {
+        let mut array_images = HashMap::new();
+        let mut wake = |gids: &BTreeSet<u64>,
+                        table: &str,
+                        row: RowUuid,
+                        key: &[u8],
+                        gone: Option<&BTreeMap<String, String>>| {
             for gid in gids {
                 let Some(group) = groups.get(gid) else {
                     continue;
@@ -698,6 +829,54 @@ impl Inner {
                 }
                 let root = group.root == table;
                 let entry = woken.entry(*gid).or_insert_with(|| Some(BTreeSet::new()));
+                if !root
+                    && let Some(arrays) = &group.arrays
+                    && arrays.iter().any(|array| array.table == table)
+                {
+                    if let Some(ids) = entry {
+                        for array in arrays.iter().filter(|array| array.table == table) {
+                            let values = array_images
+                                .entry((
+                                    table.to_owned(),
+                                    row,
+                                    key.to_vec(),
+                                    array.column.clone(),
+                                    gone.is_some(),
+                                ))
+                                .or_insert_with(|| {
+                                    if let Some(gone) = gone {
+                                        gone.get(&array.column)
+                                            .cloned()
+                                            .into_iter()
+                                            .collect::<BTreeSet<_>>()
+                                    } else {
+                                        self.images(
+                                            table,
+                                            row,
+                                            key,
+                                            &BTreeSet::from([array.column.clone()]),
+                                        )
+                                        .into_iter()
+                                        .flatten()
+                                        .map(|(_, value)| value)
+                                        .collect()
+                                    }
+                                });
+                            ids.extend(
+                                group
+                                    .rows
+                                    .iter()
+                                    .filter(|parent| {
+                                        values.contains(&canon(&Sql::Blob(
+                                            parent.id.0.as_bytes().to_vec(),
+                                        )))
+                                    })
+                                    .map(|parent| parent.id),
+                            );
+                        }
+                    }
+                    continue;
+                }
                 let columns: Vec<&String> = group
                     .includes
                     .iter()
@@ -707,7 +886,12 @@ impl Inner {
                 if !root && !columns.is_empty() {
                     let found = targets.entry(*gid).or_default();
                     found.extend(columns.into_iter().map(|column| (column.clone(), row)));
-                    continue;
+                    // To-one targets still force an output notification.
+                    // With arrays, also refresh their contents: an array's
+                    // read policy may depend on this same target table.
+                    if group.prepared.query.array_subqueries.is_empty() {
+                        continue;
+                    }
                 }
                 match (entry, root) {
                     (Some(ids), true) => {
@@ -719,7 +903,7 @@ impl Inner {
         };
         for (table, row, key) in &changes {
             if let Some(groups) = self.fan.tables.get(table) {
-                wake(groups, table, *row, key);
+                wake(groups, table, *row, key, None);
             }
             let Some(columns) = self.fan.key_columns.get(table) else {
                 continue;
@@ -727,15 +911,20 @@ impl Inner {
             for image in self.images(table, *row, key, columns) {
                 for (column, value) in image {
                     if let Some(groups) = self.fan.keys.get(&(table.clone(), column, value)) {
-                        wake(groups, table, *row, key);
+                        wake(groups, table, *row, key, None);
                     }
                 }
             }
         }
         for image in std::mem::take(&mut *self.gone.borrow_mut()) {
             let row = RowUuid::from_bytes(image.id);
+            let cells = image
+                .cells
+                .iter()
+                .map(|(name, value)| (name.clone(), canon(&Sql::from(value))))
+                .collect();
             if let Some(groups) = self.fan.tables.get(&image.table) {
-                wake(groups, &image.table, row, &image.key);
+                wake(groups, &image.table, row, &image.key, Some(&cells));
             }
             let Some(columns) = self.fan.key_columns.get(&image.table) else {
                 continue;
@@ -748,7 +937,7 @@ impl Inner {
                         canon(&Sql::from(cell)),
                     ))
                 {
-                    wake(groups, &image.table, row, &image.key);
+                    wake(groups, &image.table, row, &image.key, Some(&cells));
                 }
             }
         }
@@ -830,7 +1019,14 @@ impl Inner {
                                 .unwrap_or(&prepared.query.table),
                         )?
                         .to_owned();
-                    let watches = self.watches(prepared, group.identity, read, &compiled)?;
+                    let arrays = self.output_only_arrays(prepared, group.identity, read)?;
+                    let watches = self.array_watches(
+                        prepared,
+                        group.identity,
+                        read,
+                        &compiled,
+                        arrays.as_deref(),
+                    )?;
                     let tables = self.with_relation_tables(
                         prepared,
                         group.identity,
@@ -848,11 +1044,13 @@ impl Inner {
                             .iter()
                             .map(|(Watch::Table(table) | Watch::Key(table, ..))| table),
                     );
-                    let recheck = recheckable(&prepared.query, &root, read, &compiled);
+                    let recheck =
+                        arrays.is_some() && recheckable(&prepared.query, &root, read, &compiled);
                     let projected = order_projected(&prepared.query, &compiled);
                     group.root = root;
                     group.tables = tables;
                     group.includes = includes;
+                    group.arrays = arrays;
                     group.branches = branches;
                     group.masks = masks;
                     group.recheck = recheck;
@@ -990,7 +1188,10 @@ impl Inner {
             Ok(compiled) => compiled,
             Err(error) => return Some(Err(error)),
         };
-        let fresh = match self.execute(&narrowed, &group.prepared.query.table) {
+        let fresh = match self
+            .execute(&narrowed, &group.prepared.query.table)
+            .and_then(|rows| self.nest_relations(&prepared, group.identity, &group.read, rows))
+        {
             Ok(rows) => rows,
             Err(error) => return Some(Err(error)),
         };
@@ -1444,7 +1645,7 @@ impl Inner {
         } else {
             group.rows.iter().map(|row| (row.id, row.clone())).collect()
         };
-        if let Some(ids) = ids.filter(|_| group.recheck) {
+        if let Some(ids) = ids.filter(|_| group.recheck && group.opened && !group.awaiting) {
             match self.recheck_rows(group, ids) {
                 Some(Ok(Some(mut event))) => {
                     self.add_splices(group, &prior, &mut event);
@@ -1514,9 +1715,12 @@ impl Inner {
 /// target, so their output (built with the target) is read again.
 fn refresh_includes(group: &mut Group, changed: &BTreeSet<(String, RowUuid)>) {
     let refers = |row: &CurrentRow| {
-        row.cells.iter().any(|(name, value)| match value {
-            Some(Value::Uuid(id)) => changed.contains(&(name.clone(), RowUuid(*id))),
-            _ => false,
+        row.cells.iter().any(|(name, value)| {
+            let value = match value {
+                Some(Value::Nullable(Some(inner))) => Some(inner.as_ref()),
+                value => value.as_ref(),
+            };
+            matches!(value, Some(Value::Uuid(id)) if changed.contains(&(name.clone(), RowUuid(*id))))
         })
     };
     let updated: Vec<SubscriptionOutputRow> = group
@@ -1554,11 +1758,12 @@ impl Group {
 }
 
 /// Whether a group may apply root-only commits by re-checking ids: a
-/// single-table query (not a union), unbounded or a first page, (no joins, arrays, required includes,
-/// aggregates, windows), outside branch views and cuts (a settled-only
+/// single-root query (not a union), unbounded or a first page, (no joins,
+/// required includes, aggregates, windows), outside branch views and cuts (a settled-only
 /// read is one), whose compiled SQL
 /// reads its root table exactly once (a read policy that looks at other
 /// rows of the same table would let one row's change move another).
+/// Array eligibility is checked separately by `output_only_arrays`.
 fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) -> bool {
     !is_history_table(&query.table)
         && query.relation.is_none()
@@ -1568,7 +1773,6 @@ fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) 
         && query.flat_join.is_none()
         && query.reachable.is_empty()
         && query.inherits.is_empty()
-        && query.array_subqueries.is_empty()
         && query.includes.iter().all(|include| !include.require)
         && read.view.is_none()
         && read.cut.is_none()

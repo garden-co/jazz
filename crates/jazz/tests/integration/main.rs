@@ -220,3 +220,9 @@ mod governance_claims_composition;
 
 #[path = "../governance_ordinary_composition.rs"]
 mod governance_ordinary_composition;
+
+#[path = "../array_parent_refresh.rs"]
+mod array_parent_refresh;
+
+#[path = "../array_parent_governance_composition.rs"]
+mod array_parent_governance_composition;
