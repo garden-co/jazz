@@ -772,17 +772,63 @@ h6 {
   height: 1.25rem;
   fill: currentColor;
 }
-.home-command {
-  display: inline-flex;
-  align-items: center;
+.home-carousel-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-1);
+  margin-bottom: var(--spacing-4);
+}
+.home-carousel-tab {
+  padding: var(--spacing-1) var(--spacing-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-element);
+  color: var(--color-text-secondary);
+  font-family: var(--font-family-code);
+  font-size: 0.8125rem;
+}
+.home-carousel-tab[aria-selected="true"] {
+  border-color: var(--color-border);
+  background-color: var(--color-background-card);
+  color: var(--color-text-primary);
+}
+/* All slides share one grid cell, so the tallest sets the height and they
+   cross-fade in place. */
+.home-carousel-slides {
+  display: grid;
+}
+.home-carousel-slide {
+  grid-area: 1 / 1;
+  opacity: 0;
+  transition: opacity 600ms ease;
+}
+.home-carousel-slide[data-active="true"] {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .home-carousel-slide {
+    transition: none;
+  }
+}
+.home-agent-prompt {
+  display: flex;
+  align-items: flex-start;
   gap: var(--spacing-3);
-  padding: var(--spacing-2) var(--spacing-2) var(--spacing-2) var(--spacing-4);
+  width: 100%;
+  max-width: 34rem;
+  padding: var(--spacing-3) var(--spacing-2) var(--spacing-3) var(--spacing-4);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-element);
   background-color: var(--color-background-card);
   font-family: var(--font-family-code);
+  font-size: 0.875rem;
+  line-height: 1.6;
 }
-.home-command-prompt {
+.home-agent-prompt p {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.home-agent-prompt-placeholder {
   color: var(--color-text-secondary);
 }
 

@@ -31,26 +31,21 @@ function Diagram({
       xmlns="http://www.w3.org/2000/svg"
     >
       <defs>
-        {(["ink", "blue", "mint", "periwinkle", "muted"] as const).map(
-          (tone) => (
-            <marker
-              key={tone}
-              id={`dg-arrow-${tone}`}
-              viewBox="0 0 10 10"
-              refX="9"
-              refY="5"
-              markerWidth="10"
-              markerHeight="10"
-              markerUnits="userSpaceOnUse"
-              orient="auto-start-reverse"
-            >
-              <path
-                d="M2 1 L9 5 L2 9"
-                className={`dg-chevron dg-stroke-${tone}`}
-              />
-            </marker>
-          ),
-        )}
+        {(["ink", "blue", "mint", "periwinkle", "muted"] as const).map((tone) => (
+          <marker
+            key={tone}
+            id={`dg-arrow-${tone}`}
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="10"
+            markerHeight="10"
+            markerUnits="userSpaceOnUse"
+            orient="auto-start-reverse"
+          >
+            <path d="M2 1 L9 5 L2 9" className={`dg-chevron dg-stroke-${tone}`} />
+          </marker>
+        ))}
       </defs>
       {children}
     </svg>
@@ -100,52 +95,17 @@ function Wire({
   );
 }
 
-function Frame({
-  x,
-  y,
-  w,
-  h,
-  tone,
-}: {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  tone: Tone;
-}) {
+function Frame({ x, y, w, h, tone }: { x: number; y: number; w: number; h: number; tone: Tone }) {
   if (tone === "shared") {
     // Mint underneath, blue dashes on top: reads as alternating blue/mint.
     return (
       <g>
-        <rect
-          x={x}
-          y={y}
-          width={w}
-          height={h}
-          rx={2}
-          className="dg-box dg-stroke-mint"
-        />
-        <rect
-          x={x}
-          y={y}
-          width={w}
-          height={h}
-          rx={2}
-          className="dg-box-dash dg-stroke-blue"
-        />
+        <rect x={x} y={y} width={w} height={h} rx={2} className="dg-box dg-stroke-mint" />
+        <rect x={x} y={y} width={w} height={h} rx={2} className="dg-box-dash dg-stroke-blue" />
       </g>
     );
   }
-  return (
-    <rect
-      x={x}
-      y={y}
-      width={w}
-      height={h}
-      rx={2}
-      className={`dg-box dg-stroke-${tone}`}
-    />
-  );
+  return <rect x={x} y={y} width={w} height={h} rx={2} className={`dg-box dg-stroke-${tone}`} />;
 }
 
 /** A box with a mono title and optional mono detail lines. */
@@ -189,8 +149,7 @@ function Box({
         ) : null}
       </text>
       {lines?.map((line, index) => {
-        const { text, tone: lineTone } =
-          typeof line === "string" ? { text: line } : line;
+        const { text, tone: lineTone } = typeof line === "string" ? { text: line } : line;
         return (
           <text
             key={text}
@@ -221,12 +180,7 @@ function Label({
   anchor?: "start" | "middle" | "end";
 }) {
   return (
-    <text
-      x={x}
-      y={y}
-      textAnchor={anchor}
-      className={`dg-label dg-fill-${tone}`}
-    >
+    <text x={x} y={y} textAnchor={anchor} className={`dg-label dg-fill-${tone}`}>
       {children}
     </text>
   );
@@ -252,9 +206,7 @@ function Grid({
 }) {
   const w = cols.reduce((sum, col) => sum + col.w, 0);
   const h = rowH * (rows.length + 1);
-  const colX = cols.map(
-    (_, index) => x + cols.slice(0, index).reduce((sum, c) => sum + c.w, 0),
-  );
+  const colX = cols.map((_, index) => x + cols.slice(0, index).reduce((sum, c) => sum + c.w, 0));
   return (
     <g>
       <Frame x={x} y={y} w={w} h={h} tone={tone} />
@@ -266,21 +218,12 @@ function Grid({
           y1={y + rowH * (index + 1)}
           y2={y + rowH * (index + 1)}
           className={
-            index === 0
-              ? `dg-rule dg-stroke-${tone === "shared" ? "blue" : tone}`
-              : "dg-grid"
+            index === 0 ? `dg-rule dg-stroke-${tone === "shared" ? "blue" : tone}` : "dg-grid"
           }
         />
       ))}
       {colX.slice(1).map((cx) => (
-        <line
-          key={`c${cx}`}
-          x1={cx}
-          x2={cx}
-          y1={y}
-          y2={y + h}
-          className="dg-grid"
-        />
+        <line key={`c${cx}`} x1={cx} x2={cx} y1={y} y2={y + h} className="dg-grid" />
       ))}
       {cols.map((col, index) => (
         <text
@@ -308,16 +251,86 @@ function Grid({
   );
 }
 
-/** Clients sync with Jazz inside your backend, which keeps all data in one store. */
-export function StackDiagram() {
+export type DeploymentScenario = "vercel" | "cloudflare" | "server";
+
+const deploymentScenarios: Record<
+  DeploymentScenario,
+  {
+    label: string;
+    backend: { title: string; note: string; frameworks: string };
+    stores: { title: string; lines: string[] }[];
+    footer: string;
+  }
+> = {
+  vercel: {
+    label:
+      "On Vercel: web apps, mobile apps and backend clients sync with Jazz inside your Next.js app's functions, on your own origin. The data lives in a Vercel Sandbox that starts on demand and sleeps when idle, with large values in Vercel Blob.",
+    backend: {
+      title: "your app on vercel",
+      note: "createJazz() in your functions",
+      frameworks: "next.js · sync proxy on fluid compute",
+    },
+    stores: [
+      {
+        title: "vercel sandbox",
+        lines: ["jazz core, sqlite on its drive", "starts on demand, sleeps when idle"],
+      },
+      { title: "vercel blob", lines: ["large values", "one store per environment"] },
+    ],
+    footer: "no database to provision, no secrets to copy",
+  },
+  cloudflare: {
+    label:
+      "On Cloudflare, coming soon: web apps, mobile apps and backend clients sync with Jazz inside your Worker, on your own origin. The data lives in Durable Objects, one per shard, with large values in R2.",
+    backend: {
+      title: "your worker",
+      note: "createJazz()",
+      frameworks: "hono · any workers framework",
+    },
+    stores: [
+      {
+        title: "durable object",
+        lines: ["jazz core on its sqlite", "one per shard, hibernates when idle"],
+      },
+      { title: "r2", lines: ["large values", "no egress fees"] },
+    ],
+    footer: "coming soon",
+  },
+  server: {
+    label:
+      "On your own server: web apps, mobile apps and backend clients sync with Jazz inside your long-running backend process, on your own origin. The data lives in SQLite on its disk, with large values in files or an S3-compatible bucket.",
+    backend: {
+      title: "your server",
+      note: "createJazz() in a long-running process",
+      frameworks: "node · bun · hono · express · effect",
+    },
+    stores: [
+      { title: "sqlite()", lines: ["a directory on its disk", "back it up like any database"] },
+      { title: "files() or s3()", lines: ["large values", "aws s3, cloudflare r2, minio"] },
+    ],
+    footer: "one process, no separate database server",
+  },
+};
+
+export const deploymentScenarioNames: Record<DeploymentScenario, string> = {
+  vercel: "Vercel",
+  cloudflare: "Cloudflare (coming soon)",
+  server: "Your own server",
+};
+
+/** Clients sync with Jazz inside your backend, which keeps its data on the platform's storage. */
+export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }) {
+  const { label, backend, stores, footer } = deploymentScenarios[scenario];
   const w = 252;
   const clientY = 16;
   const clientH = 98;
   const backendY = 176;
   const backendH = 82;
   const storeY = 318;
-  const storeH = 64;
+  const storeH = 82;
   const xs = [8, 274, 540];
+  const storeW = 386;
+  const storeXs = [8, 406];
   const clients = [
     {
       title: "web app",
@@ -329,26 +342,12 @@ export function StackDiagram() {
     },
     {
       title: "mobile app",
-      lines: [
-        { text: "local-first copy (on disk)", tone: "blue" as const },
-        "react native",
-      ],
+      lines: [{ text: "local-first copy (on disk)", tone: "blue" as const }, "react native"],
     },
-    {
-      title: "backend clients",
-      lines: ["trusted machines", "jobs · agents · scripts"],
-    },
-  ];
-  const stores = [
-    { title: "sqlite()", lines: ["a file on your server"] },
-    { title: "vercel()", lines: ["sandbox + blob store"] },
-    { title: "remote()", lines: ["jazz cloud"] },
+    { title: "backend clients", lines: ["trusted machines", "jobs · agents · scripts"] },
   ];
   return (
-    <Diagram
-      viewBox="0 0 800 420"
-      label="Web apps, mobile apps and backend clients sync with Jazz running inside your own backend, on your own origin. Your backend signs users in, checks every read and write against your permissions, and keeps all data in one store: SQLite on your server, Vercel, or Jazz Cloud."
-    >
+    <Diagram viewBox="0 0 800 440" label={label}>
       {clients.map((client, index) => (
         <Box
           key={client.title}
@@ -379,44 +378,36 @@ export function StackDiagram() {
         w={784}
         h={backendH}
         tone="mint"
-        title="your backend"
-        note="createJazz()"
+        title={backend.title}
+        note={backend.note}
         lines={[
-          {
-            text: "authenticate · permissions · live queries · all data",
-            tone: "mint",
-          },
-          "next.js · hono · express · bun · effect",
+          { text: "authenticate · permissions · live queries", tone: "mint" },
+          backend.frameworks,
         ]}
       />
-      {xs.map((x) => (
+      {storeXs.map((x) => (
         <Wire
           key={`s${x}`}
           points={[
-            [x + w / 2, backendY + backendH],
-            [x + w / 2, storeY],
+            [x + storeW / 2, backendY + backendH],
+            [x + storeW / 2, storeY],
           ]}
-          tone="muted"
-          dashed
+          start
         />
       ))}
-      <Label x={xs[0] + w / 2 + 10} y={backendY + backendH + 34} tone="muted">
-        one store, your pick
-      </Label>
       {stores.map((store, index) => (
         <Box
           key={store.title}
-          x={xs[index]}
+          x={storeXs[index]}
           y={storeY}
-          w={w}
+          w={storeW}
           h={storeH}
-          tone="muted"
           title={store.title}
           lines={store.lines}
         />
       ))}
-      <Label x={8} y={410} tone="muted">
-        no separate database server, no deploy step
+      <Label x={8} y={430} tone="muted">
+        {footer}
       </Label>
     </Diagram>
   );
@@ -568,13 +559,7 @@ export function PermissionsDiagram() {
 export function HistoryDiagram() {
   const mainY = 70;
   const draftY = 170;
-  const commit = (
-    x: number,
-    y: number,
-    tone: Tone,
-    label: string,
-    below?: boolean,
-  ) => (
+  const commit = (x: number, y: number, tone: Tone, label: string, below?: boolean) => (
     <g key={`${x}-${y}`}>
       <rect
         x={x - 7}
@@ -600,13 +585,7 @@ export function HistoryDiagram() {
       <Label x={16} y={draftY + 5} tone="blue">
         draft
       </Label>
-      <line
-        x1={80}
-        x2={624}
-        y1={mainY}
-        y2={mainY}
-        className="dg-lane dg-stroke-mint"
-      />
+      <line x1={80} x2={624} y1={mainY} y2={mainY} className="dg-lane dg-stroke-mint" />
       <path
         d={rounded(
           [
@@ -626,14 +605,7 @@ export function HistoryDiagram() {
       {commit(310, draftY, "blue", "agent", true)}
       {commit(390, draftY, "blue", "agent", true)}
       {commit(410, mainY, "mint", "sam")}
-      <rect
-        x={513}
-        y={mainY - 7}
-        width={14}
-        height={14}
-        rx={2}
-        className="dg-box dg-stroke-mint"
-      />
+      <rect x={513} y={mainY - 7} width={14} height={14} rx={2} className="dg-box dg-stroke-mint" />
       <rect
         x={513}
         y={mainY - 7}
@@ -660,22 +632,13 @@ export function SchemaDiagram() {
     ["ship v2", "", "doing", "v2"],
     ["fix bug", "", "done", "v2"],
   ];
-  const tone = (version: string): Tone =>
-    version === "v1" ? "blue" : "periwinkle";
+  const tone = (version: string): Tone => (version === "v1" ? "blue" : "periwinkle");
   return (
     <Diagram
       viewBox="0 0 640 336"
       label="A raw table holds the superset of columns from every schema version: title, done from version 1 and status from version 2. Rows written by each version fill only their own columns. App v1 reads and writes it through a lens that maps status to done; app v2 through a lens that maps done to status."
     >
-      <Box
-        x={16}
-        y={16}
-        w={200}
-        h={56}
-        tone="blue"
-        title="app v1"
-        lines={["title · done"]}
-      />
+      <Box x={16} y={16} w={200} h={56} tone="blue" title="app v1" lines={["title · done"]} />
       <Box
         x={424}
         y={16}
@@ -701,15 +664,7 @@ export function SchemaDiagram() {
         tone="periwinkle"
         start
       />
-      <Box
-        x={16}
-        y={108}
-        w={200}
-        h={56}
-        tone="blue"
-        title="lens v1"
-        lines={["status → done"]}
-      />
+      <Box x={16} y={108} w={200} h={56} tone="blue" title="lens v1" lines={["status → done"]} />
       <Box
         x={424}
         y={108}
@@ -751,9 +706,7 @@ export function SchemaDiagram() {
         ]}
         rows={rows.map((row) => row.map((cell) => cell || "·"))}
         rowH={20}
-        cellTone={(r, c) =>
-          c === 0 ? "ink" : rows[r][c] ? tone(rows[r][3]) : "muted"
-        }
+        cellTone={(r, c) => (c === 0 ? "ink" : rows[r][c] ? tone(rows[r][3]) : "muted")}
       />
     </Diagram>
   );

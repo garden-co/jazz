@@ -2,11 +2,10 @@
 
 import { useState } from "react";
 import {
-  estimatePricing,
+  estimatePlatforms,
   frequencyOptions,
   realtimeOptions,
-  type FrequencyOption,
-  type RealtimeOption,
+  type PlatformEstimate,
 } from "@/lib/home-pricing";
 
 const compactFormatter = new Intl.NumberFormat("en-US", {
@@ -125,116 +124,154 @@ function TickSlider({
   );
 }
 
+function roundMau(value: number) {
+  if (value <= 0) return "none";
+  const magnitude = 10 ** Math.floor(Math.log10(value));
+  return `~${formatCount(Math.floor(value / magnitude) * magnitude)}`;
+}
+
+function PlatformResult({ estimate }: { estimate: PlatformEstimate }) {
+  const { platform, requiredShards, recommendedShards, monthlyCost, mauPerInstance } = estimate;
+  const sharded = recommendedShards > 1;
+  const instances = Number.isFinite(recommendedShards) ? recommendedShards : requiredShards;
+  return (
+    <div className="flex flex-col gap-4 border-t pt-6">
+      <div>
+        <p className="text-base font-medium">
+          {platform.name}
+          {platform.comingSoon ? (
+            <span className="ml-2 align-middle text-xs font-normal text-fd-muted-foreground">
+              coming soon
+            </span>
+          ) : null}
+        </p>
+        <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
+          One {platform.instance}: {roundMau(mauPerInstance)} MAU at this usage
+        </p>
+      </div>
+      <div>
+        <p className="text-sm text-fd-muted-foreground">
+          Platform{sharded ? `, ${formatCount(instances)} instances` : ""}
+        </p>
+        <p className="font-display mt-1 text-3xl font-black tracking-[-0.03em]">
+          {formatCurrency(monthlyCost)}
+          <span className="text-base font-normal text-fd-muted-foreground"> /mo</span>
+        </p>
+      </div>
+      <div>
+        <p className="text-sm text-fd-muted-foreground">Jazz</p>
+        {sharded ? (
+          <>
+            <p className="mt-1 font-medium">
+              {requiredShards > 1
+                ? `${formatCount(requiredShards)} shards required${
+                    recommendedShards > requiredShards
+                      ? `, ${formatCount(recommendedShards)} recommended`
+                      : ""
+                  }`
+                : `Fits on one, ${formatCount(recommendedShards)} shards recommended`}
+            </p>
+            <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
+              Pricing for Jazz Pro with sharding TBA
+            </p>
+          </>
+        ) : (
+          <p className="mt-1 font-medium">Free (MIT)</p>
+        )}
+      </div>
+      <p className="text-xs leading-relaxed text-fd-muted-foreground">{platform.costNote}</p>
+    </div>
+  );
+}
+
 export function PricingCalculator() {
-  const [mauLogValue, setMauLogValue] = useState(3);
+  const [mauLogValue, setMauLogValue] = useState(4);
   const [frequencyIndex, setFrequencyIndex] = useState(2);
-  const [realtimeIndex, setRealtimeIndex] = useState(0);
+  const [realtimeIndex, setRealtimeIndex] = useState(1);
   const [blobStoragePerUserMb, setBlobStoragePerUserMb] = useState(32);
 
   const mau = Math.max(1, Math.round(10 ** mauLogValue));
-  const frequency = frequencyOptions[frequencyIndex]?.value ?? "daily";
-  const realtime = realtimeOptions[realtimeIndex]?.value ?? "mostly-form-like";
-  const selectedFrequency =
-    frequencyOptions.find((option) => option.value === frequency) ?? frequencyOptions[2];
-  const selectedRealtime =
-    realtimeOptions.find((option) => option.value === realtime) ?? realtimeOptions[0];
+  const selectedFrequency = frequencyOptions[frequencyIndex] ?? frequencyOptions[2];
+  const selectedRealtime = realtimeOptions[realtimeIndex] ?? realtimeOptions[1];
 
-  const estimate = estimatePricing({
+  const estimates = estimatePlatforms({
     mau,
-    frequency,
-    realtime,
+    frequency: selectedFrequency.value,
+    realtime: selectedRealtime.value,
     blobStoragePerUserMb,
   });
-  const monthlyCostPerUser = mau > 0 ? estimate.totalMonthlyCost / mau : 0;
 
   return (
-    <div className="">
-      <div className="space-y-8">
-        <div className="grid gap-6 sm:grid-cols-2">
-          <TickSlider
-            label="Monthly active users"
-            max={6}
-            min={1}
-            step={0.05}
-            ticks={mauTicks}
-            value={mauLogValue}
-            valueLabel={`${formatCount(mau)} MAUs`}
-            onChange={setMauLogValue}
-          />
-          <TickSlider
-            label="Frequency of use"
-            max={frequencyTicks.length - 1}
-            min={0}
-            ticks={frequencyTicks}
-            value={frequencyIndex}
-            valueLabel={selectedFrequency.label}
-            onChange={(value) => setFrequencyIndex(Math.round(value))}
-          />
-          <TickSlider
-            label="Real-time profile"
-            max={realtimeTicks.length - 1}
-            min={0}
-            ticks={realtimeTicks}
-            value={realtimeIndex}
-            valueLabel={selectedRealtime.label}
-            onChange={(value) => setRealtimeIndex(Math.round(value))}
-          />
-          <label className="space-y-2">
-            <span className="text-sm font-medium">Blob storage per user</span>
-            <div className="flex items-center gap-3">
-              <input
-                className="w-full border border-fd-border bg-transparent px-3 py-3 text-base outline-none transition-colors focus:border-fd-foreground"
-                inputMode="decimal"
-                min="0"
-                step="1"
-                type="number"
-                value={blobStoragePerUserMb}
-                onChange={(event) => setBlobStoragePerUserMb(parseNumber(event.target.value))}
-              />
-              <span className="text-sm text-fd-muted-foreground">MB</span>
-            </div>
-          </label>
-        </div>
-        {/* The result sits right under the sliders, so on phones both stay in
-            view together. */}
-        <div className="grid grid-cols-2 items-start gap-6 border-t pt-8 sm:flex sm:gap-12">
-          <div>
-            <p className="text-sm text-fd-muted-foreground">Cost per user / mo</p>
-            <p className="font-display mt-2 text-3xl font-black tracking-[-0.03em]">
-              {formatCurrency(monthlyCostPerUser)}
-            </p>
-            <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
-              Based on {formatCount(mau)} monthly active users
-            </p>
+    <div className="space-y-8">
+      <div className="grid gap-6 sm:grid-cols-2">
+        <TickSlider
+          label="Monthly active users"
+          max={6}
+          min={1}
+          step={0.05}
+          ticks={mauTicks}
+          value={mauLogValue}
+          valueLabel={`${formatCount(mau)} MAUs`}
+          onChange={setMauLogValue}
+        />
+        <TickSlider
+          label="Frequency of use"
+          max={frequencyTicks.length - 1}
+          min={0}
+          ticks={frequencyTicks}
+          value={frequencyIndex}
+          valueLabel={selectedFrequency.label}
+          onChange={(value) => setFrequencyIndex(Math.round(value))}
+        />
+        <TickSlider
+          label="Real-time profile"
+          max={realtimeTicks.length - 1}
+          min={0}
+          ticks={realtimeTicks}
+          value={realtimeIndex}
+          valueLabel={selectedRealtime.label}
+          onChange={(value) => setRealtimeIndex(Math.round(value))}
+        />
+        <label className="space-y-2">
+          <span className="text-sm font-medium">Blob storage per user</span>
+          <div className="flex items-center gap-3">
+            <input
+              className="w-full border border-fd-border bg-transparent px-3 py-3 text-base outline-none transition-colors focus:border-fd-foreground"
+              inputMode="decimal"
+              min="0"
+              step="1"
+              type="number"
+              value={blobStoragePerUserMb}
+              onChange={(event) => setBlobStoragePerUserMb(parseNumber(event.target.value))}
+            />
+            <span className="text-sm text-fd-muted-foreground">MB</span>
           </div>
-          <div>
-            <p className="text-sm text-fd-muted-foreground">Estimated monthly bill</p>
-            <p className="font-display mt-2 text-3xl font-black tracking-[-0.03em]">
-              {formatCurrency(estimate.totalMonthlyCost)}
-            </p>
-            {estimate.isWithinFreeTier ? (
-              <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
-                Includes the free monthly allowance.
-              </p>
-            ) : null}
-          </div>
-        </div>
-        <div className="grid gap-4 text-sm leading-relaxed text-fd-muted-foreground sm:grid-cols-2">
-          <p>
-            {selectedFrequency.label} estimates about {selectedFrequency.visitsPerUserPerMonth}{" "}
-            visits per monthly active user across {selectedFrequency.activeDaysPerMonth} active{" "}
-            {selectedFrequency.activeDaysPerMonth === 1 ? "day" : "days"} each month.
-          </p>
-          <p>
-            {selectedRealtime.label} assumes {selectedRealtime.sessionLabel}, plus a short idle
-            shutdown grace period.
-          </p>
-        </div>
-        <p className="max-w-[24rem] text-sm leading-relaxed text-fd-muted-foreground">
-          Rough self-serve estimate based on the draft public meters on this page. Enterprise
-          contracts can still diverge.
+        </label>
+      </div>
+      {/* The results sit right under the sliders, so on phones both stay in
+          view together. */}
+      <div className="grid gap-8 sm:grid-cols-3">
+        {estimates.map((estimate) => (
+          <PlatformResult key={estimate.platform.id} estimate={estimate} />
+        ))}
+      </div>
+      <div className="grid gap-4 text-sm leading-relaxed text-fd-muted-foreground sm:grid-cols-2">
+        <p>
+          {selectedFrequency.label} estimates about {selectedFrequency.visitsPerUserPerMonth} visits
+          per monthly active user across {selectedFrequency.activeDaysPerMonth} active{" "}
+          {selectedFrequency.activeDaysPerMonth === 1 ? "day" : "days"} each month.
+        </p>
+        <p>
+          {selectedRealtime.label} assumes {selectedRealtime.sessionLabel}, about{" "}
+          {selectedRealtime.writesPerActiveMinute} writes per active minute, and{" "}
+          {selectedRealtime.rowsWatchedPerSession} rows watched per session.
         </p>
       </div>
+      <p className="max-w-[40rem] text-sm leading-relaxed text-fd-muted-foreground">
+        Very rough estimates from our example-app benchmarks and each platform&apos;s list prices,
+        sized to keep every instance under 70% busy at peak. Sharding assumes throughput grows with
+        about 0.7x the shard count.
+      </p>
     </div>
   );
 }
