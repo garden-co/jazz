@@ -1,8 +1,8 @@
-//! Runtime access for `jazz-tools migrate-alpha59`, which imports an
+//! Runtime access for `jazz-tools alpha59-alpha60`, which imports an
 //! alpha.59 server data dir: it writes rows through the runtime owner's own
 //! `Db` (the public Db API) on the thread that owns it.
 //!
-//! Only for the alpha.59 importer; it goes when the importer does.
+//! Only for the alpha59-alpha60 importer; it goes when the importer does.
 #![allow(missing_docs)]
 
 use jazz::db::Db;

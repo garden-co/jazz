@@ -6,10 +6,10 @@
 # The exporter has to link alpha.59 itself: it reads the store with
 # alpha.59's own decoders. It can't share a build with `jazz-tools` either:
 # the two pull different libsqlite3-sys versions, which both declare
-# `links = "sqlite3"`. The import side is `jazz-alpha59-import`
+# `links = "sqlite3"`. The import side is `jazz-alpha59-alpha60-import`
 # (crates/jazz-cli).
 #
-#   dev/migrate-alpha59/prepare.sh
+#   dev/alpha59-alpha60/prepare.sh
 #   A59_DIR=...  use an existing checkout instead of cloning into .a59/.
 set -euo pipefail
 
@@ -29,12 +29,12 @@ checkout() { # dir ref
 
 install_tool() { # dir crate
   local dir="$1" crate="$2"
-  mkdir -p "$dir/dev/migrate-alpha59"
-  rm -rf "$dir/dev/migrate-alpha59/$crate"
-  cp -R "$here/$crate" "$dir/dev/migrate-alpha59/$crate"
+  mkdir -p "$dir/dev/alpha59-alpha60"
+  rm -rf "$dir/dev/alpha59-alpha60/$crate"
+  cp -R "$here/$crate" "$dir/dev/alpha59-alpha60/$crate"
   # Join that checkout's workspace.
-  if ! grep -q "\"dev/migrate-alpha59/$crate\"" "$dir/Cargo.toml"; then
-    sed -i.bak "0,/^members = \[/s||members = [\n  \"dev/migrate-alpha59/$crate\",|" "$dir/Cargo.toml"
+  if ! grep -q "\"dev/alpha59-alpha60/$crate\"" "$dir/Cargo.toml"; then
+    sed -i.bak "0,/^members = \[/s||members = [\n  \"dev/alpha59-alpha60/$crate\",|" "$dir/Cargo.toml"
     rm -f "$dir/Cargo.toml.bak"
   fi
 }
@@ -58,9 +58,9 @@ hook "$here/export/hooks/server_migrate_export.rs" "$dir/crates/jazz-server/src/
   "$dir/crates/jazz-server/src/server/mod.rs" "pub mod routes;"
 hook "$here/export/hooks/account_migrate_export.rs" "$dir/crates/jazz/layers/types/src/account_registry/migrate_export.rs" \
   "$dir/crates/jazz/layers/types/src/account_registry.rs" "pub mod storage;"
-# The dump format, shared with `jazz-alpha59-import`.
-rm -rf "$dir/crates/jazz-alpha59-dump"
-cp -R "$crates/jazz-alpha59-dump" "$dir/crates/jazz-alpha59-dump"
+# The dump format, shared with `jazz-alpha59-alpha60-import`.
+rm -rf "$dir/crates/jazz-alpha59-alpha60-dump"
+cp -R "$crates/jazz-alpha59-alpha60-dump" "$dir/crates/jazz-alpha59-alpha60-dump"
 install_tool "$dir" export
 install_tool "$dir" produce
-echo "alpha.59 exporter ready in $dir: cargo build --release -p jazz-alpha59-export"
+echo "alpha59-alpha60 exporter ready in $dir: cargo build --release -p jazz-alpha59-alpha60-export"

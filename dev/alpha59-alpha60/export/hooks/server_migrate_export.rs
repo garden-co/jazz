@@ -1,6 +1,6 @@
 //! Read-only export hook for the one-time alpha.59 -> SQLite migration.
 //!
-//! `dev/migrate-alpha59/prepare.sh` copies this file into an alpha.59
+//! `dev/alpha59-alpha60/prepare.sh` copies this file into an alpha.59
 //! checkout as `jazz_server::server::migrate_export`, so it can read the
 //! server's private admin catalogue with alpha.59's own decoders. It never
 //! writes. Nothing in released Jazz contains it.

@@ -1254,7 +1254,7 @@ describe("createJazz", () => {
     // The store keeps its own id: naming one is refused, not ignored.
     expect(() =>
       sqlite({ path: dir, appId: randomUUID() } as unknown as Parameters<typeof sqlite>[0]),
-    ).toThrow(/appId is not an option.*jazz-alpha59-import/);
+    ).toThrow(/appId is not an option.*jazz-alpha59-alpha60-import/);
     expect(() => memory({ appId: randomUUID() } as never)).toThrow(/appId is not an option/);
     // vercel() too, when called: in dev its local store would never read it.
     expect(() => vercel({ appId: randomUUID() } as never)).toThrow(
@@ -1267,7 +1267,7 @@ describe("createJazz", () => {
   it("runs a sqlite store as the alpha.59 app its import kept", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-imported-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
-    // What `jazz-alpha59-import import --app-id` leaves beside the
+    // What `jazz-alpha59-alpha60-import import --app-id` leaves beside the
     // data: the id exactly as given, case included.
     const alpha59 = "0A590000-0000-4000-8000-000000000059";
     await writeFile(join(dir, "app-id"), `${alpha59}\n`);
