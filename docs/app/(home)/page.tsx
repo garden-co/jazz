@@ -467,8 +467,9 @@ export default function HomePage() {
               open source under MIT and free, however much you use it: you only pay your platform.
             </Text>
             <Text as="p" display="block" type="large" color="secondary" weight="normal">
-              When an app outgrows one instance, Jazz Pro shards it across many. Pricing for Jazz
-              Pro is still to be announced.
+              When an app outgrows one instance, Jazz Pro shards it across many. It is licensed on
+              peak active sessions, so as Jazz gets faster your platform bill shrinks while the
+              license stays the same.
             </Text>
           </SectionHeader>
           <div className="mt-6 flex flex-wrap gap-3">

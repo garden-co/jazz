@@ -211,7 +211,23 @@ export type Platform = {
   /** Monthly platform cost for `shards` instances of `size` at this demand. */
   cost: (d: Demand, a: Assumptions, size: Size, shards: number, cpuUtilization: number) => number;
   costNote: string;
+  /** The properties besides cost that shape the choice, keyed like `traitRows`. */
+  traits: Record<TraitKey, string>;
 };
+
+/** Rows shown under every platform, in this order. */
+export const traitRows = [
+  { key: "coldWake", label: "Cold wake (p50 / p95)" },
+  { key: "idle", label: "When idle" },
+  { key: "security", label: "Security" },
+  { key: "durability", label: "Durability" },
+  { key: "regions", label: "Regions" },
+  { key: "scale", label: "One instance up to" },
+  { key: "transfer", label: "Transfer" },
+  { key: "operations", label: "You operate" },
+] as const;
+
+export type TraitKey = (typeof traitRows)[number]["key"];
 
 const engineParams = (id: PlatformId, writeMs: number, recipientUs: number, sessionUs: number) => [
   param(`${id}.writeMs`, "CPU per write (ms)", writeMs, 0.1, 50, 0.1),
@@ -223,43 +239,6 @@ const over = (value: number, included: number) => Math.max(value - included, 0);
 const HOURS_PER_MONTH = 730;
 
 export const platforms: Platform[] = [
-  {
-    id: "vercel",
-    name: "Vercel Sandbox",
-    params: [
-      ...engineParams("vercel", 2, 110, 3.5),
-      param("vercel.maxVcpus", "Largest Sandbox (vCPUs)", 8, 1, 8, 1),
-      param("vercel.plan", "Pro plan ($/mo)", 20, 0, 100, 1),
-      param("vercel.memoryGbHour", "Memory ($/GB-hour)", 0.0106, 0, 0.05, 0.0002),
-      param("vercel.cpuHour", "Active CPU ($/vCPU-hour)", 0.128, 0, 0.5, 0.002),
-      param("vercel.proxy", "Sync proxy ($/instance-month)", 12, 0, 50, 1),
-      param("vercel.driveGb", "Drive storage ($/GB-month)", 0.08, 0, 0.5, 0.01),
-      param("vercel.blobGb", "Blob storage ($/GB-month)", 0.023, 0, 0.2, 0.001),
-      param("vercel.egressGb", "Transfer ($/GB)", 0.15, 0, 0.5, 0.01),
-      param("vercel.includedEgressGb", "Included transfer (GB)", 1024, 0, 5000, 64),
-    ],
-    sizes: (a) =>
-      [1, 2, 4, 8]
-        .filter((vcpus) => vcpus <= a["vercel.maxVcpus"])
-        .map((vcpus) => ({
-          label: `${vcpus} vCPU / ${vcpus * 2} GB Sandbox`,
-          vcpus,
-          memoryGb: vcpus * 2 - 0.5,
-        })),
-    diskGb: () => Infinity,
-    cost: (d, a, size, shards, cpu) => {
-      const hours = d.upHours;
-      const memory = shards * size.vcpus * 2 * a["vercel.memoryGbHour"] * hours;
-      const activeCpu =
-        shards * size.vcpus * Math.max(cpu * 0.4, 0.05) * hours * a["vercel.cpuHour"];
-      const proxy = shards * a["vercel.proxy"] * (hours / HOURS_PER_MONTH);
-      const storage = d.structuredGb * a["vercel.driveGb"] + d.blobGb * a["vercel.blobGb"];
-      const egress = over(d.egressGb, a["vercel.includedEgressGb"]) * a["vercel.egressGb"];
-      return a["vercel.plan"] + memory + activeCpu + proxy + storage + egress;
-    },
-    costNote:
-      "Pro plan, Sandbox memory (2 GB per vCPU) and active CPU while awake, the sync proxy, Drive and Blob storage, and transfer.",
-  },
   {
     id: "cloudflare",
     name: "Cloudflare Durable Objects",
@@ -296,42 +275,63 @@ export const platforms: Platform[] = [
     },
     costNote:
       "Workers Paid plan, Durable Object duration, requests, rows and storage, and R2 for large values. Egress is free.",
+    traits: {
+      coldWake: "~50 ms / ~250 ms (estimated)",
+      idle: "Idle WebSockets are parked at no Durable Object cost",
+      security: "Cloudflare WAF and DDoS protection, with a fast-patching security team",
+      durability: "Every write stored across multiple data centers before it's acknowledged",
+      regions: "Global; each object runs near its first user",
+      scale: "128 MB memory / 10 GB per object",
+      transfer: "Free",
+      operations: "Nothing beyond your Workers project",
+    },
   },
   {
-    id: "server",
-    name: "Your own server",
+    id: "vercel",
+    name: "Vercel Sandbox",
     params: [
-      ...engineParams("server", 2, 110, 3.5),
-      param("server.maxVcpus", "Largest server (vCPUs)", 48, 2, 48, 2),
-      param("server.perVcpu", "Dedicated server ($/vCPU-month, 4 GB each)", 8, 2, 30, 0.5),
-      param("server.backups", "Backups (share of server price)", 0.2, 0, 1, 0.05),
-      param("server.diskGbPerVcpu", "Included disk per vCPU (GB)", 35, 5, 200, 5),
-      param("server.volumeGb", "Extra volumes ($/GB-month)", 0.05, 0, 0.5, 0.01),
-      param("server.objectTb", "Object Storage ($/TB-month)", 6, 0, 50, 0.5),
-      param("server.includedTb", "Included traffic per server (TB)", 20, 0, 100, 1),
-      param("server.egressTb", "Extra traffic ($/TB)", 1.2, 0, 20, 0.1),
+      ...engineParams("vercel", 2, 110, 3.5),
+      param("vercel.maxVcpus", "Largest Sandbox (vCPUs)", 8, 1, 8, 1),
+      param("vercel.plan", "Pro plan ($/mo)", 20, 0, 100, 1),
+      param("vercel.memoryGbHour", "Memory ($/GB-hour)", 0.0106, 0, 0.05, 0.0002),
+      param("vercel.cpuHour", "Active CPU ($/vCPU-hour)", 0.128, 0, 0.5, 0.002),
+      param("vercel.proxy", "Sync proxy ($/instance-month)", 12, 0, 50, 1),
+      param("vercel.driveGb", "Drive storage ($/GB-month)", 0.08, 0, 0.5, 0.01),
+      param("vercel.blobGb", "Blob storage ($/GB-month)", 0.023, 0, 0.2, 0.001),
+      param("vercel.egressGb", "Transfer ($/GB)", 0.15, 0, 0.5, 0.01),
+      param("vercel.includedEgressGb", "Included transfer (GB)", 1024, 0, 5000, 64),
     ],
     sizes: (a) =>
-      [2, 4, 8, 16, 32, 48]
-        .filter((vcpus) => vcpus <= a["server.maxVcpus"])
+      [1, 2, 4, 8]
+        .filter((vcpus) => vcpus <= a["vercel.maxVcpus"])
         .map((vcpus) => ({
-          label: `${vcpus} vCPU / ${vcpus * 4} GB Hetzner server`,
+          label: `${vcpus} vCPU / ${vcpus * 2} GB Sandbox`,
           vcpus,
-          memoryGb: vcpus * 4 - 2,
+          memoryGb: vcpus * 2 - 0.5,
         })),
-    // Attach volumes as the data grows.
     diskGb: () => Infinity,
-    cost: (d, a, size, shards) => {
-      const servers = shards * size.vcpus * a["server.perVcpu"] * (1 + a["server.backups"]);
-      const disk = shards * size.vcpus * a["server.diskGbPerVcpu"];
-      const volumes = over(d.structuredGb, disk) * a["server.volumeGb"];
-      const objectStorage = d.blobGb > 0 ? Math.ceil(d.blobGb / 1024) * a["server.objectTb"] : 0;
-      const egress =
-        (over(d.egressGb, shards * a["server.includedTb"] * 1024) / 1024) * a["server.egressTb"];
-      return servers + volumes + objectStorage + egress;
+    cost: (d, a, size, shards, cpu) => {
+      const hours = d.upHours;
+      const memory = shards * size.vcpus * 2 * a["vercel.memoryGbHour"] * hours;
+      const activeCpu =
+        shards * size.vcpus * Math.max(cpu * 0.4, 0.05) * hours * a["vercel.cpuHour"];
+      const proxy = shards * a["vercel.proxy"] * (hours / HOURS_PER_MONTH);
+      const storage = d.structuredGb * a["vercel.driveGb"] + d.blobGb * a["vercel.blobGb"];
+      const egress = over(d.egressGb, a["vercel.includedEgressGb"]) * a["vercel.egressGb"];
+      return a["vercel.plan"] + memory + activeCpu + proxy + storage + egress;
     },
     costNote:
-      "Dedicated servers with backups, volumes past the included disk, Object Storage for large values, and traffic past each server's included allowance.",
+      "Pro plan, Sandbox memory (2 GB per vCPU) and active CPU while awake, the sync proxy, Drive and Blob storage, and transfer.",
+    traits: {
+      coldWake: "~0.75 s / ~1.2 s",
+      idle: "Active-CPU pricing; Jazz hibernates a Sandbox after a few idle minutes",
+      security: "Vercel Firewall and DDoS protection, with a fast-patching security team",
+      durability: "Persistent Drive, Blob for large values",
+      regions: "Sandbox regions (fewer than Functions)",
+      scale: "8 vCPU / 16 GB",
+      transfer: "1 TB included, then $0.15/GB",
+      operations: "Nothing beyond your Vercel project",
+    },
   },
   {
     id: "aws",
@@ -369,6 +369,62 @@ export const platforms: Platform[] = [
     },
     costNote:
       "Always-on Graviton instances (on-demand unless discounted), EBS with snapshots, S3 for large values, and data transfer out. Any region.",
+    traits: {
+      coldWake: "None, always on",
+      idle: "Billed around the clock",
+      security: "Shield Standard included; WAF, OS patches and TLS are yours",
+      durability: "EBS replicated within one zone, plus snapshots",
+      regions: "Any AWS region",
+      scale: "48 vCPU / 192 GB (or larger)",
+      transfer: "100 GB free, then $0.09/GB",
+      operations: "The OS and instance; AWS runs the hardware",
+    },
+  },
+  {
+    id: "server",
+    name: "Your own server",
+    params: [
+      ...engineParams("server", 2, 110, 3.5),
+      param("server.maxVcpus", "Largest server (vCPUs)", 48, 2, 48, 2),
+      param("server.perVcpu", "Dedicated server ($/vCPU-month, 4 GB each)", 8, 2, 30, 0.5),
+      param("server.backups", "Backups (share of server price)", 0.2, 0, 1, 0.05),
+      param("server.diskGbPerVcpu", "Included disk per vCPU (GB)", 35, 5, 200, 5),
+      param("server.volumeGb", "Extra volumes ($/GB-month)", 0.05, 0, 0.5, 0.01),
+      param("server.objectTb", "Object Storage ($/TB-month)", 6, 0, 50, 0.5),
+      param("server.includedTb", "Included traffic per server (TB)", 20, 0, 100, 1),
+      param("server.egressTb", "Extra traffic ($/TB)", 1.2, 0, 20, 0.1),
+    ],
+    sizes: (a) =>
+      [2, 4, 8, 16, 32, 48]
+        .filter((vcpus) => vcpus <= a["server.maxVcpus"])
+        .map((vcpus) => ({
+          label: `${vcpus} vCPU / ${vcpus * 4} GB Hetzner server`,
+          vcpus,
+          memoryGb: vcpus * 4 - 2,
+        })),
+    // Attach volumes as the data grows.
+    diskGb: () => Infinity,
+    cost: (d, a, size, shards) => {
+      const servers = shards * size.vcpus * a["server.perVcpu"] * (1 + a["server.backups"]);
+      const disk = shards * size.vcpus * a["server.diskGbPerVcpu"];
+      const volumes = over(d.structuredGb, disk) * a["server.volumeGb"];
+      const objectStorage = d.blobGb > 0 ? Math.ceil(d.blobGb / 1024) * a["server.objectTb"] : 0;
+      const egress =
+        (over(d.egressGb, shards * a["server.includedTb"] * 1024) / 1024) * a["server.egressTb"];
+      return servers + volumes + objectStorage + egress;
+    },
+    costNote:
+      "Dedicated servers with backups, volumes past the included disk, Object Storage for large values, and traffic past each server's included allowance.",
+    traits: {
+      coldWake: "None, always on",
+      idle: "Flat monthly price",
+      security: "Firewall, OS patches and TLS are yours",
+      durability: "Server disks plus the backups you schedule",
+      regions: "Wherever your provider runs (Hetzner: EU, US, Singapore)",
+      scale: "48 vCPU / 192 GB (or larger)",
+      transfer: "20 TB per server included",
+      operations: "The OS, backups, monitoring and failover",
+    },
   },
 ];
 
