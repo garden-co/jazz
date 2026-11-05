@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   assertCoreObservation,
   boundedHarnessOutput,
+  redactedLineWriter,
   startLocalServerSessionHarness,
   stopForOfflineRestart,
   terminateHarness,
@@ -104,6 +105,21 @@ test("ephemeral session lines and JWTs stay out of failure diagnostics", () => {
   );
   assert.ok(!safe.includes(secret));
   assert.ok(safe.includes("[redacted]"));
+});
+
+test("live backend output is redacted by line, even when a token spans chunks", () => {
+  const token = "eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJ1In0.c2lnbmF0dXJlLXNpZ25hdHVyZQ";
+  const secret = "ab".repeat(32);
+  const written = [];
+  const live = redactedLineWriter("backend: ", (text) => written.push(text));
+  live.push(`refused ${token.slice(0, 20)}`);
+  live.push(`${token.slice(20)}\nsecret ${secret.slice(0, 10)}`);
+  live.push(`${secret.slice(10)}`);
+  live.end();
+  const out = written.join("");
+  assert.ok(!out.includes(token.slice(0, 20)) && !out.includes(token.slice(20)), out);
+  assert.ok(!out.includes(secret.slice(0, 10)) && !out.includes(secret.slice(10)), out);
+  assert.equal(out, "backend: refused [redacted-token]\nbackend: secret [redacted-secret]\n");
 });
 
 test("both installed drivers gate termination on Core evidence and clean up the harness", () => {

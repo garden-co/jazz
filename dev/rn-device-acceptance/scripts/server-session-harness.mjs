@@ -22,20 +22,55 @@ const harnessRoot = resolve(import.meta.dirname, "../../..");
 const harnessCargoArgs = ["-p", "jazz-native-relay", "--example", "rn_server_session_harness"];
 const deviceBackendScript = resolve(import.meta.dirname, "device-backend.mjs");
 
-export function boundedHarnessOutput(output) {
-  // Keep readiness/control lines bounded and private to the driver. Retain
-  // token redaction defensively for any authentication diagnostics upstream.
+/** Redact readiness/control lines, secrets and tokens in whole lines of output. */
+function redactHarnessOutput(output) {
   return output
     .replace(/^JAZZ_RN_SERVER_SESSION .+$/gm, "JAZZ_RN_SERVER_SESSION [redacted]")
     .replace(/\b[0-9a-f]{64}\b/g, "[redacted-secret]")
-    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[redacted-token]")
-    .slice(-4_096);
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[redacted-token]");
+}
+
+export function boundedHarnessOutput(output) {
+  // Keep readiness/control lines bounded and private to the driver. Retain
+  // token redaction defensively for any authentication diagnostics upstream.
+  // Redact first, so the cut can't leave part of a secret unmatched.
+  return redactHarnessOutput(output).slice(-4_096);
 }
 
 function retainHarnessOutput(output, chunk) {
   // Keep enough for a split readiness line and diagnostic context without
-  // allowing a wedged child to grow the device driver indefinitely.
-  return `${output}${chunk}`.slice(-8_192);
+  // allowing a wedged child to grow the device driver indefinitely. Past the
+  // cap, drop the cut first line: what is left of a secret there would no
+  // longer match redaction.
+  const joined = `${output}${chunk}`;
+  if (joined.length <= 8_192) return joined;
+  const kept = joined.slice(-8_192);
+  const newline = kept.indexOf("\n");
+  return newline === -1 ? "" : kept.slice(newline + 1);
+}
+
+/** Write a child's output to this process's stderr as it comes, redacted line by line. */
+export function redactedLineWriter(prefix, write = (text) => process.stderr.write(text)) {
+  let pending = "";
+  return {
+    push(chunk) {
+      pending += String(chunk);
+      const end = pending.lastIndexOf("\n");
+      if (end === -1) {
+        // A line with no end yet stays pending, bounded like retained output.
+        if (pending.length > 8_192) pending = "";
+        return;
+      }
+      const lines = pending.slice(0, end + 1);
+      pending = pending.slice(end + 1);
+      for (const line of lines.split("\n").slice(0, -1))
+        write(`${prefix}${redactHarnessOutput(line)}\n`);
+    },
+    end() {
+      if (pending) write(`${prefix}${redactHarnessOutput(pending)}\n`);
+      pending = "";
+    },
+  };
 }
 
 function harnessDiagnostic({ child, stdout, stderr, device }) {
@@ -267,12 +302,15 @@ export async function startDeviceBackend({
   });
   let stdout = "";
   let stderr = "";
+  // The backend's warnings (a refused guest, say) explain a device failure
+  // that the device alone can't: show them as they happen, redacted by line
+  // so a secret split across chunks is still caught.
+  const live = redactedLineWriter("device backend: ");
   child.stderr.on("data", (chunk) => {
     stderr = retainHarnessOutput(stderr, chunk);
-    // The backend's warnings (a refused guest, say) explain a device failure
-    // that the device alone can't: show them as they happen, redacted.
-    process.stderr.write(`device backend: ${boundedHarnessOutput(String(chunk))}`);
+    live.push(chunk);
   });
+  child.stderr.once("end", () => live.end());
   const ready = await new Promise((resolveReady, rejectReady) => {
     let settled = false;
     const fail = (reason) => {
