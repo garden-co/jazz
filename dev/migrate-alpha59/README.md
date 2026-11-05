@@ -94,9 +94,10 @@ seen by each account.
 Content written while a row was deleted is kept under the deletion by
 alpha.59 and shown once the row is restored. The current engine keeps a
 deleted row's content fixed, so the import writes that content with the
-row's next restore (`contents_written_while_deleted_restored`). If the row
+row's next restore (`restores_bringing_content_written_while_deleted`). If the row
 stays deleted, its content stays as it was when deleted, and the later
-content is dropped (`contents_written_while_deleted_dropped`).
+content is dropped (`deleted_rows_dropping_content_written_while_deleted`).
+`versions_written_while_deleted` counts every such version.
 
 ## Layout
 

@@ -446,3 +446,46 @@ fn hex(bytes: &[u8]) -> String {
 fn err(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jazz::protocol::LensOp;
+
+    #[test]
+    fn lens_defaults_are_written_as_dump_values() {
+        let nil = jazz::object::ObjectId::from_uuid(Default::default());
+        for (op, kind, field) in [
+            (
+                LensOp::AddColumn {
+                    column: "owner".to_owned(),
+                    default: Value::Uuid(*nil.uuid()),
+                },
+                "AddColumn",
+                "default",
+            ),
+            (
+                LensOp::DropColumn {
+                    column: "owner".to_owned(),
+                    backwards_default: Value::Uuid(*nil.uuid()),
+                },
+                "DropColumn",
+                "backwards_default",
+            ),
+        ] {
+            let json: serde_json::Value =
+                serde_json::from_str(&lens_op_json(&op).unwrap()).unwrap();
+            let default: dump::Value = serde_json::from_value(json[kind][field].clone()).unwrap();
+            assert_eq!(default, dump::Value::Uuid([0; 16]));
+            assert_eq!(json[kind]["column"], "owner");
+        }
+        let rename = LensOp::RenameColumn {
+            from: "title".to_owned(),
+            to: "heading".to_owned(),
+        };
+        assert_eq!(
+            lens_op_json(&rename).unwrap(),
+            serde_json::to_string(&rename).unwrap()
+        );
+    }
+}

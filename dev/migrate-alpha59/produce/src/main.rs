@@ -558,6 +558,61 @@ fn v2_rows(db: &Db) {
     accept(db, updated.mergeable_tx_id());
     accept(db, inserted.mergeable_tx_id());
     delete(db, "projects", row(1, 4), user(1), 19);
+    // Content written while deleted: an edit settles after a delete
+    // written on top of it, as an offline client's edit does. Row 6 stays
+    // deleted, so the store keeps its content from before the delete; row 7
+    // is restored, and the restore brings the edit.
+    for (n, at_n, restore) in [(6, 20, false), (7, 30, true)] {
+        insert(
+            db,
+            "projects",
+            row(1, n),
+            user(1),
+            at_n,
+            &[
+                ("name", s("Edited while deleted")),
+                ("archived", Value::Bool(false)),
+                ("status", s("active")),
+            ],
+        );
+        let edited = block_on(db.update(
+            "projects",
+            row(1, n),
+            cells(&[("status", s("done"))]),
+            UpdateOptions {
+                identity: WriteIdentity::Session(user(2)),
+                updated_at_ms: at(at_n + 1),
+                ..Default::default()
+            },
+        ))
+        .expect("update");
+        let deleted = block_on(db.delete(
+            "projects",
+            row(1, n),
+            DeleteOptions {
+                identity: WriteIdentity::Session(user(1)),
+                updated_at_ms: at(at_n + 2),
+                ..Default::default()
+            },
+        ))
+        .expect("delete");
+        accept(db, deleted.mergeable_tx_id());
+        accept(db, edited.mergeable_tx_id());
+        if restore {
+            let restored = block_on(db.restore(
+                "projects",
+                row(1, n),
+                None,
+                RestoreOptions {
+                    identity: WriteIdentity::Session(user(2)),
+                    updated_at_ms: at(at_n + 3),
+                    ..Default::default()
+                },
+            ))
+            .expect("restore");
+            accept(db, restored.mergeable_tx_id());
+        }
+    }
 }
 
 fn principal(n: u8) -> Principal {
