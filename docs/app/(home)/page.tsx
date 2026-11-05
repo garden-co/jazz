@@ -113,6 +113,9 @@ const componentCode = `import { useAll, useDb } from "jazz-tools/react";
 import { app } from "./schema";
 
 export function OpenTodos() {
+  // As an alternative to traditional querying via api/todos
+  // you can query and write to Jazz directly from the client
+  // which will do real-time sync through the /jazz route
   const db = useDb();
   const { data: todos = [] } = useAll(
     app.todos.where({ done: false }),
