@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useDb, useOne } from "jazz-tools/react";
+import { useOne } from "jazz-tools/react";
 import { Grid, HStack, Selector, Skeleton, TextInput, Token, VStack } from "@astryxdesign/core";
 import { app, type IssuePriority, type IssueStatus } from "@/schema";
 import {
@@ -16,9 +16,8 @@ const UNASSIGNED = "unassigned";
 
 /** The database columns of an issue, shown above its page body. */
 export function IssueProperties({ pageId, editable }: { pageId: string; editable: boolean }) {
-  const db = useDb();
   const { members } = useWorkspace();
-  const { data: issue } = useOne(app.issues.where({ pageId }));
+  const { data: issue, db } = useOne(app.issues.where({ pageId }));
   const [newLabel, setNewLabel] = useState("");
   if (issue === undefined) return <Skeleton height={64} width="100%" />;
   if (!issue) return null;

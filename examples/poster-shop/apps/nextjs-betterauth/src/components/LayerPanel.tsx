@@ -11,7 +11,7 @@ import {
   ToggleButton,
   VStack,
 } from "@astryxdesign/core";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { ChevronDown, ChevronUp, Eye, EyeOff, Lock, LockOpen, Pencil, Plus } from "lucide-react";
 import { useState } from "react";
 import { app, type Layer } from "@/schema";
@@ -29,8 +29,9 @@ export function LayerPanel({
   activeLayerId: string | null;
   onActiveLayerChange: (id: string | null) => void;
 }) {
-  const db = useDb();
-  const { data: layers = [] } = useAll(app.layers.where({ canvasId }).orderBy("zIndex", "desc"));
+  const { data: layers = [], db } = useAll(
+    app.layers.where({ canvasId }).orderBy("zIndex", "desc"),
+  );
   const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
 
   const addLayer = () => {

@@ -13,7 +13,7 @@ import {
   ToggleButtonGroup,
   VStack,
 } from "@astryxdesign/core";
-import { useAll, useDb, useOne } from "jazz-tools/react";
+import { useAll, useOne } from "jazz-tools/react";
 import { MousePointerClick } from "lucide-react";
 import { app } from "@/schema";
 import { MIN_SHAPE_SIZE, PALETTE, fillColor, nextZIndex } from "@/src/lib/poster";
@@ -30,8 +30,7 @@ export function Inspector({
   shapeId: string | null;
   canEdit: boolean;
 }) {
-  const db = useDb();
-  const { data: shape } = useOne(shapeId ? app.shapes.where({ id: shapeId }) : undefined);
+  const { data: shape, db } = useOne(shapeId ? app.shapes.where({ id: shapeId }) : undefined);
   const { data: layers = [] } = useAll(app.layers.where({ canvasId }).orderBy("zIndex", "desc"));
   if (!shape)
     return (

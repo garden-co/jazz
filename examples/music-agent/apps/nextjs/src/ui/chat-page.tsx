@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useAll, useDb, useSession } from "jazz-tools/react";
+import { useAll, useSession } from "jazz-tools/react";
 import { AppShell } from "@astryxdesign/core/AppShell";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
@@ -36,9 +36,8 @@ export function ChatPage({ agentLabel }: { agentLabel: string }) {
 }
 
 export function MusicAgentApp({ agentLabel, userName }: { agentLabel: string; userName: string }) {
-  const db = useDb();
   const account = useSession()?.user.account;
-  const { data: artists = [] } = useAll(app.artists);
+  const { data: artists = [], db } = useAll(app.artists);
   const { data: conversations = [] } = useAll(app.conversations.orderBy("$createdAt", "desc"));
   const [selectedId, setSelectedId] = useState<string>();
   const artist = artists[0];

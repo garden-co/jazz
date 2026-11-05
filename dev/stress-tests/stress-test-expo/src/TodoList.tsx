@@ -9,7 +9,7 @@ import {
   View,
   type ListRenderItem,
 } from "react-native";
-import { useAll, useDb } from "jazz-tools/react-native";
+import { useAll } from "jazz-tools/react-native";
 import { app } from "../schema";
 
 function normalizeText(value: string | null | undefined): string {
@@ -88,7 +88,7 @@ export function TodoList() {
     setQueryTimeMs(null);
   }, [queryMode, filterTitle, showDoneOnly]);
 
-  const { data: results = [] } = useAll(query);
+  const { data: results = [], db } = useAll(query);
 
   // Measure time when results first arrive after a query change
   useEffect(() => {
@@ -98,8 +98,6 @@ export function TodoList() {
     }
     prevResultLenRef.current = results.length;
   }, [results.length]);
-
-  const db = useDb();
 
   const renderItem: ListRenderItem<any> = ({ item }) => {
     const displayTitle = normalizeText(item.title).trim() || "Untitled todo";

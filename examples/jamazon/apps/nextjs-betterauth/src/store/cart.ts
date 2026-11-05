@@ -1,7 +1,7 @@
 "use client";
 
 import type { Db } from "jazz-tools";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { useMemo } from "react";
 import { MAX_LINE_QUANTITY } from "@/permissions";
 import { app, type Cart, type CartLine, type Product, type Stock } from "@/schema";
@@ -21,9 +21,8 @@ import { shippingCents } from "./pricing";
 export type CartItem = { line: CartLine; product: Product; stock?: Stock };
 
 export function useCart(account: string) {
-  const db = useDb();
   const cartId = ids.cart(account);
-  const { data: carts } = useAll(app.carts.where({ id: cartId }));
+  const { data: carts, db } = useAll(app.carts.where({ id: cartId }));
   const { data: lines } = useAll(app.cartLines.where({ cartId }));
   // Subscribe to just the products in the cart (and their stock), not the
   // whole catalogue.

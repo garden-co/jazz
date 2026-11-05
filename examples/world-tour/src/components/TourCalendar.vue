@@ -53,7 +53,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { useAll, useDb } from "jazz-tools/vue";
+import { useAll } from "jazz-tools/vue";
 import { app, type StopWithVenue } from "../../schema.js";
 import { buildMonthGrid } from "../lib/calendar-grid.js";
 import { statusLabels, toDateInput } from "../lib/format.js";
@@ -63,7 +63,6 @@ import Icon from "./ui/Icon.vue";
 const props = defineProps<{ bandId: string; anchor: Date; selectedStopId: string | null }>();
 const emit = defineEmits<{ selectStop: [stopId: string] }>();
 
-const db = useDb();
 const weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 // Open on the anchor's month (the selected stop, or the next one) until the user pages.
@@ -84,7 +83,7 @@ const days = computed(() =>
 // Every stop in the visible grid, including the padding days of the next and
 // previous months. The stops policy hides tentative and cancelled dates from
 // non-members, but only members see the calendar.
-const { data: stopRows } = useAll(() => {
+const { data: stopRows, db } = useAll(() => {
   const first = days.value[0].date;
   const end = new Date(days.value[days.value.length - 1].date);
   end.setDate(end.getDate() + 1);

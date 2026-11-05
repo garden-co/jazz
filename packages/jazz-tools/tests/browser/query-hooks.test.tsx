@@ -100,7 +100,7 @@ function useSuspenseResult<T extends { id: string }>(
   query?: QueryBuilder<T>,
   options?: QueryOptions,
 ) {
-  return { data: useAllSuspense(query, options), error: undefined, isLoading: false };
+  return { data: useAllSuspense(query, options).data, error: undefined, isLoading: false };
 }
 
 function useNonSuspenseResult<T extends { id: string }>(

@@ -82,7 +82,9 @@ function Hooks({ children }: { children: ReactNode }) {
   }
   auth.secret satisfies string | null;
   todos satisfies ReturnType<typeof useAll<typeof app.todos._rowType>>;
-  suspenseTodos satisfies Array<{ id: string; title: string; done?: boolean | null }>;
+  suspenseTodos.data satisfies Array<{ id: string; title: string; done?: boolean | null }>;
+  suspenseTodos.db satisfies Db;
+  todos.db satisfies Db;
 
   return (
     <JazzProvider config={config} fallback={null}>
