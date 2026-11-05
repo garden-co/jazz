@@ -96,7 +96,7 @@ impl LargeValueUpdate {
 
 /// One byte-coordinate edit.
 #[derive(Clone)]
-enum Edit {
+pub(crate) enum Edit {
     Append(Vec<u8>),
     Splice {
         offset: u64,
@@ -504,10 +504,48 @@ impl Inner {
         Ok(json.pointer(pointer).cloned())
     }
 
+    /// A whole write of `logical` over a chunked value as the edit that
+    /// makes it: the one splice between the held value and the new one,
+    /// which costs its epoch a few bytes and travels as an edit, where the
+    /// whole value would be a new tree. `None` keeps the write whole: the
+    /// held value is inline, unchanged, or cannot be read here (its chunks
+    /// not fetched, a branched table), or the change inserts more than an
+    /// epoch edit holds. The edit's derived value and any nodes it wrote are
+    /// left in `derived` and `pending_nodes` for the caller to take.
+    pub(crate) fn whole_write_as_edit(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        column: &crate::values::Column,
+        logical: &[u8],
+        identity: WriteIdentity,
+    ) -> Option<Value> {
+        let (col, cell) = self
+            .physical_cell(table, row, &column.name, identity_of(identity))
+            .ok()?;
+        let Ok(Logical::Chunked(held)) = self.chunks.logical(cell.as_ref()) else {
+            return None;
+        };
+        let current = self.chunks.value_bytes(&held).ok()?;
+        let text = crate::large::kind(&col) != lv::LargeValueKind::Bytes;
+        let splice = byte_splices(&current, logical, text).pop()?;
+        // A longer insertion materializes a new tree either way (SPEC 19.4),
+        // which the whole write builds as well.
+        if splice.insert.len() > lv::epoch::EPOCH_INSERT_BYTES {
+            return None;
+        }
+        let edit = Edit::Splice {
+            offset: splice.at,
+            delete: splice.delete,
+            insert: splice.insert,
+        };
+        self.edited(table, &col, cell, edit).ok()
+    }
+
     /// The value `edit` makes of the current cell. A chunked value gains a
     /// tail entry, or is consolidated when its tail is full; the nodes a
     /// consolidation writes are stored with the row update.
-    fn edited(
+    pub(crate) fn edited(
         &mut self,
         table: &str,
         column: &crate::values::Column,
@@ -1183,7 +1221,7 @@ impl Db {
         // A value that fits inline is written as an ordinary inline cell, as
         // the store keeps it: its commit carries the bytes, not a
         // descriptor of chunks the store then reclaims.
-        let (logical, large) = if value.byte_length <= lv::INLINE_VALUE_MAX_BYTES as u64 {
+        let (logical, large) = if value.byte_length <= crate::large::inline_max(&col) as u64 {
             let bytes = self.inner().chunks.value_bytes(&value)?;
             (logical_value(value.kind, bytes)?, None)
         } else {
@@ -1482,7 +1520,9 @@ impl Inner {
                     for splice in lower_splices(self, &col, &cell, &within, splices)? {
                         let next = self.edited(table, &col, cell.clone(), splice)?;
                         cell = match &next {
-                            Value::Large(large) => self.large_cell(large)?,
+                            Value::Large(large) => {
+                                self.large_cell(large, crate::large::inline_max(&col))?
+                            }
                             other => to_sql(other)?.ok_or_else(|| unsupported("NaN"))?,
                         };
                         value = Some(next);
