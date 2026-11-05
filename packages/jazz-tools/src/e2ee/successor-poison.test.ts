@@ -58,6 +58,7 @@ it("does not let an unapproved device permanently occupy the successor slot", as
           predecessor: identity!.epochId,
           epochId: crypto.randomUUID(),
           signerId: pendingId,
+          action: "remove-device",
           removedDeviceId: creator!.id,
           membership: new Uint8Array([1]),
           revision: new Uint8Array([1]),
