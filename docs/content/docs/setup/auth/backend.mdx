@@ -61,7 +61,7 @@ function SignOutButton() {
 Jazz asks your backend who is signed in when the app starts, when the page regains focus and when
 another tab signs in or out; the identity always comes from `authenticate`. After your own sign-in
 or sign-out, call `reauthenticate()` from `useJazzAuth()` and Jazz follows your backend's answer.
-Without React, call `reauthenticate()` on the session `createJazzSession` returns.
+Without React, call `reauthenticate()` on the session `createJazzClient` returns.
 
 ## Several sign-in methods
 

@@ -4,7 +4,7 @@ import { RecoveryPhrase } from "jazz-tools/passphrase";
 import {
   JazzSessionProvider,
   useJazzSession,
-  type JazzSessionConfig,
+  type JazzClientConfig,
   type JazzSessionActions,
 } from "jazz-tools/react";
 
@@ -13,7 +13,7 @@ function TodoApp() {
 }
 
 // #region auth-localfirst-react
-export function LocalFirstAuthApp({ config }: { config: JazzSessionConfig }) {
+export function LocalFirstAuthApp({ config }: { config: JazzClientConfig }) {
   return (
     <JazzSessionProvider config={{ ...config, initial: "local-first" }}>
       <TodoApp />
@@ -23,7 +23,7 @@ export function LocalFirstAuthApp({ config }: { config: JazzSessionConfig }) {
 // #endregion auth-localfirst-react
 
 // #region auth-backend-react
-export function BackendAuthApp({ config }: { config: JazzSessionConfig }) {
+export function BackendAuthApp({ config }: { config: JazzClientConfig }) {
   return (
     <JazzSessionProvider config={config} fallback={<SignIn />}>
       <TodoApp />

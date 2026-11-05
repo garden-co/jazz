@@ -19,10 +19,10 @@ export {
 export { createAccountManager, type AccountManagerConfig } from "./create-account-manager.js";
 
 export {
-  createJazzSession,
+  createJazzClient,
   JazzSessionProvider,
   useJazzSession,
-  type JazzSessionConfig,
+  type JazzClientConfig,
   type JazzSessionProviderProps,
   type UseJazzSessionResult,
   type JazzSession,

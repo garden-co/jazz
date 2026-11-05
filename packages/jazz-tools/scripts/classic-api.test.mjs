@@ -98,7 +98,7 @@ async function runFrameworkConsumer(source, { browser = false, controlledFactory
               { filter: /[\\/]dist[\\/](svelte|vue)[\\/]create-jazz-client\.js$/ },
               () => ({
                 contents:
-                  "export const createJazzClient = (...args) => globalThis.__classicClientFactory(...args);",
+                  "export const openJazzClient = (...args) => globalThis.__classicClientFactory(...args);",
                 loader: "js",
               }),
             );
@@ -240,7 +240,11 @@ for (const [entrypoint, provider] of [
           config: await accountConfig("classic-coexistence"),
           fallback: createElement("p", {}, "loading"),
           autoAttachDevTools: false,
-          ...(${JSON.stringify(entrypoint)} === "react-core" ? { createJazzClient: binding.createJazzClient } : {}),
+          // react-core leaves opening a client to its framework binding; a
+          // client that never opens keeps the provider on its fallback.
+          ...(${JSON.stringify(entrypoint)} === "react-core"
+            ? { openJazzClient: () => new Promise(() => {}) }
+            : {}),
         }, "ready");
         assert.equal(renderToString(current), "<p>loading</p>");
       }

@@ -1,5 +1,5 @@
 import * as React from "react";
-import { JazzSessionProvider, type JazzSessionConfig } from "jazz-tools/expo";
+import { JazzSessionProvider, type JazzClientConfig } from "jazz-tools/expo";
 import {
   ActivityIndicator,
   Platform,
@@ -64,7 +64,7 @@ const defaultFallback = (
 );
 
 type AppProps = {
-  config?: JazzSessionConfig;
+  config?: JazzClientConfig;
   fallback?: React.ReactNode;
 };
 

@@ -32,7 +32,7 @@ export default async function runServer({
     });
 
     // Seed through the app's backend, as the app writes its own data.
-    jazz = await createJazz({
+    jazz = createJazz({
       app,
       permissions: serverPermissions,
       store: remote({

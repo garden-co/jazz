@@ -164,6 +164,10 @@ export interface VercelS3 {
  * Resolve `s3()` for a `vercel()` core from its options and the function's
  * environment (the Marketplace's AWS integration), warning when the bucket
  * is in another region than the Sandbox.
+ *
+ * Vercel sets `AWS_REGION` to the function's own region unless the project
+ * sets it, so without `s3({ region })` the region is only a first guess:
+ * the core signs for the region the bucket answers it is in.
  */
 export function resolveVercelS3(
   blobs: S3BlobStore,

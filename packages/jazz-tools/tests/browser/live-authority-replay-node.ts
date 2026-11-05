@@ -9,7 +9,7 @@ import type { JazzServerInfo } from "./testing-server.js";
 // The app's backend, run against the core in `info` (as the app runs it).
 const backends = new Map<string, Jazz>();
 export async function liveAuthorityBackendOpen(info: JazzServerInfo): Promise<LiveAuthoritySeed> {
-  const jazz = await createJazz({
+  const jazz = createJazz({
     app,
     permissions: liveAuthorityPermissions,
     store: remote({ url: info.serverUrl, appId: info.appId, secret: info.adminSecret }),

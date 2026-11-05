@@ -36,7 +36,7 @@ export const scenarioPlan: readonly ScenarioResult[] = [
   ["reconnect", "UI-A reconnects without replacing the admitted relay scope"],
   [
     "reopen",
-    "With upstream stopped, a fresh app process reopens scope A's durable relay store and reads the prior process's row through createJazzClient",
+    "With upstream stopped, a fresh app process reopens scope A's durable relay store and reads the prior process's row through openJazzClient",
   ],
   ["scope-isolation", "Distinct app/storage/auth scopes cannot observe each other"],
   [

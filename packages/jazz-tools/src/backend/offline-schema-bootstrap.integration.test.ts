@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { defineMigration, exportLocalFirstSecret, schema as s } from "../index.js";
 import { deploy, startLocalJazzServer, startTestJazz, type TestJazz } from "../testing/index.js";
 import { appMigrations } from "../testing/client-migrations.js";
-import { createJazzSession } from "./index.js";
+import { createJazzClient } from "./index.js";
 
 const before = { entries: s.table({ text: s.string() }, {}) };
 const after = { ...before, controls: s.table({ value: s.string() }, {}) };
@@ -42,7 +42,7 @@ describe("offline persistent schema bootstrap", () => {
         schema: oldApp,
         permissions: oldPermissions,
       });
-      type Session = Awaited<ReturnType<typeof createJazzSession>>;
+      type Session = Awaited<ReturnType<typeof createJazzClient>>;
       const sessions = new Set<Session>();
       let readerSecret: string | undefined;
       // Local-first readers reach the core through the app's backend, which
@@ -61,8 +61,8 @@ describe("offline persistent schema bootstrap", () => {
           port,
         });
       }
-      async function open(clientApp: Parameters<typeof createJazzSession>[0]["app"], name: string) {
-        const session = await createJazzSession({
+      async function open(clientApp: Parameters<typeof createJazzClient>[0]["app"], name: string) {
+        const session = await createJazzClient({
           appId: settings.appId,
           serverUrl: front!.url,
           app: clientApp,
