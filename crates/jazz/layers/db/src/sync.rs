@@ -8650,10 +8650,15 @@ impl Db {
                     }
                     SyncMessage::Holds { id, added, removed } => {
                         let client = inner.client.as_mut().expect("client");
-                        if let Some(live) = client.reads.get_mut(&id).and_then(|read| match &mut read.lifetime {
-                            ReadLifetime::Live(live) => Some(live),
-                            ReadLifetime::Once { .. } => None,
-                        }) {
+                        if let Some(live) =
+                            client
+                                .reads
+                                .get_mut(&id)
+                                .and_then(|read| match &mut read.lifetime {
+                                    ReadLifetime::Live(live) => Some(live),
+                                    ReadLifetime::Once { .. } => None,
+                                })
+                        {
                             if !std::mem::replace(&mut live.told, true) {
                                 live.holds.clear();
                             }
