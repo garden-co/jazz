@@ -89,7 +89,9 @@ const recoverySnapshotBatchSize = 8;
 function isTransactionConflict(error: unknown): boolean {
   return (
     (error instanceof PersistedWriteRejectedError &&
-      (error.code === "exclusive_conflict" || error.code === "transaction_conflict")) ||
+      (error.code === "exclusive_conflict" ||
+        error.code === "transaction_conflict" ||
+        error.code === "serialization_conflict")) ||
     (error instanceof Error && error.message.startsWith("(transaction_conflict):"))
   );
 }

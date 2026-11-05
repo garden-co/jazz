@@ -5,6 +5,7 @@ import { definePermissions } from "../permissions/index.js";
 import { PersistedWriteRejectedError, type TxId } from "../runtime/client.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
+import { exportLocalFirstSecret } from "../accounts/enrollment.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
 import { spaceSchema } from "./spaces.js";
@@ -12,8 +13,8 @@ import { createNativeCrypto } from "./native.js";
 
 it("shares a space only after an authorised account grant, excluding pending devices", async () => {
   let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  const alice = await localAccountConfig(server.appId, server.url);
-  const bob = await localAccountConfig(server.appId, server.url);
+  let alice = await localAccountConfig(server.appId, server.url);
+  let bob = await localAccountConfig(server.appId, server.url);
   const app = s.defineApp(
     {
       ...deviceRequestSchema,
@@ -70,8 +71,16 @@ it("shares a space only after an authorised account grant, excluding pending dev
         __e2ee_space_deliveries: policies.__e2ee_space_deliveries!,
       },
     });
-    alice.serverUrl = server.url;
-    bob.serverUrl = server.url;
+    const aliceId = alice.account.id;
+    const bobId = bob.account.id;
+    alice = await localAccountConfig(
+      server.appId,
+      server.url,
+      exportLocalFirstSecret(alice.account),
+    );
+    bob = await localAccountConfig(server.appId, server.url, exportLocalFirstSecret(bob.account));
+    expect(alice.account.id).toBe(aliceId);
+    expect(bob.account.id).toBe(bobId);
     expect(alice.account.id).not.toBe(bob.account.id);
     const crypto = await createNativeCrypto();
     let failureMode: "reject" | "throw" | undefined;

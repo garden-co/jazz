@@ -240,3 +240,26 @@ it("does not upgrade ordinary transactions through a registered accepted prepara
     await db.shutdown();
   }
 });
+
+it("keeps a staged scope row visible after an accepted preparation prefix", async () => {
+  const server = await startTestJazz({
+    app,
+    permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
+  let db: Awaited<ReturnType<typeof createDb>> | undefined;
+  try {
+    db = await createDb(await localAccountConfig(server.appId, server.url));
+    const tx = beginDbTransactionAfter(db, async () => {}, "accepted-evidence");
+    await prepareDbTransaction(tx, async (scope) => {
+      expect((await scope.readAccepted(app.notes)).rows).toEqual([]);
+    });
+    const row = tx.insert(app.notes, { body: "staged scope" });
+    expect(await tx.one(app.notes.where({ id: row.id }).select("id"))).toEqual({ id: row.id });
+    await tx.rollback();
+    expect(await db.all(app.notes, { tier: "remote" })).toEqual([]);
+  } finally {
+    await db?.shutdown();
+    await server.stop();
+  }
+}, 60000);
