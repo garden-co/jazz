@@ -30,7 +30,7 @@ export function jazz(): Promise<Jazz> {
     store:
       store.kind === "remote"
         ? remote({ ...store, appId: jazzAppId })
-        : sqlite({ path: store.path, appId: jazzAppId }),
+        : sqlite({ path: store.path }),
     // Better Auth's session cookie decides who the operator is.
     authenticate: async (request) => {
       const { auth } = await import("./auth");

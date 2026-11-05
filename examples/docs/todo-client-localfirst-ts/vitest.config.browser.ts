@@ -3,10 +3,9 @@ import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 import { playwright } from "@vitest/browser-playwright";
 import { jazzBackend } from "./jazz.server.js";
-import { APP_ID } from "./tests/browser/test-constants.js";
 
 export default defineConfig({
-  plugins: [wasm(), topLevelAwait(), jazzBackend({ appId: APP_ID })],
+  plugins: [wasm(), topLevelAwait(), jazzBackend()],
   worker: {
     plugins: () => [wasm(), topLevelAwait()],
   },

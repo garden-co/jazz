@@ -4,7 +4,7 @@ import { prepareTestAccount } from "../../../testing/accounts.js";
 import { app } from "../../schema.js";
 import { hexDump, readFileBlob, readFileRange } from "../../src/large-values.js";
 import { createInvite, inviteLink, parseInviteHash, redeemInvite } from "../../src/sharing.js";
-import { APP_ID, SERVER_URL } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 
 const dbs: Db[] = [];
 const serverUrl = SERVER_URL;
@@ -15,14 +15,9 @@ afterEach(async () => {
 
 async function openRemoteDb(label: string): Promise<Db> {
   const db = await createDb({
-    appId: APP_ID,
+    appId: SCOPE,
     serverUrl,
-    account: await prepareTestAccount(
-      createAccountManager,
-      APP_ID,
-      serverUrl,
-      generateAuthSecret(),
-    ),
+    account: await prepareTestAccount(createAccountManager, SCOPE, serverUrl, generateAuthSecret()),
     driver: { type: "persistent", dbName: `epic-drop-${label}-${crypto.randomUUID()}` },
   });
   dbs.push(db);

@@ -13,7 +13,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { act, useEffect } from "react";
 import { App } from "../../src/App.js";
 import { app } from "../../schema.js";
-import { APP_ID, SERVER_URL } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 import type { DbConfig } from "jazz-tools";
 import { useDb } from "jazz-tools/react";
 
@@ -169,7 +169,7 @@ describe("React Todo App core browser canary", () => {
     let readerEdgeResult: Error | null | undefined;
 
     const writer = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       driver: { type: "persistent", dbName: writerDbName },
       serverUrl: SERVER_URL,
       secret: "jazz-auth-v1:Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
@@ -178,7 +178,7 @@ describe("React Todo App core browser canary", () => {
       },
     });
     const reader = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
       secret: "jazz-auth-v1:VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg",
@@ -242,7 +242,7 @@ describe("React Todo App core browser canary", () => {
     const title = "Core durable todo";
 
     const firstSession = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       driver: { type: "persistent", dbName },
       serverUrl: SERVER_URL,
       secret: "jazz-auth-v1:GWA1Dzw4x_QVSAKK3_i0U4MlfJBdYlG3jOwAK_rLx28",
@@ -258,7 +258,7 @@ describe("React Todo App core browser canary", () => {
     await unmountApp(firstSession, dbName);
 
     const secondSession = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       driver: { type: "persistent", dbName },
       serverUrl: SERVER_URL,
       secret: "jazz-auth-v1:GWA1Dzw4x_QVSAKK3_i0U4MlfJBdYlG3jOwAK_rLx28",
@@ -284,7 +284,7 @@ describe("React Todo App core browser canary", () => {
     let readerEdgeResult: Error | null | undefined;
 
     const writer = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       driver: { type: "persistent", dbName: writerDbName },
       serverUrl: SERVER_URL,
       secret: writerSecret,
@@ -293,7 +293,7 @@ describe("React Todo App core browser canary", () => {
       },
     });
     const reader = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
       secret: readerSecret,
@@ -328,7 +328,7 @@ describe("React Todo App core browser canary", () => {
 
     let edgeResult: Error | null | undefined;
     const reconnectedReader = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
       secret: readerSecret,
