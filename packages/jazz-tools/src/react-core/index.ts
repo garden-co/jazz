@@ -1,5 +1,5 @@
 export { useCoState, useAccount, useSuspenseCoState, useSuspenseAccount } from "../classic-api.js";
-export { createJazzClient, type JazzClient } from "../react/create-jazz-client.js";
+export type { JazzClient } from "../react/create-jazz-client.js";
 export {
   JazzClientProvider,
   JazzProvider,

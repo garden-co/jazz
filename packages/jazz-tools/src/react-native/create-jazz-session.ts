@@ -4,13 +4,13 @@ import { nativeBackendWatchEvents } from "../session/native-backend-watch.js";
 import { clientRegistryUrl } from "../accounts/account-manager-core.js";
 import { createAccountManager, type AccountManagerConfig } from "./create-account-manager.js";
 import {
-  createJazzClient,
+  openJazzClient,
   type JazzClient,
-  type JazzClientConfig,
+  type OpenJazzClientConfig,
 } from "../react-native/create-jazz-client.js";
 import { refuseClientAppId } from "../runtime/client-scope.js";
 
-export type JazzSessionConfig = Omit<JazzClientConfig, "account" | "serverUrl" | "appId"> &
+export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl" | "appId"> &
   Omit<AccountManagerConfig, "appId"> & {
     /**
      * Not for a client: the app id belongs to your backend's store
@@ -42,8 +42,8 @@ export type JazzSessionConfig = Omit<JazzClientConfig, "account" | "serverUrl" |
   };
 
 /** Prepare the host account store once and own client replacement across authentication. */
-export async function createJazzSession(
-  config: JazzSessionConfig,
+export async function createJazzClient(
+  config: JazzClientConfig,
 ): Promise<UserFollowingSession<JazzClient>> {
   refuseClientAppId(config);
   const { serverUrl } = config;
@@ -59,14 +59,14 @@ export async function createJazzSession(
     return createJazzSessionOwner({
       accounts,
       initial: "local-first",
-      openClient: (account) => createJazzClient({ ...config, serverUrl: undefined, account }),
+      openClient: (account) => openJazzClient({ ...config, serverUrl: undefined, account }),
       decorate: () => ({ reauthenticate: async () => {} }),
     });
   }
   return createJazzSessionOwner({
     accounts,
     initial: config.initial,
-    openClient: (account) => createJazzClient({ ...config, serverUrl, account }),
+    openClient: (account) => openJazzClient({ ...config, serverUrl, account }),
     decorate: followUser({
       registry: clientRegistryUrl(config),
       events: nativeBackendWatchEvents,

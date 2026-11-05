@@ -38,42 +38,6 @@ const todoAppPermissions = s.definePermissions(todoApp, ({ policy, session }) =>
 // Types
 // ---------------------------------------------------------------------------
 
-type ExternalIdentity = {
-  token: string;
-  userId: string;
-  user: string;
-};
-
-const EXTERNAL_ISSUER = "urn:jazz:local-first";
-
-/**
- * A local-first guest's bearer for a named test actor, and the account the
- * core founds for it. These serving tests exercise request admission, which
- * verifies only a guest's own proof (who a signed-in user is, createJazz's
- * `authenticate` decides).
- */
-async function createExternalIdentity(
-  actorName: string,
-  server: { url: string; backendSecret?: string },
-  appId: string,
-): Promise<ExternalIdentity> {
-  const { mintLocalFirstToken } = await import("jazz-napi");
-  const { verifyLocalFirstToken } = await import("./local-first-token.js");
-  const seed = Buffer.from(`${actorName}-${randomUUID()}`.padEnd(32, "-").slice(0, 32)).toString(
-    "base64url",
-  );
-  const token = mintLocalFirstToken(seed, appId, 3600);
-  const userId = verifyLocalFirstToken(token, appId);
-  const identity = { issuer: EXTERNAL_ISSUER, subject: userId };
-  const response = await requestVouchedAccount(
-    accountRegistryUrl(server.url, appId),
-    "found-local-first",
-    identity,
-    server.backendSecret!,
-  );
-  return { token, userId, user: readAccountAssignment(response, identity) };
-}
-
 /** A signed-in app user the backend vouches for (createJazz's `authenticate`), for `forSession`. */
 async function createAppUser(
   actorName: string,
@@ -90,19 +54,21 @@ async function createAppUser(
   return { userId: identity.subject, user: readAccountAssignment(response, identity) };
 }
 
+/** The session the app's backend names `actor` with (what createJazz's forSession acts as). */
+function sessionOf(actor: { userId: string; user: string }) {
+  return {
+    user_id: actor.userId,
+    account_id: actor.user,
+    claims: {},
+    issuer: APP_ISSUER,
+    authMode: "external" as const,
+  };
+}
+
 const APP_ISSUER = "https://app.napi-request.test";
 
 async function startRequestTestServer(options: Parameters<typeof startLocalJazzServer>[0]) {
   return startLocalJazzServer(options);
-}
-
-async function createLocalFirstIdentity(
-  actorName: string,
-  appId: string,
-): Promise<{ token: string }> {
-  const { mintLocalFirstToken } = await import("jazz-napi");
-  const seed = Buffer.from(actorName.padEnd(32, "-").slice(0, 32)).toString("base64url");
-  return { token: mintLocalFirstToken(seed, appId, 60) };
 }
 
 async function removeTempDir(path: string): Promise<void> {
@@ -184,22 +150,22 @@ async function createConcurrentTestEnv() {
     await server.stop();
   });
 
-  const alice = await createExternalIdentity("alice", server, appId);
-  const bob = await createExternalIdentity("bob", server, appId);
+  const alice = await createAppUser("alice", server, appId);
+  const bob = await createAppUser("bob", server, appId);
 
   const [aliceDb, bobDb] = await Promise.all([
-    context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
-    context.forRequest({ headers: { authorization: `Bearer ${bob.token}` } }),
+    context.forSession(sessionOf(alice)),
+    context.forSession(sessionOf(bob)),
   ]);
 
   return { context, server, appId, alice, bob, aliceDb, bobDb, scopeTag };
 }
 
 // ---------------------------------------------------------------------------
-// Standalone (non-concurrent) forRequest scenarios
+// Standalone (non-concurrent) forSession scenarios
 // ---------------------------------------------------------------------------
 
-describe("forRequest auth and policy", () => {
+describe("forSession auth and policy", () => {
   it("uses request-visible transform dependencies and rejects uncertain upsert absence", async () => {
     const appId = randomUUID();
     const backendSecret = "dependent-transform-backend";
@@ -249,8 +215,8 @@ describe("forRequest auth and policy", () => {
       env: "test",
     });
     onTestFinished(() => context.shutdown());
-    const alice = await createExternalIdentity("alice", server, appId);
-    const bob = await createExternalIdentity("bob", server, appId);
+    const alice = await createAppUser("alice", server, appId);
+    const bob = await createAppUser("bob", server, appId);
     const backend = context.asBackend();
     const hidden = await backend
       .insert(app.products, { owner_id: bob.user, unit: "dollars", price: 1 })
@@ -258,9 +224,7 @@ describe("forRequest auth and policy", () => {
     const visible = await backend
       .insert(app.products, { owner_id: alice.user, unit: "dollars", price: 1 })
       .wait({ tier: "global" });
-    const scoped = await context.forRequest({
-      headers: { authorization: `Bearer ${alice.token}` },
-    });
+    const scoped = context.forSession(sessionOf(alice));
     await expect(scoped.one(app.products.where({ id: hidden.id }))).resolves.toBeNull();
     await expect(
       scoped.upsert(app.products, hidden.id, { price: 2 }).wait({ tier: "local" }),
@@ -280,7 +244,7 @@ describe("forRequest auth and policy", () => {
    * Alice inserts her own row; then tries to insert with a foreign owner_id.
    * Backend Db sees the row regardless of ownership.
    *
-   *   alice ──forRequest──► context
+   *   alice ──forSession──► context
    *             │
    *             ├─ insert({ owner_id: alice })  ──► OK
    *             ├─ insert({ owner_id: "other" }) ──► REJECT (policy)
@@ -302,10 +266,8 @@ describe("forRequest auth and policy", () => {
       await server.stop();
     });
 
-    const alice = await createExternalIdentity("alice", server, appId);
-    const aliceDb = await context.forRequest({
-      headers: { authorization: `Bearer ${alice.token}` },
-    });
+    const alice = await createAppUser("alice", server, appId);
+    const aliceDb = context.forSession(sessionOf(alice));
     const backendDb = context.asBackend();
 
     const row = await aliceDb
@@ -317,7 +279,7 @@ describe("forRequest auth and policy", () => {
       })
       .wait({ tier: "global" });
 
-    // forRequest session surfaces its own row.
+    // forSession session surfaces its own row.
     await vi.waitFor(
       async () => {
         const rows = await aliceDb.all(todoApp.todos.where({ description: scopeTag }), {
@@ -355,77 +317,19 @@ describe("forRequest auth and policy", () => {
   }, 30_000);
 
   /**
-   * Context configured with allowLocalFirstAuth=false rejects local-first JWTs
-   * before any DB interaction occurs.
-   *
-   *   alice ──forRequest──► context (allowLocalFirstAuth=false)
-   *                                  └─ REJECT (token type not allowed)
-   */
-  it("rejects local-first token when allowLocalFirstAuth is false", async () => {
-    const appId = randomUUID();
-    const dataRoot = await mkdtemp(join(tmpdir(), "jazz-napi-no-local-first-"));
-    const { createJazzContext } = await import("../backend/create-jazz-context.js");
-    const context = createJazzContext({
-      appId,
-      app: todoApp,
-      permissions: todoAppPermissions,
-      driver: { type: "persistent", dataPath: join(dataRoot, "runtime.db") },
-      serverUrl: "http://127.0.0.1:1",
-      allowLocalFirstAuth: false,
-    });
-
-    onTestFinished(async () => {
-      await context.shutdown();
-      await rm(dataRoot, { recursive: true, force: true });
-    });
-
-    const alice = await createLocalFirstIdentity("alice", appId);
-    await expect(
-      context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
-    ).rejects.toThrow(/allowLocalFirstAuth/i);
-  });
-
-  /**
-   * A garbage bearer token is rejected before any DB interaction occurs.
-   *
-   *   forRequest({ authorization: "Bearer not-a-valid-jwt" }) ──► REJECT
-   */
-  it("rejects a malformed bearer token", async () => {
-    const appId = randomUUID();
-    const dataRoot = await mkdtemp(join(tmpdir(), "jazz-napi-bad-token-"));
-    const { createJazzContext } = await import("../backend/create-jazz-context.js");
-    const context = createJazzContext({
-      appId,
-      app: todoApp,
-      permissions: todoAppPermissions,
-      driver: { type: "persistent", dataPath: join(dataRoot, "runtime.db") },
-      serverUrl: "http://127.0.0.1:1",
-    });
-
-    onTestFinished(async () => {
-      await context.shutdown();
-      await rm(dataRoot, { recursive: true, force: true });
-    });
-
-    await expect(
-      context.forRequest({ headers: { authorization: "Bearer not-a-valid-jwt" } }),
-    ).rejects.toThrow("Invalid JWT payload");
-  });
-
-  /**
    * Two contexts share the same server. One writes rows for alice, bob, and
    * carol as backend. The other reads back through backend, forSession, and
-   * forRequest — verifying that backend sees everything while each user-scoped
+   * forSession — verifying that backend sees everything while each user-scoped
    * handle sees only that user's rows.
    *
    *   writerContext ──asBackend──► insert alice-item, bob-item, carol-item
    *
    *   readerContext ──asBackend──────► all() ──► [alice-item, bob-item, carol-item]
    *                ──forSession(alice)──► all() ──► [alice-item]
-   *                ──forRequest(alice)──► all() ──► [alice-item]
+   *                ──forSession(alice)──► all() ──► [alice-item]
    *                ──forSession(bob)───► all() ──► [bob-item]
    */
-  it("backend sees all rows; forSession and forRequest Db filter to the authenticated user", async () => {
+  it("backend sees all rows; forSession and forSession Db filter to the authenticated user", async () => {
     const appId = randomUUID();
     const backendSecret = "napi-query-backend-secret";
     const adminSecret = "napi-query-admin-secret";
@@ -456,10 +360,10 @@ describe("forRequest auth and policy", () => {
     });
 
     // Alice and bob are signed-in app users (forSession); carol is a guest
-    // whose own bearer the backend verifies (forRequest).
+    // whose own bearer the backend verifies (forSession).
     const alice = await createAppUser("alice", server, appId);
     const bob = await createAppUser("bob", server, appId);
-    const carol = await createExternalIdentity("carol", server, appId);
+    const carol = await createAppUser("carol", server, appId);
 
     const writerBackend = writerContext.asBackend();
     const readerBackend = readerContext.asBackend();
@@ -499,9 +403,7 @@ describe("forRequest auth and policy", () => {
       issuer: APP_ISSUER,
       authMode: "external",
     });
-    const carolRequestDb = await readerContext.forRequest({
-      headers: { authorization: `Bearer ${carol.token}` },
-    });
+    const carolRequestDb = readerContext.forSession(sessionOf(carol));
     const bobSessionDb = readerContext.forSession({
       user_id: bob.userId,
       account_id: bob.user,
@@ -538,16 +440,16 @@ describe("forRequest auth and policy", () => {
   }, 30_000);
 });
 
-describe("forRequest concurrent session isolation", () => {
+describe("forSession concurrent session isolation", () => {
   /**
-   * Two forRequest sessions run concurrently on the same context. Each user
+   * Two forSession sessions run concurrently on the same context. Each user
    * can insert their own row; each query sees only their own row; cross-user
    * inserts are rejected. A later additional Db handle for alice (simulating a
    * subsequent HTTP request from the same user) also stays isolated.
    *
-   *   alice ──forRequest──┐
+   *   alice ──forSession──┐
    *                       ├──► context ──► server
-   *   bob   ──forRequest──┘
+   *   bob   ──forSession──┘
    *
    *   alice: insert({ owner_id: alice })  ──► OK
    *   bob:   insert({ owner_id: bob })    ──► OK
@@ -557,7 +459,7 @@ describe("forRequest concurrent session isolation", () => {
    *   bob:   all()  ──► [bob-todo]
    *   aliceAgain (new Db handle, same user): all() ──► [alice-todo]
    */
-  it("isolates concurrent forRequest sessions on the same context — alice and bob see only their own rows", async () => {
+  it("isolates concurrent forSession sessions on the same context — alice and bob see only their own rows", async () => {
     const { context, alice, bob, aliceDb, bobDb, scopeTag } = await createConcurrentTestEnv();
 
     // Fire writes for both users in parallel.
@@ -624,11 +526,9 @@ describe("forRequest concurrent session isolation", () => {
         .wait({ tier: "global" }),
     ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
 
-    // A new Db handle for alice (same identity, new forRequest call — simulating
+    // A new Db handle for alice (same identity, new forSession call — simulating
     // a subsequent HTTP request from the same user) must stay isolated from bob's data.
-    const aliceAgain = await context.forRequest({
-      headers: { authorization: `Bearer ${alice.token}` },
-    });
+    const aliceAgain = context.forSession(sessionOf(alice));
     await vi.waitFor(
       async () => {
         const rows = await aliceAgain.all(todoApp.todos.where({ description: scopeTag }), {
@@ -819,13 +719,13 @@ describe("forRequest concurrent session isolation", () => {
   }, 30_000);
 
   /**
-   * Two independent forRequest Db handles for the same user (alice) are
+   * Two independent forSession Db handles for the same user (alice) are
    * opened concurrently alongside a handle for bob. Both alice handles see
    * alice's row; bob's row, inserted after, is invisible to both.
    *
-   *   alice ──forRequest──► aliceDb1 ─┐
-   *   alice ──forRequest──► aliceDb2 ─┼──► context
-   *   bob   ──forRequest──► bobDb    ─┘
+   *   alice ──forSession──► aliceDb1 ─┐
+   *   alice ──forSession──► aliceDb2 ─┼──► context
+   *   bob   ──forSession──► bobDb    ─┘
    *
    *   aliceDb1: insert alice-todo
    *   aliceDb1: all() ──► [alice-todo]
@@ -836,13 +736,13 @@ describe("forRequest concurrent session isolation", () => {
    *   aliceDb1: all() ──► [alice-todo]  (bob's row invisible)
    *   aliceDb2: all() ──► [alice-todo]  (bob's row invisible)
    */
-  it("two concurrent forRequest sessions for the same user both see only that user's rows", async () => {
+  it("two concurrent forSession sessions for the same user both see only that user's rows", async () => {
     const { context, alice, bob, bobDb, scopeTag } = await createConcurrentTestEnv();
 
-    // Two Db handles opened with the same token — same identity, two independent sessions.
+    // Two Db handles opened for the same user — same identity, two independent sessions.
     const [aliceDb1, aliceDb2] = await Promise.all([
-      context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
-      context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
+      context.forSession(sessionOf(alice)),
+      context.forSession(sessionOf(alice)),
     ]);
 
     await aliceDb1
@@ -899,16 +799,14 @@ describe("forRequest concurrent session isolation", () => {
    * Carol has no rows. Alice inserts one. After alice's row is confirmed
    * visible to alice, carol's query still returns empty — not alice's data.
    *
-   *   alice ──forRequest──► aliceDb ──► insert alice-todo ──► all() ──► [alice-todo]
-   *   carol ──forRequest──► carolDb ──► all() ──► []
+   *   alice ──forSession──► aliceDb ──► insert alice-todo ──► all() ──► [alice-todo]
+   *   carol ──forSession──► carolDb ──► all() ──► []
    */
-  it("forRequest user with no rows gets empty results, not another user's rows", async () => {
+  it("forSession user with no rows gets empty results, not another user's rows", async () => {
     const { context, server, appId, alice, aliceDb, scopeTag } = await createConcurrentTestEnv();
 
-    const carol = await createExternalIdentity("carol", server, appId);
-    const carolDb = await context.forRequest({
-      headers: { authorization: `Bearer ${carol.token}` },
-    });
+    const carol = await createAppUser("carol", server, appId);
+    const carolDb = context.forSession(sessionOf(carol));
 
     await aliceDb
       .insert(todoApp.todos, {

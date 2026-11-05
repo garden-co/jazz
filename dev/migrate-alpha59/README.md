@@ -53,13 +53,18 @@ checks before it builds anything.
   `(jazz:backend, userId)`. So that `authenticate` answering
   `{ userId: sub }` opens a returning user's old account, each admitted
   external identity `(iss, sub)` gets `(jazz:backend, sub)` linked to the
-  same account, through the registry's own link commands. Built-in issuers (`urn:jazz:*`, `jazz:*`) are left alone, and revoked
-  identities get no link. The registry grants every linked identity the
-  right to manage the account's identities, so the import refuses an
-  identity that lacks it (alpha.59 never creates one). It also refuses,
-  naming only issuers, when two issuers hold a subject on different
-  accounts, revoked or not. Pass `--no-backend-identity-links` to skip this.
-- **Rows:** every version, brought forward to the active schema along
+  same account, through the registry's own link commands. Built-in issuers
+  (`urn:jazz:*`, `jazz:*`) are left alone, and revoked identities get no
+  link. The registry grants every linked identity the right to manage the
+  account's identities, so the import refuses an identity that lacks it
+  (alpha.59 never creates one). It also refuses, naming only issuers, when
+  two issuers hold a subject on different accounts, revoked or not. Pass
+  `--no-backend-identity-links` to skip this.
+- **Rows:** each row (a row id names a row within its table) replayed the
+  way alpha.59 settled it: a version replaces the row's content or deletion
+  only when it was written after the one it would replace, a repeated delete
+  replaces the one before it, and the insert carries the creation alpha.59
+  reads for the row. Each version written is brought forward to the active schema along
   alpha.59's own runtime lenses (columns those lenses dropped stay dropped),
   then written through the public Db API as `WriteIdentity::Attribution` of
   its original author with its original timestamp. Each insert and update

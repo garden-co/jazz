@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
 import { makeFakeAccount } from "../react-core/test-utils.js";
-import { createJazzSession as createNativeSession } from "./create-jazz-session.js";
-import { createJazzSession as createExpoSession } from "../expo/create-jazz-session.js";
+import { createJazzClient as createNativeSession } from "./create-jazz-session.js";
+import { createJazzClient as createExpoSession } from "../expo/create-jazz-session.js";
 
 const mocks = vi.hoisted(() => ({
   nativeAccounts: vi.fn(),
@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("./create-account-manager.js", () => ({ createAccountManager: mocks.nativeAccounts }));
 vi.mock("../expo/create-account-manager.js", () => ({ createAccountManager: mocks.expoAccounts }));
-vi.mock("./create-jazz-client.js", () => ({ createJazzClient: mocks.client }));
+vi.mock("./create-jazz-client.js", () => ({ openJazzClient: mocks.client }));
 
 beforeEach(() => {
   vi.resetAllMocks();

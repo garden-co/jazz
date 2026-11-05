@@ -89,7 +89,7 @@ where
             .unwrap_or_else(|| {
                 panic!("subscription stream closed while waiting for {description}")
             });
-        if let SubscriptionStreamItem::Rejected { reason } = item {
+        if let SubscriptionStreamItem::Rejected { reason, .. } = item {
             panic!("subscription rejected while waiting for {description}: {reason:?}");
         }
     }
@@ -469,7 +469,7 @@ async fn same_value_write_still_advances_visible_row_metadata_impl() {
             .await
             .expect("timed out waiting for the metadata-only delivery")
             .expect("charlie's subscription stream closed");
-        if let SubscriptionStreamItem::Rejected { reason } = item {
+        if let SubscriptionStreamItem::Rejected { reason, .. } = item {
             panic!("charlie's subscription rejected: {reason:?}");
         }
     }

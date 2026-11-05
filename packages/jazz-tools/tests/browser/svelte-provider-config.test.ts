@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 import { createAccountManager } from "../../src/accounts/create-account-manager.js";
 import type { AccountStore } from "../../src/accounts/persistence.js";
-import { createJazzClient } from "../../src/svelte/create-jazz-client.js";
+import { openJazzClient } from "../../src/svelte/create-jazz-client.js";
 import SvelteClientProviderHarness from "./fixtures/SvelteClientProviderHarness.svelte";
 import SvelteProviderConfigHarness from "./fixtures/SvelteProviderConfigHarness.svelte";
 import { waitForCondition } from "./support.js";
@@ -170,7 +170,7 @@ describe("JazzSvelteClientProvider client ownership", () => {
   it("provides a promised client without shutting it down on unmount", async () => {
     const appId = `svelte-client-provider-${crypto.randomUUID()}`;
     const accounts = await createTestAccountManager(appId);
-    const client = await createJazzClient({
+    const client = await openJazzClient({
       appId,
       driver: { type: "memory" },
       account: accounts.createLocalFirst(),

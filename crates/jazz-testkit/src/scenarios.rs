@@ -616,7 +616,7 @@ pub async fn wait_for_subscription_update<F>(
             });
         let delta = match item {
             SubscriptionStreamItem::Delta(delta) => delta,
-            SubscriptionStreamItem::Rejected { reason } => {
+            SubscriptionStreamItem::Rejected { reason, .. } => {
                 panic!("subscription rejected while waiting for {description}: {reason:?}")
             }
         };
@@ -646,7 +646,7 @@ pub async fn collect_stream_deltas(
         let next_wait = (deadline - now).min(DEFAULT_STREAM_POLL_INTERVAL);
         match tokio::time::timeout(next_wait, stream.next()).await {
             Ok(Some(SubscriptionStreamItem::Delta(delta))) => log.push(delta),
-            Ok(Some(SubscriptionStreamItem::Rejected { reason })) => {
+            Ok(Some(SubscriptionStreamItem::Rejected { reason, .. })) => {
                 panic!("subscription rejected while collecting deltas: {reason:?}")
             }
             Ok(None) => return,

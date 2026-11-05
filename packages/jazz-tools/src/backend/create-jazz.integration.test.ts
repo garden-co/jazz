@@ -13,7 +13,7 @@ import { startLocalJazzServer } from "../dev/dev-server.js";
 import {
   acceptLocalFirstAuth,
   createJazz,
-  createJazzSession,
+  createJazzClient,
   files,
   fromJWT,
   memory,
@@ -125,7 +125,7 @@ function signInAs(origin: string, userId: string) {
 
 async function userSession(appId: string, origin: string, userId: string) {
   signInAs(origin, userId);
-  const session = await createJazzSession({
+  const session = await createJazzClient({
     appId,
     app,
     permissions,
@@ -461,7 +461,7 @@ describe("createJazz", () => {
     cleanups.push(() => jazz.close());
     let upgrades = 0;
     const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
-    const guestSession = await createJazzSession({
+    const guestSession = await createJazzClient({
       app,
       permissions,
       serverUrl: `${origin}/jazz`,
@@ -494,7 +494,7 @@ describe("createJazz", () => {
     });
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: true });
-    const guestSession = await createJazzSession({
+    const guestSession = await createJazzClient({
       app,
       permissions,
       serverUrl: `${origin}/jazz`,
@@ -598,7 +598,7 @@ describe("createJazz", () => {
 
       // A browser client names no app: the backend vouches for the endpoint
       // its guest's proof is for.
-      const session = await createJazzSession({
+      const session = await createJazzClient({
         ...(scoping === "names the app" ? { appId } : {}),
         app,
         permissions,
@@ -1395,7 +1395,7 @@ describe("createJazz", () => {
     // (From a browser nobody signed in on: a signed-in request is the
     // user's, never a guest's.)
     const guestOrigin = await serve(jazz, { sockets: true });
-    const guestSession = await createJazzSession({
+    const guestSession = await createJazzClient({
       app,
       permissions,
       serverUrl: `${guestOrigin}/jazz`,
@@ -1436,7 +1436,7 @@ describe("createJazz", () => {
 
     // Local-first guests too: each backend pins its guests' sessions.
     const guestOf = async (origin: string) => {
-      const session = await createJazzSession({
+      const session = await createJazzClient({
         app,
         permissions,
         serverUrl: `${origin}/jazz`,

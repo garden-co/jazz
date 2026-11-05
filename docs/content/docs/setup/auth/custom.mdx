@@ -127,9 +127,9 @@ signs in or out.
 Without React, own the session yourself:
 
 ```ts
-import { createJazzSession } from "jazz-tools/client";
+import { createJazzClient } from "jazz-tools/client";
 
-const jazz = await createJazzSession({ serverUrl: "/jazz" });
+const jazz = await createJazzClient({ serverUrl: "/jazz" });
 await jazz.reauthenticate(); // after your own sign-in or sign-out
 ```
 
@@ -171,7 +171,7 @@ that link; the guest stays on this device.
 
 "No Jazz account yet" includes an existing user of your app who signs in to Jazz for the first time.
 On a shared device, where the guest may be someone else's, that user would get the guest's data.
-Pass `linkGuestOnSignUp: false` to `createJazzSession` (or `<JazzProvider>`) to stop the session
+Pass `linkGuestOnSignUp: false` to `createJazzClient` (or `<JazzProvider>`) to stop the session
 linking on its own. It then leaves such a guest as it is, and your app decides after its own sign-in:
 `linkWithBackend()` to give the user the guest's data, or `loginWithBackend()` for an account of
 their own (the guest stays on this device).

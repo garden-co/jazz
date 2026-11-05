@@ -97,6 +97,6 @@ describe("getLocalFirstIdentityProof", () => {
     const { createDb } = await import("./testing/create-internal-db.js");
     await expect(
       createDb({ appId: "test-app", backendSecret: "server-only" } as unknown as DbConfig),
-    ).rejects.toThrow(/createJazz\(\) or createJazzSession\(\)/);
+    ).rejects.toThrow(/Run Jazz in your backend with createJazz\(\)/);
   });
 });
