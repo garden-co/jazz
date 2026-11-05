@@ -323,11 +323,11 @@ export const platforms: Platform[] = [
     costNote:
       "Pro plan, Sandbox memory (2 GB per vCPU) and active CPU while awake, the sync proxy, Drive and Blob storage, and transfer.",
     traits: {
-      coldWake: "~0.75 s / ~1.2 s",
+      coldWake: "~0.75 s / ~1 s",
       idle: "Active-CPU pricing; Jazz hibernates a Sandbox after a few idle minutes",
       security: "Vercel Firewall and DDoS protection, with a fast-patching security team",
       durability: "Persistent Drive, Blob for large values",
-      regions: "Sandbox regions (fewer than Functions)",
+      regions: "19 regions; the Sandbox runs in your functions' region",
       scale: "8 vCPU / 16 GB",
       transfer: "1 TB included, then $0.15/GB",
       operations: "Nothing beyond your Vercel project",

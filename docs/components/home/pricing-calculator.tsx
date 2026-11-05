@@ -387,8 +387,8 @@ export function PricingCalculator() {
         Each platform picks the cheapest size and shard count, license included. One instance is
         free under MIT; sharded Jazz Pro is ${licensePer1k} a month per 1,000 peak active sessions
         (sessions that wrote, subscribed or got an update in the busiest minute), from $
-        {licenseMinimum}. Cold-wake times for Vercel are measured; Cloudflare&apos;s are estimates
-        until its runtime ships.
+        {licenseMinimum}. Vercel cold wakes are from our October measurements (0.6 to 1 s);
+        Cloudflare&apos;s are estimates until its runtime ships.
       </p>
       {SHOW_MODEL_DETAILS ? (
         <details open className="border-t pt-6">
