@@ -494,14 +494,16 @@ export default function HomePage() {
               open source under MIT and free, however much you use it: you only pay your platform.
             </Text>
             <Text as="p" display="block" type="large" color="secondary" weight="normal">
-              When an app outgrows one instance, Jazz shards it across many. Jazz Pro lets you trial
-              sharding at small scale, and Jazz Scale lets you take your database to millions of
+              When an app outgrows one instance, Jazz shards it across many. Jazz Pro lets you shard
+              for free at small scale, and Jazz Scale lets you take your database to millions of
               users, globally distributed. Jazz Scale is licensed on peak active sessions, so as
-              Jazz gets faster your platform bill shrinks while the license stays the same.
+              Jazz gets faster your platform bill shrinks while the license stays the same. Licenses
+              are keys your servers check offline: no metering and no phone-home. Going over your
+              license only logs a reminder.
             </Text>
           </SectionHeader>
-          <div className="mt-8 grid gap-6 border-t pt-6 sm:grid-cols-3">
-            {(["oss", "pro", "scale"] as const).map((id) => (
+          <div className="mt-8 grid gap-6 border-t pt-6 sm:grid-cols-2 lg:grid-cols-4">
+            {(["oss", "pro", "scale", "custom"] as const).map((id) => (
               <div key={id} className="grid content-start gap-2">
                 <Text as="p" display="block" weight="semibold">
                   {jazzTiers[id].name}
@@ -523,10 +525,10 @@ export default function HomePage() {
                     {jazzTiers[id].note}
                   </Text>
                 ) : null}
-                {id === "scale" ? (
+                {id === "custom" ? (
                   <div className="mt-2">
                     <Button
-                      label={"Talk to us about Jazz\u00a0Scale"}
+                      label="Talk to us"
                       variant="secondary"
                       href="https://cal.com/anselm-io/cloud-pro-intro"
                     />

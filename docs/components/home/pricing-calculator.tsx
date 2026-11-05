@@ -19,7 +19,7 @@ import {
 const SHOW_MODEL_DETAILS = false;
 
 /** License list prices, used while the details are hidden. */
-const LICENSE = { pro: 20, scaleBase: 200, per1k: 50 };
+const LICENSE = { pro: 0, scaleBase: 200, per1k: 50 };
 
 const compactFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 1,
@@ -246,9 +246,9 @@ function PlatformResult({
         <dd className="text-right">{formatCurrency(platformCost)}</dd>
         <dt className="text-fd-muted-foreground">Jazz</dt>
         <dd className="text-right">
-          {tier === "oss"
-            ? "Jazz OSS, free"
-            : `${jazzTiers[tier].name} $${Math.round(licenseCost).toLocaleString("en-US")}`}
+          {licenseCost === 0
+            ? `${shortName(tier)}, free`
+            : `${shortName(tier)} $${Math.round(licenseCost).toLocaleString("en-US")}`}
         </dd>
       </dl>
       {SHOW_MODEL_DETAILS ? (
@@ -329,8 +329,11 @@ function AssumptionSlider({
   );
 }
 
+/** A tier's name without its license note, such as "Jazz OSS". */
+const shortName = (tier: keyof typeof jazzTiers) => jazzTiers[tier].name.replace(/ \(.*\)$/, "");
+
 export function PricingCalculator() {
-  const [mauLogValue, setMauLogValue] = useState(4);
+  const [mauLogValue, setMauLogValue] = useState(2.5);
   const [frequencyIndex, setFrequencyIndex] = useState(2);
   const [realtimeIndex, setRealtimeIndex] = useState(1);
   const [blobLogMb, setBlobLogMb] = useState(Math.log10(32));

@@ -323,13 +323,14 @@ export const platforms: Platform[] = [
         })),
     diskGb: () => Infinity,
     cost: (d, a, size, shards, cpu) => {
-      // Memory and the proxy bill while the Sandbox is up; active CPU only
-      // while it works, which is the busy hours either way.
+      // Memory bills while the Sandbox is up; active CPU only while it works,
+      // which is the busy hours either way. The proxy holds the websockets,
+      // so it runs all month even while the Sandbox sleeps.
       const hours = a["vercel.hibernate"] >= 0.5 ? d.upHours : HOURS_PER_MONTH;
       const memory = shards * size.vcpus * 2 * a["vercel.memoryGbHour"] * hours;
       const activeCpu =
         shards * size.vcpus * Math.max(cpu * 0.4, 0.05) * d.upHours * a["vercel.cpuHour"];
-      const proxy = shards * a["vercel.proxy"] * (hours / HOURS_PER_MONTH);
+      const proxy = shards * a["vercel.proxy"];
       const storage = d.structuredGb * a["vercel.driveGb"] + d.blobGb * a["vercel.blobGb"];
       const egress = over(d.egressGb, a["vercel.includedEgressGb"]) * a["vercel.egressGb"];
       return a["vercel.plan"] + memory + activeCpu + proxy + storage + egress;
@@ -582,9 +583,9 @@ function shardsFor(platform: Platform, size: Size, d: Demand, a: Assumptions, li
 
 export type TierId = "oss" | "pro" | "scale";
 
-/** The three ways to license Jazz, as the homepage lists them. */
+/** The ways to license Jazz, as the homepage lists them. Custom is never computed. */
 export const jazzTiers: Record<
-  TierId,
+  TierId | "custom",
   {
     name: string;
     price: string;
@@ -597,8 +598,8 @@ export const jazzTiers: Record<
 > = {
   oss: { name: "Jazz OSS (MIT)", price: "Free", summary: "A single server instance of any size" },
   pro: {
-    name: "Jazz Pro",
-    price: "$20/mo",
+    name: "Jazz Pro (source-available)",
+    price: "Free",
     summary: "Several sharded instances, up to 4 GB of RAM in total",
   },
   scale: {
@@ -607,6 +608,12 @@ export const jazzTiers: Record<
     priceExtra: "+ $50/mo per 1,000 peak active sessions",
     summary: "Unlimited sharded instances",
     note: "Peak active sessions: the monthly 95th percentile of sessions active per minute. A session is active when it writes, subscribes or receives an update.",
+  },
+  custom: {
+    name: "Jazz Custom",
+    price: "Let's talk",
+    summary:
+      "Support, SLAs and volume pricing for larger teams, and a deal for early-stage startups whose usage is ahead of their revenue",
   },
 };
 
