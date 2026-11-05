@@ -395,25 +395,57 @@ struct Plan {
 struct Backoff {
     failures: std::cell::Cell<u32>,
     not_before: std::cell::Cell<Option<std::time::Instant>>,
+    /// The workload token generation the last failure saw: a fresh token
+    /// (often what the failure lacked) ends the wait, once per run of
+    /// failures, so a store that is down for another reason is not asked
+    /// again on every token rotation.
+    failed_on_token: std::cell::Cell<u64>,
+    token_ended_wait: std::cell::Cell<bool>,
 }
 
 impl Backoff {
-    /// Whether the last failure's wait is still on.
+    /// Whether the last failure's wait is still on, and no fresh workload
+    /// token ended it.
     fn waiting(&self) -> bool {
-        self.not_before
+        self.waiting_at(crate::middleware::workload::workload_token_generation())
+    }
+
+    /// [`Self::waiting`] with the workload token generation now.
+    fn waiting_at(&self, generation: u64) -> bool {
+        if !self
+            .not_before
             .get()
             .is_some_and(|at| std::time::Instant::now() < at)
+        {
+            return false;
+        }
+        if self.token_ended_wait.get() || generation == self.failed_on_token.get() {
+            return true;
+        }
+        self.token_ended_wait.set(true);
+        self.not_before.set(None);
+        false
     }
 
     /// An attempt ended; `failed` delays the next. Returns whether to log
     /// the failure: the first of a run, then once the wait is at its
     /// longest.
     fn ended(&self, failed: bool) -> bool {
+        self.ended_at(
+            failed,
+            crate::middleware::workload::workload_token_generation(),
+        )
+    }
+
+    /// [`Self::ended`] with the workload token generation now.
+    fn ended_at(&self, failed: bool, generation: u64) -> bool {
         if !failed {
             self.failures.set(0);
             self.not_before.set(None);
+            self.token_ended_wait.set(false);
             return false;
         }
+        self.failed_on_token.set(generation);
         let failures = self.failures.get().saturating_add(1);
         self.failures.set(failures);
         let (first, longest) = CHUNK_IO_BACKOFF;
@@ -3169,5 +3201,31 @@ mod tests {
         runner.out.set(true);
         assert!(runner.returned(true));
         assert_eq!(runner.plan(), plan(false, true, true));
+    }
+
+    /// A backoff after failures ends once a fresh workload token arrives,
+    /// rather than waiting it out on a stale one; but only once until an
+    /// attempt succeeds, so a store down for another reason is not asked
+    /// again on every token rotation. The generation is passed in: other
+    /// tests keep tokens in this process at the same time.
+    #[test]
+    fn a_fresh_workload_token_ends_the_chunk_io_backoff_once() {
+        let backoff = Backoff::default();
+        for _ in 0..7 {
+            backoff.ended_at(true, 5);
+        }
+        assert!(backoff.waiting_at(5), "backed off");
+        assert!(!backoff.waiting_at(6), "a fresh token ends the wait");
+        assert_eq!(backoff.not_before.get(), None);
+
+        // The early attempt fails too: the next token waits out the backoff.
+        backoff.ended_at(true, 6);
+        assert!(backoff.waiting_at(7), "once per run of failures");
+
+        // A success ends the run; the next run may be cut short again.
+        backoff.ended_at(false, 7);
+        backoff.ended_at(true, 7);
+        assert!(backoff.waiting_at(7));
+        assert!(!backoff.waiting_at(8));
     }
 }

@@ -64,11 +64,8 @@ impl WebIdentityToken {
                 .ok()
                 .and_then(|token| token.clone())
                 .ok_or_else(|| "web identity token: none handed over yet".to_owned()),
-            Self::Workload => {
-                crate::middleware::workload::latest_workload_token().ok_or_else(|| {
-                    "web identity token: no trusted workload token arrived yet".to_owned()
-                })
-            }
+            Self::Workload => crate::middleware::workload::current_workload_token()
+                .map_err(|why| format!("web identity token: {why}")),
         }
     }
 }

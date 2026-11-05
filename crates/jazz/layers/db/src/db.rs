@@ -1353,6 +1353,7 @@ impl Db {
             physical
         };
         names.admit(&conn, &schema)?;
+        conn.execute_batch(sync::PENDING_DDL).map_err(storage)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
         let withheld: i64 = conn
             .query_row(

@@ -427,21 +427,24 @@ fn a_pending_commit_over_one_stored_value_survives_a_reopen() {
         block_on(writer.tick()).unwrap();
     }
     let items = |path: &std::path::Path| -> (i64, i64) {
-        rusqlite::Connection::open(path)
-            .unwrap()
+        let conn = rusqlite::Connection::open(path).unwrap();
+        let ops = conn
+            .query_row("SELECT count(*) FROM _jazz_pending_ops", [], |r| r.get(0))
+            .unwrap();
+        let largest = conn
             .query_row(
-                "SELECT count(*), coalesce(max(length(item)), 0) FROM _jazz_pending_items \
-                 WHERE part = 0",
+                "SELECT coalesce(max(length(value)), 0) FROM _jazz_pending_cells",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )
-            .unwrap()
+            .unwrap();
+        (ops, largest)
     };
     let (ops, largest) = items(&path);
     assert_eq!(ops, ROWS as i64, "kept a row per op");
     assert!(
         largest < 64 * 1024,
-        "no stored op near the value limit: {largest}"
+        "no stored cell near the value limit: {largest}"
     );
     let writer = open_writer();
     let server = open(0xc5, AuthorSubject::SYSTEM);
@@ -455,7 +458,7 @@ fn a_pending_commit_over_one_stored_value_survives_a_reopen() {
     drop(writer);
     assert_eq!(items(&path).0, 0, "its rows go once the commit settles");
     let conn = rusqlite::Connection::open(&path).unwrap();
-    for table in ["_jazz_pending", "_jazz_pending_rows"] {
+    for table in ["_jazz_pending", "_jazz_pending_cells", "_jazz_pending_rows"] {
         let left: i64 = conn
             .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
             .unwrap();
@@ -502,12 +505,13 @@ fn a_refused_commit_over_one_stored_value_is_listed_whole_and_discarded() {
     assert_eq!(rejected.len(), 1);
     assert_eq!(rejected[0].ops.len(), 300, "listed whole");
     assert_eq!(count("_jazz_rejected_ops"), 300, "kept a row per op");
-    assert_eq!(count("_jazz_pending_items"), 0, "and no longer pending");
+    assert_eq!(count("_jazz_pending_ops"), 0, "and no longer pending");
     writer
         .discard_rejected_transaction(rejected[0].seq)
         .unwrap();
     assert!(writer.rejected_transactions().unwrap().is_empty());
     assert_eq!(count("_jazz_rejected_ops"), 0, "its ops go with it");
+    assert_eq!(count("_jazz_rejected_cells"), 0, "and their cells");
 }
 
 fn commit_serializable_notes(writer: &Db, rows: usize) {

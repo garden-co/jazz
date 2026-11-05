@@ -109,7 +109,6 @@ export function ConfiguredJazzSessionProvider<Config, Client extends CoreJazzCli
       ...(error ? { error } : {}),
       createLocalFirst: unavailable,
       restoreLocalFirst: unavailable,
-      becomeBackend: unavailable,
       loginWithBackend: unavailable,
       linkWithBackend: unavailable,
       logout: unavailable,
