@@ -6257,17 +6257,14 @@ impl Inner {
         let mut inputs = self.read_dependencies_in(prepared, identity, read)?;
         // The policies that govern the read: a pinned session's bundle's,
         // as `read_dependencies_in` takes them.
-        let policies = prepared
-            .schema
-            .as_ref()
-            .map_or(&*self.owner, |schema| schema.policy_schema());
+        let policies = read.governance.policies(self);
         let mut tables = Vec::new();
         support_tables(support, &mut tables);
         for table in tables {
             if let Some(author) = identity
                 && policies.by_stored(&table).is_some()
             {
-                inputs.extend(self.read_policy_tables(policies, &table, author)?);
+                inputs.extend(self.read_policy_tables(&policies, &table, author)?);
             }
             inputs.insert(table);
         }
@@ -6929,7 +6926,7 @@ impl Db {
             },
             ..ReadOpts::default()
         };
-        let mut read = ReadSpec::of(&opts, &self.inner.borrow())?;
+        let mut read = ReadSpec::of(&opts, &self.inner.borrow(), self.governance.clone())?;
         read.position = Position::Current;
         // A frozen view is this store's own state, not the server's to judge.
         if read.frozen() {
@@ -9238,6 +9235,21 @@ impl Inner {
             .map_or_else(|| self.owner.clone(), |(_, governing)| governing.clone())
     }
 
+    /// Admission has resolved every pinned bundle before serving a session.
+    fn session_governance(&self, index: usize) -> Governance {
+        match self.sessions[index].bundle {
+            None => Governance::CurrentOwner,
+            Some(bundle) => Governance::Selected(
+                self.bundles
+                    .get(&bundle)
+                    .expect("admitted session bundle")
+                    .1
+                    .clone(),
+                bundle,
+            ),
+        }
+    }
+
     /// `view` governed by session `index`'s policies: unchanged unless the
     /// session is pinned to a bundle, whose policies then replace its own.
     pub(crate) fn governed_view(&self, view: &Rc<Schema>, index: usize) -> Rc<Schema> {
@@ -9425,22 +9437,6 @@ impl Inner {
     /// schema's policies.
     pub(crate) fn governed(&self, version: crate::ids::SchemaVersionId) -> Option<Rc<Schema>> {
         self.governed_by(version, self.owner.clone())
-    }
-
-    /// Admitted `version` governed again by `policies`, a schema that
-    /// governed it before a reset: a published bundle's policies are kept
-    /// (the schema names its bundle), any other schema's give way to the
-    /// current one's.
-    pub(crate) fn regoverned(
-        &self,
-        version: crate::ids::SchemaVersionId,
-        policies: &Rc<Schema>,
-    ) -> Option<Rc<Schema>> {
-        if policies.bundle.is_some() {
-            self.governed_by(version, policies.clone())
-        } else {
-            self.governed(version)
-        }
     }
 
     /// Admitted `version` under its stored names, governed by `policies`'
@@ -10237,13 +10233,11 @@ impl Db {
             .filter(|_| identity != AuthorSubject::SYSTEM)
             .map(|claims| (identity, claims));
         let tables = self.with_claims(vouched, || {
-            let prepared = self
-                .session_db(index)
-                .prepare_query_bound(query, binding.clone())
-                .ok()?;
+            let db = self.session_db(index);
+            let prepared = db.prepare_query_bound(query, binding.clone()).ok()?;
             self.inner
                 .borrow()
-                .read_dependencies(&prepared, policy)
+                .read_dependencies_in(&prepared, policy, &ReadSpec::new(db.governance.clone()))
                 .ok()
         });
         // An unadmitted version may be admitted without the owner schema
@@ -11294,7 +11288,10 @@ impl Db {
             let (queue, group) = inner.subscribe_member(
                 &wait.prepared,
                 policy,
-                wait.read,
+                ReadSpec {
+                    governance: db.governance.clone(),
+                    ..wait.read
+                },
                 SettledBy::Always(authority),
             )?;
             let session = &mut inner.sessions[index];
@@ -11313,27 +11310,29 @@ impl Db {
     fn stored_db_for(&self, index: usize) -> Db {
         let inner = self.inner.borrow();
         let view = inner.governed_view(&inner.stored_view(), index);
+        let governance = inner.session_governance(index);
         drop(inner);
         Db {
             inner: self.inner.clone(),
             view: Some(view),
+            governance,
         }
     }
 
-    /// The schema whose policies this handle's reads and writes are
-    /// governed by: its view's, else the current schema's.
-    fn view_policies(&self) -> Rc<Schema> {
-        self.view
-            .as_ref()
-            .and_then(|view| view.policies_from.clone())
-            .unwrap_or_else(|| self.inner.borrow().owner.clone())
+    /// Resolve the policy source chosen by trusted handle construction.
+    /// Named-view policy snapshots do not establish an authenticated pin.
+    pub(super) fn view_policies(&self) -> Rc<Schema> {
+        self.governance.policies(&self.inner.borrow())
     }
 
     fn session_db(&self, index: usize) -> Db {
-        let view = self.inner.borrow_mut().session_schema(index);
+        let mut inner = self.inner.borrow_mut();
+        let view = inner.session_schema(index);
+        let governance = inner.session_governance(index);
         Db {
             inner: self.inner.clone(),
             view,
+            governance,
         }
     }
 
@@ -11425,7 +11424,7 @@ impl Db {
                     // A session's read is served as this store holds it.
                     ReadSpec {
                         position: Position::Current,
-                        ..ReadSpec::of(&opts, &db.inner())?
+                        ..ReadSpec::of(&opts, &db.inner(), db.governance.clone())?
                     }
                 };
                 let resume_read = viewed.clone();
@@ -11796,7 +11795,7 @@ impl Db {
                     },
                     ..ReadOpts::default()
                 };
-                let viewed = match ReadSpec::of(&opts, &inner) {
+                let viewed = match ReadSpec::of(&opts, &inner, db.governance.clone()) {
                     // A session's read is served as this store holds it.
                     Ok(viewed) => ReadSpec {
                         position: Position::Current,
@@ -11812,6 +11811,7 @@ impl Db {
                     }
                 };
                 let read = ReadSpec {
+                    governance: viewed.governance,
                     position: Position::Current,
                     cut: viewed.cut.or(pinned.map(Cut::at)),
                     include_deleted,
@@ -12689,7 +12689,7 @@ impl Db {
                 };
                 let spec = ReadSpec {
                     include_deleted: read.include_deleted,
-                    ..ReadSpec::default()
+                    ..ReadSpec::new(self.governance.clone())
                 };
                 let now: Vec<([u8; 16], Option<Pos>)> = inner
                     .read_versions(&prepared, identity, &spec)
@@ -13267,7 +13267,7 @@ impl Db {
         poll_fn(|_| {
             let read = {
                 let inner = self.inner();
-                ReadSpec::of(&opts, &inner).and_then(|mut spec| {
+                ReadSpec::of(&opts, &inner, self.governance.clone()).and_then(|mut spec| {
                     // It reads as far as the answer it fetched settled.
                     if let Some(at) = fetched
                         && spec.position == Position::Known
@@ -13630,3 +13630,15 @@ mod tests {
         assert!(joiner.push(&parts[1]).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "nested_policy_dependencies_tests.rs"]
+mod nested_policy_dependencies_tests;
+
+#[cfg(test)]
+#[path = "executing_handle_policy_context_tests.rs"]
+mod executing_handle_policy_context_tests;
+
+#[cfg(test)]
+#[path = "governance_composition_tests.rs"]
+mod governance_composition_tests;
