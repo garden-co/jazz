@@ -2683,7 +2683,8 @@ struct Follow<'w> {
     /// inputs changed: the client may hold them, so each ships its
     /// eviction.
     gone: &'w mut Vec<RowKey>,
-    followed: &'w mut HashSet<(usize, u64)>,
+    /// The deepest support each key was followed with in this traversal.
+    followed: &'w mut HashMap<(NestedKind, u64), usize>,
 }
 
 /// The watch on row `id` of stored table `table`.
@@ -2699,13 +2700,16 @@ fn id_watch(table: &str, id: [u8; 16]) -> u64 {
 pub(super) const NAMESPACE_META: &str = "namespace";
 
 /// The stored tables `support` reads rows of.
-fn support_tables(support: &[Support], out: &mut Vec<String>) {
+fn support_tables(support: &[Support], out: &mut Vec<String>, seen: &mut HashSet<usize>) {
     for support in support {
         match support {
             Support::Include { target, .. } => out.push(target.clone()),
             Support::Array { table, nested, .. } => {
                 out.push(table.clone());
-                support_tables(nested, out);
+                // Nested support is shared: walk each node once.
+                if seen.insert(nested.as_ptr() as usize) {
+                    support_tables(nested, out, seen);
+                }
             }
             Support::Reach { edges, .. } => out.push(edges.clone()),
         }
@@ -2735,13 +2739,17 @@ pub(crate) enum Support {
     /// A forward array relation (`outer` holds child ids) correlates each
     /// element; a reverse one (`inner` holds parent ids) each child whose
     /// array contains the parent's value.
+    /// `nested` is shared between arrays that rest on the same support (see
+    /// [`SupportMemo`]). `policy` says which policy support `nested` is, if
+    /// it is, so the walk can tell a key was followed deeper already.
     Array {
         table: String,
         inner: String,
         outer: String,
         outer_array: bool,
         inner_array: bool,
-        nested: Vec<Support>,
+        nested: Rc<Vec<Support>>,
+        policy: Option<PolicyNesting>,
     },
     /// The edges of a gather from the row's `frontier` value: edge rows
     /// whose `member` holds it, then transitively from each edge's
@@ -2752,6 +2760,28 @@ pub(crate) enum Support {
         member: String,
         parent: String,
     },
+}
+
+/// The nested policy support built for one [`Support`] tree, by (stored table,
+/// remaining depth, inherited only). Sharing it keeps the tree's size at
+/// tables x depth where a policy's arms would otherwise rebuild it arms^depth.
+type SupportMemo = HashMap<(String, usize, bool), Rc<Vec<Support>>>;
+
+/// What a [`Support::Array`]'s `nested` is, when it is a table's own policy
+/// support at some remaining depth. Depths of one kind nest: what a key's rows
+/// reach at a depth, they reach at any deeper one.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PolicyNesting {
+    inherited_only: bool,
+    depth: usize,
+}
+
+/// Which walks of a key [`Inner::follow_value`] counts as the same: policy
+/// support by kind, any other nested support by its node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum NestedKind {
+    Policy { inherited_only: bool },
+    Node(usize),
 }
 
 /// A snapshot whose history this store has not observed (yet): it may be
@@ -3152,7 +3182,11 @@ impl Inner {
         }
         support.extend(self.array_support(table, &query.array_subqueries)?);
         support.extend(self.join_support(table, &query.joins)?);
-        support.extend(self.policy_support(table, crate::compile::DEFAULT_INHERITS_DEPTH)?);
+        support.extend(self.policy_support(
+            table,
+            crate::compile::DEFAULT_INHERITS_DEPTH,
+            &mut SupportMemo::new(),
+        )?);
         for via in &query.reachable {
             // Seed rows that reference the rows the walk starts from.
             if let Some(seed) = via.seed.as_ref().filter(|seed| seed.team_column != "id") {
@@ -3163,7 +3197,8 @@ impl Inner {
                     outer: "id".to_owned(),
                     outer_array: false,
                     inner_array: crate::compile::is_array(seeds, &seed.team_column),
-                    nested: Vec::new(),
+                    nested: Rc::default(),
+                    policy: None,
                 });
             }
             let edges = self.schema.table(&via.edge_table)?;
@@ -3193,7 +3228,8 @@ impl Inner {
                 outer: parent.stored_name(&array.outer_column).to_owned(),
                 outer_array: crate::compile::is_array(parent, &array.outer_column),
                 inner_array: crate::compile::is_array(child, &array.inner_column),
-                nested: self.array_support(child, &array.nested_arrays)?,
+                nested: Rc::new(self.array_support(child, &array.nested_arrays)?),
+                policy: None,
             });
         }
         Ok(support)
@@ -3207,9 +3243,32 @@ impl Inner {
         &self,
         table: &crate::values::Table,
         depth: usize,
+        memo: &mut SupportMemo,
     ) -> Result<Vec<Support>, Error> {
-        let mut support = self.inherited_support(table, depth)?;
-        support.extend(self.exists_support(table, depth)?);
+        let mut support = self.inherited_support(table, depth, memo)?;
+        support.extend(self.exists_support(table, depth, memo)?);
+        Ok(support)
+    }
+
+    /// [`Inner::policy_support`] (or, `inherited_only`,
+    /// [`Inner::inherited_support`]) as a node shared across `memo`'s tree.
+    fn shared_support(
+        &self,
+        table: &crate::values::Table,
+        depth: usize,
+        inherited_only: bool,
+        memo: &mut SupportMemo,
+    ) -> Result<Rc<Vec<Support>>, Error> {
+        let key = (table.stored.clone(), depth, inherited_only);
+        if let Some(shared) = memo.get(&key) {
+            return Ok(Rc::clone(shared));
+        }
+        let support = Rc::new(if inherited_only {
+            self.inherited_support(table, depth, memo)?
+        } else {
+            self.policy_support(table, depth, memo)?
+        });
+        memo.insert(key, Rc::clone(&support));
         Ok(support)
     }
 
@@ -3221,6 +3280,7 @@ impl Inner {
         &self,
         table: &crate::values::Table,
         depth: usize,
+        memo: &mut SupportMemo,
     ) -> Result<Vec<Support>, Error> {
         use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
         /// The `(inner, outer)` columns an `EXISTS` condition correlates.
@@ -3267,7 +3327,11 @@ impl Inner {
                 outer: table.stored_name(outer).to_owned(),
                 outer_array: crate::compile::is_array(table, outer),
                 inner_array: crate::compile::is_array(consulted, inner),
-                nested: self.policy_support(consulted, depth - 1)?,
+                nested: self.shared_support(consulted, depth - 1, false, memo)?,
+                policy: Some(PolicyNesting {
+                    inherited_only: false,
+                    depth: depth - 1,
+                }),
             });
         }
         Ok(support)
@@ -3280,6 +3344,7 @@ impl Inner {
         &self,
         table: &crate::values::Table,
         depth: usize,
+        memo: &mut SupportMemo,
     ) -> Result<Vec<Support>, Error> {
         use crate::tools::{Operation, PolicyExpr};
         fn hops<'p>(policy: &'p PolicyExpr, out: &mut Vec<(&'p str, Option<usize>)>) {
@@ -3318,7 +3383,11 @@ impl Inner {
                 outer: table.stored_name(column).to_owned(),
                 outer_array: crate::compile::is_array(table, column),
                 inner_array: false,
-                nested: self.inherited_support(parent, depth - 1)?,
+                nested: self.shared_support(parent, depth - 1, true, memo)?,
+                policy: Some(PolicyNesting {
+                    inherited_only: true,
+                    depth: depth - 1,
+                }),
             });
         }
         Ok(support)
@@ -3342,7 +3411,8 @@ impl Inner {
                 outer: parent.stored_name(source).to_owned(),
                 outer_array: crate::compile::is_array(parent, source),
                 inner_array: crate::compile::is_array(target, &join.on_column),
-                nested: self.join_support(target, &join.nested_joins)?,
+                nested: Rc::new(self.join_support(target, &join.nested_joins)?),
+                policy: None,
             });
         }
         Ok(support)
@@ -3521,7 +3591,7 @@ impl Inner {
         follow: &mut Follow<'_>,
     ) -> Result<(), Error> {
         for item in support {
-            let (table, column, values, nested, contains) = match item {
+            let (table, column, values, nested, policy, contains) = match item {
                 Support::Reach {
                     frontier,
                     edges,
@@ -3539,7 +3609,7 @@ impl Inner {
                     continue;
                 }
                 Support::Include { column, target } => match image_cell(image, column) {
-                    Some(value @ Sql::Blob(_)) => (target, "id", vec![value], &[][..], false),
+                    Some(value @ Sql::Blob(_)) => (target, "id", vec![value], &[][..], None, false),
                     _ => continue,
                 },
                 Support::Array {
@@ -3549,23 +3619,34 @@ impl Inner {
                     outer_array,
                     inner_array,
                     nested,
+                    policy,
                 } => match image_cell(image, outer) {
                     Some(Sql::Null) | None => continue,
                     Some(value) if *outer_array => {
                         let elements = array_elements(&value).unwrap_or_default();
-                        (table, inner.as_str(), elements, &nested[..], *inner_array)
+                        (
+                            table,
+                            inner.as_str(),
+                            elements,
+                            &nested[..],
+                            *policy,
+                            *inner_array,
+                        )
                     }
                     Some(value) => (
                         table,
                         inner.as_str(),
                         vec![value],
                         &nested[..],
+                        *policy,
                         *inner_array,
                     ),
                 },
             };
             for value in values {
-                self.follow_value(table, column, value, contains, nested, floor, follow)?;
+                self.follow_value(
+                    table, column, value, contains, nested, policy, floor, follow,
+                )?;
             }
         }
         Ok(())
@@ -3613,6 +3694,7 @@ impl Inner {
         value: Sql,
         contains: bool,
         nested: &[Support],
+        policy: Option<PolicyNesting>,
         floor: Option<Floor>,
         follow: &mut Follow<'_>,
     ) -> Result<(), Error> {
@@ -3629,11 +3711,28 @@ impl Inner {
         // Once per traversal, though: a policy whose EXISTS consults its
         // own table (a member reads the band's members) nests the same
         // support at every depth, and each row reaches the same key
-        // again, so following it anew costs (rows per key)^depth. The
-        // nested support node tells depths apart, so a key reached with
-        // deeper support than before is still followed.
-        if !follow.followed.insert((nested.as_ptr() as usize, key)) {
-            return Ok(());
+        // again, so following it anew costs (rows per key)^depth. A key
+        // reached with deeper support than before is still followed; what
+        // shallower support reaches, the deeper walk reached already.
+        let (kind, depth) = match policy {
+            Some(policy) => (
+                NestedKind::Policy {
+                    inherited_only: policy.inherited_only,
+                },
+                policy.depth,
+            ),
+            None => (NestedKind::Node(nested.as_ptr() as usize), 0),
+        };
+        match follow.followed.entry((kind, key)) {
+            std::collections::hash_map::Entry::Occupied(mut deepest) => {
+                if *deepest.get() >= depth {
+                    return Ok(());
+                }
+                deepest.insert(depth);
+            }
+            std::collections::hash_map::Entry::Vacant(first) => {
+                first.insert(depth);
+            }
         }
         let filter = if column == "id" {
             "id = ?1".to_owned()
@@ -6257,7 +6356,7 @@ impl Inner {
             .as_ref()
             .map_or(&*self.owner, |schema| schema.policy_schema());
         let mut tables = Vec::new();
-        support_tables(support, &mut tables);
+        support_tables(support, &mut tables, &mut HashSet::new());
         for table in tables {
             if let Some(author) = identity
                 && policies.by_stored(&table).is_some()
@@ -10664,7 +10763,7 @@ impl Db {
                     });
                     let mut extra = Vec::new();
                     let mut gone = Vec::new();
-                    let mut followed = HashSet::new();
+                    let mut followed = HashMap::new();
                     let mut follow = Follow {
                         owner: id,
                         identity: policy,
@@ -11830,7 +11929,7 @@ impl Db {
                 let mut extra = Vec::new();
                 let mut watch = Watches::default();
                 let mut held = Kept::default();
-                let (mut gone, mut followed) = (Vec::new(), HashSet::new());
+                let (mut gone, mut followed) = (Vec::new(), HashMap::new());
                 let mut follow = Follow {
                     owner: id,
                     identity: policy,
