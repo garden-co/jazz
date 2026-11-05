@@ -16,7 +16,8 @@ full details.
 | Provider           | `<JazzProvider config={config}>` | `<JazzProvider :config="config">` | `<JazzSvelteProvider {config}>`   | `<JazzProvider config={...}>` |
 | Query subscription | `useAll(query)`                  | `useAll(query)`                   | `new QuerySubscription(query)`    | `useAll(() => ({ query }))`   |
 | Single-row query   | `useOne(query)`                  | `useOne(query)`                   | `new QuerySubscriptionOne(query)` | `useOne(() => ({ query }))`   |
-| DB access          | `useDb()`                        | `useDb()`                         | `getDb()`                         | `useDb()`                     |
+| DB access          | `useAll(query).db`               | `useAll(query).db`                | `subscription.db`                 | `useAll(...).db`              |
+| Write-only DB      | `useDb()`                        | `useDb()`                         | `getDb()`                         | `useDb()`                     |
 | Session            | `useSession()`                   | `useSession()`                    | `getSession()`                    | `useSession()`                |
 | Client creation    | `createJazzClient(config)`       | `createJazzClient(config)`        | `createJazzClient(config)`        | `createSolidJazzClient(...)`  |
 

@@ -75,12 +75,11 @@ You can also query and write to the database right from your frontend. It is pro
   </Tab>
   <Tab value="React">
     ```tsx title="Todos.tsx"
-    import { useAll, useDb } from "jazz-tools/react";
+    import { useAll } from "jazz-tools/react";
     import { app } from "./schema";
 
     export function Todos() {
-      const db = useDb();
-      const { data: todos = [] } = useAll(app.todos.where({ done: false }));
+      const { data: todos = [], db } = useAll(app.todos.where({ done: false }));
 
       return todos.map((todo) => (
         <label key={todo.id}>
@@ -104,11 +103,10 @@ You can also query and write to the database right from your frontend. It is pro
   <Tab value="Vue">
     ```vue title="Todos.vue"
     <script setup lang="ts">
-    import { useAll, useDb } from "jazz-tools/vue";
+    import { useAll } from "jazz-tools/vue";
     import { app } from "./schema";
 
-    const db = useDb();
-    const { data: todos } = useAll(app.todos.where({ done: false }));
+    const { data: todos, db } = useAll(app.todos.where({ done: false }));
     </script>
 
     <template>
@@ -136,16 +134,15 @@ You can also query and write to the database right from your frontend. It is pro
   <Tab value="Svelte">
     ```svelte title="Todos.svelte"
     <script lang="ts">
-      import { getDb, QuerySubscription } from "jazz-tools/svelte";
+      import { QuerySubscription } from "jazz-tools/svelte";
       import { app } from "./schema";
 
-      const db = getDb();
       const todos = new QuerySubscription(app.todos.where({ done: false }));
     </script>
 
     {#each todos.current ?? [] as todo (todo.id)}
       <label>
-        <input type="checkbox" onchange={() => db.update(app.todos, todo.id, { done: true })} />
+        <input type="checkbox" onchange={() => todos.db.update(app.todos, todo.id, { done: true })} />
         {todo.title}
       </label>
     {/each}
@@ -166,18 +163,17 @@ You can also query and write to the database right from your frontend. It is pro
   <Tab value="Solid">
     ```tsx title="Todos.tsx"
     import { For } from "solid-js";
-    import { useAll, useDb } from "jazz-tools/solid";
+    import { useAll } from "jazz-tools/solid";
     import { app } from "./schema";
 
     export function Todos() {
-      const db = useDb();
       const todos = useAll(() => ({ query: app.todos.where({ done: false }) }));
 
       return (
         <For each={todos.data ?? []}>
           {(todo) => (
             <label>
-              <input type="checkbox" onChange={() => db().update(app.todos, todo.id, { done: true })} />
+              <input type="checkbox" onChange={() => todos.db.update(app.todos, todo.id, { done: true })} />
               {todo.title}
             </label>
           )}
