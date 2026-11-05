@@ -1559,3 +1559,84 @@ fn a_remote_subscription_never_lists_pending_local_versions() {
     assert_eq!(rows_in(&drive(&links, read).unwrap()), 2);
     assert_eq!(titles(&server), ["changed", "pending"]);
 }
+
+/// The React Native relay's shape: a non-durable foreground served by the
+/// relay's own durable store, which syncs with the server; every binding's
+/// host ticks only when asked, and is listening before anything opens.
+fn device_chain_subscribes_to_a_large_value(file: Option<&std::path::Path>) {
+    let server = authority();
+    let large = "w".repeat(300 * 1024);
+    server.insert("notes", &title(&large), &none()).unwrap();
+    let node = 0xd8;
+    let relay = match file {
+        Some(path) => {
+            let db = block_on(Db::open_at(
+                DbConfig::new(schema(), identity(node)),
+                path,
+                jazz::db::FileOptions::default(),
+            ))
+            .unwrap();
+            Binding::new(db, identity(node), false)
+        }
+        None => open(node),
+    };
+    let tab = open(0xd9);
+    let flags: Vec<(&Binding, Rc<Cell<bool>>)> = [&relay, &tab, &server]
+        .into_iter()
+        .map(|binding| {
+            let asked = Rc::new(Cell::new(false));
+            let flag = Rc::clone(&asked);
+            *binding.hooks.schedule_tick.borrow_mut() = Some(Box::new(move || flag.set(true)));
+            (binding, asked)
+        })
+        .collect();
+    relay.set_remote_link_hint("live").unwrap();
+    let up = relay.connect_upstream();
+    let down = server
+        .accept_subscriber(relay.author(), Default::default())
+        .unwrap();
+    tab.set_non_durable_client();
+    let tab_up = tab.connect_upstream();
+    let tab_down = relay
+        .accept_subscriber(relay.author(), Default::default())
+        .unwrap();
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+    let query = postcard::to_allocvec(&Query::from("notes").select(["title"])).unwrap();
+    let mut stream = tab
+        .subscribe(&query, &json!({ "tier": "local-first" }), None, None)
+        .unwrap();
+    for (binding, asked) in &flags {
+        if asked.replace(false) {
+            block_on(binding.tick()).unwrap();
+        }
+    }
+    let mut seen = Vec::new();
+    for _ in 0..6 {
+        let event = binding_host::event_chunk(drive_on_demand(&links, tab.next_event(&mut stream)))
+            .unwrap();
+        if let EventChunk::Delta { delta, .. } = event {
+            let (added, _) = jazz::binding_codec::decode_subscription_delta_rows(&delta).unwrap();
+            seen.extend(
+                added
+                    .iter()
+                    .flat_map(|batch| &batch.rows)
+                    .map(|row| row.cells["title"].clone()),
+            );
+        }
+        if !seen.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(seen, [Value::String(large)]);
+}
+
+#[test]
+fn a_foreground_over_a_memory_relay_subscribes_to_a_large_value_on_demand() {
+    device_chain_subscribes_to_a_large_value(None);
+}
+
+#[test]
+fn a_foreground_over_a_file_relay_subscribes_to_a_large_value_on_demand() {
+    let dir = tempfile::tempdir().unwrap();
+    device_chain_subscribes_to_a_large_value(Some(&dir.path().join("relay.sqlite")));
+}
