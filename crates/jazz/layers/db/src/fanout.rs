@@ -1144,7 +1144,10 @@ impl Inner {
                             {
                                 Sql::Text(bytes) | Sql::Blob(bytes)
                                     if bytes.len()
-                                        > jazz_types::large_values::INLINE_VALUE_MAX_BYTES =>
+                                        > root.column(&by.column).map_or(
+                                            jazz_types::large_values::INLINE_VALUE_MAX_BYTES,
+                                            crate::large::inline_max,
+                                        ) =>
                                 {
                                     return None;
                                 }

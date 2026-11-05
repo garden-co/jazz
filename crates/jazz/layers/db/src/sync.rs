@@ -4167,7 +4167,7 @@ impl Inner {
                             format!("large value from upstream: {e}"),
                         )
                     })?;
-                cells.push((name.clone(), self.large_cell(&value)?));
+                cells.push((name.clone(), self.received_cell(&value)?));
                 continue;
             }
             // An enum cell travels by variant name (see `portable_enums`).

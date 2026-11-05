@@ -101,7 +101,9 @@ tie-breaker so page boundaries are stable.
 ## Values over 64 KB
 
 A `string`, `bytes` or `json` value over 64 KB is stored in chunks, and filters and sorting
-never read those chunks. Shorter values filter and sort as described above. A value over
+never read those chunks. A text column with a `text`, `markdown` or `html` merge strategy
+is chunked from 4 KB, so typing into a long document stays cheap; everything below applies
+to its values over 4 KB. Shorter values filter and sort as described above. A value over
 64 KB is compared by identity instead of by content:
 
 - A filter literal over 64 KB in `eq`, `ne` or `in` is rejected with a "not supported yet"
