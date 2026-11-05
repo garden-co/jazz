@@ -26,6 +26,15 @@ durability. Sharding and distributed query execution are outside this change.
 - Replaying the same transaction identity and unchanged payload is idempotent;
   a different payload under that identity is a conflict. Retrying never mints
   replacement authorship or transaction identities.
+- A replica never mints a transaction identity it may already have uploaded.
+  One whose store lives in a file numbers its commits no lower than its wall
+  clock's first HLC position as well as after what its file records, because
+  the file may reopen without commits it uploaded: a lost IndexedDB tail,
+  power loss under `synchronous=NORMAL`, a restored backup. Core deduplicates
+  by identity, so a reused one would drop the new write. A pending commit keeps
+  its identity across a reopen and is still deduplicated on resend. An
+  in-memory replica never reopens; a host handing its node to a fresh one seeds
+  the floor (`INV-EDGE-28`).
 - A non-authority receiving an unfated commit unit stages or parks it. Possessing
   bytes is never authorization or permission to assign a fate (`INV-TX-23`).
 
