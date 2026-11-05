@@ -665,6 +665,33 @@ async fn switching_a_table_to_latest_only_needs_allow_dropping_history() {
     server.shutdown().await;
 }
 
+/// A server started with a schema keeps the data written under it: the
+/// first deploy that makes one of its tables latest-only needs the flag
+/// too, though nothing was deployed before.
+#[tokio::test]
+async fn the_initial_schema_counts_for_the_latest_only_guard() {
+    let full = schema(&[]);
+    let mut latest = full.clone();
+    latest.get_mut(&TableName::new("notes")).unwrap().history =
+        jazz::tools::HistoryRetention::Latest;
+    let server = builder(None)
+        .with_schema(full.clone())
+        .build()
+        .await
+        .unwrap();
+    let router = create_router(server.state.clone());
+
+    let switch = request(&latest, &[&latest], vec![]);
+    let (status, error) = http(&router, "POST", "/bundles", switch.clone()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "drops_history", "{error}");
+
+    let mut confirmed = switch;
+    confirmed["allowDroppingHistory"] = json!(true);
+    deploy_ok(&router, confirmed).await;
+    server.shutdown().await;
+}
+
 /// A deployment published to `/bundles` publishes its permissions as a
 /// bundle, by content: the same bundle again (a rollback) changes nothing,
 /// and the current permissions stay as they were.

@@ -5935,40 +5935,59 @@ impl Inner {
 
     /// Whether `node`'s commit `tx`, which this authority keeps no entry
     /// for, is one it accepted and dropped the entry of: it writes only
-    /// latest-only tables and the node has a newer accepted commit. A
-    /// node's commits arrive in order (`INV-HIST-23`), so a newer one means
-    /// this one came before it; a rejected commit's entry is never dropped.
+    /// latest-only tables, and its tx is at or below the newest tx this
+    /// store dropped an entry of for the node (`through`). A node's commits
+    /// arrive in order (`INV-HIST-23`), so such a tx came before; a rejected
+    /// commit's entry is never dropped. Fails closed where order does not
+    /// hold: a cross-shard part this shard still awaits lands instead, even
+    /// below `through`, as its other parts reached other shards first.
     pub(crate) fn dropped(&self, node: [u8; 16], tx: u64, ops: &[WireOp]) -> Result<bool, Error> {
         if self.client.is_some()
             || ops.is_empty()
+            || self.shard.awaits(crate::db::shard::CommitRef { node, tx })
             || !ops.iter().all(|op| {
                 self.schema
                     .stored_table(op.table())
                     .is_ok_and(|stored| self.latest_only(stored))
             })
+            || !self.has_pruned_txs()?
         {
             return Ok(false);
         }
         self.conn
             .cached_row(
-                "SELECT 1 FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
-                 WHERE n.node = ?1 AND t.tx > ?2 AND t.t BETWEEN 0 AND ?3 LIMIT 1",
-                rusqlite::params![node.to_vec(), tx as i64, MAX_SEQ as i64],
+                "SELECT p.through FROM _jazz_pruned_txs AS p JOIN _jazz_nodes AS n ON n.n = p.n \
+                 WHERE n.node = ?1",
+                [node.to_vec()],
                 |r| r.get::<_, i64>(0),
             )
             .optional()
-            .map(|newer| newer.is_some())
+            .map(|through| through.is_some_and(|through| tx as i64 <= through))
             .map_err(storage)
     }
 
-    /// Drop the dedupe entries of accepted commits that wrote only
-    /// latest-only tables (SPEC 4 §4.9), keeping each node's newest. An
-    /// entry stays until the same node's next commit is accepted: it then
-    /// holds the node's counter and answers the resend most likely to come.
-    /// Each node's newest such commit waits in `_jazz_prunable_txs`. A
-    /// resend of a dropped commit is answered as accepted ([`Self::dropped`]);
-    /// a later write built on one counts as blind (`resolve_bases`). A
-    /// store with no latest-only table never creates the table.
+    fn has_pruned_txs(&self) -> Result<bool, Error> {
+        self.conn
+            .cached_row(
+                "SELECT count(*) > 0 FROM sqlite_master \
+                 WHERE type = 'table' AND name = '_jazz_pruned_txs'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(storage)
+    }
+
+    /// Drop the dedupe entries of accepted commits that wrote only tables
+    /// their version declares latest-only (SPEC 4 §4.9), keeping each
+    /// node's newest. An entry stays until the same node's next commit is
+    /// accepted: it then holds the node's counter and answers the resend
+    /// most likely to come. Each node's newest such commit waits in
+    /// `_jazz_pruned_txs` (`waiting`), beside the newest tx whose entry was
+    /// dropped (`through`). A resend of a dropped commit is answered as
+    /// accepted ([`Self::dropped`]); a later write built on one counts as
+    /// blind (`resolve_bases`). A cross-shard part's entry is never
+    /// dropped: it is its cross-shard commit's recorded fate. A store with
+    /// no latest-only table never creates the table.
     pub(crate) fn prune_transactions(
         &self,
         (node, tx): ([u8; 16], u64),
@@ -5978,14 +5997,15 @@ impl Inner {
             return Ok(());
         }
         self.exec(
-            "CREATE TABLE IF NOT EXISTS _jazz_prunable_txs \
-             (n INTEGER PRIMARY KEY, tx INTEGER NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS _jazz_pruned_txs \
+             (n INTEGER PRIMARY KEY, waiting INTEGER, through INTEGER NOT NULL)",
             [],
         )
         .map_err(storage)?;
         let code = self.node_code(node)?;
         // The commit's own version decides, as for its history.
         let latest_only = !ops.is_empty()
+            && !self.shard.awaits(crate::db::shard::CommitRef { node, tx })
             && ops.iter().all(|op| {
                 self.schema
                     .stored_table(op.table())
@@ -5994,17 +6014,24 @@ impl Inner {
         let waiting: Option<i64> = self
             .conn
             .cached_row(
-                "SELECT tx FROM _jazz_prunable_txs WHERE n = ?1",
+                "SELECT waiting FROM _jazz_pruned_txs WHERE n = ?1",
                 [code],
                 |r| r.get(0),
             )
             .optional()
-            .map_err(storage)?;
+            .map_err(storage)?
+            .flatten();
         let forget = |tx: i64| {
             self.exec(
                 "DELETE FROM _jazz_transactions \
                  WHERE n = ?1 AND tx = ?2 AND t BETWEEN 0 AND ?3",
                 rusqlite::params![code, tx, MAX_SEQ as i64],
+            )
+            .map_err(storage)?;
+            self.exec(
+                "INSERT INTO _jazz_pruned_txs (n, waiting, through) VALUES (?1, NULL, ?2) \
+                 ON CONFLICT (n) DO UPDATE SET through = max(through, excluded.through)",
+                rusqlite::params![code, tx],
             )
             .map_err(storage)
         };
@@ -6022,13 +6049,12 @@ impl Inner {
             }
             None => {}
         }
-        match latest_only {
-            true => self.exec(
-                "INSERT OR REPLACE INTO _jazz_prunable_txs (n, tx) VALUES (?1, ?2)",
-                rusqlite::params![code, tx as i64],
-            ),
-            false => self.exec("DELETE FROM _jazz_prunable_txs WHERE n = ?1", [code]),
-        }
+        let waiting = latest_only.then_some(tx as i64);
+        self.exec(
+            "INSERT INTO _jazz_pruned_txs (n, waiting, through) VALUES (?1, ?2, -1) \
+             ON CONFLICT (n) DO UPDATE SET waiting = excluded.waiting",
+            rusqlite::params![code, waiting],
+        )
         .map_err(storage)?;
         Ok(())
     }
@@ -12189,7 +12215,9 @@ impl Db {
                 }
                 // What the commit prunes goes by the version its session
                 // wrote under (SPEC 4 §4.9): a rolled-back deployment's
-                // sessions prune nothing.
+                // sessions prune nothing. A relay's link carries its
+                // sessions' commits, which prune by the link's version (a
+                // known limit: a relay serves one deployment's schema).
                 let written = self.inner.borrow().written_version(index);
                 let prior = self.inner.borrow().set_writing(written);
                 let decided = (|| -> Result<_, Error> {

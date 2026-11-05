@@ -755,3 +755,93 @@ fn a_latest_only_read_skips_the_per_query_position() {
     );
     assert_eq!(read(&alice, "presence", None), [("a".into(), "0".into())]);
 }
+
+/// A cross-shard commit's part reaches this shard only after two later
+/// commits of the same device, which wrote only this shard and landed
+/// first: a node's commits do not arrive in order across shards. The
+/// second of them dropped the first's dedupe entry, so the part's tx is
+/// below one this shard dropped, yet the part is held here, so it is
+/// applied at its fixed position rather than answered as a dropped
+/// resend. A part's entry is never dropped: it records its cross-shard
+/// commit's fate.
+///
+/// ```
+/// alice ──part(row 2)──┐ (held back)
+/// alice ──c2(row 1)──c3(row 1)──► shard   then   part ──► shard: applied
+/// ```
+#[test]
+fn a_late_cross_shard_part_is_applied_not_taken_for_a_dropped_resend() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shard.sqlite");
+    let now = Rc::new(std::cell::Cell::new(1_790_000_000_000u64));
+    let clock = now.clone();
+    let shard = block_on(Db::open_at(
+        DbConfig::new(
+            schema(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )
+        .with_clock(move || clock.get()),
+        &path,
+        FileOptions::default(),
+    ))
+    .unwrap();
+    shard.set_authority();
+    assert!(shard.shard().is_shard());
+    let alice = open_at(1, &dir.path().join("alice.sqlite"));
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let _link = block_on(alice.connect_upstream(Box::new(Pipe {
+        out: up.clone(),
+        inbound: down.clone(),
+    })));
+    shard
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down,
+                inbound: up.clone(),
+            }),
+            AuthorSubject::SYSTEM,
+        )
+        .unwrap();
+    insert(&alice, "presence", row(1), "a", "0");
+    pump(&shard, &[&alice]);
+
+    // The part: Alice's insert of row 2, held back on its way.
+    insert(&alice, "presence", row(2), "b", "0");
+    block_on(alice.tick()).unwrap();
+    let position = up
+        .borrow()
+        .iter()
+        .position(|m| matches!(m, SyncMessage::Commit { .. }))
+        .expect("the part was uploaded");
+    let late = up.borrow_mut().remove(position).unwrap();
+    let SyncMessage::Commit { id, .. } = &late else {
+        unreachable!()
+    };
+    let part = jazz::db::shard::CommitRef::from(id);
+    let held = shard.shard().hold(part, &[]).unwrap();
+    shard.shard().fix(part, held).unwrap();
+
+    for step in 1..3 {
+        update(&alice, "presence", row(1), "a", &step.to_string());
+        pump(&shard, &[&alice]);
+    }
+    assert_eq!(read(&shard, "presence", None), [("a".into(), "2".into())]);
+
+    up.borrow_mut().push_back(late);
+    pump(&shard, &[&alice]);
+
+    assert_eq!(shard.shard().lowest_hold(), None, "the part landed");
+    assert_eq!(
+        read(&shard, "presence", Some("b")),
+        [("b".into(), "0".into())],
+        "and was applied"
+    );
+    assert_eq!(alice.pending_upload_count(), 0);
+    drop(shard);
+    // The part's entry, and Alice's newest commit's.
+    assert_eq!(transactions_of(&path, 1), 2);
+}

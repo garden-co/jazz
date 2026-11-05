@@ -21,7 +21,7 @@ Invariant digest:
 - `INV-HIST-25`: A table MAY declare latest-only history retention. A retention change MUST be a version of its own that keeps its predecessor's compatibility id, schemas whose tables all keep full history MUST keep their `SchemaVersionId` and `SchemaHash`, and a write MUST prune by the version it was written under (its session's declared version, else its bundle's; a node's own writes by its own schema), so a write under a full-history version prunes nothing. A schema MUST fail to compile when a latest-only table declares `branchBy` or a text-merging column, and a deploy MUST be refused when it makes a table latest-only for the first time (some admitted version keeps it in full, none latest-only) without confirming that it drops history.
 - `INV-HIST-26`: For each row of a latest-only table a node MUST keep its current version, the newest accepted version it superseded, and every version above that (its own or a relay's unsettled ones), and SHOULD drop the older accepted versions when it writes or receives the next one. A value large enough to be chunked MUST be refused there with a typed not-supported error, since its chunks name versions the table drops.
 - `INV-HIST-27`: A read of a table any admitted version declares latest-only that needs a version the table may have dropped MUST fail with a typed not-supported error or ship whole, never answer with another version; a subscription resuming over a latest-only input that changed since it settled MUST open fresh; and a write to a latest-only table is never maybe conflicting.
-- `INV-HIST-28`: On the authority, the dedupe entry of an accepted commit that wrote only tables its version declares latest-only MAY be dropped once the same node's next commit is accepted; each node's newest entry and every rejected commit's entry MUST be kept. A resend of a commit whose entry was dropped MUST be answered as accepted without being applied again, and a later write built on such a commit MUST be accepted as a blind write.
+- `INV-HIST-28`: On the authority, the dedupe entry of an accepted commit that wrote only tables its version declares latest-only MAY be dropped once the same node's next commit is accepted; each node's newest entry, every rejected commit's entry and every cross-shard part's entry MUST be kept. A resend of a commit whose entry was dropped, at or below the node's newest dropped tx, MUST be answered as accepted without being applied again, a cross-shard part the shard still awaits MUST be applied instead, and a later write built on such a commit MUST be accepted as a blind write.
 - `INV-HIST-29`: A replica's read of a latest-only table under per-query visibility (SPEC 8 §8.4) MUST read the table as the replica holds it rather than at its read's settled position, as a branch view does (a known limit): the table keeps no version to read back to.
 - `INV-HIST-11`: Content and deletion state MUST be separate layers; content writes MUST NOT change the deletion register, and a current `DeletionEvent::Deleted` MUST hide the content-current row until a current `DeletionEvent::Restored` reveals it.
 - `INV-HIST-12`: Accepted globally settled versions that become per-layer winners MUST be reflected in `jazz_{table}_global_current` or `jazz_{table}_register_global_current`.
@@ -805,7 +805,9 @@ once (sessions pinned to different bundles), so retention is decided per
 write: a write prunes by the version it was written under. At the
 authority that is the version its session declared, else its bundle's
 write version; a node's own writes, and the versions a replica receives,
-go by its own schema. A write under a version that declares a table
+go by its own schema. A relay forwards its sessions' commits over its own
+link, so the authority prunes them by the relay link's version, not each
+writer's (a known limit: a relay serves one deployment's schema). A write under a version that declares a table
 latest-only prunes that row's older versions; a write under one that
 keeps it in full prunes nothing, so rolling a deployment back to a
 full-history bundle stops the pruning for the sessions on it.
@@ -818,13 +820,15 @@ limit).
 
 Turning latest-only on loses the history a row had, at that row's next
 write under it, and cannot be undone, so a deploy that makes a table
-latest-only for the first time (some admitted version keeps it in full
-and none latest-only yet) is refused (`drops_history`, naming the
+latest-only for the first time (some admitted version, counting the
+schema a server was started with, keeps it in full and none latest-only
+yet) is refused (`drops_history`, naming the
 tables) unless it confirms with `allowDroppingHistory: true` (a
 `createJazz` option, also in the deploy API). Publishing another
 latest-only version of it later, or rolling back and forth, needs no
 confirmation. Tables are matched by name, so a table renamed in the same
-deploy is not caught (`INV-HIST-25`).
+deploy is not caught, and a row that already holds a chunked value keeps
+it but refuses the next one written to it (`INV-HIST-25`).
 
 A latest-only node keeps each row's current version, the newest accepted
 version it superseded, and the versions above that: its own unsettled
@@ -859,8 +863,12 @@ accepted commit that wrote only tables its version declares latest-only
 next commit is accepted, so it keeps one such entry per node: the newest,
 which holds the node's counter and answers the resend most likely to come.
 A resend of a commit whose entry is gone is answered as accepted, with its
-rows as they are now, rather than applied again: the node's newer accepted
-commit shows it came first (`INV-HIST-23`). A rejected commit's entry is
+rows as they are now, rather than applied again, when its tx is at or
+below the newest one whose entry the store dropped for that node: a
+node's commits arrive in order (`INV-HIST-23`), so it came first. Across
+shards they do not: a cross-shard part the shard still holds or fixed a
+position for is applied even below that tx, and a part's entry is never
+dropped, since it records its cross-shard commit's fate. A rejected commit's entry is
 never dropped, and a later write built on a dropped commit counts as blind
 (`INV-HIST-28`).
 

@@ -321,7 +321,12 @@ impl CatalogueIndex {
         admitted.sort_by_key(|(n, _)| *n);
         index.admitted = admitted.into_iter().map(|(_, hash)| hash).collect();
         if let Some(schema) = initial_schema {
-            index.add_schema(schema.clone());
+            // The store's data was written under it too: the deploy guard
+            // counts it as admitted (SPEC 4 §4.9), oldest.
+            let hash = index.add_schema(schema.clone());
+            if !index.admitted.contains(&hash) {
+                index.admitted.insert(0, hash);
+            }
         }
         Ok(index)
     }
