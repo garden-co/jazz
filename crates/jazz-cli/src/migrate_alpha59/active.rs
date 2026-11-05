@@ -85,6 +85,37 @@ impl ToHead {
         Ok(Some(table))
     }
 
+    /// The active-schema columns that `column` of `table` under `schema`
+    /// lands in, as the lenses forward rename, copy and drop it, with
+    /// their table; none when it or its table is gone.
+    pub fn head_columns(
+        &self,
+        schema: [u8; 16],
+        table: &str,
+        column: &str,
+    ) -> Result<Option<(String, BTreeSet<String>)>, String> {
+        let (mut schema, mut table) = (schema, table.to_owned());
+        let mut columns = BTreeSet::from([column.to_owned()]);
+        let mut steps = 0;
+        while schema != self.head {
+            match self.step(schema, &table, &mut steps)? {
+                Step::Next {
+                    target,
+                    table: next,
+                    ops,
+                } => {
+                    for op in ops {
+                        follow(&mut columns, op)?;
+                    }
+                    schema = target;
+                    table = next;
+                }
+                Step::Gone => return Ok(None),
+            }
+        }
+        Ok((!columns.is_empty()).then_some((table, columns)))
+    }
+
     pub fn translate(&self, mut version: dump::Version) -> Result<Translated, String> {
         let mut steps = 0;
         while version.schema != self.head {
@@ -154,6 +185,34 @@ enum Step<'a> {
         ops: &'a [String],
     },
     Gone,
+}
+
+/// Which columns hold the values of `columns` after one of alpha.59's
+/// runtime `LensOp`s, as [`apply`] moves them.
+fn follow(columns: &mut BTreeSet<String>, op: &str) -> Result<(), String> {
+    let op: Json = serde_json::from_str(op).map_err(err)?;
+    let (kind, body) = op
+        .as_object()
+        .and_then(|op| op.iter().next())
+        .ok_or(format!("unreadable lens op {op}"))?;
+    let name = |key: &str| body[key].as_str().unwrap_or_default().to_owned();
+    match kind.as_str() {
+        "RenameColumn" => {
+            if columns.remove(&name("from")) {
+                columns.insert(name("to"));
+            }
+        }
+        "CopyColumn" => {
+            if columns.contains(&name("from")) {
+                columns.insert(name("to"));
+            }
+        }
+        "DropColumn" => {
+            columns.remove(&name("column"));
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Apply one of alpha.59's runtime `LensOp`s, as its serde JSON.
