@@ -6,7 +6,7 @@ Node + Express REST API backed by Jazz as the database. No frontend: pure server
 
 - Running Jazz inside a Node backend with `createJazz` from `jazz-tools/backend`: no browser, no WASM.
 - Authenticated CRUD over `/todos` (`GET`, `POST`, `PUT /:id`, `DELETE /:id`) with row-level permissions enforced server-side.
-- Request authentication in the app's own `authenticate`: every `/todos` request sends `Authorization: Bearer <jwt>`, `fromJWT` verifies it against the identity provider's JWKS, and `jazz.forRequest(request)` opens the database as that user.
+- Request authentication in the app's own `authenticate`: every `/todos` request sends `Authorization: Bearer <jwt>`, `fromJWT` verifies it against the identity provider's JWKS, and `jazz.forReqUser(request)` opens the database as that user.
 - Server-Sent Events (`/todos/live`) pushing only the authenticated caller's live snapshot on every mutation.
 - Write durability control via `wait({ tier })` (`local`, `edge`, `global`).
 - Explicit persistent or in-memory storage selection for programmatic servers and the CLI.

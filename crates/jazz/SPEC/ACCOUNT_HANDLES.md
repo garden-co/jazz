@@ -288,7 +288,7 @@ Copied handles and SYSTEM identity objects confer no authority. Ordinary JWT
 registration, login, linking, and token extraction cannot mint or use backend
 handles. Logout fences late admissions and invalidates all issued handles.
 
-The backend's `db` already carries backend authority. `jazz.forRequest(request)`
+The backend's `db` already carries backend authority. `jazz.forReqUser(request)`
 asks the app's `authenticate` who the request's user is, resolves (or creates)
 that user's account through the core registry, and creates an immutable policy
 scope; the backend does not verify external JWTs itself (an app can use

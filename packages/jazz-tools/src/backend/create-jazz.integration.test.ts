@@ -214,7 +214,7 @@ describe("createJazz", () => {
     // The backend's own db sees the row; a request scope sees only its user's rows.
     const seen = await jazz.db.all(app.todos.where({ id: row.id }));
     expect(seen.map((todo) => todo.title)).toEqual(["from alice"]);
-    const asBob = await jazz.forRequest(
+    const asBob = await jazz.forReqUser(
       new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
     );
     expect(await asBob.all(app.todos)).toEqual([]);
@@ -497,12 +497,12 @@ describe("createJazz", () => {
     expect(upgrades).toBe(opened);
 
     // The app demotes her: her open session ends, and the client reconnects
-    // with the claims authenticate names now, as forRequest already sees.
+    // with the claims authenticate names now, as forReqUser already sees.
     roles.set("alice", "viewer");
-    const scoped = await jazz.forRequest(
+    const scoped = await jazz.forReqUser(
       new Request(`${origin}/`, { headers: { "x-test-user": "alice" } }),
     );
-    expect(await outcome(scoped.insert(app.todos, { title: "forRequest", owner }))).toBe(
+    expect(await outcome(scoped.insert(app.todos, { title: "forReqUser", owner }))).toBe(
       "permission_denied",
     );
     await expect.poll(() => upgrades, { timeout: 5_000, interval: 50 }).toBeGreaterThan(opened);
@@ -1449,13 +1449,13 @@ describe("createJazz", () => {
     cleanups.push(() => other.close());
     const seen = await other.db.all(app.todos.where({ id: row.id }));
     expect(seen.map((todo) => todo.title)).toEqual(["through the backend"]);
-    const asAlice = await other.forRequest(
+    const asAlice = await other.forReqUser(
       new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
     );
     expect((await asAlice.all(app.todos)).map((todo) => todo.title)).toEqual([
       "through the backend",
     ]);
-    const asBob = await other.forRequest(
+    const asBob = await other.forReqUser(
       new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
     );
     expect(await asBob.all(app.todos)).toEqual([]);
@@ -1549,7 +1549,7 @@ describe("createJazz", () => {
         .wait({ tier: "global" }),
     ).rejects.toThrow();
     // The backend's own scoped writes too.
-    const asBob = await newer.forRequest(
+    const asBob = await newer.forReqUser(
       new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
     );
     expect(await asBob.all(app.todos)).toEqual([]);
@@ -1557,7 +1557,7 @@ describe("createJazz", () => {
     // Rolling back: the current deployment boots again, and serves as before.
     const rolledBack = await createJazz({ app, permissions, store, authenticate }).ready();
     cleanups.push(() => rolledBack.close());
-    const asAlice = await rolledBack.forRequest(
+    const asAlice = await rolledBack.forReqUser(
       new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
     );
     const again = await asAlice
