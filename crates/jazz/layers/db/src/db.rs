@@ -1697,7 +1697,7 @@ impl Db {
         let Some(store) = chunks.store().cloned() else {
             return Ok(());
         };
-        let Some(mut io) = self.begin_chunk_io(&chunks)? else {
+        let Some(mut io) = self.begin_chunk_io(&chunks, true)? else {
             return Ok(());
         };
         let wanted = std::mem::take(&mut io.fetch);
@@ -1721,6 +1721,23 @@ impl Db {
     /// to back with [`Self::finish_chunk_io`]; a batch dropped instead ends
     /// there, and its work goes to the next one.
     pub fn take_chunk_io(&self) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
+        self.take_host_chunk_io(true)
+    }
+
+    /// [`Self::take_chunk_io`] with no fetches in it: for a host whose
+    /// fetches back off after failing ([`Self::take_chunk_fetches`]), so
+    /// its uploads go on meanwhile without asking the store again for what
+    /// it failed to give. The reads refused for those stay refused.
+    pub fn take_chunk_io_holding_fetches(
+        &self,
+    ) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
+        self.take_host_chunk_io(false)
+    }
+
+    fn take_host_chunk_io(
+        &self,
+        fetches: bool,
+    ) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
         let chunks = self.inner().chunks.clone();
         if !chunks.host_io() {
             return Err(not_host_run());
@@ -1728,7 +1745,78 @@ impl Db {
         if chunks.store().is_none() {
             return Ok(None);
         }
-        self.begin_chunk_io(&chunks)
+        self.begin_chunk_io(&chunks, fetches)
+    }
+
+    /// The offloaded nodes reads wait on, to fetch beside the batch that is
+    /// out (or backing off) so they do not wait for its uploads: `None`
+    /// when no read waits. Hand what running it came to back with
+    /// [`Self::finish_chunk_fetches`]. A node a read waits on is
+    /// referenced, so no delete in the batch removes it. Dropped instead,
+    /// its nodes are wanted again. A node a fetch is already out for, in
+    /// either lane, is not fetched again.
+    ///
+    /// The fetches that failed last are asked again here, as by the next
+    /// batch: a host backing its fetches off takes these only once the
+    /// wait is over.
+    pub fn take_chunk_fetches(&self) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
+        let chunks = self.inner().chunks.clone();
+        if !chunks.host_io() {
+            return Err(not_host_run());
+        }
+        if chunks.store().is_none() {
+            return Ok(None);
+        }
+        if chunks.clear_failed() {
+            let mut inner = self.inner();
+            inner.retry_awaiting();
+            inner.retry_store_failed_pulls();
+        }
+        let wanted = chunks.take_fetch();
+        if wanted.is_empty() {
+            return Ok(None);
+        }
+        let mut io = crate::chunk_store::ChunkIo::unleased(wanted.clone());
+        io.refetch = Some(crate::chunk_store::Refetch {
+            chunks: std::sync::Arc::downgrade(&chunks),
+            unfetched: wanted,
+        });
+        Ok(Some(io))
+    }
+
+    /// Install fetches [`Self::take_chunk_fetches`] handed out, and serve
+    /// the messages held for them. Reads of a node the store failed to
+    /// answer are refused with why until the next batch starts; the first
+    /// failure is returned. Anything else is refused.
+    pub fn finish_chunk_fetches(
+        &self,
+        mut done: crate::chunk_store::ChunkIoDone,
+    ) -> Result<(), Error> {
+        let chunks = self.inner().chunks.clone();
+        if !chunks.host_io() {
+            return Err(not_host_run());
+        }
+        let ours = done.io.refetch.as_ref().is_some_and(|refetch| {
+            std::ptr::eq(refetch.chunks.as_ptr(), std::sync::Arc::as_ptr(&chunks))
+        });
+        if !ours
+            || done.io.lease.is_some()
+            || !done.io.puts.is_empty()
+            || !done.io.deletes.is_empty()
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "chunk I/O: these are not fetches this store handed out",
+            ));
+        }
+        // Answered: nothing goes back to the wanted nodes.
+        if let Some(mut refetch) = done.io.refetch.take() {
+            refetch.unfetched.clear();
+        }
+        let mut first = None;
+        self.install_fetched(&chunks, &done.io.fetch, done.fetched, true, &mut first);
+        self.sync_tick()?;
+        first.map_or(Ok(()), Err)
     }
 
     /// Apply a batch [`Self::take_chunk_io`] handed out: fetched nodes are
@@ -1762,19 +1850,22 @@ impl Db {
     /// Start a batch: what reads wait on, and (between SQLite transactions,
     /// so the mark that a put may have landed is durable before it does)
     /// settled leaves to put and reclaimed ones to delete.
+    /// `fetches: false` leaves what reads wait on, and the last failed
+    /// fetches, for later.
     fn begin_chunk_io(
         &self,
         chunks: &std::sync::Arc<crate::large::Chunks>,
+        fetches: bool,
     ) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
         // The last batch's failed fetches are asked again: results that
         // were refused for them run again, and want what they still lack
         // in this batch.
-        if chunks.outstanding().is_none() && chunks.clear_failed() {
+        if fetches && chunks.outstanding().is_none() && chunks.clear_failed() {
             let mut inner = self.inner();
             inner.retry_awaiting();
             inner.retry_store_failed_pulls();
         }
-        let Some((batch, fetch)) = chunks.begin_fetch() else {
+        let Some((batch, fetch)) = chunks.begin_fetch(fetches) else {
             return Ok(None);
         };
         // From here the lease ends the batch however this returns.
@@ -1885,6 +1976,7 @@ impl Db {
                 first.get_or_insert(error);
             }
         }
+        chunks.landed(wanted);
         self.inner().retry_awaiting();
     }
 
@@ -1898,9 +1990,24 @@ impl Db {
         if wanted.is_empty() {
             return Ok(());
         }
+        // Dropped before the answer, the nodes are wanted again: no fetch
+        // is out for them any more.
+        struct Out<'a>(
+            &'a crate::large::Chunks,
+            Option<Vec<jazz_types::large_values::chunks::ChunkRequest>>,
+        );
+        impl Drop for Out<'_> {
+            fn drop(&mut self) {
+                if let Some(requests) = self.1.take() {
+                    self.0.want_again(requests);
+                }
+            }
+        }
+        let mut out = Out(chunks, Some(wanted.clone()));
         let done = crate::chunk_store::ChunkIo::unleased(wanted)
             .run(store)
             .await;
+        out.1 = None;
         let mut first = None;
         self.install_fetched(chunks, &done.io.fetch, done.fetched, false, &mut first);
         first.map_or(Ok(()), Err)
@@ -1943,7 +2050,7 @@ impl Db {
                         self.fetch_from(&chunks, &*store, wanted).await?;
                         continue;
                     }
-                    let Some((batch, wanted)) = chunks.begin_fetch() else {
+                    let Some((batch, wanted)) = chunks.begin_fetch(true) else {
                         return Err(error);
                     };
                     // Ends the batch even if this future is dropped.
