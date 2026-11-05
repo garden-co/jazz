@@ -7,7 +7,11 @@ import { openRecoveryMaterial, protectRecoveryMaterial } from "./recovery-protec
 import { E2eeRecoveryError, RecoveryCandidateError } from "./recovery-error.js";
 import { recoveryMaterialRootId } from "./recovery-format.js";
 import type { AccountHandle } from "../accounts/state.js";
-import { beginDbTransactionAfter, prepareDbTransaction } from "../runtime/db.js";
+import {
+  beginDbTransactionAfter,
+  prepareDbTransaction,
+  transactionHasRegisteredInsert,
+} from "../runtime/db.js";
 import type {
   Db,
   TableProxy,
@@ -116,6 +120,7 @@ export async function prepareInitialSpaceForTransaction<T, Init>(
   recipientIds?: readonly string[],
 ): Promise<void> {
   const recipients = recipientIds?.slice();
+  const ownScopeInsert = transactionHasRegisteredInsert(tx, scope, identifier);
   try {
     await prepareDbTransaction(tx, async (prepared) => {
       const memo = initialAuthorityMemos.get(tx);
@@ -140,6 +145,7 @@ export async function prepareInitialSpaceForTransaction<T, Init>(
         identifier,
         prepareData,
         recipients,
+        ownScopeInsert,
       );
     });
   } catch (error) {
@@ -160,9 +166,17 @@ export async function prepareInitialSpaceRows<T, Init>(
   identifier: string,
   prepareData: SpaceDataPreparation,
   recipientIds?: readonly string[],
+  ownScopeInsert = false,
 ): Promise<void> {
   e2eeForDb(db);
-  await initialSpacePreparers.get(db)!(tx, scope, identifier, prepareData, recipientIds);
+  await initialSpacePreparers.get(db)!(
+    tx,
+    scope,
+    identifier,
+    prepareData,
+    recipientIds,
+    ownScopeInsert,
+  );
 }
 
 export type RecoveryStatus = Readonly<{

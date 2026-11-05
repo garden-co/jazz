@@ -685,6 +685,7 @@ export class Spaces {
     identifier: string,
     prepareData: SpaceDataPreparation,
     recipientIds: readonly string[] = [this.accountId],
+    ownScopeInsert = false,
   ): Promise<void> {
     if (tx.kind !== "serializable")
       throw new Error("E2EE initialisation requires an exclusive transaction");
@@ -701,6 +702,7 @@ export class Spaces {
           address,
           device,
           secret,
+          ownScopeInsert,
         );
         await prepareData(secret, root, tx);
         this.assertOpen();
@@ -720,13 +722,14 @@ export class Spaces {
     address: Address,
     device: LocalDevice,
     secret: Uint8Array,
+    ownScopeInsert = false,
   ): Promise<SpaceRoot> {
     const rootId = spaceRootId(address);
     const roots = this.tables.__e2ee_spaces.where({ id: rootId });
     if (
-      await tx.one(this.tables.__e2ee_spaces.includeDeleted().where({ id: rootId }), {
-        tier: "remote",
-      })
+      !ownScopeInsert &&
+      (await readSpaceRows(tx, this.tables.__e2ee_spaces.includeDeleted().where({ id: rootId })))
+        .rows.length
     )
       throw new Error("E2EE space already exists");
     const state = await this.requireDevice().states(tx);
@@ -774,13 +777,10 @@ export class Spaces {
     const scopeRow = new TypedTableQueryBuilder(scope._table, scope._schema)
       .where({ id: identifier })
       .select("id");
-    // The ordinary transaction view includes a newly staged scope row. If it
-    // cannot find an existing row, request its actual same-cut authority proof.
-    // The core refuses that request after writes; no memo can invent coverage
-    // for an unknown existing scope at that point.
-    const scopeExists =
-      (await tx.one(scopeRow, { tier: "local-first" })) ??
-      (await readSpaceRows(tx, scopeRow)).rows[0];
+    // A registered insert is this transaction's own intent, never accepted
+    // evidence. Its normal write failure poisons the enclosing atomic commit.
+    // Every existing scope instead needs an actual same-cut authority predicate.
+    const scopeExists = ownScopeInsert || (await readSpaceRows(tx, scopeRow)).rows[0];
     if (!scopeExists)
       throw new Error("Explicit space initialisation requires an existing scope row");
     if (await tx.one(roots, { tier: "local-first" })) throw new Error("E2EE space already exists");
