@@ -1,8 +1,8 @@
 //! Subscription fan-out: shared execution and keyed invalidation.
 //!
-//! Subscriptions whose compiled SQL and parameters are identical share one
-//! live result (a `Group`); a session-independent shape (a public feed) is
-//! one group however many identities watch it. Each group declares
+//! Subscriptions with identical compiled output and executing author/claim
+//! scope share one live result (a `Group`). A public policy still retains
+//! each reader's scope so later policy changes remain isolated. Each group declares
 //! `Watch`es: the tables it reads, narrowed where the query or its read
 //! policy pins a column to one value (a root filter `room = R`, a policy
 //! `EXISTS memberships WHERE member = session.user`). A commit's changed
@@ -35,9 +35,12 @@ struct GroupKey {
     /// The SQL selects stored columns; output aliases and types also belong
     /// to a shared result's identity.
     projection: String,
-    /// Set only when the SQL depends on the identity's session (array
-    /// relations, read as the identity, always may).
-    identity: Option<String>,
+    /// A later policy may use an author even when today's policy is public.
+    identity: String,
+    /// Preserve registry-following versus explicit, including empty, claims.
+    request_claims: String,
+    /// Preserve the executing policy source and every retained read mode.
+    read_context: String,
     /// The array relations nested in each row: queries that differ only
     /// in them compile to the same root SQL.
     relations: String,
@@ -269,7 +272,9 @@ impl Fanout {
     fn drop_group(&mut self, gid: u64) {
         if let Some(group) = self.groups.remove(&gid) {
             let group = group.borrow();
-            self.by_key.remove(&group.key);
+            if self.by_key.get(&group.key) == Some(&gid) {
+                self.by_key.remove(&group.key);
+            }
             self.unindex(gid, &group.watches);
         }
     }
@@ -389,27 +394,41 @@ impl Inner {
         }
     }
 
-    /// Open a subscription: join the group with identical SQL, or start one.
-    pub(super) fn subscribe_member(
-        &mut self,
+    /// Compile-sharing identity retains author, claims, governor and E17 modes.
+    fn group_key(
+        &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
-        read: ReadSpec,
-        settled: sync::SettledBy,
-    ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
-        let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
-        if let Some(live) = &read.union_live {
-            live.tables
-                .borrow_mut()
-                .extend(compiled.tables.iter().cloned());
-        }
-        let key = GroupKey {
+        read: &ReadSpec,
+        compiled: &Compiled,
+    ) -> GroupKey {
+        GroupKey {
             renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
             sql: compiled.sql.clone(),
             params: format!("{:?}", compiled.params),
             projection: format!("{:?}", compiled.projection),
-            identity: (session_used || !prepared.query.array_subqueries.is_empty())
-                .then(|| format!("{identity:?}")),
+            identity: format!("{identity:?}"),
+            request_claims: format!("{:?}", prepared.request_claims),
+            read_context: format!(
+                "{:?}",
+                (
+                    prepared.authority_policies,
+                    prepared
+                        .schema
+                        .as_ref()
+                        .is_some_and(|schema| schema.policies_from.is_some()),
+                    read.members_only,
+                    read.scoped_live,
+                    read.scoped_evidence,
+                    read.readable_inheritance,
+                    read.permission_cut,
+                    read.permission_own,
+                    read.include_deleted,
+                    read.settled_only,
+                    &read.view,
+                    &read.cut,
+                )
+            ),
             relations: format!(
                 "{:?}{:?}{:?}",
                 prepared.query.array_subqueries,
@@ -418,7 +437,24 @@ impl Inner {
                     .as_ref()
                     .map(|live| (Rc::as_ptr(live) as usize, read.union_preview))
             ),
-        };
+        }
+    }
+
+    /// Open a subscription: join the group with identical SQL, or start one.
+    pub(super) fn subscribe_member(
+        &mut self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: ReadSpec,
+        settled: sync::SettledBy,
+    ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
+        let (compiled, _) = self.compile_tracked(prepared, identity, &read)?;
+        if let Some(live) = &read.union_live {
+            live.tables
+                .borrow_mut()
+                .extend(compiled.tables.iter().cloned());
+        }
+        let key = self.group_key(prepared, identity, &read, &compiled);
         let existing = self
             .fan
             .by_key
@@ -500,10 +536,8 @@ impl Inner {
                 Err(error) => return Err(error),
             };
         let watches = self.watches(prepared, identity, &read, &compiled)?;
-        let root = prepared
-            .schema
-            .as_ref()
-            .unwrap_or(&self.owner)
+        let schema = self.read_schema(prepared, &read)?;
+        let root = schema
             .stored_table(
                 history_source_table(&prepared.query.table).unwrap_or(&prepared.query.table),
             )?
@@ -563,11 +597,12 @@ impl Inner {
         if query.includes.iter().all(|include| include.require) {
             return Ok(Vec::new());
         }
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        let schema = self.read_schema(prepared, read)?;
         let root = schema.table(&query.table)?;
         let mut bare = prepared.clone();
         bare.query.includes.retain(|include| include.require);
-        let others = self.compile_tracked(&bare, identity, read)?.0.tables;
+        let bare_compiled = self.compile_tracked(&bare, identity, read)?.0;
+        let others = self.with_relation_tables(&bare, identity, read, &bare_compiled.tables)?;
         let mut out = Vec::new();
         for include in query.includes.iter().filter(|include| !include.require) {
             let column = include.path.split('.').next().unwrap_or_default();
@@ -608,7 +643,7 @@ impl Inner {
         read: &ReadSpec,
         compiled: &Compiled,
     ) -> Result<Vec<Watch>, Error> {
-        let schema = self.effective_schema(prepared.schema.as_ref().unwrap_or(&self.owner));
+        let schema = self.read_schema(prepared, read)?;
         // Watches name stored tables and columns: changed rows do.
         let stored = |name: &str| schema.stored_table(name).map(str::to_owned);
         // Under a branch view, inherited rows read with the head's branch
@@ -656,6 +691,7 @@ impl Inner {
             Ok(())
         }
         arrays(&mut structural, &query.array_subqueries, &stored)?;
+        structural.extend(self.relation_read_tables(prepared, identity, read)?);
         for source in query.flat_join.iter().flat_map(|flat| &flat.sources) {
             let table = &source.table;
             structural.insert(stored(history_source_table(table).unwrap_or(table))?);
@@ -883,10 +919,54 @@ impl Inner {
             }
             let old = std::mem::take(&mut group.watches);
             self.fan.unindex(gid, &old);
+            if self.fan.by_key.get(&group.key) == Some(&gid) {
+                self.fan.by_key.remove(&group.key);
+            }
             let watches = self
                 .compile(&group.prepared, group.identity, &group.read)
                 .and_then(|compiled| {
-                    self.watches(&group.prepared, group.identity, &group.read, &compiled)
+                    let prepared = &group.prepared;
+                    let read = &group.read;
+                    let schema = self.read_schema(prepared, read)?;
+                    let root = schema
+                        .stored_table(
+                            history_source_table(&prepared.query.table)
+                                .unwrap_or(&prepared.query.table),
+                        )?
+                        .to_owned();
+                    let watches = self.watches(prepared, group.identity, read, &compiled)?;
+                    let tables = self.with_relation_tables(
+                        prepared,
+                        group.identity,
+                        read,
+                        &compiled.tables,
+                    )?;
+                    let includes =
+                        self.output_only_includes(prepared, group.identity, read, &compiled)?;
+                    let pending = group
+                        .preview_pending
+                        .as_ref()
+                        .map(|_| self.union_has_pending_inputs(&tables))
+                        .transpose()?;
+                    let recheck = recheckable(&prepared.query, &root, read, &compiled);
+                    let projected = order_projected(&prepared.query, &compiled);
+                    let key = self.group_key(prepared, group.identity, read, &compiled);
+                    // Publish the complete derived state only after fallible work.
+                    group.root = root;
+                    group.includes = includes;
+                    group.recheck = recheck;
+                    group.projected = projected;
+                    group.keys.clear();
+                    if let Some((prior_tables, flag)) = &mut group.preview_pending {
+                        *prior_tables = tables.clone();
+                        flag.set(pending.expect("existing preview"));
+                    }
+                    if let Some(live) = &group.read.union_live {
+                        live.tables.borrow_mut().extend(tables);
+                    }
+                    group.key = key;
+                    self.fan.by_key.entry(group.key.clone()).or_insert(gid);
+                    Ok(watches)
                 })
                 .unwrap_or(old);
             self.fan.index(gid, &watches);

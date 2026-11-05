@@ -2804,7 +2804,13 @@ impl Inner {
         prepared: &PreparedQuery,
         read: &ReadSpec,
     ) -> Result<Rc<Schema>, Error> {
-        let schema = self.effective_schema(prepared.schema.as_ref().unwrap_or(&self.owner));
+        let names = prepared.schema.as_ref().unwrap_or(&self.owner);
+        let schema = if prepared.schema.is_some() && names.policies_from.is_none() {
+            // A locally retained ordinary view supplies names, not a policy pin.
+            Rc::new((**names).clone().with_policies_of(self.owner.clone()))
+        } else {
+            self.effective_schema(names)
+        };
         let schema = if read.scoped_evidence || prepared.authority_policies {
             let descriptor = self.policy_descriptor()?.ok_or_else(|| {
                 Error::new(
@@ -2881,25 +2887,51 @@ impl Inner {
         }
         let mut compiled = self.compile(prepared, identity, read)?;
         let rows = self.execute(&compiled, &prepared.query.table)?;
-        // Array relations are part of a subscription's dependencies.
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
-        fn arrays(
-            schema: &Schema,
-            out: &mut BTreeSet<String>,
-            list: &[crate::query::ArraySubquery],
-        ) -> Result<(), Error> {
-            for array in list {
-                out.insert(schema.stored_table(&array.table)?.to_owned());
-                arrays(schema, out, &array.nested_arrays)?;
-            }
-            Ok(())
-        }
-        arrays(
-            schema,
-            &mut compiled.tables,
-            &prepared.query.array_subqueries,
-        )?;
+        compiled.tables = self.with_relation_tables(prepared, identity, read, &compiled.tables)?;
         Ok((rows, compiled.tables))
+    }
+
+    /// Compile child policies and filters under the same executing context.
+    fn relation_read_tables(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+    ) -> Result<BTreeSet<String>, Error> {
+        let (policy, claims) = self.read_sessions(prepared, identity);
+        let schema = self.read_schema(prepared, read)?;
+        let mut pending: Vec<_> = prepared
+            .query
+            .array_subqueries
+            .iter()
+            .map(|array| (prepared.query.table.as_str(), array))
+            .collect();
+        let mut tables = BTreeSet::new();
+        while let Some((parent, array)) = pending.pop() {
+            tables.extend(
+                self.read_ctx(&schema, prepared, identity, policy.as_ref(), &claims, read)
+                    .child_read_tables(parent, array)?,
+            );
+            pending.extend(
+                array
+                    .nested_arrays
+                    .iter()
+                    .map(|child| (array.table.as_str(), child)),
+            );
+        }
+        Ok(tables)
+    }
+
+    fn with_relation_tables(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        tables: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, Error> {
+        let mut out = tables.clone();
+        out.extend(self.relation_read_tables(prepared, identity, read)?);
+        Ok(out)
     }
 
     fn execute(&self, compiled: &Compiled, table: &str) -> Result<Vec<CurrentRow>, Error> {

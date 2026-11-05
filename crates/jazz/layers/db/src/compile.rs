@@ -1683,9 +1683,6 @@ impl<'a> Ctx<'a> {
         array: &ArraySubquery,
         parent: &Value,
     ) -> Result<Compiled, Error> {
-        let child = self.table(&array.table)?;
-        let projection = projection(child, array.select.as_deref())?;
-        let alias = "t";
         let elements = match parent {
             Value::Nullable(Some(inner)) => matches!(**inner, Value::Array(_)),
             value => matches!(value, Value::Array(_)),
@@ -1694,6 +1691,30 @@ impl<'a> Ctx<'a> {
             Term::Bound(sql, _) => sql,
             _ => "NULL".to_owned(),
         };
+        self.compile_children_bound(array, parent, elements)
+    }
+
+    /// Discover the actual child dependencies without executing a statement.
+    pub(crate) fn child_read_tables(
+        self,
+        parent_table: &str,
+        array: &ArraySubquery,
+    ) -> Result<BTreeSet<String>, Error> {
+        let elements = is_array(self.schema.table(parent_table)?, &array.outer_column);
+        Ok(self
+            .compile_children_bound(array, "NULL".to_owned(), elements)?
+            .tables)
+    }
+
+    fn compile_children_bound(
+        mut self,
+        array: &ArraySubquery,
+        parent: String,
+        elements: bool,
+    ) -> Result<Compiled, Error> {
+        let child = self.table(&array.table)?;
+        let projection = projection(child, array.select.as_deref())?;
+        let alias = "t";
         // A forward array relation reads one child per array element, in
         // the array's order and with its duplicates.
         let (from, correlated) = if elements {

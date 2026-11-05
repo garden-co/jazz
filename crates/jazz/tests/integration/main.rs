@@ -340,3 +340,12 @@ mod streaming_upload_ownership;
 
 #[path = "../served_query_failures.rs"]
 mod served_query_failures;
+
+#[path = "../e17_governance_scope.rs"]
+mod e17_governance_scope;
+
+#[path = "../e17_governance_sharing_controls.rs"]
+mod e17_governance_sharing_controls;
+
+#[path = "../e17_governance_nested_controls.rs"]
+mod e17_governance_nested_controls;
