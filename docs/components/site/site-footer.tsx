@@ -11,14 +11,8 @@ const columns = [
       { label: "Docs", href: "/docs" },
       { label: "Quickstart", href: "/docs/setup/run-locally" },
       { label: "Examples & benches", href: "/examples" },
-      { label: "Roadmap", href: "https://github.com/garden-co/jazz/milestones" },
-    ],
-  },
-  {
-    title: "Jazz Cloud",
-    links: [
       { label: "Pricing", href: "/#pricing" },
-      { label: "Dashboard", href: "https://v2.dashboard.jazz.tools" },
+      { label: "Roadmap", href: "https://github.com/garden-co/jazz/milestones" },
     ],
   },
   {
@@ -45,7 +39,7 @@ export function SiteFooter() {
   return (
     <footer className="site-footer w-full">
       <div className="mx-auto grid w-full max-w-(--fd-layout-width) grid-cols-2 gap-x-6 gap-y-12 px-4 py-14 md:grid-cols-12">
-        <div className="col-span-2 flex flex-col gap-4 md:col-span-4">
+        <div className="col-span-2 flex flex-col gap-4 md:col-span-6">
           <JazzLogo label="Jazz" className="h-7 self-start" />
           <Text as="p" display="block" color="secondary" className="max-w-[22rem]">
             The local-first relational database that syncs across your frontend, backend and cloud.
