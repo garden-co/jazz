@@ -1020,3 +1020,188 @@ fn a_pending_insert_overlays_another_writers_row_of_the_same_id_until_its_fate()
     pump(&server, &client);
     assert_eq!(current(&client), titles(&["theirs"]), "refused, it drops");
 }
+
+/// Alice's nested SELECT support arrives ahead of her settled position.
+/// A trusted replication link keeps root/child delivery independent of Alice's
+/// local read policy; only the support version changes while settles are held.
+///
+/// Bob deletes support -> data arrives -> Alice keeps old cut -> release -> child leaves.
+#[test]
+fn optional_include_nested_transitive_support_keeps_visible_cut() {
+    use jazz::tools::PolicyExpr;
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("docs")
+                    .column("title", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("comments")
+                    .fk_column("doc", "docs")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies().with_select(PolicyExpr::Exists {
+                        table: "support".into(),
+                        condition: Box::new(PolicyExpr::True),
+                    })),
+            )
+            .table(
+                TableSchemaBuilder::new("support")
+                    .column("name", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let open_node = |node, author| {
+        block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )))
+        .unwrap()
+    };
+    let server = open_node(0x73, AuthorSubject::SYSTEM);
+    let client = open_node(0x74, user(1));
+    // This is a normal trusted subscriber, so a local policy revocation does
+    // not itself remove the unchanged child body from the replicated cache.
+    let link = connect(&server, &client, AuthorSubject::SYSTEM);
+    for (table, id, cells) in [
+        (
+            "support",
+            row(3),
+            BTreeMap::from([("name".into(), Value::String("grant".into()))]),
+        ),
+        (
+            "docs",
+            row(1),
+            BTreeMap::from([("title".into(), Value::String("parent".into()))]),
+        ),
+        (
+            "comments",
+            row(2),
+            BTreeMap::from([
+                ("doc".into(), Value::Uuid(row(1).0)),
+                ("body".into(), Value::String("secret".into())),
+            ]),
+        ),
+    ] {
+        block_on(server.insert(
+            table,
+            cells,
+            InsertOptions {
+                row_id: Some(id),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    let support_query = client.prepare_query(&Query::from("support")).unwrap();
+    let _support_stream = block_on(client.subscribe(&support_query, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    let query =
+        Query::from("docs").array_subquery(ArraySubquery::new("comments", "comments", "doc", "id"));
+    let prepared = client.prepare_query(&query).unwrap();
+    let mut stream =
+        block_on(client.subscribe_for_identity(&prepared, ReadOpts::default(), user(1))).unwrap();
+    let read = link.next_read(|| pump(&server, &client));
+    let mut current = None;
+    let mut drain = |stream: &mut SubscriptionStream| {
+        while let Some(event) = stream.try_next_event() {
+            match event {
+                SubscriptionEvent::Delta {
+                    added,
+                    updated,
+                    removed,
+                    ..
+                } => {
+                    assert!(removed.is_empty(), "support must not remove the parent");
+                    for output in added.into_iter().chain(updated) {
+                        assert_eq!(output.row.row_uuid(), row(1));
+                        current = output.row.cell("comments");
+                    }
+                }
+                SubscriptionEvent::Rejected { reason, .. } => panic!("{reason}"),
+                _ => {}
+            }
+        }
+        current.clone().expect("live parent has nested content")
+    };
+    let before = drain(&mut stream);
+    assert!(matches!(&before, Value::Array(rows) if rows.len() == 1));
+    assert_eq!(
+        client.read(&support_query).unwrap().len(),
+        1,
+        "support is physically present first"
+    );
+    let root_query = client.prepare_query(&Query::from("docs")).unwrap();
+    let child_query = client.prepare_query(&Query::from("comments")).unwrap();
+    let root_before = client.read(&root_query).unwrap()[0].seq();
+    let child_before = client.read(&child_query).unwrap()[0].seq();
+    link.hold(move |m| match m {
+        SyncMessage::Settled { id, .. } => *id == read,
+        SyncMessage::ConnectionSettled { .. } => true,
+        _ => false,
+    });
+    block_on(server.delete("support", row(3), Default::default())).unwrap();
+    pump(&server, &client);
+    assert!(
+        client.read(&support_query).unwrap().is_empty(),
+        "foreign support deletion actually arrived before settle"
+    );
+    assert_eq!(
+        client.read(&root_query).unwrap()[0].seq(),
+        root_before,
+        "root did not independently move the cut"
+    );
+    assert_eq!(
+        client.read(&child_query).unwrap()[0].seq(),
+        child_before,
+        "child body did not independently move the cut"
+    );
+    let bytes = postcard::to_allocvec(&query).unwrap();
+    let local_nested = || {
+        let opts = ReadOpts {
+            tier: ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        };
+        let rows = match block_on(client.all_serialized_query(
+            &bytes,
+            opts,
+            None,
+            Some((user(1), BTreeMap::new())),
+            None,
+        ))
+        .unwrap()
+        {
+            jazz::db::SerializedReadResult::Rows(rows) => rows,
+            jazz::db::SerializedReadResult::Relation(snapshot) => snapshot.rows,
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].row_uuid(), row(1));
+        rows[0].cell("comments").unwrap()
+    };
+    assert_eq!(
+        local_nested(),
+        before,
+        "one-shot uses the old transitive support cut while settle is held"
+    );
+    assert_eq!(
+        drain(&mut stream),
+        before,
+        "live result uses that old cut too"
+    );
+    link.release();
+    pump(&server, &client);
+    assert_eq!(
+        local_nested(),
+        Value::Array(Vec::new()),
+        "one-shot observes revoked support after release"
+    );
+    assert_eq!(
+        drain(&mut stream),
+        Value::Array(Vec::new()),
+        "live result observes revoked support after release"
+    );
+}
