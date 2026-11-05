@@ -45,6 +45,11 @@ pub struct DbConfig {
     /// The node SYSTEM provenance names, when it is not this replica's own:
     /// a backend that draws a fresh node per open keeps one stable subject.
     pub system_node: Option<NodeUuid>,
+    /// The store file's pages are not all in memory: its VFS faults on a
+    /// missing page, and the engine loads it from here and runs the
+    /// operation again ([`crate::pages`]). `None` for files whose VFS
+    /// never faults.
+    pub page_source: Option<std::rc::Rc<dyn crate::pages::PageSource>>,
 }
 
 /// Schema versions and the lenses between them (see
@@ -67,7 +72,14 @@ impl DbConfig {
             clock: None,
             migrations: Migrations::default(),
             system_node: None,
+            page_source: None,
         }
+    }
+
+    /// The store's VFS pages from `source` ([`crate::pages`]).
+    pub fn with_page_source(mut self, source: std::rc::Rc<dyn crate::pages::PageSource>) -> Self {
+        self.page_source = Some(source);
+        self
     }
 
     /// Stamp SYSTEM provenance as `node` instead of this replica's node.
@@ -600,6 +612,10 @@ pub enum ErrorCode {
     /// local store is reset (`deleteClientStorage()` in jazz-tools) or the
     /// old server is back.
     AuthorityChanged,
+    /// A read needed a page the store's file has not loaded yet (see
+    /// [`crate::pages`]). The engine loads it and runs the operation again,
+    /// so this reaches a caller only from an entry point that cannot wait.
+    PageFault,
 }
 
 impl ErrorCode {
@@ -622,6 +638,7 @@ impl ErrorCode {
             ErrorCode::HistoricalReadRequiresServer => "historical_read_requires_server",
             ErrorCode::UnsupportedStorageCodecs => "unsupported_storage_codecs",
             ErrorCode::AuthorityChanged => "authority_changed",
+            ErrorCode::PageFault => "page_fault",
         }
     }
 }

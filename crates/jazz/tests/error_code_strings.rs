@@ -14,7 +14,7 @@ use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 /// Every variant, spelled out. The exhaustive `match` in `pinned` stops this
 /// file compiling when a variant is added, so a new code must be pinned here.
-const ALL: [ErrorCode; 11] = [
+const ALL: [ErrorCode; 12] = [
     ErrorCode::Schema,
     ErrorCode::Query,
     ErrorCode::WriteRejected,
@@ -26,6 +26,7 @@ const ALL: [ErrorCode; 11] = [
     ErrorCode::HistoricalReadRequiresServer,
     ErrorCode::UnsupportedStorageCodecs,
     ErrorCode::AuthorityChanged,
+    ErrorCode::PageFault,
 ];
 
 fn pinned(code: ErrorCode) -> &'static str {
@@ -41,6 +42,7 @@ fn pinned(code: ErrorCode) -> &'static str {
         ErrorCode::HistoricalReadRequiresServer => "historical_read_requires_server",
         ErrorCode::UnsupportedStorageCodecs => "unsupported_storage_codecs",
         ErrorCode::AuthorityChanged => "authority_changed",
+        ErrorCode::PageFault => "page_fault",
     }
 }
 
@@ -140,6 +142,7 @@ fn a_public_api_error_keeps_its_display_text_and_exposes_the_stable_code() {
         clock: None,
         migrations: Default::default(),
         system_node: None,
+        page_source: None,
     }))
     .expect("alice opens a database");
 

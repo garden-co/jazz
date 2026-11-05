@@ -42,6 +42,9 @@ impl CachedRow for rusqlite::Connection {
 }
 
 pub(crate) fn storage(error: rusqlite::Error) -> Error {
+    if crate::pages::is_sqlite_fault(&error) {
+        return crate::pages::fault();
+    }
     // Only the large-value collation and functions interrupt a statement,
     // when a chunk it needs is not local (see `crate::large`).
     if error.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted) {
