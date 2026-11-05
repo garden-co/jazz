@@ -318,6 +318,86 @@ it("answers a reauthenticate waiting on a transition when the watch stops", asyn
   await t.session.close();
 });
 
+/** Whether `promise` has settled yet. */
+function tracked(promise: Promise<unknown>) {
+  let done = false;
+  void promise.then(
+    () => (done = true),
+    () => (done = true),
+  );
+  return () => done;
+}
+
+it("started settles once the session follows the backend's first answer", async () => {
+  const t = await setup(undefined);
+  t.signIn(user("alice"));
+  const release = t.holdOpen();
+  const started = tracked(t.watch.started);
+  await settle();
+  // Asked, and signing alice in: not started until the session follows.
+  expect(t.probe).toHaveBeenCalledOnce();
+  expect(started()).toBe(false);
+  release();
+  await t.watch.started;
+  expect(t.session.getSnapshot().status).toBe("ready");
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("alice");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("started settles signed out when the backend names no one or can't be asked", async () => {
+  const nobody = await setup(undefined);
+  await nobody.watch.started;
+  expect(nobody.probe).toHaveBeenCalledOnce();
+  expect(nobody.session.getSnapshot().status).toBe("signed-out");
+  nobody.watch.stop();
+  await nobody.session.close();
+
+  // A failed first check settles it too: it never rejects.
+  const offline = await setup(undefined);
+  offline.signIn(user("alice"));
+  offline.probe.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+  await expect(offline.watch.started).resolves.toBeUndefined();
+  expect(offline.session.getSnapshot().status).toBe("signed-out");
+  offline.watch.stop();
+  await offline.session.close();
+});
+
+it("started settles when the watch stops or finds no backend", async () => {
+  const stopped = await setup(undefined);
+  stopped.watch.stop();
+  await stopped.watch.started;
+  await settle();
+  expect(stopped.probe).not.toHaveBeenCalled();
+  await stopped.session.close();
+
+  // A 404 on start settles it (the check failed), though the watch keeps
+  // asking until 404s persist.
+  const none = await setup(undefined, { noBackend: true });
+  await none.watch.started;
+  expect(none.session.getSnapshot().status).toBe("signed-out");
+  expect(none.hasListeners()).toBe(true);
+  await settle(60);
+  expect(none.hasListeners()).toBe(false);
+  await none.session.close();
+});
+
+it("started waits past a refused check for one that may sign someone in", async () => {
+  const t = await setup(undefined);
+  t.signIn(user("alice"));
+  // A refusal still asking when the check on start comes: it only
+  // reconnects, never signs in, so it doesn't answer who is signed in.
+  t.probe.mockImplementationOnce(
+    () => new Promise((resolve) => setTimeout(() => resolve(user("alice").identity), 5)),
+  );
+  t.watch.authRefused();
+  await t.watch.started;
+  expect(t.session.getSnapshot().status).toBe("ready");
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("alice");
+  t.watch.stop();
+  await t.session.close();
+});
+
 it("stops only once the backend keeps answering 404, asking again with backoff", async () => {
   const t = await setup(undefined, { noBackend: true });
   await settle();
