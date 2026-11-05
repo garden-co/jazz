@@ -15,7 +15,7 @@ import {
   TextInput,
   VStack,
 } from "@astryxdesign/core";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { UserPlus } from "lucide-react";
 import { useState } from "react";
 import { app } from "@/schema";
@@ -28,7 +28,6 @@ type InviteRole = "editor" | "viewer";
  * server-side. The token lives in the link's URL fragment only.
  */
 export function InviteButton({ canvasId }: { canvasId: string }) {
-  const db = useDb();
   const [open, setOpen] = useState(false);
   const [role, setRole] = useState<InviteRole>("editor");
   const [singleUse, setSingleUse] = useState(true);
@@ -36,7 +35,7 @@ export function InviteButton({ canvasId }: { canvasId: string }) {
   const [copied, setCopied] = useState(false);
   // Only admins can read invites (see permissions.ts), and only admins see
   // this button.
-  const { data: invites = [] } = useAll(
+  const { data: invites = [], db } = useAll(
     open
       ? app.canvasInvites
           .where({ canvasId })

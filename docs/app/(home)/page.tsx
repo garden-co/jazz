@@ -69,12 +69,11 @@ export default s.definePermissions(
   },
 );`;
 
-const componentCode = `import { useAll, useDb } from "jazz-tools/react";
+const componentCode = `import { useAll } from "jazz-tools/react";
 import { app } from "./schema";
 
 export function OpenTodos() {
-  const db = useDb();
-  const { data: todos = [] } = useAll(
+  const { data: todos = [], db } = useAll(
     app.todos.where({ done: false }),
   );
 

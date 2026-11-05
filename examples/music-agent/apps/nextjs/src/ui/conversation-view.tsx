@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { ChatLayout, ChatMessageList } from "@astryxdesign/core/Chat";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { app, type Conversation } from "@/schema";
@@ -19,9 +19,8 @@ export function ConversationView({
   conversation: Conversation;
   agentLabel: string;
 }) {
-  const db = useDb();
   const where = { conversationId: conversation.id };
-  const { data: turns = [] } = useAll(app.turns.where(where).select("*", "$createdAt"));
+  const { data: turns = [], db } = useAll(app.turns.where(where).select("*", "$createdAt"));
   const { data: toolCalls = [] } = useAll(app.toolCalls.where(where).orderBy("ordinal", "asc"));
   // Attachment metadata only: the audio bytes are fetched page by page by the player.
   const { data: attachments = [] } = useAll(

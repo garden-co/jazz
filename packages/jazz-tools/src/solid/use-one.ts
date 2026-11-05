@@ -1,11 +1,13 @@
 import type { Accessor } from "solid-js";
-import { limitQueryToOne, type QueryBuilder, type QueryOptions } from "../runtime/db.js";
+import { limitQueryToOne, type Db, type QueryBuilder, type QueryOptions } from "../runtime/db.js";
 import { useAll } from "./use-all.js";
 
 export type UseOneResult<T extends { id: string }> = {
   readonly data: T | null | undefined;
   readonly isLoading: boolean;
   readonly error: Error | null;
+  /** The {@link Db} handle for writes, so components don't need a separate `useDb()`. */
+  readonly db: Db;
 };
 
 export function useOne<T extends { id: string }>(
@@ -29,5 +31,6 @@ export function useOne<T extends { id: string }>(
     get error() {
       return result.error;
     },
+    db: result.db,
   };
 }

@@ -1,10 +1,9 @@
 <script lang="ts">
-  import { getDb, QuerySubscription } from "jazz-tools/svelte";
+  import { QuerySubscription } from "jazz-tools/svelte";
   import { app, TASK_STATUSES, type Show, type Task, type TaskStatus } from "../../../schema";
   import { addTask, moveTask, rankAfter, STATUS_LABELS, type Me } from "$lib/model/actions";
 
   let { show, me }: { show: Show; me: Me } = $props();
-  const db = getDb();
   const tasks = new QuerySubscription(() => app.tasks.where({ showId: show.id }));
   let title = $state("");
 
@@ -18,11 +17,11 @@
     const trimmed = title.trim();
     if (!trimmed) return;
     title = "";
-    await addTask(db, me, show.id, trimmed, "todo", rankAfter(column("todo")));
+    await addTask(tasks.db, me, show.id, trimmed, "todo", rankAfter(column("todo")));
   }
 
   function move(task: Task, status: TaskStatus) {
-    void moveTask(db, me, task, status, rankAfter(column(status)));
+    void moveTask(tasks.db, me, task, status, rankAfter(column(status)));
   }
 </script>
 

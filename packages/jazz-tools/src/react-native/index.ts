@@ -23,8 +23,8 @@ export {
   useJazzClient,
   useSession,
 } from "./provider.js";
-export { useAll, useAllSuspense, type UseAllResult } from "./use-all.js";
-export { useOne, useOneSuspense, type UseOneResult } from "./use-one.js";
+export { useAll, useAllSuspense, type UseAllResult, type UseAllSuspenseResult } from "./use-all.js";
+export { useOne, useOneSuspense, type UseOneResult, type UseOneSuspenseResult } from "./use-one.js";
 export {
   useLocalFirstAuth,
   REACT_NATIVE_AUTH_SECRET_STORE_REQUIRED_ERROR,

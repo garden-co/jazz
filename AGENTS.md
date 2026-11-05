@@ -28,6 +28,10 @@ layers, WASM + NAPI + React Native bindings.
 - **CI-equivalent.** Only
   `node dev/gates/local-ci-equivalent.mjs --ci-equivalent` may be described as
   CI-equivalent.
+- **Examples and snippets.** Take `db` from the query hook that is already in
+  the component (`const { data: todos = [], db } = useAll(...)`; `todos.db` in
+  Solid and on a Svelte `QuerySubscription`). Use `useDb()` / `getDb()` only
+  where a component has no query.
 - **Backlog.** Follow-ups go in GitHub Issues, not in specs or docs.
 - **Changesets.** Name only published packages. Rust-facing notes go under
   `jazz-tools` (the crates ship at its version); private `@jazz/rust` makes
