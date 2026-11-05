@@ -63,7 +63,8 @@ export const jazz = createJazz({
   // Also: cloudflare() (coming soon), and plain sqlite()
   // for local dev and your own servers
   store: vercel(),
-  // Your own auth: return { userId } or null
+  // Better Auth, WorkOS, many other providers or any custom auth:
+  // pass on the user ID and permission-relevant claims, or null
   authenticate: (request) => getSignedInUser(request),
 });`;
 
