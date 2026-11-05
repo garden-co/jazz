@@ -74,6 +74,8 @@ async function withFixture(
     };
     return result;
   };
+  let failed = false;
+  let firstError: unknown;
   try {
     expect(["127.0.0.1", "localhost", "[::1]"]).toContain(new URL(server.url).hostname);
     await deploy({
@@ -109,16 +111,17 @@ async function withFixture(
         return db;
       },
     });
-  } finally {
-    const closed = await Promise.allSettled(clients.map((client) => client.shutdown()));
-    try {
-      await server.stop();
-    } finally {
-      for (const saved of stores.values()) saved.clear();
-    }
-    for (const result of closed) {
-      if (result.status === "rejected") throw result.reason;
-    }
+  } catch (error) {
+    failed = true;
+    firstError = error;
+  }
+  const closed = await Promise.allSettled(clients.map(async (client) => client.shutdown()));
+  const stopped = await Promise.allSettled([Promise.resolve().then(() => server.stop())]);
+  for (const saved of stores.values()) saved.clear();
+  // Teardown must not hide the first assertion or operational error.
+  if (failed) throw firstError;
+  for (const result of [...closed, ...stopped]) {
+    if (result.status === "rejected") throw result.reason;
   }
 }
 
