@@ -1,8 +1,8 @@
-//! Server access for `jazz-tools migrate-alpha59`, which imports an alpha.59
+//! Server access for `jazz-tools alpha59-alpha60`, which imports an alpha.59
 //! server data dir. It drives the same code `deploy()` and the account
 //! routes run, without HTTP.
 //!
-//! Only for the alpha.59 importer; it goes when the importer does.
+//! Only for the alpha59-alpha60 importer; it goes when the importer does.
 #![allow(missing_docs)]
 
 use std::sync::Arc;

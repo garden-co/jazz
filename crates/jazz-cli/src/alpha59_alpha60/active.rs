@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use jazz_alpha59_dump as dump;
+use jazz_alpha59_alpha60_dump as dump;
 use serde_json::Value as Json;
 
 use super::{err, uuid_string};

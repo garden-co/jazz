@@ -23,9 +23,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use jazz::account_registry::{AccountCommand, AccountRegistry, AccountState, Principal};
-use jazz_alpha59_dump as dump;
+use jazz_alpha59_alpha60_dump as dump;
 use jazz_server::ServerState;
-use jazz_server::server::migrate_alpha59::{migrate_import_account, migrate_import_login};
+use jazz_server::server::alpha59_alpha60::{migrate_import_account, migrate_import_login};
 use serde_json::json;
 
 use super::err;

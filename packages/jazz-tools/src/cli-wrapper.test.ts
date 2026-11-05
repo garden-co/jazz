@@ -179,7 +179,11 @@ export default s.definePermissions(app, ({ policy }) => {
   it.each([
     ["server", "`jazz-tools server` was removed", "createJazz"],
     ["create", "`jazz-tools create` was removed", "npm create jazz"],
-    ["migrate-alpha59", "moved to `jazz-alpha59-import`", "github.com/garden-co/jazz/releases"],
+    [
+      "migrate-alpha59",
+      "moved to `jazz-alpha59-alpha60-import`",
+      "github.com/garden-co/jazz/releases",
+    ],
   ])("explains what replaced the removed %s command", async (command, removed, replacement) => {
     const result = await runWrapper([command, "my-app"]);
 

@@ -1,4 +1,4 @@
-//! `jazz-tools migrate-alpha59 verify`: compare a migrated data dir with the dump it was
+//! `jazz-tools alpha59-alpha60 verify`: compare a migrated data dir with the dump it was
 //! built from, through the new server's own read paths.
 //!
 //! - the bundle the one deployment published: schema and policies;
@@ -24,8 +24,8 @@ use jazz::ids::{AuthorSubject, RowUuid};
 use jazz::protocol::ReadViewSpec;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz_alpha59_dump as dump;
-use jazz_server::server::migrate_alpha59::{
+use jazz_alpha59_alpha60_dump as dump;
+use jazz_server::server::alpha59_alpha60::{
     migrate_import_active_permissions, migrate_import_login,
 };
 use jazz_server::{ServerBuilder, ServerState, StorageBackend};
