@@ -174,7 +174,9 @@ jobs:
           node dev/artifacts/rn-packages.mjs pack "${out}"
           rm -f "${out}/rn-packages.json"
           node dev/artifacts/verify-packed-napi.mjs "${out}/jazz-napi-${VERSION}.tgz"
-          tar -tf "${out}/jazz-tools-${VERSION}.tgz" | grep -q "package/dist/dev/inspector-overlay/embedded/embedded.html"
+          # Not `grep -q`: under pipefail its early exit makes tar fail with a write error.
+          tar -tf "${out}/jazz-tools-${VERSION}.tgz" > "${RUNNER_TEMP}/jazz-tools-files.txt"
+          grep -qx "package/dist/dev/inspector-overlay/embedded/embedded.html" "${RUNNER_TEMP}/jazz-tools-files.txt"
           ls -la "${out}"
 
       - name: Link the tarballs to this release
