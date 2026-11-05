@@ -4,7 +4,7 @@
 // createJazz in your server with `jazz.nodeHandler` and `jazz.attach`.
 import type { Server } from "node:http";
 import type { Plugin, PreviewServer, ViteDevServer } from "vite";
-import { createJazz, memory, sqlite } from "jazz-tools/backend";
+import { acceptLocalFirstAuth, createJazz, memory, sqlite } from "jazz-tools/backend";
 import { app } from "./src/lib/schema.js";
 import permissions from "./src/lib/permissions.js";
 
@@ -15,9 +15,11 @@ import permissions from "./src/lib/permissions.js";
  */
 export function jazzBackend(options: { dataDir?: string; appId?: string } = {}): Plugin {
   async function mount(server: ViteDevServer | PreviewServer) {
-    const jazz = await createJazz({
+    const jazz = createJazz({
       app,
       permissions,
+      // No sign-in: every browser is a guest, so let guests sync.
+      authenticate: acceptLocalFirstAuth,
       store: options.dataDir
         ? sqlite({ path: options.dataDir, appId: options.appId })
         : memory({ appId: options.appId }),

@@ -1,13 +1,15 @@
-import type { BackendAuth } from "../accounts/enrollment.js";
 import type { AccountManagerConfig } from "../accounts/create-account-manager.js";
 import type { AccountHandle } from "../accounts/state.js";
-import { createAccountManagerWithMinter } from "../accounts/account-manager-core.js";
+import {
+  clientRegistryUrl,
+  createAccountManagerWithMinter,
+} from "../accounts/account-manager-core.js";
 import {
   createRegisteredJazzClient,
   type CreateAccountDb,
   type JazzClient,
 } from "../web/registered-jazz-client.js";
-import type { JazzClientConfig } from "../web/create-jazz-client.js";
+import type { OpenJazzClientConfig } from "../web/create-jazz-client.js";
 import {
   createClient as createThinDb,
   mintLocalFirstTokenInJs,
@@ -19,22 +21,37 @@ import {
   type LocalFirstModule,
 } from "../runtime/local-first-upgrade.js";
 import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
-import { clientScope, DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
-import { accountRegistryUrl } from "../accounts/context.js";
+import { DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
 import { followUser, type UserFollowingSession } from "./follow-user.js";
 
 export type { LocalFirstLoader };
 
-export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
-  AccountManagerConfig & {
+export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl" | "appId"> &
+  Omit<AccountManagerConfig, "appId"> & {
+    /**
+     * Not for a client: the app id belongs to your backend's store
+     * (`remote({ appId })`, `sqlite({ appId })`). A client is scoped by its
+     * `serverUrl`; use `scope` to keep local-first users created under an
+     * app id.
+     */
+    appId?: never;
+    /**
+     * Your app's Jazz endpoint: by default `"/jazz"`, where `createJazz` is
+     * mounted in your own backend. `null` keeps Jazz on this device only: no
+     * server, no sign-in, one local-first account per browser profile. That
+     * needs the local-first client (`client`).
+     */
+    serverUrl?: string | null;
     /**
      * Who the app starts as before your backend names a user: signed out
      * (the default, also `"signed-out"`), or a `"local-first"` guest, an
-     * account on this device that works offline and can later link to your
-     * backend's user (`linkWithBackend`).
+     * account on this device that can later link to your backend's user
+     * (`linkWithBackend`). Your backend must accept guests
+     * (`acceptLocalFirstAuth`). A guest works offline once its client is the
+     * local-first one (`client`).
      */
-    initial?: "local-first" | "signed-out" | BackendAuth;
+    initial?: "local-first" | "signed-out";
     /**
      * When a local-first guest is on this device and the user who signs in
      * has no Jazz account yet (they just signed up, or they are an existing
@@ -70,7 +87,9 @@ export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
 export type BrowserJazzSession = UserFollowingSession<JazzClient>;
 
 /** Own one configured client and serialize its account lifecycle. */
-export async function createJazzSession(config: JazzSessionConfig): Promise<BrowserJazzSession> {
+export async function createJazzClient(config: JazzClientConfig): Promise<BrowserJazzSession> {
+  refuseClientAppId(config);
+  if (config.serverUrl === null) return createDeviceOnlySession(config);
   const serverUrl = config.serverUrl ?? DEFAULT_SERVER_URL;
   const {
     initial,
@@ -84,7 +103,7 @@ export async function createJazzSession(config: JazzSessionConfig): Promise<Brow
     { ...config, serverUrl },
     mintLocalFirstTokenInJs,
   );
-  const registry = accountRegistryUrl(serverUrl, clientScope({ ...config, serverUrl }));
+  const registry = clientRegistryUrl({ ...config, serverUrl });
   const upgrades = localFirstMemory(registry);
   let session: BrowserJazzSession | undefined;
 
@@ -157,6 +176,37 @@ export async function createJazzSession(config: JazzSessionConfig): Promise<Brow
   });
   if (loadLocalFirst) upgradeInBackground(session, loadLocalFirst);
   return session;
+}
+
+/**
+ * `serverUrl: null`: Jazz on this device only. There is no backend to name a
+ * user or to run a thin client against, so the session opens the local-first
+ * client straight away, on this browser's local-first account.
+ */
+async function createDeviceOnlySession(config: JazzClientConfig): Promise<BrowserJazzSession> {
+  const { initial, clearOnSignOut, client: loadLocalFirst, store: _store, ...rest } = config;
+  if (!loadLocalFirst) {
+    throw new Error(
+      'serverUrl: null keeps Jazz on this device, which needs the local-first client: pass client: () => import("jazz-tools/local-first")',
+    );
+  }
+  if (initial !== undefined && initial !== "local-first") {
+    throw new Error(
+      'serverUrl: null has no backend to sign in through, so it always opens this device\'s local-first account: leave out initial or set it to "local-first"',
+    );
+  }
+  const { serverUrl: _serverUrl, ...clientConfig } = rest;
+  const accounts = await createAccountManagerWithMinter(config, mintLocalFirstTokenInJs);
+  const { createClient } = await loadLocalFirst();
+  return createJazzSessionOwner({
+    accounts,
+    initial: "local-first",
+    clearOnSignOut: clearOnSignOut && (config.driver?.type ?? "persistent") === "persistent",
+    openClient: (account) =>
+      createRegisteredJazzClient("web", { ...clientConfig, account }, createClient),
+    // No backend says who is signed in: there is nothing to ask again.
+    decorate: () => ({ reauthenticate: async () => {} }),
+  });
 }
 
 /**

@@ -7,8 +7,8 @@ import { attachSubscriptionStore } from "../subscription-store-internal.js";
 import { JazzProvider, useJazzAuth } from "./app.js";
 import { useJazzClient } from "./provider.js";
 const factory = vi.hoisted(() => vi.fn());
-vi.mock("../session/create-jazz-session.js", () => ({ createJazzSession: factory }));
-vi.mock("../web/create-jazz-client.js", () => ({ createJazzClient: vi.fn() }));
+vi.mock("../session/create-jazz-session.js", () => ({ createJazzClient: factory }));
+vi.mock("../web/create-jazz-client.js", () => ({ openJazzClient: vi.fn() }));
 vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
 const flush = async () => {
   for (let i = 0; i < 40; i++) await Promise.resolve();
@@ -85,7 +85,7 @@ it("retries startup through the default UI and exposes unified auth to children"
   document.body.append(node);
   dispose = render(
     () => (
-      <JazzProvider appId="test" autoAttachDevTools={false}>
+      <JazzProvider scope="test" autoAttachDevTools={false}>
         <Child />
       </JazzProvider>
     ),
@@ -131,7 +131,7 @@ it("follows the backend on reauthenticate and releases children before shutdown"
   dispose = render(
     () => (
       <JazzProvider
-        appId="test"
+        scope="test"
         initial="signed-out"
         signedOut={<SignedOut />}
         loading={<p>WAIT</p>}

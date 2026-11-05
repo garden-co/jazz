@@ -6,3 +6,5 @@
 
 #[cfg(heap_profiling)]
 pub mod heap_profiling;
+
+pub mod migrate_alpha59;

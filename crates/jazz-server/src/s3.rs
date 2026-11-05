@@ -64,11 +64,8 @@ impl WebIdentityToken {
                 .ok()
                 .and_then(|token| token.clone())
                 .ok_or_else(|| "web identity token: none handed over yet".to_owned()),
-            Self::Workload => {
-                crate::middleware::workload::latest_workload_token().ok_or_else(|| {
-                    "web identity token: no trusted workload token arrived yet".to_owned()
-                })
-            }
+            Self::Workload => crate::middleware::workload::current_workload_token()
+                .map_err(|why| format!("web identity token: {why}")),
         }
     }
 }
@@ -211,6 +208,16 @@ const OWNER_OBJECT: &str = ".jazz-owner";
 /// whose stores may use the bucket.
 pub(crate) const ENVIRONMENT_OBJECT: &str = ".jazz-environment";
 
+/// What reading a marker object found.
+enum Marker {
+    Found(String),
+    /// 404: no such object.
+    Missing,
+    /// 403 AccessDenied: absent to keys without s3:ListBucket, or not
+    /// readable with these keys.
+    Denied,
+}
+
 /// Large-value bytes in an S3-compatible bucket ([`S3Options`]).
 pub struct S3ChunkStore {
     inner: Arc<Inner>,
@@ -228,6 +235,10 @@ struct Inner {
     /// The last claim that failed, and when: it answers every operation
     /// for a while, as a failed role assumption does.
     claim_failed: Mutex<Option<(Instant, String)>>,
+    /// The region requests are signed for: [`S3Options::region`], until
+    /// AWS answers that the bucket is in another (on Vercel `AWS_REGION`
+    /// is the function's own region, not necessarily the bucket's).
+    region: Mutex<String>,
 }
 
 #[derive(Default)]
@@ -252,8 +263,12 @@ impl S3ChunkStore {
             .enable_all()
             .build()
             .map_err(|error| format!("s3 blobs: start runtime: {error}"))?;
+        // Redirects are not followed: a cross-host one would carry the
+        // session token along, and a bucket's 301 names its region, which
+        // `send` handles itself.
         let http = reqwest::Client::builder()
             .timeout(OPERATION_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| format!("s3 blobs: http client: {error}"))?;
         let keys = KeyState {
@@ -265,6 +280,7 @@ impl S3ChunkStore {
         };
         Ok(Self {
             inner: Arc::new(Inner {
+                region: Mutex::new(options.region.clone()),
                 options,
                 http,
                 keys: tokio::sync::Mutex::new(keys),
@@ -363,6 +379,34 @@ impl ChunkStore for S3ChunkStore {
     }
 }
 
+/// A response rebuilt from its status, headers and body, once the body was
+/// read.
+fn rebuilt(
+    status: reqwest::StatusCode,
+    headers: reqwest::header::HeaderMap,
+    body: &[u8],
+) -> reqwest::Response {
+    let mut response = http::Response::new(body.to_vec());
+    *response.status_mut() = status;
+    *response.headers_mut() = headers;
+    reqwest::Response::from(response)
+}
+
+/// The region a bucket's reply names (its `x-amz-bucket-region` header, or
+/// a `<Region>` in the body), if that is a region name other than
+/// `signed_for`. It goes into host names, so anything but a plain region
+/// name (`[a-z0-9-]`, at most 32 long) is ignored.
+fn named_region(header: Option<&str>, body: &[u8], signed_for: &str) -> Option<String> {
+    let named = header
+        .map(str::to_owned)
+        .or_else(|| xml_field(&String::from_utf8_lossy(body), "Region"))?;
+    let plain = (1..=32).contains(&named.len())
+        && named
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    (plain && named != signed_for).then_some(named)
+}
+
 /// What one request to the bucket was.
 struct Request<'a> {
     method: reqwest::Method,
@@ -389,7 +433,7 @@ impl Inner {
         let base = o
             .endpoint
             .clone()
-            .unwrap_or_else(|| format!("https://s3.{}.amazonaws.com", o.region));
+            .unwrap_or_else(|| format!("https://s3.{}.amazonaws.com", self.region()));
         let base = base.trim_end_matches('/');
         let (scheme, authority) = base.split_once("://").unwrap_or(("https", base));
         let (host, path) = if o.path_style || o.bucket.contains('.') {
@@ -499,7 +543,47 @@ impl Inner {
         }
     }
 
+    /// The region requests are signed for now.
+    fn region(&self) -> String {
+        self.region.lock().expect("region").clone()
+    }
+
+    /// Send `request`. A bucket that answers it is in another region than
+    /// the one signed for (AWS does, with `x-amz-bucket-region` or a
+    /// `<Region>`) is asked again in that one, which is kept from then on.
     async fn send(&self, request: Request<'_>) -> Result<reqwest::Response, String> {
+        let signed_for = self.region();
+        let response = self.send_once(&request).await?;
+        let status = response.status();
+        if status != reqwest::StatusCode::MOVED_PERMANENTLY
+            && status != reqwest::StatusCode::BAD_REQUEST
+        {
+            return Ok(response);
+        }
+        let headers = response.headers().clone();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| format!("s3 blobs: {}", error.without_url()))?;
+        let header = headers
+            .get("x-amz-bucket-region")
+            .and_then(|value| value.to_str().ok());
+        let Some(region) = named_region(header, &body, &signed_for) else {
+            return Ok(rebuilt(status, headers, &body));
+        };
+        tracing::warn!(
+            bucket = %self.options.bucket,
+            configured = %signed_for,
+            region = %region,
+            "s3 blobs: bucket {} is in {region}, not {signed_for}; signing for {region} from now on. \
+             Set the region explicitly (s3({{ region }}) or a project AWS_REGION) to skip this",
+            self.options.bucket,
+        );
+        *self.region.lock().expect("region") = region;
+        self.send_once(&request).await
+    }
+
+    async fn send_once(&self, request: &Request<'_>) -> Result<reqwest::Response, String> {
         let (url, host, path) = self.locate(request.name, request.rooted);
         let keys = self.keys().await?;
         let payload = hex::encode(
@@ -524,7 +608,7 @@ impl Inner {
         if let Some(token) = &keys.session_token {
             headers.push(("x-amz-security-token".to_owned(), token.clone()));
         }
-        let method = request.method;
+        let method = request.method.clone();
         let authorization = sign(
             method.as_str(),
             &path,
@@ -532,15 +616,15 @@ impl Inner {
             &mut headers,
             &payload,
             &keys,
-            &self.options.region,
+            &self.region(),
         );
         let mut http = self.http.request(method, url);
         for (name, value) in headers.iter().filter(|(name, _)| name != "host") {
             http = http.header(name, value);
         }
         http = http.header("authorization", authorization);
-        if let Some(body) = request.body {
-            http = http.body(body);
+        if let Some(body) = &request.body {
+            http = http.body(body.clone());
         }
         http.send()
             .await
@@ -608,6 +692,16 @@ impl Inner {
 
     /// A small marker object's contents, or `None` if there is none.
     async fn read_marker(&self, name: &str, rooted: bool) -> Result<Option<String>, String> {
+        Ok(match self.read_marker_status(name, rooted).await? {
+            Marker::Found(contents) => Some(contents),
+            Marker::Missing | Marker::Denied => None,
+        })
+    }
+
+    /// A small marker object's contents, or which answer said it is absent:
+    /// a 404, or a 403 AccessDenied (absence to keys without s3:ListBucket,
+    /// or a key that may not read it).
+    async fn read_marker_status(&self, name: &str, rooted: bool) -> Result<Marker, String> {
         let response = self
             .send(Request {
                 method: reqwest::Method::GET,
@@ -618,11 +712,23 @@ impl Inner {
                 rooted,
             })
             .await?;
-        let Some(response) = self.found(response, "read", name).await? else {
-            return Ok(None);
-        };
-        let body = read_bounded(response, 1024, name).await?;
-        Ok(Some(String::from_utf8_lossy(&body).trim().to_owned()))
+        let status = response.status();
+        if status.is_success() {
+            let body = read_bounded(response, 1024, name).await?;
+            return Ok(Marker::Found(
+                String::from_utf8_lossy(&body).trim().to_owned(),
+            ));
+        }
+        let body = response.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Marker::Missing);
+        }
+        if status == reqwest::StatusCode::FORBIDDEN
+            && xml_field(&body, "Code").as_deref() == Some("AccessDenied")
+        {
+            return Ok(Marker::Denied);
+        }
+        Err(self.failure(status, &body, "read", name).await)
     }
 
     /// With [`S3Options::environment`] set, check that the bucket serves
@@ -633,6 +739,15 @@ impl Inner {
     async fn claim_environment(&self) -> Result<(), String> {
         let Some(environment) = &self.options.environment else {
             return Ok(());
+        };
+        let unreachable_marker = || {
+            format!(
+                "s3 blobs: cannot claim bucket {bucket} for the {environment} environment: \
+                 the credentials may not read or write s3://{bucket}/{ENVIRONMENT_OBJECT}. \
+                 Allow s3:GetObject and s3:PutObject on arn:aws:s3:::{bucket}/{ENVIRONMENT_OBJECT} \
+                 as well as on the prefix",
+                bucket = self.options.bucket,
+            )
         };
         let refused = |other: &str| {
             format!(
@@ -663,13 +778,7 @@ impl Inner {
             // reads as absent, and its put is refused.
             let body = response.text().await.unwrap_or_default();
             if xml_field(&body, "Code").as_deref() == Some("AccessDenied") {
-                return Err(format!(
-                    "s3 blobs: cannot claim bucket {bucket} for the {environment} environment: \
-                     the credentials may not read or write s3://{bucket}/{ENVIRONMENT_OBJECT}. \
-                     Allow s3:GetObject and s3:PutObject on arn:aws:s3:::{bucket}/{ENVIRONMENT_OBJECT} \
-                     as well as on the prefix",
-                    bucket = self.options.bucket,
-                ));
+                return Err(unreachable_marker());
             }
             return Err(self
                 .failure(
@@ -681,10 +790,19 @@ impl Inner {
                 .await);
         }
         if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
-            return match self.read_marker(ENVIRONMENT_OBJECT, true).await? {
-                Some(claimed) if &claimed == environment => Ok(()),
-                Some(claimed) => Err(refused(&claimed)),
-                None => Err("s3 blobs: the environment marker vanished while claiming".to_owned()),
+            return match self.read_marker_status(ENVIRONMENT_OBJECT, true).await? {
+                Marker::Found(claimed) if &claimed == environment => Ok(()),
+                Marker::Found(claimed) => Err(refused(&claimed)),
+                // Its put says it exists, and its read was denied: the keys
+                // may not read it (s3:GetObject).
+                Marker::Denied => Err(unreachable_marker()),
+                // Its put says it exists, and its read found none: deleted
+                // in between. A later claim starts over.
+                Marker::Missing => Err(format!(
+                    "s3 blobs: the environment marker s3://{}/{ENVIRONMENT_OBJECT} vanished \
+                     while claiming it for the {environment} environment",
+                    self.options.bucket
+                )),
             };
         }
         self.expect_ok(response, "claim", ENVIRONMENT_OBJECT)
@@ -737,10 +855,12 @@ impl Inner {
             .map(Some)
     }
 
-    /// A successful GET's response, or `None` if the object is absent. A
-    /// key that is missing answers 403 AccessDenied rather than 404 to keys
-    /// without s3:ListBucket; reading is allowed under the prefix (or the
-    /// owner object could not have been read), so that is absence too.
+    /// A successful GET's response, or `None` on a 404. A 403 is an error,
+    /// not absence: only nodes this store put are read, so with the store's
+    /// own keys a denied read is a permission problem (a role or bucket
+    /// policy edited, an SSE-KMS key it may not use) that a fix ends. Keys
+    /// without s3:ListBucket also answer 403 for a missing key; the error
+    /// says so.
     async fn found(
         &self,
         response: reqwest::Response,
@@ -751,12 +871,19 @@ impl Inner {
         if status.is_success() {
             return Ok(Some(response));
         }
-        let body = response.text().await.unwrap_or_default();
-        if status == reqwest::StatusCode::NOT_FOUND
-            || (status == reqwest::StatusCode::FORBIDDEN
-                && xml_field(&body, "Code").as_deref() == Some("AccessDenied"))
-        {
+        if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
+        }
+        let body = response.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::FORBIDDEN
+            && xml_field(&body, "Code").as_deref() == Some("AccessDenied")
+        {
+            return Err(format!(
+                "s3 blobs: reading s3://{}/{}{name} was denied (AccessDenied). Check that the \
+                 credentials may s3:GetObject under the prefix, and kms:Decrypt for an SSE-KMS \
+                 bucket; without s3:ListBucket S3 also answers so for a missing object",
+                self.options.bucket, self.options.prefix
+            ));
         }
         Err(self.failure(status, &body, what, name).await)
     }
@@ -1123,6 +1250,110 @@ mod tests {
         assert_eq!(block(again.get(&key)).unwrap().as_deref(), Some(&bytes[..]));
     }
 
+    /// A bucket in another region than the store was given (on Vercel,
+    /// `AWS_REGION` is the function's region) answers naming its own: the
+    /// store signs for that one from then on.
+    #[test]
+    fn a_bucket_in_another_region_is_signed_for_its_own() {
+        let bucket = mock::MockS3::start();
+        *bucket.state.bucket_region.lock().unwrap() = Some("eu-west-1".to_owned());
+        let options = bucket.options("app/");
+        assert_eq!(options.region, "auto");
+        let store = S3ChunkStore::new(options, "me".to_owned()).unwrap();
+        let (key, bytes) = node(9);
+        block(store.put(&key, &bytes)).unwrap();
+        assert_eq!(block(store.get(&key)).unwrap().as_deref(), Some(&bytes[..]));
+        assert_eq!(store.inner.region(), "eu-west-1");
+    }
+
+    /// The same, when the bucket answers 301 with `x-amz-bucket-region`
+    /// and no body.
+    #[test]
+    fn a_bucket_naming_its_region_in_a_header_is_signed_for_its_own() {
+        let bucket = mock::MockS3::start();
+        *bucket.state.bucket_region.lock().unwrap() = Some("ap-south-1".to_owned());
+        bucket
+            .state
+            .region_by_header
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let store = S3ChunkStore::new(bucket.options("app/"), "me".to_owned()).unwrap();
+        let (key, bytes) = node(10);
+        block(store.put(&key, &bytes)).unwrap();
+        assert_eq!(block(store.get(&key)).unwrap().as_deref(), Some(&bytes[..]));
+        assert_eq!(store.inner.region(), "ap-south-1");
+    }
+
+    /// A reply naming something other than a plain region name is passed
+    /// on as it came, and the region kept is unchanged: it would go into
+    /// the host name. Its headers come along.
+    #[test]
+    fn a_reply_naming_no_plain_region_is_passed_on() {
+        assert_eq!(
+            named_region(Some("eu-west-1"), b"", "auto").as_deref(),
+            Some("eu-west-1")
+        );
+        assert_eq!(
+            named_region(None, b"<Error><Region>us-west-2</Region></Error>", "auto").as_deref(),
+            Some("us-west-2")
+        );
+        assert_eq!(named_region(Some("auto"), b"", "auto"), None, "the same");
+        for junk in [
+            "",
+            "evil.example.com/x",
+            "EU-WEST-1",
+            "a b",
+            &"a".repeat(33),
+        ] {
+            assert_eq!(named_region(Some(junk), b"", "auto"), None, "{junk:?}");
+            let body = format!("<Error><Region>{junk}</Region></Error>");
+            assert_eq!(
+                named_region(None, body.as_bytes(), "auto"),
+                None,
+                "{junk:?}"
+            );
+        }
+
+        let bucket = mock::MockS3::start();
+        *bucket.state.bucket_region.lock().unwrap() = Some("evil.example.com/x".to_owned());
+        bucket
+            .state
+            .region_by_header
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let store = S3ChunkStore::new(bucket.options("app/"), "me".to_owned()).unwrap();
+        let (key, bytes) = node(11);
+        let error = block(store.put(&key, &bytes)).unwrap_err();
+        assert!(error.message.contains("301"), "{error}");
+        assert_eq!(store.inner.region(), "auto");
+    }
+
+    /// With no endpoint, the host is built from the region kept, so a
+    /// bucket found in another region is addressed there.
+    #[test]
+    fn the_aws_host_follows_the_region_kept() {
+        let options = S3Options {
+            bucket: "jazz-app".to_owned(),
+            region: "us-east-1".to_owned(),
+            path_style: false,
+            endpoint: None,
+            prefix: "blobs/".to_owned(),
+            credentials: S3Credentials::Static(Keys {
+                access_key_id: String::new(),
+                secret_access_key: String::new(),
+                session_token: None,
+            }),
+            sts_endpoint: None,
+            environment: None,
+        };
+        let store = S3ChunkStore::new(options, "me".to_owned()).unwrap();
+        *store.inner.region.lock().unwrap() = "eu-central-1".to_owned();
+        let (url, host, _) = store.inner.locate("x", false);
+        assert_eq!(host, "jazz-app.s3.eu-central-1.amazonaws.com");
+        assert!(
+            url.starts_with("https://jazz-app.s3.eu-central-1.amazonaws.com/"),
+            "{url}"
+        );
+    }
+
     /// A bucket serves one environment: the first store with an
     /// environment claims it at the bucket's root (create-if-absent), and
     /// a store of another environment is refused under any prefix.
@@ -1186,18 +1417,71 @@ mod tests {
         assert!(bucket.names("prod/").is_empty());
     }
 
-    /// Without s3:ListBucket a missing key answers 403: it reads as absent.
-    /// A body larger than any node is refused.
+    /// Keys that may put the root marker but not read it see an existing
+    /// marker as absent and their create-if-absent refused: the claim says
+    /// which permission is missing, not that the marker vanished.
     #[test]
-    fn reads_of_missing_or_oversized_objects() {
+    fn a_marker_that_cannot_be_read_names_the_missing_permission() {
+        let bucket = mock::MockS3::start();
+        let in_env = |prefix: &str| {
+            let mut options = bucket.options(prefix);
+            options.environment = Some("production".to_owned());
+            options
+        };
+        let (key, bytes) = node(7);
+        let first = S3ChunkStore::new(in_env("a/"), "store-a".to_owned()).unwrap();
+        block(first.put(&key, &bytes)).unwrap();
+        *bucket.state.only_prefix_reads.lock().unwrap() = Some("b/".to_owned());
+        let second = S3ChunkStore::new(in_env("b/"), "store-b".to_owned()).unwrap();
+        let error = block(second.put(&key, &bytes)).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("s3:GetObject and s3:PutObject on arn:aws:s3:::bucket/.jazz-environment"),
+            "{error}"
+        );
+        assert!(bucket.names("b/").is_empty());
+    }
+
+    /// A marker created by someone else and deleted before our read: the
+    /// claim says it vanished, not that a permission is missing.
+    #[test]
+    fn a_marker_deleted_while_claiming_says_it_vanished() {
+        let bucket = mock::MockS3::start();
+        let mut options = bucket.options("a/");
+        options.environment = Some("production".to_owned());
+        *bucket.state.conflict_then_vanish.lock().unwrap() =
+            Some("bucket/.jazz-environment".to_owned());
+        let store = S3ChunkStore::new(options, "store-a".to_owned()).unwrap();
+        let (key, bytes) = node(8);
+        let error = block(store.put(&key, &bytes)).unwrap_err();
+        assert!(error.message.contains("vanished"), "{error}");
+        assert!(!error.message.contains("s3:GetObject"), "{error}");
+        assert!(bucket.names("a/").is_empty());
+    }
+
+    /// A 404 is absence. A 403 is an error, not absence, whether the keys
+    /// lack s3:ListBucket or the permission went away: once it is back,
+    /// the same store reads again. A body larger than any node is refused.
+    #[test]
+    fn reads_of_missing_denied_or_oversized_objects() {
         let bucket = mock::MockS3::start();
         let store = S3ChunkStore::new(bucket.options("app/"), "me".to_owned()).unwrap();
+        let (key, bytes) = node(4);
+        assert_eq!(block(store.get(&key)).unwrap(), None);
         bucket
             .state
             .deny_missing
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let (key, _) = node(4);
-        assert_eq!(block(store.get(&key)).unwrap(), None);
+        let error = block(store.get(&key)).unwrap_err();
+        assert!(error.message.contains("AccessDenied"), "{error}");
+        assert!(error.message.contains("s3:ListBucket"), "{error}");
+        block(store.put(&key, &bytes)).unwrap();
+        *bucket.state.only_prefix_reads.lock().unwrap() = Some("elsewhere/".to_owned());
+        let error = block(store.get(&key)).unwrap_err();
+        assert!(error.message.contains("s3:GetObject"), "{error}");
+        *bucket.state.only_prefix_reads.lock().unwrap() = None;
+        assert_eq!(block(store.get(&key)).unwrap().as_deref(), Some(&bytes[..]));
         let (big, _) = node(5);
         bucket.state.objects.lock().unwrap().insert(
             format!("bucket/app/{}", big.object_name()),
@@ -1293,6 +1577,18 @@ pub(crate) mod mock {
         /// Set: the keys may only touch objects under this prefix (an IAM
         /// policy on `bucket/prefix/*`); anything else answers 403.
         pub only_prefix: Mutex<Option<String>>,
+        /// Set: the bucket's region; a request signed for another is
+        /// refused naming it, as AWS refuses one.
+        pub bucket_region: Mutex<Option<String>>,
+        /// Name `bucket_region` the way a 301 does (`x-amz-bucket-region`,
+        /// no body), not as a 400's `<Region>`.
+        pub region_by_header: AtomicBool,
+        /// Set: reads (GET) only under this prefix; puts anywhere.
+        pub only_prefix_reads: Mutex<Option<String>>,
+        /// Set: a create-if-absent put of this key answers 412 while the key
+        /// stays absent, as when another writer created it and it was
+        /// deleted before our read.
+        pub conflict_then_vanish: Mutex<Option<String>>,
         /// Keys by access key id; `test`/`test` is always valid.
         issued: Mutex<BTreeMap<String, (String, String)>>,
         /// What STS was last asked to accept.
@@ -1317,7 +1613,13 @@ pub(crate) mod mock {
             let served = Arc::clone(&state);
             let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
                 let state = Arc::clone(&served);
-                async move { serve(&state, request).await }
+                async move {
+                    use axum::response::IntoResponse as _;
+                    match moved(&state, &request) {
+                        Some(moved) => moved,
+                        None => serve(&state, request).await.into_response(),
+                    }
+                }
             });
             runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
             Self {
@@ -1369,6 +1671,30 @@ pub(crate) mod mock {
         )
     }
 
+    /// The 301 a bucket in `bucket_region` answers a request signed for
+    /// another region with, when `region_by_header` is set.
+    fn moved(state: &State, request: &axum::extract::Request) -> Option<axum::response::Response> {
+        use axum::response::IntoResponse as _;
+        if !state.region_by_header.load(Ordering::Relaxed) {
+            return None;
+        }
+        let region = state.bucket_region.lock().unwrap().clone()?;
+        let signed_for = request
+            .headers()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split("Credential=").nth(1))
+            .and_then(|credential| credential.split('/').nth(2))
+            .unwrap_or_default();
+        (signed_for != region).then(|| {
+            (
+                axum::http::StatusCode::MOVED_PERMANENTLY,
+                [("x-amz-bucket-region", region)],
+            )
+                .into_response()
+        })
+    }
+
     async fn serve(state: &State, request: axum::extract::Request) -> Reply {
         use axum::http::StatusCode;
         let (parts, body) = request.into_parts();
@@ -1380,11 +1706,38 @@ pub(crate) mod mock {
         if parts.uri.path() == "/sts" {
             return sts(state, &parts, &body);
         }
+        if let Some(region) = state.bucket_region.lock().unwrap().clone() {
+            let signed_for = parts
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split("Credential=").nth(1))
+                .and_then(|credential| credential.split('/').nth(2))
+                .unwrap_or_default()
+                .to_owned();
+            if signed_for != region {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "<Error><Code>AuthorizationHeaderMalformed</Code><Message>the region \
+                         '{signed_for}' is wrong; expecting '{region}'</Message>\
+                         <Region>{region}</Region></Error>"
+                    )
+                    .into_bytes(),
+                );
+            }
+        }
         if let Err(code) = verify(state, &parts) {
             return error(StatusCode::FORBIDDEN, code);
         }
         let key = parts.uri.path().trim_start_matches('/').to_owned();
         if let Some(prefix) = state.only_prefix.lock().unwrap().as_deref()
+            && !key.starts_with(&format!("bucket/{prefix}"))
+        {
+            return error(StatusCode::FORBIDDEN, "AccessDenied");
+        }
+        if parts.method == axum::http::Method::GET
+            && let Some(prefix) = state.only_prefix_reads.lock().unwrap().as_deref()
             && !key.starts_with(&format!("bucket/{prefix}"))
         {
             return error(StatusCode::FORBIDDEN, "AccessDenied");
@@ -1403,6 +1756,11 @@ pub(crate) mod mock {
                     base64::engine::general_purpose::STANDARD.encode(Sha256::digest(&body));
                 if header("x-amz-checksum-sha256") != Some(digest.as_str()) {
                     return error(StatusCode::BAD_REQUEST, "BadDigest");
+                }
+                if header("if-none-match") == Some("*")
+                    && state.conflict_then_vanish.lock().unwrap().as_deref() == Some(key.as_str())
+                {
+                    return error(StatusCode::PRECONDITION_FAILED, "PreconditionFailed");
                 }
                 if header("if-none-match") == Some("*") && objects.contains_key(&key) {
                     return error(StatusCode::PRECONDITION_FAILED, "PreconditionFailed");

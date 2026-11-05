@@ -1,10 +1,11 @@
 # jazz-rn
 
 This directory is the native relay package for Jazz's supported React Native
-alpha. Applications use the public `jazz-tools/react-native` client API: prepare
-an `AccountHandle`, then open and own a `createJazzClient` instance. The
+alpha. Applications use the public `jazz-tools/react-native` client API: open
+a client with `createJazzClient` (or `<JazzSessionProvider>` from
+`jazz-tools/expo`), which keeps an `AccountHandle` for its user. The
 [canonical Expo scaffold](../../examples/todo-client-localfirst-expo) shows the
-complete account-handle and client lifecycle.
+complete client lifecycle.
 
 The alpha requires a matching native development or release build. Expo Go
 cannot contain this native module.
@@ -99,10 +100,9 @@ it cannot contain the relay module.
 Expo Go is not supported. For a bare Android host set `newArchEnabled=true`;
 for iOS install pods with `RCT_NEW_ARCH_ENABLED=1 bundle exec pod install`.
 Use the `rn-preview-release` pull-request label when a preview must run the
-expensive native artifact and device workflows. Then prepare an account through
-`jazz-tools/expo` (or an OS-protected `AccountStore` in a bare host) and pass
-the resulting `AccountHandle` to `createJazzClient` from
-`jazz-tools/react-native`.
+expensive native artifact and device workflows. Then open a client with
+`createJazzClient` from `jazz-tools/react-native` (in a bare host, pass an
+OS-protected `AccountStore`) or `jazz-tools/expo`.
 
 Bare React Native uses the same direct dependency and autolinking metadata, but
 has no Expo plugin: enable the New Architecture in the host project before

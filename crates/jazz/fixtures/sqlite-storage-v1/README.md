@@ -12,9 +12,9 @@ pending uploads moved from one encoded message to a row per op, and
 watermarks became per-sequencer rows).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `4ed6e440fe4f74dbc745011475e0892f5d3543a73ffdde8bcc68f86336ed4bbf`.
+  the SQLite file `d47da977328c19bdead4d6eefa5c706f234ded153b2095cc2a26a3b736e54232`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `9c819e575adcf9cd04d31f49ac6c9f68aebadc23d6d451488cd794c602259273`.
+  `544e4b09a34b75703140aa4b301aa3b50eaeb2be8c9857740518542564c5e4a1`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -60,9 +60,7 @@ way.
 Keeping the deploy catalogue as typed rows (`_jazz_versions` numbering the
 admitted versions, `_jazz_names` keyed by that number, `_jazz_stored_columns`,
 and `_jazz_schemas`, `_jazz_lenses` and `_jazz_permissions`) regenerated it
-the same way. A development store with the earlier layout (`_jazz_names`
-keyed by version id) is refused at open with "delete the local store and
-resync".
+the same way.
 
 Moving a commit's bases, access proofs (formerly sources) and deltas onto its
 ops, so each pending op is stored with them and `_jazz_pending_items` keeps
@@ -142,3 +140,13 @@ Resuming reads from where they settled regenerated it the same way:
 `_jazz_watermarks` is `(key, through, context)`, where `context` is the
 digest of the permissions bundle and claims the result was read under
 (`NULL` for a session with neither, as every session here is).
+
+Storing pending uploads as rows shaped like the rows they write, instead of
+encoded sync messages (`_jazz_pending` with named columns, one
+`_jazz_pending_ops` row per op, one `_jazz_pending_cells` row per written
+cell with its kind and a native SQLite value, `_jazz_pending_deltas`,
+`_jazz_pending_reads` and `_jazz_pending_read_rows`; the retry store's
+`_jazz_rejected_ops`, `_jazz_rejected_cells` and `_jazz_rejected_deltas`
+in the same layout), regenerated it the same way and re-pinned the browser
+corpus, whose store an open now gives the `_jazz_pending*` tables (the
+retry store's tables appear with the first refused commit).

@@ -8,7 +8,15 @@ import express, { Request, Response, NextFunction } from "express";
 import type { Application } from "express";
 import type { Server } from "node:http";
 import { join } from "node:path";
-import { createJazzSession, type Db } from "jazz-tools/backend";
+import {
+  createJazz,
+  fromJWT,
+  memory,
+  remote,
+  sqlite,
+  type Db,
+  type JazzStore,
+} from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 // ============================================================================
@@ -38,7 +46,6 @@ export interface TodoServer {
   app: Application;
   db: Db;
   shutdown: () => Promise<void>;
-  flush: () => void;
 }
 
 export interface RunningServer extends TodoServer {
@@ -48,20 +55,26 @@ export interface RunningServer extends TodoServer {
 }
 
 export interface TodoServerOptions {
-  /** URL of the external issuer's JWKS endpoint for HTTP request authentication. */
-  jwksUrl?: string;
-  /** The deployed Jazz app used to admit external identities. */
-  appId?: string;
-  /** Upstream Jazz server that owns the account registry. */
-  serverUrl?: string;
-  /** Server-only credential for durable backend writes. */
-  backendSecret?: string;
-  adminSecret?: string;
   /**
-   * The published bundle (schema and permissions) this backend's users are
-   * checked by, as `deploy()` returns it. Defaults to `JAZZ_BUNDLE`.
+   * The JWKS endpoint of the identity provider whose JWTs this API accepts.
+   * Defaults to `JAZZ_JWKS_URL`.
    */
-  bundle?: string;
+  jwksUrl?: string;
+  /** The `iss` of the JWTs this API accepts. Defaults to `JAZZ_JWT_ISSUER`. */
+  jwtIssuer?: string;
+  /**
+   * The `aud` that names this API. Defaults to `JAZZ_JWT_AUDIENCE`; without
+   * one, the issuer must be this API's alone.
+   */
+  jwtAudience?: string;
+  /**
+   * A Jazz core elsewhere (Jazz Cloud, or a sync server you run) to keep the
+   * data in, instead of `storage`. Defaults to `JAZZ_SERVER_URL`; needs
+   * `appId` and `adminSecret` too.
+   */
+  serverUrl?: string;
+  appId?: string;
+  adminSecret?: string;
 }
 interface ServerLifecycle {
   draining: boolean;
@@ -77,6 +90,17 @@ export type TodoServerStorage = { type: "persistent"; dataPath: string } | { typ
 // Helpers
 // ============================================================================
 
+/** The parts of an Express request `authenticate` reads, as a fetch Request. */
+function toRequest(req: Request): globalThis.Request {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(req.headers)) {
+    for (const item of [value ?? []].flat()) headers.append(name, item);
+  }
+  return new globalThis.Request(`http://${req.headers.host ?? "localhost"}${req.originalUrl}`, {
+    headers,
+  });
+}
+
 /**
  * Create a todo server.
  *
@@ -87,50 +111,40 @@ export async function createServer(
   storage: TodoServerStorage,
   options: TodoServerOptions = {},
 ): Promise<TodoServer> {
-  const appId = options.appId ?? process.env.JAZZ_APP_ID ?? "019d4349-244c-74d4-8573-8e1b24cf21e2";
   const serverUrl = options.serverUrl ?? process.env.JAZZ_SERVER_URL;
-  const backendSecret = options.backendSecret ?? process.env.JAZZ_BACKEND_SECRET;
-  const bundle = options.bundle ?? process.env.JAZZ_BUNDLE;
-  const driver =
-    storage.type === "persistent"
-      ? { type: "persistent" as const, dataPath: storage.dataPath }
-      : { type: "memory" as const };
+  const jwksUrl = options.jwksUrl ?? process.env.JAZZ_JWKS_URL;
+  const jwtIssuer = options.jwtIssuer ?? process.env.JAZZ_JWT_ISSUER;
+  const jwtAudience = options.jwtAudience ?? process.env.JAZZ_JWT_AUDIENCE;
 
   if (storage.type === "persistent" && storage.dataPath.trim() === "") {
     throw new Error("Persistent storage requires a non-empty dataPath");
   }
-
-  if (!serverUrl || !backendSecret) {
-    throw new Error("JAZZ_SERVER_URL and JAZZ_BACKEND_SECRET are required");
-  }
-  if (!bundle) {
-    // Users act through a link pinned to the bundle this app deployed; an
-    // unpinned link cannot act for them.
-    throw new Error("JAZZ_BUNDLE is required: pass the bundle id that `deploy` returned");
+  if (!jwksUrl || !jwtIssuer) {
+    throw new Error(
+      "JAZZ_JWKS_URL and JAZZ_JWT_ISSUER are required: the API accepts that issuer's JWTs",
+    );
   }
 
-  const session = await createJazzSession({
-    appId,
-    app: schemaApp,
-    permissions,
-    driver,
-    serverUrl,
-    initial: { backendSecret },
-    bundle,
-    env: "dev",
-    jwksUrl: options.jwksUrl ?? process.env.JAZZ_JWKS_URL,
-    jwtPublicKey: process.env.JAZZ_JWT_PUBLIC_KEY,
-    // This demo uses local-first tokens, including when NODE_ENV is production.
-    allowLocalFirstAuth: true,
-  });
+  let store: JazzStore;
+  if (serverUrl) {
+    const appId = options.appId ?? process.env.JAZZ_APP_ID;
+    const secret = options.adminSecret ?? process.env.JAZZ_ADMIN_SECRET;
+    if (!appId || !secret) {
+      throw new Error("JAZZ_SERVER_URL needs JAZZ_APP_ID and JAZZ_ADMIN_SECRET");
+    }
+    store = remote({ url: serverUrl, appId, secret });
+  } else {
+    store = storage.type === "persistent" ? sqlite({ path: storage.dataPath }) : memory();
+  }
+
+  // Who a request is, this API decides: here, the subject of a JWT that
+  // the identity provider signed. Jazz gives each subject its own account.
+  const authenticate = fromJWT({ jwksUrl, issuer: jwtIssuer, audience: jwtAudience ?? false });
+
+  const jazz = createJazz({ app: schemaApp, permissions, store, authenticate });
   // Preserve the programmatic administrative handle for embedding and tests.
   // Network routes below exclusively use request-scoped databases.
-  const snapshot = session.getSnapshot();
-  if (snapshot.status !== "ready" || !snapshot.client) {
-    throw snapshot.error ?? new Error("Backend session is not ready");
-  }
-  const client = snapshot.client;
-  const db = client.db;
+  const db = jazz.db;
 
   const app = express();
 
@@ -195,36 +209,35 @@ export async function createServer(
     res.status(503).json({ error: "Server is shutting down" });
   });
 
-  // Sign in: the first call with a verified identity provisions its Jazz
-  // account for this app. The todo routes below only log existing accounts in.
-  app.post("/sign-in", async (req: Request, res: Response) => {
+  // Sign in: returns the caller's Jazz account, which Jazz creates the first
+  // time it sees a verified identity.
+  app.post("/sign-in", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const db = await client.forRequest(req, { account: "login-or-register" });
-      const session = db.getAuthState().session;
-      if (!session) {
+      const account = await jazz.accountFor(toRequest(req));
+      if (!account) {
         res.status(401).json({ error: "Unauthorized" });
         return;
       }
-      res.json({ account: session.user.account });
-    } catch {
-      res.status(401).json({ error: "Unauthorized" });
+      res.json({ account });
+    } catch (e) {
+      next(e);
     }
   });
 
   // Authenticate every todo request before selecting a session-scoped database.
   app.use("/todos", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const db = await client.forRequest(req);
-      const session = db.getAuthState().session;
-      if (!session) {
+      const request = toRequest(req);
+      const account = await jazz.accountFor(request);
+      if (!account) {
         res.status(401).json({ error: "Unauthorized" });
         return;
       }
-      res.locals.requestDb = db;
-      res.locals.userId = session.user.account;
+      res.locals.requestDb = await jazz.forRequest(request);
+      res.locals.userId = account;
       next();
-    } catch {
-      res.status(401).json({ error: "Unauthorized" });
+    } catch (e) {
+      next(e);
     }
   });
   app.use(express.json());
@@ -255,7 +268,7 @@ export async function createServer(
         description: body.description?.trim(),
         owner_id: res.locals.userId as string,
       });
-      await inserted.wait({ tier: "local" });
+      await inserted.wait({ tier: "global" });
       await broadcastTodos();
 
       res.status(201).json(inserted.value);
@@ -333,7 +346,7 @@ export async function createServer(
       };
 
       if (Object.values(updates).some((value) => value !== undefined)) {
-        await db.update(schemaApp.todos, id, updates).wait({ tier: "local" });
+        await db.update(schemaApp.todos, id, updates).wait({ tier: "global" });
         await broadcastTodos();
       }
 
@@ -359,7 +372,7 @@ export async function createServer(
         return;
       }
 
-      await db.delete(schemaApp.todos, id).wait({ tier: "local" });
+      await db.delete(schemaApp.todos, id).wait({ tier: "global" });
       await broadcastTodos();
       res.status(204).send();
     } catch (e) {
@@ -377,18 +390,11 @@ export async function createServer(
 
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = async () => {
-    shutdownPromise ??= session.close();
+    shutdownPromise ??= jazz.close();
     await shutdownPromise;
   };
 
-  return {
-    app,
-    db,
-    shutdown,
-    flush: () => {
-      client.flush();
-    },
-  };
+  return { app, db, shutdown };
 }
 
 /**

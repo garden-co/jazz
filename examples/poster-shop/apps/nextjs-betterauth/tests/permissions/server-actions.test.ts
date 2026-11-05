@@ -1,47 +1,23 @@
 import type { Db } from "jazz-tools";
-import { createJazzSession, type JazzClient } from "jazz-tools/backend";
-import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
+import { createJazz, memory, type Jazz } from "jazz-tools/backend";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
 import { ensurePersonalCanvas, seedPersonalCanvas } from "../../src/lib/bootstrap.js";
 import { redeemInvite } from "../../src/lib/join.js";
 
-// The server actions run against a real local Jazz server with backend
-// authority, exactly as the API routes run them.
-let server: LocalJazzServerHandle;
-let session: Awaited<ReturnType<typeof createJazzSession>>;
+// The server actions run against the app's own Jazz with backend authority,
+// exactly as the API routes run them.
+let jazz: Jazz;
 let db: Db;
 
 beforeAll(async () => {
-  const backendSecret = "poster-shop-test-backend-secret";
-  const adminSecret = "poster-shop-test-admin-secret";
-  server = await startLocalJazzServer({ backendSecret, adminSecret });
-  await deploy({
-    appId: server.appId,
-    serverUrl: server.url,
-    adminSecret,
-    schema: app,
-    permissions,
-  });
-  session = await createJazzSession({
-    app,
-    permissions,
-    appId: server.appId,
-    driver: { type: "memory" },
-    serverUrl: server.url,
-    initial: { backendSecret },
-    env: "test",
-  });
-  const snapshot = session.getSnapshot();
-  if (snapshot.status !== "ready" || !snapshot.client)
-    throw snapshot.error ?? new Error("not ready");
-  db = (snapshot.client as JazzClient).db;
+  jazz = createJazz({ app, permissions, store: memory() });
+  db = jazz.db;
 }, 120_000);
 
 afterAll(async () => {
-  await session?.close();
-  await server?.stop();
+  await jazz?.close();
 });
 
 const membershipsOf = (memberAuthor: string) =>

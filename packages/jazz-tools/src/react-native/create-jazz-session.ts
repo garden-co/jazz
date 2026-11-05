@@ -1,25 +1,32 @@
-import type { BackendAuth } from "../accounts/enrollment.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { followUser, type UserFollowingSession } from "../session/follow-user.js";
 import { nativeBackendWatchEvents } from "../session/native-backend-watch.js";
-import { accountRegistryUrl } from "../accounts/context.js";
-import { clientScope } from "../runtime/client-scope.js";
+import { clientRegistryUrl } from "../accounts/account-manager-core.js";
 import { createAccountManager, type AccountManagerConfig } from "./create-account-manager.js";
 import {
-  createJazzClient,
+  openJazzClient,
   type JazzClient,
-  type JazzClientConfig,
+  type OpenJazzClientConfig,
 } from "../react-native/create-jazz-client.js";
+import { refuseClientAppId } from "../runtime/client-scope.js";
 
-export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
-  AccountManagerConfig & {
+export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl" | "appId"> &
+  Omit<AccountManagerConfig, "appId"> & {
+    /**
+     * Not for a client: the app id belongs to your backend's store
+     * (`remote({ appId })`, `sqlite({ appId })`). A client is scoped by its
+     * `serverUrl`; use `scope` to keep local-first users created under an
+     * app id.
+     */
+    appId?: never;
     /**
      * Who the app starts as before your backend names a user: signed out
      * (the default, also `"signed-out"`), or a `"local-first"` guest, an
-     * account on this device that works offline and can later link to your
-     * backend's user (`linkWithBackend`).
+     * account on this device that can later link to your backend's user
+     * (`linkWithBackend`). Your backend must accept guests
+     * (`acceptLocalFirstAuth`).
      */
-    initial?: "local-first" | "signed-out" | BackendAuth;
+    initial?: "local-first" | "signed-out";
     /**
      * When a local-first guest is on this device and the user who signs in
      * has no Jazz account yet (they just signed up, or they are an existing
@@ -35,16 +42,33 @@ export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
   };
 
 /** Prepare the host account store once and own client replacement across authentication. */
-export async function createJazzSession(
-  config: JazzSessionConfig,
+export async function createJazzClient(
+  config: JazzClientConfig,
 ): Promise<UserFollowingSession<JazzClient>> {
+  refuseClientAppId(config);
+  const { serverUrl } = config;
+  // Jazz on this device only: no backend names a user, so the session opens
+  // this device's local-first account and never asks one.
+  if (serverUrl === null && config.initial !== undefined && config.initial !== "local-first") {
+    throw new Error(
+      'serverUrl: null has no backend to sign in through, so it always opens this device\'s local-first account: leave out initial or set it to "local-first"',
+    );
+  }
   const accounts = await createAccountManager(config);
+  if (serverUrl === null) {
+    return createJazzSessionOwner({
+      accounts,
+      initial: "local-first",
+      openClient: (account) => openJazzClient({ ...config, serverUrl: undefined, account }),
+      decorate: () => ({ reauthenticate: async () => {} }),
+    });
+  }
   return createJazzSessionOwner({
     accounts,
     initial: config.initial,
-    openClient: (account) => createJazzClient({ ...config, account }),
+    openClient: (account) => openJazzClient({ ...config, serverUrl, account }),
     decorate: followUser({
-      registry: accountRegistryUrl(config.serverUrl, clientScope(config)),
+      registry: clientRegistryUrl(config),
       events: nativeBackendWatchEvents,
       linkGuest: config.linkGuestOnSignUp,
     }),

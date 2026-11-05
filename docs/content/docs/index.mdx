@@ -59,7 +59,7 @@ You can also query and write to the database right from your frontend. It is pro
 import { createDb } from "jazz-tools/thin";
 import { app } from "./schema";
 
-const db = createDb({ appId, serverUrl: "/jazz", account });
+const db = createDb({ serverUrl: "/jazz", account });
 
 // Live query: updates as soon as the server (or anyone else) changes a todo
 db.subscribe(app.todos.where({ done: false }), (todos) => {
@@ -112,7 +112,7 @@ export function Todos() {
 - **A backend with live data.** Your API or server components read and write through Jazz instead of an ORM, with permissions checked per user and live queries pushed to the browser. Path: [Quickstart](/docs/setup/run-locally) → [User-scoped backend](/docs/setup/backend/user-scoped) → [Policies](/docs/schemas/policies) → [Thin client](/docs/setup/web-client/thin-client).
 - **A collaborative app.** Shared lists, boards or documents that several people edit at once, with mergeable text and edit history. Path: [Mergeable text](/docs/writing/text) → [Shared access](/docs/recipes/access-control/shared-access) → [Edit metadata](/docs/reading/metadata).
 - **An app that works offline.** Field tools, note-taking or mobile apps that keep working without a connection. Path: start thin, then [go local-first](/docs/recipes/local-first) on the screens that need it, or use the [React Native client](/docs/setup/react-native).
-- **Agents and automations.** Background jobs and AI agents that read and write the same data as your users, attributed and permission-checked. Path: [Trusted backend](/docs/setup/backend/trusted) → [Sessions](/docs/setup/auth/sessions) → [CLI & MCP](/docs/tooling/cli-and-mcp).
+- **Agents and automations.** Background jobs and AI agents that read and write the same data as your users, attributed and permission-checked. Path: [Backend](/docs/setup/backend#trusted-backend-use) → [Sessions](/docs/setup/auth/sessions) → [CLI & MCP](/docs/tooling/cli-and-mcp).
 - **Drafts and review flows.** Edit a copy, compare it with the original, merge it back. Path: [Drafts & branches](/docs/recipes/drafts-and-branches).
 
 ## Recipes

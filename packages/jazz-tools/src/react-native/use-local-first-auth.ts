@@ -2,10 +2,7 @@ import { useLocalFirstAuthWithStore } from "../react-core/use-local-first-auth.j
 import type { BrowserAuthSecretStoreOptions } from "../runtime/auth-secret-store.js";
 import type { AuthSecretStore } from "../runtime/auth-secret-store.js";
 
-export type UseLocalFirstAuthOptions = Pick<
-  BrowserAuthSecretStoreOptions,
-  "key" | "appId" | "profile"
-> & {
+export type UseLocalFirstAuthOptions = Pick<BrowserAuthSecretStoreOptions, "key" | "profile"> & {
   /** Native secure-store adapter; required because React Native has no localStorage. */
   store: AuthSecretStore;
 };

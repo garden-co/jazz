@@ -8,7 +8,7 @@ import type { JazzAuthState } from "./auth-state.js";
 import AuthStatus from "../../tests/svelte/AuthStatus.svelte";
 import UserApp from "../../tests/svelte/UserApp.svelte";
 const factory = vi.hoisted(() => vi.fn());
-vi.mock("../session/create-jazz-session.js", () => ({ createJazzSession: factory }));
+vi.mock("../session/create-jazz-session.js", () => ({ createJazzClient: factory }));
 vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
 const settle = async () => {
   for (let i = 0; i < 30; i++) {
@@ -74,7 +74,7 @@ it("owns startup retry and keeps the hook context across fallback and ready chil
   component = mount(JazzProvider, {
     target,
     props: {
-      appId: "test",
+      scope: "test",
       autoAttachDevTools: false,
       children: status,
       signedOut: createRawSnippet(() => ({ render: () => "<p>SIGN IN</p>" })),
@@ -119,7 +119,7 @@ it("renders custom startup loading and error snippets with the provider retry", 
   component = mount(JazzProvider, {
     target,
     props: {
-      appId: "test",
+      scope: "test",
       children: createRawSnippet(() => ({ render: () => "<p>PRIVATE</p>" })),
       loading: createRawSnippet(() => ({ render: () => "<p>CUSTOM LOADING</p>" })),
       error: createRawSnippet((error, action) => {
