@@ -1,9 +1,9 @@
 import { DefaultRuntimeSource } from "../runtime/default-runtime-source.js";
 import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
 import type { RuntimeSourcesConfig } from "../runtime/context.js";
-import { accountRegistryUrl } from "./context.js";
-import { clientScope, DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
-import { prepareAccountManager, type AccountStore } from "./persistence.js";
+import { clientScope } from "../runtime/client-scope.js";
+import type { AccountStore } from "./persistence.js";
+import { createAccountManagerWithMinter, resolvedServerUrl } from "./account-manager-core.js";
 
 export interface AccountManagerConfig {
   /**
@@ -13,8 +13,11 @@ export interface AccountManagerConfig {
   appId?: string;
   /** The app id an existing local-first app's users were created under. */
   scope?: string;
-  /** The app's Jazz endpoint (default `"/jazz"`, its own backend). */
-  serverUrl?: string;
+  /**
+   * The app's Jazz endpoint (default `"/jazz"`, its own backend), or `null`
+   * to keep Jazz on this device only, with no server and no sign-in.
+   */
+  serverUrl?: string | null;
   env?: string;
   runtimeSources?: RuntimeSourcesConfig;
   /**
@@ -23,47 +26,26 @@ export interface AccountManagerConfig {
    * before its provider confirms it.
    */
   store?: AccountStore;
+  /**
+   * The `fetch` sign-in requests to the app's backend go through (default:
+   * the global one). Supply one that adds what the backend authenticates
+   * requests by, when that is not a cookie the global one sends, such as a
+   * native app's bearer.
+   */
+  fetch?: typeof fetch;
 }
 
 /** Prepare crypto and restore selection; createLocalFirst() is synchronous afterward. */
 export async function createAccountManager(config: AccountManagerConfig) {
-  const serverUrl = config.serverUrl ?? DEFAULT_SERVER_URL;
-  const scope = clientScope({ ...config, serverUrl });
-  const registry = accountRegistryUrl(serverUrl, scope);
+  const scope = clientScope({ ...config, serverUrl: resolvedServerUrl(config) });
   const source = new DefaultRuntimeSource();
   await source.load({ appId: scope, runtimeSources: config.runtimeSources });
-  const store = config.store ?? browserAccountStore(registry, config.env ?? "dev");
-  return prepareAccountManager({
-    appId: scope,
-    registry,
-    store,
-    mintToken(secret, audience) {
-      return source.mintLocalFirstToken({
-        secret: authSecretSeedForMinting(secret),
-        audience,
-        ttlSeconds: 3600,
-        nowSeconds: BigInt(Math.floor(Date.now() / 1000)),
-      });
-    },
-  });
-}
-
-function browserAccountStore(registry: string, env: string): AccountStore {
-  if (typeof localStorage === "undefined") {
-    throw new Error("createAccountManager requires an AccountStore outside the browser");
-  }
-  if (typeof navigator === "undefined" || !navigator.locks) {
-    throw new Error("The browser account store requires Web Locks; supply an atomic AccountStore");
-  }
-  const key = `jazz-account-selection-v1:${encodeURIComponent(registry)}:${encodeURIComponent(env)}`;
-  return {
-    async read() {
-      return localStorage.getItem(key);
-    },
-    async update(transform) {
-      await navigator.locks.request(key, () => {
-        localStorage.setItem(key, transform(localStorage.getItem(key)));
-      });
-    },
-  };
+  return createAccountManagerWithMinter(config, (secret, audience) =>
+    source.mintLocalFirstToken({
+      secret: authSecretSeedForMinting(secret),
+      audience,
+      ttlSeconds: 3600,
+      nowSeconds: BigInt(Math.floor(Date.now() / 1000)),
+    }),
+  );
 }

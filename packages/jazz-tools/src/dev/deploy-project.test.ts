@@ -55,8 +55,12 @@ ${commonjs ? "module.exports = migration;" : "export default migration;"}`;
   await writeFile(file, source);
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     if (url.endsWith("/migrations/graph"))
-      return Response.json({ activeSchemaHash: fromHash, schemas: [fromHash], migrations: [] });
-    expect(url.endsWith("/admin/deploy")).toBe(true);
+      return Response.json({
+        latestBundleSchemaHash: fromHash,
+        schemas: [fromHash],
+        migrations: [],
+      });
+    expect(url.endsWith("/admin/bundles")).toBe(true);
     const body = JSON.parse(String(init?.body));
     expect(body.migrations).toHaveLength(1);
     expect(body.migrations[0]).toMatchObject({ fromHash, toHash });
@@ -88,14 +92,14 @@ it.each(["file", "directory"])(
     await rename(path, `${path}-real`);
     await symlink(`${path}-real`, path, kind === "file" ? "file" : "dir");
     await expect(deploy({ ...options, schemaDir: root })).rejects.toThrow("symlink or junction");
-    expect(fetchMock.mock.calls.every(([url]) => !url.endsWith("/deploy"))).toBe(true);
+    expect(fetchMock.mock.calls.every(([url]) => !url.endsWith("/bundles"))).toBe(true);
   },
 );
 it("rejects a migration witness that differs from its historical snapshot", async () => {
   const { root, file, source, fetchMock } = await fixture();
   await writeFile(file, source.replace("title:s.string()", "title:s.string(),extra:s.string()"));
   await expect(deploy({ ...options, schemaDir: root })).rejects.toThrow();
-  expect(fetchMock.mock.calls.every(([url]) => !url.endsWith("/deploy"))).toBe(true);
+  expect(fetchMock.mock.calls.every(([url]) => !url.endsWith("/bundles"))).toBe(true);
 });
 
 it("keeps concurrent migration bundles isolated across module realms", async () => {
@@ -351,8 +355,8 @@ it("publishes the current schema once validate moved the legacy migrations", asy
   await validateProject({ schemaDir: root });
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     if (url.endsWith("/migrations/graph"))
-      return Response.json({ activeSchemaHash: null, schemas: [], migrations: [] });
-    expect(url.endsWith("/admin/deploy")).toBe(true);
+      return Response.json({ latestBundleSchemaHash: null, schemas: [], migrations: [] });
+    expect(url.endsWith("/admin/bundles")).toBe(true);
     const body = JSON.parse(String(init?.body));
     expect(body.migrations).toEqual([]);
     return Response.json({

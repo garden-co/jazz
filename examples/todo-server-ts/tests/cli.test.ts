@@ -5,17 +5,8 @@ import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createAccountManager } from "jazz-tools";
 
-import {
-  deploy,
-  startLocalJazzServer,
-  startTestJwtIssuer,
-  type LocalJazzServerHandle,
-  type TestJwtIssuerHandle,
-} from "jazz-tools/testing";
-import permissions from "../permissions.js";
-import { app } from "../schema.js";
+import { startTestJwtIssuer, type TestJwtIssuerHandle } from "jazz-tools/testing";
 
 const EXTERNAL_ISSUER = "https://todo-server.example.test";
 const APP_ID = "todo-cli-durable-restart";
@@ -28,39 +19,14 @@ type RunningChild = {
 };
 
 let jwtIssuer: TestJwtIssuerHandle;
-let upstream: LocalJazzServerHandle;
-async function startUpstream(): Promise<void> {
-  jwtIssuer = await startTestJwtIssuer();
-  upstream = await startLocalJazzServer({
-    appId: APP_ID,
-    jwksUrl: jwtIssuer.jwksUrl,
-    jwtIssuer: EXTERNAL_ISSUER,
-    jwtAudience: jwtIssuer.audience,
+/** Sign in to the todo server, which returns the identity's account. */
+async function signIn(baseUrl: string, token: string): Promise<void> {
+  const response = await fetch(`${baseUrl}/sign-in`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
   });
-  await deploy({
-    serverUrl: upstream.url,
-    appId: upstream.appId,
-    adminSecret: upstream.adminSecret,
-    schema: app,
-    permissions,
-  });
-}
-async function registerToken(token: string): Promise<void> {
-  let stored: string | null = null;
-  const accounts = await createAccountManager({
-    appId: APP_ID,
-    serverUrl: upstream.url,
-    env: `todo-cli-${crypto.randomUUID()}`,
-    store: {
-      async read() {
-        return stored;
-      },
-      async update(transform) {
-        stored = transform(stored);
-      },
-    },
-  });
-  await accounts.registerJWT(token);
+  expect(response.status).toBe(200);
+  await response.body?.cancel();
 }
 
 async function startChild(cwd: string): Promise<RunningChild> {
@@ -68,10 +34,10 @@ async function startChild(cwd: string): Promise<RunningChild> {
     ...process.env,
     PORT: "0",
     JAZZ_APP_ID: APP_ID,
-    JAZZ_SERVER_URL: upstream.url,
-    JAZZ_BACKEND_SECRET: upstream.backendSecret,
     JAZZ_JWKS_URL: jwtIssuer.jwksUrl,
+    JAZZ_JWT_ISSUER: EXTERNAL_ISSUER,
   };
+  delete childEnv.JAZZ_SERVER_URL;
   delete childEnv.DB_PATH;
   const child = spawn(tsxLauncher, [join(exampleRoot, "src", "main.ts")], {
     cwd,
@@ -119,10 +85,10 @@ async function runCli(
     ...process.env,
     PORT: "0",
     JAZZ_APP_ID: APP_ID,
-    JAZZ_SERVER_URL: upstream.url,
-    JAZZ_BACKEND_SECRET: upstream.backendSecret,
     JAZZ_JWKS_URL: jwtIssuer.jwksUrl,
+    JAZZ_JWT_ISSUER: EXTERNAL_ISSUER,
   };
+  delete childEnv.JAZZ_SERVER_URL;
   if (dbPath === undefined) delete childEnv.DB_PATH;
   else childEnv.DB_PATH = dbPath;
   const child = spawn(tsxLauncher, [join(exampleRoot, "src", "main.ts"), ...args], {
@@ -156,23 +122,26 @@ const invalidCliCases = [
 
 describe("Todo server CLI", () => {
   beforeAll(async () => {
-    await startUpstream();
+    jwtIssuer = await startTestJwtIssuer();
   });
 
   afterAll(async () => {
-    await upstream?.stop();
     await jwtIssuer?.stop();
   });
 
   it("persists authenticated todos across fresh CLI processes with the default path", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "jazz-todo-cli-restart-"));
-    const token = jwtIssuer.jwtForUser("todo-cli-restart-user", {}, { issuer: EXTERNAL_ISSUER });
+    const token = await jwtIssuer.jwtForUser(
+      "todo-cli-restart-user",
+      {},
+      { issuer: EXTERNAL_ISSUER },
+    );
     let first: RunningChild | undefined;
     let second: RunningChild | undefined;
 
     try {
-      await registerToken(token);
       first = await startChild(cwd);
+      await signIn(first.baseUrl, token);
       const createResponse = await fetch(`${first.baseUrl}/todos`, {
         method: "POST",
         headers: {

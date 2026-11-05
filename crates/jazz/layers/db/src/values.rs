@@ -1209,6 +1209,10 @@ pub struct Schema {
     /// the current schema's policies, compiled under its names (tables
     /// match by stored name; see [`crate::compile::Ctx`]).
     pub policies_from: Option<std::rc::Rc<Schema>>,
+    /// The published bundle whose policies this schema carries, when it
+    /// is one's governing schema (see [`crate::catalogue`]): what a schema
+    /// governed by it keeps through a reset, whatever is current.
+    pub bundle: Option<crate::catalogue::BundleId>,
     /// Tables and columns are named by their stored names, as writes travel
     /// on the wire (see [`Schema::stored_view`]).
     pub stored_names: bool,
@@ -1304,6 +1308,7 @@ impl Schema {
             jazz: jazz.clone(),
             version: jazz.version_id(),
             policies_from: None,
+            bundle: None,
             stored_names: false,
         }
     }
@@ -1436,6 +1441,7 @@ impl Schema {
             jazz: current.jazz.clone(),
             version: current.version,
             policies_from: None,
+            bundle: None,
             stored_names: true,
         }
         .with_policies_of(current.clone())

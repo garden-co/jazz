@@ -1,4 +1,3 @@
-import { accountRegistryUrl } from "../accounts/context.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
@@ -9,7 +8,6 @@ import { runInNewContext } from "node:vm";
 import { MAX_PENDING_MUTATION_ERROR_EVENTS, createJazzContext } from "./create-jazz-context.js";
 
 const mocks = vi.hoisted(() => {
-  const resolveRequestSession = vi.fn();
   const openMemory = vi.fn();
   const openMemoryAsBackend = vi.fn();
   const openPersistent = vi.fn();
@@ -103,7 +101,6 @@ const mocks = vi.hoisted(() => {
     MockNapiDb,
     MockNativeRuntimeAdapter,
     MockJazzClient,
-    resolveRequestSession,
     openMemory,
     openMemoryAsBackend,
     openPersistent,
@@ -113,7 +110,6 @@ const mocks = vi.hoisted(() => {
     connectWithRuntime,
     clients,
     reset() {
-      resolveRequestSession.mockReset();
       openMemory.mockReset();
       openMemoryAsBackend.mockReset();
       openPersistent.mockReset();
@@ -148,7 +144,6 @@ vi.mock("../runtime/client.js", async () => {
 });
 
 vi.mock("./request-auth.js", () => ({
-  resolveRequestSession: mocks.resolveRequestSession,
   verifiedLocalFirstRequestProof: () => undefined,
 }));
 
@@ -206,44 +201,9 @@ const RELATION_LITERAL_PERMISSIONS: CompiledPermissions = {
   },
 };
 
-function makeJwt(payload: Record<string, unknown>): string {
-  const encode = (value: unknown) =>
-    Buffer.from(JSON.stringify(value), "utf8")
-      .toString("base64")
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/g, "");
-
-  return `${encode({ alg: "none", typ: "JWT" })}.${encode(payload)}.signature`;
-}
-
 describe("backend/create-jazz-context", () => {
   beforeEach(() => {
     mocks.reset();
-    mocks.resolveRequestSession.mockResolvedValue({
-      issuer: "https://issuer.example",
-      user_id: "u1",
-      claims: {},
-      authMode: "external" as const,
-    });
-  });
-
-  afterEach(() => vi.unstubAllEnvs());
-
-  it("rejects unassigned requests before opening a runtime", async () => {
-    const context = createJazzContext({
-      appId: "server-app",
-      serverUrl: "https://core.example",
-      app: { wasmSchema: SCHEMA_A },
-      permissions: {},
-      driver: { type: "memory" },
-    });
-    mocks.resolveRequestSession.mockRejectedValue(new Error("identity_not_assigned"));
-    await expect(
-      context.forRequest({ headers: { authorization: "Bearer rejected" } }),
-    ).rejects.toThrow("identity_not_assigned");
-    expect(mocks.nativeRuntimeCtor).not.toHaveBeenCalled();
-    expect(mocks.connectWithRuntime).not.toHaveBeenCalled();
   });
 
   it("BC-U01: lazily initializes runtime/client on first access", () => {
@@ -285,25 +245,7 @@ describe("backend/create-jazz-context", () => {
     expect(node).toEqual(options.systemNode);
   });
 
-  it("BC-U01b: rejects configuring both jwksUrl and jwtPublicKey", () => {
-    expect(() =>
-      createJazzContext({
-        appId: "server-app",
-        app: { wasmSchema: SCHEMA_A },
-        permissions: {},
-        driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
-        jwksUrl: "https://issuer.example/.well-known/jwks.json",
-        jwtPublicKey: {
-          kty: "oct",
-          kid: "static-kid",
-          alg: "HS256",
-          k: "c3RhdGljLXNlY3JldA",
-        },
-      }),
-    ).toThrow(/jwksUrl.*jwtPublicKey|jwtPublicKey.*jwksUrl/i);
-  });
-
-  it("BC-U02: supports high-level db/backend/request/session/attribution helpers", async () => {
+  it("BC-U02: supports high-level db/backend/session/attribution helpers", async () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
@@ -313,10 +255,6 @@ describe("backend/create-jazz-context", () => {
       backendSecret: "secret",
     });
 
-    const req = {
-      header: (name: string) =>
-        name === "authorization" ? `Bearer ${makeJwt({ sub: "u1" })}` : undefined,
-    };
     const session: Session = {
       issuer: "https://issuer.example",
       user_id: "u1",
@@ -326,17 +264,15 @@ describe("backend/create-jazz-context", () => {
 
     const db = context.db();
     const backendDb = context.asBackend();
-    const requestDb = await context.forRequest(req);
     const sessionDb = context.forSession(session);
     const attributedDb = context.withAttribution("https://issuer.example", "u2");
     const attributedSessionDb = context.withAttributionForSession(session);
-    const attributedRequestDb = await context.withAttributionForRequest(req);
 
     // An un-attributed backend read deliberately passes no logical session:
     // it is trusted serving, not a public request impersonating SYSTEM. A
-    // request keeps its external session and therefore remains policy-scoped.
+    // user's session keeps it external and therefore policy-scoped.
     expect((backendDb as any).getAccessContext()).toBeNull();
-    expect((requestDb as any).getAccessContext()).toMatchObject({
+    expect((sessionDb as any).getAccessContext()).toMatchObject({
       writeSession: session,
       readSession: session,
     });
@@ -347,64 +283,21 @@ describe("backend/create-jazz-context", () => {
       readSession: SYSTEM_READ_SESSION,
     });
 
-    for (const scopedDb of [
-      db,
-      backendDb,
-      requestDb,
-      sessionDb,
-      attributedDb,
-      attributedSessionDb,
-      attributedRequestDb,
-    ]) {
+    for (const scopedDb of [db, backendDb, sessionDb, attributedDb, attributedSessionDb]) {
       expect(scopedDb).toHaveProperty("getAuthState");
     }
-    expect(requestDb.getAuthState()).toMatchObject({
-      authMode: "external",
-      session: {
-        user: { account: null, identity: { issuer: session.issuer, subject: session.user_id } },
-      },
-    });
     expect(sessionDb.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
         user: { account: null, identity: { issuer: session.issuer, subject: session.user_id } },
       },
     });
-    expect(mocks.resolveRequestSession).toHaveBeenCalledTimes(2);
-    expect(mocks.resolveRequestSession).toHaveBeenNthCalledWith(
-      1,
-      req,
-      {
-        appId: "server-app",
-        accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
-        jwksUrl: undefined,
-        allowLocalFirstAuth: true,
-        jwtPublicKey: undefined,
-        jwtIssuer: undefined,
-        jwtAudience: undefined,
-      },
-      undefined,
-    );
-    expect(mocks.resolveRequestSession).toHaveBeenNthCalledWith(
-      2,
-      req,
-      {
-        appId: "server-app",
-        accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
-        jwksUrl: undefined,
-        allowLocalFirstAuth: true,
-        jwtPublicKey: undefined,
-        jwtIssuer: undefined,
-        jwtAudience: undefined,
-      },
-      undefined,
-    );
     expect(mocks.clients).toHaveLength(1);
-    expect(mocks.clients[0]!.asBackend).toHaveBeenCalledTimes(6);
+    expect(mocks.clients[0]!.asBackend).toHaveBeenCalledTimes(4);
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(1);
   });
 
-  it("BC-U03: local-only backends require explicit trusted sessions instead of public request admission", async () => {
+  it("BC-U03: local-only backends scope explicit trusted sessions", async () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
@@ -412,10 +305,6 @@ describe("backend/create-jazz-context", () => {
       driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
     });
 
-    const req = {
-      header: (name: string) =>
-        name === "authorization" ? `Bearer ${makeJwt({ sub: "u1" })}` : undefined,
-    };
     const session: Session = {
       issuer: "https://issuer.example",
       user_id: "u1",
@@ -423,132 +312,10 @@ describe("backend/create-jazz-context", () => {
       authMode: "external",
     };
 
-    await expect(context.forRequest(req)).rejects.toThrow(/core serverUrl for account admission/);
     expect(() => context.forSession(session)).not.toThrow();
     expect(() => context.withAttribution("https://issuer.example", "u2")).not.toThrow();
     expect(() => context.withAttributionForSession(session)).not.toThrow();
-    await expect(context.withAttributionForRequest(req)).rejects.toThrow(
-      /core serverUrl for account admission/,
-    );
     expect(mocks.clients[0]!.asBackend).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    { nodeEnv: undefined, allowLocalFirstAuth: undefined, expected: true },
-    { nodeEnv: "development", allowLocalFirstAuth: undefined, expected: true },
-    { nodeEnv: "test", allowLocalFirstAuth: undefined, expected: true },
-    { nodeEnv: "production", allowLocalFirstAuth: undefined, expected: false },
-    { nodeEnv: "PrOdUcTiOn", allowLocalFirstAuth: undefined, expected: false },
-    { nodeEnv: "development", allowLocalFirstAuth: true, expected: true },
-    { nodeEnv: "development", allowLocalFirstAuth: false, expected: false },
-    { nodeEnv: "production", allowLocalFirstAuth: true, expected: true },
-    { nodeEnv: "production", allowLocalFirstAuth: false, expected: false },
-  ])(
-    "forwards allowLocalFirstAuth=$expected when NODE_ENV=$nodeEnv and override=$allowLocalFirstAuth",
-    async ({ nodeEnv, allowLocalFirstAuth, expected }) => {
-      vi.stubEnv("NODE_ENV", nodeEnv);
-      const context = createJazzContext({
-        appId: "server-app",
-        serverUrl: "http://localhost:1625",
-        backendSecret: "secret",
-        app: { wasmSchema: SCHEMA_A },
-        permissions: {},
-        driver: { type: "memory" },
-        allowLocalFirstAuth,
-      });
-      const req = { headers: { authorization: "Bearer token" } };
-
-      await context.forRequest(req);
-      await context.withAttributionForRequest(req);
-
-      expect(mocks.resolveRequestSession).toHaveBeenCalledTimes(2);
-      for (const [request, config] of mocks.resolveRequestSession.mock.calls) {
-        expect(request).toBe(req);
-        expect(config).toMatchObject({
-          appId: "server-app",
-          accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
-          allowLocalFirstAuth: expected,
-        });
-      }
-    },
-  );
-
-  it("BC-U03b: forwards backend request auth config into request session resolution", async () => {
-    const context = createJazzContext({
-      appId: "server-app",
-      serverUrl: "http://localhost:1625",
-      backendSecret: "secret",
-      app: { wasmSchema: SCHEMA_A },
-      permissions: {},
-      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
-      jwksUrl: "https://issuer.example/.well-known/jwks.json",
-      allowLocalFirstAuth: false,
-    });
-
-    const req = {
-      header: (name: string) =>
-        name === "authorization" ? `Bearer ${makeJwt({ sub: "u1" })}` : undefined,
-    };
-
-    await context.forRequest(req);
-
-    expect(mocks.resolveRequestSession).toHaveBeenCalledWith(
-      req,
-      {
-        appId: "server-app",
-        accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
-        jwksUrl: "https://issuer.example/.well-known/jwks.json",
-        allowLocalFirstAuth: false,
-        jwtPublicKey: undefined,
-        jwtIssuer: undefined,
-        jwtAudience: undefined,
-      },
-      undefined,
-    );
-  });
-
-  it("BC-U03c: forwards jwtPublicKey into request session resolution", async () => {
-    const context = createJazzContext({
-      appId: "server-app",
-      serverUrl: "http://localhost:1625",
-      backendSecret: "secret",
-      app: { wasmSchema: SCHEMA_A },
-      permissions: {},
-      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
-      jwtPublicKey: {
-        kty: "oct",
-        kid: "static-kid",
-        alg: "HS256",
-        k: "c3RhdGljLXNlY3JldA",
-      },
-      allowLocalFirstAuth: false,
-    });
-
-    const req = {
-      header: (name: string) =>
-        name === "authorization" ? `Bearer ${makeJwt({ sub: "u1" })}` : undefined,
-    };
-
-    await context.forRequest(req);
-
-    expect(mocks.resolveRequestSession).toHaveBeenCalledWith(
-      req,
-      {
-        appId: "server-app",
-        accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
-        jwksUrl: undefined,
-        jwtPublicKey: {
-          kty: "oct",
-          kid: "static-kid",
-          alg: "HS256",
-          k: "c3RhdGljLXNlY3JldA",
-        },
-        allowLocalFirstAuth: false,
-        jwtIssuer: undefined,
-        jwtAudience: undefined,
-      },
-      undefined,
-    );
   });
 
   it("BC-U04: merges compiled permissions into the runtime schema", () => {

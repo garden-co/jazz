@@ -76,7 +76,6 @@ fn initial_and_permission_only_deployments_replace_embedded_permissions() {
     assert!(prepared.migrations().is_empty());
     let stored = DeploymentCatalogue {
         schemas: vec![schema.clone()],
-        active_schema_hash: Some(SchemaHash::compute(&schema)),
         ..Default::default()
     };
     let mut update = request(&schema, &[], vec![]);
@@ -103,7 +102,7 @@ fn retention_only_changes_deploy_without_a_migration_in_both_directions() {
     for (from, to) in [(&full, &latest), (&latest, &full)] {
         let stored = DeploymentCatalogue {
             schemas: vec![from.clone()],
-            active_schema_hash: Some(SchemaHash::compute(from)),
+            admitted_schema_hashes: vec![SchemaHash::compute(from)],
             ..Default::default()
         };
         let prepared = prepare_deployment(
@@ -128,22 +127,22 @@ fn retention_only_changes_deploy_without_a_migration_in_both_directions() {
     }
 }
 
-/// Switching a table of the active schema to latest-only drops its past
+/// Switching a table the store keeps in full to latest-only drops its past
 /// versions for good, so the deploy is refused until it says so; a new
 /// latest-only table, or switching back to full history, needs no flag.
 #[test]
-fn switching_an_active_table_to_latest_only_needs_an_explicit_flag() {
+fn switching_a_kept_table_to_latest_only_needs_an_explicit_flag() {
     let full = schema(&[]);
     let mut latest = full.clone();
     latest.get_mut(&TableName::from("notes")).unwrap().history = HistoryRetention::Latest;
-    let active = |schema: &Schema| DeploymentCatalogue {
+    let deployed = |schema: &Schema| DeploymentCatalogue {
         schemas: vec![schema.clone()],
-        active_schema_hash: Some(SchemaHash::compute(schema)),
+        admitted_schema_hashes: vec![SchemaHash::compute(schema)],
         ..Default::default()
     };
 
     let error = prepare_deployment(
-        &active(&full),
+        &deployed(&full),
         request(&latest, std::slice::from_ref(&latest), vec![]),
     )
     .expect_err("an unconfirmed switch drops history");
@@ -166,7 +165,7 @@ fn switching_an_active_table_to_latest_only_needs_an_explicit_flag() {
     );
 
     prepare_deployment(
-        &active(&full),
+        &deployed(&full),
         DeploymentRequest {
             allow_dropping_history: true,
             ..request(&latest, std::slice::from_ref(&latest), vec![])
@@ -179,16 +178,14 @@ fn switching_an_active_table_to_latest_only_needs_an_explicit_flag() {
     )
     .expect("a first deploy has no history to drop");
     prepare_deployment(
-        &active(&latest),
+        &deployed(&latest),
         request(&full, std::slice::from_ref(&full), vec![]),
     )
     .expect("switching back to full history drops nothing");
 
-    // A bundle published since (admitted, not made current) is the newest
-    // deploy: it says how the store keeps the table now.
+    // The newest admitted schema says how the store keeps the table now.
     let published = |admitted: [&Schema; 2]| DeploymentCatalogue {
         schemas: vec![full.clone(), latest.clone()],
-        active_schema_hash: Some(SchemaHash::compute(&full)),
         admitted_schema_hashes: admitted.iter().map(|s| SchemaHash::compute(s)).collect(),
         ..Default::default()
     };
@@ -208,7 +205,6 @@ fn equivalent_diamond_combines_stored_and_submitted_history_in_any_order() {
     let stored = DeploymentCatalogue {
         schemas: vec![base.clone(), left.clone()],
         migrations: vec![first.clone()],
-        active_schema_hash: Some(SchemaHash::compute(&left)),
         ..Default::default()
     };
     let mut update = request(
@@ -246,41 +242,6 @@ fn equivalent_diamond_combines_stored_and_submitted_history_in_any_order() {
         SchemaHash::compute(&merged)
     );
     assert_eq!(actual.active_schema().public_schema(), &merged);
-}
-
-#[test]
-fn sibling_path_cannot_deploy_without_forward_convergence_from_the_authored_branch() {
-    // Same graph as merged_schema_via_sibling_path_defaults_reintroduced_column_without_erasing_source:
-    // left -> base -> right -> merged is a read path, not an eligible deployment.
-    let base = schema(&[]);
-    let left = schema(&["a"]);
-    let right = schema(&["b"]);
-    let merged = schema(&["a", "b"]);
-    let stored = DeploymentCatalogue {
-        schemas: vec![base.clone(), left.clone()],
-        migrations: vec![migration(&base, &left, vec![add("a")])],
-        active_schema_hash: Some(SchemaHash::compute(&left)),
-        ..Default::default()
-    };
-    let error = prepare_deployment(
-        &stored,
-        request(
-            &merged,
-            &[right.clone(), merged.clone()],
-            vec![
-                migration(&base, &right, vec![add("b")]),
-                migration(&right, &merged, vec![add("a")]),
-            ],
-        ),
-    )
-    .unwrap_err();
-    assert_eq!(
-        error,
-        DeploymentError::UnreachableTarget {
-            target: SchemaHash::compute(&merged),
-            active: SchemaHash::compute(&left),
-        }
-    );
 }
 
 #[test]
@@ -370,7 +331,6 @@ fn allows_backward_activation_but_rejects_cycles_and_disconnected_stored_schemas
     let stored = DeploymentCatalogue {
         schemas: vec![base.clone(), next.clone()],
         migrations: vec![edge.clone()],
-        active_schema_hash: Some(SchemaHash::compute(&next)),
         ..Default::default()
     };
     prepare_deployment(&stored, request(&base, &[], vec![])).unwrap();
@@ -401,7 +361,6 @@ fn rejects_missing_artifacts_bad_hashes_and_conflicting_migrations() {
     let stored = DeploymentCatalogue {
         schemas: vec![base.clone(), next.clone()],
         migrations: vec![edge.clone()],
-        active_schema_hash: Some(SchemaHash::compute(&base)),
         ..Default::default()
     };
     assert!(matches!(

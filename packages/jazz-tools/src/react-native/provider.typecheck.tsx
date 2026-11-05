@@ -1,28 +1,29 @@
-import { JazzProvider, backendAuth, useJazzAuth } from "./index.js";
+import { JazzProvider, useJazzAuth, type JazzUser } from "./index.js";
 import type { AccountStore } from "../accounts/persistence.js";
 declare const store: AccountStore;
 function Data() {
-  const { status, sessionActions } = useJazzAuth();
+  const { status, sessionActions, user, reauthenticate } = useJazzAuth();
+  const signedIn: JazzUser | null = user;
+  void signedIn;
   void sessionActions;
+  void reauthenticate;
   return status;
 }
 export const nativeApplication = (
   <JazzProvider
-    appId="native-app"
+    scope="native-app"
     serverUrl="https://sync.example.test"
     store={store}
-    auth={backendAuth({ key: null, logout: async () => {} })}
     signedOut={null}
   >
     <Data />
   </JazzProvider>
 );
-declare const signedInUser: string | null | undefined;
-export const nativeApplicationFollowingUser = (
+export const nativeApplicationWithoutGuests = (
   <JazzProvider
     serverUrl="https://app.example.test/jazz"
     store={store}
-    user={signedInUser}
+    initial="signed-out"
     signedOut={null}
   >
     <Data />

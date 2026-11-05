@@ -156,9 +156,8 @@ Messages, with their postcard variant tags:
 | 18  | `Welcome`            | server → client | The answer to `Join`: admission and catalogue (§8.9, §8.10)      |
 | 19  | `ConnectionSettled`  | server → client | The position the whole connection is settled through (§8.4)      |
 
-Tags before `Commit` keep their numbers: a replica stores each pending
-upload's header as an encoded `Commit` message (`_jazz_pending`, see §8.3),
-so `Commit` stays tag 4 across stores. No server-sent message has tag 0 or 1, which lets a client tell a
+A replica stores pending uploads as rows of their parts, never as encoded
+messages (§8.3), so no tag needs to stay put for storage. No server-sent message has tag 0 or 1, which lets a client tell a
 sync frame from a `WireFrame::Hello` (tag 0) or `WireFrame::Error` (tag 1) by
 its first byte.
 
@@ -259,14 +258,31 @@ first identity to send one under a node claims it); a trusted link may send
 any.
 
 A replica keeps every unsettled commit and uploads it in order on each
-connection. It is stored a row per op, not as one encoded message:
+connection. It is stored in tables shaped like the rows it writes, not as
+an encoded message, so a change to how commits travel never strands a
+write a user made offline:
 
-- `_jazz_pending (tx, header)`: the `Commit` with its ops and reads left
-  out.
-- `_jazz_pending_items (tx, part, n, item)`: each op (with its bases, deltas
-  and access proof) and serializable read, by list (`part`) and position
-  (`n`).
+- `_jazz_pending (tx, node, seq, clock, snapshot, own, acting, author,
+claims)`: the commit's writer and HLC, a serializable commit's snapshot
+  and own commits (NULL when mergeable), and who it acts as.
+- `_jazz_pending_ops (tx, n, op, tbl, id, target, move_from, move_to, at,
+has_cells, bases, proof_key, proof_seq)`: each op, by position `n`.
+- `_jazz_pending_cells (tx, n, list, col, ty, nulls, value)`: each cell an op
+  writes (`list` 0) or an upsert creates its row with (`list` 1): the kind
+  of value (`ty`), how many present-nullable wrappers hold it (`nulls`), and
+  the value as a native SQLite value. An `f64` is its 8 bits (so NaN and
+  -0.0 survive), a `u64` its bits as an integer, and a composite value
+  (array, tuple, record, enum, large-value descriptor) JSON (`ty` `json`).
+- `_jazz_pending_deltas (tx, n, i, col, depth, key, seq, base, edits)`: each
+  chunked cell that travels as edits.
+- `_jazz_pending_reads (tx, n, version, query, binding, include_deleted)` and
+  `_jazz_pending_read_rows (tx, n, i, id, node, t)`: a serializable commit's
+  reads and the row versions each listed.
 - `_jazz_pending_rows (tx, n, tbl, id, key)`: the local rows it wrote.
+
+Branch targets, bases, claims, own commits, and a read's query and binding
+are JSON with named fields. A value JSON cannot hold (NaN or an infinity in
+a claim, a binding or a composite cell) is refused when the write is made.
 
 What each commit wrote stays in the store at the commit's local seq (the
 row's current version, or history under a later pending write), so a
@@ -279,7 +295,8 @@ it can hold, even one that travels in several frames. An op is bounded by
 its row, not by a limit of its own: a row of 33 or more inline cells near
 64 KiB each is over 2 MiB, and such a store refuses it as a row too. A refused commit moves
 to the retry store, `_jazz_rejected (tx, error, serializable)` with its ops
-in `_jazz_rejected_ops (tx, n, op)`, until the host discards it. A build
+in `_jazz_rejected_ops`, `_jazz_rejected_cells` and `_jazz_rejected_deltas`
+(the op tables' layout), until the host discards it. A build
 from before this layout cannot open a store written by one after it, nor the
 other way around. That is acceptable only because the SQLite store format
 has not shipped (alpha.60).
@@ -875,6 +892,63 @@ move on: a later settle of the upstream read, with no change to the result's
 rows here (they may have arrived through another read), goes out as a
 `Settled` without members, and a move of `served_through` as a
 `ConnectionSettled` to every session it has sent one before.
+
+### 8.14 Thin clients
+
+A thin client holds no replica. It negotiates `FEATURE_THIN_RESULTS` in its
+`Hello` on the ordinary `/ws` route, after the same prelude and admission as a
+sync client, and then exchanges only `WireFrame::ThinRequest` and
+`WireFrame::ThinResponse` (postcard tags 4 and 5), outside the ordered
+channels. The server answers a thin connection with no sync session: a thin
+connection that sends any other frame after its `Hello` ends with
+`MalformedFrame`.
+
+- A thin session is served as its admitted identity and claims, exactly as a
+  sync session with that admission is (§8.6): reads see what its policies let
+  it see, and writes are admitted and authorized as `WriteIdentity::Session`.
+  A trusted backend link is served as SYSTEM.
+- The client first declares the schema it was built against
+  (`ThinOp::Schema`, the public schema JSON the bindings open with); the
+  server takes its version id, as a replica opened on that schema would
+  declare it. Every later request is resolved against that admitted version,
+  governed by the current schema's policies, as a sync session's declared
+  version is (§8.9). A version the store has not admitted is refused with
+  `SchemaNotDeployed`; nothing else is served before a version.
+- Request options are the JSON the native bindings take for the same call:
+  read options (`tier`, `include_deleted`, `read_view` with branch head and
+  frozen base, ...) on `Query` and `Subscribe`, and write options (`rowId`,
+  `branch`, `head`, `base`, `updatedAtMs`) on writes. Options that name an
+  author or attribution are refused: a thin write always runs as its session.
+- `Query` answers once with binding-codec row batches (a relation snapshot
+  for a query with array relations). `Subscribe` answers with a stream of
+  binding-codec subscription deltas, the same bytes the WASM and Node
+  bindings hand to JavaScript, until `Unsubscribe` (answered `Closed` on the
+  live query's id, then `Ok`) or an error that ends it.
+- `Insert`, `Update`, `Upsert`, `Delete`, `Restore` and `UpdateLargeValues`
+  outside a transaction commit on the authority and answer `Written` with the
+  row and the server seq of the version they left; the write is globally
+  durable when the answer arrives. A client-chosen row id is honored on
+  insert.
+- `Begin` opens a mergeable or serializable transaction under a
+  client-chosen open-transaction id, owned by that session. A write naming it
+  is staged and answered `Staged`; a refusal while staging is kept and
+  reported by `Commit`, as the bindings report it. A `Query` naming it reads
+  the transaction's own staged writes. `Commit` answers `Written` with the
+  commit's seq; `Rollback` abandons it. A connection that closes abandons its
+  open transactions.
+- `CaptureSnapshot` answers `Snapshot` with the persisted snapshot reference
+  of the authority's current frontier, for frozen branch bases.
+- `BeginStream` starts a large-value insert, update or upsert of one
+  column, `StreamChunk` appends to it in order, and `FinishStream` commits
+  the row (answered `Written`) or `AbortStream` drops it. A `BeginStream`
+  naming an open transaction stages the row write in it instead
+  (`FinishStream` answers `Staged`). A stream is named by its `BeginStream`
+  request id and ends with its connection.
+- A thin session's answers share its connection's egress budget: a live
+  query's events wait on the owner while the budget is spent.
+
+Not supported yet: offline writes and attributed writes. A thin client asks
+for offline work by upgrading to a replica.
 
 ## Open Questions
 

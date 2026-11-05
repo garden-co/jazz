@@ -44,7 +44,9 @@ repository:
 
 Run `node dev/release-acceptance/run.mjs /absolute/config.json`.
 The CLI must be executable. Use `phase: baseline` for historical mechanics
-checks; those may have older package versions. Final-preview/published runs
+checks; those may have older package versions (the backend scenario runs
+`createJazz` with `remote()`, and falls back to a backend-secret session only
+for baseline packages that predate it). Final-preview/published runs
 require alpha56 manifests. The script checks CLI and tarball hashes and compares
 every installed package file against extracted tarball bytes. Unexpected files
 are rejected except nested dependency directories; pin native payload packages
@@ -219,7 +221,7 @@ fires, a `deadline` failure and `results.json` are written before exit.
 Results are written to `<output>/results.json`; set `JAZZ_MIXED_TRACE=1` for
 per-command client traces and `RUST_LOG` for server logs.
 
-The client driver and CLI calls assume the current API: `createJazzSession`
+The client driver and CLI calls assume the current API: `createJazzClient`
 with a persistent driver, the `"global"` durability tier,
 `jazz-tools server --bound-port-file --allow-local-first-auth` and
 the `deploy-fixture.mjs` catalogue deploy. A release that renames any of these needs

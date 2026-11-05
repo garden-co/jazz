@@ -16,7 +16,7 @@ function TestAppProvider(
     <ConfiguredJazzAppProvider
       {...props}
       config={{}}
-      createJazzSession={async () => fixture.session!}
+      createJazzClient={async () => fixture.session!}
     />
   );
 }

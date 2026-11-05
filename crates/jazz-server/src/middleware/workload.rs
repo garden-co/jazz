@@ -28,7 +28,7 @@ use tokio::sync::OnceCell;
 use tracing::warn;
 
 use super::auth::{
-    AuthConfig, JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, validate_jwt_with_cache_at,
+    ExpectedJwtClaims, JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, validate_jwt_with_cache_at,
 };
 use crate::server::ServerState;
 
@@ -57,7 +57,7 @@ pub struct TrustedWorkload {
 /// Verifies workload tokens against the trusted workload's issuer.
 pub struct WorkloadVerifier {
     workload: TrustedWorkload,
-    claims: AuthConfig,
+    claims: ExpectedJwtClaims,
     http_client: reqwest::Client,
     jwks: OnceCell<JwksCache>,
 }
@@ -72,10 +72,9 @@ impl WorkloadVerifier {
     }
 
     pub fn with_client(workload: TrustedWorkload, http_client: reqwest::Client) -> Self {
-        let claims = AuthConfig {
-            jwt_issuer: Some(workload.issuer.clone()),
-            jwt_audience: Some(workload.audience.clone()),
-            ..AuthConfig::default()
+        let claims = ExpectedJwtClaims {
+            issuer: workload.issuer.clone(),
+            audience: workload.audience.clone(),
         };
         Self {
             workload,
@@ -163,24 +162,100 @@ impl WorkloadVerifier {
         if verified.subject != self.workload.subject {
             return Err("workload token subject is not the trusted workload".to_owned());
         }
-        if let Ok(mut latest) = LATEST_WORKLOAD_TOKEN.lock() {
-            *latest = Some(token.to_owned());
-        }
+        keep_workload_token(token, verified.exp);
         Ok(())
     }
+}
+
+/// A verified workload token and when it expires (Unix seconds).
+struct WorkloadToken {
+    token: String,
+    exp: Option<u64>,
 }
 
 /// The trusted workload's latest verified token in this process: on
 /// Vercel, the deploying function's OIDC token, which is also what its AWS
 /// role trusts ([`crate::s3::WebIdentityToken::Workload`]).
-static LATEST_WORKLOAD_TOKEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static LATEST_WORKLOAD_TOKEN: std::sync::Mutex<Option<WorkloadToken>> = std::sync::Mutex::new(None);
 
-/// The trusted workload's latest verified token, if one arrived yet.
+/// Bumped each time a different token is kept: work that failed on a stale
+/// token (a blob store's backed-off batch) may go again at once.
+static WORKLOAD_TOKEN_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default()
+}
+
+/// Keep `token` unless the one kept lasts longer: requests carrying an
+/// older token than one already seen do not roll it back.
+fn keep_workload_token(token: &str, exp: Option<u64>) {
+    let Ok(mut latest) = LATEST_WORKLOAD_TOKEN.lock() else {
+        return;
+    };
+    if !replaces(latest.as_ref(), token, exp) {
+        return;
+    }
+    *latest = Some(WorkloadToken {
+        token: token.to_owned(),
+        exp,
+    });
+    WORKLOAD_TOKEN_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The trusted workload's latest verified token, if one arrived yet and it
+/// has not expired.
 pub fn latest_workload_token() -> Option<String> {
-    LATEST_WORKLOAD_TOKEN
+    current_workload_token().ok()
+}
+
+/// [`latest_workload_token`], or why there is none: none arrived yet, or
+/// the last one expired (the next request from the workload renews it).
+pub fn current_workload_token() -> Result<String, String> {
+    let latest = LATEST_WORKLOAD_TOKEN
         .lock()
-        .ok()
-        .and_then(|token| token.clone())
+        .map_err(|_| "no trusted workload token: its lock is poisoned".to_owned())?;
+    usable(latest.as_ref(), unix_now())
+}
+
+/// Whether a verified `token` expiring at `exp` replaces `kept`: a
+/// different token that lasts at least as long.
+fn replaces(kept: Option<&WorkloadToken>, token: &str, exp: Option<u64>) -> bool {
+    kept.is_none_or(|kept| {
+        kept.token != token && kept.exp.unwrap_or(u64::MAX) <= exp.unwrap_or(u64::MAX)
+    })
+}
+
+/// How long before its `exp` a token counts as expired: clocks here and at
+/// STS may disagree, and a token handed out must outlast the request.
+const EXPIRY_MARGIN_SECONDS: u64 = 60;
+
+/// `kept`'s token, unless there is none or it expires within
+/// [`EXPIRY_MARGIN_SECONDS`] of `now`.
+fn usable(kept: Option<&WorkloadToken>, now: u64) -> Result<String, String> {
+    let Some(kept) = kept else {
+        return Err("no trusted workload token arrived yet".to_owned());
+    };
+    if kept
+        .exp
+        .is_some_and(|exp| exp <= now.saturating_add(EXPIRY_MARGIN_SECONDS))
+    {
+        return Err(
+            "the trusted workload's last token expired; the next request from the workload \
+             renews it"
+                .to_owned(),
+        );
+    }
+    Ok(kept.token.clone())
+}
+
+/// How many different workload tokens this process has kept: a change
+/// means a fresh token arrived.
+pub fn workload_token_generation() -> u64 {
+    WORKLOAD_TOKEN_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// How a server checks the backend credential.
@@ -378,6 +453,41 @@ mod tests {
     use super::*;
     use base64::Engine as _;
     use jsonwebtoken::{EncodingKey, Header, encode};
+
+    /// A token is kept only over one that lasts no longer, and an expired
+    /// one is not handed out: the error says it expired.
+    #[test]
+    fn the_kept_token_is_the_freshest_and_only_while_current() {
+        let kept = |token: &str, exp| WorkloadToken {
+            token: token.to_owned(),
+            exp,
+        };
+        assert!(replaces(None, "a", Some(10)));
+        assert!(replaces(Some(&kept("a", Some(10))), "b", Some(20)));
+        assert!(
+            !replaces(Some(&kept("b", Some(20))), "a", Some(10)),
+            "no rollback"
+        );
+        assert!(
+            !replaces(Some(&kept("a", Some(10))), "a", Some(10)),
+            "the same token"
+        );
+        assert_eq!(usable(Some(&kept("a", Some(100))), 39).unwrap(), "a");
+        let expired = usable(Some(&kept("a", Some(100))), 100).unwrap_err();
+        assert!(expired.contains("expired"), "{expired}");
+        // Within the margin of its exp, a token is not handed out: STS
+        // might see it expired by the time it arrives.
+        assert!(
+            usable(Some(&kept("a", Some(100))), 40).is_err(),
+            "about to expire"
+        );
+        assert_eq!(
+            usable(Some(&kept("a", None)), u64::MAX).unwrap(),
+            "a",
+            "no exp"
+        );
+        assert!(usable(None, 0).unwrap_err().contains("arrived yet"));
+    }
 
     const SECRET: &str = "workload-test-signing-key-0123456789";
     const NOW: u64 = 1_800_000_000;

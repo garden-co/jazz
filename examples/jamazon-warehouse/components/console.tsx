@@ -9,7 +9,7 @@ import { SideNav, SideNavItem, SideNavSection } from "@astryxdesign/core/SideNav
 import { VStack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { TopNav, TopNavHeading } from "@astryxdesign/core/TopNav";
-import { useAll, useSession } from "jazz-tools/react";
+import { useAll, useJazzAuth, useSession } from "jazz-tools/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
@@ -124,6 +124,7 @@ function ScopedShell({
   children: ReactNode;
 }) {
   const pathname = usePathname();
+  const { reauthenticate } = useJazzAuth();
   const [warehouseId, setWarehouseId] = useState(homeWarehouse.id);
   const [districtId, setDistrictId] = useState<string>();
   const warehouse = warehouses.find((candidate) => candidate.id === warehouseId) ?? homeWarehouse;
@@ -174,7 +175,10 @@ function ScopedShell({
               label="Sign out"
               variant="ghost"
               size="sm"
-              onClick={() => void authClient.signOut()}
+              onClick={async () => {
+                await authClient.signOut();
+                await reauthenticate();
+              }}
             />
           }
         />

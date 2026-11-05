@@ -35,6 +35,7 @@ import {
   createOpenTransactionId,
   setWriteWaitReadiness,
   type TransactionKind,
+  type Runtime,
   type ReadTierOptions,
   type InternalQueryExecutionOptions,
   type QueryVisibility,
@@ -48,6 +49,7 @@ import {
   type OpenTransactionId,
   type TxId,
   type PermissionAdvice,
+  type StreamingMutationKind,
   type StreamingValueSource,
   validateWriteWaitTimeout,
   WriteWaitTimeoutError,
@@ -130,6 +132,7 @@ import {
   type DbForConnection,
 } from "./connection-manager/index.js";
 import { toError } from "./util.js";
+import { upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -1451,7 +1454,30 @@ function rejectIncompleteDependencies(
   }
 }
 
-function reserveRowId(): string {
+/**
+ * @internal The row an insert or restore of `data` as row `id` writes, as
+ * the table's schema alone decides it: for writes made before a client
+ * exists (`createJazz`'s `db` while its store opens).
+ */
+export function previewWrittenRow<T, Init>(
+  table: TableProxy<T, Init>,
+  operation: "Insert" | "Restore",
+  id: string,
+  data: Init,
+): T {
+  assertWritableTable(table);
+  const transformedData = table._columnTransforms
+    ? transformInputColumns(table, data, { id }, true)
+    : (data as Record<string, unknown>);
+  return immediateWriteRow(
+    table,
+    id,
+    toWriteRecordForOperation(operation, transformedData, table._schema, table._table),
+  );
+}
+
+/** @internal A fresh row id, as an insert without one would get. */
+export function reserveRowId(): string {
   const hex = createOpenTransactionId();
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
@@ -1793,6 +1819,114 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const result = ownerClient.rollbackTransaction(openTransactionId);
     preparation.cancelled = true;
     return result;
+  }
+
+  /**
+   * Stream one Text, Json, or Bytea column into a new row, staged in this
+   * transaction. Resolves with the row id once the stream is consumed; the
+   * commit waits for it and fails if the stream did.
+   *
+   * The streamed value is held for the transaction for at most the store's
+   * staging max age (10 minutes by default) after the stream finishes. A
+   * transaction left open longer than that is refused at commit, with
+   * `streaming upload expired`, so its storage is never held indefinitely;
+   * start it again. The same applies to `updateStreaming` and
+   * `upsertStreaming`.
+   */
+  insertStreaming<T, Init, StreamingInit>(
+    table: TableProxy<T, Init, StreamingInit>,
+    data: StreamingInit,
+    options?: StreamingInsertOptions,
+  ): Promise<{ id: string }> {
+    return this.streamingMutation("insert", table, options?.id, data, options);
+  }
+
+  /** Stream one large column of an existing row, staged in this transaction. */
+  updateStreaming<T, Init, StreamingInit, StreamingUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate>,
+    id: string,
+    data: StreamingUpdate,
+    options?: UpdateOptions,
+  ): Promise<{ id: string }> {
+    return this.streamingMutation("update", table, id, data, options);
+  }
+
+  /** Stream one large column of a row, creating it if absent, staged in this transaction. */
+  upsertStreaming<T, Init, StreamingInit, StreamingUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate>,
+    id: string,
+    data: StreamingUpdate,
+    options?: UpdateOptions,
+  ): Promise<{ id: string }> {
+    return this.streamingMutation("upsert", table, id, data, options);
+  }
+
+  private streamingMutation(
+    mutation: StreamingMutationKind,
+    table: TableProxy<any, any, any, any>,
+    id: string | undefined,
+    data: unknown,
+    options?: StreamingInsertOptions | UpdateOptions,
+  ): Promise<{ id: string }> {
+    assertWritableTable(table);
+    this.bindTable(table);
+    const client = this.resolveClient(table._schema);
+    const operation =
+      mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
+    const { openTransactionId, session, attribution, preparation } = this.requireBinding(
+      `${mutation}Streaming`,
+    );
+    const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
+    rejectIncompleteDependencies(table, ordinaryData, [column]);
+    const rowId =
+      id ??
+      (missingWriteDependencies(table, ordinaryData).includes("id") ? reserveRowId() : undefined);
+    const stage = async () => {
+      const record =
+        mutation === "insert"
+          ? transformInputColumns(table, ordinaryData, rowId ? { id: rowId } : {}, true)
+          : await prepareInputColumns(
+              table,
+              ordinaryData,
+              operation,
+              rowId!,
+              client,
+              session,
+              undefined,
+              normalizeViewOptions(table._schema, table._table, options as UpdateOptions),
+            );
+      const values = toWriteRecordForOperation(operation, record, table._schema, table._table);
+      const branch =
+        mutation === "insert" ? deriveStreamingInsertBranch(table, ordinaryData) : undefined;
+      const normalized =
+        mutation === "insert"
+          ? normalizeSelectorOptions(table._schema, table._table, {
+              ...options,
+              ...(rowId ? { id: rowId } : {}),
+              ...(branch ? { branch } : {}),
+            })
+          : normalizeViewOptions(table._schema, table._table, options as UpdateOptions);
+      return client.streamingMutationInTransaction(
+        mutation,
+        table._table,
+        values,
+        column,
+        source,
+        openTransactionId,
+        normalized,
+        session,
+        attribution,
+        rowId,
+      );
+    };
+    return Promise.resolve(
+      preparation.run(() =>
+        runAfterPreparation(client, () => (preparation.cancelled ? undefined : stage())),
+      ),
+    ).then((staged) => {
+      if (!staged) throw new Error("Transaction was rolled back before the stream was staged");
+      return staged;
+    });
   }
 
   /**
@@ -2542,6 +2676,21 @@ export class Db {
 
   protected getCurrentClient(): JazzClient | null {
     return this.connection.getCurrentClient();
+  }
+
+  /** @internal The runtime behind this Db's client, once it exists. */
+  currentRuntime(): Runtime | null {
+    return this.getCurrentClient()?.getRuntime() ?? null;
+  }
+
+  /**
+   * @internal Read each runtime query at the remote tier, so that this Db's
+   * store holds what the server holds for it before anything subscribes.
+   */
+  async prefetchRuntimeQueries(schema: WasmSchema, queryJsons: readonly string[]): Promise<void> {
+    const client = this.getClient(schema);
+    await this.ensureReady("server");
+    await Promise.all(queryJsons.map((queryJson) => client.query(queryJson, { tier: "remote" })));
   }
 
   protected async ensureReady(
@@ -3387,6 +3536,19 @@ export class Db {
       callback,
       () => getDbTxHandleBinding(transaction, "result").ownerClient,
     );
+  }
+
+  /**
+   * Move this app from the thin client to the local-first one, loading it with
+   * `loader` (for example `() => import("jazz-tools/local-first")`). Under a
+   * Jazz provider the provider swaps in the local-first `Db` once it holds the
+   * app's live queries, and this resolves then. A local-first `Db` resolves at
+   * once. (A thin `Db` opened directly, outside a session, upgrades with
+   * `upgradeToLocalFirst(thin, open)` from `jazz-tools/thin`, which returns
+   * the new `Db` for the app to swap in itself.)
+   */
+  async upgradeToLocalFirst(loader: LocalFirstLoader): Promise<void> {
+    await upgradeDbToLocalFirst(this, loader);
   }
 
   /**
@@ -4256,7 +4418,7 @@ async function openDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
 export function assertNoClientBackendSecret(config: object): void {
   if (Object.hasOwn(config, "backendSecret")) {
     throw new Error(
-      "DbConfig does not accept backendSecret. Use createJazzContext() from jazz-tools/backend on a trusted server instead.",
+      "DbConfig does not accept backendSecret. Run Jazz in your backend with createJazz() from jazz-tools/backend instead.",
     );
   }
 }

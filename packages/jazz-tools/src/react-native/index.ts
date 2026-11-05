@@ -13,7 +13,7 @@ export {
   SnapshotRefFormatError,
   UnsupportedSnapshotError,
 } from "../runtime/snapshot-ref.js";
-export { createJazzClient, type JazzClientConfig, type JazzClient } from "./create-jazz-client.js";
+export type { JazzClient } from "./create-jazz-client.js";
 export {
   JazzProvider,
   type JazzProviderProps,
@@ -54,10 +54,10 @@ export { createAccountManager, type AccountManagerConfig } from "./create-accoun
 export * from "../accounts/exports.js";
 
 export {
-  createJazzSession,
+  createJazzClient,
   JazzSessionProvider,
   useJazzSession,
-  type JazzSessionConfig,
+  type JazzClientConfig,
   type JazzSessionProviderProps,
   type UseJazzSessionResult,
   type JazzSession,
@@ -68,7 +68,7 @@ export {
 export { useJazzSessionOwner, type JazzSessionOwnerResult } from "./session.js";
 
 export { useJazzAuth, type JazzAuthState } from "../react-core/app.js";
-export { backendAuth, betterAuth, type JazzAuth } from "../session/app.js";
+export type { JazzUser } from "../session/app.js";
 export type { JazzAppProviderProps } from "./provider.js";
 
 export type {

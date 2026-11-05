@@ -2,7 +2,11 @@ import { afterEach, expect, it } from "vitest";
 import { generateAuthSecret, schema, ReadTier } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { TestCleanup, createBrowserTestDb, uniqueDbName, waitForCondition } from "./support.js";
-import { getJazzServerInfo, createJazzServerTransportControl } from "./testing-server.js";
+import {
+  createJazzServerTransportControl,
+  getJazzServerInfo,
+  startJazzApp,
+} from "./testing-server.js";
 
 // A tab over its shared worker reads with the same tiers as a direct client
 // (INV-API-32): a remote read waits for the server, a Global wait for the
@@ -54,10 +58,16 @@ it("keeps a tab's remote reads and Global waits pending while its worker cannot 
 }, 30_000);
 
 it("waits for a tab's firstLoadRemoteWaitMs in its worker, then shows the worker's store", async () => {
-  const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-    uniqueDbName("worker-first-load-wait"),
+  const {
+    appId,
+    serverUrl: coreUrl,
+    adminSecret,
+  } = await getJazzServerInfo(uniqueDbName("worker-first-load-wait"));
+  await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
+  const { serverUrl } = await startJazzApp(
+    { appId, serverUrl: coreUrl, adminSecret },
+    { schema: app.wasmSchema, permissions },
   );
-  await deploy({ appId, serverUrl, adminSecret, schema: app.wasmSchema, permissions });
   const transport = await createJazzServerTransportControl(serverUrl);
   try {
     const writer = ctx.track(

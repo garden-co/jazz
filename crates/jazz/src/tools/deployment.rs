@@ -27,10 +27,9 @@ type Edge = (Hash, Hash);
 pub struct DeploymentCatalogue {
     pub schemas: Vec<Schema>,
     pub migrations: Vec<Lens>,
-    pub active_schema_hash: Option<SchemaHash>,
-    /// The schemas the store admitted, oldest first: published bundles'
-    /// as well as activated ones. The newest that has a table decides how
-    /// much of its history the store keeps (SPEC 4 §4.9).
+    /// The schemas the store admitted, oldest first. The newest that has
+    /// a table decides how much of its history the store keeps
+    /// (SPEC 4 §4.9).
     pub admitted_schema_hashes: Vec<SchemaHash>,
 }
 
@@ -93,13 +92,6 @@ pub enum DeploymentError {
     },
     #[error("migration graph contains a cycle; blocked schemas: {}", display_hashes(.schemas, ", "))]
     Cycle { schemas: Vec<SchemaHash> },
-    #[error(
-        "cannot deploy schema {target} from active schema {active}: no forward migration path exists. Create a new target schema with a forward migration from the active schema, review it, then deploy again."
-    )]
-    UnreachableTarget {
-        active: SchemaHash,
-        target: SchemaHash,
-    },
     #[error("migration history has disconnected roots: {}. Add migrations connecting these histories to one common root before deploying", display_hashes(.roots, ", "))]
     DisconnectedGraph { roots: Vec<SchemaHash> },
     #[error("migration paths disagree: {} and {}", display_hashes(.first, " -> "), display_hashes(.second, " -> "))]
@@ -160,22 +152,17 @@ pub fn prepare_deployment(
         }
         schemas.insert(actual.0, structural(schema));
     }
-    for hash in [Some(request.target_schema_hash), stored.active_schema_hash]
-        .into_iter()
-        .flatten()
-    {
-        if !schemas.contains_key(&hash.0) {
-            return Err(DeploymentError::MissingSchema { schema: hash });
-        }
+    if !schemas.contains_key(&request.target_schema_hash.0) {
+        return Err(DeploymentError::MissingSchema {
+            schema: request.target_schema_hash,
+        });
     }
     if !request.allow_dropping_history {
-        // Newest first, the active schema last for a catalogue that lists
-        // no admissions.
+        // Newest first.
         let deployed: Vec<&Schema> = stored
             .admitted_schema_hashes
             .iter()
             .rev()
-            .chain(stored.active_schema_hash.iter())
             .filter_map(|hash| schemas.get(&hash.0))
             .collect();
         let tables = drops_history(&deployed, &schemas[&request.target_schema_hash.0]);
@@ -228,13 +215,7 @@ pub fn prepare_deployment(
         request.target_schema_hash.0,
     )?;
     let order = topological_order(&schemas, &migrations)?;
-    compatible::validate_compatible_graph(
-        &schemas,
-        &migrations,
-        &representatives,
-        stored,
-        request.target_schema_hash,
-    )?;
+    compatible::validate_compatible_graph(&schemas, &migrations, &representatives)?;
     for ((from, to), lens) in &migrations {
         let check = || -> Result<(), String> {
             if lens.is_draft() {

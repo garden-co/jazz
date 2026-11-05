@@ -1,149 +1,34 @@
 ---
 title: Local-First Client
-description: "The local-first browser client: dev plugins, Wasm loading, then one session with local storage and sync."
+description: "The local-first browser client: bundler config, Wasm loading, then one session with local storage and sync."
 reviewedAt: "20017a2694"
 ---
 
 import CreateJazzClientReference from "../../../partials/create-jazz-client-reference.mdx";
 
-## Dev plugins
+## Bundler config
 
-Jazz ships bundler plugins that remove boilerplate in development. They start a local Jazz dev server, watch `schema.ts` and `permissions.ts`, auto-push both on change, and inject the app ID and server URL as framework-appropriate env vars for the account-manager bootstrap. Prepare a handle using those values, then pass `{ appId, serverUrl, account }` to the client.
+Jazz needs no bundler plugin. Two settings cover the common setups:
 
-<Tabs
-  groupId="jazz-framework"
-  items={["React (Vite)", "Vue (Vite)", "Svelte (Vite)", "Solid (Vite)", "SvelteKit", "Next.js"]}
-  persist
-  updateAnchor
->
-  <Tab value="React (Vite)">
-    ```ts title="vite.config.ts"
-    import { defineConfig } from "vite";
-    import react from "@vitejs/plugin-react";
-    import { jazzPlugin } from "jazz-tools/dev/vite";
+- **Vite:** keep the Wasm package out of dependency pre-bundling, and add `jazz-wasm` as a direct dependency of your app so pnpm's strict layout resolves it:
 
-    export default defineConfig({
-      plugins: [react(), jazzPlugin()],
-    });
-    ```
+  ```ts title="vite.config.ts"
+  import { defineConfig } from "vite";
 
-    Injects `VITE_JAZZ_APP_ID` and `VITE_JAZZ_SERVER_URL` into `import.meta.env`.
+  export default defineConfig({
+    optimizeDeps: { exclude: ["jazz-wasm"] },
+  });
+  ```
 
-  </Tab>
-  <Tab value="Vue (Vite)">
-    ```ts title="vite.config.ts"
-    import { defineConfig } from "vite";
-    import vue from "@vitejs/plugin-vue";
-    import { jazzPlugin } from "jazz-tools/dev/vite";
+- **Next.js:** let Node load the native addon at runtime instead of bundling it:
 
-    export default defineConfig({
-      plugins: [vue(), jazzPlugin()],
-    });
-    ```
+  ```ts title="next.config.ts"
+  export default {
+    serverExternalPackages: ["jazz-napi"],
+  };
+  ```
 
-    Injects `VITE_JAZZ_APP_ID` and `VITE_JAZZ_SERVER_URL` into `import.meta.env`.
-
-  </Tab>
-  <Tab value="Svelte (Vite)">
-    ```ts title="vite.config.ts"
-    import { defineConfig } from "vite";
-    import { svelte } from "@sveltejs/vite-plugin-svelte";
-    import { jazzPlugin } from "jazz-tools/dev/vite";
-
-    export default defineConfig({
-      plugins: [svelte(), jazzPlugin()],
-    });
-    ```
-
-    Injects `VITE_JAZZ_APP_ID` and `VITE_JAZZ_SERVER_URL` into `import.meta.env`, matching this guide's Vite app bootstrap.
-
-  </Tab>
-  <Tab value="Solid (Vite)">
-    ```ts title="vite.config.ts"
-    import { defineConfig } from "vite";
-    import solid from "vite-plugin-solid";
-    import { jazzPlugin } from "jazz-tools/dev/vite";
-
-    export default defineConfig({
-      plugins: [solid(), jazzPlugin()],
-    });
-    ```
-
-    Injects `VITE_JAZZ_APP_ID` and `VITE_JAZZ_SERVER_URL` into `import.meta.env`.
-
-  </Tab>
-  <Tab value="SvelteKit">
-    ```ts title="vite.config.ts"
-    import { sveltekit } from "@sveltejs/kit/vite";
-    import { jazzSvelteKit } from "jazz-tools/dev/sveltekit";
-    import { defineConfig } from "vite";
-
-    export default defineConfig({
-      plugins: [sveltekit(), jazzSvelteKit()],
-    });
-    ```
-
-    Defaults `schemaDir` to `src/lib/`. Injects `PUBLIC_JAZZ_APP_ID` and `PUBLIC_JAZZ_SERVER_URL`.
-
-  </Tab>
-  <Tab value="Next.js">
-    ```ts title="next.config.ts"
-    import { withJazz } from "jazz-tools/dev/next";
-
-    export default withJazz({});
-    ```
-
-    Injects `NEXT_PUBLIC_JAZZ_APP_ID` and `NEXT_PUBLIC_JAZZ_SERVER_URL`. Only runs in the Next.js dev phase; production builds are untouched.
-
-  </Tab>
-</Tabs>
-
-On first run the plugin generates an app ID, persists it to `.env`, and starts a local Jazz server under `node_modules/.cache/jazz-dev-server/`. Every subsequent run reuses both.
-
-### Env var names
-
-Each plugin writes the same two values (`appId`, `serverUrl`) under the prefix its bundler uses to expose env vars to the client bundle. SvelteKit's `PUBLIC_*` prefix also covers Svelte+Vite via `jazzSvelteKit`. Secrets are always unprefixed — they're server-only: `JAZZ_ADMIN_SECRET` and `BACKEND_SECRET`.
-
-| Bundler   | App ID                    | Server URL                    |
-| --------- | ------------------------- | ----------------------------- |
-| Vite      | `VITE_JAZZ_APP_ID`        | `VITE_JAZZ_SERVER_URL`        |
-| Next.js   | `NEXT_PUBLIC_JAZZ_APP_ID` | `NEXT_PUBLIC_JAZZ_SERVER_URL` |
-| SvelteKit | `PUBLIC_JAZZ_APP_ID`      | `PUBLIC_JAZZ_SERVER_URL`      |
-
-Jazz Cloud sync URL: `https://v2.sync.jazz.tools/`. For self-hosted deployments, point the server URL at your own host.
-
-### Plugin options
-
-All plugins accept the same base options:
-
-| Option        | Description                                                                                                                                                                                   |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `server`      | `true` (default) starts an embedded local server. `false` disables managed-server startup. A URL string connects to an existing server. An object configures the embedded server (see below). |
-| `schemaDir`   | Directory containing `schema.ts` and `permissions.ts`. Defaults to the project root, or `src/lib/` for SvelteKit.                                                                             |
-| `appId`       | Override the app ID. Defaults to the value in `.env`, otherwise a generated UUID persisted on first run.                                                                                      |
-| `adminSecret` | Required when `server` is a URL. For the embedded server, used as its admin secret unless `server.adminSecret` is set; otherwise a random secret is generated.                                |
-
-When `server` is an object, the embedded server accepts: `port` (default: random), `appId`, `adminSecret`, `dataDir` (default: `node_modules/.cache/jazz-dev-server`), `inMemory`, `allowLocalFirstAuth`, and `jwksUrl`. See [Server Setup](/docs/setup/backend/trusted) for the full semantics.
-
-### Connecting to an existing server
-
-Pass a URL to point the plugin at a server you already run — hosted cloud, staging, or a shared self-hosted instance. You must also provide `adminSecret` (or set `JAZZ_ADMIN_SECRET`) so the plugin can push schema and permissions.
-
-```ts title="vite.config.ts"
-jazzPlugin({
-  server: "https://my-jazz-server.example.com",
-  adminSecret: process.env.JAZZ_ADMIN_SECRET,
-  appId: process.env.VITE_JAZZ_APP_ID,
-});
-```
-
-### What auto-pushes
-
-On startup and on every change to `schema.ts` or `permissions.ts`, the plugin deploys the current schema and permissions using the resolved admin secret (from `server.adminSecret`, root `adminSecret`, or a generated embedded-server secret). Both files are required. If a schema change requires a migration, prepare the migration before deploying; the plugin reports missing deployment inputs instead of publishing just the schema.
-
-<Callout type="warn">
-  Auto-push covers the development loop. For production — or any change that needs a schema migration — run `pnpm dlx jazz-tools@alpha deploy <appId>` to publish the migration, the new schema, and the current permissions in one step. See [Migrations](/docs/schemas/migrations).
-</Callout>
+The browser names no app: it syncs with your backend at `/jazz` (or the `serverUrl` you pass), and the app ID belongs to the backend's store (`remote({ appId })`, `sqlite({ appId })`), read from server-only env like `JAZZ_APP_ID`. Secrets stay server-only too: `JAZZ_ADMIN_SECRET` and `BACKEND_SECRET`. Publish schema and permissions with `pnpm dlx jazz-tools@alpha deploy <appId>`; see [Migrations](/docs/schemas/migrations).
 
 ## Wasm loading
 

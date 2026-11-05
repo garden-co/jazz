@@ -156,8 +156,7 @@ async fn fresh_native_client_reads_indirect_text_and_json() {
             assert_eq!(row.1[1], Value::Text(text.clone()));
             assert_eq!(row.1[2], Value::Text(json.clone()));
             if size > 4 * 1024 * 1024 {
-                let mut context = server.make_client_context_for_user(schema.clone(), "gated-uploader");
-                context.backend_secret = None;
+                let mut context = server.make_user_context(schema.clone(), "gated-uploader");
                 context.admin_secret = None;
                 jazz_testkit::enroll_test_context(&mut context).await.unwrap();
                 let gate = Arc::new(CommitGate::default());

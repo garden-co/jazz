@@ -1,15 +1,17 @@
 "use client";
 
 import { useEffect } from "react";
-import { JazzProvider as Jazz, betterAuth, useJazzAuth, useSession } from "jazz-tools/react";
+import { JazzProvider as Jazz, useJazzAuth, useSession } from "jazz-tools/react";
 import { authClient } from "@/lib/auth-client";
 import { ErrorScreen, LoadingScreen } from "@/components/status-screen";
 
-const APP_ID = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
+// Start on the thin client; load the local-first one (WASM, local storage,
+// offline writes) in its own chunk once the page has loaded.
+const loadLocalFirst = () => import("jazz-tools/local-first");
+
 // Better Auth's session drives sign-in; Wequencer's backend (`createJazz` in
 // lib/jazz.server.ts) reads it in `authenticate`. Signing up creates the
 // bandmate's Jazz account, signing in opens it again.
-const auth = betterAuth(authClient);
 
 const profileRequests = new Map<string, Promise<void>>();
 const profileKey = (accountId: string) => `wequencer-profile:${accountId}`;
@@ -60,17 +62,20 @@ function ProfileSetup() {
   return null;
 }
 
-/** Signs out of Jazz first (flushing local writes), then of Better Auth. */
+/** Signs out of Better Auth, then Jazz follows the backend's answer. */
 export function useGracefulSignOut() {
-  return useJazzAuth().logout;
+  const { reauthenticate } = useJazzAuth();
+  return async () => {
+    await authClient.signOut();
+    await reauthenticate();
+  };
 }
 
 export function JazzProvider({ children }: { children: React.ReactNode }) {
   return (
     <Jazz
-      appId={APP_ID}
       serverUrl="/jazz"
-      auth={auth}
+      client={loadLocalFirst}
       // Signed-out pages (the sign-in form) need no Jazz.
       signedOut={children}
       loading={<LoadingScreen label="Opening your Jazz account…" />}

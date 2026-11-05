@@ -12,8 +12,8 @@ import { compile, compileModule } from "svelte/compiler";
 const packageDir =
   process.env.JAZZ_CLASSIC_CONSUMER_DIR ?? fileURLToPath(new URL("..", import.meta.url));
 
-// Match the enrolled-account fixture used by runtime tests. Only the external
-// registration response is substituted; provider configs receive opaque handles.
+// Match the enrolled-account fixture used by runtime tests. Only the backend
+// sign-in response is substituted; provider configs receive opaque handles.
 const accountFixture = `
   import { createAccountManagerWithRuntime } from ${JSON.stringify(
     pathToFileURL(join(packageDir, "dist/accounts/enrollment.js")).href,
@@ -29,8 +29,7 @@ const accountFixture = `
         account: crypto.randomUUID(), identity: { issuer, subject },
       }), { status: 200 }),
     });
-    const token = "header." + btoa(JSON.stringify({ iss: issuer, sub: subject })) + ".signature";
-    return { appId, serverUrl, account: await manager.registerJWT(token) };
+    return { appId, serverUrl, account: await manager.loginWithBackend() };
   }
 `;
 
@@ -99,7 +98,7 @@ async function runFrameworkConsumer(source, { browser = false, controlledFactory
               { filter: /[\\/]dist[\\/](svelte|vue)[\\/]create-jazz-client\.js$/ },
               () => ({
                 contents:
-                  "export const createJazzClient = (...args) => globalThis.__classicClientFactory(...args);",
+                  "export const openJazzClient = (...args) => globalThis.__classicClientFactory(...args);",
                 loader: "js",
               }),
             );
@@ -241,7 +240,11 @@ for (const [entrypoint, provider] of [
           config: await accountConfig("classic-coexistence"),
           fallback: createElement("p", {}, "loading"),
           autoAttachDevTools: false,
-          ...(${JSON.stringify(entrypoint)} === "react-core" ? { createJazzClient: binding.createJazzClient } : {}),
+          // react-core leaves opening a client to its framework binding; a
+          // client that never opens keeps the provider on its fallback.
+          ...(${JSON.stringify(entrypoint)} === "react-core"
+            ? { openJazzClient: () => new Promise(() => {}) }
+            : {}),
         }, "ready");
         assert.equal(renderToString(current), "<p>loading</p>");
       }

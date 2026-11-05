@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { JazzProvider, betterAuth } from "jazz-tools/react";
+import { JazzProvider, useJazzAuth } from "jazz-tools/react";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { Card } from "@astryxdesign/core/Card";
@@ -11,11 +11,13 @@ import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { authClient } from "../src/lib/auth-client";
 
-const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
+// Start on the thin client; load the local-first one (WASM, local storage,
+// offline writes) in its own chunk once the page has loaded.
+const loadLocalFirst = () => import("jazz-tools/local-first");
+
 // Better Auth's session drives sign-in; RecordPlayer's backend (`createJazz`
 // in src/lib/jazz.server.ts) reads it in `authenticate`. Signing up creates
 // the listener's Jazz account, signing in opens it again.
-const auth = betterAuth(authClient);
 
 /**
  * `frame` wraps every state in the page chrome; only the signed-in one gets
@@ -30,9 +32,8 @@ export function RecordPlayerProvider({
 }) {
   return (
     <JazzProvider
-      appId={appId}
       serverUrl="/jazz"
-      auth={auth}
+      client={loadLocalFirst}
       signedOut={frame(<SignIn />, false)}
       loading={frame(<Status>Connecting RecordPlayer…</Status>, false)}
       error={(state) =>
@@ -64,6 +65,7 @@ export function SignIn() {
   const [password, setPassword] = useState("record-player-demo");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const { reauthenticate } = useJazzAuth();
   async function authenticate(mode: "sign-in" | "sign-up") {
     setPending(true);
     setError(null);
@@ -73,6 +75,8 @@ export function SignIn() {
           ? await authClient.signIn.email({ email, password })
           : await authClient.signUp.email({ email, password, name: email });
       if (result.error) setError(result.error.message ?? "Authentication failed");
+      // Jazz asks the backend who is signed in now and opens their account.
+      else await reauthenticate();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Authentication failed");
     } finally {

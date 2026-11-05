@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
-import { attachJazzSessionConsumer, createJazzSessionOwner } from "./state.js";
+import {
+  attachJazzSessionConsumer,
+  createJazzSessionOwner,
+  replaceJazzSessionClient,
+} from "./state.js";
 import type { JWTAuth } from "../accounts/enrollment.js";
 import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
+import { markThinDb } from "../runtime/local-first-upgrade.js";
 const handle = (id: string) =>
   Object.freeze({ id, identity: { issuer: "test", subject: id } }) as AccountHandle;
 function deferred<T = void>() {
@@ -304,38 +309,6 @@ describe("Jazz session lifecycle", () => {
   });
 });
 
-it("backend transitions wait for detach and sync, and restore the old account on rejected admission", async () => {
-  const { createAccountManagerWithRuntime } = await import("../accounts/enrollment.js");
-  const old = handle("old");
-  const admitBackend = vi.fn(async () => {
-    throw new Error("backend denied");
-  });
-  const accounts = createAccountManagerWithRuntime({
-    registry: "https://core.example/apps/test/accounts",
-    localFirst: { create: () => ({ accountId: old.id, identity: old.identity, auth: "unused" }) },
-    backend: { admitBackend },
-  });
-  accounts.createLocalFirst();
-  const shutdown = vi.fn(async () => {});
-  const openClient = vi.fn(async () => ({ shutdown }));
-  const session = await createJazzSessionOwner({ accounts, openClient });
-  const previous = session.getSnapshot().account;
-  const lease = attachJazzSessionConsumer(session);
-  const pending = session.becomeBackend({ backendSecret: "secret" });
-  const rejected = expect(pending).rejects.toThrow("backend denied");
-  await tick();
-  expect(session.getSnapshot().pending).toBe("becomeBackend");
-  expect(shutdown).not.toHaveBeenCalled();
-  expect(admitBackend).not.toHaveBeenCalled();
-  lease.acknowledge(session.getSnapshot());
-  await rejected;
-  expect(shutdown).toHaveBeenCalledWith({ waitForSync: true });
-  expect(openClient).toHaveBeenCalledTimes(2);
-  expect(session.getSnapshot()).toMatchObject({ status: "ready", account: previous });
-  lease.release();
-  await session.close();
-});
-
 it("clearOnSignOut wipes the signed-out account's storage instead of syncing it", async () => {
   const old = handle("old");
   const accounts = new AccountManager(
@@ -358,4 +331,84 @@ it("clearOnSignOut wipes the signed-out account's storage instead of syncing it"
   expect(calls).toEqual(["wipe", "shutdown"]);
   expect(session.getSnapshot().status).toBe("signed-out");
   await session.close();
+});
+
+it("clearOnSignOut leaves a thin client's writes to sync, as it stores nothing", async () => {
+  const old = handle("old");
+  const accounts = new AccountManager(
+    {
+      createLocalFirst: () => old,
+      restoreLocalFirst: () => old,
+      logout() {},
+      loginWithBackend: async () => old,
+    },
+    old,
+  );
+  const calls: string[] = [];
+  const openClient = async () => {
+    const db = { deleteClientStorage: async () => void calls.push("wipe") };
+    markThinDb(db as never);
+    return {
+      db,
+      shutdown: async (options?: { waitForSync?: boolean }) =>
+        void calls.push(options?.waitForSync ? "sync+shutdown" : "shutdown"),
+    };
+  };
+  const session = await createJazzSessionOwner({ accounts, openClient, clearOnSignOut: true });
+  await session.logout();
+  expect(calls).toEqual(["sync+shutdown"]);
+  await session.close();
+});
+
+describe("replacing the signed-in client", () => {
+  it("publishes the new client, then shuts the old one down after its writes sync", async () => {
+    const { session, clients, old } = await setup();
+    const current = session.getSnapshot().client!;
+    const replacement = { account: old, shutdown: vi.fn(async () => {}) };
+    await replaceJazzSessionClient(session, async (client, account) => {
+      expect(client).toBe(current);
+      expect(account).toBe(old);
+      return replacement;
+    });
+    expect(session.getSnapshot()).toMatchObject({ status: "ready", client: replacement });
+    expect(clients[0]!.shutdown).toHaveBeenCalledWith({ waitForSync: true });
+    // The session now owns the replacement: logging out shuts it down.
+    await session.logout();
+    expect(replacement.shutdown).toHaveBeenCalled();
+  });
+
+  it("completes the swap when the old client fails to shut down", async () => {
+    const { session, clients } = await setup();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    clients[0]!.shutdown.mockRejectedValueOnce(new Error("sync failed"));
+    const replacement = { shutdown: vi.fn(async () => {}) };
+    await replaceJazzSessionClient(session, async () => replacement as never);
+    expect(session.getSnapshot()).toMatchObject({ status: "ready", client: replacement });
+    await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+    warn.mockRestore();
+    await session.close();
+  });
+
+  it("drops the new client when the session logs out while it opens", async () => {
+    const { session, clients } = await setup();
+    const opening = deferred<{ shutdown: ReturnType<typeof vi.fn> }>();
+    const replacing = replaceJazzSessionClient(session, () => opening.promise as never);
+    await tick();
+    const logout = session.logout();
+    const replacement = { shutdown: vi.fn(async () => {}) };
+    opening.resolve(replacement);
+    await expect(replacing).rejects.toThrow("superseded");
+    await logout;
+    expect(replacement.shutdown).toHaveBeenCalled();
+    expect(clients[0]!.shutdown).toHaveBeenCalled();
+    expect(session.getSnapshot().status).toBe("signed-out");
+  });
+
+  it("refuses without a signed-in client", async () => {
+    const { session } = await setup();
+    await session.logout();
+    await expect(
+      replaceJazzSessionClient(session, async () => ({ shutdown: async () => {} })),
+    ).rejects.toThrow("no signed-in client");
+  });
 });

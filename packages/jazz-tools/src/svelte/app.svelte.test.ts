@@ -5,13 +5,10 @@ import { createJazzSessionOwner } from "../session/state.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
 import JazzProvider from "./JazzProvider.svelte";
 import type { JazzAuthState } from "./auth-state.js";
-import { writable } from "svelte/store";
-import { backendAuth, type JazzAuth } from "../session/app.js";
-import BackendAuthApp from "../../tests/svelte/BackendAuthApp.svelte";
 import AuthStatus from "../../tests/svelte/AuthStatus.svelte";
 import UserApp from "../../tests/svelte/UserApp.svelte";
 const factory = vi.hoisted(() => vi.fn());
-vi.mock("../session/create-jazz-session.js", () => ({ createJazzSession: factory }));
+vi.mock("../session/create-jazz-session.js", () => ({ createJazzClient: factory }));
 vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
 const settle = async () => {
   for (let i = 0; i < 30; i++) {
@@ -77,7 +74,7 @@ it("owns startup retry and keeps the hook context across fallback and ready chil
   component = mount(JazzProvider, {
     target,
     props: {
-      appId: "test",
+      scope: "test",
       autoAttachDevTools: false,
       children: status,
       signedOut: createRawSnippet(() => ({ render: () => "<p>SIGN IN</p>" })),
@@ -89,7 +86,7 @@ it("owns startup retry and keeps the hook context across fallback and ready chil
   target.querySelector("button")!.click();
   await settle();
   expect(factory).toHaveBeenCalledTimes(2);
-  expect(factory.mock.calls[1][0].initial).toBe("local-first");
+  expect(factory.mock.calls[1][0].initial).toBeUndefined();
   expect(target.textContent).toContain("ready");
   target.querySelector("button")!.click();
   await settle();
@@ -122,7 +119,7 @@ it("renders custom startup loading and error snippets with the provider retry", 
   component = mount(JazzProvider, {
     target,
     props: {
-      appId: "test",
+      scope: "test",
       children: createRawSnippet(() => ({ render: () => "<p>PRIVATE</p>" })),
       loading: createRawSnippet(() => ({ render: () => "<p>CUSTOM LOADING</p>" })),
       error: createRawSnippet((error, action) => {
@@ -144,15 +141,15 @@ it("renders custom startup loading and error snippets with the provider retry", 
   await settle();
 });
 
-it("updates backend auth descriptors reactively and never mounts private children while pending", async () => {
+it("follows the backend on reauthenticate and never mounts private children signed out", async () => {
   const events: string[] = [];
-  // The backend names whoever the provider's latest key says is signed in.
-  let backendUser = "";
+  // Who the app's backend names (null: no one).
+  let backendUser: string | null = null;
   const handle = (id: string) =>
     ({ id, identity: { issuer: "test", subject: id } }) as AccountHandle;
   const accounts = new AccountManager({
     logout: () => {},
-    loginWithBackend: async () => handle(backendUser),
+    loginWithBackend: async () => handle(backendUser!),
   } as any);
   const owner = await createJazzSessionOwner({
     accounts,
@@ -167,24 +164,24 @@ it("updates backend auth descriptors reactively and never mounts private childre
         },
         {} as never,
       ) as any,
+    // A stand-in for the browser's backend watch.
+    decorate: (session) => ({
+      async reauthenticate() {
+        const current = session.getSnapshot().account?.identity.subject;
+        if (current === backendUser) return;
+        if (session.getSnapshot().status === "ready") await session.logout();
+        if (backendUser !== null) await session.loginWithBackend();
+      },
+    }),
   });
   factory.mockResolvedValue(owner);
-  const descriptor = (key: string | null, isPending = false) => {
-    if (key) backendUser = key;
-    return backendAuth({ key, isPending, logout: async () => {} });
-  };
-  const auth = writable(descriptor(null));
-  const seen: boolean[] = [];
+  let auth!: JazzAuthState;
   let mounts = 0;
   const target = document.createElement("div");
-  component = mount(BackendAuthApp, {
+  component = mount(UserApp, {
     target,
     props: {
-      auth,
-      observe: (value: JazzAuth) => {
-        seen.push(value.kind === "backend" && value.isPending === true);
-        return "";
-      },
+      onAuth: (value: JazzAuthState) => (auth = value),
       children: createRawSnippet(() => ({
         render: () => {
           mounts++;
@@ -197,50 +194,21 @@ it("updates backend auth descriptors reactively and never mounts private childre
     },
   });
   await settle();
-  expect(target.textContent).toBe("SIGN IN");
+  expect(target.textContent).toContain("SIGN IN");
+  expect(factory).toHaveBeenCalledWith(expect.objectContaining({ initial: "signed-out" }));
   expect(mounts).toBe(0);
-  auth.set(descriptor("a"));
+  backendUser = "a";
+  await auth.reauthenticate();
   await settle();
   expect(target.textContent).toBe("PRIVATE");
-  auth.set(descriptor("a", true));
-  await settle();
-  expect(target.textContent).toBe("WAIT");
-  expect(seen).not.toContain(true);
-  auth.set(descriptor("b"));
+  backendUser = "b";
+  await auth.reauthenticate();
   await settle();
   expect(target.textContent).toBe("PRIVATE");
   expect(owner.getSnapshot().account?.identity.subject).toBe("b");
   expect(events.slice(0, 2)).toEqual(["detached", "shutdown"]);
-});
-
-it("follows the `user` prop: loading, signed in, signed out", async () => {
-  let backendUser = "";
-  const handle = (id: string) =>
-    ({ id, identity: { issuer: "test", subject: id } }) as AccountHandle;
-  const owner = await createJazzSessionOwner({
-    accounts: new AccountManager({
-      logout: () => {},
-      loginWithBackend: async () => handle(backendUser),
-    } as any),
-    openClient: async () =>
-      attachSubscriptionStore(
-        { db: { onAuthChanged: () => () => {} }, session: null, shutdown: async () => {} },
-        {} as never,
-      ) as any,
-  });
-  factory.mockResolvedValue(owner);
-  const user = writable<string | null | undefined>(undefined);
-  const target = document.createElement("div");
-  component = mount(UserApp, { target, props: { user } });
+  backendUser = null;
+  await auth.reauthenticate();
   await settle();
-  expect(target.textContent).toBe("WAIT");
-  expect(factory).toHaveBeenCalledWith(expect.objectContaining({ initial: undefined }));
-  backendUser = "a";
-  user.set("a");
-  await settle();
-  expect(target.textContent).toBe("PRIVATE");
-  expect(owner.getSnapshot().account?.identity.subject).toBe("a");
-  user.set(null);
-  await settle();
-  expect(target.textContent).toBe("SIGN IN");
+  expect(target.textContent).toContain("SIGN IN");
 });

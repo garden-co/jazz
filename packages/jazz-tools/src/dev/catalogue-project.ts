@@ -44,7 +44,6 @@ import {
   collectMissingExplicitPolicyDiagnostics,
   mergePermissionsIntoWasmSchema,
 } from "../schema-permissions.js";
-import { DeploymentError } from "./catalogue-api.js";
 import { collectConventionalProvenanceDiagnostics } from "../provenance-guidance.js";
 import { fetchSchemaHashes, fetchStoredWasmSchema } from "./catalogue-api.js";
 import { renderMigrationStub } from "./migrations.js";
@@ -879,21 +878,21 @@ async function loadMigrationBaseline(
   if (local) return local;
   if (!options.serverUrl) {
     throw new Error(
-      "No local schema snapshot found. Pass --server-url and --admin-secret to use the server's active schema as the migration baseline.",
+      "No local schema snapshot found. Pass --server-url and --admin-secret to use the schema of the server's latest bundle as the migration baseline.",
     );
   }
   const appId = requireAppId(options.appId);
   const adminSecret = requireServerValue(options.adminSecret, "adminSecret");
   const graph = await fetchMigrationGraph({ appId, serverUrl: options.serverUrl, adminSecret });
-  if (!graph.activeSchemaHash) {
+  if (!graph.latestBundleSchemaHash) {
     throw new Error(
-      "No local schema snapshot or active server schema found. Deploy the initial schema before creating a migration. No snapshot was created.",
+      "No local schema snapshot or published bundle found. Deploy the initial schema before creating a migration. No snapshot was created.",
     );
   }
   return resolveRemoteHistoricalSchema(
     storage,
-    graph.activeSchemaHash,
-    "active schema",
+    graph.latestBundleSchemaHash,
+    "latest bundle's schema",
     appId,
     options.serverUrl,
     adminSecret,
@@ -1390,7 +1389,7 @@ async function loadLocalMigrationGraph(
   return { schemas, migrations, currentSchemaHash: current?.hash ?? null };
 }
 
-/** Publish all missing local history and activate schema.ts with its permissions. */
+/** Publish all missing local history and schema.ts with its permissions as a bundle. */
 export async function deploy(options: DeployOptions): Promise<DeployResult> {
   const migrationsDir = resolvedMigrationsDir(options.schemaDir, options.migrationsDir);
   if ("noVerify" in options)
@@ -1475,51 +1474,19 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
 
   const schemas = new Map(snapshots.map(({ hash, schema }) => [hash, schema]));
   schemas.set(toHash, compiled.wasmSchema);
-  let result: CatalogueDeployResult;
-  try {
-    result = await deployArtifacts(options, graph, {
-      targetSchemaHash: toHash,
-      schemas: [...schemas].map(([hash, schema]) => ({
-        hash,
-        schema: mergePermissionsIntoWasmSchema(schema, {}),
-      })),
-      migrations: edges.map((edge) => ({
-        fromHash: edge.fromHash,
-        toHash: edge.toHash,
-        forward: serializeForwardLenses(edge.migration.forward),
-      })),
-      permissions: compiled.permissions,
-    });
-  } catch (error) {
-    if (
-      error instanceof DeploymentError &&
-      error.code === "unreachable_deployment_target" &&
-      error.details?.active
-    ) {
-      const active = shortSchemaHash(error.details.active);
-      const target = shortSchemaHash(toHash);
-      throw new Error(
-        [
-          `Cannot deploy local schema ${target} from server schema ${active}: no forward migration path connects them.`,
-          "",
-          "Choose one:",
-          "",
-          "1. Revert to the common schema.",
-          "   Restore the shared ancestor in schema.ts (and its permissions), then deploy it.",
-          "   After that, restore your branch and deploy again. No reverse migration is needed.",
-          "",
-          "2. Merge both changes.",
-          "   Update schema.ts to include both branches' changes and update permissions.ts.",
-          "   Create a migration from each branch to that merged schema:",
-          `     jazz-tools migrations create ${options.appId} --fromHash ${active}`,
-          `     jazz-tools migrations create ${options.appId} --fromHash ${target}`,
-          "   Review both migrations, then deploy.",
-        ].join("\n"),
-        { cause: error },
-      );
-    }
-    throw error;
-  }
+  const result: CatalogueDeployResult = await deployArtifacts(options, graph, {
+    targetSchemaHash: toHash,
+    schemas: [...schemas].map(([hash, schema]) => ({
+      hash,
+      schema: mergePermissionsIntoWasmSchema(schema, {}),
+    })),
+    migrations: edges.map((edge) => ({
+      fromHash: edge.fromHash,
+      toHash: edge.toHash,
+      forward: serializeForwardLenses(edge.migration.forward),
+    })),
+    permissions: compiled.permissions,
+  });
   for (const warning of result.warnings) emit(options, { type: "warning", message: warning });
   for (const hash of result.published.schemas) emit(options, { type: "schema-published", hash });
   if (result.schema.status === "already-stored")

@@ -255,7 +255,12 @@ pub enum SubscriptionEvent {
         settled: bool,
         tier: DurabilityTier,
     },
+    /// The subscription ended with an error: `code` says what kind,
+    /// `message` is the error's own message, `reason` the error as text
+    /// (with its code).
     Rejected {
+        code: ErrorCode,
+        message: String,
         reason: String,
     },
     Closed,
@@ -381,14 +386,20 @@ impl Drop for SubscriptionStream {
 
 impl SubscriptionStream {
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
-        let reason = self
-            .refused
-            .as_ref()
-            .and_then(|refused| refused.borrow().as_ref().map(Error::to_string));
-        if let Some(reason) = reason {
+        let refused = self.refused.as_ref().and_then(|refused| {
+            refused
+                .borrow()
+                .as_ref()
+                .map(|error| (error.code, error.message.clone(), error.to_string()))
+        });
+        if let Some((code, message, reason)) = refused {
             self.refused = None;
             self.gate = None;
-            return Some(SubscriptionEvent::Rejected { reason });
+            return Some(SubscriptionEvent::Rejected {
+                code,
+                message,
+                reason,
+            });
         }
         if let Some(gate) = &self.gate {
             if !gate.open() {
@@ -598,6 +609,9 @@ struct Inner {
     pub(crate) as_written_mismatches: u64,
     /// The global authority: what it settles is durable at `Global`.
     authority: bool,
+    /// Every session but SYSTEM's must be pinned to a published bundle
+    /// (see [`Db::require_session_pins`]).
+    pub(crate) pins_required: bool,
     /// Uploads the authority refused, by commit seq, kept for a host that
     /// reports them (see [`Db::track_upstream_rejections`]).
     upstream_rejections: Option<Vec<UpstreamRejection>>,
@@ -819,6 +833,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
         jazz: jazz.clone(),
         version: jazz.version_id(),
         policies_from: None,
+        bundle: None,
         stored_names: false,
     })
 }
@@ -1334,6 +1349,7 @@ impl Db {
                 jazz: config.schema.clone(),
                 version: config.schema.version_id(),
                 policies_from: None,
+                bundle: None,
                 stored_names: false,
             };
             physical.union(&schema)?;
@@ -1345,6 +1361,7 @@ impl Db {
             physical
         };
         names.admit(&conn, &schema)?;
+        conn.execute_batch(sync::PENDING_DDL).map_err(storage)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
         let withheld: i64 = conn
             .query_row(
@@ -1450,6 +1467,7 @@ impl Db {
                 non_durable: false,
                 as_written_mismatches: 0,
                 authority: false,
+                pins_required: false,
                 upstream_rejections: None,
                 sessions: Vec::new(),
                 column_codes: RefCell::default(),
@@ -1570,6 +1588,14 @@ impl Db {
     /// store without the role (a relay with no upstream) settles at `Local`.
     pub fn set_authority(&self) {
         self.inner.borrow_mut().authority = true;
+    }
+
+    /// Refuse every session but SYSTEM's that is not pinned to a published
+    /// bundle: a core serves its app only through createJazz, which pins
+    /// each session it opens, so no session is governed by this store's
+    /// own permissions.
+    pub fn require_session_pins(&self) {
+        self.inner.borrow_mut().pins_required = true;
     }
 
     /// Whether this store is the global authority.
@@ -1748,6 +1774,14 @@ impl Db {
         &self,
         chunks: &std::sync::Arc<crate::large::Chunks>,
     ) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
+        // The last batch's failed fetches are asked again: results that
+        // were refused for them run again, and want what they still lack
+        // in this batch.
+        if chunks.outstanding().is_none() && chunks.clear_failed() {
+            let mut inner = self.inner();
+            inner.retry_awaiting();
+            inner.retry_store_failed_pulls();
+        }
         let Some((batch, fetch)) = chunks.begin_fetch() else {
             return Ok(None);
         };
@@ -1799,7 +1833,7 @@ impl Db {
         let mut fetch_failed = None;
         let any = !io.fetch.is_empty();
         if any {
-            self.install_fetched(chunks, &io.fetch, fetched, &mut fetch_failed);
+            self.install_fetched(chunks, &io.fetch, fetched, true, &mut fetch_failed);
         }
         {
             let inner = self.inner();
@@ -1830,25 +1864,32 @@ impl Db {
                 })?;
             }
         }
-        if any && fetch_failed.is_none() {
-            // Messages held for those nodes are served now, not a tick later.
+        if any {
+            // Messages held for those nodes are served now, not a tick
+            // later: with them, or refused with why they could not be.
             self.sync_tick()?;
         }
         fetch_failed.or(first).map_or(Ok(()), Err)
     }
 
     /// Install what the chunk store answered for `wanted`; reads waiting
-    /// on those nodes run again.
+    /// on those nodes run again. For the host's batch (`refuse`), reads of
+    /// a node it failed to fetch are refused with why until the next batch,
+    /// rather than waiting on it; a read that fetched itself gets the error
+    /// back directly.
     fn install_fetched(
         &self,
         chunks: &crate::large::Chunks,
         wanted: &[jazz_types::large_values::chunks::ChunkRequest],
         answers: Vec<Result<Option<bytes::Bytes>, Error>>,
+        refuse: bool,
         first: &mut Option<Error>,
     ) {
         for (request, answer) in wanted.iter().zip(answers) {
             if let Err(error) = answer.and_then(|bytes| chunks.install_from_store(request, bytes)) {
-                // Asked again by the next read that needs it.
+                if refuse {
+                    chunks.fetch_failed(request, error.clone());
+                }
                 first.get_or_insert(error);
             }
         }
@@ -1869,7 +1910,7 @@ impl Db {
             .run(store)
             .await;
         let mut first = None;
-        self.install_fetched(chunks, &done.io.fetch, done.fetched, &mut first);
+        self.install_fetched(chunks, &done.io.fetch, done.fetched, false, &mut first);
         first.map_or(Ok(()), Err)
     }
 
@@ -3504,7 +3545,9 @@ impl Inner {
                 format!("bundle {id} does not compile: {error}"),
             )
         })?;
-        let resolved = (*version, Rc::new(self.named(&governing)));
+        let mut named = self.named(&governing);
+        named.bundle = Some(*id);
+        let resolved = (*version, Rc::new(named));
         self.bundles.insert(*id, resolved.clone());
         Ok(Some(resolved))
     }
@@ -7233,9 +7276,45 @@ fn same_tables(
 }
 
 impl Db {
-    /// Register a typed schema view. The handle shares this owner's store,
-    /// batches, clock and subscriptions; it reads and writes its own columns
-    /// of the physical tables, which hold the union of every admitted view.
+    /// A handle that reads and writes as a sync session declaring schema
+    /// `version` is served: by that admitted version's names, governed by
+    /// the current schema's policies. `None` while `version` is not
+    /// admitted.
+    pub fn governed_view(&self, version: crate::ids::SchemaVersionId) -> Option<Db> {
+        let view = self.inner.borrow().governed(version)?;
+        Some(Db {
+            inner: self.inner.clone(),
+            view: Some(view),
+        })
+    }
+
+    /// [`Self::governed_view`] for a session pinned to published bundle
+    /// `bundle` (see [`Self::check_session_pin`]): governed by the
+    /// bundle's policies instead of the current schema's. Without a bundle
+    /// it is [`Self::governed_view`]. `None` while `version` is not
+    /// admitted or the bundle does not resolve.
+    pub fn pinned_view(
+        &self,
+        version: crate::ids::SchemaVersionId,
+        bundle: Option<&crate::catalogue::BundleId>,
+    ) -> Result<Option<Db>, Error> {
+        let Some(bundle) = bundle else {
+            return Ok(self.governed_view(version));
+        };
+        let mut inner = self.inner.borrow_mut();
+        let Some((_, governing)) = inner.bundle(bundle)? else {
+            return Ok(None);
+        };
+        let Some(view) = inner.governed_by(version, governing) else {
+            return Ok(None);
+        };
+        drop(inner);
+        Ok(Some(Db {
+            inner: self.inner.clone(),
+            view: Some(view),
+        }))
+    }
+
     /// Ship more of the app's versions and lenses (see
     /// [`DbConfig::with_migrations`]): a client learns an app's migrations
     /// when it first sees the app, not only when it opens.
@@ -7264,6 +7343,9 @@ impl Db {
         }
     }
 
+    /// Register a typed schema view. The handle shares this owner's store,
+    /// batches, clock and subscriptions; it reads and writes its own columns
+    /// of the physical tables, which hold the union of every admitted view.
     pub async fn register_schema_view(&self, schema: JazzSchema) -> Result<Db, Error> {
         // A version the app's lenses lead to is admitted as the authority
         // admits it, not named against the current one.
@@ -7391,6 +7473,9 @@ struct Batch {
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
     edits: LargeEdits,
+    /// Leases of the streamed values the batch's writes hold: their chunks
+    /// stay until the batch commits or is dropped.
+    uploads: Vec<crate::db::large_ops::UploadLease>,
 }
 
 #[derive(Default)]
@@ -7890,6 +7975,7 @@ impl Db {
                 kind,
                 ops: Vec::new(),
                 edits: LargeEdits::default(),
+                uploads: Vec::new(),
             },
         );
         Ok(())
@@ -8093,6 +8179,7 @@ impl Db {
     }
 
     fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+        crate::db::large_ops::renew_upload_leases(&self.inner(), &batch.uploads)?;
         self.with_upload(|| self.commit_ops_now(batch, kind))
     }
 
@@ -8387,6 +8474,23 @@ impl Db {
             batch.edits.pending_nodes.truncate(marks.1);
         }
         staged
+    }
+
+    /// Keep a streamed value's upload lease for as long as batch `id` is
+    /// open.
+    pub(crate) fn hold_upload(
+        &self,
+        id: OpenTransactionId,
+        lease: crate::db::large_ops::UploadLease,
+    ) -> Result<(), Error> {
+        self.inner
+            .staging()
+            .batches
+            .get_mut(&id)
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?
+            .uploads
+            .push(lease);
+        Ok(())
     }
 
     fn record_read(

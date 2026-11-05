@@ -38,7 +38,7 @@ song and the pages inside it, under **Shared with you**.
 `apps/nextjs-betterauth/.env.example` lists the settings. The checked-in
 defaults are for local development only. A production build or server
 (`NODE_ENV=production`) never uses them: it refuses to start unless
-`NEXT_PUBLIC_APP_ORIGIN`, `NEXT_PUBLIC_JAZZ_APP_ID` and `BETTER_AUTH_SECRET`
+`NEXT_PUBLIC_APP_ORIGIN`, `JAZZ_APP_ID` and `BETTER_AUTH_SECRET`
 are all set. Jazz runs inside the Next app and keeps its data in `.jazz/`; to
 keep it on a sync server such as Jazz Cloud instead, set `JAZZ_SERVER_URL`
 and `JAZZ_ADMIN_SECRET`.
@@ -58,9 +58,9 @@ and `JAZZ_ADMIN_SECRET`.
 Next app (`createJazz` in `src/lib/jazz.server.ts`, mounted at `/jazz`), and
 its `authenticate` reads that session cookie and maps the Better Auth user to
 an account; every membership, grant and assignee stores that account id. In
-the browser, `JazzProvider` takes `auth={betterAuth(authClient)}`: it follows
-the Better Auth session, signs in through the backend, and shows the sign-in
-form while signed out. The browser holds no token: server routes ask
+the browser, `JazzProvider` starts signed out and asks the backend who
+is signed in, again after the app signs in or out with Better Auth
+(`reauthenticate()`), and shows the sign-in form while signed out. The browser holds no token: server routes ask
 `jazz.accountFor(request)` who the caller is.
 
 **Atomic writes.** Anything that spans rows commits as one transaction: an

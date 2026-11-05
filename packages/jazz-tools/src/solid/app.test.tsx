@@ -1,15 +1,14 @@
-import { createSignal, createRenderEffect, onCleanup } from "solid-js";
+import { onCleanup } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
-import { backendAuth } from "../session/app.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
 import { JazzProvider, useJazzAuth } from "./app.js";
 import { useJazzClient } from "./provider.js";
 const factory = vi.hoisted(() => vi.fn());
-vi.mock("../session/create-jazz-session.js", () => ({ createJazzSession: factory }));
-vi.mock("../web/create-jazz-client.js", () => ({ createJazzClient: vi.fn() }));
+vi.mock("../session/create-jazz-session.js", () => ({ createJazzClient: factory }));
+vi.mock("../web/create-jazz-client.js", () => ({ openJazzClient: vi.fn() }));
 vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
 const flush = async () => {
   for (let i = 0; i < 40; i++) await Promise.resolve();
@@ -22,7 +21,8 @@ afterEach(async () => {
   factory.mockReset();
   document.body.replaceChildren();
 });
-const backend = { user: "unused" };
+// Who the app's backend names (null: no one).
+const backend: { user: string | null } = { user: null };
 async function setup() {
   const events: string[] = [];
   const handle = (id: string) =>
@@ -34,7 +34,7 @@ async function setup() {
       if (failLogout) throw new Error("logout failed");
     },
     // The backend names whoever the test's provider says is signed in.
-    loginWithBackend: async () => handle(backend.user),
+    loginWithBackend: async () => handle(backend.user!),
   });
   const owner = await createJazzSessionOwner({
     accounts,
@@ -49,6 +49,16 @@ async function setup() {
         },
         {} as never,
       ) as any,
+    // A stand-in for the browser's backend watch.
+    decorate: (session) => ({
+      async reauthenticate() {
+        if (backend.user === null) await session.logout();
+        else if (session.getSnapshot().account?.identity.subject !== backend.user) {
+          if (session.getSnapshot().status === "ready") await session.logout();
+          await session.loginWithBackend();
+        }
+      },
+    }),
   });
   factory.mockResolvedValue(owner);
   return {
@@ -75,7 +85,7 @@ it("retries startup through the default UI and exposes unified auth to children"
   document.body.append(node);
   dispose = render(
     () => (
-      <JazzProvider appId="test" autoAttachDevTools={false}>
+      <JazzProvider scope="test" autoAttachDevTools={false}>
         <Child />
       </JazzProvider>
     ),
@@ -87,7 +97,7 @@ it("retries startup through the default UI and exposes unified auth to children"
   node.querySelector("button")!.click();
   await flush();
   expect(factory).toHaveBeenCalledTimes(2);
-  expect(factory.mock.calls[1][0].initial).toBe("local-first");
+  expect(factory.mock.calls[1][0].initial).toBeUndefined();
   expect(node.textContent).toContain("PRIVATE");
   await auth!.logout();
   expect(events).toEqual(["detached", "shutdown:local"]);
@@ -102,36 +112,27 @@ it("retries startup through the default UI and exposes unified auth to children"
   await flush();
   expect(node.textContent).toContain("logout failed");
 });
-it("reacts to provider keys, conceals children during provider pending, and releases before shutdown", async () => {
+it("follows the backend on reauthenticate and releases children before shutdown", async () => {
   const { owner, events } = await setup();
-  const [key, setProviderKey] = createSignal<string | null>(null);
-  const setKey = (next: string | null) => {
-    if (next) backend.user = next;
-    setProviderKey(next);
-  };
-  const [pending, setPending] = createSignal(false);
-  const seen: boolean[] = [];
+  backend.user = null;
   let mounts = 0;
   const Child = () => {
     mounts++;
-    createRenderEffect(() => seen.push(pending()));
     onCleanup(() => events.push("detached"));
     return <p>PRIVATE</p>;
   };
-  const SignedOut = () => <p>{useJazzAuth().snapshot().status}</p>;
+  let auth!: ReturnType<typeof useJazzAuth>;
+  const SignedOut = () => {
+    auth = useJazzAuth();
+    return <p>{auth.snapshot().status}</p>;
+  };
   const node = document.createElement("div");
   document.body.append(node);
   dispose = render(
     () => (
       <JazzProvider
-        appId="test"
-        auth={backendAuth({
-          key: key(),
-          isPending: pending(),
-          logout: async () => {
-            setKey(null);
-          },
-        })}
+        scope="test"
+        initial="signed-out"
         signedOut={<SignedOut />}
         loading={<p>WAIT</p>}
         autoAttachDevTools={false}
@@ -143,16 +144,15 @@ it("reacts to provider keys, conceals children during provider pending, and rele
   );
   await flush();
   expect(node.textContent).toBe("signed-out");
+  expect(factory).toHaveBeenCalledWith(expect.objectContaining({ initial: "signed-out" }));
   expect(mounts).toBe(0);
-  setKey("a");
+  backend.user = "a";
+  await auth.reauthenticate();
   await flush();
   expect(node.textContent).toBe("PRIVATE");
-  setPending(true);
-  await flush();
-  expect(node.textContent).toBe("WAIT");
-  expect(seen).not.toContain(true);
-  setKey("b");
-  setPending(false);
+  expect(auth.snapshot().user).toMatchObject({ id: "a", issuer: "test" });
+  backend.user = "b";
+  await auth.reauthenticate();
   await flush();
   expect(owner.getSnapshot().account?.identity.subject).toBe("b");
   expect(node.textContent).toBe("PRIVATE");
@@ -162,35 +162,4 @@ it("reacts to provider keys, conceals children during provider pending, and rele
   await flush();
   expect(owner.getSnapshot().status).toBe("closed");
   expect(events.slice(-2)).toEqual(["detached", "shutdown:b"]);
-});
-
-it("follows the `user` prop: loading, signed in, signed out", async () => {
-  const { owner } = await setup();
-  const [user, setUser] = createSignal<string | null | undefined>(undefined);
-  const node = document.createElement("div");
-  document.body.append(node);
-  dispose = render(
-    () => (
-      <JazzProvider
-        user={user()}
-        signedOut={<p>SIGN IN</p>}
-        loading={<p>WAIT</p>}
-        autoAttachDevTools={false}
-      >
-        <p>PRIVATE</p>
-      </JazzProvider>
-    ),
-    node,
-  );
-  await flush();
-  expect(node.textContent).toBe("WAIT");
-  expect(factory).toHaveBeenCalledWith(expect.objectContaining({ initial: undefined }));
-  backend.user = "a";
-  setUser("a");
-  await flush();
-  expect(node.textContent).toBe("PRIVATE");
-  expect(owner.getSnapshot().account?.identity.subject).toBe("a");
-  setUser(null);
-  await flush();
-  expect(node.textContent).toBe("SIGN IN");
 });

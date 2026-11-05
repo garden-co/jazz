@@ -81,8 +81,8 @@ async function signIn(email: string, name: string) {
   );
   if (!account) throw new Error(`the app's Jazz resolves no account for ${email}`);
 
-  const { createJazzSession } = await import("jazz-tools/backend");
-  const browser = await createJazzSession({
+  const { createJazzClient } = await import("jazz-tools/backend");
+  const browser = await createJazzClient({
     appId: server.appId,
     app,
     permissions,
@@ -103,7 +103,7 @@ beforeAll(async () => {
   // The app's Jazz fronts this test server with remote().
   process.env.JAZZ_SERVER_URL = server.url;
   process.env.JAZZ_ADMIN_SECRET = server.adminSecret;
-  process.env.NEXT_PUBLIC_JAZZ_APP_ID = server.appId;
+  process.env.JAZZ_APP_ID = server.appId;
   process.env.BACKEND_SECRET = server.backendSecret;
   process.env.BETTER_AUTH_SECRET = "music-agent-test-better-auth-secret-0123456789";
   process.env.MUSIC_AGENT_PROVIDER = "scripted";

@@ -867,12 +867,12 @@ test("React Native docs advertise the supported alpha session and account-handle
   assert.match(expoSetup, /import \{ JazzSessionProvider \} from "jazz-tools\/expo"/);
   assert.match(
     expoSetup,
-    /<JazzSessionProvider config=\{\{ appId, serverUrl, initial: "local-first" \}\}>[\s\S]*<TodoApp \/>[\s\S]*<\/JazzSessionProvider>/,
+    /<JazzSessionProvider config=\{\{ serverUrl, initial: "local-first" \}\}>[\s\S]*<TodoApp \/>[\s\S]*<\/JazzSessionProvider>/,
     "Expo setup must give the session provider one local-first configuration and mount its child",
   );
   assert.doesNotMatch(
     expoSetup,
-    /createAccountManager|createJazzClient|JazzClientProvider|client\.shutdown/,
+    /createAccountManager|openJazzClient|JazzClientProvider|client\.shutdown/,
     "the session provider must own account selection and client lifecycle in the primary Expo setup",
   );
   assert.match(clientSetupGuide, /canonical Expo\s+scaffold/);
@@ -880,10 +880,10 @@ test("React Native docs advertise the supported alpha session and account-handle
     durabilityGuide,
     /React Native\/Expo alpha uses these same read and write durability tiers/,
   );
-  assert.match(durabilityGuide, /account-handle client with `createJazzClient`/);
+  assert.match(durabilityGuide, /client with `createJazzClient`/);
   assert.match(
     examplesGuide,
-    /Supported alpha app:[\s\S]*`AccountHandle`[\s\S]*`createJazzClient`/,
+    /Supported alpha app:[\s\S]*`AccountHandle`[\s\S]*`JazzSessionProvider`/,
   );
   assert.match(
     exampleReadme,
