@@ -40,9 +40,10 @@ env:
   JAZZ_RN_CARGO_NDK_VERSION: 4.1.2
 
 jobs:
-  # jazz-tools ships no server binary. This internal build keeps a release
-  # gated on the server shell Jazz Cloud runs (its image builds the same
-  # binary from the release tag) and on its heap profiling.
+  # The server binary Jazz Cloud runs. npm's jazz-tools ships no native
+  # binary: "Publish jazz-tools alpha" attaches these to the GitHub release
+  # with SHA256SUMS, and Jazz Cloud's images (and its preview image, from
+  # this artifact) take it from there. Keep the artifact names.
   build-linux:
     name: Build server Linux (${{ matrix.arch }})
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -54,10 +55,10 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             arch: x64
-            output: jazz-server-linux-x64
+            output: jazz-tools-linux-x64
           - target: aarch64-unknown-linux-musl
             arch: arm64
-            output: jazz-server-linux-arm64
+            output: jazz-tools-linux-arm64
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -114,11 +115,11 @@ jobs:
         include:
           - arch: x64
             os: blacksmith-4vcpu-ubuntu-2404
-            artifact: jazz-server-linux-x64
+            artifact: jazz-tools-linux-x64
           # Jazz Cloud runs the arm64 build.
           - arch: arm64
             os: blacksmith-4vcpu-ubuntu-2404-arm
-            artifact: jazz-server-linux-arm64
+            artifact: jazz-tools-linux-arm64
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:

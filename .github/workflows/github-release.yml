@@ -141,5 +141,13 @@ jobs:
               fi
             done
           fi
+          # Jazz Cloud's images take the server binary from the release.
+          assets=$(gh release view "${TAG}" --json assets --jq '.assets[].name')
+          for asset in jazz-tools-linux-x64 jazz-tools-linux-arm64 SHA256SUMS; do
+            if ! grep -qx "${asset}" <<<"${assets}"; then
+              echo "::error::${TAG} has no ${asset}; \"Publish jazz-tools alpha\" attaches the server binaries after the npm publish."
+              exit 1
+            fi
+          done
           gh release edit "${TAG}" --draft=false --prerelease=false --latest
           gh release view "${TAG}" --json url --jq '"Published: " + .url'

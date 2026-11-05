@@ -1461,10 +1461,22 @@ test("CodSpeed measures BandChat and WorldTour through the native wall-time matr
 });
 
 test("the jazz-tools npm package ships no native CLI binary", () => {
-  // The server CLI was removed: jazz-tools is TypeScript only, and the core
-  // ships as the jazz-napi addon (serveCore) that vercel() Sandboxes run.
-  assert.doesNotMatch(packageBuild, /jazz-tools-(linux|darwin)-/);
+  // The server CLI was removed from npm: jazz-tools is TypeScript only, and
+  // the core ships as the jazz-napi addon (serveCore) that vercel()
+  // Sandboxes run. Jazz Cloud's Linux server binary is a CI artifact under
+  // its old names, attached to the GitHub release, never staged into npm.
   assert.doesNotMatch(packageBuild, /bin\/native/);
+  assert.doesNotMatch(packageBuild, /jazz-tools-darwin-/);
+  for (const arch of ["x64", "arm64"])
+    assert.match(packageBuild, new RegExp(`output: jazz-tools-linux-${arch}\\n`));
+  const publish = fs.readFileSync(
+    path.join(root, ".github/workflows/publish-jazz-tools-alpha.yml"),
+    "utf8",
+  );
+  assert.match(
+    publish,
+    /gh release upload "\$\{TAG\}" dist\/jazz-tools-linux-x64 dist\/jazz-tools-linux-arm64 dist\/SHA256SUMS/,
+  );
   const launcher = fs.readFileSync(
     path.join(root, "packages/jazz-tools/bin/jazz-tools.js"),
     "utf8",

@@ -741,6 +741,72 @@ jobs:
 
           npm dist-tag add "create-jazz@${CREATE_JAZZ_VERSION}" latest
 
+  # Jazz Cloud's images run the Linux server binary from the GitHub release:
+  # npm's jazz-tools carries no native binary. Attach both builds with their
+  # SHA256SUMS to the version's draft (creating a bare one if "GitHub
+  # release" hasn't drafted it yet); "GitHub release" refuses to publish
+  # without them. A published release's assets are never replaced.
+  attach-server-binaries:
+    name: Attach server binaries to the GitHub release
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs:
+      - release-push-gate
+      - resolve-preview-artifacts
+      - publish-npm
+    if: >-
+      always() &&
+      needs.publish-npm.result == 'success' &&
+      (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
+        with:
+          pattern: jazz-tools-linux-*
+          merge-multiple: true
+          path: dist
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
+          pattern: jazz-tools-linux-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          test -s jazz-tools-linux-x64
+          test -s jazz-tools-linux-arm64
+          sha256sum jazz-tools-linux-x64 jazz-tools-linux-arm64 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
+          TAG="v${VERSION}"
+          if is_draft=$(gh release view "${TAG}" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "${is_draft}" != true ]; then
+              echo "::error::${TAG} is published; its server binaries are never replaced."
+              exit 1
+            fi
+          else
+            gh release create "${TAG}" --draft --verify-tag --title "Jazz ${VERSION}" --notes ""
+          fi
+          gh release upload "${TAG}" dist/jazz-tools-linux-x64 dist/jazz-tools-linux-arm64 dist/SHA256SUMS --clobber
+
   # Read-only check that the Inspector Vercel token can see its project. It runs
   # in candidate dry-runs too, so a broken token shows up before anything
   # publishes. It deliberately does not gate npm publication.
