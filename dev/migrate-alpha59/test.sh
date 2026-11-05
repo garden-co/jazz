@@ -22,7 +22,8 @@ app=0a590000-0000-4000-8000-000000000059
 # `--bin` filters every listed package, so the tool crates build separately.
 (cd "$a59" && CARGO_TARGET_DIR="$t59" cargo build --release -p jazz-cli --bin jazz-tools &&
   CARGO_TARGET_DIR="$t59" cargo build --release -p migrate-alpha59-produce \
-    -p jazz-alpha59-export -p jazz-alpha59-dump)
+    -p jazz-alpha59-export -p jazz-alpha59-dump &&
+  CARGO_TARGET_DIR="$t59" cargo test --release -p jazz-alpha59-export)
 (cd "$root" && CARGO_TARGET_DIR="$t60" cargo build --release -p jazz-cli --bin jazz-tools)
 import=("$t60/release/jazz-tools" migrate-alpha59)
 
@@ -41,6 +42,11 @@ grep -q '"backend_identities_linked":3' "$work/import.json"
 # creation of the insert that settled after it.
 # (Repeated deletes need two alpha.59 clients; unit tests cover them.)
 grep -q '"inserts_with_their_own_creation":1' "$work/import.json"
+# Two rows edited while deleted: one restored with the edit, one left
+# deleted, its edit dropped.
+grep -q '"versions_written_while_deleted":2' "$work/import.json"
+grep -q '"restores_bringing_content_written_while_deleted":1' "$work/import.json"
+grep -q '"deleted_rows_dropping_content_written_while_deleted":1' "$work/import.json"
 "${import[@]}" verify --dump "$work/dump" --data-dir "$work/a60" --app-id "$app"
 
 # Only the active schema came over, and rows written under v1 read under

@@ -5,9 +5,12 @@
 //! - every principal's login answer, against what alpha.59 itself answered;
 //! - every backend identity link;
 //! - every row, against what alpha.59 itself reads as its current state
-//!   (the dump's settled content and deletion winners, not this tool's own
-//!   replay): deleted or not, every cell in the active schema, and its
-//!   created/updated author and timestamp; and no row alpha.59 lacks.
+//!   (the dump's settled content and deletion winners): deleted or not,
+//!   every cell in the active schema, and its creation; and no row alpha.59
+//!   lacks. Where the store differs from alpha.59 by design (its last write,
+//!   and content written under a deletion that lasts), the import's replay
+//!   rules ([`super::replay`]) say what it holds, and the replay must end on
+//!   alpha.59's winners.
 //!
 //! It prints counts and at most 20 mismatches, naming rows and columns but
 //! never cell values or authors.
@@ -29,65 +32,76 @@ use jazz_server::{ServerBuilder, ServerState, StorageBackend};
 use serde_json::{Value as Json, json};
 
 use super::active::{ToHead, Translated};
+use super::replay::{Released, RowReplay};
 use super::{
     Args, RowKey, active_deployment, convert_author, convert_value, err, keyed_currents,
-    match_schemas, replaces, uuid_string,
+    match_schemas, uuid_string,
 };
 
 const MAX_REPORTED: usize = 20;
 
-/// The latest run of one kind of deletion event on a row.
-struct DeletionRun {
-    deleting: bool,
-    /// Whether the row was deleted before the run.
-    deleted_before: bool,
-}
+/// A write's author and time.
+type Stamp = (dump::Author, u64);
 
-/// The import's rule for deletion events, replayed alongside: a run of the
-/// same event collapses to its last one, and a run of restores on a live
-/// row writes nothing, so leaves the row's update as it was.
+/// What the import writes for each row, by its own replay rules
+/// ([`super::replay`]): which content the store holds, and who wrote the
+/// row last, when. Only alpha.59's current state says what the content and
+/// deletion are; this says where the store differs from it by design.
 #[derive(Default)]
-struct DeletionRuns {
-    runs: HashMap<RowKey, DeletionRun>,
-    /// Whether the row was deleted when its last run was closed by content.
-    stored_deleted: HashMap<RowKey, bool>,
+struct Predicted {
+    rows: RowReplay<Stamp, (dump::TxRef, Stamp)>,
+    /// Per row, the content transaction the store holds.
+    stored: HashMap<RowKey, dump::TxRef>,
+    last_write: HashMap<RowKey, Stamp>,
+    /// Per row that stays deleted, the content dropped under the deletion.
+    dropped: HashMap<RowKey, dump::TxRef>,
 }
 
-impl DeletionRuns {
-    /// Records a version that won its layer of the row.
-    fn accept(&mut self, key: &RowKey, deletion: Option<dump::Deletion>) {
-        match deletion {
-            None => {
-                if let Some(run) = self.runs.remove(key) {
-                    self.stored_deleted.insert(key.clone(), run.deleting);
-                }
-            }
+impl Predicted {
+    fn version(&mut self, key: &RowKey, version: &dump::Version) {
+        if version.fate != "accepted" || !self.rows.wins(key, version) {
+            return;
+        }
+        let stamp = (version.updated_by.clone(), version.updated_at);
+        let mut out = Vec::new();
+        match version.deletion {
             Some(event) => {
-                let deleting = event == dump::Deletion::Deleted;
-                let before = match self.runs.get(key) {
-                    Some(run) if run.deleting == deleting => None,
-                    Some(run) => Some(run.deleting),
-                    None => Some(self.stored_deleted.get(key).copied().unwrap_or(false)),
+                self.rows
+                    .event(key, event == dump::Deletion::Deleted, stamp, &mut out);
+                self.take(out);
+            }
+            None => {
+                let tx = dump::TxRef {
+                    node: version.tx_node,
+                    time: version.tx_time,
                 };
-                if let Some(deleted_before) = before {
-                    self.runs.insert(
-                        key.clone(),
-                        DeletionRun {
-                            deleting,
-                            deleted_before,
-                        },
-                    );
+                let content = self.rows.content(key, (tx, stamp), &mut out);
+                self.take(out);
+                if let Some((tx, stamp)) = content {
+                    self.stored.insert(key.clone(), tx);
+                    self.last_write.insert(key.clone(), stamp);
                 }
             }
         }
     }
 
-    /// Whether the row's last deletion events are restores of a live row,
-    /// which the import drops.
-    fn live_restore(&self, key: &RowKey) -> bool {
-        self.runs
-            .get(key)
-            .is_some_and(|run| !run.deleting && !run.deleted_before)
+    fn take(&mut self, out: Vec<Released<Stamp, (dump::TxRef, Stamp)>>) {
+        for released in out {
+            if let Some((tx, _)) = released.content {
+                self.stored.insert(released.key.clone(), tx);
+            }
+            self.last_write.insert(released.key, released.event);
+        }
+    }
+
+    fn finish(&mut self) {
+        let mut out = Vec::new();
+        let dropped = self.rows.finish(&mut out);
+        self.take(out);
+        self.dropped = dropped
+            .into_iter()
+            .map(|(key, (tx, _))| (key, tx))
+            .collect();
     }
 }
 
@@ -146,13 +160,11 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
     let mut accounts = Vec::new();
     let mut raw_currents = Vec::new();
     let mut currents: HashMap<RowKey, dump::Current> = HashMap::new();
-    // Per row: its content winner and its deletion winner, each with its
-    // position in commit order.
-    let mut content: HashMap<RowKey, (u64, dump::Version)> = HashMap::new();
-    let mut deletion: HashMap<RowKey, (u64, dump::Version)> = HashMap::new();
-    let mut position = 0u64;
-    let mut layer_winners: HashMap<(RowKey, bool), dump::TxRef> = HashMap::new();
-    let mut runs = DeletionRuns::default();
+    // Per row: its content winner and its deletion winner, as alpha.59
+    // reads them.
+    let mut content: HashMap<RowKey, dump::Version> = HashMap::new();
+    let mut deletion: HashMap<RowKey, dump::Version> = HashMap::new();
+    let mut predicted = Predicted::default();
     while let Some(record) = reader.next_record().map_err(err)? {
         match record {
             dump::Record::Schema(schema) => runtime_schemas.push(schema),
@@ -166,7 +178,6 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
             } => logins.push((principal_json, login_json)),
             dump::Record::Current(current) => raw_currents.push(current),
             dump::Record::Version(version) => {
-                position += 1;
                 if to_head.is_none() {
                     let built = ToHead::new(
                         active_schema.ok_or("the dump has rows but no active schema")?,
@@ -186,15 +197,7 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
                     continue;
                 };
                 let key: RowKey = (table, version.row);
-                if version.fate == "accepted"
-                    && replaces(
-                        layer_winners.get(&(key.clone(), version.deletion.is_some())),
-                        &version,
-                    )
-                {
-                    layer_winners.insert((key.clone(), version.deletion.is_some()), tx);
-                    runs.accept(&key, version.deletion);
-                }
+                predicted.version(&key, &version);
                 let Some(current) = currents.get(&key) else {
                     continue;
                 };
@@ -206,25 +209,51 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
                 if winner != Some(tx) {
                     continue;
                 }
-                let version = match to_head.translate(version)? {
-                    Translated::Kept(version) => version,
-                    Translated::TableGone => {
-                        return Err(format!(
-                            "{} row {}: its table is in the active schema, but its version \
-                             translates to none",
-                            key.0,
-                            uuid_string(key.1)
-                        ));
-                    }
-                };
+                let version = translated(to_head, &key, version)?;
                 let winners = if version.deletion.is_none() {
                     &mut content
                 } else {
                     &mut deletion
                 };
-                winners.insert(key, (position, version));
+                winners.insert(key, version);
             }
             _ => {}
+        }
+    }
+    predicted.finish();
+    // A row that stays deleted over content written under its deletion: the
+    // store holds the content from before it. Read those versions back.
+    let mut wanted: HashMap<RowKey, dump::TxRef> = HashMap::new();
+    for (key, current) in &currents {
+        if let (Some(stored), Some(winner)) = (predicted.stored.get(key), current.content)
+            && *stored != winner
+        {
+            wanted.insert(key.clone(), *stored);
+        }
+    }
+    let mut stored_versions: HashMap<RowKey, dump::Version> = HashMap::new();
+    if !wanted.is_empty() {
+        let to_head = to_head.as_ref().expect("rows imply a head");
+        let file = std::fs::File::open(&args.dump).map_err(err)?;
+        let (mut reader, _) = dump::Reader::open(std::io::BufReader::new(file)).map_err(err)?;
+        while let Some(record) = reader.next_record().map_err(err)? {
+            let dump::Record::Version(version) = record else {
+                continue;
+            };
+            if version.deletion.is_some() {
+                continue;
+            }
+            let Some(table) = to_head.head_table(version.schema, &version.table)? else {
+                continue;
+            };
+            let key: RowKey = (table, version.row);
+            let tx = dump::TxRef {
+                node: version.tx_node,
+                time: version.tx_time,
+            };
+            if wanted.get(&key) == Some(&tx) {
+                stored_versions.insert(key.clone(), translated(to_head, &key, version)?);
+            }
         }
     }
     let mut report = Report::default();
@@ -244,7 +273,7 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
             });
             continue;
         }
-        let Some((content_at, content)) = content.remove(key) else {
+        let Some(content) = content.remove(key) else {
             report.check("alpha.59 current state", false, || {
                 format!("{}: its current content version is missing", label())
             });
@@ -258,22 +287,39 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
             continue;
         }
         report.check("alpha.59 current state", true, label);
-        // A restore of a live row changed nothing the new store keeps.
-        let live_restore = runs.live_restore(key);
-        let (updated_by, updated_at) = match &deletion {
-            Some((at, event)) if *at > content_at && !live_restore => {
-                (event.updated_by.clone(), event.updated_at)
+        // The import's replay ends on alpha.59's content winner, held by the
+        // store or dropped under a lasting deletion.
+        let winner = current.content;
+        let replayed = predicted.stored.get(key).copied() == winner
+            || predicted.dropped.get(key).copied() == winner;
+        report.check("replayed content", replayed, || {
+            format!("{}: the replay ends on another content version", label())
+        });
+        let Some((updated_by, updated_at)) = predicted.last_write.remove(key) else {
+            report.check("replayed content", false, || {
+                format!("{}: the replay writes nothing", label())
+            });
+            continue;
+        };
+        let stored = match stored_versions.remove(key) {
+            Some(stored) => stored,
+            None if predicted.stored.get(key).copied() == winner => content.clone(),
+            None => {
+                report.check("replayed content", false, || {
+                    format!("{}: the content the store holds is missing", label())
+                });
+                continue;
             }
-            _ => (content.updated_by.clone(), content.updated_at),
         };
         rows.insert(
             key.clone(),
             Expected {
-                table: content.table,
-                schema: content.schema,
+                table: stored.table,
+                schema: stored.schema,
                 deleted: deletion
-                    .is_some_and(|(_, event)| event.deletion == Some(dump::Deletion::Deleted)),
-                cells: content.cells,
+                    .is_some_and(|event| event.deletion == Some(dump::Deletion::Deleted)),
+                cells: stored.cells,
+                // The insert carries alpha.59's creation: the content winner's.
                 created_by: content.created_by,
                 created_at: content.created_at,
                 updated_by,
@@ -528,6 +574,22 @@ async fn verify_rows(
     Ok(())
 }
 
+/// `version` brought to the active schema, whose table holds `key`.
+fn translated(
+    to_head: &ToHead,
+    key: &RowKey,
+    version: dump::Version,
+) -> Result<dump::Version, String> {
+    match to_head.translate(version)? {
+        Translated::Kept(version) => Ok(version),
+        Translated::TableGone => Err(format!(
+            "{} row {}: its table is in the active schema, but its version translates to none",
+            key.0,
+            uuid_string(key.1)
+        )),
+    }
+}
+
 /// An author as `Db::row_provenance` spells it.
 fn canonical(author: &AuthorSubject) -> String {
     let account = author.account_id().unwrap_or(SYSTEM_ACCOUNT_ID).0;
@@ -548,37 +610,94 @@ mod tests {
         ("notes".to_owned(), [1; 16])
     }
 
-    fn replay(events: &[Option<dump::Deletion>]) -> bool {
-        let mut runs = DeletionRuns::default();
-        for event in events {
-            runs.accept(&key(), *event);
+    fn author(subject: &str) -> dump::Author {
+        dump::Author::Authenticated {
+            account: None,
+            issuer: "https://issuer.example".to_owned(),
+            subject: subject.to_owned(),
         }
-        runs.live_restore(&key())
+    }
+
+    fn version(n: u64, by: &str, deletion: Option<dump::Deletion>) -> dump::Version {
+        dump::Version {
+            table: "notes".to_owned(),
+            schema: [7; 16],
+            branch: Vec::new(),
+            row: [1; 16],
+            tx_node: [9; 16],
+            tx_time: n,
+            parents: Vec::new(),
+            global_time: Some(n),
+            fate: "accepted".to_owned(),
+            made_by: author(by),
+            created_by: author("creator"),
+            created_at: 1,
+            updated_by: author(by),
+            updated_at: n,
+            deletion,
+            cells: BTreeMap::new(),
+            user_metadata_json: None,
+        }
+    }
+
+    fn tx(n: u64) -> dump::TxRef {
+        dump::TxRef {
+            node: [9; 16],
+            time: n,
+        }
+    }
+
+    fn predict(versions: &[dump::Version]) -> Predicted {
+        let mut predicted = Predicted::default();
+        for version in versions {
+            predicted.version(&key(), version);
+        }
+        predicted.finish();
+        predicted
     }
 
     #[test]
     fn a_restore_of_a_live_row_keeps_the_rows_update() {
-        use dump::Deletion::{Deleted, Restored};
-        assert!(replay(&[None, Some(Restored)]));
-        assert!(replay(&[None, Some(Restored), Some(Restored)]));
-        assert!(!replay(&[None, Some(Deleted)]));
-        assert!(!replay(&[None, Some(Deleted), Some(Restored)]));
-        assert!(!replay(&[
-            None,
-            Some(Deleted),
-            Some(Deleted),
-            Some(Restored)
-        ]));
-        // Content closes a run; a restore after it is of a deleted row.
-        assert!(!replay(&[None, Some(Deleted), None, Some(Restored)]));
-        // Restored, then content, then restored again: the last restore is
-        // of a live row.
-        assert!(replay(&[
-            None,
-            Some(Deleted),
-            Some(Restored),
-            None,
-            Some(Restored)
-        ]));
+        let predicted = predict(&[
+            version(1, "a", None),
+            version(2, "b", Some(dump::Deletion::Restored)),
+        ]);
+        assert_eq!(predicted.last_write[&key()], (author("a"), 1));
+    }
+
+    #[test]
+    fn content_under_a_lasting_deletion_leaves_the_delete_last() {
+        let predicted = predict(&[
+            version(1, "a", None),
+            version(2, "b", Some(dump::Deletion::Deleted)),
+            version(3, "c", None),
+        ]);
+        // The store keeps the content from before the delete, and the
+        // delete as its last write, though alpha.59's content winner is 3.
+        assert_eq!(predicted.stored[&key()], tx(1));
+        assert_eq!(predicted.dropped[&key()], tx(3));
+        assert_eq!(predicted.last_write[&key()], (author("b"), 2));
+    }
+
+    #[test]
+    fn content_written_while_deleted_comes_back_with_the_restore() {
+        let deleted = Some(dump::Deletion::Deleted);
+        let predicted = predict(&[
+            version(1, "a", None),
+            version(2, "b", deleted),
+            version(3, "c", None),
+            version(4, "d", deleted),
+            version(5, "e", Some(dump::Deletion::Restored)),
+        ]);
+        assert_eq!(predicted.stored[&key()], tx(3));
+        assert!(predicted.dropped.is_empty());
+        assert_eq!(predicted.last_write[&key()], (author("e"), 5));
+    }
+
+    #[test]
+    fn a_version_settled_after_a_newer_one_writes_nothing() {
+        let predicted = predict(&[version(2, "a", None), version(1, "b", None)]);
+        assert_eq!(predicted.stored[&key()], tx(2));
+        assert_eq!(predicted.last_write[&key()], (author("a"), 2));
     }
 }
