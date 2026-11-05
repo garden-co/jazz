@@ -1,15 +1,5 @@
 # Agent Quickstart for jazz.tools
 
-A guide from the Jazz team for agents building with Jazz. You and your user have the most context
-about what you're building, so use your intuition. Depending on how established or greenfield the
-project is and what the user wants, explain how Jazz fits their existing tech choices, recommend
-options for open choices, or just make the choices needed to get things running quickly. Every
-choice below has a default you can take when the user has no preference.
-
-All docs links are paths on https://jazz.tools. Append `.md` to any docs page for Markdown. The
-full docs index is https://jazz.tools/llms.txt. To search the docs, fetch
-https://jazz.tools/api/search?q=<words>&format=md (add `&full=1` to include the top three pages).
-
 ## Decide
 
 1. **Where should this project be deployed?** Jazz runs embedded in your backend, so it deploys
@@ -96,3 +86,15 @@ Finish with: the commands to run, what you chose and why, and any docs that were
 2. Need backend clients that can't be part of the main backend API? /docs/setup/backend-client
 3. Drafts and branches of rows: /docs/recipes/drafts-and-branches
 4. Durability tiers, for "is it saved?" indicators: /docs/reference/durability-tiers
+
+## About this guide
+
+The above is a guide from the Jazz team for agents building with Jazz. You and your user have the
+most context about what you're building, so use your intuition. Depending on how established or
+greenfield the project is and what the user wants, explain how Jazz fits their existing tech
+choices, recommend options for open choices, or just make the choices needed to get things running
+quickly. Every choice under "Decide" has a default you can take when the user has no preference.
+
+All docs links are paths on https://jazz.tools. Append `.md` to any docs page for Markdown. The
+full docs index is https://jazz.tools/llms.txt. To search the docs, fetch
+https://jazz.tools/api/search?q=<words>&format=md (add `&full=1` to include the top three pages).
