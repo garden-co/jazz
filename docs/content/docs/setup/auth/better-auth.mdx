@@ -42,22 +42,29 @@ The plain Better Auth client is enough:
 
 ## Connecting to Jazz
 
-Give `JazzProvider` the user from Better Auth's own `useSession()`. Forms only call Better Auth sign-up
-or sign-in; Jazz follows the session, signs in through your backend, and owns startup, account
-changes and error recovery.
+`JazzProvider` asks your backend who is signed in, so forms only call Better Auth's sign-up or
+sign-in and then `reauthenticate()`. Jazz owns startup, account changes and error recovery, and
+also checks again on start, on focus and when another tab signs in or out.
 
 ```tsx title="App.tsx"
-import { JazzProvider } from "jazz-tools/react";
+import { JazzProvider, useJazzAuth } from "jazz-tools/react";
 import { authClient } from "./auth-client";
 
 function Root() {
-  const { data, isPending } = authClient.useSession();
   return (
-    // undefined while your auth loads, null when signed out, the user's id when signed in
-    <JazzProvider user={isPending ? undefined : (data?.user.id ?? null)} signedOut={<SignIn />}>
+    <JazzProvider signedOut={<SignIn />}>
       <App />
     </JazzProvider>
   );
+}
+
+function SignIn() {
+  const { reauthenticate } = useJazzAuth();
+  async function signIn(email: string, password: string) {
+    await authClient.signIn.email({ email, password });
+    await reauthenticate();
+  }
+  // ...your form calls signIn
 }
 ```
 
@@ -65,9 +72,9 @@ For a full working example, including Better Auth's tables stored in Jazz, see t
 [Better Auth chat example](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat).
 
 <Callout type="info">
-  If your users start as local-first guests and sign up later, call `linkWithBackend()` after Better
-  Auth's sign-up so they keep their data. See [Other /
-  Custom](/docs/setup/auth/custom#guests-who-sign-up).
+  If your users start as local-first guests and sign up later, call
+  `linkWithBackend()` after Better Auth's sign-up so they keep their data. See
+  [Other / Custom](/docs/setup/auth/custom#guests-who-sign-up).
 </Callout>
 
 ## Store Better Auth's tables in Jazz
@@ -215,8 +222,8 @@ export const auth = betterAuth({
 | `prefix`    | Table name prefix (defaults to `"better_auth_"`).                                                    |
 
 <Callout title="Leave Better Auth joins disabled">
-  The Jazz adapter does not support Better Auth experimental joins yet, so do not enable
-  `experimental.joins`.
+  The Jazz adapter does not support Better Auth experimental joins yet, so do
+  not enable `experimental.joins`.
 </Callout>
 
 ### Compatibility
@@ -230,7 +237,8 @@ The adapter is currently aligned with Better Auth `1.7.1`.
 | Email OTP             |      ✅       |
 
 <Callout title="Compatibility scope">
-  This section reflects the adapter behavior currently covered by this repo's Better Auth
-  integration and tests. If you add plugins that introduce extra tables or custom schema fields,
-  regenerate `schema-better-auth/schema.ts` and re-run the Jazz schema workflow.
+  This section reflects the adapter behavior currently covered by this repo's
+  Better Auth integration and tests. If you add plugins that introduce extra
+  tables or custom schema fields, regenerate `schema-better-auth/schema.ts` and
+  re-run the Jazz schema workflow.
 </Callout>

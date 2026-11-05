@@ -65,7 +65,10 @@ const backup = new BrowserPasskeyBackup({
   appName: "My App",
   appHostname: "app.example",
 });
-await backup.backup(exportLocalFirstSecret(jazz.getSnapshot().account!), "My account");
+await backup.backup(
+  exportLocalFirstSecret(jazz.getSnapshot().account!),
+  "My account",
+);
 ```
 
 `await backup.restore()` returns the root for `await jazz.restoreLocalFirst(secret)`. Pin the canonical production hostname when configuring a passkey backup; passkey availability and synchronization depend on the user's platform.

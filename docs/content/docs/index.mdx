@@ -59,11 +59,12 @@ You can also query and write to the database right from your frontend. It is pro
 <Tabs groupId="client-framework" items={["JavaScript", "React", "Vue", "Svelte", "Solid", "Effect"]} persist updateAnchor>
   <Tab value="JavaScript">
     ```ts title="client.ts"
-    import { createClient } from "jazz-tools/thin";
+    import { createJazzClient } from "jazz-tools/client";
     import { app } from "./schema";
 
-    // Signs in through your backend's /jazz route, with your app's own session cookie
-    const db = await createClient();
+    // Asks your backend's /jazz route who is signed in, with your app's own session cookie
+    const jazz = await createJazzClient({});
+    const db = jazz.getSnapshot().client!.db;
 
     // Live query: updates as soon as the server (or anyone else) changes a todo
     db.subscribe(app.todos.where({ done: false }), (todos) => {
@@ -94,7 +95,7 @@ You can also query and write to the database right from your frontend. It is pro
     import { JazzProvider } from "jazz-tools/react";
 
     // Connects to /jazz on your backend by default, signed in as your app's current user
-    <JazzProvider user={session?.user.id ?? null}>
+    <JazzProvider>
       <Todos />
     </JazzProvider>;
     ```
@@ -125,7 +126,7 @@ You can also query and write to the database right from your frontend. It is pro
 
     <template>
       <!-- Connects to /jazz on your backend by default, signed in as your app's current user -->
-      <JazzProvider :user="session?.user.id ?? null">
+      <JazzProvider>
         <Todos />
       </JazzProvider>
     </template>
@@ -156,7 +157,7 @@ You can also query and write to the database right from your frontend. It is pro
     </script>
 
     <!-- Connects to /jazz on your backend by default, signed in as your app's current user -->
-    <JazzProvider user={session?.user.id ?? null}>
+    <JazzProvider>
       <Todos />
     </JazzProvider>
     ```
@@ -189,7 +190,7 @@ You can also query and write to the database right from your frontend. It is pro
     import { JazzProvider } from "jazz-tools/solid";
 
     // Connects to /jazz on your backend by default, signed in as your app's current user
-    <JazzProvider user={session()?.user.id ?? null}>
+    <JazzProvider>
       <Todos />
     </JazzProvider>;
     ```
@@ -210,7 +211,7 @@ You can also query and write to the database right from your frontend. It is pro
         .pipe(Stream.runForEach((todos) => Effect.log(todos)));
     });
 
-    // Same config as createClient(): signs in through /jazz with your session cookie
+    // Same config as createJazzClient(): asks /jazz who is signed in, with your session cookie
     program.pipe(Effect.provide(Jazz.layer()), Effect.runPromise);
     ```
 
@@ -239,7 +240,8 @@ Set up the client: [Thin Client](/docs/setup/web-client/thin-client) (the defaul
 ## What people build with Jazz
 
 <Callout type="info">
-  Preview: rough sketches of each scenario; each will link to a short path through the docs.
+  Preview: rough sketches of each scenario; each will link to a short path
+  through the docs.
 </Callout>
 
 - **A backend with live data.** Your API or server components read from and write to Jazz directly, with permissions checked per user and live queries pushed to the browser. Path: [Quickstart](/docs/setup/run-locally) → [User-scoped use](/docs/setup/deployment/own-server#user-scoped-use) → [Policies](/docs/schemas/policies) → [Thin client](/docs/setup/web-client/thin-client).

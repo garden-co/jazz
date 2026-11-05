@@ -18,16 +18,10 @@ after the first load, with live queries carried over:
   <Tab value="React">
     ```tsx title="App.tsx"
     import { JazzProvider } from "jazz-tools/react";
-    import { authClient } from "./auth-client";
 
     function Root() {
-      const { data, isPending } = authClient.useSession();
       return (
-        <JazzProvider
-          user={isPending ? undefined : (data?.user.id ?? null)}
-          client={() => import("jazz-tools/local-first")}
-          signedOut={<SignIn />}
-        >
+        <JazzProvider client={() => import("jazz-tools/local-first")} signedOut={<SignIn />}>
           <App />
         </JazzProvider>
       );
@@ -37,11 +31,12 @@ after the first load, with live queries carried over:
   </Tab>
   <Tab value="TypeScript">
     ```ts title="app.ts"
-    import { createClient } from "jazz-tools/local-first";
+    import { createJazzClient } from "jazz-tools/client";
     import { app } from "./schema";
 
-    const db = await createClient();
-    authClient.onSessionChange((session) => db.setUser(session?.user.id ?? null));
+    const jazz = await createJazzClient({ client: () => import("jazz-tools/local-first") });
+    authClient.onSessionChange(() => void jazz.reauthenticate());
+    const db = jazz.getSnapshot().client!.db;
 
     const todos = await db.all(app.todos);
     ```

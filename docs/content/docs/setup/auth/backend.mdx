@@ -27,7 +27,9 @@ export const jazz = createJazz({
   store: sqlite({ path: "./data/jazz" }),
   authenticate: async (request) => {
     const session = await auth.api.getSession({ headers: request.headers });
-    return session ? { userId: session.user.id, claims: { role: session.user.role } } : null;
+    return session
+      ? { userId: session.user.id, claims: { role: session.user.role } }
+      : null;
   },
 });
 ```
@@ -56,7 +58,7 @@ import { authClient } from "./auth-client";
 
 function Root() {
   return (
-    <JazzProvider serverUrl="/jazz" signedOut={<SignIn />}>
+    <JazzProvider signedOut={<SignIn />}>
       <App />
     </JazzProvider>
   );
@@ -77,22 +79,20 @@ another tab signs in or out; the identity always comes from `authenticate`. Afte
 or sign-out, call `reauthenticate()` from `useJazzAuth()` and Jazz follows your backend's answer.
 Without React, call `reauthenticate()` on the session `createJazzClient` returns.
 
-- **Sign-out.** When `user` becomes `null`, Jazz closes the account's client. A local-first client's
+- **Sign-out.** When your backend answers signed out, Jazz closes the account's client. A local-first client's
   unsynced writes stay in that account's local storage and sync the next time the same user signs
   in. On shared devices, pass `clearOnSignOut` to wipe them instead.
 - **Sign-out elsewhere.** Another tab, an expired session or a revoked one: your backend re-runs
   `authenticate` on open connections, and when it returns `null` Jazz ends the connection as
   signed out. No client code needed.
-- **Without the prop**, Jazz asks your backend on start, when the tab regains focus and when another
-  tab signs in or out. The prop only makes changes instant.
 
-Without a framework, pass the same value from your auth library's own listener:
+Without a framework, call `reauthenticate()` from your auth library's own listener:
 
 ```ts
-import { createClient } from "jazz-tools/thin";
+import { createJazzClient } from "jazz-tools/client";
 
-const db = await createClient();
-supabase.auth.onAuthStateChange((_event, session) => db.setUser(session?.user.id ?? null));
+const jazz = await createJazzClient({});
+supabase.auth.onAuthStateChange(() => void jazz.reauthenticate());
 ```
 
 ## The session
@@ -206,7 +206,8 @@ A [local-first](/docs/setup/auth/local-first) guest who signs up keeps its accou
 your sign-up sets its session, the client calls `linkWithBackend()`. It proves it owns the guest
 account by signing a one-time challenge with its local-first key; your backend runs `authenticate`
 and links the new user to that account. Call it in your sign-up handler, right after your auth sets
-the session; the `user` change that follows is then a no-op.
+the session. The session also links on its own when it finds a signed-in user with no Jazz account
+yet; pass `linkGuestOnSignUp: false` to `createJazzClient` (or `<JazzProvider>`) on shared devices.
 
 By default the guest's key stays an identity of the account, so the device can still sign in as the
 guest, for example offline. Pass `guestKeyAfterLink: "revoke"` to `createJazz` to retire it once it
@@ -224,7 +225,7 @@ Linking keeps the account id; earlier rows keep their original issuer and subjec
 
 ## Lifecycle
 
-With the `user` prop, Jazz runs the lifecycle for you. This section is what happens underneath, and
+`<JazzProvider>` and `createJazzClient` run the lifecycle for you. This section is what happens underneath, and
 how to own it yourself.
 
 ### Switching accounts
@@ -250,7 +251,9 @@ import { useJazzSession } from "jazz-tools/react";
 function AccountStatus() {
   const { status, error, retry } = useJazzSession();
   return error ? (
-    <button onClick={() => void retry().catch(console.error)}>{error.message}: retry</button>
+    <button onClick={() => void retry().catch(console.error)}>
+      {error.message}: retry
+    </button>
   ) : (
     <p>{status === "signed-out" ? "Sign in to continue" : "Loading…"}</p>
   );
@@ -278,13 +281,12 @@ same.
 
 ### Owning the session yourself
 
-For apps that manage accounts without the `user` prop, `createJazzSession` exposes the same state
-machine with explicit commands:
+The session `createJazzClient` returns also takes explicit commands:
 
 ```ts
-import { createJazzSession } from "jazz-tools/client";
+import { createJazzClient } from "jazz-tools/client";
 
-const session = await createJazzSession({ initial: "local-first" });
+const session = await createJazzClient({ initial: "local-first" });
 
 await session.loginWithBackend(); // select the user your backend's authenticate names
 await session.linkWithBackend(); // upgrade this local-first guest, keeping its data
@@ -294,5 +296,5 @@ await session.close();
 
 `initial: "local-first"` restores the saved guest or creates one; without it, the session starts
 signed out. In React, pass it to `JazzSessionProvider session={…}`; the provider then leaves closing
-it to you. Below that, `createAccountManager`, `AccountHandle` and `createJazzClient` remain for
-apps that arrange shutdown and replacement themselves.
+it to you. Below that, `createAccountManager` and `AccountHandle` remain for apps that arrange
+shutdown and replacement themselves.

@@ -42,11 +42,37 @@ users' credentials.
     { id: "jazz", label: "Jazz core", createAtStep: 2 },
   ]}
   steps={[
-    { kind: "message", from: "browser", to: "backend", text: "Sign in (your auth library)" },
-    { kind: "message", from: "backend", to: "browser", text: "Session cookie", line: "dashed" },
-    { kind: "message", from: "browser", to: "backend", text: "POST /jazz/.../backend-sign-in" },
-    { kind: "message", from: "backend", to: "backend", text: "authenticate(request)" },
-    { kind: "message", from: "backend", to: "jazz", text: "Log in or register this user" },
+    {
+      kind: "message",
+      from: "browser",
+      to: "backend",
+      text: "Sign in (your auth library)",
+    },
+    {
+      kind: "message",
+      from: "backend",
+      to: "browser",
+      text: "Session cookie",
+      line: "dashed",
+    },
+    {
+      kind: "message",
+      from: "browser",
+      to: "backend",
+      text: "POST /jazz/.../backend-sign-in",
+    },
+    {
+      kind: "message",
+      from: "backend",
+      to: "backend",
+      text: "authenticate(request)",
+    },
+    {
+      kind: "message",
+      from: "backend",
+      to: "jazz",
+      text: "Log in or register this user",
+    },
     {
       kind: "message",
       from: "jazz",
@@ -58,8 +84,8 @@ users' credentials.
 />
 
 1. The user signs in with your auth library, which sets its own session cookie.
-2. The client sees the new user (the `user` prop or `setUser`) and signs in through `/jazz`. Your
-   backend runs `authenticate` and returns the user id.
+2. The client asks `/jazz` who is signed in (after `reauthenticate()`, on start, on focus, or when
+   another tab signs in). Your backend runs `authenticate` and returns the user id.
 3. Jazz gives that user an account the first time, and the same account every time after. The
    identity is `{ issuer: "jazz:backend", subject: userId }`.
 4. Every sync connection asks `authenticate` again, so a sign-out or changed claims apply on the
@@ -73,29 +99,33 @@ call `reauthenticate()` from `useJazzAuth()`:
 ```tsx
 import { JazzProvider, useJazzAuth } from "jazz-tools/react";
 
-<JazzProvider serverUrl="/jazz" signedOut={<SignIn />}>
+<JazzProvider signedOut={<SignIn />}>
   <App />
 </JazzProvider>;
 
 function SignOutButton() {
   const { reauthenticate } = useJazzAuth();
-  return <button onClick={async () => (await signOut(), await reauthenticate())}>Sign out</button>;
+  return (
+    <button onClick={async () => (await signOut(), await reauthenticate())}>
+      Sign out
+    </button>
+  );
 }
 ```
 
 Jazz also asks your backend when the app starts, when the page regains focus and when another tab
 signs in or out.
 
-Without a framework, call `setUser` from your auth's listener:
+Without a framework, call `reauthenticate()` on the session:
 
 ```ts
 import { createJazzClient } from "jazz-tools/client";
 
-const jazz = await createJazzClient({ serverUrl: "/jazz" });
+const jazz = await createJazzClient({});
 await jazz.reauthenticate(); // after your own sign-in or sign-out
 ```
 
-Svelte, Solid, Vue and React Native take the same `user` value on their providers.
+Svelte, Solid, Vue and React Native expose the same actions through their bindings.
 
 ## Guests who sign up
 
@@ -110,8 +140,7 @@ authenticate: async (request) => {
 },
 ```
 
-When the guest signs up, call `linkWithBackend()` in your sign-up handler, before the `user` value
-changes:
+When the guest signs up, call `linkWithBackend()` in your sign-up handler:
 
 ```ts
 await yourAuth.signUp(email, password); // sets your session cookie

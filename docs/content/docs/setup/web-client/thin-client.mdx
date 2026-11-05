@@ -11,23 +11,17 @@ commit on the server.
 
 ## Connect
 
-The thin client is what you get with no choice made: `JazzProvider` in React, or `createClient`
-from `jazz-tools/thin`.
+The thin client is what you get with no choice made: `JazzProvider` in React, or `createJazzClient`
+from `jazz-tools/client`, without a `client` loader.
 
 <Tabs groupId="jazz-framework" items={["React", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
     ```tsx title="App.tsx"
     import { JazzProvider } from "jazz-tools/react";
-    import { authClient } from "./auth-client";
 
     function Root() {
-      const { data, isPending } = authClient.useSession();
       return (
-        <JazzProvider
-          // undefined while your auth loads, null when signed out, the user's id when signed in
-          user={isPending ? undefined : (data?.user.id ?? null)}
-          signedOut={<SignIn />}
-        >
+        <JazzProvider signedOut={<SignIn />}>
           <App />
         </JazzProvider>
       );
@@ -37,12 +31,13 @@ from `jazz-tools/thin`.
   </Tab>
   <Tab value="TypeScript">
     ```ts title="app.ts"
-    import { createClient } from "jazz-tools/thin";
+    import { createJazzClient } from "jazz-tools/client";
     import { app } from "./schema";
 
-    const db = await createClient();
-    // Follow your auth library's current user: null when signed out.
-    authClient.onSessionChange((session) => db.setUser(session?.user.id ?? null));
+    const jazz = await createJazzClient({});
+    // After your own sign-in or sign-out, ask your backend again.
+    authClient.onSessionChange(() => void jazz.reauthenticate());
+    const db = jazz.getSnapshot().client!.db;
 
     const todos = await db.all(app.todos);
     ```
@@ -88,7 +83,7 @@ background after the first load. Your live queries carry over, and the thin clie
 writes before it shuts down:
 
 ```tsx
-<JazzProvider user={user} client={() => import("jazz-tools/local-first")}>
+<JazzProvider client={() => import("jazz-tools/local-first")}>
 ```
 
 The dynamic import lives in your code, so the local-first client and its Wasm become a separate
