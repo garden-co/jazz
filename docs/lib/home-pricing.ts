@@ -319,22 +319,34 @@ export const platforms: Platform[] = [
     diskGb: (a) => a["cloudflare.diskGb"],
     cost: (d, a, _size, shards) => {
       const gbSeconds = shards * 0.128 * d.upHours * 3600;
+      // Workers Free runs SQLite-backed objects with daily caps (reset at
+      // 00:00 UTC; past one, that kind of operation fails until the reset):
+      // 100k requests, 13,000 GB-s, 100k rows written, 5M rows read, 5 GB in
+      // total and 1 GB per object. R2's 10 GB free tier holds large values.
+      const perDay = (monthly: number) => monthly / 30;
+      const requestCount = d.monthlyVisits + d.monthlyWrites / 20;
+      const rowsWrittenCount = d.monthlyWrites * a["global.rowsPerWrite"] * 2;
+      const rowsReadCount = d.monthlyWrites * 100 + d.monthlyVisits * d.rowsWatchedPerSession;
+      const fitsFree =
+        perDay(requestCount) <= 100_000 &&
+        perDay(gbSeconds) <= 13_000 &&
+        perDay(rowsWrittenCount) <= 100_000 &&
+        perDay(rowsReadCount) <= 5_000_000 &&
+        d.structuredGb <= 5 &&
+        d.structuredGb / shards <= 1 &&
+        d.blobGb <= 10;
+      if (fitsFree) return 0;
       const duration = (over(gbSeconds, 400_000) / 1e6) * a["cloudflare.durationMGbS"];
-      const requests =
-        (over(d.monthlyVisits + d.monthlyWrites / 20, 1e6) / 1e6) * a["cloudflare.requestsM"];
-      const rowsWritten =
-        (over(d.monthlyWrites * a["global.rowsPerWrite"] * 2, 50e6) / 1e6) *
-        a["cloudflare.rowsWrittenM"];
-      const rowsRead =
-        (over(d.monthlyWrites * 100 + d.monthlyVisits * d.rowsWatchedPerSession, 25e9) / 1e6) *
-        a["cloudflare.rowsReadM"];
+      const requests = (over(requestCount, 1e6) / 1e6) * a["cloudflare.requestsM"];
+      const rowsWritten = (over(rowsWrittenCount, 50e6) / 1e6) * a["cloudflare.rowsWrittenM"];
+      const rowsRead = (over(rowsReadCount, 25e9) / 1e6) * a["cloudflare.rowsReadM"];
       const storage =
         over(d.structuredGb, 5) * a["cloudflare.storageGb"] +
         over(d.blobGb, 10) * a["cloudflare.r2Gb"];
       return a["cloudflare.plan"] + duration + requests + rowsWritten + rowsRead + storage;
     },
     costNote:
-      "Workers Paid plan, Durable Object duration, requests, rows and storage, and R2 for large values. Egress is free.",
+      "Workers Free while the app fits its daily caps (100k requests, 100k rows written, 13,000 GB-s, 5 GB stored), otherwise Workers Paid at $5 plus Durable Object duration, requests, rows and storage past its allowances. R2 holds large values. Egress is free.",
     traits: {
       coldWake: "~50 ms / ~250 ms (estimated)",
       idle: "Idle WebSockets are parked at no Durable Object cost",
