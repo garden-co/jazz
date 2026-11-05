@@ -29,7 +29,7 @@ export function backend(): Promise<Jazz> {
     permissions,
     store: sync
       ? remote({ ...sync, appId: serverConfig.appId })
-      : sqlite({ path: serverConfig.dataPath, appId: serverConfig.appId }),
+      : sqlite({ path: serverConfig.dataPath }),
     // Better Auth's session cookie decides who the shopper is. Guests have
     // no Better Auth session: they stay on their local-first account.
     authenticate: async (request) => {

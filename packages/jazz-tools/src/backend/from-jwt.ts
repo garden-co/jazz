@@ -41,7 +41,7 @@ function bearerToken(request: Request): string | null {
 }
 
 function isReservedIssuer(issuer: string): boolean {
-  return issuer.startsWith("urn:jazz:") || issuer.startsWith("jazz:app:");
+  return issuer.startsWith("urn:jazz:") || issuer.startsWith("jazz:");
 }
 
 /**

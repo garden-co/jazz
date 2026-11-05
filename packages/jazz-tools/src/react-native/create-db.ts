@@ -1,3 +1,4 @@
+import "./abort-signal.js";
 import { Db } from "../runtime/db.js";
 import { createAccountDbWithRuntimeSource, type AccountDbConfig } from "../accounts/context.js";
 import { ReactNativeRuntimeSource, type ReactNativeDbConfig } from "./runtime-source.js";

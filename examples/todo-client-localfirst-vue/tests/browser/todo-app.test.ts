@@ -10,7 +10,7 @@ import { prepareTestAccount } from "../../../testing/accounts.js";
 
 import { describe, it, expect, afterEach } from "vitest";
 import { createApp, type App as VueApp } from "vue";
-import { APP_ID, SERVER_URL } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 import type { DbConfig } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
@@ -143,11 +143,11 @@ describe("Vue Todo App E2E", () => {
 
     // Mount two independent app instances connected to the same server
     const el1 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
     });
     const el2 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
     });
 

@@ -297,7 +297,7 @@ function assertPublicClientSeedStages(source) {
   for (const pattern of [
     /markFailure\("public-client-open-failed"\);\s*const client = await openJazzClient/,
     /markFailure\("public-client-subscribe-failed"\);\s*unsubscribe = client\.db\.subscribe/,
-    /markFailure\("public-client-write-failed"\);\s*const write = client\.db\.insert/,
+    /markFailure\("public-client-write-failed"\);\s*try \{\s*const write = client\.db\.insert/,
     /markFailure\("public-client-read-failed"\);\s*const rows = await client\.db\.all/,
     /markFailure\("public-client-publish-failed"\);\s*if \(!\(await waitForPublication\(\(\) => observed\)\)\)/,
     /markFailure\("public-client-core-observation-failed"\);\s*boundary\?\.\("js-before-core-await"\);\s*await waitForCoreObservation\(\);/,
@@ -683,7 +683,9 @@ test("Android acceptance reads only bounded receipt and allowlisted diagnostic t
   );
   assert.match(harness, /rn_server_session_harness/);
   assert.match(driver, /host: "10\.0\.2\.2"/);
-  assert.match(harness, /http:\/\/\$\{host\}:\$\{session\.server_port\}/);
+  // Devices reach Jazz through the app's backend, never Core directly.
+  assert.match(harness, /http:\/\/\$\{host\}:\$\{backend\.port\}\$\{backend\.basePath\}/);
+  assert.match(harness, /device-backend\.mjs/);
   for (const input of ["jazzDeviceEdgeEndpoint"]) {
     assert.match(driver, new RegExp(`"${input}"`));
     assert.match(fixture, new RegExp(`"${input}"`));
@@ -1003,7 +1005,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   assert.match(app, /await proveHighLevelForegroundRestart\(reopened, receipt\.runNonce\)/);
   assert.match(
     app,
-    /seedHighLevelForegroundRuntime\(\s*scopeA,\s*receipt\.runNonce,\s*markFailure,\s*waitForNativeCoreObservation,\s*recordNativeSeedBoundary,?\s*\)/,
+    /seedHighLevelForegroundRuntime\(\s*scopeA,\s*receipt\.runNonce,\s*markFailure,\s*waitForNativeCoreObservation,\s*recordNativeSeedBoundary,\s*reportPublicClientWriteFailure,?\s*\)/,
   );
   // Before the driver ends the seed process, a separately opened public
   // foreground must read the run-bound row. This prevents the restart claim
@@ -1232,7 +1234,7 @@ test("dispatch device workflow uses Blacksmith KVM while source jobs remain chea
     assert.match(
       section,
       new RegExp(
-        `pnpm install --frozen-lockfile[\\s\\S]*?pnpm --filter rn-device-acceptance build:workspace-prerequisites[\\s\\S]*?${followingStage}`,
+        `pnpm install --frozen-lockfile[\\s\\S]*?pnpm --filter rn-device-acceptance build:device-backend[\\s\\S]*?pnpm --filter jazz-rn build\\n[\\s\\S]*?${followingStage}`,
       ),
       `${job} must stage the source-built React Native public entrypoint immediately after install and before native bundling`,
     );
