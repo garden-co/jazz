@@ -164,6 +164,12 @@ impl ShardState {
         self.fixed.get(&commit).copied()
     }
 
+    /// Whether `commit` is a cross-shard part this shard holds or fixed a
+    /// position for: it has not landed here yet.
+    pub(crate) fn awaits(&self, commit: CommitRef) -> bool {
+        self.fixed.contains_key(&commit) || self.held(commit).is_some()
+    }
+
     /// The part `commit` landed (or was refused): it holds nothing more.
     pub(crate) fn landed(&mut self, commit: CommitRef) {
         self.holds.retain(|_, held| *held != commit);

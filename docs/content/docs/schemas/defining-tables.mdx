@@ -73,6 +73,27 @@ Targets and local columns must exist, forward columns must have supported UUID s
 reverse declarations must resolve to a forward relation pointing back to their table.
 Relation names must not collide with stored column names.
 
+## Latest-only tables
+
+By default a table keeps every version of every row, for [history](/docs/reading/history) reads,
+snapshots and branches. A table whose rows are overwritten often and whose past is worth nothing,
+such as editor presence or cursors, can keep only each row's latest version instead:
+
+```ts
+const presence = s.table({ doc: s.string(), cursor: s.string() }, {}).history("latest");
+```
+
+A latest-only table can't be read through `history`, at a snapshot or in a serializable
+transaction, and can't use `branchBy`, text-merging columns or values too large to store inline.
+Its writes are never reported as conflicts. On a client, live queries over it show what the client
+holds now, which can be newer than what the query has otherwise settled at.
+
+Switching an existing table to latest-only drops its history for good, so the first deployment that
+does it must pass `allowDroppingHistory: true` to `createJazz`. A row that already holds a value
+too large to store inline keeps it, but can't be written with such a value again. Each write prunes
+by the schema its client runs, so rolling back to a version that keeps full history stops the
+pruning, but the table still can't be read through `history`.
+
 ## Validate locally
 
 <SchemaSetup />

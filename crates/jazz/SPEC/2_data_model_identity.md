@@ -189,6 +189,16 @@ therefore a new schema version that goes through ordinary catalogue lineage
 publication (ch. 10), which backfills the new index for existing rows; it is
 never a silent in-place respelling of the stored schema.
 `crates/jazz/tests/composite_indexes.rs` pins a plain and two composite ids.
+A schema with a latest-only table (ch. 4 §4.9) is encoded under its own
+domain tag, `jazz-schema-latest-only-tables`: a `u64` count and each such
+table's length-prefixed name in name order, then the bytes the schema would
+have without it. A retention change is therefore a version of its own, which
+a store admits like any other, and a write prunes by the version it was
+written under; every schema that keeps full history keeps its id. The
+compatibility id leaves retention out, as it leaves out merge strategies: it
+does not change how a row is stored, so such versions share stored names and
+join by an empty lens. The public structural `SchemaHash` covers `history`
+only when a table is latest-only, likewise.
 The canonical bytes deliberately do **not** include read/write
 policies: policies are runtime/catalogue metadata attached to a storage schema
 version, so publishing permissions for the same tables can refresh authorization

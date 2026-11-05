@@ -1568,6 +1568,48 @@ describe("createJazz", () => {
     );
   }, 60_000);
 
+  it("starts a deployment that switches a table to latest-only only when it says so", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const store = remote({ url: core.url, appId, secret: core.adminSecret });
+    const latest = s.defineApp(
+      {
+        todos: s.table({ title: s.string(), owner: s.uuid() }, {}).history("latest"),
+      },
+      { migrations: "none" },
+    );
+    const latestPermissions = s.definePermissions(latest, ({ policy, session }) => {
+      policy.todos.allowRead.where({ owner: session.user.account });
+      policy.todos.allowInsert.where({ owner: session.user.account });
+      policy.todos.allowUpdate.never();
+      policy.todos.allowDelete.never();
+    });
+    const full = await createJazz({ app, permissions, store, authenticate });
+    cleanups.push(() => full.close());
+
+    await expect(
+      createJazz({ app: latest, permissions: latestPermissions, store, authenticate }),
+    ).rejects.toThrow(/switches table `todos` to latest-only[\s\S]*allowDroppingHistory: true/);
+    const confirmed = await createJazz({
+      app: latest,
+      permissions: latestPermissions,
+      store,
+      authenticate,
+      allowDroppingHistory: true,
+    });
+    cleanups.push(() => confirmed.close());
+    // Its bundle is the newest deploy: the table is latest-only now, so
+    // starting it again needs no confirmation.
+    const again = await createJazz({
+      app: latest,
+      permissions: latestPermissions,
+      store,
+      authenticate,
+    });
+    cleanups.push(() => again.close());
+  }, 60_000);
+
   it.each([
     ["has no route for bundles", 404, /predates per-deployment permissions bundles/],
     ["publishes no bundle", 200, /did not publish a permissions bundle/],

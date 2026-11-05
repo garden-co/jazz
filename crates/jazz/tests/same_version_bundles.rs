@@ -112,6 +112,7 @@ fn deploy(server: &Db, source: &PublicSchema) -> (BundleId, usize) {
     let stored = DeploymentCatalogue {
         schemas: rows.schemas.iter().map(|s| s.schema.clone()).collect(),
         migrations: Vec::new(),
+        ..Default::default()
     };
     let target = structural(source);
     let hash = SchemaHash::compute(&target);
@@ -126,6 +127,7 @@ fn deploy(server: &Db, source: &PublicSchema) -> (BundleId, usize) {
             schemas: vec![(hash, target.clone())],
             migrations: Vec::new(),
             permissions: permissions.clone(),
+            allow_dropping_history: false,
         },
     )
     .unwrap();
