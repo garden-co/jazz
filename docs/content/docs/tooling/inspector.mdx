@@ -65,6 +65,8 @@ An agent gets access only when a person approves it in the browser:
 npx jazz-tools@alpha inspect login --app https://my-app.com
 ```
 
+`--app` is your app's URL, or the URL Jazz is served at if you changed `basePath`.
+
 This opens the Inspector on an approval page. Once you approve, the browser hands the token straight
 to the waiting command on your machine, which keeps it in `~/.config/jazz/inspect-tokens.json`,
 so nothing goes into `.env`. When the agent runs elsewhere,
