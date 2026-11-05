@@ -206,15 +206,17 @@ pub(crate) fn commit_clock<'de, D: serde::Deserializer<'de>>(
     Ok(clock)
 }
 
-/// [`accepted_seq`], when the peer may send none.
-pub(crate) fn accepted_seq_opt<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<u64>, D::Error> {
-    let seq = Option::<u64>::deserialize(deserializer)?;
-    if seq.is_some_and(|seq| seq > MAX_SEQ) {
-        return Err(serde::de::Error::custom("an accepted seq past 2^52"));
-    }
-    Ok(seq)
+/// Where a replica's result of a read last settled: authority seq
+/// `through`, read in `context`, the digest of the permissions bundle and
+/// claims its session was read under then (see [`SyncMessage::Welcome`]);
+/// `None` for a session with neither. The server resumes a read only in
+/// the same context: another bundle's policies, or the same policies
+/// reading other claims, may have shown other rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Since {
+    #[serde(deserialize_with = "accepted_seq")]
+    pub through: u64,
+    pub context: Option<[u8; 32]>,
 }
 
 /// `_clock` of the first version of kind `n`: `_clock < band_start(PENDING)` is
@@ -1214,9 +1216,9 @@ pub enum SyncMessage {
         /// view (head over an optional live or frozen base), or a
         /// snapshot. Part of the read's identity (`INV-BVIEW-12`).
         view: Box<ReadViewSourceSpec>,
-        /// Last complete checkpoint for this read, independent of its lifetime.
-        #[serde(deserialize_with = "accepted_seq_opt")]
-        since: Option<u64>,
+        /// Last complete checkpoint for this read, independent of its
+        /// lifetime, with the read context it was settled in.
+        since: Option<Since>,
         span: ReadSpan,
     },
     Unsubscribe {
@@ -1380,6 +1382,11 @@ pub enum SyncMessage {
     Welcome {
         admitted: bool,
         catalogue: CatalogueUpdate,
+        /// The digest of what this session's reads are evaluated under
+        /// besides its identity: its pinned permissions bundle and its
+        /// claims (`None`: neither). The client stamps the results it
+        /// settles on this connection with it, as their [`Since::context`].
+        context: Option<[u8; 32]>,
     },
     /// Server → client: the position the whole connection is settled
     /// through. Every read it settled is complete through `through`, and
@@ -1684,6 +1691,10 @@ struct LiveRead {
     /// results read as of it (or the connection's, when that is further),
     /// see `Inner::visible_read`. Kept across reconnects.
     visible: Option<Pos>,
+    /// The rows the upstream last listed as this read's result (its last
+    /// listing settle), kept across reconnects: another read's listing
+    /// leaves them on the replica for this one to judge.
+    listed: HashSet<[u8; 16]>,
 }
 
 enum ReadLifetime {
@@ -1699,6 +1710,8 @@ struct ActiveRead {
     view: ReadViewSourceSpec,
     watermark: Option<[u8; 32]>,
     through: Option<u64>,
+    /// The read context `through` was settled in ([`Since::context`]).
+    context: Option<[u8; 32]>,
     lifetime: ReadLifetime,
 }
 
@@ -1717,8 +1730,11 @@ impl ActiveRead {
         }
     }
 
-    fn since(&self) -> Option<u64> {
-        self.through
+    fn since(&self) -> Option<Since> {
+        self.through.map(|through| Since {
+            through,
+            context: self.context,
+        })
     }
 }
 
@@ -1852,6 +1868,10 @@ pub(crate) struct Client {
     /// knows every version the authority deployed, so its own sessions'
     /// commits under a version it still lacks are refused (INV-SYNC-52).
     catalogued: bool,
+    /// The read context the upstream named for this connection, once its
+    /// `Welcome` said (`Some(None)`: none). Results settled on it are
+    /// stamped with it ([`Since::context`]); none is stored before it is known.
+    context: Option<Option<[u8; 32]>>,
     /// Rows asked for whole (their shipped deltas did not apply), until a
     /// whole image of each arrives. This store holds a stale version of
     /// each, so no result it settles is the server's: no watermark is
@@ -2348,6 +2368,15 @@ impl Watches {
         self.holders.contains_key(key)
     }
 
+    /// Whether an owner other than `owner` holds `key`.
+    fn held_by_other(&self, owner: u64, key: u64) -> bool {
+        let mine = self
+            .by_owner
+            .get(&owner)
+            .is_some_and(|keys| keys.contains(&key));
+        self.holders.get(&key).copied().unwrap_or(0) > u32::from(mine)
+    }
+
     /// Hold `key` for `owner`: (whether the session did not watch it yet,
     /// whether `owner` did not hold it yet).
     fn hold(&mut self, owner: u64, key: u64) -> (bool, bool) {
@@ -2511,6 +2540,10 @@ struct Follow<'w> {
     /// eviction.
     gone: &'w mut Vec<RowKey>,
     followed: &'w mut HashSet<(usize, u64)>,
+    /// Follow rows as the server settled them through this position, not
+    /// as they stand with pending local writes: a replica judging what
+    /// the server holds for a read (see `Db::held_by_other_reads`).
+    settled: Option<u64>,
 }
 
 /// The watch on row `id` of stored table `table`.
@@ -3472,7 +3505,13 @@ impl Inner {
         } else {
             format!("{} = ?1", quote(column))
         };
-        for found in self.images_where(table, false, &filter, &[&value])? {
+        let found = match follow.settled {
+            Some(through) => {
+                self.settled_where(table, &filter, column, &value, contains, through)?
+            }
+            None => self.images_where(table, false, &filter, &[&value])?,
+        };
+        for found in found {
             let row = RowUuid::from_bytes(found.id);
             let can = readable(
                 self,
@@ -3553,7 +3592,13 @@ impl Inner {
             } else {
                 format!("{} = ?1", quote(reach.member))
             };
-            for found in self.images_where(reach.edges, false, &filter, &[&value])? {
+            let found = match follow.settled {
+                Some(through) => {
+                    self.settled_where(reach.edges, &filter, reach.member, &value, false, through)?
+                }
+                None => self.images_where(reach.edges, false, &filter, &[&value])?,
+            };
+            for found in found {
                 let row = RowUuid::from_bytes(found.id);
                 let can = readable(
                     self,
@@ -4204,6 +4249,98 @@ impl Inner {
             .filter_map(|id| id.ok().and_then(|id| id.try_into().ok()))
             .collect();
         Ok(ids)
+    }
+
+    /// Each of `rows`' images in `table` as the server settled it through
+    /// `through`: the current version when it is accepted at or below
+    /// `through`, otherwise the newest such version in history.
+    fn settled_images(
+        &self,
+        table: &str,
+        rows: Vec<RowUuid>,
+        through: u64,
+    ) -> Result<Vec<Image>, Error> {
+        let settled = |image: &Image| image.at.accepted() && image.at.seq <= through;
+        let mut out = Vec::new();
+        // The slots (row and branch key) whose current version is not
+        // settled: only they are looked up in history.
+        let mut unsettled: HashSet<([u8; 16], Vec<u8>)> = HashSet::new();
+        for image in self.images_of(table, false, rows)? {
+            if settled(&image) {
+                out.push(image);
+            } else {
+                unsettled.insert((image.id, image.key.clone()));
+            }
+        }
+        if unsettled.is_empty() {
+            return Ok(out);
+        }
+        let mut ids: Vec<RowUuid> = unsettled
+            .iter()
+            .map(|(id, _)| RowUuid::from_bytes(*id))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        let mut newest: HashMap<([u8; 16], Vec<u8>), Image> = HashMap::new();
+        for image in self.images_of(table, true, ids)? {
+            let slot = (image.id, image.key.clone());
+            if !settled(&image) || !unsettled.contains(&slot) {
+                continue;
+            }
+            match newest.get(&slot) {
+                Some(kept) if kept.at.seq >= image.at.seq => {}
+                _ => {
+                    newest.insert(slot, image);
+                }
+            }
+        }
+        out.extend(newest.into_values());
+        Ok(out)
+    }
+
+    /// The images of `table` that match `filter` (on `column`, against
+    /// `value`) as the server settled them through `through`: a row a
+    /// pending write moved out of the match still matches, one it moved in
+    /// does not.
+    #[allow(clippy::too_many_arguments)]
+    fn settled_where(
+        &self,
+        table: &str,
+        filter: &str,
+        column: &str,
+        value: &Sql,
+        contains: bool,
+        through: u64,
+    ) -> Result<Vec<Image>, Error> {
+        // History only holds a settled match at or below `through`.
+        let settled_clock = Pos::at(through.min(MAX_SEQ)).t();
+        let mut ids: Vec<RowUuid> = self
+            .images_where(table, false, filter, &[value])?
+            .into_iter()
+            .chain(self.images_where(
+                table,
+                true,
+                &format!("({filter}) AND _clock <= ?2"),
+                &[value, &settled_clock],
+            )?)
+            .map(|image| RowUuid::from_bytes(image.id))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .settled_images(table, ids, through)?
+            .into_iter()
+            .filter(|image| match image_cell(image, column) {
+                Some(cell) if contains => {
+                    array_elements(&cell).is_some_and(|elements| elements.contains(value))
+                }
+                Some(cell) => cell == *value,
+                None => false,
+            })
+            .collect())
     }
 
     /// Every image of each of `rows` in `table` (or its history).
@@ -4962,7 +5099,7 @@ pub(crate) const WITHHELD_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_withheld
 /// so that opening an existing store without one leaves the file
 /// byte-identical.
 const WATERMARKS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_watermarks \
-    (key BLOB PRIMARY KEY, through INTEGER NOT NULL) WITHOUT ROWID";
+    (key BLOB PRIMARY KEY, through INTEGER NOT NULL, context BLOB) WITHOUT ROWID";
 
 /// A remote query's `_jazz_watermarks` key: what it reads, and as whom.
 /// How far it reaches (tier and wait) is not part of it: every tier's
@@ -5214,20 +5351,33 @@ impl Inner {
         pending::write(&self.conn, tx, commit, rows)
     }
 
-    /// Where a remote query's result was last settled through.
-    fn watermark(&self, key: &[u8; 32]) -> Result<Option<u64>, Error> {
+    /// Where a remote query's result was last settled through, and the
+    /// read context it was settled in ([`Since`]).
+    fn watermark(&self, key: &[u8; 32]) -> Result<Option<(u64, Option<[u8; 32]>)>, Error> {
         if !self.has_table("_jazz_watermarks")? {
             return Ok(None);
         }
-        self.conn
+        let found = self
+            .conn
             .cached_row(
-                "SELECT through FROM _jazz_watermarks WHERE key = ?1",
+                "SELECT through, context FROM _jazz_watermarks WHERE key = ?1",
                 [key.as_slice()],
-                |r| r.get::<_, i64>(0),
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<Vec<u8>>>(1)?)),
             )
             .optional()
-            .map(|through| through.map(|through| through as u64))
-            .map_err(storage)
+            .map_err(storage)?;
+        found
+            .map(|(through, context)| {
+                let context = context
+                    .map(|context| {
+                        <[u8; 32]>::try_from(context.as_slice()).map_err(|_| {
+                            crate::format::unsupported("bad read context in _jazz_watermarks")
+                        })
+                    })
+                    .transpose()?;
+                Ok((through as u64, context))
+            })
+            .transpose()
     }
 
     fn active_read(
@@ -5254,9 +5404,10 @@ impl Inner {
             )
         });
         // A replica that cannot read its watermark opens fresh.
-        let through = watermark
+        let (through, context) = watermark
             .as_ref()
-            .and_then(|key| self.watermark(key).ok().flatten());
+            .and_then(|key| self.watermark(key).ok().flatten())
+            .map_or((None, None), |(through, context)| (Some(through), context));
         ActiveRead {
             query,
             binding,
@@ -5264,6 +5415,7 @@ impl Inner {
             view,
             watermark,
             through,
+            context,
             lifetime,
         }
     }
@@ -5277,7 +5429,7 @@ impl Inner {
         include_deleted: bool,
         view: &ReadViewSourceSpec,
         at: Option<u64>,
-    ) -> Option<u64> {
+    ) -> Option<Since> {
         let read = self.active_read(
             query.clone(),
             binding.clone(),
@@ -5308,6 +5460,7 @@ impl Inner {
         if let Some(client) = self.client.as_mut() {
             for read in client.reads.values_mut() {
                 read.through = None;
+                read.context = None;
             }
             client.forgotten = true;
         }
@@ -5316,11 +5469,20 @@ impl Inner {
 
     /// Record that a remote query's result settled through authority seq
     /// `through`, replacing where it had settled before.
+    /// It is stamped with this connection's read context; before the
+    /// upstream's `Welcome` said which, nothing is stored.
     fn store_watermark(&self, key: &[u8; 32], through: u64) -> Result<(), Error> {
+        let Some(context) = self.client.as_ref().and_then(|client| client.context) else {
+            return Ok(());
+        };
         self.exec(WATERMARKS_DDL, []).map_err(storage)?;
         self.exec(
-            "INSERT OR REPLACE INTO _jazz_watermarks (key, through) VALUES (?1, ?2)",
-            rusqlite::params![key.as_slice(), through as i64],
+            "INSERT OR REPLACE INTO _jazz_watermarks (key, through, context) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                key.as_slice(),
+                through as i64,
+                context.map(|context| context.to_vec())
+            ],
         )
         .map_err(storage)?;
         Ok(())
@@ -6032,9 +6194,9 @@ impl Inner {
     ///
     /// Only an authority resumes: a relay's store may be cold, and its seqs
     /// are not the ones its sessions resume from. A windowed, flat-join,
-    /// aggregate, relation or history read opens fresh, as does a session
-    /// with its own claims (its policies read them, and they are not part
-    /// of what the client resumes from), a `since` past what this store
+    /// aggregate, relation or history read opens fresh, as does a one-shot
+    /// read with its own claims (they are not part of the session's read
+    /// context the client resumes from), a `since` past what this store
     /// serves (a reset store), or one at or before the current schema's
     /// activation (its policies may read differently).
     fn resume_from(
@@ -6044,11 +6206,11 @@ impl Inner {
         read: &ReadSpec,
         support: &[Support],
         since: u64,
-        claims: bool,
+        request_claims: bool,
     ) -> Result<Option<Resume>, Error> {
         let query = &prepared.query;
         if self.client.is_some()
-            || claims
+            || request_claims
             || read.cut.is_some()
             || since > self.served_through()
             || crate::db::is_windowed(query)
@@ -6063,14 +6225,20 @@ impl Inner {
         // Membership inputs: every table the read and its policies read
         // (its own included: a filter or policy may read other rows of
         // it), and the supporting tables with their policies' inputs.
-        let mut inputs = self.read_dependencies(prepared, identity)?;
+        let mut inputs = self.read_dependencies_in(prepared, identity, read)?;
+        // The policies that govern the read: a pinned session's bundle's,
+        // as `read_dependencies_in` takes them.
+        let policies = prepared
+            .schema
+            .as_ref()
+            .map_or(&*self.owner, |schema| schema.policy_schema());
         let mut tables = Vec::new();
         support_tables(support, &mut tables);
         for table in tables {
             if let Some(author) = identity
-                && self.owner.by_stored(&table).is_some()
+                && policies.by_stored(&table).is_some()
             {
-                inputs.extend(self.read_policy_tables(&self.owner, &table, author)?);
+                inputs.extend(self.read_policy_tables(policies, &table, author)?);
             }
             inputs.insert(table);
         }
@@ -6500,6 +6668,7 @@ impl Client {
             stranded: false,
             uncatalogued: None,
             catalogued: false,
+            context: None,
             whole: HashMap::new(),
             deferred: VecDeque::new(),
             releasing: None,
@@ -6667,6 +6836,7 @@ impl Db {
         client.wanted.extend(asked);
         client.unadmitted = false;
         client.catalogued = false;
+        client.context = None;
         client.connection += 1;
         let connection = client.connection;
         if client.stranded {
@@ -6675,37 +6845,31 @@ impl Db {
         Upstream(connection)
     }
 
-    /// Evict the cached rows of a remote query's settled view that its
-    /// answer, listing `listed`, left out: the server's result no longer
-    /// holds them for this reader. The answer judges only the rows its read
-    /// view holds: a branch view's answer, the rows on its head branch. A
-    /// row a pending write touches waits for the server's own word on it.
-    /// Each pass reads the view again, so rows that move up into a window
-    /// are checked too.
-    fn evict_unanswered(
+    /// How the settled view of a remote query is read as of `through`, as
+    /// its answer's listing judges it (see [`Self::evict_unanswered`]):
+    /// `None` for a read no listing judges.
+    fn listed_view(
         &self,
-        query: Query,
-        binding: BTreeMap<String, Value>,
+        query: &Query,
+        binding: &BTreeMap<String, Value>,
         include_deleted: bool,
         view: &ReadViewSourceSpec,
-        listed: &[[u8; 16]],
         through: u64,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<(PreparedQuery, ReadSpec)>, Error> {
         // A history read lists versions and a flat join tuples, not the
         // rows a replica caches.
         if history_source_table(&query.table).is_some() || query.flat_join.is_some() {
-            return Ok(());
+            return Ok(None);
         }
-        let listed: HashSet<[u8; 16]> = listed.iter().copied().collect();
         // Only which rows the view holds matters: ids, not values (whose
         // large chunks may not be here yet), nor included rows.
-        let mut query = remote_query(&query).into_owned();
+        let mut query = remote_query(query).into_owned();
         query.select = Some(Vec::new());
         query.includes.clear();
         query.array_subqueries.clear();
         let prepared = PreparedQuery {
             query,
-            binding,
+            binding: binding.clone(),
             shape: Shape([0; 16]),
             binding_id: Binding([0; 16]),
             request_claims: None,
@@ -6724,10 +6888,172 @@ impl Db {
         read.position = Position::Current;
         // A frozen view is this store's own state, not the server's to judge.
         if read.frozen() {
-            return Ok(());
+            return Ok(None);
         }
         read.settled_only = true;
         read.cut = Some(crate::compile::Cut::at(Pos::at(through)));
+        Ok(Some((prepared, read)))
+    }
+
+    /// The rows of stored `table` that live reads other than this one
+    /// (`query` with `binding`, `include_deleted` and `view`) hold, as the
+    /// server holds them for each: the rows it last listed for the read that
+    /// its settled view still holds, and the rows those reach as support
+    /// (includes, relations, joins, policy inputs), followed as the server
+    /// follows them. A row that left a read through a live delta is no
+    /// longer in its view, so its last listing does not keep it.
+    fn held_by_other_reads(
+        &self,
+        table: &str,
+        query: &Query,
+        binding: &BTreeMap<String, Value>,
+        include_deleted: bool,
+        view: &ReadViewSourceSpec,
+    ) -> Result<HashSet<[u8; 16]>, Error> {
+        let reads: Vec<_> = {
+            let inner = self.inner.borrow();
+            let Some(client) = inner.client.as_ref() else {
+                return Ok(HashSet::new());
+            };
+            client
+                .reads
+                .values()
+                .filter(|other| {
+                    !(other.query == *query
+                        && other.binding == *binding
+                        && other.include_deleted == include_deleted
+                        && other.view == *view)
+                })
+                .filter_map(|other| {
+                    let live = other.live()?;
+                    let through = other.through?;
+                    Some((
+                        other.query.clone(),
+                        other.binding.clone(),
+                        other.include_deleted,
+                        other.view.clone(),
+                        through,
+                        live.listed.clone(),
+                    ))
+                })
+                .collect()
+        };
+        let mut held = HashSet::new();
+        for (other, binding, include_deleted, view, through, listed) in reads {
+            if listed.is_empty() {
+                continue;
+            }
+            // A read that touches `table` neither as its root nor through
+            // its support holds none of its rows: skip it before reading.
+            let (root, support) = {
+                let inner = self.inner.borrow();
+                let other = remote_query(&other);
+                if history_source_table(&other.table).is_some() || other.flat_join.is_some() {
+                    continue;
+                }
+                // A union's rows carry their arm, and its listing names
+                // rows by id alone: no listing judges them (see
+                // `evict_unanswered`), and its plan is not followed for
+                // support, so it holds nothing here.
+                if crate::db::union_plan(&other, &inner.schema)?.is_some() {
+                    continue;
+                }
+                let support = inner.support_of(&other)?;
+                let root = inner.schema.table(&other.table)?.stored.clone();
+                (root, support)
+            };
+            let mut support_tables_read = Vec::new();
+            support_tables(&support, &mut support_tables_read);
+            let follows = support_tables_read.iter().any(|read| read == table);
+            if root != table && !follows {
+                continue;
+            }
+            let Some((prepared, read)) =
+                self.listed_view(&other, &binding, include_deleted, &view, through)?
+            else {
+                continue;
+            };
+            let inner = self.inner.borrow();
+            let rows: Vec<RowUuid> = match inner.run(&prepared, None, &read) {
+                // Its view cannot be read yet: keep all it was listed with.
+                Err(error) if crate::large::is_missing(&error) => {
+                    listed.iter().map(|id| RowUuid::from_bytes(*id)).collect()
+                }
+                rows => rows?
+                    .into_iter()
+                    .filter(|row| listed.contains(row.id.0.as_bytes()))
+                    .map(|row| row.id)
+                    .collect(),
+            };
+            if rows.is_empty() {
+                continue;
+            }
+            if root == table {
+                held.extend(rows.iter().map(|row| *row.0.as_bytes()));
+            }
+            if !follows {
+                continue;
+            }
+            let mut out = Vec::new();
+            let (mut watch, mut kept, mut gone, mut followed) = (
+                Watches::default(),
+                Kept::default(),
+                Vec::new(),
+                HashSet::new(),
+            );
+            let mut follow = Follow {
+                owner: 0,
+                identity: None,
+                policies: inner.owner.clone(),
+                out: &mut out,
+                watch: &mut watch,
+                held: &mut kept,
+                gone: &mut gone,
+                followed: &mut followed,
+                settled: Some(through),
+            };
+            // Followed from each row as the server settled it through
+            // `through`, as its view was read: a pending local write's
+            // references are not the server's, and a rejected one would
+            // leave the row it moved away from evicted and never re-sent.
+            for image in inner.settled_images(&root, rows, through)? {
+                inner.follow_support(&support, &image, None, &mut follow)?;
+            }
+            held.extend(
+                out.into_iter()
+                    .filter(|image| image.table == table)
+                    .map(|image| image.id),
+            );
+        }
+        Ok(held)
+    }
+
+    /// Evict the cached rows of a remote query's settled view that its
+    /// answer, listing `listed`, left out: the server's result no longer
+    /// holds them for this reader. The answer judges only the rows its read
+    /// view holds: a branch view's answer, the rows on its head branch. A
+    /// row a pending write touches waits for the server's own word on it.
+    /// Each pass reads the view again, so rows that move up into a window
+    /// are checked too.
+    fn evict_unanswered(
+        &self,
+        query: Query,
+        binding: BTreeMap<String, Value>,
+        include_deleted: bool,
+        view: &ReadViewSourceSpec,
+        listed: &[[u8; 16]],
+        through: u64,
+    ) -> Result<(), Error> {
+        let Some((prepared, read)) =
+            self.listed_view(&query, &binding, include_deleted, view, through)?
+        else {
+            return Ok(());
+        };
+        let listed: HashSet<[u8; 16]> = listed.iter().copied().collect();
+        // Rows another live read holds are that read's to judge: evicted
+        // here, the server (which still holds them for it) never ships them
+        // again. Read once, and only when a pass finds a stale row.
+        let mut others: Option<HashSet<[u8; 16]>> = None;
         let (table, head, base) = {
             let inner = self.inner.borrow();
             let schema = inner.schema.clone();
@@ -6753,11 +7079,24 @@ impl Db {
                 Err(error) if crate::large::is_missing(&error) => return Ok(()),
                 rows => rows?,
             };
-            let stale: Vec<RowUuid> = rows
+            let mut stale: Vec<RowUuid> = rows
                 .into_iter()
                 .filter(|row| row.union_arm.is_none() && !listed.contains(row.id.0.as_bytes()))
                 .map(|row| row.id)
                 .collect();
+            if !stale.is_empty() {
+                let others = match &mut others {
+                    Some(others) => others,
+                    None => others.insert(self.held_by_other_reads(
+                        &table,
+                        &query,
+                        &binding,
+                        include_deleted,
+                        view,
+                    )?),
+                };
+                stale.retain(|row| !others.contains(row.0.as_bytes()));
+            }
             if stale.is_empty() || stale == previous {
                 return Ok(());
             }
@@ -7271,6 +7610,7 @@ impl Inner {
                 refused: refused.clone(),
                 global: global.clone(),
                 visible: None,
+                listed: HashSet::new(),
             }),
         );
         let client = self.client.as_mut().expect("client");
@@ -7384,7 +7724,7 @@ impl Db {
             }
             at => at.map(|at| at.seq),
         };
-        let message = |id: u64, since: Option<u64>| SyncMessage::Read {
+        let message = |id: u64, since: Option<Since>| SyncMessage::Read {
             id,
             query: Box::new(remote_query(&prepared.query).into_owned()),
             binding: prepared.binding.clone(),
@@ -8011,7 +8351,9 @@ impl Db {
                     SyncMessage::Welcome {
                         admitted,
                         catalogue,
+                        context,
                     } => {
+                        inner.client.as_mut().expect("client").context = Some(context);
                         queue.push_front(SyncMessage::SchemaAdmission { admitted });
                         queue.push_front(SyncMessage::Catalogue(catalogue));
                     }
@@ -8074,12 +8416,18 @@ impl Db {
                                 ReadLifetime::Live(live) => {
                                     live.answered.set(true);
                                     live.global.set(global);
+                                    if let Some(members) = &members {
+                                        live.listed = members.iter().copied().collect();
+                                    }
                                     if live.visible.is_none_or(|v| v.n != at.n || v.seq < at.seq) {
                                         live.visible = Some(at);
                                         client.visibility_moved = true;
                                     }
-                                    if resumable {
+                                    // Resumable only in the context it was
+                                    // read in, known once the `Welcome` said.
+                                    if resumable && let Some(context) = client.context {
                                         read.through = Some(through);
+                                        read.context = context;
                                         client.forgotten = false;
                                         live_watermark = read.watermark;
                                     }
@@ -8725,6 +9073,7 @@ impl Inner {
         // What the authority deployed is known again once the next
         // upstream sends its catalogue.
         client.catalogued = false;
+        client.context = None;
         let mut link = client.hint.get();
         link.detached = true;
         client.hint.set(link);
@@ -8874,6 +9223,26 @@ impl Inner {
         let identity = self.sessions[index].identity;
         let own = self.client.is_some() && identity == self.identity.author;
         (identity != AuthorSubject::SYSTEM && !own).then_some(identity)
+    }
+
+    /// What session `index`'s reads are evaluated under besides its
+    /// identity: the permissions bundle it is pinned to and the claims its
+    /// policies read, as one digest (`None` for a session with neither).
+    /// The server names it in the session's `Welcome`, the client stamps
+    /// each result it settles with it, and a read resumes only from a
+    /// result settled under the same one ([`Since::context`]).
+    pub(crate) fn read_context(&self, index: usize) -> Option<[u8; 32]> {
+        let session = &self.sessions[index];
+        if session.bundle.is_none() && session.claims.is_none() {
+            return None;
+        }
+        let bytes =
+            postcard::to_allocvec(&(session.bundle.map(|bundle| bundle.0), &session.claims))
+                .expect("a session's bundle and claims encode");
+        Some(jazz_types::sha256::derive_key(
+            "jazz session read context v1",
+            &bytes,
+        ))
     }
 
     /// The schema whose policies govern session `index`: its bundle's,
@@ -10352,8 +10721,10 @@ impl Db {
                 }
                 // Rows the client held in the result as of `since` that are
                 // in it no more, though they need not have changed (their
-                // membership inputs did): each ships as it is now, or its
-                // eviction.
+                // membership inputs did). The opening's listing evicts them
+                // from the replica, as a fresh opening would, unless another
+                // of the session's subscriptions still watches one, or it was
+                // deleted: that one ships as it is now, or its eviction.
                 if let (Some(prior), Some(group)) = (
                     resume.as_ref().and_then(|resume| resume.prior.as_ref()),
                     group.upgrade(),
@@ -10361,13 +10732,28 @@ impl Db {
                     let group = group.borrow();
                     let table = group.root().to_owned();
                     let now: HashSet<RowUuid> = group.rows.iter().map(|row| row.id).collect();
+                    let watched = |row: &RowUuid| {
+                        watch.held_by_other(
+                            id,
+                            wk((
+                                table.clone(),
+                                "id".to_owned(),
+                                watch_key(&Sql::Blob(row.0.as_bytes().to_vec())),
+                            )),
+                        )
+                    };
                     let gone = inner.rows_images(
                         &table,
                         prior.iter().filter(|row| !now.contains(row)).copied(),
                     )?;
                     for (row, images) in gone {
+                        let watched = watched(&row);
                         for image in images {
-                            touched.insert((table.clone(), row, image.key));
+                            // A deletion is a change the client learns of
+                            // as such; it leaves the result by itself.
+                            if watched || image.deleted {
+                                touched.insert((table.clone(), row, image.key));
+                            }
                         }
                     }
                 }
@@ -10389,6 +10775,7 @@ impl Db {
                         held: &mut held_rows,
                         gone: &mut gone,
                         followed: &mut followed,
+                        settled: None,
                     };
                     // A shipped row may point at rows the client never had:
                     // its support is followed whole. A held one's changed
@@ -10598,12 +10985,14 @@ impl Db {
             // reach the client first, in the `Welcome` it is owed.
             if let Some(catalogue) = inner.catalogue_for(index)? {
                 let unadmitted = inner.session_unadmitted(index);
+                let context = inner.read_context(index);
                 let session = &mut inner.sessions[index];
                 out.push(if std::mem::take(&mut session.welcome_owed) {
                     session.told_unadmitted = unadmitted;
                     SyncMessage::Welcome {
                         admitted: !unadmitted,
                         catalogue,
+                        context,
                     }
                 } else {
                     SyncMessage::Catalogue(catalogue)
@@ -11154,18 +11543,18 @@ impl Db {
                 inner.sessions[index]
                     .subs
                     .insert(id, (queue, group, windowed, false));
-                if let Some(since) = since {
-                    // A pinned session reads by its bundle's policies, which
-                    // what it resumes from may not have been read under.
-                    let claims = inner.sessions[index].claims.is_some()
-                        || inner.sessions[index].bundle.is_some();
+                // A session reads by its bundle's policies and its claims: it
+                // resumes only from a result settled under the same ones
+                // (others may have shown other rows), else opens fresh.
+                let context = inner.read_context(index);
+                if let Some(since) = since.filter(|since| since.context == context) {
                     let resume = inner.resume_from(
                         &prepared,
                         policy,
                         &resume_read,
                         &support,
-                        since,
-                        claims,
+                        since.through,
+                        false,
                     )?;
                     if let Some(resume) = resume {
                         inner.sessions[index].resume.insert(id, resume);
@@ -11454,14 +11843,18 @@ impl Db {
                 let resume = if at.is_none()
                     && matches!(opts.read_view.source, ReadViewSourceSpec::Current)
                 {
+                    // Only from a result settled under this session's bundle
+                    // and claims.
+                    let context = inner.read_context(index);
                     since
+                        .filter(|since| since.context == context)
                         .map(|since| {
                             inner.resume_from(
                                 &prepared,
                                 policy,
                                 &read,
                                 &support,
-                                since,
+                                since.through,
                                 prepared.request_claims.is_some(),
                             )
                         })
@@ -11542,6 +11935,7 @@ impl Db {
                     held: &mut held,
                     gone: &mut gone,
                     followed: &mut followed,
+                    settled: None,
                 };
                 for image in &images {
                     let floor = unchanged
@@ -13076,7 +13470,10 @@ mod tests {
             tier: ReadTier::Remote,
             wait: None,
             view: Box::new(ReadViewSourceSpec::Current),
-            since: Some(since),
+            since: Some(Since {
+                through: since,
+                context: None,
+            }),
             span: ReadSpan::Live,
         };
         let serializable = |snapshot| WireKind::Serializable {

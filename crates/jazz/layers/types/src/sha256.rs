@@ -115,6 +115,10 @@ mod tests {
                 "jazz.authority-policy-binding-directory.v1",
                 "0e08a77a6b5fc18ae365ede839b4f1319e1f951b72e2b2b734913ecfe467092a",
             ),
+            (
+                "jazz session read context v1",
+                "e99d9710a3d3743f52fb82b477b7ac0e51b250e6067391905fb9146d4ffbe617",
+            ),
         ] {
             let derived = derive_key(context, b"abc");
             let hex: String = derived.iter().map(|byte| format!("{byte:02x}")).collect();
