@@ -476,7 +476,7 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="pricing" title="Priced for flexible self-hosting" />
+          <SectionHeader id="pricing" title="Priced for flexible self-hosting & BYOC" />
           <div className="mt-8 grid gap-6 border-t pt-6 sm:grid-cols-2 lg:grid-cols-4">
             {(["oss", "pro", "scale", "custom"] as const).map((id) => (
               <div key={id} className="grid content-start gap-2">
