@@ -129,7 +129,10 @@ describe("structuralSchemaHash", () => {
       .table({ session: s.string(), cursor: s.json() }, {})
       .history("latest")
       .indexOnly(["session"]);
-    const app = s.defineApp({ presence, notes: s.table({ body: s.string() }, {}) });
+    const app = s.defineApp(
+      { presence, notes: s.table({ body: s.string() }, {}) },
+      { migrations: "none" },
+    );
     expect(app.wasmSchema.presence!.history).toBe("latest");
     expect(app.wasmSchema.notes!.history).toBeUndefined();
     expect(() => s.table({ body: s.string() }, {}).history("30d" as unknown as "latest")).toThrow(
