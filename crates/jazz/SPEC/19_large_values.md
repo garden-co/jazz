@@ -71,6 +71,13 @@ or `TEXT_MERGE_INLINE_MAX_BYTES` for a text-merge column). So an inline cell nev
 a chunked one, and a write that brings a chunked value back under the limit
 stores it inline.
 
+One exception: a cell received from upstream always keeps the descriptor it
+came with, chunked, since receiving a descriptor never pulls nodes (19.8). On
+a replica whose schema or threshold differs from its upstream's, a received
+value at or under the column's threshold therefore stays chunked until its
+next local write. Until then it compares by identity and sorts as chunked in
+SQL (`=`, `contains`, `ORDER BY`), while fanout sorts it by its logical value.
+
 A large-capable column has no other stored column: its indexes are on the
 cell itself, and no query reads a chunked value's bytes (19.5).
 

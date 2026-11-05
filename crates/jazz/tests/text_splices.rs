@@ -582,3 +582,47 @@ fn whole_writes_edit_the_held_value_after_a_restart() {
     let db = open_file(dir.path(), 0x56);
     assert_eq!(body(&db), expected);
 }
+
+/// A merge whose result inserts more than an epoch edit holds into the held
+/// value (here a 1 KiB paste merged over a concurrent keystroke) is written
+/// whole, and every store converges on it; the keystrokes after it are edits
+/// again.
+#[test]
+fn a_merge_inserting_more_than_an_epoch_edit_is_written_whole() {
+    const LEN: usize = 12 * 1024;
+    let server = block_on(Db::open(config(0x58))).unwrap();
+    let mut a = connect(block_on(Db::open(config(0x85))).unwrap(), &server);
+    let mut b = connect(block_on(Db::open(config(0x86))).unwrap(), &server);
+    let start = text(LEN, 23);
+    insert(&a.db, &start);
+    settle(&server, &mut [&mut a, &mut b]);
+    let edit = |db: &Db, at: usize, typed: &str| {
+        let mut body = body(db);
+        body.insert_str(at, typed);
+        write_whole(db, &body);
+    };
+    let paste = "P".repeat(1024);
+    // A's keystroke reaches the authority first; B's paste, written over
+    // the value before it, merges over A's.
+    edit(&a.db, 10, "a");
+    edit(&b.db, LEN - 10, &paste);
+    settle(&server, &mut [&mut a, &mut b]);
+    let mut expected = start.clone();
+    expected.insert_str(LEN - 10, &paste);
+    expected.insert(10, 'a');
+    assert_eq!(body(&server), expected);
+    assert_eq!(body(&a.db), expected);
+    assert_eq!(body(&b.db), expected);
+    let down = *a.down.0.borrow();
+    for key in 0..10 {
+        edit(&a.db, 20 + key, "k");
+        expected.insert(20 + key, 'k');
+        settle(&server, &mut [&mut a, &mut b]);
+    }
+    assert_eq!(body(&b.db), expected);
+    let per_key = (*a.down.0.borrow() - down) as f64 / 10.0;
+    assert!(
+        per_key < 1024.0,
+        "{per_key} bytes per keystroke after the merge"
+    );
+}
