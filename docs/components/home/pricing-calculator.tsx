@@ -135,25 +135,19 @@ function roundMau(value: number) {
   return `~${formatCount(Math.floor(value / magnitude) * magnitude)}`;
 }
 
-function PlatformResult({
-  estimate,
-  instanceLabel,
-  licensePerShard,
-}: {
-  estimate: PlatformEstimate;
-  instanceLabel: string;
-  licensePerShard: number;
-}) {
+function PlatformResult({ estimate }: { estimate: PlatformEstimate }) {
   const {
     platform,
-    requiredShards,
-    recommendedShards,
+    size,
     instances,
+    requiredShards,
     platformCost,
     licenseCost,
     totalCost,
     costPerMau,
+    peakActiveSessions,
     mauPerInstance,
+    largest,
   } = estimate;
   const sharded = instances > 1;
   return (
@@ -168,7 +162,7 @@ function PlatformResult({
           ) : null}
         </p>
         <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
-          One {instanceLabel}: {roundMau(mauPerInstance)} MAU at this usage
+          One {largest.label}: {roundMau(mauPerInstance)} MAU at this usage
         </p>
       </div>
       <div className="grid grid-cols-2 gap-4">
@@ -186,27 +180,26 @@ function PlatformResult({
         </div>
       </div>
       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-        <dt className="text-fd-muted-foreground">
-          Platform{sharded ? `, ${formatCount(instances)} instances` : ""}
-        </dt>
+        <dt className="text-fd-muted-foreground">Runs on</dt>
+        <dd className="text-right">
+          {sharded ? `${formatCount(instances)} × ` : ""}
+          {size.label}
+        </dd>
+        <dt className="text-fd-muted-foreground">Platform</dt>
         <dd className="text-right">{formatCurrency(platformCost)}</dd>
         <dt className="text-fd-muted-foreground">Jazz</dt>
         <dd className="text-right">
-          {sharded
-            ? `${formatCount(instances)} × $${licensePerShard} = ${formatCurrency(licenseCost)}`
-            : "Free (MIT)"}
+          {sharded ? `Jazz Pro ${formatCurrency(licenseCost)}` : "Free (MIT)"}
         </dd>
       </dl>
       {sharded ? (
         <p className="text-sm leading-relaxed">
           {requiredShards > 1
-            ? `${formatCount(requiredShards)} shards required${
-                recommendedShards > requiredShards
-                  ? `, ${formatCount(recommendedShards)} recommended`
-                  : ""
-              }.`
-            : `Fits on one, ${formatCount(recommendedShards)} shards recommended.`}{" "}
-          <span className="text-fd-muted-foreground">Pricing for Jazz Pro with sharding TBA.</span>
+            ? `Sharded: even the largest size needs ${formatCount(requiredShards)} shards.`
+            : "Sharded: cheaper than one larger instance with headroom."}{" "}
+          <span className="text-fd-muted-foreground">
+            Jazz Pro is billed on {formatCount(peakActiveSessions)} peak active sessions.
+          </span>
         </p>
       ) : null}
       <p className="text-xs leading-relaxed text-fd-muted-foreground">{platform.costNote}</p>
@@ -260,7 +253,8 @@ export function PricingCalculator() {
   const [frequencyIndex, setFrequencyIndex] = useState(2);
   const [realtimeIndex, setRealtimeIndex] = useState(1);
   const [blobStoragePerUserMb, setBlobStoragePerUserMb] = useState(32);
-  const [licensePerShard, setLicensePerShard] = useState(50);
+  const [licensePer1k, setLicensePer1k] = useState(20);
+  const [licenseMinimum, setLicenseMinimum] = useState(199);
   const [overrides, setOverrides] = useState<Assumptions>({});
 
   const mau = Math.max(1, Math.round(10 ** mauLogValue));
@@ -276,14 +270,11 @@ export function PricingCalculator() {
       frequency: selectedFrequency.value,
       realtime: selectedRealtime.value,
       blobStoragePerUserMb,
-      licensePerShard,
+      licensePer1k,
+      licenseMinimum,
     },
     assumptions,
   );
-  const vcpus = assumptions["vercel.vcpus"];
-  const instanceLabels: Record<string, string> = {
-    vercel: `${vcpus} vCPU / ${vcpus * 2} GB Sandbox`,
-  };
 
   return (
     <div className="space-y-8">
@@ -331,40 +322,39 @@ export function PricingCalculator() {
             <span className="text-sm text-fd-muted-foreground">MB</span>
           </div>
         </label>
-        <div className="space-y-3 sm:col-span-2">
-          <div className="flex items-end justify-between gap-4">
-            <span className="text-sm font-medium">Jazz Pro license per shard (draft)</span>
-            <span className="text-sm text-fd-muted-foreground">
-              ${licensePerShard} / shard / mo
-            </span>
-          </div>
-          <input
-            className="w-full"
-            type="range"
-            min={5}
-            max={200}
-            step={5}
-            value={licensePerShard}
-            onChange={(event) => setLicensePerShard(Number(event.target.value))}
-          />
-        </div>
+        <TickSlider
+          label="Jazz Pro per 1,000 peak active sessions (draft)"
+          max={50}
+          min={1}
+          step={1}
+          ticks={[1, 10, 20, 30, 40, 50].map((value) => ({ value, label: `$${value}` }))}
+          value={licensePer1k}
+          valueLabel={`$${licensePer1k} / mo`}
+          onChange={setLicensePer1k}
+        />
+        <TickSlider
+          label="Jazz Pro minimum when sharded (draft)"
+          max={1000}
+          min={0}
+          step={10}
+          ticks={[0, 250, 500, 750, 1000].map((value) => ({ value, label: `$${value}` }))}
+          value={licenseMinimum}
+          valueLabel={`$${licenseMinimum} / mo`}
+          onChange={setLicenseMinimum}
+        />
       </div>
       {/* The results sit right under the sliders, so on phones both stay in
           view together. */}
       <div className="grid gap-8 sm:grid-cols-3">
         {estimates.map((estimate) => (
-          <PlatformResult
-            key={estimate.platform.id}
-            estimate={estimate}
-            instanceLabel={instanceLabels[estimate.platform.id] ?? estimate.platform.instance}
-            licensePerShard={licensePerShard}
-          />
+          <PlatformResult key={estimate.platform.id} estimate={estimate} />
         ))}
       </div>
       <p className="max-w-[40rem] text-sm leading-relaxed text-fd-muted-foreground">
         Very rough estimates from our example-app benchmarks and each platform&apos;s list prices.
-        An app gets another shard once an instance passes the target peak utilization; one instance
-        is free under MIT.
+        Each platform picks the cheapest size and shard count, license included. One instance is
+        free under MIT; sharded Jazz Pro is licensed on peak active sessions (sessions that wrote,
+        subscribed or got an update in the busiest minute).
       </p>
       <details open className="border-t pt-6">
         <summary className="cursor-pointer text-sm font-medium">

@@ -52,6 +52,8 @@ export const realtimeOptions = [
   {
     value: "mostly-form-like",
     label: "Mostly form-like apps",
+    recipientsPerWrite: 1,
+    activeShare: 0.25,
     averageSessionMinutes: 3,
     activeWindowHours: 10,
     writesPerActiveMinute: 0.5,
@@ -63,6 +65,8 @@ export const realtimeOptions = [
   {
     value: "collaborative",
     label: "Collaborative / shared state",
+    recipientsPerWrite: 4,
+    activeShare: 0.7,
     averageSessionMinutes: 20,
     activeWindowHours: 10,
     writesPerActiveMinute: 4,
@@ -74,6 +78,8 @@ export const realtimeOptions = [
   {
     value: "live",
     label: "Live streams / fan-out",
+    recipientsPerWrite: 50,
+    activeShare: 0.9,
     averageSessionMinutes: 45,
     activeWindowHours: 3,
     writesPerActiveMinute: 6,
@@ -166,6 +172,15 @@ function realtimeParams(option: (typeof realtimeOptions)[number]) {
       0.1,
     ),
     param(`${k}.fanout`, "Egress fan-out multiplier", option.egressFanoutMultiplier, 1, 50, 0.5),
+    param(`${k}.recipients`, "Sessions receiving each write", option.recipientsPerWrite, 0, 500, 1),
+    param(
+      `${k}.activeShare`,
+      "Share of sessions active in a minute",
+      option.activeShare,
+      0.05,
+      1,
+      0.05,
+    ),
   ];
 }
 
@@ -173,38 +188,35 @@ const globalParams = [
   param("global.peakFactor", "Peak over average concurrency", 2, 1, 10, 0.1),
   param("global.comfortable", "Target peak utilization", 0.7, 0.3, 1, 0.05),
   param("global.shardEfficiency", "Shard throughput efficiency", 0.7, 0.3, 1, 0.05),
-  param("global.kbPerWatchedRow", "Memory per watched row (KB)", 1.25, 0.1, 10, 0.05),
+  param("global.parallel", "Share of per-write work on other cores", 0, 0, 0.95, 0.05),
+  param("global.sqliteShare", "Share of a write that is serial SQLite", 0.45, 0.1, 1, 0.05),
+  param("global.kbPerWatchedRow", "Memory per watched row (KB)", 1.25, 0.05, 10, 0.05),
   param("global.rowsPerWrite", "Rows per write", 10, 1, 100, 1),
   param("global.idleGraceMinutes", "Idle time before sleeping (min)", 5, 0, 60, 1),
 ];
 
 type PlatformId = "vercel" | "cloudflare" | "server";
 
+/** One instance size a platform offers. */
+export type Size = { label: string; vcpus: number; memoryGb: number };
+
 export type Platform = {
   id: PlatformId;
   name: string;
   comingSoon?: boolean;
-  /** One shard's worth of the platform, as shown to the reader. */
-  instance: string;
   params: Param[];
+  sizes: (a: Assumptions) => Size[];
   /** Largest structured data one instance may hold, or Infinity. */
   diskGb: (a: Assumptions) => number;
-  /** Monthly platform cost for `shards` instances at this demand. */
-  cost: (d: Demand, a: Assumptions, shards: number, cpuUtilization: number) => number;
+  /** Monthly platform cost for `shards` instances of `size` at this demand. */
+  cost: (d: Demand, a: Assumptions, size: Size, shards: number, cpuUtilization: number) => number;
   costNote: string;
 };
 
-const engineParams = (
-  id: PlatformId,
-  cores: number,
-  writeMs: number,
-  sessionUs: number,
-  memoryGb: number,
-) => [
-  param(`${id}.cores`, "Usable cores", cores, 0.25, 32, 0.25),
+const engineParams = (id: PlatformId, writeMs: number, recipientUs: number, sessionUs: number) => [
   param(`${id}.writeMs`, "CPU per write (ms)", writeMs, 0.1, 50, 0.1),
-  param(`${id}.sessionUs`, "CPU per session per write (µs)", sessionUs, 0, 50, 0.5),
-  param(`${id}.memoryGb`, "Memory for sessions (GB)", memoryGb, 0.05, 64, 0.05),
+  param(`${id}.recipientUs`, "CPU per receiving session (µs)", recipientUs, 0, 2000, 10),
+  param(`${id}.sessionUs`, "CPU per idle session per write (µs)", sessionUs, 0, 50, 0.5),
 ];
 
 const over = (value: number, included: number) => Math.max(value - included, 0);
@@ -214,10 +226,9 @@ export const platforms: Platform[] = [
   {
     id: "vercel",
     name: "Vercel Sandbox",
-    instance: "Sandbox",
     params: [
-      ...engineParams("vercel", 1.5, 2, 3.5, 3.5),
-      param("vercel.vcpus", "Sandbox vCPUs", 2, 1, 8, 1),
+      ...engineParams("vercel", 2, 110, 3.5),
+      param("vercel.maxVcpus", "Largest Sandbox (vCPUs)", 8, 1, 8, 1),
       param("vercel.plan", "Pro plan ($/mo)", 20, 0, 100, 1),
       param("vercel.memoryGbHour", "Memory ($/GB-hour)", 0.0106, 0, 0.05, 0.0002),
       param("vercel.cpuHour", "Active CPU ($/vCPU-hour)", 0.128, 0, 0.5, 0.002),
@@ -227,12 +238,20 @@ export const platforms: Platform[] = [
       param("vercel.egressGb", "Transfer ($/GB)", 0.15, 0, 0.5, 0.01),
       param("vercel.includedEgressGb", "Included transfer (GB)", 1024, 0, 5000, 64),
     ],
+    sizes: (a) =>
+      [1, 2, 4, 8]
+        .filter((vcpus) => vcpus <= a["vercel.maxVcpus"])
+        .map((vcpus) => ({
+          label: `${vcpus} vCPU / ${vcpus * 2} GB Sandbox`,
+          vcpus,
+          memoryGb: vcpus * 2 - 0.5,
+        })),
     diskGb: () => Infinity,
-    cost: (d, a, shards, cpu) => {
+    cost: (d, a, size, shards, cpu) => {
       const hours = d.upHours;
-      const vcpus = a["vercel.vcpus"];
-      const memory = shards * vcpus * 2 * a["vercel.memoryGbHour"] * hours;
-      const activeCpu = shards * vcpus * Math.max(cpu * 0.4, 0.05) * hours * a["vercel.cpuHour"];
+      const memory = shards * size.vcpus * 2 * a["vercel.memoryGbHour"] * hours;
+      const activeCpu =
+        shards * size.vcpus * Math.max(cpu * 0.4, 0.05) * hours * a["vercel.cpuHour"];
       const proxy = shards * a["vercel.proxy"] * (hours / HOURS_PER_MONTH);
       const storage = d.structuredGb * a["vercel.driveGb"] + d.blobGb * a["vercel.blobGb"];
       const egress = over(d.egressGb, a["vercel.includedEgressGb"]) * a["vercel.egressGb"];
@@ -245,9 +264,9 @@ export const platforms: Platform[] = [
     id: "cloudflare",
     name: "Cloudflare Durable Objects",
     comingSoon: true,
-    instance: "Durable Object",
     params: [
-      ...engineParams("cloudflare", 1, 8, 6, 0.1),
+      ...engineParams("cloudflare", 8, 440, 6),
+      param("cloudflare.memoryGb", "Memory for sessions (GB)", 0.1, 0.05, 0.128, 0.005),
       param("cloudflare.diskGb", "Storage per object (GB)", 10, 1, 50, 1),
       param("cloudflare.plan", "Workers Paid ($/mo)", 5, 0, 50, 1),
       param("cloudflare.durationMGbS", "Duration ($/M GB-s)", 12.5, 0, 50, 0.5),
@@ -257,8 +276,9 @@ export const platforms: Platform[] = [
       param("cloudflare.storageGb", "SQLite storage ($/GB-month)", 0.2, 0, 1, 0.01),
       param("cloudflare.r2Gb", "R2 storage ($/GB-month)", 0.015, 0, 0.1, 0.001),
     ],
+    sizes: (a) => [{ label: "Durable Object", vcpus: 1, memoryGb: a["cloudflare.memoryGb"] }],
     diskGb: (a) => a["cloudflare.diskGb"],
-    cost: (d, a, shards) => {
+    cost: (d, a, _size, shards) => {
       const gbSeconds = shards * 0.128 * d.upHours * 3600;
       const duration = (over(gbSeconds, 400_000) / 1e6) * a["cloudflare.durationMGbS"];
       const requests =
@@ -280,22 +300,31 @@ export const platforms: Platform[] = [
   {
     id: "server",
     name: "Your own server",
-    instance: "4 vCPU / 16 GB Hetzner server",
     params: [
-      ...engineParams("server", 2.5, 2, 3.5, 14),
-      param("server.monthly", "Server ($/mo)", 32, 5, 200, 1),
-      param("server.backups", "Backups ($/server-month)", 6.4, 0, 50, 0.1),
-      param("server.diskGb", "Included disk (GB)", 140, 20, 1000, 10),
+      ...engineParams("server", 2, 110, 3.5),
+      param("server.maxVcpus", "Largest server (vCPUs)", 48, 2, 48, 2),
+      param("server.perVcpu", "Dedicated server ($/vCPU-month, 4 GB each)", 8, 2, 30, 0.5),
+      param("server.backups", "Backups (share of server price)", 0.2, 0, 1, 0.05),
+      param("server.diskGbPerVcpu", "Included disk per vCPU (GB)", 35, 5, 200, 5),
       param("server.volumeGb", "Extra volumes ($/GB-month)", 0.05, 0, 0.5, 0.01),
       param("server.objectTb", "Object Storage ($/TB-month)", 6, 0, 50, 0.5),
       param("server.includedTb", "Included traffic per server (TB)", 20, 0, 100, 1),
       param("server.egressTb", "Extra traffic ($/TB)", 1.2, 0, 20, 0.1),
     ],
+    sizes: (a) =>
+      [2, 4, 8, 16, 32, 48]
+        .filter((vcpus) => vcpus <= a["server.maxVcpus"])
+        .map((vcpus) => ({
+          label: `${vcpus} vCPU / ${vcpus * 4} GB Hetzner server`,
+          vcpus,
+          memoryGb: vcpus * 4 - 2,
+        })),
     // Attach volumes as the data grows.
     diskGb: () => Infinity,
-    cost: (d, a, shards) => {
-      const servers = shards * (a["server.monthly"] + a["server.backups"]);
-      const volumes = over(d.structuredGb, shards * a["server.diskGb"]) * a["server.volumeGb"];
+    cost: (d, a, size, shards) => {
+      const servers = shards * size.vcpus * a["server.perVcpu"] * (1 + a["server.backups"]);
+      const disk = shards * size.vcpus * a["server.diskGbPerVcpu"];
+      const volumes = over(d.structuredGb, disk) * a["server.volumeGb"];
       const objectStorage = d.blobGb > 0 ? Math.ceil(d.blobGb / 1024) * a["server.objectTb"] : 0;
       const egress =
         (over(d.egressGb, shards * a["server.includedTb"] * 1024) / 1024) * a["server.egressTb"];
@@ -313,7 +342,7 @@ export function paramGroups(frequency: FrequencyOption, realtime: RealtimeOption
   return [
     { id: "frequency", title: `Usage: ${f.label}`, params: frequencyParams(f) },
     { id: "realtime", title: `Usage: ${r.label}`, params: realtimeParams(r) },
-    { id: "global", title: "Peaks, headroom and sharding", params: globalParams },
+    { id: "global", title: "Engine, headroom and sharding", params: globalParams },
     ...platforms.map((platform) => ({
       id: platform.id,
       title: platform.name,
@@ -336,8 +365,10 @@ export type Usage = {
   frequency: FrequencyOption;
   realtime: RealtimeOption;
   blobStoragePerUserMb: number;
-  /** Jazz Pro license per shard, per month. */
-  licensePerShard: number;
+  /** Jazz Pro, for sharded apps: price per 1,000 peak active sessions per month. */
+  licensePer1k: number;
+  /** Jazz Pro's smallest monthly price. */
+  licenseMinimum: number;
 };
 
 function nonNegative(value: number) {
@@ -373,6 +404,8 @@ export function estimateDemand(usage: Usage, a: Assumptions) {
   return {
     monthlyVisits,
     peakSessions,
+    /** Sessions that wrote, subscribed or received an update in the peak minute. */
+    peakActiveSessions: peakSessions * r("activeShare"),
     peakWritesPerSecond,
     monthlyWrites,
     upHours,
@@ -380,27 +413,38 @@ export function estimateDemand(usage: Usage, a: Assumptions) {
     blobGb,
     egressGb,
     rowsWatchedPerSession: r("rowsWatched"),
+    recipientsPerWrite: r("recipients"),
   };
 }
 
 export type Demand = ReturnType<typeof estimateDemand>;
 
-/** The busiest share of one shard's CPU, memory and disk with `shards` shards. */
-function utilization(platform: Platform, d: Demand, a: Assumptions, shards: number) {
+/**
+ * The busiest share of one shard's capacity with `shards` shards of `size`.
+ * The SQLite part of a write (and, with no parallel engine, all of it) runs on
+ * one core, so a bigger box only helps with the rest and with memory.
+ */
+function utilization(platform: Platform, size: Size, d: Demand, a: Assumptions, shards: number) {
   const p = (name: string) => a[`${platform.id}.${name}`];
   const sessions = d.peakSessions / shards;
-  const msPerWrite = p("writeMs") + (sessions * p("sessionUs")) / 1000;
-  const scale = shards > 1 ? a["global.shardEfficiency"] * shards : 1;
-  const cpu = (d.peakWritesPerSecond * msPerWrite) / (p("cores") * 1000 * scale);
+  const recipients = Math.min(d.recipientsPerWrite, sessions);
+  const msPerWrite =
+    p("writeMs") + (recipients * p("recipientUs") + sessions * p("sessionUs")) / 1000;
+  const parallel = a["global.parallel"];
+  const serialMs = Math.max(msPerWrite * (1 - parallel), p("writeMs") * a["global.sqliteShare"]);
+  const writes = d.peakWritesPerSecond / (shards > 1 ? a["global.shardEfficiency"] * shards : 1);
+  const cpuSerial = (writes * serialMs) / 1000;
+  const cpuTotal = (writes * msPerWrite) / 1000 / size.vcpus;
   const memoryGb = (sessions * d.rowsWatchedPerSession * a["global.kbPerWatchedRow"]) / 1024 / 1024;
-  const memory = memoryGb / p("memoryGb");
+  const memory = memoryGb / size.memoryGb;
   const disk = d.structuredGb / shards / platform.diskGb(a);
+  const cpu = Math.max(cpuSerial, cpuTotal);
   return { cpu, worst: Math.max(cpu, memory, disk) };
 }
 
-/** The fewest shards that keep every shard under `limit` of its capacity. */
-function shardsFor(platform: Platform, d: Demand, a: Assumptions, limit: number) {
-  const fits = (shards: number) => utilization(platform, d, a, shards).worst <= limit;
+/** The fewest shards of `size` that keep every shard under `limit` of its capacity. */
+function shardsFor(platform: Platform, size: Size, d: Demand, a: Assumptions, limit: number) {
+  const fits = (shards: number) => utilization(platform, size, d, a, shards).worst <= limit;
   if (fits(1)) return 1;
   let high = 2;
   while (!fits(high)) {
@@ -416,9 +460,32 @@ function shardsFor(platform: Platform, d: Demand, a: Assumptions, limit: number)
   return high;
 }
 
-function mauPerInstance(platform: Platform, usage: Usage, a: Assumptions) {
+export function licenseCost(d: Demand, usage: Usage, shards: number) {
+  if (shards <= 1) return 0;
+  const billed = Math.ceil(d.peakActiveSessions / 1000) * usage.licensePer1k;
+  return Math.max(usage.licenseMinimum, billed);
+}
+
+export type PlatformEstimate = {
+  platform: Platform;
+  /** The cheapest size and shard count, license included. */
+  size: Size;
+  instances: number;
+  /** Shards the largest size needs to run at all. */
+  requiredShards: number;
+  platformCost: number;
+  licenseCost: number;
+  totalCost: number;
+  costPerMau: number;
+  peakActiveSessions: number;
+  /** The most MAU one instance of the largest size serves comfortably at this usage. */
+  mauPerInstance: number;
+  largest: Size;
+};
+
+function mauPerInstance(platform: Platform, size: Size, usage: Usage, a: Assumptions) {
   const fits = (mau: number) =>
-    utilization(platform, estimateDemand({ ...usage, mau }, a), a, 1).worst <=
+    utilization(platform, size, estimateDemand({ ...usage, mau }, a), a, 1).worst <=
     a["global.comfortable"];
   let low = 1;
   let high = 1e9;
@@ -431,45 +498,45 @@ function mauPerInstance(platform: Platform, usage: Usage, a: Assumptions) {
   return low;
 }
 
-export type PlatformEstimate = {
-  platform: Platform;
-  /** Shards needed to run at all, and to run with headroom. */
-  requiredShards: number;
-  recommendedShards: number;
-  /** Instances the costs assume: the recommended count. */
-  instances: number;
-  platformCost: number;
-  licenseCost: number;
-  totalCost: number;
-  costPerMau: number;
-  /** The most MAU one instance serves comfortably at this usage. */
-  mauPerInstance: number;
-};
-
 export function estimatePlatforms(
   usage: Usage,
   a: Assumptions = defaultAssumptions,
 ): PlatformEstimate[] {
   const d = estimateDemand(usage, a);
   return platforms.map((platform) => {
-    const requiredShards = shardsFor(platform, d, a, 1);
-    const recommendedShards = shardsFor(platform, d, a, a["global.comfortable"]);
-    const instances = Number.isFinite(recommendedShards) ? recommendedShards : requiredShards;
-    const cpu = utilization(platform, d, a, instances).cpu;
-    const platformCost = platform.cost(d, a, instances, cpu);
-    // One instance is free under MIT; sharding licenses every shard.
-    const licenseCost = instances > 1 ? instances * usage.licensePerShard : 0;
-    const totalCost = platformCost + licenseCost;
+    const sizes = platform.sizes(a);
+    const largest = sizes[sizes.length - 1];
+    let best: { size: Size; instances: number; platformCost: number; license: number } | null =
+      null;
+    for (const size of sizes) {
+      const instances = shardsFor(platform, size, d, a, a["global.comfortable"]);
+      if (!Number.isFinite(instances)) continue;
+      const cpu = utilization(platform, size, d, a, instances).cpu;
+      const platformCost = platform.cost(d, a, size, instances, cpu);
+      const license = licenseCost(d, usage, instances);
+      if (!best || platformCost + license < best.platformCost + best.license) {
+        best = { size, instances, platformCost, license };
+      }
+    }
+    const chosen = best ?? {
+      size: largest,
+      instances: Infinity,
+      platformCost: Infinity,
+      license: Infinity,
+    };
+    const totalCost = chosen.platformCost + chosen.license;
     return {
       platform,
-      requiredShards,
-      recommendedShards,
-      instances,
-      platformCost,
-      licenseCost,
+      size: chosen.size,
+      instances: chosen.instances,
+      requiredShards: shardsFor(platform, largest, d, a, 1),
+      platformCost: chosen.platformCost,
+      licenseCost: chosen.license,
       totalCost,
       costPerMau: usage.mau > 0 ? totalCost / usage.mau : 0,
-      mauPerInstance: mauPerInstance(platform, usage, a),
+      peakActiveSessions: d.peakActiveSessions,
+      mauPerInstance: mauPerInstance(platform, largest, usage, a),
+      largest,
     };
   });
 }
