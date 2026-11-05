@@ -1,6 +1,6 @@
 import { accountRegistryUrl } from "../accounts/context.js";
 import { requestVouchedAccount, readAccountAssignment } from "../accounts/registry-client.js";
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,59 +44,53 @@ type ExternalIdentity = {
   user: string;
 };
 
-const EXTERNAL_ISSUER = "https://napi-request.test";
-const EXTERNAL_JWT_KID = "napi-request-test";
-const EXTERNAL_JWT_SECRET = "napi-request-test-secret";
-
-const externalJwtPublicKey = {
-  kty: "oct" as const,
-  kid: EXTERNAL_JWT_KID,
-  alg: "HS256",
-  k: Buffer.from(EXTERNAL_JWT_SECRET, "utf8").toString("base64url"),
-};
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+const EXTERNAL_ISSUER = "urn:jazz:local-first";
 
 /**
- * Mints a signed external bearer token for a named test actor. These serving
- * tests exercise public request admission; reserved Jazz issuers are covered
- * separately by the local-first rejection test below.
+ * A local-first guest's bearer for a named test actor, and the account the
+ * core founds for it. These serving tests exercise request admission, which
+ * verifies only a guest's own proof (who a signed-in user is, createJazz's
+ * `authenticate` decides).
  */
 async function createExternalIdentity(
   actorName: string,
   server: { url: string; backendSecret?: string },
   appId: string,
 ): Promise<ExternalIdentity> {
-  const header = Buffer.from(
-    JSON.stringify({ alg: "HS256", typ: "JWT", kid: EXTERNAL_JWT_KID }),
-    "utf8",
-  ).toString("base64url");
-  const payload = Buffer.from(
-    JSON.stringify({
-      iss: EXTERNAL_ISSUER,
-      sub: actorName,
-      aud: "napi-request-audience",
-      exp: Math.floor(Date.now() / 1000) + 3600,
-    }),
-    "utf8",
-  ).toString("base64url");
-  const signature = createHmac("sha256", EXTERNAL_JWT_SECRET)
-    .update(`${header}.${payload}`, "utf8")
-    .digest("base64url");
-  const token = `${header}.${payload}.${signature}`;
-  const userId = actorName;
+  const { mintLocalFirstToken } = await import("jazz-napi");
+  const { verifyLocalFirstToken } = await import("./local-first-token.js");
+  const seed = Buffer.from(`${actorName}-${randomUUID()}`.padEnd(32, "-").slice(0, 32)).toString(
+    "base64url",
+  );
+  const token = mintLocalFirstToken(seed, appId, 3600);
+  const userId = verifyLocalFirstToken(token, appId);
   const identity = { issuer: EXTERNAL_ISSUER, subject: userId };
-  // The app's backend registers the user it verified.
+  const response = await requestVouchedAccount(
+    accountRegistryUrl(server.url, appId),
+    "found-local-first",
+    identity,
+    server.backendSecret!,
+  );
+  return { token, userId, user: readAccountAssignment(response, identity) };
+}
+
+/** A signed-in app user the backend vouches for (createJazz's `authenticate`), for `forSession`. */
+async function createAppUser(
+  actorName: string,
+  server: { url: string; backendSecret?: string },
+  appId: string,
+) {
+  const identity = { issuer: APP_ISSUER, subject: `${actorName}-${randomUUID()}` };
   const response = await requestVouchedAccount(
     accountRegistryUrl(server.url, appId),
     "login-or-register",
     identity,
     server.backendSecret!,
   );
-  return { token, userId, user: readAccountAssignment(response, identity) };
+  return { userId: identity.subject, user: readAccountAssignment(response, identity) };
 }
+
+const APP_ISSUER = "https://app.napi-request.test";
 
 async function startRequestTestServer(options: Parameters<typeof startLocalJazzServer>[0]) {
   return startLocalJazzServer(options);
@@ -160,7 +154,6 @@ async function createTestContext(
     driver: { type: "persistent", dataPath },
     serverUrl: server.url,
     backendSecret,
-    jwtPublicKey: externalJwtPublicKey,
     env: "test",
   });
 
@@ -253,7 +246,6 @@ describe("forRequest auth and policy", () => {
       driver: { type: "memory" },
       serverUrl: server.url,
       backendSecret,
-      jwtPublicKey: externalJwtPublicKey,
       env: "test",
     });
     onTestFinished(() => context.shutdown());
@@ -453,7 +445,6 @@ describe("forRequest auth and policy", () => {
       serverUrl: server.url,
       backendSecret,
       adminSecret,
-      jwtPublicKey: externalJwtPublicKey,
       env: "test",
     });
 
@@ -464,8 +455,10 @@ describe("forRequest auth and policy", () => {
       await server.stop();
     });
 
-    const alice = await createExternalIdentity("alice", server, appId);
-    const bob = await createExternalIdentity("bob", server, appId);
+    // Alice and bob are signed-in app users (forSession); carol is a guest
+    // whose own bearer the backend verifies (forRequest).
+    const alice = await createAppUser("alice", server, appId);
+    const bob = await createAppUser("bob", server, appId);
     const carol = await createExternalIdentity("carol", server, appId);
 
     const writerBackend = writerContext.asBackend();
@@ -503,17 +496,17 @@ describe("forRequest auth and policy", () => {
       user_id: alice.userId,
       account_id: alice.user,
       claims: {},
-      issuer: EXTERNAL_ISSUER,
+      issuer: APP_ISSUER,
       authMode: "external",
     });
-    const aliceRequestDb = await readerContext.forRequest({
-      headers: { authorization: `Bearer ${alice.token}` },
+    const carolRequestDb = await readerContext.forRequest({
+      headers: { authorization: `Bearer ${carol.token}` },
     });
     const bobSessionDb = readerContext.forSession({
       user_id: bob.userId,
       account_id: bob.user,
       claims: {},
-      issuer: EXTERNAL_ISSUER,
+      issuer: APP_ISSUER,
       authMode: "external",
     });
 
@@ -531,13 +524,13 @@ describe("forRequest auth and policy", () => {
     // Each user-scoped handle surfaces only that user's rows.
     await vi.waitFor(
       async () => {
-        const [aliceSession, aliceRequest, bobSession] = await Promise.all([
+        const [aliceSession, carolRequest, bobSession] = await Promise.all([
           aliceSessionDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
-          aliceRequestDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
+          carolRequestDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
           bobSessionDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
         ]);
         expect(aliceSession.map((r) => r.title)).toEqual(["alice-item"]);
-        expect(aliceRequest.map((r) => r.title)).toEqual(["alice-item"]);
+        expect(carolRequest.map((r) => r.title)).toEqual(["carol-item"]);
         expect(bobSession.map((r) => r.title)).toEqual(["bob-item"]);
       },
       { timeout: 10_000 },
@@ -1015,11 +1008,11 @@ it.each(["table", "relation"] as const)(
         await writer.asBackend().insert(app.links, { room: row.id }).wait({ tier: "global" });
         return row;
       });
-    const identity = await createExternalIdentity("same-actor", server, appId);
+    const identity = await createAppUser("same-actor", server, appId);
     const base = {
       user_id: identity.userId,
       account_id: identity.user,
-      issuer: EXTERNAL_ISSUER,
+      issuer: APP_ISSUER,
       authMode: "external" as const,
     };
     const a = reader.forSession({ ...base, claims: { join_code: "code-a" } });

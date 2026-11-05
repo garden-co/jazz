@@ -59,8 +59,8 @@ const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
 /// change re-runs the producer and re-pins these; after that the corpus is
 /// immutable and a new storage format gets a new corpus beside it (see
 /// `fixtures/sqlite-storage-v1/README.md`).
-const SERVER_SHA256: &str = "4ed6e440fe4f74dbc745011475e0892f5d3543a73ffdde8bcc68f86336ed4bbf";
-const CLIENT_SHA256: &str = "9c819e575adcf9cd04d31f49ac6c9f68aebadc23d6d451488cd794c602259273";
+const SERVER_SHA256: &str = "ec0f311bcd560f207436e247f19ece5b2ae022bc2eb1f280bcc017dcb3a6d1c2";
+const CLIENT_SHA256: &str = "920fd39ddef476eaa7cd9d240a7b0a256bc29d4c3b1e50a62c5ae9db75f8fc94";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];
@@ -713,13 +713,16 @@ fn expected_projects(with_client_writes: bool) -> Rows {
     expected
 }
 
-/// (tx, part, items) of each list the client corpus's pending commits keep
-/// in `_jazz_pending_items`.
+/// (tx, list, items) of each list the client corpus's pending commits keep:
+/// list 0 their ops (`_jazz_pending_ops`), 1 their serializable reads
+/// (`_jazz_pending_reads`).
 fn pending_items(path: &Path) -> Vec<(i64, i64, i64)> {
     let conn = rusqlite::Connection::open(path).unwrap();
     let mut statement = conn
         .prepare(
-            "SELECT tx, part, count(*) FROM _jazz_pending_items GROUP BY tx, part ORDER BY tx, part",
+            "SELECT tx, 0, count(*) FROM _jazz_pending_ops GROUP BY tx \
+             UNION ALL SELECT tx, 1, count(*) FROM _jazz_pending_reads GROUP BY tx \
+             ORDER BY 1, 2",
         )
         .unwrap();
     statement
@@ -1107,12 +1110,6 @@ fn another_storage_format_is_refused_without_changing_the_file() {
         ("older", "UPDATE _jazz_format SET version = 0"),
         // Tables but no stamp: not a file Jazz wrote.
         ("unstamped", "DROP TABLE _jazz_format"),
-        // A development format-1 store from before the catalogue was rows:
-        // stored names keyed by version id.
-        (
-            "versioned names",
-            "ALTER TABLE _jazz_names ADD COLUMN version BLOB",
-        ),
     ] {
         let path = edited_server_corpus(name, sql);
         let before = digest_tree(&path);

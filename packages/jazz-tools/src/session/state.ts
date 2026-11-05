@@ -1,5 +1,5 @@
 import { ensureAutomaticLocalFirst } from "../accounts/persistence.js";
-import type { AccountHandle, AccountManager } from "../accounts/state.js";
+import { admitBackendAccount, type AccountHandle, type AccountManager } from "../accounts/state.js";
 import type { JWTAuth, BackendAuth } from "../accounts/enrollment.js";
 import {
   GracefulShutdownSyncError,
@@ -22,7 +22,6 @@ type WipeableClient = {
 export type JazzSessionOperation =
   | "createLocalFirst"
   | "restoreLocalFirst"
-  | "becomeBackend"
   | "loginWithBackend"
   | "linkWithBackend"
   | "logout"
@@ -39,7 +38,6 @@ export interface JazzSessionSnapshot<Client> {
 export interface JazzSessionActions {
   createLocalFirst(): Promise<void>;
   restoreLocalFirst(secret: string): Promise<void>;
-  becomeBackend(auth: BackendAuth): Promise<void>;
   /**
    * Sign in as whoever the app's own backend says is signed in. For apps that
    * mount Jazz with `createJazz`: the backend's `authenticate` decides, from
@@ -102,7 +100,13 @@ export async function createJazzSessionOwner<
 >(options: {
   accounts: AccountManager<JWTAuth>;
   openClient(account: AccountHandle): Promise<Client>;
-  initial?: "local-first" | "signed-out" | BackendAuth;
+  initial?: "local-first" | "signed-out";
+  /**
+   * @internal Open as the backend this core admits with `auth`: only the
+   * Node host passes it, for the session `createJazz` opens on its own core
+   * and for a backend client its main backend trusts as a machine.
+   */
+  backend?: BackendAuth;
   /**
    * Wipe the signed-out account's local storage, unsynced writes included,
    * instead of keeping it for that user's next sign-in (shared devices).
@@ -115,7 +119,8 @@ export async function createJazzSessionOwner<
   let selected = accounts.getLoggedIn();
   if (!selected && options.initial === "local-first")
     selected = await ensureAutomaticLocalFirst(accounts);
-  if (typeof options.initial === "object") selected = await accounts.becomeBackend(options.initial);
+  if (options.backend)
+    selected = await admitBackendAccount(accounts as AccountManager<unknown>, options.backend);
   await accounts.settleSelection();
   let client = selected ? await openClient(selected) : undefined;
   let snapshot: JazzSessionSnapshot<Client> = Object.freeze({
@@ -268,7 +273,6 @@ export async function createJazzSessionOwner<
     createLocalFirst: () => run("createLocalFirst", () => accounts.createLocalFirst()),
     restoreLocalFirst: (secret) =>
       run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret)),
-    becomeBackend: (auth) => run("becomeBackend", () => accounts.becomeBackend(auth)),
     loginWithBackend: () => run("loginWithBackend", () => accounts.loginWithBackend()),
     linkWithBackend: () => run("linkWithBackend", () => accounts.linkWithBackend()),
     retry: () => run("retry", () => selected),

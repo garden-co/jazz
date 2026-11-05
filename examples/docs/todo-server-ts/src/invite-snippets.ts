@@ -1,5 +1,5 @@
 import { schema as s } from "jazz-tools";
-import type { JazzClient } from "jazz-tools/backend";
+import type { Jazz } from "jazz-tools/backend";
 
 // #region invite-schema
 const schema = {
@@ -77,18 +77,17 @@ s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
 });
 // #endregion invite-permissions
 
-declare const client: JazzClient;
+declare const jazz: Jazz;
 
 // #region invite-redeem-route
 export async function POST(req: Request): Promise<Response> {
-  const requester = await client.forRequest(req);
-  const user = requester.getAuthState().session?.user.account;
+  const user = await jazz.accountFor(req);
   if (!user) return new Response("Account required", { status: 401 });
 
   const { chatId, code } = (await req.json()) as { chatId: string; code: string };
 
   // Preserve the verified caller as author while using backend permissions.
-  const backendDb = await client.withAttributionForRequest(req);
+  const backendDb = await jazz.withAttribution(req);
   const result = await backendDb.serializableTransaction(async (tx) => {
     // Checking membership first keeps re-opening a successfully redeemed link idempotent,
     // even after a single-use invite has been consumed.

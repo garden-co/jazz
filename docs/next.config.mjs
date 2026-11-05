@@ -157,7 +157,12 @@ const config = {
       },
       {
         source: "/docs/getting-started/server-setup",
-        destination: "/docs/setup/backend/trusted",
+        destination: "/docs/setup/backend",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/backend/trusted",
+        destination: "/docs/setup/backend#trusted-backend-use",
         permanent: false,
       },
       {

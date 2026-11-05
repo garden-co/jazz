@@ -37,9 +37,11 @@ repository:
 
 Run `node dev/release-acceptance/run.mjs /absolute/config.json`.
 Use `phase: baseline` for historical mechanics checks; those may have older
-package versions. Final-preview/published runs require alpha56 manifests. The
-script checks tarball hashes and compares every installed package file against
-extracted tarball bytes. Unexpected files are rejected except nested dependency
+package versions (the backend scenario runs `createJazz` with `remote()`, and
+falls back to a backend-secret session only for baseline packages that predate
+it). Final-preview/published runs require alpha56 manifests. The script checks
+tarball hashes and compares every installed package file against extracted
+tarball bytes. Unexpected files are rejected except nested dependency
 directories; pin native payload packages as well. Before loading Jazz, every
 verified package directory is checked to ensure its Jazz imports resolve to the
 verified package directories. Unchecked nested Jazz copies are rejected,
