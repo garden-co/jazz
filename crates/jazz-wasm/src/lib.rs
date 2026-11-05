@@ -39,6 +39,7 @@ mod browser;
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
 pub mod browser_bench;
 mod identity;
+mod initialization;
 
 #[cfg(feature = "bench-probes")]
 pub mod bench_probes;
@@ -484,6 +485,40 @@ impl WasmDbInner {
             }
         }));
         binding.db.set_tick_scheduler(Some(host.clone()));
+        binding.db.require_owner_durability_flush();
+        let flush_host = Rc::downgrade(&host);
+        let flush_db = binding.db.clone();
+        *binding.hooks.flush_owner.borrow_mut() = Some(Box::new(move || {
+            let host = flush_host.upgrade();
+            let through = flush_db.seq_high_water();
+            Box::pin(async move {
+                let host = host.ok_or_else(|| {
+                    HostError::Engine(Error::new(
+                        jazz::db::ErrorCode::Storage,
+                        "storage owner closed",
+                    ))
+                })?;
+                if host.closed.get() {
+                    return Err(HostError::Engine(Error::new(
+                        jazz::db::ErrorCode::Storage,
+                        "storage owner closed",
+                    )));
+                }
+                host.flush(through).await.map_err(|error| {
+                    HostError::Engine(Error::new(
+                        jazz::db::ErrorCode::Storage,
+                        format!("storage owner flush failed: {}", js_error_message(&error)),
+                    ))
+                })?;
+                if host.closed.get() {
+                    return Err(HostError::Engine(Error::new(
+                        jazz::db::ErrorCode::Storage,
+                        "storage owner closed during flush",
+                    )));
+                }
+                Ok(())
+            })
+        }));
         Self { binding, host }
     }
 
@@ -1100,22 +1135,47 @@ impl WasmDb {
         }
     }
 
-    fn open_memory_as(schema: &[u8], config: &[u8], how: OpenAs<'_>) -> Result<WasmDb, JsValue> {
+    fn open_memory_as(
+        schema: &[u8],
+        config: &[u8],
+        how: OpenAs<'_>,
+        cached_catalogue: Option<&[u8]>,
+    ) -> Result<WasmDb, JsValue> {
         initialize_wasm_tracing();
         let (schema, mut config) = binding_host::decode_open(schema, config).map_err(host_error)?;
         let (identity, trusted) =
             binding_host::open_identity(&mut config, how).map_err(host_error)?;
+        if cached_catalogue.is_some() && config.history_complete {
+            return Err(to_js_error(Error::new(
+                jazz::db::ErrorCode::Protocol,
+                "cached catalogue open cannot initialise a standalone authority",
+            )));
+        }
         let db = block_on(binding_host::open_memory(
             binding_host::db_config(schema, &config, identity),
             &config,
         ))
         .map_err(to_js_error)?;
+        if let Some(capture) = cached_catalogue {
+            // SAFETY: the host loads the opaque capture from its app-scoped
+            // authenticated cache, before sharing this new runtime owner.
+            unsafe { db.install_cached_catalogue(capture) }.map_err(to_js_error)?;
+        }
         Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
     }
 
     #[wasm_bindgen(js_name = openMemory)]
-    pub fn open_memory(schema: Vec<u8>, config: Vec<u8>) -> Result<WasmDb, JsValue> {
-        Self::open_memory_as(&schema, &config, OpenAs::Untrusted)
+    pub fn open_memory(
+        schema: Vec<u8>,
+        config: Vec<u8>,
+        cached_catalogue: Option<Vec<u8>>,
+    ) -> Result<WasmDb, JsValue> {
+        Self::open_memory_as(
+            &schema,
+            &config,
+            OpenAs::Untrusted,
+            cached_catalogue.as_deref(),
+        )
     }
 
     /// Open a deliberate backend runtime. This remains a separate ABI from
@@ -1123,7 +1183,7 @@ impl WasmDb {
     /// privileged system author.
     #[wasm_bindgen(js_name = openMemoryAsBackend)]
     pub fn open_memory_as_backend(schema: Vec<u8>, config: Vec<u8>) -> Result<WasmDb, JsValue> {
-        Self::open_memory_as(&schema, &config, OpenAs::Backend)
+        Self::open_memory_as(&schema, &config, OpenAs::Backend, None)
     }
 
     /// Open with a verified Jazz self-signed client identity. This deliberately
@@ -1136,6 +1196,7 @@ impl WasmDb {
         token: String,
         app_id: String,
         claimed_author: String,
+        cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
         Self::open_memory_as(
             &schema,
@@ -1145,6 +1206,7 @@ impl WasmDb {
                 app_id: &app_id,
                 claimed_author: &claimed_author,
             },
+            cached_catalogue.as_deref(),
         )
     }
 
@@ -1171,12 +1233,23 @@ impl WasmDb {
         schema: Vec<u8>,
         config: Vec<u8>,
         storage_owner: String,
+        cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
-        Self::open_browser_as(storage, schema, config, storage_owner, OpenAs::Untrusted).await
+        Self::open_browser_as(
+            storage,
+            schema,
+            config,
+            storage_owner,
+            OpenAs::Untrusted,
+            cached_catalogue,
+        )
+        .await
     }
 
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen(js_name = openBrowserWithSelfSignedProof)]
+    // The public WASM ABI includes proof, owner and catalogue arguments.
+    #[allow(clippy::too_many_arguments)]
     pub async fn open_browser_with_self_signed_proof(
         storage: JsValue,
         schema: Vec<u8>,
@@ -1185,13 +1258,22 @@ impl WasmDb {
         app_id: String,
         claimed_author: String,
         storage_owner: String,
+        cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
         let how = OpenAs::SelfSigned {
             token: &token,
             app_id: &app_id,
             claimed_author: &claimed_author,
         };
-        Self::open_browser_as(storage, schema, config, storage_owner, how).await
+        Self::open_browser_as(
+            storage,
+            schema,
+            config,
+            storage_owner,
+            how,
+            cached_catalogue,
+        )
+        .await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1201,6 +1283,7 @@ impl WasmDb {
         config: Vec<u8>,
         storage_owner: String,
         how: OpenAs<'_>,
+        cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
         initialize_wasm_tracing();
         let (schema, mut config) =
@@ -1212,6 +1295,11 @@ impl WasmDb {
         let spec = browser::StoreSpec::from_js(&storage, &storage_owner)?;
         let (db, store) =
             browser::open(&spec, binding_host::db_config(schema, &config, identity)).await?;
+        if let Some(capture) = cached_catalogue {
+            // SAFETY: the storage owner supplies only its exact app-scoped
+            // authenticated cache, before this runtime is exposed to callers.
+            unsafe { db.install_cached_catalogue(&capture) }.map_err(to_js_error)?;
+        }
         let owner = Self::runtime_owner(Binding::new(db, identity, trusted));
         *owner.open_inner()?.host.store.borrow_mut() = Some(store);
         Ok(owner)
@@ -1510,6 +1598,11 @@ impl WasmDb {
             match durability_tier_from_str(&tier)? {
                 DurabilityTier::None => {}
                 DurabilityTier::Local => {
+                    inner
+                        .binding
+                        .wait_for_pending_writes(DurabilityTier::Local)
+                        .await
+                        .map_err(host_error)?;
                     inner.host.flush(inner.binding.db.seq_high_water()).await?
                 }
                 DurabilityTier::Global => inner
@@ -1609,11 +1702,46 @@ impl WasmDb {
 
     /// Mark an in-memory foreground whose local-first reads must first receive
     /// its storage owner's cache. Authority waits remain separately qualified.
-    /// Writes remain unsupported until worker forwarding and durability are ported.
+    /// New writes require the private owner's subject- and schema-bound reply.
     #[wasm_bindgen(js_name = setNonDurableClient)]
     pub fn set_non_durable_client(&self) -> Result<(), JsValue> {
         self.open_inner()?.binding.db.set_non_durable_client();
         Ok(())
+    }
+
+    /// Admit this authenticated replica as the private owner of one subject's
+    /// durable browser store, before accepting any foreground peers.
+    #[wasm_bindgen(js_name = setScopeIsolatedStorageOwner)]
+    pub fn set_scope_isolated_storage_owner(&self) -> Result<(), JsValue> {
+        self.open_inner()?
+            .binding
+            .db
+            .set_scope_isolated_storage_owner()
+            .map_err(to_js_error)
+    }
+
+    /// Resolve when the current worker connection supports private recovery.
+    /// This acknowledgement does not require a connection to the authority.
+    #[wasm_bindgen(js_name = waitForStorageOwner)]
+    pub fn wait_for_storage_owner(&self) -> Result<js_sys::Promise, JsValue> {
+        let inner = self.open_inner()?;
+        let progress = inner.binding.hooks.progress.clone();
+        Ok(future_to_promise(progress.parked(async move {
+            let mut waiting = Box::pin(inner.binding.db.wait_for_storage_owner());
+            std::future::poll_fn(|cx| {
+                if inner.host.closed.get() {
+                    return Poll::Ready(Err(JsValue::from_str(
+                        "storage owner admission cancelled by close",
+                    )));
+                }
+                waiting
+                    .as_mut()
+                    .poll(cx)
+                    .map(|result| result.map_err(to_js_error))
+            })
+            .await?;
+            Ok(JsValue::UNDEFINED)
+        })))
     }
 
     /// Report what the host knows about the path to the authoritative server
@@ -1728,7 +1856,9 @@ impl WasmDb {
         };
         let owns_runtime = self.owns_runtime;
         if owns_runtime {
+            inner.binding.close_initializations();
             inner.host.closed.set(true);
+            inner.binding.hooks.progress.wake_all();
         }
         future_to_promise(async move {
             if owns_runtime {

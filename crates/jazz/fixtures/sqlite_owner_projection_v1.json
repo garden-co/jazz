@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "roles": [
+    "jazz.sqlite.owner-position.v1",
+    "jazz.sqlite.owner-scope.v1",
+    "jazz.sqlite.owner-input-row.v1"
+  ],
+  "position": 4503599627370497,
+  "tx": 4503599627370497,
+  "nodeHex": "01010101010101010101010101010101",
+  "rowHex": "44444444444444444444444444444444",
+  "rootBranchHex": "",
+  "subject": "[\"https://issuer.example\",\"alice\"]",
+  "subjectUtf8Hex": "5b2268747470733a2f2f6973737565722e6578616d706c65222c22616c696365225d",
+  "schemaByteLength": 16,
+  "pending": 1,
+  "writes": 1
+}

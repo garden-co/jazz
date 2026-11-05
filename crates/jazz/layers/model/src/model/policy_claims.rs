@@ -73,7 +73,9 @@ pub fn author_policy_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
     claims
 }
 
-fn auth_mode_for_author_issuer(issuer: &str) -> &'static str {
+/// Resolve `session.authMode` from an already admitted identity's issuer.
+/// Provider claims cannot override this value.
+pub fn auth_mode_for_author_issuer(issuer: &str) -> &'static str {
     match issuer {
         AuthorSubject::LOCAL_FIRST_ISSUER => "local-first",
         AuthorSubject::ANONYMOUS_ISSUER => "anonymous",

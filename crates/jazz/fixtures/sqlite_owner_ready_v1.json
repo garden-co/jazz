@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "role": "jazz.sqlite.sync.owner-ready.v1",
+  "subject": "[\"https://issuer.example\",\"alice\"]",
+  "readyHex": "1f22222222222222222222222222222222225b2268747470733a2f2f6973737565722e6578616d706c65222c22616c696365225d33333333333333333333333333333333"
+}

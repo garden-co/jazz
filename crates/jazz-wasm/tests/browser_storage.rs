@@ -54,7 +54,7 @@ fn storage(path: &str, require_existing: bool) -> JsValue {
     js_sys::JSON::parse(&serde_json::json!({"backend":"indexeddb", "path":path, "requireExisting":require_existing}).to_string()).unwrap()
 }
 async fn open(storage: JsValue, owner: &str) -> Result<WasmDb, JsValue> {
-    WasmDb::open_browser(storage, schema(), config(), owner.into()).await
+    WasmDb::open_browser(storage, schema(), config(), owner.into(), None).await
 }
 fn cells() -> Vec<u8> {
     let descriptor = RecordDescriptor::new([("text", ValueType::String)]);

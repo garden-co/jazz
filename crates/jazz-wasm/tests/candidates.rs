@@ -66,7 +66,7 @@ fn open(node: u8, authority: bool) -> WasmDb {
     if authority {
         WasmDb::open_memory_as_backend(serde_json::to_vec(&schema).unwrap(), config)
     } else {
-        WasmDb::open_memory(serde_json::to_vec(&schema).unwrap(), config)
+        WasmDb::open_memory(serde_json::to_vec(&schema).unwrap(), config, None)
     }
     .unwrap()
 }

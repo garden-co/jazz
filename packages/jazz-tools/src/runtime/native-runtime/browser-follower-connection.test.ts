@@ -44,6 +44,9 @@ async function createWatchdogFollower(port = new TestPort()) {
     tick: () => 0,
   };
   const runtime = {
+    setInitializationStatusOwner: vi.fn(),
+    setCatalogueReadinessOwner: vi.fn(),
+    waitForStorageOwner: vi.fn(async () => undefined),
     connectUpstreamPeer: vi.fn(() => transport),
     onPeerTransportWork: vi.fn(() => () => undefined),
     onLocalSettlementChange: vi.fn((listener: (pending: boolean) => void) => {
@@ -166,6 +169,9 @@ describe("MessagePortBrowserFollowerConnection", () => {
         finishConnecting = resolve;
       });
       const runtime = {
+        setInitializationStatusOwner: vi.fn(),
+        setCatalogueReadinessOwner: vi.fn(),
+        waitForStorageOwner: vi.fn(async () => undefined),
         connectUpstreamPeer: vi.fn(() => pendingTransport),
         onPeerTransportWork: vi.fn(() => () => undefined),
         onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -217,6 +223,9 @@ describe("MessagePortBrowserFollowerConnection", () => {
         tick: () => 0,
       };
       const runtime = {
+        setInitializationStatusOwner: vi.fn(),
+        setCatalogueReadinessOwner: vi.fn(),
+        waitForStorageOwner: vi.fn(async () => undefined),
         connectUpstreamPeer: vi.fn(() => transport),
         onPeerTransportWork: vi.fn(() => () => undefined),
         onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -424,6 +433,9 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => 0,
     };
     const runtime = {
+      setInitializationStatusOwner: vi.fn(),
+      setCatalogueReadinessOwner: vi.fn(),
+      waitForStorageOwner: vi.fn(async () => undefined),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -469,6 +481,9 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => 0,
     };
     const runtime = {
+      setInitializationStatusOwner: vi.fn(),
+      setCatalogueReadinessOwner: vi.fn(),
+      waitForStorageOwner: vi.fn(async () => undefined),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -528,6 +543,9 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => Promise.reject(failure),
     };
     const runtime = {
+      setInitializationStatusOwner: vi.fn(),
+      setCatalogueReadinessOwner: vi.fn(),
+      waitForStorageOwner: vi.fn(async () => undefined),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -576,6 +594,9 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => 0,
     };
     const runtime = {
+      setInitializationStatusOwner: vi.fn(),
+      setCatalogueReadinessOwner: vi.fn(),
+      waitForStorageOwner: vi.fn(async () => undefined),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -639,6 +660,9 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => 0,
     };
     const runtime = {
+      setInitializationStatusOwner: vi.fn(),
+      setCatalogueReadinessOwner: vi.fn(),
+      waitForStorageOwner: vi.fn(async () => undefined),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -693,6 +717,9 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => 0,
     };
     const runtime = {
+      setInitializationStatusOwner: vi.fn(),
+      setCatalogueReadinessOwner: vi.fn(),
+      waitForStorageOwner: vi.fn(async () => undefined),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -738,3 +765,54 @@ describe("MessagePortBrowserFollowerConnection", () => {
     request.port.close();
   });
 });
+
+// The worker control reply admits the peer; core recovery admission is a later
+// wire reply. SDK readiness must include both while the pump remains active.
+it.each([false, true])(
+  "waits for owner recovery admission and cancels it on close (close=%s)",
+  async (close) => {
+    const port = new TestPort();
+    let acknowledge!: () => void;
+    const admitted = new Promise<void>((resolve) => {
+      acknowledge = resolve;
+    });
+    const transport = { recvWireFrames: () => [], sendWireFrame: vi.fn(), tick: () => 0 };
+    const runtime = {
+      setInitializationStatusOwner: vi.fn(),
+      setCatalogueReadinessOwner: vi.fn(),
+      waitForStorageOwner: vi.fn(() => admitted),
+      connectUpstreamPeer: vi.fn(() => transport),
+      onPeerTransportWork: vi.fn(() => () => undefined),
+      onLocalSettlementChange: vi.fn(() => () => undefined),
+      progressPeerTransport: vi.fn(async () => undefined),
+      retirePeerTransport: vi.fn(async () => undefined),
+      reportRemoteServerTransportError: vi.fn(),
+    };
+    const connection = new MessagePortBrowserFollowerConnection(
+      runtime as never,
+      port as unknown as MessagePort,
+      {},
+      null,
+      { onAuthFailure: vi.fn(), onAuthRestored: vi.fn(), onFailure: vi.fn() },
+    );
+    const init = port.sent[0]!;
+    if (init.type !== "init") throw new Error("missing init");
+    port.emit({ type: "result", id: init.id });
+    const settled = vi.fn();
+    const ready = connection.ready();
+    void ready.then(settled, settled);
+    await vi.waitFor(() => expect(runtime.waitForStorageOwner).toHaveBeenCalledOnce());
+    port.emit({ type: "frames", frames: [Uint8Array.of(7)] });
+    await vi.waitFor(() => expect(transport.sendWireFrame).toHaveBeenCalledWith(Uint8Array.of(7)));
+    expect(settled).not.toHaveBeenCalled();
+    if (close) {
+      connection.detachForReconnect();
+      await expect(ready).rejects.toThrow("closed");
+      acknowledge();
+    } else {
+      acknowledge();
+      await expect(ready).resolves.toBeUndefined();
+      connection.detachForReconnect();
+    }
+  },
+);

@@ -51,19 +51,18 @@ uploads continue waiting for their authority fate.
 
 ## Relay boundary
 
-SQLite relay write forwarding remains unported. Previously a relay could apply a
-downstream upload locally and acknowledge it with an optimistic sequence, without
-forwarding it to the authority. Relays now reject those uploads explicitly before
-applying them. Applications requiring that topology must wait for the forwarding
-port; upgrading makes the existing unsupported path fail visibly. Scoped relay
-reads remain supported. Receipts with optimistic upstream sequences are never
-reported as globally accepted.
+Durable relay upload forwarding is now covered by
+[SQLite durable relay uploads](sqlite-relay-upload-compatibility.md). It journals
+original transaction identities and waits for the authority's qualified receipt.
+Non-durable foreground writes remain unsupported pending owner flush
+acknowledgements and private pending overlays. Optimistic upstream sequences are
+never reported as globally accepted.
 
 ## Validation boundary
 
 Public integration tests cover pending and accepted writes across restarts,
 rejected writes and their exact recovered errors, authority/local distinctions,
-receipt ownership, immediate row-state refusal and relay rejection. A direct SQL
+receipt ownership, immediate row-state refusal and relay authority settlement. A direct SQL
 corruption test is deliberate because undecodable durable bytes must fail closed.
 Browser tests cover the public WASM snapshot, rejection and closed-handle paths,
 plus IndexedDB flush qualification and reopening.

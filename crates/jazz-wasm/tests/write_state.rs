@@ -73,7 +73,7 @@ async fn wait(write: &WasmWrite, tier: &str) -> Result<JsValue, JsValue> {
 /// acceptance, and preserves an immediate rejection across snapshots and waits.
 #[wasm_bindgen_test]
 async fn memory_receipts_report_fate_without_consuming_waits() {
-    let db = WasmDb::open_memory(schema(), config()).unwrap();
+    let db = WasmDb::open_memory(schema(), config(), None).unwrap();
     let mut write = insert(&db, 1);
     let snapshot = state(&write);
     assert_eq!(snapshot.fate, Fate::Pending);
@@ -106,7 +106,7 @@ async fn indexeddb_local_wait_flushes_the_write_prefix() {
         &serde_json::json!({"backend":"indexeddb", "path":format!("/{owner}.sqlite")}).to_string(),
     )
     .unwrap();
-    let db = WasmDb::open_browser(storage.clone(), schema(), config(), owner.clone())
+    let db = WasmDb::open_browser(storage.clone(), schema(), config(), owner.clone(), None)
         .await
         .unwrap();
     let first = insert(&db, 2);
@@ -124,7 +124,7 @@ async fn indexeddb_local_wait_flushes_the_write_prefix() {
     drop(second);
     JsFuture::from(db.close()).await.unwrap();
     drop(db);
-    let reopened = WasmDb::open_browser(storage.clone(), schema(), config(), owner.clone())
+    let reopened = WasmDb::open_browser(storage.clone(), schema(), config(), owner.clone(), None)
         .await
         .unwrap();
     let duplicate = insert(&reopened, 2);

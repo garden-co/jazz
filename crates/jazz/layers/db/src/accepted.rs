@@ -674,6 +674,7 @@ impl Db {
                     prepared: prepared.clone(),
                     include_deleted,
                     rows: versions(&rows),
+                    content: read_contents(&rows)?,
                 });
                 Ok(BindingSettledRead { rows, settlements })
             })();

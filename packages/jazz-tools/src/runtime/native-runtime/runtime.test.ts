@@ -213,6 +213,68 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 
+  // A controlled physical close is needed to observe the interval that a real
+  // synchronous SQLite busy error cannot expose. Every caller must wait for
+  // the same outcome; retrying disposal must never reopen mutation admission.
+  it.each(["resolve", "reject"] as const)(
+    "shares a pending physical close that will %s and permits a failed close retry",
+    async (outcome) => {
+      let finish!: () => void;
+      let fail!: (error: Error) => void;
+      const pending = new Promise<void>((resolve, reject) => {
+        finish = resolve;
+        fail = reject;
+      });
+      const close = vi.fn(() => pending);
+      const runtime = new NativeRuntimeAdapter(
+        { openMemory: () => fakeDb({ close }) },
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const first = runtime.close();
+      const second = runtime.close();
+      let secondSettled = false;
+      void second.then(
+        () => {
+          secondSettled = true;
+        },
+        () => {
+          secondSettled = true;
+        },
+      );
+      const results = Promise.allSettled([first, second]);
+      try {
+        await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+        expect(secondSettled).toBe(false);
+        const error = new Error("storage close failed");
+        if (outcome === "reject") fail(error);
+        else finish();
+        expect(await results).toEqual(
+          outcome === "reject"
+            ? [
+                { status: "rejected", reason: error },
+                { status: "rejected", reason: error },
+              ]
+            : [
+                { status: "fulfilled", value: undefined },
+                { status: "fulfilled", value: undefined },
+              ],
+        );
+        expect(() => runtime.insert("todos", {})).toThrow(/closed/);
+        if (outcome === "reject") close.mockResolvedValue(undefined);
+        await runtime.close();
+        expect(close).toHaveBeenCalledTimes(outcome === "reject" ? 2 : 1);
+        expect(() => runtime.insert("todos", {})).toThrow(/closed/);
+      } finally {
+        finish();
+        await results;
+      }
+    },
+  );
+
   it("resolves connect only after the owned native transport has pumped", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {

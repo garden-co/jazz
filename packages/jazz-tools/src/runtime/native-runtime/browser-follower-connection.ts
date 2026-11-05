@@ -1,3 +1,7 @@
+import {
+  decodeInitializationStatuses,
+  type InitializationTransactionStatus,
+} from "../provisional-initialization.js";
 import type { AuthFailureReason } from "../auth-state.js";
 import type {
   BrowserFollowerConnection,
@@ -23,6 +27,8 @@ type PendingRequest = {
   type: BrowserFollowerPortRpcRequest["type"] | "open-inspector-control";
   resolve: () => void;
   reject: (error: Error) => void;
+  receiveInitializationStatuses?: (encoded: string) => void;
+  receiveCatalogueReadiness?: (ready: boolean) => void;
 };
 
 type BrowserFollowerPortRpcRequest =
@@ -32,6 +38,8 @@ type BrowserFollowerPortRpcRequest =
       inspectorBinding?: InspectorAttachmentBinding;
     }
   | { type: "wait-server" }
+  | { type: "initialization-status"; reservedTxIds: string[] }
+  | { type: "authenticated-catalogue-ready" }
   | { type: "disconnect" }
   | { type: "flush-local" }
   | { type: "flush-pending-writes" }
@@ -64,6 +72,8 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private pump: BrowserWorkerTransportPump | null = null;
   private readonly pendingFrames: Uint8Array[][] = [];
   private readonly readyPromise: Promise<void>;
+  private rejectReadiness?: (error: Error) => void;
+  private ownerAdmissionPending = true;
   private inspectorAttachmentPhysicalDbName: string | null = null;
   private peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
   private workerRealmId?: string;
@@ -163,9 +173,35 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
           : undefined,
       );
       for (const frames of this.pendingFrames.splice(0)) this.pump.receive(frames);
+      await runtime.waitForStorageOwner();
+      this.ownerAdmissionPending = false;
+      if (!this.hasPendingWork()) this.clearWatchdog();
     })();
-    this.readyPromise = Promise.all([initialized, connected]).then(() => undefined);
+    const disposed = new Promise<never>((_, reject) => {
+      this.rejectReadiness = reject;
+    });
+    this.readyPromise = Promise.race([Promise.all([initialized, connected]), disposed]).then(() => {
+      this.rejectReadiness = undefined;
+    });
     void this.readyPromise.catch((error: unknown) => this.fail(toError(error)));
+    runtime.setInitializationStatusOwner(async (ids) => {
+      await this.ready();
+      let statuses: readonly InitializationTransactionStatus[] | undefined;
+      await this.request({ type: "initialization-status", reservedTxIds: [...ids] }, (encoded) => {
+        statuses = decodeInitializationStatuses(encoded, ids);
+      });
+      if (!statuses) throw new Error("Durable owner omitted initialization status");
+      return statuses;
+    });
+    runtime.setCatalogueReadinessOwner(async () => {
+      await this.ready();
+      let ready: boolean | undefined;
+      await this.request({ type: "authenticated-catalogue-ready" }, undefined, (value) => {
+        ready = value;
+      });
+      if (ready === undefined) throw new Error("Durable owner omitted catalogue readiness");
+      return ready;
+    });
   }
 
   async ready(): Promise<void> {
@@ -295,13 +331,23 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.dispose(new Error("Browser follower connection is reconnecting"));
   }
 
-  private request(request: BrowserFollowerPortRpcRequest): Promise<void> {
+  private request(
+    request: BrowserFollowerPortRpcRequest,
+    receiveInitializationStatuses?: (encoded: string) => void,
+    receiveCatalogueReadiness?: (ready: boolean) => void,
+  ): Promise<void> {
     if (this.failed) return Promise.reject(this.failed);
     if (this.closed) return Promise.reject(new Error("Browser follower connection is closed"));
     const id = this.nextRequestId++;
     const message = { ...request, id };
     const promise = new Promise<void>((resolve, reject) => {
-      this.pending.set(id, { type: request.type, resolve, reject });
+      this.pending.set(id, {
+        type: request.type,
+        resolve,
+        reject,
+        receiveInitializationStatuses,
+        receiveCatalogueReadiness,
+      });
     });
     this.armWatchdog();
     try {
@@ -374,7 +420,12 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   };
 
   private hasPendingWork(): boolean {
-    return this.pending.size > 0 || this.localSettlementsPending || this.resumeProbePending;
+    return (
+      this.ownerAdmissionPending ||
+      this.pending.size > 0 ||
+      this.localSettlementsPending ||
+      this.resumeProbePending
+    );
   }
 
   private readonly onVisibilityChange = (): void => {
@@ -461,6 +512,23 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     if (message.error) {
       pending.reject(deserializeBrowserRelayError(message.error));
     } else {
+      if (pending.receiveCatalogueReadiness) {
+        if (typeof message.authenticatedCatalogueReady !== "boolean") {
+          pending.reject(new Error("Missing catalogue readiness response"));
+          return;
+        }
+        pending.receiveCatalogueReadiness(message.authenticatedCatalogueReady);
+      }
+      if (pending.receiveInitializationStatuses) {
+        try {
+          if (typeof message.initializationStatuses !== "string")
+            throw new Error("Missing initialization status response");
+          pending.receiveInitializationStatuses(message.initializationStatuses);
+        } catch (error) {
+          pending.reject(toError(error));
+          return;
+        }
+      }
       this.inspectorAttachmentPhysicalDbName ??= message.inspectorAttachmentPhysicalDbName ?? null;
       if (pending.type === "init") {
         this.peerAuthority = message.peerAuthority;
@@ -498,6 +566,8 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private dispose(error: Error): void {
     if (this.closed) return;
     this.closed = true;
+    this.rejectReadiness?.(this.failed ?? new Error("Browser follower connection is closed"));
+    this.rejectReadiness = undefined;
     this.clearWatchdog();
     globalThis.removeEventListener?.("pageshow", this.onResume);
     globalThis.document?.removeEventListener("visibilitychange", this.onVisibilityChange);

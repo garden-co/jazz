@@ -1622,3 +1622,39 @@ fn inherited_large_grants_use_historical_values_before_same_unit_updates() {
         }
     }
 }
+
+/// Alice seals a same-unit founder graph, then creates another graph against
+/// that publication. Bob checks both the sealed unit and the later serializable
+/// upload carrying the reservation-to-publication origin map.
+#[test]
+fn sealed_and_origin_mapped_units_keep_candidate_authorization() {
+    let f = Fixture::new(insert(parent(true)));
+    let id = OpenTransactionId::new();
+    block_on(f.alice.begin_serializable(id)).unwrap();
+    for (row_id, parent, seed) in [(1, 2, false), (2, 2, true)] {
+        f.alice
+            .prepare_initialization_insert(id, "nodes", row(row_id))
+            .unwrap();
+        block_on(f.alice.serializable_tx_ref(id).upsert(
+            "nodes",
+            row(row_id),
+            cells(parent, seed, true, "room"),
+            Default::default(),
+        ))
+        .unwrap();
+    }
+    let seal = f.alice.seal_initialization_transaction(id).unwrap();
+    assert!(rows(&f.alice).is_empty());
+    let published = f.alice.publish_initialization_transaction(seal).unwrap().0;
+    let next = f.commit(
+        &[
+            (3, cells(4, false, true, "room")),
+            (4, cells(4, true, true, "room")),
+        ],
+        true,
+    );
+    f.connect();
+    f.settle(published).unwrap();
+    f.settle(next).unwrap();
+    assert_eq!(rows(&f.bob).len(), 4);
+}

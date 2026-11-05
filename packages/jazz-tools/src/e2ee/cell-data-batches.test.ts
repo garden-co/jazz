@@ -35,6 +35,7 @@ const currentA = root(1, 12),
 const secretFor = (epoch: SpaceRoot) => new Uint8Array([Number(epoch.epochId.slice(-2))]);
 const mechanism = { id: "test.cell-batch", version: 1 };
 const db = {
+  authenticatedTableIdentity: vi.fn(async () => uuid(90)),
   tableIdentity: vi.fn(async () => uuid(90)),
   columnIdentity: vi.fn(async (_table, column: string) => uuid(column === "title" ? 91 : 92)),
 } as unknown as Db;

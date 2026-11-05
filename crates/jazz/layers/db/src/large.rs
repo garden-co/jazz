@@ -97,6 +97,8 @@ CREATE TABLE IF NOT EXISTS _jazz_lv_root (root BLOB PRIMARY KEY, durable INTEGER
 CREATE TABLE IF NOT EXISTS _jazz_lv_receipt (locator BLOB PRIMARY KEY, \
  expires INTEGER NOT NULL) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS _jazz_lv_receipt_expires ON _jazz_lv_receipt (expires);
+CREATE TABLE IF NOT EXISTS _jazz_lv_relay_root_v1 (node BLOB NOT NULL CHECK(length(node)=16), tx INTEGER NOT NULL CHECK(tx>0), root BLOB NOT NULL CHECK(length(root)=32), PRIMARY KEY(node,tx,root)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS _jazz_lv_relay_root_lookup_v1 ON _jazz_lv_relay_root_v1(root);
 CREATE TABLE IF NOT EXISTS _jazz_lv_unpushed (locator BLOB PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS _jazz_lv_upload (id BLOB PRIMARY KEY, touched INTEGER NOT NULL) \
  WITHOUT ROWID;
@@ -1221,6 +1223,25 @@ pub(crate) fn mark_pushed(conn: &Connection, locators: &[lv::Locator]) -> Result
     Ok(())
 }
 
+/// Forward the available authenticated nodes of this exact upload. Missing
+/// base nodes may already belong to the authority; it validates the complete
+/// value before accepting the commit. The relay never claims local completion.
+pub(crate) fn relay_nodes(
+    conn: &Connection,
+    value: &LargeValueRef,
+) -> Result<Vec<(ChunkRequest, Vec<u8>)>, Error> {
+    let mut out = Vec::new();
+    walk(conn, value, |request, bytes| {
+        if let Some(bytes) = bytes {
+            out.push((request.clone(), bytes.to_vec()));
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    })?;
+    Ok(out)
+}
+
 /// Store a node fetched from upstream, after authenticating it against the
 /// hash this replica asked for.
 pub(crate) fn install_fetched(
@@ -1408,7 +1429,8 @@ pub(crate) fn reclaim(conn: &Connection, chunks: &Chunks, budget: usize) -> Resu
                  AND durable > 0) \
                  OR EXISTS (SELECT 1 FROM _jazz_lv_edge WHERE child = ?1) \
                  OR EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE locator = ?1) \
-                 OR EXISTS (SELECT 1 FROM _jazz_lv_upload_node WHERE locator = ?1)",
+                 OR EXISTS (SELECT 1 FROM _jazz_lv_upload_node WHERE locator = ?1) \
+                 OR EXISTS (SELECT 1 FROM _jazz_lv_relay_root_v1 WHERE root = ?1)",
                 [&locator],
                 |r| r.get(0),
             )

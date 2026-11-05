@@ -20,24 +20,24 @@ use std::task::{Context, Poll, Waker};
 use jazz_model::model::transaction::{OpenTransactionId, TransactionId};
 use jazz_model::query::Query;
 use jazz_model::schema::JazzSchema;
-use jazz_model::tx::{DurabilityTier, TxId};
+use jazz_model::tx::{DurabilityTier, Fate, RejectionReason, TxId};
 use jazz_protocol::protocol::{
     BranchSelector, BranchViewBase, PermissionAdvice, PermissionAdviceAction, ReadViewSpec,
 };
 use jazz_types::ids::{AuthorSubject, AuthorSubjectError, NodeUuid, RowUuid};
 use jazz_types::records::Value;
-use jazz_types::time::TxTime;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::binding_args;
 use crate::db::{
     Db, DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, FirstLoad,
-    InsertOptions, LargeValueStagingPolicy, LargeValueUpdate, ReadOpts, ReadTier, RemoteLinkHint,
-    RestoreOptions, SeededRowIdSource, SerializedReadResult, StreamingMutationKind,
-    StreamingValueUpload, SubscriberId, SubscriptionEvent, SubscriptionStream, TransportError,
-    UpdateOptions, UpsertOptions, Upstream, WireTransport, WireTransportAdapter, WriteHandle,
-    WriteIdentity, WriteState, block_on,
+    InitializationSeal, InitializationTransactionStatus, InsertOptions, LargeValueStagingPolicy,
+    LargeValueUpdate, ReadOpts, ReadTier, RemoteLinkHint, ReservedTxId, RestoreOptions,
+    SeededRowIdSource, SerializedReadResult, StreamingMutationKind, StreamingValueUpload,
+    SubscriberId, SubscriptionEvent, SubscriptionStream, TransportError, UpdateOptions,
+    UpsertOptions, Upstream, WireTransport, WireTransportAdapter, WriteHandle, WriteIdentity,
+    WriteState, block_on,
 };
 
 /// Named cells, as the binding codec decodes them.
@@ -558,6 +558,9 @@ pub struct Hooks {
     pub progress: Progress,
     /// Asks the host for a tick: there is sync work to send or apply.
     pub schedule_tick: RefCell<Option<Box<dyn Fn()>>>,
+    /// Flush the storage owner's asynchronous backing store. Required when
+    /// its Db defers owner durability; completion must cover all preceding writes.
+    pub flush_owner: RefCell<Option<Box<dyn Fn() -> HostFuture<()>>>>,
 }
 
 impl Hooks {
@@ -603,6 +606,20 @@ pub struct Write {
 
 // ---- the binding ------------------------------------------------------------------
 
+#[derive(Default)]
+struct InitializationRegistry {
+    closed: bool,
+    seals: BTreeMap<String, InitializationSeal>,
+}
+
+/// The host must durably flush the allocator before delivering this token.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitializationToken {
+    pub token: String,
+    pub reserved_tx_id: String,
+}
+
 /// An open database (or one of its schema views) and its host hooks.
 #[derive(Clone)]
 pub struct Binding {
@@ -613,9 +630,11 @@ pub struct Binding {
     node: NodeUuid,
     author: AuthorSubject,
     trusted_backend: bool,
+    owns_runtime: bool,
     /// Open transactions a staged write was refused in for its row's
     /// state: the transaction's commit reports the first such refusal.
     refused: Rc<RefCell<BTreeMap<OpenTransactionId, Error>>>,
+    initializations: Rc<RefCell<InitializationRegistry>>,
 }
 
 impl Binding {
@@ -627,7 +646,9 @@ impl Binding {
             node: identity.node,
             author: identity.author,
             trusted_backend,
+            owns_runtime: true,
             refused: Rc::default(),
+            initializations: Rc::default(),
         }
     }
 
@@ -647,6 +668,7 @@ impl Binding {
         let view = block_on(self.db.register_schema_view(schema))?;
         Ok(Self {
             db: Rc::new(view),
+            owns_runtime: false,
             ..self.clone()
         })
     }
@@ -702,7 +724,7 @@ impl Binding {
     }
 
     fn receipt(&self, row_id: RowUuid, seq: u64) -> HostResult<Write> {
-        let tx_id = TxId::new(TxTime(seq), self.node);
+        let tx_id = self.db.committed_transaction_id(seq)?;
         Ok(Write {
             node: self.node,
             payload: postcard::to_allocvec(&WriteResultPayload { row_id, tx_id })
@@ -869,6 +891,154 @@ impl Binding {
         };
         self.hooks.after_write();
         self.receipt(RowUuid::from_bytes([0; 16]), receipt.0)
+    }
+
+    /// Freeze an owner-wide batch. A token is private to this runtime registry.
+    pub fn seal_initialization_transaction(&self, id: &str) -> HostResult<InitializationToken> {
+        if self.initializations.borrow().closed {
+            return Err(closed());
+        }
+        let id = open_transaction(id)?;
+        if let Some(error) = self.refused.borrow_mut().remove(&id) {
+            self.db.abandon_transaction_handle(id)?;
+            return Err(error.into());
+        }
+        let seal = self.db.seal_initialization_transaction(id)?;
+        let result = InitializationToken {
+            token: OpenTransactionId::new().to_string(),
+            reserved_tx_id: seal.reservation().encode(),
+        };
+        self.initializations
+            .borrow_mut()
+            .seals
+            .insert(result.token.clone(), seal);
+        Ok(result)
+    }
+
+    /// Foregrounds reserve at their admitted durable owner before returning a
+    /// journal identity. Local owner callers retain the synchronous primitive.
+    pub async fn seal_initialization_transaction_with_owner(
+        &self,
+        id: &str,
+    ) -> HostResult<InitializationToken> {
+        if self.initializations.borrow().closed {
+            return Err(closed());
+        }
+        let id = open_transaction(id)?;
+        if let Some(error) = self.refused.borrow_mut().remove(&id) {
+            self.db.abandon_transaction_handle(id)?;
+            return Err(error.into());
+        }
+        let seal = self
+            .hooks
+            .progress
+            .parked(self.db.seal_initialization_transaction_with_owner(id))
+            .await?;
+        if self.initializations.borrow().closed {
+            self.db.cancel_initialization_transaction(seal)?;
+            return Err(closed());
+        }
+        let result = InitializationToken {
+            token: OpenTransactionId::new().to_string(),
+            reserved_tx_id: seal.reservation().encode(),
+        };
+        self.initializations
+            .borrow_mut()
+            .seals
+            .insert(result.token.clone(), seal);
+        Ok(result)
+    }
+
+    /// Recheck after an asynchronous host durability barrier (close may win).
+    pub fn check_initialization_token(&self, token: &str) -> HostResult<()> {
+        let registry = self.initializations.borrow();
+        if registry.closed {
+            return Err(closed());
+        }
+        if !registry.seals.contains_key(token) {
+            return Err("initialization token is consumed or belongs to another runtime".into());
+        }
+        Ok(())
+    }
+
+    fn take_initialization(&self, token: &str) -> HostResult<InitializationSeal> {
+        self.check_initialization_token(token)?;
+        Ok(self
+            .initializations
+            .borrow_mut()
+            .seals
+            .remove(token)
+            .expect("checked token"))
+    }
+
+    pub fn publish_initialization_transaction(&self, token: &str) -> HostResult<Write> {
+        let seal = self.take_initialization(token)?;
+        let receipt = self.db.publish_initialization_transaction(seal)?;
+        self.hooks.after_write();
+        self.receipt(RowUuid::from_bytes([0; 16]), receipt.0)
+    }
+
+    pub fn cancel_initialization_transaction(&self, token: &str) -> HostResult<()> {
+        Ok(self
+            .db
+            .cancel_initialization_transaction(self.take_initialization(token)?)?)
+    }
+
+    pub fn record_initialization_insert_absence(
+        &self,
+        id: &str,
+        table: &str,
+        row: &[u8],
+    ) -> HostResult<()> {
+        if self.initializations.borrow().closed {
+            return Err(closed());
+        }
+        Ok(self
+            .db
+            .prepare_initialization_insert(open_transaction(id)?, table, row_uuid(row)?)?)
+    }
+
+    /// JSON bridge v1, consumed by the SDK's existing strict status decoder.
+    /// A browser must flush through the captured high water before delivery.
+    pub fn initialization_transaction_status(&self, ids: &[String]) -> HostResult<String> {
+        if self.initializations.borrow().closed {
+            return Err(closed());
+        }
+        if ids.len() > 64 {
+            return Err("initialization status accepts at most 64 identities".into());
+        }
+        let decoded = ids
+            .iter()
+            .map(|id| ReservedTxId::decode(id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let statuses = self.db.initialization_transaction_status(&decoded)?;
+        let statuses=ids.iter().zip(statuses).map(|(id,status)|{
+            let mut value=serde_json::json!({"reservedTxId":id});
+            value["kind"]=match status {
+                InitializationTransactionStatus::NotObserved=>"not-observed".into(),
+                InitializationTransactionStatus::Incomplete=>"incomplete".into(),
+                InitializationTransactionStatus::Complete(state)=>{
+                    value["durability"]=match state.durability{DurabilityTier::None=>"none",DurabilityTier::Local=>"local",DurabilityTier::Global=>"global"}.into();
+                    value["fate"]=match state.fate {
+                        Fate::Pending=>serde_json::json!({"kind":"pending"}),
+                        Fate::Accepted=>serde_json::json!({"kind":"accepted"}),
+                        Fate::Rejected(reason)=>{
+                            let code=match &reason {
+                                RejectionReason::AuthorizationDenied=>"authorization-denied",
+                                RejectionReason::SerializableConflict=>"serializable-conflict",
+                                RejectionReason::ClientClockTooFarAhead=>"client-clock-too-far-ahead",
+                                RejectionReason::CausalityViolation=>"causality-violation",
+                                RejectionReason::Cascade{..}=>"cascade",
+                                RejectionReason::MalformedCommit(_)=>"malformed-commit",
+                            };
+                            serde_json::json!({"kind":"rejected","code":code,"reason":format!("{reason:?}")})
+                        }
+                    };
+                    "complete".into()
+                }
+            };value
+        }).collect::<Vec<_>>();
+        Ok(serde_json::json!({"version":1,"statuses":statuses}).to_string())
     }
 
     /// Roll back an open transaction.
@@ -1272,9 +1442,8 @@ impl Binding {
         )
     }
 
-    /// Resolve once write `seq` reached `tier`: at once for `none` and
-    /// `local`, on the server's acceptance for `global` (rejecting if it
-    /// refused).
+    /// Resolve once write `seq` reached `tier`. Foreground Local waits for
+    /// the storage owner's receipt; Global waits for authority acceptance.
     pub fn wait_for(&self, seq: u64, tier: &str) -> HostResult<HostFuture<()>> {
         let tier = binding_args::durability_tier(tier)?;
         let db = self.db.clone();
@@ -1313,8 +1482,17 @@ impl Binding {
         self.wait_for(write.seq, tier)
     }
 
-    /// Resolve once every local write so far reached the server. Local
-    /// durability is the host's store to flush.
+    /// Wait for every pending local transaction to reach the requested tier.
+    /// Foregrounds wait for their owner's durable receipt at Local.
+    pub fn wait_for_pending_writes(&self, tier: DurabilityTier) -> HostFuture<()> {
+        let db = self.db.clone();
+        Box::pin(self.hooks.progress.parked(async move {
+            db.wait_for_pending_writes(tier).await?;
+            Ok(())
+        }))
+    }
+
+    /// Resolve once every local write so far reached the server.
     pub fn wait_for_pending_writes_global(&self) -> HostFuture<()> {
         let db = self.db.clone();
         Box::pin(self.hooks.progress.parked(async move {
@@ -1325,9 +1503,30 @@ impl Binding {
 
     /// Apply received frames and send what is due; waits wake.
     pub async fn tick(&self) -> HostResult<()> {
-        let result = self.db.tick().await;
+        let result = async {
+            self.db.tick().await?;
+            if let Some(barrier) = self.db.prepare_owner_durability()? {
+                let flush = self
+                    .hooks
+                    .flush_owner
+                    .borrow()
+                    .as_ref()
+                    .map(|flush| flush());
+                let flush = flush.ok_or_else(|| {
+                    HostError::Engine(Error::new(
+                        ErrorCode::Storage,
+                        "storage owner has no durability flush hook",
+                    ))
+                })?;
+                flush.await?;
+                self.db.confirm_owner_durability(barrier)?;
+                self.db.flush_owner_durability()?;
+            }
+            Ok(())
+        }
+        .await;
         self.hooks.progress.wake_all();
-        Ok(result?)
+        result
     }
 
     /// Report the path to the authoritative server (`"none" | "attempting"
@@ -1472,8 +1671,18 @@ impl Binding {
         }
     }
 
+    /// Retire capabilities synchronously when an owner begins async close.
+    pub fn close_initializations(&self) {
+        let mut registry = self.initializations.borrow_mut();
+        registry.closed = true;
+        registry.seals.clear();
+    }
+
     /// Close the database (a schema view leaves its owner open).
     pub async fn close(&self) -> HostResult<()> {
+        if self.owns_runtime {
+            self.close_initializations();
+        }
         Ok(self.db.close().await?)
     }
 }
@@ -1794,7 +2003,7 @@ impl Link {
 
     /// Detach the link; `false` when already closed.
     pub fn close(&mut self) -> bool {
-        match &mut self.kind {
+        let detached = match &mut self.kind {
             LinkKind::Upstream(upstream) => upstream
                 .take()
                 .is_some_and(|upstream| self.binding.db.detach_connection(&upstream)),
@@ -1805,6 +2014,8 @@ impl Link {
                 }
                 None => false,
             },
-        }
+        };
+        self.binding.hooks.progress.wake_all();
+        detached
     }
 }

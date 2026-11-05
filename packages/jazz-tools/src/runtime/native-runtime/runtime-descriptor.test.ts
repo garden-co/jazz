@@ -181,7 +181,7 @@ describe("native row descriptor cache keys", () => {
     const firstRegistry = {
       tag: 17,
       enumSchema: {
-        registryId: 3,
+        registryId: 3n,
         name: "event",
         cases: [{ name: "message", payload: [{ name: "body", valueType: { tag: 8 } }] }],
       },
@@ -189,7 +189,7 @@ describe("native row descriptor cache keys", () => {
     const secondRegistry = {
       tag: 17,
       enumSchema: {
-        registryId: 4,
+        registryId: 4n,
         name: "event",
         cases: [{ name: "message", payload: [{ name: "body", valueType: { tag: 8 } }] }],
       },
@@ -215,20 +215,20 @@ describe("native row descriptor cache keys", () => {
     const nullableInteger = { tag: 15, inner: { tag: 4 } };
     const scalarEnum = {
       tag: 12,
-      enumSchema: { registryId: 7, name: "status", variants: ["draft", "published"] },
+      enumSchema: { registryId: 7n, name: "status", variants: ["draft", "published"] },
     };
     const otherScalarEnumRegistry = {
       tag: 12,
-      enumSchema: { registryId: 8, name: "status", variants: ["draft", "published"] },
+      enumSchema: { registryId: 8n, name: "status", variants: ["draft", "published"] },
     };
     const otherScalarEnumVariants = {
       tag: 12,
-      enumSchema: { registryId: 7, name: "status", variants: ["draft", "archived"] },
+      enumSchema: { registryId: 7n, name: "status", variants: ["draft", "archived"] },
     };
     const payloadEnum = {
       tag: 17,
       enumSchema: {
-        registryId: 3,
+        registryId: 3n,
         name: "event",
         cases: [{ name: "message", payload: [{ name: "body", valueType: { tag: 8 } }] }],
       },
@@ -236,7 +236,7 @@ describe("native row descriptor cache keys", () => {
     const changedPayloadEnum = {
       tag: 17,
       enumSchema: {
-        registryId: 3,
+        registryId: 3n,
         name: "event",
         cases: [{ name: "message", payload: [{ name: "body", valueType: { tag: 4 } }] }],
       },
@@ -244,7 +244,7 @@ describe("native row descriptor cache keys", () => {
     const changedPayloadEnumCase = {
       tag: 17,
       enumSchema: {
-        registryId: 3,
+        registryId: 3n,
         name: "event",
         cases: [{ name: "reaction", payload: [{ name: "body", valueType: { tag: 8 } }] }],
       },

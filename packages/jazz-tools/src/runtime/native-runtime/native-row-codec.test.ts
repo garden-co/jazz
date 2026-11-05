@@ -14,6 +14,8 @@ import {
   fieldIndex,
   nativeRowDescriptorPublicName,
   readDescriptor,
+  readValueType,
+  writeValueType,
   readNativeRowDescriptor,
   writeNativeRowDescriptor,
   storageColumnValueType,
@@ -303,7 +305,7 @@ describe("native row codec", () => {
         valueType: {
           tag: 17,
           enumSchema: {
-            registryId: 41,
+            registryId: 41n,
             name: "event",
             cases: [
               { name: "connected", payload: [] },
@@ -637,3 +639,38 @@ function uuidBytes(id: string): Uint8Array {
       .map((hex) => Number.parseInt(hex, 16)),
   );
 }
+
+it.each([
+  {
+    name: "scalar",
+    valueType: {
+      tag: 12,
+      enumSchema: {
+        registryId: 12992257249939625855n,
+        name: "deletion",
+        variants: ["deleted", "restored"],
+      },
+    },
+    hex: "0cffae94a9a0a4f1a6b4010864656c6574696f6e020764656c6574656408726573746f726564",
+  },
+  {
+    name: "payload",
+    valueType: {
+      tag: 17,
+      enumSchema: {
+        registryId: 18446744073709551615n,
+        name: "event",
+        cases: [{ name: "ready", payload: [] }],
+      },
+    },
+    hex: "11ffffffffffffffffff01056576656e740105726561647900",
+  },
+])("pins full-u64 registry IDs for $name enums", ({ valueType, hex }) => {
+  const writer = new PostcardWriter();
+  writeValueType(writer, valueType);
+  const bytes = writer.finish();
+  expect(Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")).toBe(hex);
+  const reader = new PostcardReader(bytes);
+  expect(readValueType(reader)).toEqual(valueType);
+  expect(reader.done()).toBe(true);
+});

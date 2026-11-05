@@ -82,6 +82,12 @@ impl Session {
             ["user", "identity", "subject"] => Value::String(self.subject.clone()?),
             ["user", "identity", "issuer"] => Value::String(self.issuer.clone()?),
             ["user", "account"] => Value::Uuid(self.account?),
+            ["authMode"] => Value::String(
+                jazz_model::model::policy_claims::auth_mode_for_author_issuer(
+                    self.issuer.as_deref()?,
+                )
+                .to_owned(),
+            ),
             ["claims", _, ..] => {
                 jazz_model::model::policy_claims::policy_claim_at_path(&self.claims, path)?
             }

@@ -15,7 +15,7 @@ function signal() {
   return { promise, resolve };
 }
 
-it("accepts only one simultaneous first encrypted writer even when root updates are permitted", async () => {
+async function firstWriterRace(grantLoser: boolean) {
   const before = { projects: s.table({ title: s.string() }, {}) };
   const after = {
     ...before,
@@ -134,21 +134,49 @@ it("accepts only one simultaneous first encrypted writer even when root updates 
       { spaceId: roots[0]!.id, recipientId: accounts[winnerIndex]!.account.id },
     ]);
     expect(await winner.all(app.notes, { tier: "remote" })).toEqual([writes[winnerIndex]!.value]);
-    await expect(
-      loser.one(app.notes.where({ id: writes[winnerIndex]!.value.id }), { tier: "remote" }),
-    ).rejects.toMatchObject({ code: "key-not-shared" });
-    await expect(
-      loser
-        .insert(app.notes, { projectId: project.id, body: "No retained provisional key" })
-        .wait({ tier: "global" }),
-    ).rejects.toMatchObject({ code: "key-not-shared" });
-    expect(await winner.all(app.notes.select("id"), { tier: "remote" })).toEqual([
-      { id: writes[winnerIndex]!.value.id },
-    ]);
+    if (grantLoser) {
+      await winner.e2ee.spaces
+        .grant(app.projects, project.id, accounts[loserIndex]!.account.id)
+        .wait();
+      expect(await loser.all(app.notes, { tier: "remote" })).toEqual([writes[winnerIndex]!.value]);
+      const allowed = loser.insert(app.notes, {
+        projectId: project.id,
+        body: "Allowed after winner grant",
+      });
+      await allowed.wait({ tier: "global" });
+      expect(new Set(await winner.all(app.notes, { tier: "remote" }))).toEqual(
+        new Set([allowed.value, writes[winnerIndex]!.value]),
+      );
+      expect(await winner.all(app.__e2ee_spaces, { tier: "remote" })).toEqual(roots);
+    } else {
+      await expect(
+        loser.one(app.notes.where({ id: writes[winnerIndex]!.value.id }), { tier: "remote" }),
+      ).rejects.toMatchObject({ code: "key-not-shared" });
+      await expect(
+        loser
+          .insert(app.notes, { projectId: project.id, body: "No retained provisional key" })
+          .wait({ tier: "global" }),
+      ).rejects.toMatchObject({ code: "key-not-shared" });
+      expect(await winner.all(app.notes.select("id"), { tier: "remote" })).toEqual([
+        { id: writes[winnerIndex]!.value.id },
+      ]);
+    }
   } finally {
     armed = false;
     resume.resolve();
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
   }
-}, 60_000);
+}
+
+it(
+  "accepts only one simultaneous first encrypted writer even when root updates are permitted",
+  () => firstWriterRace(false),
+  60_000,
+);
+
+it(
+  "uses the winning accepted key after the winner grants the losing first writer",
+  () => firstWriterRace(true),
+  60_000,
+);
