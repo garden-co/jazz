@@ -63,7 +63,12 @@ Every framework provides a hook to access the database handle. In plain TypeScri
 
 Mutations are methods on the database handle. All three take a table as their first argument.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs
+  groupId="jazz-environment"
+  items={["TypeScript", "Effect"]}
+  persist
+  updateAnchor
+>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-crud-ts
@@ -82,7 +87,12 @@ Use `upsert(...)` when your app already knows the row ID and wants to create tha
 not exist, or update it if it does. Like `insert`, `update`, and `delete`, it applies locally first
 and returns a `MutationResult<void>` that can be awaited for durability.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs
+  groupId="jazz-environment"
+  items={["TypeScript", "Effect"]}
+  persist
+  updateAnchor
+>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-upsert-ts
@@ -102,7 +112,12 @@ Trying to insert, update or delete an already deleted row will fail. Use `restor
 Deleted rows are omitted from queries by default. Add `includeDeleted()` when you need to find a
 row before restoring it.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs
+  groupId="jazz-environment"
+  items={["TypeScript", "Effect"]}
+  persist
+  updateAnchor
+>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-restore-ts
@@ -122,7 +137,12 @@ Omitted fields are left unchanged; explicitly passing `undefined` also leaves a 
 To clear a nullable column in TypeScript, pass `null`.
 Required fields cannot be set to `null`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs
+  groupId="jazz-environment"
+  items={["TypeScript", "Effect"]}
+  persist
+  updateAnchor
+>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-nullable-update-ts
@@ -245,14 +265,21 @@ still be accepted, so do not retry it:
 
 ```ts
 try {
-  await db.insert(app.todos, { title: "Buy milk" }).wait({ tier: "global", timeoutMs: 5_000 });
+  await db
+    .insert(app.todos, { title: "Buy milk" })
+    .wait({ tier: "global", timeoutMs: 5_000 });
 } catch (error) {
   if (error instanceof WriteWaitTimeoutError) showPendingBadge();
   else throw error;
 }
 ```
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs
+  groupId="jazz-environment"
+  items={["TypeScript", "Effect"]}
+  persist
+  updateAnchor
+>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-durability-tier-ts
@@ -297,6 +324,18 @@ const unsubscribe = db.onSyncStatusChange((status) => renderBadge(status));
 A brief drop shows as `connecting`, not `offline`, so a status badge doesn't flicker. `synced` is
 `true` when nothing waits for upload and the link is `connected` (or `local-only`).
 
+Three more fields help with debugging:
+
+- `oldestPendingAt`: when the oldest unsynced write was committed, in Unix milliseconds.
+- `rejected`: how many of this client's writes the server rejected since the `Db` opened, whether or
+  not a wait or listener handled them.
+- `lastError`: the latest rejection (`{ kind: "rejected", code, message, at }`) or link failure
+  (`kind` `"network"`, `"auth"` or `"stopped"`, with `message` and `at`). It stays after the link
+  recovers; an explicit disconnect is not an error.
+
+In a browser, `window.__jazz` gives the same view for the whole page: `status()`, `pending()`,
+`dbs()` and `waitForSync()`. Agents driving a browser can read it directly.
+
 In Node and React Native, `pendingUploads` includes transactions recovered from local storage after a
 restart. In the browser, each tab counts only the transactions it committed itself. Transactions
 recovered after a reload, or written by another tab, are uploaded by the shared worker and are not
@@ -310,7 +349,8 @@ The framework bindings expose the same object: `useSyncStatus()` in React, React
 function SyncBadge() {
   const { link, pendingUploads, synced } = useSyncStatus();
   if (synced) return <span>Saved</span>;
-  if (link.state === "offline") return <span>Offline, {pendingUploads} changes waiting</span>;
+  if (link.state === "offline")
+    return <span>Offline, {pendingUploads} changes waiting</span>;
   return <span>Saving…</span>;
 }
 ```
@@ -335,7 +375,12 @@ A mutation can fail when you call it or while you wait:
 - If a server later rejects the mutation, an active `wait(...)` call rejects with
   `PersistedWriteRejectedError`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs
+  groupId="jazz-environment"
+  items={["TypeScript", "Effect"]}
+  persist
+  updateAnchor
+>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-errors-ts
@@ -352,7 +397,12 @@ Use `db.onMutationError(...)` as a fallback for rejected mutations without an ac
 This includes mutations you did not wait for and mutations whose wait finished before a later
 rejection arrived.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs
+  groupId="jazz-environment"
+  items={["TypeScript", "Effect"]}
+  persist
+  updateAnchor
+>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-error-listener-ts
