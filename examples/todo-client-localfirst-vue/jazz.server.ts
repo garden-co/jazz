@@ -15,7 +15,7 @@ import permissions from "./src/lib/permissions.js";
  */
 export function jazzBackend(options: { dataDir?: string; appId?: string } = {}): Plugin {
   async function mount(server: ViteDevServer | PreviewServer) {
-    const jazz = await createJazz({
+    const jazz = createJazz({
       app,
       permissions,
       // No sign-in: every browser is a guest, so let guests sync.

@@ -268,11 +268,9 @@ impl JazzCoreSocket {
 fn lock_data_dir(dir: &std::path::Path) -> napi::Result<std::fs::File> {
     jazz_server::lock_data_dir(dir).map_err(|error| match error {
         jazz_server::DataDirLockError::Held(holder) => napi::Error::from_reason(format!(
-            "sqlite(): {} is already open{}. Another core holds its jazz.lock: a second dev server, a build \
-             or dev worker that imported a module calling createJazz at module scope, or a second \
-             createJazz in this process. \
-             Create Jazz lazily on the first request and cache it on globalThis across hot reloads, \
-             and give each server its own directory or use remote().",
+            "sqlite(): {} is already open{}. createJazz shares one core per directory within a process, \
+             so another process holds it (a second dev server, a build worker that used Jazz, a replica on \
+             the same volume): give each process its own directory, or use remote().",
             dir.display(),
             if holder.is_empty() {
                 String::new()

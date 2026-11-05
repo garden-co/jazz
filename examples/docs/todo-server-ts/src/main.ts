@@ -103,7 +103,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
       ? fromJWT({ jwksUrl, issuer: jwtIssuer, audience: false })
       : async () => null;
 
-  const jazz = await createJazz({
+  const jazz = createJazz({
     app: schemaApp,
     permissions,
     // Jazz Cloud (or your own core), or SQLite in this process.
