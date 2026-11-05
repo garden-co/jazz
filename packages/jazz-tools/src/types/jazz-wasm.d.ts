@@ -163,6 +163,10 @@ declare module "jazz-wasm" {
     /** Resolves once every commit so far is in the browser store's backing storage. */
     flush(): Promise<void>;
 
+    /** Authority UUID bytes (empty for an unknown name); throws before catalogue admission. */
+    tableIdentity(table: string): Uint8Array;
+    columnIdentity(table: string, column: string): Uint8Array;
+
     registerSchema(schema: Uint8Array, migrations?: Uint8Array): WasmDb;
     captureSnapshot(): Uint8Array | PendingNativeRead;
     beginTransaction(
@@ -170,6 +174,7 @@ declare module "jazz-wasm" {
       kind: string,
       author?: Uint8Array | null,
       attribution?: Uint8Array | null,
+      acceptedEvidence?: boolean | null,
     ): void;
     commitTransaction(openTransactionId: string, kind?: string | null): WasmWrite;
     rollbackTransaction(openTransactionId: string): void;
@@ -178,6 +183,14 @@ declare module "jazz-wasm" {
       query: Uint8Array,
       opts: unknown,
       openTransactionId?: string,
+      author?: Uint8Array,
+      claims?: Record<string, unknown>,
+    ): Uint8Array | PendingNativeRead;
+    acceptedRead(
+      query: Uint8Array,
+      openTransactionId: string,
+      includeDeleted: boolean,
+      timeoutMs: number,
       author?: Uint8Array,
       claims?: Record<string, unknown>,
     ): Uint8Array | PendingNativeRead;

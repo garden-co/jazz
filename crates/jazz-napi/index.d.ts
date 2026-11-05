@@ -110,19 +110,26 @@ export declare class NapiDb {
   static openPersistentAsBackend(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
   static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
   /**
+   * Authority table UUID as 16 canonical bytes, or empty for an unknown name.
+   * Refuses with NotObserved until the authority confirms this schema.
+   */
+  tableIdentity(table: string): Uint8Array
+  /** Authority column UUID as 16 canonical bytes, or empty for an unknown name. */
+  columnIdentity(table: string, column: string): Uint8Array
+  /**
    * Register and return a typed view backed by this same runtime owner,
    * of an app shipping `migrations` (its bundle as JSON).
    */
   registerSchema(schema: Uint8Array, migrations?: Uint8Array | undefined | null): NapiDb
   /** Begin one owner-wide transaction. */
-  beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null): void
+  beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null, acceptedEvidence?: boolean | undefined | null): void
   /** Commit an owner-wide transaction by id and optional kind. */
   commitTransaction(openTransactionId: string, kind?: string | undefined | null): Write
   /** Roll back an owner-wide open transaction by id. */
   rollbackTransaction(openTransactionId: string): void
   /**
-   * The host's tick callback: called with `"immediate"` whenever there
-   * is sync work (a local write to upload, frames to apply).
+   * Install the core's progress/deadline hook. The host schedules ticks
+   * and re-polls pending reads, using `"after:<milliseconds>"` for timers.
    */
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   /** Register a callback for rejected writes that no active wait consumed. */
@@ -132,6 +139,8 @@ export declare class NapiDb {
    * never crosses the language boundary.
    */
   all(query: Uint8Array, opts?: { tier?: string; include_deleted?: boolean; sync?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
+  /** Authority evidence in one explicitly admitted serializable transaction. */
+  acceptedRead(query: Uint8Array, openTransactionId: string, includeDeleted: boolean, timeoutMs: number, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
   /** Bind receipt-correlation claims to this client's own admitted identity. */
   setSessionClaims(claims?: Record<string, unknown> | undefined | null): void
   observeLocalBatch(queries: Array<Uint8Array>, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): JsonValue
