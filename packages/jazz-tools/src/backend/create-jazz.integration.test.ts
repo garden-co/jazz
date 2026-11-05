@@ -1254,7 +1254,7 @@ describe("createJazz", () => {
     // The store keeps its own id: naming one is refused, not ignored.
     expect(() =>
       sqlite({ path: dir, appId: randomUUID() } as unknown as Parameters<typeof sqlite>[0]),
-    ).toThrow(/appId is not an option.*migrate-alpha59/);
+    ).toThrow(/appId is not an option.*jazz-alpha59-import/);
     expect(() => memory({ appId: randomUUID() } as never)).toThrow(/appId is not an option/);
     // vercel() too, when called: in dev its local store would never read it.
     expect(() => vercel({ appId: randomUUID() } as never)).toThrow(
