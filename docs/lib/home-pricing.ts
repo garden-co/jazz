@@ -225,16 +225,19 @@ export type Platform = {
   traitsFor?: (a: Assumptions) => Partial<Record<TraitKey, string>>;
 };
 
-/** Rows shown under every platform, in this order. */
+/**
+ * Rows shown under every platform, in this order. Rows marked `more` stay
+ * behind the shared "More details" button.
+ */
 export const traitRows = [
   { key: "coldWake", label: "Cold wake (p50 / p95)" },
-  { key: "idle", label: "When idle" },
   { key: "security", label: "Security" },
   { key: "durability", label: "Durability" },
-  { key: "regions", label: "Regions" },
-  { key: "scale", label: "One instance up to" },
-  { key: "transfer", label: "Transfer" },
-  { key: "operations", label: "You operate" },
+  { key: "idle", label: "When idle", more: true },
+  { key: "regions", label: "Regions", more: true },
+  { key: "scale", label: "One instance up to", more: true },
+  { key: "transfer", label: "Transfer", more: true },
+  { key: "operations", label: "You operate", more: true },
 ] as const;
 
 export type TraitKey = (typeof traitRows)[number]["key"];

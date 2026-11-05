@@ -172,18 +172,24 @@ function roundMau(value: number) {
   return `~${formatCount(Math.floor(value / magnitude) * magnitude)}`;
 }
 
-// Header, button, totals, cost breakdown, sharding note, one row per trait, cost note.
-const resultRows = (SHOW_MODEL_DETAILS ? 6 : 5) + traitRows.length;
+function visibleTraitRows(showMore: boolean) {
+  return traitRows.filter((row) => showMore || !("more" in row && row.more));
+}
 
 function PlatformResult({
   estimate,
   assumptions,
+  showMore,
   onHibernateChange,
 }: {
   estimate: PlatformEstimate;
   assumptions: Assumptions;
+  showMore: boolean;
   onHibernateChange: (hibernate: boolean) => void;
 }) {
+  const rows = visibleTraitRows(showMore);
+  // Header, button, totals, cost breakdown, sharding note, one row per trait, cost note.
+  const resultRows = (SHOW_MODEL_DETAILS ? 6 : 5) + rows.length;
   const {
     platform,
     size,
@@ -267,7 +273,7 @@ function PlatformResult({
           ) : null}
         </p>
       ) : null}
-      {traitRows.map((row) => (
+      {rows.map((row) => (
         <div key={row.key} className="border-t pt-3 text-sm leading-relaxed">
           <p className="text-xs text-fd-muted-foreground">{row.label}</p>
           <p className="mt-0.5">{traits[row.key]}</p>
@@ -341,6 +347,7 @@ export function PricingCalculator() {
   const [licenseScaleBase, setLicenseScaleBase] = useState(LICENSE.scaleBase);
   const [licensePer1k, setLicensePer1k] = useState(LICENSE.per1k);
   const [overrides, setOverrides] = useState<Assumptions>({});
+  const [showMore, setShowMore] = useState(false);
 
   const mau = Math.max(1, Math.round(10 ** mauLogValue));
   const blobStoragePerUserMb = 10 ** blobLogMb;
@@ -454,9 +461,18 @@ export function PricingCalculator() {
             key={estimate.platform.id}
             estimate={estimate}
             assumptions={assumptions}
+            showMore={showMore}
             onHibernateChange={(hibernate) => setParam("vercel.hibernate", hibernate ? 1 : 0)}
           />
         ))}
+      </div>
+      <div>
+        <Button
+          label={showMore ? "Fewer details" : "More details"}
+          variant="secondary"
+          aria-expanded={showMore}
+          onClick={() => setShowMore((value) => !value)}
+        />
       </div>
       <p className="max-w-[40rem] text-sm leading-relaxed text-fd-muted-foreground">
         Very rough estimates from our example-app benchmarks and each platform&apos;s list prices.
