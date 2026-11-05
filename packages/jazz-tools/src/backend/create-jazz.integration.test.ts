@@ -1585,28 +1585,35 @@ describe("createJazz", () => {
       policy.todos.allowUpdate.never();
       policy.todos.allowDelete.never();
     });
-    const full = await createJazz({ app, permissions, store, authenticate });
+    const full = await createJazz({ app, permissions, store, authenticate }).ready();
     cleanups.push(() => full.close());
 
-    await expect(
-      createJazz({ app: latest, permissions: latestPermissions, store, authenticate }),
-    ).rejects.toThrow(/switches table `todos` to latest-only[\s\S]*allowDroppingHistory: true/);
+    const refused = createJazz({
+      app: latest,
+      permissions: latestPermissions,
+      store,
+      authenticate,
+    });
+    cleanups.push(() => refused.close());
+    await expect(refused.ready()).rejects.toThrow(
+      /switches table `todos` to latest-only[\s\S]*allowDroppingHistory: true/,
+    );
     const confirmed = await createJazz({
       app: latest,
       permissions: latestPermissions,
       store,
       authenticate,
       allowDroppingHistory: true,
-    });
+    }).ready();
     cleanups.push(() => confirmed.close());
-    // Its bundle is the newest deploy: the table is latest-only now, so
-    // starting it again needs no confirmation.
+    // A latest-only version is admitted now: starting it again needs no
+    // confirmation.
     const again = await createJazz({
       app: latest,
       permissions: latestPermissions,
       store,
       authenticate,
-    });
+    }).ready();
     cleanups.push(() => again.close());
   }, 60_000);
 
