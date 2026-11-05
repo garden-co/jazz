@@ -249,7 +249,7 @@ function PlatformResult({
           {sharded ? `${formatCount(instances)} × ` : ""}
           {size.label}
         </dd>
-        <dt className="text-fd-muted-foreground">Platform</dt>
+        <dt className="text-fd-muted-foreground">{platform.billLabel}</dt>
         <dd className="text-right">{formatCurrency(platformCost)}</dd>
         <dt className="text-fd-muted-foreground">Jazz</dt>
         <dd className="text-right">

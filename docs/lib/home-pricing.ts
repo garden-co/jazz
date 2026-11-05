@@ -209,6 +209,8 @@ export type Size = { label: string; vcpus: number; ramGb: number; memoryGb: numb
 export type Platform = {
   id: PlatformId;
   name: string;
+  /** Label for the platform cost in the breakdown, e.g. "Est. Vercel bill". */
+  billLabel: string;
   comingSoon?: boolean;
   params: Param[];
   sizes: (a: Assumptions) => Size[];
@@ -303,6 +305,7 @@ export const platforms: Platform[] = [
     id: "cloudflare",
     cta: { label: "Coming soon" },
     name: "Cloudflare Durable Objects",
+    billLabel: "Est. Cloudflare bill",
     comingSoon: true,
     params: [
       ...engineParams("cloudflare", 8, 440, 6),
@@ -365,6 +368,7 @@ export const platforms: Platform[] = [
     id: "vercel",
     cta: { label: "Deploy on Vercel", href: "/docs/setup/deployment/vercel" },
     name: "Vercel Sandbox",
+    billLabel: "Est. Vercel bill",
     params: [
       ...engineParams("vercel", 2, 110, 3.5),
       param("vercel.maxVcpus", "Largest Sandbox (vCPUs)", 8, 1, 8, 1),
@@ -417,6 +421,7 @@ export const platforms: Platform[] = [
     id: "aws",
     cta: { label: "Host yourself", href: "/docs/setup/deployment/own-server" },
     name: "AWS EC2",
+    billLabel: "Est. AWS bill",
     params: [
       ...engineParams("aws", 2, 110, 3.5),
       param("aws.maxVcpus", "Largest instance (vCPUs)", 48, 2, 48, 2),
@@ -466,6 +471,7 @@ export const platforms: Platform[] = [
     id: "server",
     cta: { label: "Host yourself", href: "/docs/setup/deployment/own-server" },
     name: "Your own server",
+    billLabel: "Est. hosting bill",
     params: [
       ...engineParams("server", 2, 110, 3.5),
       param("server.maxVcpus", "Largest server (vCPUs)", 48, 2, 48, 2),
