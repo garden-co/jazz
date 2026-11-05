@@ -313,6 +313,63 @@ test("release fingerprint staging verifies downloaded WASM bytes before deriving
   assert.throws(() => stageNativeFingerprints(root), /downloaded WASM artifact hash mismatch/);
 });
 
+test("fingerprint staging explains how to build locally when inputs are missing", () => {
+  const root = releaseFixture();
+  try {
+    const localHint = /pnpm --filter jazz-tools build:runtime[\s\S]*--workspace/;
+    assert.throws(
+      () => stageNativeFingerprints(root, { workspace: true }),
+      (error) =>
+        /jazz-wasm build manifest is missing/.test(error.message) && localHint.test(error.message),
+    );
+    writeWasmRelease(root);
+    // Release mode on a checkout without CI's downloaded linux-x64-gnu manifest,
+    // e.g. a linux-arm64 or macOS contributor running the script without a flag.
+    assert.throws(
+      () => stageNativeFingerprints(root),
+      (error) =>
+        /release mode \(no flag\)/.test(error.message) &&
+        /jazz-napi\.linux-x64-gnu\.manifest\.json/.test(error.message) &&
+        localHint.test(error.message),
+    );
+    assert.throws(
+      () => stageNativeFingerprints(root, { workspace: true }),
+      (error) =>
+        /jazz-napi build pointer is missing/.test(error.message) && localHint.test(error.message),
+    );
+    writeFileSync(
+      join(root, "crates/jazz-napi/native-binding.pointer.cjs"),
+      "module.exports = {};\n",
+    );
+    assert.throws(
+      () => stageNativeFingerprints(root, { workspace: true }),
+      /jazz-napi build pointer names no generation/,
+    );
+    writeFileSync(
+      join(root, "crates/jazz-napi/native-binding.pointer.cjs"),
+      'require("./.native-artifacts/generation-test/index.js");',
+    );
+    assert.throws(
+      () => stageNativeFingerprints(root, { workspace: true }),
+      /jazz-napi build manifest is missing/,
+    );
+    writeFileSync(
+      join(root, "crates/jazz-napi/.native-artifacts/generation-test/.jazz-artifact-manifest.json"),
+      JSON.stringify({ kind: "napi", profile: "release", nativeArtifactFingerprint: fingerprint }),
+    );
+    stageNativeFingerprints(root, { workspace: true });
+    assert.match(
+      readFileSync(
+        join(root, "packages/jazz-tools/src/runtime/native-artifact-fingerprint-napi.ts"),
+        "utf8",
+      ),
+      new RegExp(fingerprint),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("generated fingerprint expectations stay out of Git after fresh release assembly", () => {
   const root = releaseFixture();
   try {

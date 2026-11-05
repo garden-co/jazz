@@ -1,22 +1,10 @@
+export { createJazzClient, type JazzClientConfig, type JazzClient } from "./create-jazz-session.js";
 export {
-  createJazzSession,
-  type JazzSessionConfig,
-  type JazzClient,
-} from "./create-jazz-session.js";
-export {
-  type BackendContextConfig,
-  type BackendJwtPublicKey,
   type BackendQuerySchemaSource,
   type BackendSchemaInput,
   type BackendSchemaSource,
 } from "./create-jazz-context.js";
-export {
-  isRequestAuthenticationError,
-  RequestAuthenticationError,
-  resolveRequestSession,
-  type BackendRequestAuthConfig,
-  type BackendRequestOptions,
-} from "./request-auth.js";
+export { isRequestAuthenticationError, RequestAuthenticationError } from "./request-auth.js";
 export type { WasmSchema } from "../drivers/types.js";
 export type { PublicSession } from "../runtime/context.js";
 export { Db, type QueryBuilder, type QueryOptions, type TableProxy } from "../runtime/db.js";

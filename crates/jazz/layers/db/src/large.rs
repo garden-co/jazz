@@ -23,7 +23,7 @@
 //! file on tick; their metadata stays.
 
 use crate::values::CachedRow;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -544,8 +544,12 @@ struct State {
     /// Offloaded nodes a statement needed that the chunk store could not
     /// answer at once: the next fetch reads them.
     fetch: BTreeSet<ChunkRequest>,
-    /// Offloaded nodes the chunk store answered it does not hold.
-    lost: BTreeSet<ChunkRequest>,
+    /// Offloaded nodes the host's last batch failed to fetch, with why:
+    /// reads that need them are refused with that error rather than left
+    /// waiting, until the next batch starts and asks again. A store that
+    /// failed for a while (a token, a permission, the network) serves
+    /// again once it is fixed.
+    failed: BTreeMap<ChunkRequest, Error>,
     /// The batch of chunk-store work that is out, if one is: one at a
     /// time, so a delete never overtakes the put it undoes.
     batch: Option<u64>,
@@ -616,7 +620,7 @@ impl Chunks {
                 demand: BTreeSet::new(),
                 spans: HashMap::new(),
                 fetch: BTreeSet::new(),
-                lost: BTreeSet::new(),
+                failed: BTreeMap::new(),
                 batch: None,
             }),
             store,
@@ -723,17 +727,33 @@ impl Chunks {
         }
     }
 
-    /// Install what the chunk store answered for an offloaded node.
+    /// Forget the last batch's failed fetches, so reads of them ask again;
+    /// whether there were any.
+    pub(crate) fn clear_failed(&self) -> bool {
+        let mut state = self.state.lock().expect("chunk cache");
+        let any = !state.failed.is_empty();
+        state.failed.clear();
+        any
+    }
+
+    /// Refuse reads of `request` with `error` until the next batch starts:
+    /// the host's batch failed to fetch it.
+    pub(crate) fn fetch_failed(&self, request: &ChunkRequest, error: Error) {
+        let mut state = self.state.lock().expect("chunk cache");
+        state.failed.insert(request.clone(), error);
+    }
+
+    /// Install what the chunk store answered for an offloaded node; one it
+    /// answered it does not hold is data loss.
     pub(crate) fn install_from_store(
         &self,
         request: &ChunkRequest,
         bytes: Option<Bytes>,
     ) -> Result<(), Error> {
-        let mut state = self.state.lock().expect("chunk cache");
         let Some(bytes) = bytes else {
-            state.lost.insert(request.clone());
-            return Ok(());
+            return Err(lost());
         };
+        let mut state = self.state.lock().expect("chunk cache");
         if lv::object_hash(&bytes).0 != request.object_hash {
             return Err(corrupt(lv::Error::ObjectHashMismatch));
         }
@@ -976,18 +996,15 @@ impl Chunks {
         }
         let bytes = if bytes.is_empty() {
             // Offloaded: its bytes are in the chunk store.
-            if state.lost.contains(request) {
-                return Err(lost());
+            if let Some(error) = state.failed.get(request) {
+                return Err(error.clone());
             }
             let Some(store) = &self.store else {
                 return Err(unconfigured());
             };
             match store.get_now(&NodeKey::from(request)) {
                 None => return Ok(Local::Fetching),
-                Some(Ok(None)) => {
-                    state.lost.insert(request.clone());
-                    return Err(lost());
-                }
+                Some(Ok(None)) => return Err(lost()),
                 Some(Err(error)) => return Err(error),
                 Some(Ok(Some(bytes))) => bytes,
             }

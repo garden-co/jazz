@@ -9,7 +9,7 @@ import {
   type RowOf,
 } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
-import { createJazzClient } from "../../src/web/create-jazz-client.js";
+import { openJazzClient } from "../../src/web/create-jazz-client.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { getSubscriptionStore } from "../../src/subscription-store-internal.js";
 import {
@@ -300,7 +300,7 @@ describe("raw websocket private read gate", () => {
 
     const accounts = await createAccountManager({ appId, serverUrl });
     const account = accounts.restoreLocalFirst(generateAuthSecret());
-    const client = await createJazzClient({
+    const client = await openJazzClient({
       appId,
       serverUrl,
       account,

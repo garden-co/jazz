@@ -51,3 +51,6 @@ export async function createNativeAccountTestSession(
     throw error;
   }
 }
+
+/** The account-handle client the public session API opens internally, for device acceptance only. */
+export { openJazzClient, type OpenJazzClientConfig } from "../react-native/create-jazz-client.js";

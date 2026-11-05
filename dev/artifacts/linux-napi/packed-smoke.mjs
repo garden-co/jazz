@@ -11,7 +11,7 @@ import * as esm from "jazz-napi";
 const require = createRequire(import.meta.url);
 const cjs = require("jazz-napi");
 assert.equal(cjs.NapiDb, esm.NapiDb);
-assert.equal(typeof backend.createJazzSession, "function");
+assert.equal(typeof backend.createJazzClient, "function");
 const platform = `linux-${process.arch}-gnu`;
 const direct = require(`@garden-co/jazz-napi-${platform}`);
 assert.equal(direct.nativeArtifactFingerprint(), cjs.nativeArtifactFingerprint());

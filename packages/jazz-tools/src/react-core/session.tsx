@@ -93,13 +93,13 @@ export type ConfiguredJazzSessionProviderProps<Config> = {
 /** Host adapters supply a factory; no host initialization occurs during render or SSR. */
 export function ConfiguredJazzSessionProvider<Config, Client extends CoreJazzClient>({
   config,
-  createJazzSession,
+  createJazzClient,
   fallback = null,
   children,
 }: ConfiguredJazzSessionProviderProps<Config> & {
-  createJazzSession: (config: Config) => Promise<JazzSession<Client>>;
+  createJazzClient: (config: Config) => Promise<JazzSession<Client>>;
 }) {
-  const { session, error, retry: start } = useJazzSessionOwner(config, createJazzSession);
+  const { session, error, retry: start } = useJazzSessionOwner(config, createJazzClient);
   const startup = useMemo<UseJazzSessionResult<Client>>(() => {
     const unavailable = async () => {
       throw new Error("Jazz session is not ready; retry initialization first");
@@ -109,7 +109,6 @@ export function ConfiguredJazzSessionProvider<Config, Client extends CoreJazzCli
       ...(error ? { error } : {}),
       createLocalFirst: unavailable,
       restoreLocalFirst: unavailable,
-      becomeBackend: unavailable,
       loginWithBackend: unavailable,
       linkWithBackend: unavailable,
       logout: unavailable,
@@ -128,7 +127,7 @@ export function ConfiguredJazzSessionProvider<Config, Client extends CoreJazzCli
 
 /** A host adapter's session exports, with its client type and session factory filled in. */
 export function createJazzSessionBindings<Config, Client extends CoreJazzClient>(
-  createJazzSession: (config: Config) => Promise<JazzSession<Client>>,
+  createJazzClient: (config: Config) => Promise<JazzSession<Client>>,
 ) {
   return {
     useJazzSession: (): UseJazzSessionResult<Client> => useJazzSession<Client>(),
@@ -138,10 +137,10 @@ export function createJazzSessionBindings<Config, Client extends CoreJazzClient>
       "session" in props ? (
         <JazzSessionProvider {...props} />
       ) : (
-        <ConfiguredJazzSessionProvider {...props} createJazzSession={createJazzSession} />
+        <ConfiguredJazzSessionProvider {...props} createJazzClient={createJazzClient} />
       ),
     /** Capture configuration once and retain the owner across authentication UI transitions. */
-    useJazzSessionOwner: (config: Config) => useJazzSessionOwner(config, createJazzSession),
+    useJazzSessionOwner: (config: Config) => useJazzSessionOwner(config, createJazzClient),
   };
 }
 
@@ -150,9 +149,9 @@ export function createJazzSessionBindings<Config, Client extends CoreJazzClient>
  */
 export function useJazzSessionOwner<Config, Client extends CoreJazzClient>(
   config: Config,
-  createJazzSession: (config: Config) => Promise<JazzSession<Client>>,
+  createJazzClient: (config: Config) => Promise<JazzSession<Client>>,
 ): JazzSessionOwnerResult<Client> {
-  const initial = useRef({ config, createJazzSession }).current;
+  const initial = useRef({ config, createJazzClient }).current;
   const owner = useRef<{
     active: boolean;
     promise?: Promise<void>;
@@ -166,7 +165,7 @@ export function useJazzSessionOwner<Config, Client extends CoreJazzClient>(
       if (owner.promise) return owner.promise;
       setError(undefined);
       owner.promise = Promise.resolve()
-        .then(() => initial.createJazzSession(initial.config))
+        .then(() => initial.createJazzClient(initial.config))
         .then(
           async (created) => {
             owner.session = created;
