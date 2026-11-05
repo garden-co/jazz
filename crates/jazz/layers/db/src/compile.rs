@@ -3226,7 +3226,7 @@ fn long_literal(column: &LargeColumn) -> Error {
         "comparing `{}.{}` with a literal over {} bytes",
         column.table,
         column.column,
-        jazz_types::large_values::INLINE_VALUE_MAX_BYTES
+        jazz_types::large_values::inline_value_max_bytes()
     ))
 }
 
@@ -3469,7 +3469,7 @@ impl Ctx<'_> {
     ) -> Result<String, Error> {
         let c = &column.cell;
         if literal_of(value)
-            .is_some_and(|literal| literal.len() > jazz_types::large_values::INLINE_VALUE_MAX_BYTES)
+            .is_some_and(|literal| literal.len() > jazz_types::large_values::inline_value_max_bytes())
             && matches!(op, CmpOp::Eq | CmpOp::Ne)
         {
             return Err(long_literal(column));
@@ -3528,7 +3528,7 @@ impl Ctx<'_> {
             // literal is refused as `=` refuses it.
             let long = |option: &Term| match option {
                 Term::Bound(_, value) => literal_of(value).is_some_and(|literal| {
-                    literal.len() > jazz_types::large_values::INLINE_VALUE_MAX_BYTES
+                    literal.len() > jazz_types::large_values::inline_value_max_bytes()
                 }),
                 _ => false,
             };

@@ -94,6 +94,19 @@ impl LargeValueFormat {
 }
 /// Logical scalar size above which ordinary writes use indirect storage.
 pub const INLINE_VALUE_MAX_BYTES: usize = 64 * 1024;
+
+/// EXPERIMENT ONLY: the inline threshold in effect, from
+/// `JAZZ_INLINE_VALUE_MAX_BYTES` when set (read once), else
+/// [`INLINE_VALUE_MAX_BYTES`].
+pub fn inline_value_max_bytes() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("JAZZ_INLINE_VALUE_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(INLINE_VALUE_MAX_BYTES)
+    })
+}
 /// Frozen V1 content-defined leaf profile. These values, masks, and the gear
 /// mixer below are format data: changing any of them requires a new immutable
 /// format, not a tuning-only release.

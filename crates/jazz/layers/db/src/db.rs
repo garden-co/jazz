@@ -5353,7 +5353,7 @@ impl Inner {
             Value::Large(large) => return self.bind_large(column, large, cells),
             _ => return Self::bind_value(value),
         };
-        if logical.len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES
+        if logical.len() <= jazz_types::large_values::inline_value_max_bytes()
             || !crate::large::large_capable(column)
         {
             return Self::bind_value(value);
@@ -5458,7 +5458,7 @@ impl Inner {
         &self,
         large: &jazz_types::large_values::LargeValueRef,
     ) -> Result<Sql, Error> {
-        if large.byte_length <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES as u64 {
+        if large.byte_length <= jazz_types::large_values::inline_value_max_bytes() as u64 {
             let bytes = self.chunks.value_bytes(large)?;
             return Ok(crate::large::inline_cell(large.kind, bytes));
         }
@@ -5542,7 +5542,7 @@ impl Inner {
                 Value::Bytes(bytes) => bytes.as_slice(),
                 _ => continue,
             };
-            if logical.len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES {
+            if logical.len() <= jazz_types::large_values::inline_value_max_bytes() {
                 continue;
             }
             let prepared = jazz_types::large_values::prepare(crate::large::kind(column), logical)

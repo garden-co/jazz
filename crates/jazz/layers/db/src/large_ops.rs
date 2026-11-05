@@ -1183,7 +1183,7 @@ impl Db {
         // A value that fits inline is written as an ordinary inline cell, as
         // the store keeps it: its commit carries the bytes, not a
         // descriptor of chunks the store then reclaims.
-        let (logical, large) = if value.byte_length <= lv::INLINE_VALUE_MAX_BYTES as u64 {
+        let (logical, large) = if value.byte_length <= lv::inline_value_max_bytes() as u64 {
             let bytes = self.inner().chunks.value_bytes(&value)?;
             (logical_value(value.kind, bytes)?, None)
         } else {
