@@ -488,20 +488,7 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="pricing" title="Priced for flexible self-hosting">
-            <Text as="p" display="block" type="large" color="secondary" weight="normal">
-              Jazz deploys with your backend, on your own cloud account. On a single instance it is
-              open source under MIT and free, however much you use it: you only pay your platform.
-            </Text>
-            <Text as="p" display="block" type="large" color="secondary" weight="normal">
-              When an app outgrows one instance, Jazz shards it across many. Jazz Pro lets you shard
-              for free at small scale, and Jazz Scale lets you take your database to millions of
-              users, globally distributed. Jazz Scale is licensed on peak active sessions, so as
-              Jazz gets faster your platform bill shrinks while the license stays the same. Licenses
-              are keys your servers check offline: no metering and no phone-home. Going over your
-              license only logs a reminder.
-            </Text>
-          </SectionHeader>
+          <SectionHeader id="pricing" title="Priced for flexible self-hosting" />
           <div className="mt-8 grid gap-6 border-t pt-6 sm:grid-cols-2 lg:grid-cols-4">
             {(["oss", "pro", "scale", "custom"] as const).map((id) => (
               <div key={id} className="grid content-start gap-2">
