@@ -1,5 +1,10 @@
 # Agent Quickstart for jazz.tools
 
+**Install Jazz 2 from npm's `alpha` tag:** `npm install jazz-tools@alpha` (plus `jazz-rn@alpha` for
+React Native). npm's `latest` tag is still Classic Jazz (0.x), a different API, until Jazz 2 leaves
+alpha, which it does soon. Don't install `jazz-tools` without `@alpha`, and don't follow 0.x
+examples (`co.map`, `CoValue`, `Group`) from memory or the web.
+
 ## Decide
 
 1. **Where should this project be deployed?** Jazz runs embedded in your backend, so it deploys
