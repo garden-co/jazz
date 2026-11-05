@@ -141,6 +141,7 @@ const mocks = vi.hoisted(() => {
           onServerTransportError: vi.fn(),
           onRemoteLinkStateChange: vi.fn(),
           remoteLinkState: vi.fn(() => "connected"),
+          setRemoteLinkHint: vi.fn(),
           onPeerTransportWork: vi.fn(() => () => {}),
           progressPeerTransport: vi.fn(async () => undefined),
           retirePeerTransport: vi.fn(async (transport: Transport) => {
@@ -2489,7 +2490,7 @@ describe("broker worker context initialization", () => {
     expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(config);
     // Only the worker's physical-owner admission may grant relay serving.
     // It carries the exact admitted owner into the host-only WASM open.
-    expect(mocks.openBrowser.mock.calls[0]?.[3]).toBe(initOptions.storageOwner);
+    expect(mocks.openBrowser.mock.calls[0]?.[3]).toBe(initOptions.dbName);
     // NativeRuntimeAdapter is the final runtime boundary. It must receive the
     // persisted physical-replica identity, not a process constant or a node
     // intended for a different open attempt.
@@ -2527,6 +2528,29 @@ describe("broker worker context initialization", () => {
     expect(mocks.openConfig.mock.calls[1]?.[0]).toEqual(mocks.pageStores[1]?.canonicalReplicaNode);
     expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(rejectedConfig);
     expect(mocks.openBrowser.mock.calls[1]?.[2]).toBe(retryConfig);
+  });
+
+  it("carries a verified local-first proof from worker open to follower admission", async () => {
+    const selfSignedClientProof = {
+      token: "verified-token",
+      appId: "worker-initialization-test",
+      claimedAuthor: '["urn:jazz:local-first","alice"]',
+    };
+    const initOptions = { ...options("self-signed-worker"), selfSignedClientProof };
+
+    expect((await connect(initOptions, "proof-tab")).outcome).toEqual({ type: "runtime-ready" });
+    expect(mocks.openBrowser).not.toHaveBeenCalled();
+    expect(mocks.openBrowserWithSelfSignedProof).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Uint8Array),
+      expect.any(Uint8Array),
+      selfSignedClientProof.token,
+      selfSignedClientProof.appId,
+      selfSignedClientProof.claimedAuthor,
+      initOptions.dbName,
+      undefined,
+    );
+    expect(mocks.fromDb.mock.calls[0]?.[2]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
   });
 
   it("closes an unowned browser DB when adapter construction fails, cleans up, and retries", async () => {
@@ -3278,5 +3302,130 @@ describe("broker worker context initialization", () => {
       id: 3,
       error: expect.objectContaining({ message: "Inspector context is no longer available" }),
     });
+  });
+  it("keeps Alice's physical owner fenced after close failure and retries before successor admission", async () => {
+    const release = vi.fn(async () => undefined);
+    mocks.acquireBrowserPhysicalDatabaseEpoch.mockResolvedValueOnce({
+      id: "close-retry-owner",
+      release,
+    });
+    const config = options("close-retry-root");
+    const first = await connect(config, "first");
+    expect(first.outcome.type).toBe("runtime-ready");
+    const store = mocks.pageStores[0]!;
+    let mayClose = false;
+    store.close.mockImplementation(async () => {
+      if (!mayClose) throw new Error("durable close failed");
+    });
+    const closed = await followerResult(first.port, { type: "close", id: 1, releaseContext: true });
+    expect(closed.error).toMatchObject({ message: "durable close failed" });
+    expect(release).not.toHaveBeenCalled();
+    const blocked = await connect(config, "blocked-successor");
+    expect(blocked.outcome.type).toBe("runtime-error");
+    expect(mocks.openPageStore).toHaveBeenCalledOnce();
+    expect(release).not.toHaveBeenCalled();
+    mayClose = true;
+    const next = await connect(config, "after-retry");
+    expect(next.outcome.type).toBe("runtime-ready");
+    expect(release).toHaveBeenCalledOnce();
+    expect(mocks.openPageStore).toHaveBeenCalledTimes(2);
+    await followerResult(next.port, { type: "close", id: 2, releaseContext: true });
+  });
+
+  it("retries failed tree retirement before admitting a replacement schema on a leased owner", async () => {
+    const target = options("failed-tree-retirement");
+    const lease = connectLease({
+      type: "acquire-foreground-node-lease",
+      dbName: target.dbName,
+      storageOwner: target.storageOwner,
+    });
+    await lease.outcome;
+    const first = await connect(target, "first", "old-schema");
+    expect(first.outcome.type).toBe("runtime-ready");
+    const store = mocks.pageStores[0]!;
+    let mayRetire = false;
+    store.retireTreeOwnership.mockImplementation(async () => {
+      if (!mayRetire) throw new Error("tree retirement failed");
+    });
+    const closed = await followerResult(first.port, { type: "close", id: 1, releaseContext: true });
+    expect(closed.error).toMatchObject({ message: "tree retirement failed" });
+    expect((await connect(target, "blocked", "new-schema")).outcome.type).toBe("runtime-error");
+    expect(mocks.openBrowser).toHaveBeenCalledOnce();
+    expect(store.close).not.toHaveBeenCalled();
+    mayRetire = true;
+    const successor = await connect(target, "retry", "new-schema");
+    expect(successor.outcome.type).toBe("runtime-ready");
+    expect(mocks.openBrowser).toHaveBeenCalledTimes(2);
+    expect(mocks.pageStores).toHaveLength(1);
+    await followerResult(successor.port, { type: "close", id: 2, releaseContext: true });
+    lease.port.emitMessage({ type: "retire-foreground-node-lease" });
+    await vi.waitFor(() => expect(store.close).toHaveBeenCalledOnce());
+  });
+
+  it("retains the physical lock after reset cannot close SQLite and retries before reopening", async () => {
+    const release = vi.fn(async () => undefined);
+    mocks.acquireBrowserPhysicalDatabaseEpoch.mockResolvedValueOnce({
+      id: "failed-reset-close",
+      release,
+    });
+    const config = options("failed-reset-close");
+    const first = await connect(config, "first");
+    const unrelated = await connect(options("healthy-reset-neighbour"), "unrelated");
+    const store = mocks.pageStores[0]!;
+    let mayClose = false;
+    store.close.mockImplementation(async () => {
+      if (!mayClose) throw new Error("SQLite close failed");
+    });
+    const reset = await followerResult(first.port, { type: "delete-storage", id: 1 });
+    expect(reset.error).toMatchObject({ message: "SQLite close failed" });
+    expect(store.destroyUnderOwner).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+    expect((await connect(config, "blocked")).outcome.type).toBe("runtime-error");
+    expect(mocks.openPageStore).toHaveBeenCalledTimes(2);
+    expect(release).not.toHaveBeenCalled();
+    expect(await followerResult(unrelated.port, { type: "disconnect", id: 2 })).not.toHaveProperty(
+      "error",
+    );
+    mayClose = true;
+    const successor = await connect(config, "retry");
+    expect(successor.outcome.type).toBe("runtime-ready");
+    expect(release).toHaveBeenCalledOnce();
+    expect(mocks.openPageStore).toHaveBeenCalledTimes(3);
+    await followerResult(successor.port, { type: "close", id: 3, releaseContext: true });
+    await followerResult(unrelated.port, { type: "close", id: 3, releaseContext: true });
+  });
+
+  it("retries failed initialization retirement before reusing a leased SQLite owner", async () => {
+    const config = options("failed-initialization-retirement");
+    const lease = connectLease({
+      type: "acquire-foreground-node-lease",
+      dbName: config.dbName,
+      storageOwner: config.storageOwner,
+    });
+    await lease.outcome;
+    const store = mocks.pageStores[0]!;
+    let mayRetire = false;
+    store.retireTreeOwnership.mockImplementation(async () => {
+      if (!mayRetire) throw new Error("initial runtime close failed");
+    });
+    mocks.fromDb.mockImplementationOnce(() => {
+      throw new Error("adapter construction failed");
+    });
+    const failed = await connect(config, "failed");
+    expect(failed.outcome).toMatchObject({
+      type: "runtime-error",
+      error: { message: "adapter construction failed" },
+    });
+    expect((await connect(config, "blocked")).outcome.type).toBe("runtime-error");
+    expect(mocks.openBrowser).toHaveBeenCalledOnce();
+    expect(store.close).not.toHaveBeenCalled();
+    mayRetire = true;
+    const next = await connect(config, "retry");
+    expect(next.outcome.type).toBe("runtime-ready");
+    expect(mocks.openBrowser).toHaveBeenCalledTimes(2);
+    expect(mocks.pageStores).toHaveLength(1);
+    await followerResult(next.port, { type: "close", id: 1, releaseContext: true });
+    lease.port.emitMessage({ type: "retire-foreground-node-lease" });
+    await vi.waitFor(() => expect(store.close).toHaveBeenCalledOnce());
   });
 });

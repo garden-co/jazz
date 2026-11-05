@@ -116,6 +116,23 @@ the per-milestone benchmarks that gate individual features.
 
 A micro tier (scenario 0) covers the primitive costs underneath all of them.
 
+### Harness
+
+Every scenario (`micro`, S1–S5, S7–S9) runs on one deterministic simulator
+(`jazz_sim::Sim`):
+full `Db` clients and relays linked to an authority over a seeded virtual
+network, carrying native messages or encoded wire frames. Its smoke tests are
+`jazz-sim/tests/scenario_smoke.rs`. The focused `jazz` bench contracts
+(cold subscription over deep history, four-tier sync, serializable
+validation against a model, relation include delivery, same-shape route
+subscriptions) are `jazz-sim/tests/core_benchmark_smoke.rs`. `Db` is
+single-threaded, so timing runs use the simulator at bench scale, with latency
+in virtual milliseconds and wall-clock microseconds for local work; sizes are
+wire bytes from the simulator's link stats.
+
+The audit table below predates this harness; rows that name `jazz/benches` or
+`groove/benches` receipts are pending a refresh.
+
 ### Overview: phase-level coverage audit
 
 Evidence checked 2026-06-14: `jazz-sim/benches/*.rs`,

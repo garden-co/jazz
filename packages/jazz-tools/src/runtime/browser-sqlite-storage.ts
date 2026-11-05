@@ -1,6 +1,9 @@
+import { sha256 } from "@noble/hashes/sha2.js";
+
 /** The identity/lease sidecar and SQLite file are one logical browser root. */
-export const SQLITE_BROWSER_DATABASE_VERSION = 4;
-export const SQLITE_BROWSER_ROOT_FORMAT = "jazz.browser.sqlite-root.v1";
+export const SQLITE_BROWSER_DATABASE_VERSION = 3;
+export const SQLITE_BROWSER_ROOT_KEY = "sqlite-file-owner-v2";
+export const SQLITE_BROWSER_ROOT_FORMAT = "jazz.browser.sqlite-root.v2";
 
 export type SqliteBrowserRoot = {
   name: string;
@@ -59,7 +62,9 @@ export function decodeSqliteBrowserRoot(
 export function sqliteBrowserDescriptor(root: SqliteBrowserRoot) {
   return {
     backend: "indexeddb" as const,
-    path: `/jazz-sqlite-v1-${root.node}.sqlite`,
+    // Match upstream StoreSpec's default: SHA-256 of the physical name,
+    // truncated to 16 bytes. The node may rotate on reset; the filename does not.
+    path: `/jazz-${Array.from(sha256(new TextEncoder().encode(root.name)).slice(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join("")}.sqlite`,
     requireExisting: root.state === "ready",
   };
 }

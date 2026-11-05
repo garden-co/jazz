@@ -8,7 +8,7 @@ writers can use the same numeric transaction number without sharing a receipt.
 
 ## Authority and scope
 
-The relay does not apply pending downstream writes to its shared row cache.
+An ordinary relay does not apply pending downstream writes to its shared row cache.
 Only the authority runs the normal candidate, permission, large-value and
 serializable validation. Accepted rows arrive through ordinary sync, and the
 relay reconciles the exact written row coordinates before sending a receipt.
@@ -80,13 +80,19 @@ branch moves, fail before journalling. Work is indexed by pending unit, exact
 transaction identity, touched row or referenced chunk tree; it does not scan
 unrelated row tables.
 
-Non-durable foreground writes remain explicitly unsupported. They still need an
-owner flush acknowledgement and a private pending-write overlay. Ordinary
-unscoped one-shot reads retain the existing relay-cache semantics: a serializable
-read can be stale until normal subscriptions hydrate the cache, and the authority
-then rejects a conflicting commit. Scoped/accepted reads use their existing
-forwarding path. This port does not qualify a full E2EE browser application,
-encrypted subscriptions or the NAPI runtime.
+Non-durable foreground writes use the later
+[private-owner projection and admission port](sqlite-owner-projection-compatibility.md)
+and [owner flush receipts](sqlite-owner-stored-compatibility.md). Private pending
+previews are restricted to the admitted subject; they do not become shared
+permission evidence or authority acceptance.
+
+Ordinary unscoped one-shot reads retain the existing relay-cache semantics: a
+serializable read can be stale until normal subscriptions hydrate the cache, and
+the authority then rejects a conflicting commit. Scoped/accepted reads use their
+existing forwarding path. These upload tests do not qualify the full browser or
+native application. Separate [browser checks](sqlite-private-relay-websocket.md)
+exercise encrypted chat, sharing and live replies through the production worker;
+the NAPI port remains unpublished.
 
 ## Validation
 

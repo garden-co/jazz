@@ -52,7 +52,7 @@ fn owner(path: Option<&Path>) -> Db {
 }
 fn foreground(node: u8, owner: &Db) -> Db {
     let db = open(node, None);
-    db.set_non_durable_client();
+    db.set_private_owner_client().unwrap();
     connect(&db, owner);
     turns(&[&db, owner]);
     block_on(db.wait_for_storage_owner()).unwrap();
@@ -83,7 +83,7 @@ fn stage(db: &Db, n: u8) -> OpenTransactionId {
     block_on(db.begin_serializable(id)).unwrap();
     db.prepare_initialization_insert(id, "notes", RowUuid::from_bytes([n; 16]))
         .unwrap();
-    block_on(db.serializable_tx_ref(id).insert(
+    block_on(db.tx_ref(id).insert(
         "notes",
         BTreeMap::from([("text".into(), Value::String("founder".into()))]),
         jazz::db::InsertOptions {
@@ -186,7 +186,7 @@ fn foreground_initialization_waits_for_storage_and_recovers_original_fate() {
     let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
     let read = drive(
         &[&fresh_tab, &storage],
-        fresh_tab.all_serialized_query(
+        fresh_tab.all_serialized_query_as(
             &query,
             ReadOpts::for_read_tier(jazz::db::ReadTier::LocalFirst),
             None,
@@ -429,7 +429,7 @@ fn owner_rejects_forged_initialization_publications() {
     for case in ["nonce", "ordinary", "mergeable", "author", "transaction"] {
         let storage = owner(None);
         let tab = open(1, None);
-        tab.set_non_durable_client();
+        tab.set_private_owner_client().unwrap();
         let (up, down) = duplex();
         let wire = Rc::new(RefCell::new(up));
         let captured = Rc::new(RefCell::new(Vec::new()));
@@ -559,7 +559,7 @@ fn supplied_claims_cannot_grant_initialization_permission() {
     let path = dir.path().join("alice.sqlite");
     let storage = owner(Some(&path));
     let tab = open(1, None);
-    tab.set_non_durable_client();
+    tab.set_private_owner_client().unwrap();
     let (up, down) = duplex();
     let wire = Rc::new(RefCell::new(up));
     let captured = Rc::new(RefCell::new(Vec::new()));

@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { mintLocalFirstToken } from "jazz-napi";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,6 +23,50 @@ import {
 } from "../src/main.ts";
 
 const EXTERNAL_ISSUER = "https://todo-server.example.test";
+
+afterEach(() => vi.unstubAllEnvs());
+
+it.each([true, false])(
+  "accepts demo local-first tokens in production only when the sync server allows them: %s",
+  async (upstreamAllows) => {
+    vi.stubEnv("NODE_ENV", "production");
+    const upstream = await startLocalJazzServer({
+      inMemory: true,
+      allowLocalFirstAuth: upstreamAllows,
+      schema: app,
+      permissions,
+    });
+    let server: RunningServer | undefined;
+    try {
+      server = await startServer(
+        await createServer(
+          { type: "memory" },
+          {
+            appId: upstream.appId,
+            serverUrl: upstream.url,
+            backendSecret: upstream.backendSecret,
+          },
+        ),
+        0,
+      );
+      const token = mintLocalFirstToken(
+        Buffer.alloc(32, 7).toString("base64url"),
+        upstream.appId,
+        3600,
+      );
+      const response = await fetch(`${server.baseUrl}/todos`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(response.status).toBe(upstreamAllows ? 200 : 401);
+      await expect(response.json()).resolves.toEqual(
+        upstreamAllows ? [] : { error: "Unauthorized" },
+      );
+    } finally {
+      if (server) await stopServer(server);
+      await upstream.stop();
+    }
+  },
+);
 
 type Identity = {
   token: string;

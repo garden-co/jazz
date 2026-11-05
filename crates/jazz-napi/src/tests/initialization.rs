@@ -1,5 +1,5 @@
-use crate::*;
-use jazz::groove::records::{RecordDescriptor, ValueType};
+use super::*;
+use jazz::records::{RecordDescriptor, ValueType};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema};
 
 fn fixture() -> NapiDb {
@@ -136,10 +136,9 @@ fn napi_seal_is_unpublished_owner_bound_single_use_and_preserves_insert_absence(
     let raw = descriptor
         .create(&[CoreValue::String("sealed value".into())])
         .unwrap();
-    let cells = jazz::binding_codec::encode_named_cells(&jazz::groove::records::OwnedRecord::new(
-        raw, descriptor,
-    ))
-    .unwrap();
+    let cells =
+        jazz::binding_codec::encode_named_cells(&jazz::records::OwnedRecord::new(raw, descriptor))
+            .unwrap();
     db.insert_in_transaction(
         open.clone(),
         "items".into(),
@@ -158,11 +157,7 @@ fn napi_seal_is_unpublished_owner_bound_single_use_and_preserves_insert_absence(
         db.seal_initialization_transaction(open.clone()).unwrap(),
     )
     .unwrap();
-    assert!(
-        foreign
-            .publish_initialization_transaction(sealed.token.clone())
-            .is_err()
-    );
+    assert!(foreign.publish_test(sealed.token.clone()).is_err());
     let before = db
         .local_current_row("items".into(), Uint8Array::new(row.to_vec()))
         .unwrap();
@@ -177,10 +172,8 @@ fn napi_seal_is_unpublished_owner_bound_single_use_and_preserves_insert_absence(
     )
     .unwrap();
     assert_eq!(status["statuses"][0]["kind"], "not-observed");
-    let _write = db
-        .publish_initialization_transaction(sealed.token.clone())
-        .unwrap();
-    assert!(db.publish_initialization_transaction(sealed.token).is_err());
+    let _write = db.publish_test(sealed.token.clone()).unwrap();
+    assert!(db.publish_test(sealed.token).is_err());
     assert!(
         db.initialization_transaction_status(vec![sealed.reserved_tx_id.clone(); 65])
             .is_err()
@@ -215,32 +208,6 @@ fn napi_seal_is_unpublished_owner_bound_single_use_and_preserves_insert_absence(
 
 #[test]
 fn schema_view_cannot_drain_authenticated_catalogue_capture_from_runtime_owner() {
-    use jazz::db::{ConnectionSessionContext, Transport};
-    use jazz::protocol::SyncMessage;
-    use jazz::wire::WireAuthorityEndpoint;
-    use std::collections::VecDeque;
-
-    struct Link {
-        incoming: Rc<RefCell<VecDeque<SyncMessage>>>,
-        outgoing: Rc<RefCell<VecDeque<SyncMessage>>>,
-        session: ConnectionSessionContext,
-    }
-    impl Transport for Link {
-        fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
-            Some(self.session)
-        }
-        fn send(
-            &mut self,
-            message: SyncMessage,
-        ) -> std::result::Result<(), jazz::wire::TransportError> {
-            self.outgoing.borrow_mut().push_back(message);
-            Ok(())
-        }
-        fn try_recv(&mut self) -> Option<SyncMessage> {
-            self.incoming.borrow_mut().pop_front()
-        }
-    }
-
     let schema = serde_json::to_vec(
         &SchemaBuilder::new()
             .table(
@@ -273,54 +240,35 @@ fn schema_view_cannot_drain_authenticated_catalogue_capture_from_runtime_owner()
         None,
     )
     .unwrap();
-    let authority = NapiDb::open_memory_as_backend(
-        Uint8Array::new(schema.clone()),
-        config(authority_node, true),
-    )
+    // Native hosts are replicas; use the actual authority constructor for
+    // the peer which supplies authenticated catalogue coverage.
+    let identity = CoreDbIdentity {
+        node: authority_node,
+        author: CoreAuthorSubject::SYSTEM,
+    };
+    let authority_db = block_on(jazz::db::Db::open_history_complete(
+        jazz::db::DbConfig::new(binding_host::decode_schema(&schema).unwrap(), identity),
+    ))
     .unwrap();
+    let authority = NapiDb::runtime_owner(Binding::new(authority_db, identity, true));
+
     let core = |db: &NapiDb| {
         let inner = db.inner.borrow();
         let Some(inner) = inner.as_ref() else {
             panic!("memory fixture");
         };
-        let core = &inner.core;
+        let core = &inner.binding.db;
         Rc::clone(core)
     };
     let owner_core = core(&owner);
     let authority_core = core(&authority);
-    let incoming = Rc::new(RefCell::new(VecDeque::new()));
-    let outgoing = Rc::new(RefCell::new(VecDeque::new()));
-    let client_endpoint = WireAuthorityEndpoint {
-        node: client_node,
-        epoch: 1,
-    };
-    let authority_endpoint = WireAuthorityEndpoint {
-        node: authority_node,
-        epoch: 2,
-    };
-    let session = |local, remote| ConnectionSessionContext {
-        local,
-        remote: Some(remote),
-        link_identity: author,
-        negotiated_features: jazz::wire::current_wire_features(),
-    };
-    let upstream = core_block_on(owner_core.connect_upstream(Box::new(Link {
-        incoming: Rc::clone(&incoming),
-        outgoing: Rc::clone(&outgoing),
-        session: session(client_endpoint, authority_endpoint),
-    })));
-    let downstream = authority_core.accept_subscriber(
-        Box::new(Link {
-            incoming: outgoing,
-            outgoing: incoming,
-            session: session(authority_endpoint, client_endpoint),
-        }),
-        author,
-    );
+    // open_history_complete installed the actual authority's catalogue.
+    let (client_link, authority_link) = jazz::db::duplex();
+    let upstream = core_block_on(owner_core.connect_upstream(client_link));
+    let downstream = authority_core.accept_subscriber(authority_link, author);
     for _ in 0..32 {
         owner.tick().unwrap();
         authority.tick().unwrap();
-        core_block_on(core_block_on(downstream.lock()).tick()).unwrap();
     }
     let alias = owner
         .register_schema(Uint8Array::new(schema.clone()))
@@ -354,5 +302,6 @@ fn schema_view_cannot_drain_authenticated_catalogue_capture_from_runtime_owner()
     let drained = finish_catalogue(&owner);
     assert!(drained.ready);
     assert!(drained.capture.is_none(), "only the owner drains once");
-    core_block_on(owner_core.detach_connection_async(&upstream)).unwrap();
+    assert!(owner_core.detach_connection(&upstream));
+    authority_core.disconnect_subscriber(downstream);
 }

@@ -245,12 +245,6 @@ impl Fixture {
     }
     pub fn verify(&mut self) {
         assert_eq!(self.read_result.len(), self.count);
-        let table = self
-            .schema
-            .tables
-            .iter()
-            .find(|table| table.name == "tasks")
-            .unwrap();
         let actual = self
             .read_result
             .iter()
@@ -262,13 +256,10 @@ impl Fixture {
                 .get(&row(i))
                 .expect("expected task present in timed read");
             assert_eq!(
-                value.cell(table, "title"),
+                value.cell("title"),
                 Some(Value::String(format!("Task {i}")))
             );
-            assert_eq!(
-                value.cell(table, "done"),
-                Some(Value::Bool(i < self.changed))
-            );
+            assert_eq!(value.cell("done"), Some(Value::Bool(i < self.changed)));
         }
         if REPORT.get() {
             // The worker holds exactly the done tasks the foreground shows.

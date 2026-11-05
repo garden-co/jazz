@@ -1,16 +1,17 @@
-// Server fan-out scenario, written once against the Jazz `Db` API and built
-// twice (Groove and SQLite) by benches/fanout.rs. Included with `db` bound
-// to `jazz::db` or `jazz::db`.
+// Server fan-out scenario, run by benches/fanout.rs.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use jazz::records::Value;
+use jazz::db;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
-use super::common::{allow_all_policies, compile_schema, exists, outer_eq, read_and_allow_all_writes, session_eq};
+use super::common::{
+    allow_all_policies, compile_schema, exists, outer_eq, read_and_allow_all_writes, session_eq,
+};
 use super::{Config, Report, rss_kib};
 
 fn id(kind: u8, n: usize) -> RowUuid {
@@ -36,7 +37,10 @@ fn text(value: impl Into<String>) -> Value {
 }
 
 fn cells(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
-    pairs.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect()
+    pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), v.clone()))
+        .collect()
 }
 
 /// Rooms are numbered so user `u` belongs to rooms `u, u+1, ..` (mod rooms)
@@ -49,7 +53,11 @@ pub fn run(cfg: &Config) -> Report {
     let me = ["user", "identity", "subject"];
     let schema = compile_schema(
         &SchemaBuilder::new()
-            .table(TableSchemaBuilder::new("rooms").column("name", ColumnType::Text).policies(allow_all_policies()))
+            .table(
+                TableSchemaBuilder::new("rooms")
+                    .column("name", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
             .table(
                 TableSchemaBuilder::new("memberships")
                     .fk_column("room", "rooms")
@@ -80,16 +88,31 @@ pub fn run(cfg: &Config) -> Report {
     );
     let db = db::block_on(db::Db::open(db::DbConfig::new(
         schema,
-        db::DbIdentity { node: NodeUuid::from_bytes([0x11; 16]), author: AuthorSubject::SYSTEM },
+        db::DbIdentity {
+            node: NodeUuid::from_bytes([0x11; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
     )))
     .unwrap();
     let insert = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
-        db::block_on(db.insert(table, values, db::InsertOptions { row_id: Some(row), ..Default::default() })).unwrap();
+        db::block_on(db.insert(
+            table,
+            values,
+            db::InsertOptions {
+                row_id: Some(row),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     };
 
     // Fixture.
     for r in 0..cfg.rooms {
-        insert("rooms", id(1, r), cells(&[("name", text(format!("room {r}")))]));
+        insert(
+            "rooms",
+            id(1, r),
+            cells(&[("name", text(format!("room {r}")))]),
+        );
     }
     let mut membership = 0;
     for u in 0..cfg.users {
@@ -97,7 +120,10 @@ pub fn run(cfg: &Config) -> Report {
             insert(
                 "memberships",
                 id(2, membership),
-                cells(&[("room", Value::Uuid(id(1, room_of(u, k, cfg)).0)), ("member", text(subject(u)))]),
+                cells(&[
+                    ("room", Value::Uuid(id(1, room_of(u, k, cfg)).0)),
+                    ("member", text(subject(u))),
+                ]),
             );
             membership += 1;
         }
@@ -119,7 +145,14 @@ pub fn run(cfg: &Config) -> Report {
         }
     }
     for a in 0..20 {
-        insert("announcements", id(4, a), cells(&[("body", text(format!("a{a}"))), ("posted_at", Value::I64(a as i64))]));
+        insert(
+            "announcements",
+            id(4, a),
+            cells(&[
+                ("body", text(format!("a{a}"))),
+                ("posted_at", Value::I64(a as i64)),
+            ]),
+        );
     }
     db::block_on(db.tick()).unwrap();
 
@@ -140,10 +173,19 @@ pub fn run(cfg: &Config) -> Report {
             .unwrap();
         let my_rooms = db.prepare_query(&Query::from("memberships")).unwrap();
         let feed = db
-            .prepare_query(&Query::from("announcements").order_by("posted_at", OrderDirection::Desc).limit(20))
+            .prepare_query(
+                &Query::from("announcements")
+                    .order_by("posted_at", OrderDirection::Desc)
+                    .limit(20),
+            )
             .unwrap();
         for prepared in [open_room, my_rooms, feed] {
-            let mut sub = db::block_on(db.subscribe_for_identity(&prepared, db::ReadOpts::default(), user(u))).unwrap();
+            let mut sub = db::block_on(db.subscribe_for_identity(
+                &prepared,
+                db::ReadOpts::default(),
+                user(u),
+            ))
+            .unwrap();
             db::block_on(db.tick()).unwrap();
             while sub.try_next_event().is_some() {}
             subs.push(sub);
@@ -163,7 +205,10 @@ pub fn run(cfg: &Config) -> Report {
         }
         events
     };
-    let mut measure = |name: &'static str, n: usize, op: &mut dyn FnMut(usize)| -> (&'static str, Duration, usize) {
+    let mut measure = |name: &'static str,
+                       n: usize,
+                       op: &mut dyn FnMut(usize)|
+     -> (&'static str, Duration, usize) {
         let mut times = Vec::new();
         let mut events = 0;
         for i in 0..n {
@@ -197,19 +242,35 @@ pub fn run(cfg: &Config) -> Report {
     }));
     // Edit a message that is on its room's open page.
     ops.push(measure("edit visible message", cfg.ops, &mut |i| {
-        db::block_on(db.update("messages", id(5, i), cells(&[("body", text("edited"))]), Default::default())).unwrap();
+        db::block_on(db.update(
+            "messages",
+            id(5, i),
+            cells(&[("body", text("edited"))]),
+            Default::default(),
+        ))
+        .unwrap();
     }));
     // A user joins a room: their room list and policy evidence change.
     ops.push(measure("join room", cfg.ops, &mut |i| {
         insert(
             "memberships",
             id(6, i),
-            cells(&[("room", Value::Uuid(id(1, (i * 13 + 5) % cfg.rooms).0)), ("member", text(subject(i % cfg.users)))]),
+            cells(&[
+                ("room", Value::Uuid(id(1, (i * 13 + 5) % cfg.rooms).0)),
+                ("member", text(subject(i % cfg.users))),
+            ]),
         );
     }));
     // A public announcement: every user's feed changes.
     ops.push(measure("post announcement", cfg.ops.min(20), &mut |i| {
-        insert("announcements", id(7, i), cells(&[("body", text("news")), ("posted_at", Value::I64(1_000 + i as i64))]));
+        insert(
+            "announcements",
+            id(7, i),
+            cells(&[
+                ("body", text("news")),
+                ("posted_at", Value::I64(1_000 + i as i64)),
+            ]),
+        );
     }));
     Report {
         subscriptions: subs.len(),

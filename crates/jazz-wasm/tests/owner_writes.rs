@@ -151,7 +151,7 @@ async fn qualified_foreground_writes_use_real_owner_and_authority_receipts() {
     owner.set_scope_isolated_storage_owner().unwrap();
     owner.set_remote_link_hint("failed".into()).unwrap();
     let tab = open(1, false);
-    tab.set_non_durable_client().unwrap();
+    tab.set_private_owner_client().unwrap();
     tab.set_remote_link_hint("failed".into()).unwrap();
     let (tu, td) = admit(&tab, &owner).await;
     let yes = insert(&tab, "accepted", true);
@@ -210,7 +210,7 @@ async fn indexeddb_private_owner_recovers_into_a_new_foreground() {
         owner.set_scope_isolated_storage_owner().unwrap();
         owner.set_remote_link_hint("failed".into()).unwrap();
         let tab = open(1, false);
-        tab.set_non_durable_client().unwrap();
+        tab.set_private_owner_client().unwrap();
         tab.set_remote_link_hint("failed".into()).unwrap();
         let (tu, td) = admit(&tab, &owner).await;
         let write = insert(&tab, &text, true);
@@ -237,7 +237,7 @@ async fn indexeddb_private_owner_recovers_into_a_new_foreground() {
     owner.set_scope_isolated_storage_owner().unwrap();
     owner.set_remote_link_hint("failed".into()).unwrap();
     let tab = open(2, false);
-    tab.set_non_durable_client().unwrap();
+    tab.set_private_owner_client().unwrap();
     tab.set_remote_link_hint("failed".into()).unwrap();
     let (tu, td) = admit(&tab, &owner).await;
     assert_eq!(count(&tab), 0);
@@ -292,7 +292,7 @@ async fn indexeddb_private_owner_recovers_into_a_new_foreground() {
 async fn owner_admission_wait_is_cancelled_by_transport_or_runtime_close() {
     for close_runtime in [false, true] {
         let tab = open(1, false);
-        tab.set_non_durable_client().unwrap();
+        tab.set_private_owner_client().unwrap();
         let relay = open(50, false);
         let (up, _) = connect(&tab, &relay).await;
         let wait = tab.wait_for_storage_owner().unwrap();

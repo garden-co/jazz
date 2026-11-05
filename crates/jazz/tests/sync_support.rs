@@ -1,10 +1,9 @@
 //! Synced reads that span tables: the server ships a remote query's
 //! supporting rows (include targets, array children) with its result, and
 //! keeps them coherent on the replica through per-session watches. Shapes
-//! that read further still are refused with "not supported yet". Not
-//! ported from Jazz.
+//! that read further still are refused with "not supported yet".
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

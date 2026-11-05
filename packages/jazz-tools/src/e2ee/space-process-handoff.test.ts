@@ -4,11 +4,12 @@ import { execFile as rawExecFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
-import { app, permissions } from "./fixtures/initial-handoff-child.js";
+import { app, permissions, store } from "./fixtures/initial-handoff-child.js";
 
 const execFile = promisify(rawExecFile);
 it("resumes an excluded author's initial handoff in a fresh Node process", async () => {
@@ -101,3 +102,38 @@ it("resumes an excluded author's initial handoff in a fresh Node process", async
     await rm(directory, { recursive: true, force: true });
   }
 }, 60_000);
+
+it("keeps handoff store reads complete during queued updates and preserves them on reopen", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "e2ee-handoff-store-"));
+  try {
+    const path = join(directory, "device.json");
+    const deviceStore = store(path);
+    const padding = "x".repeat(128 * 1024);
+    await deviceStore.update(() => JSON.stringify({ count: 0, padding }));
+    const updates = Array.from({ length: 20 }, () =>
+      deviceStore.update((value) => {
+        const saved = JSON.parse(value!);
+        return JSON.stringify({ ...saved, count: saved.count + 1 });
+      }),
+    );
+    const reads = Array.from({ length: 2 }, async () => {
+      for (let i = 0; i < 40; i++) {
+        const saved = JSON.parse((await deviceStore.read())!);
+        expect(saved.padding).toBe(padding);
+        expect(saved.count).toBeGreaterThanOrEqual(0);
+        expect(saved.count).toBeLessThanOrEqual(20);
+      }
+    });
+    const results = await Promise.allSettled([...updates, ...reads]);
+    for (const result of results) expect(result.status).toBe("fulfilled");
+    expect(JSON.parse((await store(path).read())!)).toEqual({ count: 20, padding });
+    await expect(
+      deviceStore.update(() => {
+        throw new Error("Rejected store update");
+      }),
+    ).rejects.toThrow("Rejected store update");
+    expect(JSON.parse((await store(path).read())!)).toEqual({ count: 20, padding });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

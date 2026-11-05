@@ -22,6 +22,9 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 fn open(node: u8, authority: bool) -> Db {
+    open_as(node, authority, AuthorSubject::SYSTEM)
+}
+fn open_as(node: u8, authority: bool, author: AuthorSubject) -> Db {
     let schema = common::compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -35,7 +38,7 @@ fn open(node: u8, authority: bool) -> Db {
         schema,
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
-            author: AuthorSubject::SYSTEM,
+            author,
         },
     )))
     .unwrap();
@@ -104,7 +107,7 @@ fn one_shot<'a>(
     query: &'a [u8],
     opts: ReadOpts,
 ) -> impl Future<Output = Result<SerializedReadResult, jazz::db::Error>> + 'a {
-    db.all_serialized_query(query, opts, None, None, None, false, || false, |_| {})
+    db.all_serialized_query_as(query, opts, None, None, None, false, || false, |_| {})
 }
 fn poll<T>(future: Pin<&mut impl Future<Output = T>>) -> Poll<T> {
     future.poll(&mut Context::from_waker(Waker::noop()))
@@ -115,6 +118,43 @@ fn warm(owner: &Db, server: &Db) {
     assert_eq!(tier, DurabilityTier::Global);
     drop(stream);
     turn(&[owner, server, owner]);
+}
+
+/// Alice's two streams share one upstream query on Bob's authority. Cancelling
+/// one preserves the other; cancelling both releases the authority subscription.
+/// The internal inventory is needed to distinguish a shared remote reference
+/// from two independent queries that happen to return the same public rows.
+#[test]
+fn remote_attachment_inventory_tracks_shared_streams_and_cancellation() {
+    let authority = open(0xf1, true);
+    insert(&authority, "initial");
+    let alice = open(0xf2, false);
+    connect(&alice, &authority);
+    let mut first = subscribe(&alice, ReadOpts::for_read_tier(ReadTier::Remote));
+    let mut second = subscribe(&alice, ReadOpts::for_read_tier(ReadTier::Remote));
+    assert_eq!(alice.query_coverage_attachment_counts_for_test(), (1, 2));
+    assert_eq!(
+        opening(&mut first, &[&alice, &authority, &alice]).0,
+        vec!["initial"]
+    );
+    assert_eq!(
+        opening(&mut second, &[&alice, &authority, &alice]).0,
+        vec!["initial"]
+    );
+    assert_eq!(authority.runtime_stats_for_test().active_subscriptions, 1);
+    drop(first);
+    turn(&[&alice, &authority, &alice]);
+    assert_eq!(alice.query_coverage_attachment_counts_for_test(), (1, 1));
+    assert_eq!(authority.runtime_stats_for_test().active_subscriptions, 1);
+    insert(&authority, "after cancellation");
+    turn(&[&authority, &alice]);
+    assert!(
+        matches!(second.try_next_event(), Some(SubscriptionEvent::Delta { added, .. }) if added.len() == 1)
+    );
+    drop(second);
+    turn(&[&alice, &authority, &alice]);
+    assert_eq!(alice.query_coverage_attachment_counts_for_test(), (0, 0));
+    assert_eq!(authority.runtime_stats_for_test().active_subscriptions, 0);
 }
 
 /// Alice's fresh tab cannot mistake its own empty memory for the owner's cache,
@@ -213,6 +253,7 @@ fn foreground_fallback_keeps_owner_rows_and_local_tier() {
         if timeout {
             std::thread::sleep(Duration::from_millis(100));
         } else {
+            owner.set_remote_link_hint(RemoteLinkHint::Failed);
             tab.set_remote_link_hint(RemoteLinkHint::Failed);
         }
         assert_eq!(
@@ -412,7 +453,7 @@ fn foreground_cache_hydration_preserves_the_owners_session_policy() {
         (vec!["alice".into()], DurabilityTier::Local)
     );
     let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
-    let error = block_on(tab.all_serialized_query(
+    let error = block_on(tab.all_serialized_query_as(
         &query,
         ReadOpts::default(),
         None,
@@ -565,9 +606,11 @@ fn attempting_foreground_has_a_bounded_host_wake() {
     insert(&owner, "cached");
     let tab = open(1, false);
     tab.set_non_durable_client();
+    owner.set_remote_link_hint(RemoteLinkHint::Attempting);
     tab.set_remote_link_hint(RemoteLinkHint::Attempting);
     connect(&tab, &owner);
     let scheduler = Rc::new(Earliest::default());
+    owner.set_tick_scheduler(Some(scheduler.clone()));
     tab.set_tick_scheduler(Some(scheduler.clone()));
     let mut stream = subscribe(&tab, opts(60_000));
     for _ in 0..3 {
@@ -589,11 +632,15 @@ fn attempting_foreground_has_a_bounded_host_wake() {
 }
 
 /// Alice's foreground cannot claim local durability for an in-memory mutation.
-/// Standalone and staged writes fail until worker upload forwarding is ported.
+/// Standalone and staged writes fail until its private owner is admitted.
 #[test]
 fn foreground_writes_fail_without_publishing_or_claiming_durability() {
-    let tab = open(1, false);
-    tab.set_non_durable_client();
+    let tab = open_as(
+        1,
+        false,
+        AuthorSubject::authenticated("https://issuer.example", "alice").unwrap(),
+    );
+    tab.set_private_owner_client().unwrap();
     let cells = || BTreeMap::from([("text".into(), Value::String("unsaved".into()))]);
     let error = block_on(tab.insert("notes", cells(), Default::default())).unwrap_err();
     assert_eq!(error.code, jazz::db::ErrorCode::Query);
@@ -601,7 +648,7 @@ fn foreground_writes_fail_without_publishing_or_claiming_durability() {
     let batch = jazz::tools::OpenTransactionId::new();
     block_on(tab.begin_mergeable(batch)).unwrap();
     let error = block_on(
-        tab.mergeable_tx_ref(batch)
+        tab.tx_ref(batch)
             .insert("notes", cells(), Default::default()),
     )
     .unwrap_err();
@@ -623,9 +670,11 @@ fn restarted_attempt_rearms_after_the_hosts_older_timer() {
     insert(&owner, "cached");
     let tab = open(1, false);
     tab.set_non_durable_client();
+    owner.set_remote_link_hint(RemoteLinkHint::Attempting);
     tab.set_remote_link_hint(RemoteLinkHint::Attempting);
     connect(&tab, &owner);
     let scheduler = Rc::new(Earliest::default());
+    owner.set_tick_scheduler(Some(scheduler.clone()));
     tab.set_tick_scheduler(Some(scheduler.clone()));
     let mut stream = subscribe(&tab, opts(60_000));
     for _ in 0..3 {
@@ -635,6 +684,7 @@ fn restarted_attempt_rearms_after_the_hosts_older_timer() {
     std::thread::sleep(
         original.saturating_duration_since(Instant::now()) + Duration::from_millis(20),
     );
+    owner.set_remote_link_hint(RemoteLinkHint::Attempting);
     tab.set_remote_link_hint(RemoteLinkHint::Attempting);
     assert!(scheduler.0.borrow_mut().take().unwrap() <= Instant::now());
     block_on(tab.tick()).unwrap();
@@ -649,9 +699,189 @@ fn restarted_attempt_rearms_after_the_hosts_older_timer() {
             <= jazz::db::REMOTE_LINK_ATTEMPT_WINDOW + Duration::from_millis(10)
     );
     assert!(stream.try_next_event().is_none());
+    owner.set_remote_link_hint(RemoteLinkHint::Failed);
     tab.set_remote_link_hint(RemoteLinkHint::Failed);
     assert_eq!(
         opening(&mut stream, &[&tab, &owner, &tab]),
         (vec!["cached".into()], DurabilityTier::Local)
     );
+}
+
+/// Alice's already-open Remote subscription pauses when her replica loses its
+/// authority. Local previews remain usable; reconnect reconciles the last result.
+/// alice -> authority; disconnect -> offline write -> reconnect -> poll
+#[test]
+fn strict_remote_subscription_rechecks_authority_after_its_opening() {
+    for consume_offline in [true, false] {
+        let server = open(93, true);
+        insert(&server, "accepted");
+        let alice = open(92, false);
+        let (up, down) = duplex_transport::duplex();
+        let connection = block_on(alice.connect_upstream(up));
+        let subscriber = server.accept_subscriber(down, AuthorSubject::SYSTEM);
+        let mut stream = subscribe(&alice, ReadOpts::for_read_tier(ReadTier::Remote));
+        assert_eq!(
+            opening(&mut stream, &[&alice, &server, &alice]),
+            (vec!["accepted".into()], DurabilityTier::Global)
+        );
+        while stream.try_next_event().is_some() {}
+        assert!(alice.detach_connection(&connection));
+        server.disconnect_subscriber(subscriber);
+        alice.set_remote_link_hint(RemoteLinkHint::NoServer);
+        if consume_offline {
+            assert!(stream.try_next_event().is_none(), "lost authority");
+        }
+        insert(&alice, "offline");
+        for _ in 0..10 {
+            turn(&[&alice]);
+            if consume_offline {
+                assert!(stream.try_next_event().is_none(), "offline preview leaked");
+            }
+        }
+        let query = alice.prepare_query(&Query::from("notes")).unwrap();
+        assert_eq!(
+            block_on(alice.all(&query, ReadOpts::default()))
+                .unwrap()
+                .len(),
+            2
+        );
+        connect(&alice, &server);
+        alice.set_remote_link_hint(RemoteLinkHint::Live);
+        for _ in 0..20 {
+            turn(&[&alice, &server, &alice]);
+        }
+        let Some(SubscriptionEvent::Delta {
+            reset,
+            added,
+            removed,
+            settled,
+            tier,
+            ..
+        }) = stream.try_next_event()
+        else {
+            panic!("missing resumed delta")
+        };
+        assert!(!reset && settled);
+        assert_eq!(tier, DurabilityTier::Global);
+        assert!(removed.is_empty());
+        assert_eq!(added.len(), 1);
+        assert_eq!(
+            added[0]
+                .cells()
+                .find(|(name, _)| *name == "text")
+                .unwrap()
+                .1
+                .unwrap(),
+            &Value::String("offline".into())
+        );
+        assert!(stream.try_next_event().is_none(), "duplicate resumed delta");
+    }
+}
+
+/// Alice consumes ordered deltas before an outage. Reconciliation uses the last
+/// delivered ordering, even when several updates were queued between polls.
+#[test]
+fn strict_remote_reconnect_preserves_delivered_row_indexes() {
+    let server = open(83, true);
+    let put = |text: &str| {
+        block_on(server.insert(
+            "notes",
+            BTreeMap::from([("text".into(), Value::String(text.into()))]),
+            Default::default(),
+        ))
+        .unwrap()
+        .row_uuid()
+    };
+    let a = put("a");
+    let b = put("b");
+    let c = put("c");
+    let alice = open(82, false);
+    let (up, down) = duplex_transport::duplex();
+    let connection = block_on(alice.connect_upstream(up));
+    let subscriber = server.accept_subscriber(down, AuthorSubject::SYSTEM);
+    let query = alice
+        .prepare_query(&Query::from("notes").order_by("text", jazz::query::OrderDirection::Asc))
+        .unwrap();
+    let mut stream =
+        block_on(alice.subscribe(&query, ReadOpts::for_read_tier(ReadTier::Remote))).unwrap();
+    assert_eq!(
+        opening(&mut stream, &[&alice, &server, &alice]).0,
+        ["a", "b", "c"]
+    );
+    block_on(server.update(
+        "notes",
+        b,
+        BTreeMap::from([("text".into(), Value::String("z".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    for _ in 0..5 {
+        turn(&[&alice, &server, &alice]);
+    }
+    block_on(server.delete("notes", a, Default::default())).unwrap();
+    put("d");
+    for _ in 0..5 {
+        turn(&[&alice, &server, &alice]);
+    }
+    while stream.try_next_event().is_some() {}
+    // The delivered order is now c, d, z.
+    assert!(alice.detach_connection(&connection));
+    server.disconnect_subscriber(subscriber);
+    insert(&alice, "offline");
+    assert!(stream.try_next_event().is_none());
+    block_on(server.delete("notes", c, Default::default())).unwrap();
+    connect(&alice, &server);
+    for _ in 0..20 {
+        turn(&[&alice, &server, &alice]);
+    }
+    let Some(SubscriptionEvent::Delta {
+        reset,
+        added,
+        removed,
+        settled,
+        tier,
+        ..
+    }) = stream.try_next_event()
+    else {
+        panic!("missing resumed delta")
+    };
+    assert!(!reset && settled);
+    assert_eq!(tier, DurabilityTier::Global);
+    assert_eq!(removed.len(), 1);
+    assert_eq!((removed[0].row_uuid, removed[0].index), (c, 0));
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].index, 1);
+    assert_eq!(
+        added[0]
+            .cells()
+            .find(|(name, _)| *name == "text")
+            .unwrap()
+            .1
+            .unwrap(),
+        &Value::String("offline".into())
+    );
+}
+
+/// Alice's real writes advance the SQLite change receipt. Reads, diagnostics and
+/// idle ticks leave it unchanged. This low-level receipt supports host tests
+/// that must distinguish scheduling a wake from writing persistent state.
+#[test]
+fn sqlite_change_receipt_observes_writes_without_mutating_storage() {
+    let alice = open(91, false);
+    let before = alice.sqlite_total_changes_for_test();
+    assert_eq!(alice.sqlite_total_changes_for_test(), before);
+    insert(&alice, "actual stored row");
+    let after_write = alice.sqlite_total_changes_for_test();
+    assert!(
+        after_write > before,
+        "the receipt must observe actual SQL writes"
+    );
+    let query = alice.prepare_query(&Query::from("notes")).unwrap();
+    for _ in 0..16 {
+        let rows =
+            block_on(alice.all(&query, ReadOpts::for_read_tier(ReadTier::LocalOnly))).unwrap();
+        assert_eq!(rows.len(), 1);
+        block_on(alice.tick()).unwrap();
+        assert_eq!(alice.sqlite_total_changes_for_test(), after_write);
+    }
 }

@@ -1,5 +1,5 @@
 import { accountRegistryUrl } from "../accounts/context.js";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import type { AppContext, Session } from "../runtime/context.js";
@@ -228,6 +228,8 @@ describe("backend/create-jazz-context", () => {
     });
   });
 
+  afterEach(() => vi.unstubAllEnvs());
+
   it("rejects unassigned requests before opening a runtime", async () => {
     const context = createJazzContext({
       appId: "server-app",
@@ -425,6 +427,46 @@ describe("backend/create-jazz-context", () => {
     );
     expect(mocks.clients[0]!.asBackend).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { nodeEnv: undefined, allowLocalFirstAuth: undefined, expected: true },
+    { nodeEnv: "development", allowLocalFirstAuth: undefined, expected: true },
+    { nodeEnv: "test", allowLocalFirstAuth: undefined, expected: true },
+    { nodeEnv: "production", allowLocalFirstAuth: undefined, expected: false },
+    { nodeEnv: "PrOdUcTiOn", allowLocalFirstAuth: undefined, expected: false },
+    { nodeEnv: "development", allowLocalFirstAuth: true, expected: true },
+    { nodeEnv: "development", allowLocalFirstAuth: false, expected: false },
+    { nodeEnv: "production", allowLocalFirstAuth: true, expected: true },
+    { nodeEnv: "production", allowLocalFirstAuth: false, expected: false },
+  ])(
+    "forwards allowLocalFirstAuth=$expected when NODE_ENV=$nodeEnv and override=$allowLocalFirstAuth",
+    async ({ nodeEnv, allowLocalFirstAuth, expected }) => {
+      vi.stubEnv("NODE_ENV", nodeEnv);
+      const context = createJazzContext({
+        appId: "server-app",
+        serverUrl: "http://localhost:1625",
+        backendSecret: "secret",
+        app: { wasmSchema: SCHEMA_A },
+        permissions: {},
+        driver: { type: "memory" },
+        allowLocalFirstAuth,
+      });
+      const req = { headers: { authorization: "Bearer token" } };
+
+      await context.forRequest(req);
+      await context.withAttributionForRequest(req);
+
+      expect(mocks.resolveRequestSession).toHaveBeenCalledTimes(2);
+      for (const [request, config] of mocks.resolveRequestSession.mock.calls) {
+        expect(request).toBe(req);
+        expect(config).toMatchObject({
+          appId: "server-app",
+          accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
+          allowLocalFirstAuth: expected,
+        });
+      }
+    },
+  );
 
   it("BC-U03b: forwards backend request auth config into request session resolution", async () => {
     const context = createJazzContext({

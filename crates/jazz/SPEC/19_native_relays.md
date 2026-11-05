@@ -218,8 +218,9 @@ embedded Rust library.
 The first public ABI is V1. It includes host-generated opaque admission
 capabilities and trusted revocation; no earlier implementation number or
 compatibility path is part of the released contract. ABI 2 (alpha.58) adds
-coded operation errors (response 25) as answers to existing commands; see
-§19.6 ("Coded operation errors"). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
+coded operation errors (response 25) as answers to existing commands, and
+ABI 3 (alpha.60) adds their optional reason name; see §19.6 ("Coded operation
+errors"). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
 the current version.
 
 The ABI stays coarse and binary:
@@ -637,20 +638,26 @@ attribution; malformed bytes and lifecycle failures still fail closed at the C
 boundary.
 
 **Coded operation errors.** Response 25, `CodedOperationError`, is introduced
-by ABI 2: a code string followed by a reason string. A failure caused by a core
+by ABI 2. Since ABI 3 its layout is a code string, an optional reason name
+(postcard `Option<String>`), then a reason string. A failure caused by a core
 `jazz::db::Error` uses it, with the code set to the stable
-`ErrorCode::as_str` spelling (for example `not_observed`) and the reason set to
-the core error's unchanged display text (`"NotObserved: …"`). Every other
-failure keeps response 8, `OperationError`, with only a reason. The TypeScript
-decoder presents both as one `operationError` response with an optional
-`code`, and the shared adapter throws it as an `Error` whose `code` is that
-string. Bytes are pinned by `foreground_coded_operation_error_v1_byte_contract`.
-Because this response answers existing commands, it bumped the relay ABI to 2:
-a JavaScript bundle and a native build from different ABIs refuse to open with
-the "new native development/release build required" error, so neither an old
-decoder meets tag 25 nor new JavaScript meets an uncoded core failure. A
-JavaScript-only OTA update onto an ABI 1 native build therefore needs a new
-native build.
+`ErrorCode::as_str` spelling (for example `not_observed`), the reason name set
+to the error's `Reason::as_str` when it has one (for example
+`authorization_denied`), and the reason set to the core error's unchanged
+display text (`"NotObserved: …"`). Every other failure keeps response 8,
+`OperationError`, with only a reason. The TypeScript decoder presents both as
+one `operationError` response with an optional `code` and `reasonName`, and
+the shared adapter throws it as an `Error` whose `code` and `reason` are those
+strings. Both shapes, with and without a reason name, are pinned by the Rust
+codec corpus in `jazz-napi`'s `rn_test_bridge` and its TypeScript mirror
+`tests/react-native/codec-contract.test.ts`. Because this response answers
+existing commands, introducing it bumped the relay ABI to 2 and adding the
+reason name bumped it to 3: a JavaScript bundle and a native build from
+different ABIs refuse to open with the "new native development/release build
+required" error, so no decoder meets a layout it does not know. A
+JavaScript-only OTA update onto an older native build therefore needs a new
+native build. The C header's `JAZZ_NATIVE_RELAY_ABI_VERSION` names the same
+version, and the C and C++ ABI probes compare the artifact against it.
 
 This slice intentionally delegates every mutation to the existing core
 transaction APIs with their default options. It therefore does not invent

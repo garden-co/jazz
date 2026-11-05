@@ -89,8 +89,9 @@ closing the binding during a pending seal, and ordinary-write isolation from a
 delayed or cancelled reservation across reconnect. Independent wire/storage fixtures
 and existing initialization, owner, relay and permission regressions run alongside.
 
-The real SDK browser experiment with the separately prepared WebSocket admission
-port creates an account, writes an encrypted chat message, shuts down, reopens,
-and decrypts the message using the real SQLite server and IndexedDB worker. This result does not qualify every encrypted query/subscription shape,
-all crash schedules, or the remaining native runtime integration. The stack stays
-draft.
+The [private-owner WebSocket port](sqlite-private-relay-websocket.md) now includes
+reproducible browser tests against the real SQLite server and production IndexedDB
+worker. They cover encrypted chat creation and reopening, sharing between two
+accounts, a subscribed reply, and refusal to decrypt for an unshared account.
+This does not qualify every encrypted query/subscription shape, all crash
+schedules, or the remaining native runtime integration. The stack stays draft.

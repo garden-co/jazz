@@ -172,7 +172,8 @@ fn schema() -> JazzSchema {
     .expect("DocShelf schema compiles")
 }
 
-fn config(node: u8) -> DbConfig {
+/// The DocShelf schema for a node.
+pub fn config(node: u8) -> DbConfig {
     DbConfig::new(
         schema(),
         DbIdentity {
@@ -182,7 +183,8 @@ fn config(node: u8) -> DbConfig {
     )
 }
 
-fn insert(db: &Db, id: RowUuid, title: String, body: String, updated_at: i32) {
+/// Inserts a document and waits until it is locally durable.
+pub fn insert(db: &Db, id: RowUuid, title: String, body: String, updated_at: i32) {
     let write = block_on(db.insert(
         "docs",
         BTreeMap::from([

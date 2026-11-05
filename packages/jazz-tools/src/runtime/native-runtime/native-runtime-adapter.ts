@@ -89,7 +89,11 @@ import {
 import { exactSignedI64 } from "./exact-integer.js";
 import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey } from "./native-row-descriptor-key.js";
-import { nativeCoreErrorCode } from "./native-error-code.js";
+import {
+  nativeCoreErrorCode,
+  nativeCoreErrorReason,
+  type NativeCoreErrorReason,
+} from "./native-error-code.js";
 import { asUnsupportedStorageCodecsError } from "../unsupported-storage-codecs-error.js";
 import {
   WebSocketCarrier,
@@ -337,6 +341,7 @@ type NativeDb = {
     | NativeCatalogueStateResult
     | Promise<NativeCatalogueStateResult>;
   validateCatalogueCaptureReplacement?(previous: Uint8Array, next: Uint8Array): void;
+  mergeCatalogueCaptures?(previous: Uint8Array, next: Uint8Array): Uint8Array;
   /** Qualify this schema view without draining the runtime owner's capture. */
   hasAuthenticatedCatalogue?():
     | boolean
@@ -459,6 +464,7 @@ type NativeDb = {
   ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   setNonDurableClient?(): void;
+  setPrivateOwnerClient?(): void;
   setScopeIsolatedStorageOwner?(): void;
   waitForStorageOwner?(): Promise<void>;
   /** Exact wire features compiled into the native artifact backing this DB. */
@@ -916,6 +922,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverTransport: Transport | null = null;
   private peerUpstreamAttached = false;
   private nonDurableClient = false;
+  private privateOwnerClient = false;
   private serverCarrier: WebSocketCarrier | null = null;
   private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
   private serverConnectionAttempt: ServerConnectionAttempt | null = null;
@@ -924,6 +931,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverReplacementPromise: Promise<WebSocketCarrier> | null = null;
   private serverTransportError: Error | null = null;
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
+  private localRelayError: Error | null = null;
+  private readonly localRelayErrorWaiters: ServerTransportErrorWaiter[] = [];
   private serverTransportWorkEpoch = 0;
   private serverTransportWorkWaiters: ServerTransportWorkWaiter[] = [];
   private serverEndpointUrl: string | null = null;
@@ -1175,13 +1184,15 @@ export class NativeRuntimeAdapter implements Runtime {
   }): Promise<Transport> {
     if (this !== this.ownerRuntime) return await this.ownerRuntime.connectUpstreamPeer(authority);
     this.peerUpstreamAttached = true;
-    if (authority)
-      return this.connectNegotiatedUpstream({
-        protocolVersion: WIRE_PROTOCOL_VERSION,
-        features: authority.features,
-        authority,
-      });
-    return await this.db.connectUpstream();
+    const transport = authority
+      ? await this.connectNegotiatedUpstream({
+          protocolVersion: WIRE_PROTOCOL_VERSION,
+          features: authority.features,
+          authority,
+        })
+      : await this.db.connectUpstream();
+    this.localRelayError = null;
+    return transport;
   }
 
   onPeerTransportWork(listener: (requiresDistinctPass?: boolean) => void): () => void {
@@ -1276,10 +1287,28 @@ export class NativeRuntimeAdapter implements Runtime {
     this.nonDurableClient = true;
   }
 
+  /** Select E2EE owner admission before attaching this foreground to its worker. */
+  setPrivateOwnerClient(): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.setPrivateOwnerClient();
+    if (!this.db.setPrivateOwnerClient) {
+      throw new Error(
+        "Native runtime does not expose private owner client mode; rebuild the native artifact",
+      );
+    }
+    this.db.setPrivateOwnerClient();
+    this.nonDurableClient = true;
+    this.privateOwnerClient = true;
+  }
+
+  /** Whether this foreground must wait for private-owner admission before staging. */
+  requiresStorageOwnerAdmission(): boolean {
+    return this.ownerRuntime.privateOwnerClient;
+  }
+
   /** Wait for the current worker's recovery acknowledgement, independent of the server. */
   async waitForStorageOwner(): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.waitForStorageOwner();
-    if (!this.nonDurableClient) return;
+    if (!this.privateOwnerClient) return;
     if (!this.db.waitForStorageOwner) {
       throw new Error("Native runtime lacks private storage-owner admission; rebuild its bindings");
     }
@@ -2408,9 +2437,12 @@ export class NativeRuntimeAdapter implements Runtime {
     const validate = this.db.validateCatalogueCaptureReplacement;
     if (!validate)
       throw new InitializationCapabilityError("authenticated catalogue capture/publication");
-    await store.cache.publish(store.scope, capture, (previous, next) =>
-      validate.call(this.db, previous, next),
-    );
+    const merge = this.db.mergeCatalogueCaptures;
+    await store.cache.publish(store.scope, capture, (previous, next) => {
+      // Resolve against the current bytes under the cache's publication lock.
+      if (merge) return merge.call(this.db, previous, next);
+      validate.call(this.db, previous, next);
+    });
     this.pendingCatalogueCapture = undefined;
   }
 
@@ -2631,7 +2663,7 @@ export class NativeRuntimeAdapter implements Runtime {
             this.pumpSubscriptions();
             return;
           } catch (error) {
-            throw rejectedWaitError(txId, error) ?? error;
+            throw rejectedWaitError(txId, error, write) ?? error;
           }
         } finally {
           state.wake = null;
@@ -2850,6 +2882,9 @@ export class NativeRuntimeAdapter implements Runtime {
     // Validate synchronously before retiring the current transport. Callers
     // historically observe an incompatible native binding at connect() time.
     const features = this.nativeWireFeatures();
+    // Admit the replica role before connect() returns. Writes made during the
+    // asynchronous Hello must enter its upload journal, not standalone history.
+    this.setRemoteLinkHint("connecting");
     const generation = this.serverConnectionGeneration + 1;
     const predecessorRetirement = this.invalidateServerTransport({
       rejectWaiters: false,
@@ -3063,6 +3098,9 @@ export class NativeRuntimeAdapter implements Runtime {
         this.clearServerOutage();
         attempt.transport = transport;
         this.serverTransport = transport;
+        // Worker-owned runtimes have no ConnectionManager to publish this
+        // transition. Replace the bounded attempt hint once admission succeeds.
+        this.setRemoteLinkHint("connected");
         this.remoteLink.changed();
         transport.setAuxiliaryTraceEnabled?.(this.auxiliaryTraceListeners.size > 0);
         this.watchAuxiliaryOutbound(transport, carrier, generation).catch((error) =>
@@ -3266,6 +3304,16 @@ export class NativeRuntimeAdapter implements Runtime {
     this.handleServerTransportError(error);
   }
 
+  /** The durable worker itself failed, so a tab cannot establish Local either. */
+  reportLocalRelayError(error: Error): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.reportLocalRelayError(error);
+    this.localRelayError ??= error;
+    for (const waiter of this.localRelayErrorWaiters.splice(0)) {
+      if (waiter.active) waiter.reject(this.localRelayError);
+    }
+    this.handleServerTransportError(error);
+  }
+
   /** Clear a terminal remote-peer error after its replacement transport is ready. */
   clearRemoteServerTransportError(): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.clearRemoteServerTransportError();
@@ -3308,6 +3356,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.pendingLocalSettlements.size > 0) {
       await Promise.all(this.pendingLocalSettlements);
     }
+    this.throwServerTransportErrorForTier("local");
   }
 
   /** Observe worker durability work, including fire-and-forget mutations. */
@@ -3532,14 +3581,16 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   /**
-   * A session supplies the subject for a trusted-serving host; it never turns
-   * an ordinary client mutation into a policy-enforcing local admission.
+   * A write with a session is that session's: the authority checks it as the
+   * session over a backend link, or as the link's own identity otherwise. A
+   * client's own session is the runtime itself, so it writes as the runtime.
+   * A trusted-serving host writes as its peer when no session is given.
    */
   private trustedWriteIdentity(session: RuntimeSession | null | undefined): Uint8Array | undefined {
-    if (this.trustedBackend && !session) return undefined;
-    return this.readAuthorizationHost === "trusted-serving"
-      ? (session?.identity ?? this.peerIdentity)
-      : undefined;
+    const serving = this.readAuthorizationHost === "trusted-serving";
+    if (!session) return serving && !this.trustedBackend ? this.peerIdentity : undefined;
+    const own = !this.trustedBackend && !serving && sameBytes(session.identity, this.peerIdentity);
+    return own ? undefined : session.identity;
   }
 
   /** External provenance is accepted only by the explicit backend runtime;
@@ -4700,6 +4751,9 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private throwServerTransportErrorForTier(tier: string): void {
+    if (tier === "local" && this.nonDurableClient && this.localRelayError) {
+      throw this.localRelayError;
+    }
     if ((tier === "global" || tier === "remote") && this.serverTransportError) {
       throw this.serverTransportError;
     }
@@ -4708,10 +4762,13 @@ export class NativeRuntimeAdapter implements Runtime {
   private waitForServerTransportError(
     tier: string,
   ): { promise: Promise<never>; cancel: () => void } | null {
-    if (tier !== "global" && tier !== "remote") return null;
-    if (this.serverTransportError) {
+    const local = tier === "local" && this.nonDurableClient;
+    if (!local && tier !== "global" && tier !== "remote") return null;
+    const error = local ? this.localRelayError : this.serverTransportError;
+    const waiters = local ? this.localRelayErrorWaiters : this.serverTransportErrorWaiters;
+    if (error) {
       return {
-        promise: Promise.reject(this.serverTransportError),
+        promise: Promise.reject(error),
         cancel: () => {},
       };
     }
@@ -4722,14 +4779,14 @@ export class NativeRuntimeAdapter implements Runtime {
     const promise = new Promise<never>((_, reject) => {
       waiter.reject = reject;
     });
-    this.serverTransportErrorWaiters.push(waiter);
+    waiters.push(waiter);
     return {
       promise,
       cancel: () => {
         if (!waiter.active) return;
         waiter.active = false;
-        const index = this.serverTransportErrorWaiters.indexOf(waiter);
-        if (index >= 0) this.serverTransportErrorWaiters.splice(index, 1);
+        const index = waiters.indexOf(waiter);
+        if (index >= 0) waiters.splice(index, 1);
       },
     };
   }
@@ -5078,6 +5135,7 @@ function readOptions(
   if (tier != null) readOptions.tier = tier;
   if (includeDeleted) readOptions.include_deleted = true;
   if (options.e2ee_snapshot_at_begin === true) readOptions.e2ee_snapshot_at_begin = true;
+  if (options.observe_accepted_evidence === true) readOptions.observe_accepted_evidence = true;
   if (
     typeof options.first_load_remote_wait_ms === "number" &&
     options.first_load_remote_wait_ms > 0
@@ -5492,7 +5550,7 @@ function terminalBytes(bytes: NativeTerminalBytes): Uint8Array {
   return bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes);
 }
 
-/** Decode the leading UUID key field from Groove's ordered record-key carrier. */
+/** Decode the leading UUID key field from the ordered record-key carrier. */
 function terminalPayloadRowId(encoded: NativeTerminalBytes): string {
   const bytes = terminalBytes(encoded);
   if (bytes.length < 17 || bytes[0] !== 10) {
@@ -5584,6 +5642,7 @@ function sleep(ms: number): Promise<void> {
 function rejectedWaitError(
   transactionId: TxId,
   error: unknown,
+  write: Pick<Write, "writeState">,
 ): {
   kind: "rejected";
   transactionId: TxId;
@@ -5594,7 +5653,57 @@ function rejectedWaitError(
 } | null {
   if (isCoreTransactionConflict(error)) return transactionConflictRejection(transactionId, error);
   if (!isCoreWriteRejection(error)) return null;
+  // SQLite exposes the real fate through the retained receipt. Use it before
+  // interpreting the host's diagnostic: WASM and NAPI render that text
+  // differently, and malformed payload text can contain a rejection name.
+  const details = rejectedWriteState(write);
+  if (details) {
+    const rejection = {
+      kind: "rejected" as const,
+      transactionId,
+      ...details,
+      message: errorMessage(error),
+    };
+    Object.defineProperty(rejection, "message", { enumerable: false });
+    return rejection;
+  }
   return queuedWriteRejection(transactionId, error);
+}
+
+function rejectedWriteState(write: Pick<Write, "writeState">): {
+  code: string;
+  reason: string;
+} | null {
+  // A shutdown or an older binding may make the receipt unavailable. Preserve
+  // the original wait failure in that case instead of throwing a second error.
+  let state: unknown;
+  try {
+    state = write.writeState();
+  } catch {
+    return null;
+  }
+  if (!state || typeof state !== "object" || !("fate" in state)) return null;
+  const fate = state.fate;
+  if (!fate || typeof fate !== "object" || !("Rejected" in fate)) return null;
+  const rejected = fate.Rejected;
+  if (typeof rejected === "string") {
+    const codes: Readonly<Record<string, string>> = {
+      AuthorizationDenied: "permission_denied",
+      ExclusiveConflict: "serialization_conflict",
+      CausalityViolation: "causality_violation",
+      ClientClockTooFarAhead: "client_clock_too_far_ahead",
+    };
+    const code = Object.hasOwn(codes, rejected) ? codes[rejected] : undefined;
+    return code ? { code, reason: READABLE_REJECTION_REASONS[code]! } : null;
+  }
+  if (!rejected || typeof rejected !== "object") return null;
+  if ("MalformedCommit" in rejected && typeof rejected.MalformedCommit === "string") {
+    return { code: "write_rejected", reason: rejected.MalformedCommit };
+  }
+  if ("Cascade" in rejected && rejected.Cascade && typeof rejected.Cascade === "object") {
+    return { code: "cascade_rejected", reason: READABLE_REJECTION_REASONS.cascade_rejected! };
+  }
+  return null;
 }
 
 /**
@@ -5647,8 +5756,8 @@ function queuedWriteRejection(
   } = {
     kind: "rejected",
     transactionId,
-    code: rejectionCode(message),
-    reason: rejectionReason(message),
+    code: rejectionCode(nativeCoreErrorReason(error)),
+    reason: rejectionReason(message, nativeCoreErrorReason(error)),
     message,
   };
   // Worker transport intentionally carries only the enumerable structured
@@ -5708,37 +5817,42 @@ function contextualError(context: string, error: unknown): Error {
   return new Error(`${context}: ${cause.message}`, { cause });
 }
 
-function rejectionCode(message: string): string {
-  if (message.includes("AuthorizationDenied")) return "permission_denied";
-  if (message.includes("SerializationConflict")) return "serialization_conflict";
-  if (message.includes("CausalityViolation")) return "causality_violation";
-  if (message.includes("ClientClockTooFarAhead")) return "client_clock_too_far_ahead";
-  if (message.includes("Cascade")) return "cascade_rejected";
-  return "write_rejected";
+/**
+ * The rejection code of each core reason a rejected wait can carry. Reasons
+ * with no code of their own are a plain `write_rejected`.
+ */
+const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>> = {
+  authorization_denied: "permission_denied",
+  client_clock_too_far_ahead: "client_clock_too_far_ahead",
+  serialization_conflict: "serialization_conflict",
+  row_already_deleted: "write_rejected",
+  row_already_exists: "write_rejected",
+  row_not_deleted: "write_rejected",
+  missing_required: "write_rejected",
+  branch_move: "write_rejected",
+  missing_chunks: "write_rejected",
+  permissions_head_missing: "write_rejected",
+};
+
+/** A rejected wait's code, from the core reason every binding carries on it. */
+function rejectionCode(reason: NativeCoreErrorReason | undefined): string {
+  return reason === undefined ? "write_rejected" : REJECTION_CODES_BY_REASON[reason];
 }
 
 /**
- * Fallback readable reasons for structured authority rejections, used only
- * when the core diagnostic does not carry its own readable reason (older
- * native bindings). The core appends ` (reason: …)` with the same text it puts
- * on `onMutationError` events, so waits and events agree.
+ * Readable reasons for authority rejections whose diagnostic is an internal
+ * detail, the same text `onMutationError` events carry.
  */
 const READABLE_REJECTION_REASONS: Readonly<Record<string, string>> = {
   permission_denied: "Write rejected by server authorization",
   serialization_conflict: "Serializable transaction conflicted with another write",
-  causality_violation: "Transaction violated causal ordering",
   client_clock_too_far_ahead: "Client clock is too far ahead",
-  cascade_rejected: "Transaction was rejected because an ancestor transaction was rejected",
 };
 
-function rejectionReason(message: string): string {
+function rejectionReason(message: string, coreReason: NativeCoreErrorReason | undefined): string {
   const reason = extractWriteRejectedReason(message);
   if (reason === null) return message;
-  const readable = /^transaction .* was rejected: .* \(reason: (.*)\)$/s.exec(reason)?.[1];
-  if (readable) return readable;
-  const fallback = READABLE_REJECTION_REASONS[rejectionCode(reason)];
-  if (fallback) return fallback;
-  return reason || "Write rejected";
+  return READABLE_REJECTION_REASONS[rejectionCode(coreReason)] ?? (reason || "Write rejected");
 }
 
 /** Whether a native error is a core `TransactionConflict` error, decided by its stable core code. */

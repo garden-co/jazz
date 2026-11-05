@@ -21,7 +21,7 @@ pub(super) struct OwnerReservation {
     pub(super) durable: bool,
 }
 struct ReservationWait {
-    inner: Weak<RefCell<Inner>>,
+    inner: Weak<Store>,
     id: u64,
 }
 impl Drop for ReservationWait {
@@ -48,8 +48,14 @@ impl Db {
         &self,
         open: OpenTransactionId,
     ) -> Result<InitializationSeal, Error> {
+        self.inner().require_mutation_admission()?;
         if !self.inner().non_durable {
             return self.seal_initialization_transaction(open);
+        }
+        if !self.inner().private_owner_required {
+            return Err(unsupported(
+                "initialization reservations through an ordinary worker",
+            ));
         }
         let (batch, id, nonce, connection) = {
             let mut inner = self.inner();
@@ -127,6 +133,9 @@ impl Db {
             .expect("deadline");
         let reservation = poll_fn(|_| {
             let mut inner = self.inner();
+            if let Err(error) = inner.require_mutation_admission() {
+                return Poll::Ready(Err(error));
+            }
             if let Err(error) = inner.require_foreground_writes("initialization reservations") {
                 return Poll::Ready(Err(error));
             }
@@ -411,7 +420,7 @@ impl Inner {
         result: Result<UploadId, WireError>,
     ) -> Result<(), Error> {
         self.require_foreground_writes("initialization reservation replies")?;
-        if !self.non_durable {
+        if !self.private_owner_required {
             return Err(query_error(
                 "initialization reply without a foreground request",
             ));

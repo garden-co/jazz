@@ -11,7 +11,10 @@ on a decision. A successful read alone does not mean its transaction committed.
 A Remote read obtains a typed authority answer. The first queued read pins the
 transaction's cut; subsequent paired reads request that cut. The replica checks
 that its ordered root ids equal the authority result and that every returned
-row state has authority-issued content evidence. Pagination hydrates the normal
+row state has authority-issued content evidence. The cut excludes commits that
+were pending locally at begin and later settled beyond that authority position.
+Ordinary transaction reads keep their own-write overlay; paired accepted reads
+do not extend the authority result with it. Pagination hydrates the normal
 bounded prefix, then applies the original offset locally. The read set records
 the original query, including its window, for authority validation. Large values
 hydrate through ordinary chunk transport, including at a relay. Requests have a
@@ -47,6 +50,13 @@ roots, explicit query traversals, relationship output, flat joins and aggregates
 return a typed unsupported error. Policies still use the normal policy compiler;
 missing supporting evidence cannot qualify an incomplete result as complete.
 
+The [accepted scoped extension](sqlite-accepted-scoped-evidence-v1-compatibility.md)
+adds bounded permission evidence for trusted backends, including historical
+indexed dependencies and recursive helpers. The
+[accepted overlay check](sqlite-accepted-overlay-v1-compatibility.md) allows
+staged writes when the authority verifies that their projection leaves the
+original accepted result unchanged.
+
 ## Worked cases
 
 Bob's content write B is accepted at authority position 7. A later deletion D
@@ -54,6 +64,13 @@ changes row state at position 8. Alice's paired read including deleted rows
 returns D's retained content with B's writer transaction and position 7. A
 content-free restore keeps B; newly written content gets a new witness. An
 identical payload written in another transaction is still a different witness.
+
+Alice pins position 7 while her own insert, update or delete is pending. That
+write settles at position 8 before a second paired read. The second read still
+returns the position-7 contents and their original authority evidence. Its read
+set remains subject to normal commit validation: a decision changed by the
+position-8 write conflicts and must be retried. A later own commit cannot cause
+a false incomplete-result error or silently replace content at a matching id.
 
 Alice begins while she has accepted evidence only for A. She later receives B,
 even if B was accepted upstream before begin. Her LocalOnly observation retains
@@ -113,6 +130,7 @@ binaries cannot decode them. A newer replica with no accepted proof cannot infer
 it from legacy Origins or a local receipt. Downgrade and mixed-version deployment
 are unsupported; no compatibility with retired Groove or earlier unreleased
 E2EE schemas is claimed. Catalogue identity/coverage is covered separately in
-`sqlite-catalogue-compatibility.md`. Catalogue policy intrinsics and browser SDK
-storage admission remain separate boundaries, so these scoped checks do not
-qualify the full browser E2EE runtime.
+`sqlite-catalogue-compatibility.md` and E17’s
+`sqlite-catalogue-policies-compatibility.md`. Browser SDK storage admission remains
+a separate boundary, so these scoped checks do not qualify the full browser
+E2EE runtime.

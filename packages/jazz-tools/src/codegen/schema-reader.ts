@@ -26,6 +26,7 @@ import { analyzeRelations } from "./relation-analyzer.js";
 import { mapPolicyExpr, type PolicyLeafMappers } from "../policy-expr-map.js";
 import { toValue } from "../runtime/value-converter.js";
 import { assertSchemaNameAllowed } from "../schema-name.js";
+import { assertNoSyntheticReferences, isProvenanceAccountColumn } from "../magic-columns.js";
 
 const map: Record<ScalarSqlType, ColumnType> = {
   TEXT: { type: "Text" },
@@ -184,6 +185,7 @@ export function schemaToWasm(schema: Schema): WasmSchema {
   const tableNames = new Set<string>();
 
   for (const table of schema.tables) {
+    assertNoSyntheticReferences(table.name, table.syntheticReferencesV1);
     assertSchemaNameAllowed(table.name);
     if (tableNames.has(table.name)) {
       throw new Error(
@@ -226,6 +228,9 @@ export function schemaToWasm(schema: Schema): WasmSchema {
 
     tables[table.name] = {
       columns,
+      ...(table.syntheticReferencesV1
+        ? { synthetic_references_v1: { ...table.syntheticReferencesV1 } }
+        : {}),
       ...(table.relations ? { relations: table.relations } : {}),
       ...(table.indexedColumns ? { indexed_columns: [...table.indexedColumns] } : {}),
       ...(table.compositeIndexes
@@ -242,6 +247,11 @@ export function schemaToWasm(schema: Schema): WasmSchema {
   for (const [tableName, table] of Object.entries(tables)) {
     for (const [name, relation] of Object.entries(table.relations ?? {})) {
       if (relation.kind !== "forward") continue;
+      if (isProvenanceAccountColumn(relation.column)) {
+        throw new Error(
+          `Relationships through "${tableName}.${relation.column}" are not supported yet. Use a stored UUID owner column.`,
+        );
+      }
       const column = table.columns.find((c) => c.name === relation.column);
       if (!column)
         throw new Error(

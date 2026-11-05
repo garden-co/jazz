@@ -1,12 +1,18 @@
 import { NapiDb } from "jazz-napi";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { openConfig, queryFromTable } from "./native-runtime/native-codec.js";
-import { nativeCoreErrorCode, nativeErrorCode } from "./native-runtime/native-error-code.js";
+import {
+  NATIVE_CORE_ERROR_REASONS,
+  nativeCoreErrorCode,
+  nativeCoreErrorReason,
+  nativeErrorCode,
+} from "./native-runtime/native-error-code.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "./native-runtime/schema-codec.js";
 import {
@@ -14,6 +20,7 @@ import {
   isUnsupportedStorageCodecsError,
 } from "./unsupported-storage-codecs-error.js";
 import { testAuthorBytes } from "./testing/account-fixtures.js";
+import { loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "./testing/wasm-runtime-test-utils.js";
 
 // A core error crossing a native binding keeps its Rust display text as the
@@ -43,6 +50,27 @@ async function missingTableReadError(read: (query: Uint8Array) => unknown): Prom
   }
   throw new Error("reading an undeclared table unexpectedly succeeded");
 }
+
+describe("native core error reasons", () => {
+  it("reads a core reason name and ignores anything else", () => {
+    const denied = Object.assign(new Error("WriteRejected: authorization_denied: x"), {
+      code: "write_rejected",
+      reason: "authorization_denied",
+    });
+    expect(nativeCoreErrorReason(denied)).toBe("authorization_denied");
+    expect(nativeCoreErrorReason(new Error("no reason"))).toBeUndefined();
+    expect(nativeCoreErrorReason({ reason: "a_reason_from_a_newer_engine" })).toBeUndefined();
+    expect(nativeCoreErrorReason("authorization_denied")).toBeUndefined();
+  });
+
+  it("knows exactly the reasons the engine has", async () => {
+    // A test-only export (`skip_typescript`), absent from the declarations.
+    const napi = (await loadNapiModule()) as unknown as {
+      __testCoreErrorReasonNames(): string[];
+    };
+    expect([...NATIVE_CORE_ERROR_REASONS].sort()).toEqual(napi.__testCoreErrorReasonNames().sort());
+  });
+});
 
 describe("native core error codes", () => {
   it("NAPI throws a core error as an Error with its message and stable code", async () => {
@@ -95,50 +123,60 @@ describe("native core error codes", () => {
 });
 
 // A store written by an older Jazz storage format is refused at open with the
-// stable code `unsupported_storage_codecs` and its codec lists (#3728).
+// stable code `unsupported_storage_codecs` and the required SQLite root format.
 
 /** The published alpha.54 native client root, unpacked into a fresh directory. */
-function unpackPublishedAlpha54Root(): { dir: string; root: string } {
+function unpackPublishedAlpha54Root(): {
+  dir: string;
+  root: string;
+  originalFiles: Record<string, string>;
+} {
   const base64 = readFileSync(
     new URL(
-      "../../../../crates/jazz/fixtures/published-alpha54-native-rocksdb.tar.gz.base64",
+      "../../../../crates/jazz/fixtures/pre-sqlite/published-alpha54-native-rocksdb.tar.gz.base64",
       import.meta.url,
     ),
     "utf8",
   ).replace(/\s+/g, "");
+  const bytes = Buffer.from(base64, "base64");
+  // This is the immutable published receipt, not a newly generated old store.
+  expect(createHash("sha256").update(bytes).digest("hex")).toBe(
+    "10d139b12fd21530fd553ee148e975d4e2f55d11b43bf3bd90d00179f5703575",
+  );
   const dir = mkdtempSync(join(tmpdir(), "jazz-old-store-"));
   const archive = join(dir, "root.tar.gz");
-  writeFileSync(archive, Buffer.from(base64, "base64"));
+  writeFileSync(archive, bytes);
   execFileSync("tar", ["-xzf", archive, "-C", dir]);
-  return { dir, root: join(dir, "rocksdb-epoch-1") };
+  const root = join(dir, "rocksdb-epoch-1");
+  return { dir, root, originalFiles: fileHashes(root) };
 }
 
-// Matches `alpha54_missing()` / `alpha54_unknown()` in
-// crates/jazz/tests/storage_format_refusal.rs.
-const ALPHA54_MISSING = [
-  "groove.dictionary.v1",
-  "groove.durable-index.v2",
-  "groove.large-value.v2",
-  "groove.ordered-chunk-storage.v2",
-  "jazz.node-storage.v2",
-];
-const ALPHA54_UNKNOWN = [
-  "groove.large-value.v1",
-  "groove.ordered-chunk-storage.v1",
-  "jazz.branch-key.v1",
-  "jazz.catalogue.activation.v1",
-  "jazz.catalogue.bootstrap-ready.v1",
-  "jazz.catalogue.lens.v1",
-  "jazz.catalogue.lineage.v1",
-  "jazz.catalogue.physical-mapping.v1",
-  "jazz.catalogue.schema.v1",
-  "jazz.catalogue.write-pointer.v1",
-  "jazz.subscription-program-fact-key.v1",
-];
+const SQLITE_ROOT_FORMAT = "jazz.sqlite.native-root.v1";
+
+function fileHashes(root: string): Record<string, string> {
+  return Object.fromEntries(
+    readdirSync(root)
+      .sort()
+      .map((name) => [
+        name,
+        createHash("sha256")
+          .update(readFileSync(join(root, name)))
+          .digest("hex"),
+      ]),
+  );
+}
+
+function expectUnchangedOldRoot(root: string, originalFiles: Record<string, string>) {
+  const after = fileHashes(root);
+  // Admission may create its process lock, but must not create a SQLite file
+  // or alter/remove any of the published root's original physical files.
+  delete after[".jazz-native-owner.lock"];
+  expect(after).toEqual(originalFiles);
+}
 
 describe("storage-format refusal", () => {
-  it("NAPI throws an old store as an Error with the stable code and codec lists", () => {
-    const { dir, root } = unpackPublishedAlpha54Root();
+  it("NAPI refuses an old store with the stable code and required SQLite format", () => {
+    const { dir, root, originalFiles } = unpackPublishedAlpha54Root();
     try {
       let error: unknown;
       try {
@@ -150,14 +188,18 @@ describe("storage-format refusal", () => {
       expect(error).toBeInstanceOf(Error);
       expect(nativeCoreErrorCode(error)).toBe("unsupported_storage_codecs");
       expect(isUnsupportedStorageCodecsError(error)).toBe(true);
-      expect(error).toMatchObject({ epoch: 1, missing: ALPHA54_MISSING, unknown: ALPHA54_UNKNOWN });
+      expect(error).toMatchObject({ format: SQLITE_ROOT_FORMAT });
+      expect(error).not.toHaveProperty("epoch");
+      expect(error).not.toHaveProperty("missing");
+      expect(error).not.toHaveProperty("unknown");
+      expectUnchangedOldRoot(root, originalFiles);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
   it("the native runtime rethrows the refusal as UnsupportedStorageCodecsError", () => {
-    const { dir, root } = unpackPublishedAlpha54Root();
+    const { dir, root, originalFiles } = unpackPublishedAlpha54Root();
     try {
       let error: unknown;
       try {
@@ -182,9 +224,15 @@ describe("storage-format refusal", () => {
       expect(error).toMatchObject({
         name: "UnsupportedStorageCodecsError",
         code: "unsupported_storage_codecs",
-        missing: ALPHA54_MISSING,
-        unknown: ALPHA54_UNKNOWN,
+        format: SQLITE_ROOT_FORMAT,
+        missing: [],
+        unknown: [],
+        cause: expect.objectContaining({
+          code: "unsupported_storage_codecs",
+          format: SQLITE_ROOT_FORMAT,
+        }),
       });
+      expectUnchangedOldRoot(root, originalFiles);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

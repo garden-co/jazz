@@ -20,7 +20,7 @@ name: Starters E2E
 #   release preview run on the same commit and download its assembled
 #   packages: the exact bytes publish-jazz-tools-alpha.yml later publishes
 #   (it reuses the same preview artifacts), including the Linux NAPI binary
-#   built on the pinned AL2023 image. Starters therefore finish a few minutes
+#   built on the pinned Bullseye image. Starters therefore finish a few minutes
 #   after the preview instead of duplicating its Rust build.
 # - Manual dispatches build release WASM and NAPI from their own tree on 16
 #   vCPUs (`build:starters-e2e`, i.e. build:core without the debug CLI binary

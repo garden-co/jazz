@@ -154,7 +154,10 @@ it.each(["insert", "upsert"] as const)(
       });
       const roots = await writer.all(app.__e2ee_spaces, { tier: "remote" });
       expect(roots).toHaveLength(1);
-      expect(roots[0]).toMatchObject({ identifier: project.id, accountId: account.account.id });
+      expect(roots[0]).toMatchObject({
+        identifier: project.id,
+        creatorAccountId: account.account.id,
+      });
       const grants = await writer.all(app.__e2ee_space_grants, { tier: "remote" });
       expect(grants).toHaveLength(1);
       expect(grants[0]).toMatchObject({

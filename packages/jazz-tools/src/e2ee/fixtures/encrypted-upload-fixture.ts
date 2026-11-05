@@ -1,3 +1,8 @@
+import { TypedTableQueryBuilder } from "../../typed-app.js";
+import {
+  spaceAdministrationSchema,
+  spaceAdministrationTable,
+} from "../space-administration-schema.js";
 import { schema as s } from "../../schema-namespace.js";
 import { definePermissions } from "../../permissions/index.js";
 import { createDb } from "../../runtime/default-create-db.js";
@@ -20,16 +25,26 @@ export const uploadApp = s.defineApp({
     .encrypted({ space: "projectId", columns: ["payload", "name"] }),
 });
 // Same deployed physical schema/identities, without automatic scope initialisation.
-export const legacyUploadApp = s.defineApp({
+const legacyPhysical = s.defineApp({
   ...deviceRequestSchema,
   ...groupSchema,
   ...spaceSchema,
+  [spaceAdministrationTable("projects")]: spaceAdministrationSchema("projects"),
   projects: s.table({ title: s.string() }, {}),
   files: s.table(
     { projectId: s.uuid(), payload: s.bytes(), name: s.bytes() },
     { project: s.rel("projects", "projectId") },
   ),
 });
+
+const rawSchema = { ...uploadApp.wasmSchema };
+export const legacyUploadApp = {
+  projects: new TypedTableQueryBuilder(
+    "projects",
+    rawSchema,
+  ) as unknown as typeof legacyPhysical.projects,
+  files: new TypedTableQueryBuilder("files", rawSchema) as unknown as typeof legacyPhysical.files,
+};
 
 export async function uploadFixture(native = false, denied = false, withRecipient = false) {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });

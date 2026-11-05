@@ -1,11 +1,9 @@
-//! WebAssembly bindings for Jazz on SQLite (`jazz-db`).
+//! WebAssembly bindings for the Jazz database (`jazz-db`).
 //!
 //! One bundle serves both browser roles: a worker that owns a durable SQLite
 //! file (on IndexedDB or OPFS, see [`browser`]) and main-thread in-memory
-//! databases that sync through it. The exported names and byte codecs are the
-//! ones the Groove engine's binding had, so the TypeScript runtime keeps its
-//! shape. Engine features `jazz-db` does not have yet fail with an explicit
-//! "not supported on SQLite yet" error instead of a stand-in.
+//! databases that sync through it. Calls for features Jazz does not support
+//! yet fail with an explicit "not supported yet" error.
 //!
 //! `jazz-db` runs every operation to completion synchronously. The only
 //! things that wait are reads and write fates that need the server; they
@@ -200,24 +198,40 @@ pub fn test_binding_codec_golden_fixture() -> String {
     jazz::binding_codec::BINDING_CODEC_GOLDEN_FIXTURE.to_owned()
 }
 
-/// Test-only execution of a frozen v5 frame batch through the
-/// generated WASM artifact. This reaches the production Rust frame, feature,
-/// compression, and semantic-payload decoders; it is not a browser transport
-/// API.
+/// Test-only: read one pinned wire corpus batch through the generated WASM
+/// artifact, as `reader` (`"server-opening"`, `"server"` or `"client"`)
+/// would, with the production frame and sync message decoders. Not a
+/// browser transport API.
 #[wasm_bindgen(js_name = __testValidateWireFrameBatchCorpus)]
 pub fn test_validate_wire_frame_batch_corpus(
-    frame: Vec<u8>,
+    batch: Vec<u8>,
+    reader: String,
     negotiated_features: String,
 ) -> Result<(), JsValue> {
     let negotiated_features = negotiated_features
         .parse()
         .map_err(|_| JsValue::from_str("test wire corpus features must be a u64 decimal"))?;
-    jazz::wire::decode_websocket_frame_batch(&frame)
-        .map_err(|error| error.to_string())
-        .and_then(|frames| {
-            jazz::wire::validate_frames_for_artifact_corpus(&frames, negotiated_features)
-        })
-        .map_err(|error| error.into())
+    let reader = match reader.as_str() {
+        "server-opening" => jazz::db::CorpusReader::ServerOpening,
+        "server" => jazz::db::CorpusReader::Server,
+        "client" => jazz::db::CorpusReader::Client,
+        other => {
+            return Err(JsValue::from_str(&format!(
+                "unknown wire corpus reader {other:?}"
+            )));
+        }
+    };
+    jazz::db::validate_frame_batch_for_corpus(&batch, reader, negotiated_features)
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Test-only execution of one current SQLite semantic frame through its
+/// production exact decoder. It creates no link and confers no authority.
+#[wasm_bindgen(js_name = __testValidateSqliteSyncFrameCorpus)]
+pub fn test_validate_sqlite_sync_frame_corpus(frame: Vec<u8>) -> Result<(), JsValue> {
+    jazz::sync_codec::decode_sync_message(&frame)
+        .map(drop)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 /// Test-only feature inventory paired with [`test_validate_wire_frame_batch_corpus`].
@@ -437,6 +451,15 @@ impl TickScheduler for Host {
 }
 
 impl Host {
+    fn has_store(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.store.borrow().is_some()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        false
+    }
+
     /// Resolve once every commit so far is in the browser store's backing
     /// storage (a no-op without one).
     async fn flush(&self, through: u64) -> Result<(), JsValue> {
@@ -519,6 +542,18 @@ impl WasmDbInner {
                 Ok(())
             })
         }));
+        let reporter = Rc::clone(&host);
+        *binding.hooks.rejected.borrow_mut() =
+            Some(Box::new(move |tx_id, error, serializable, claimed| {
+                report_later(
+                    &reporter,
+                    &tx_id.to_string(),
+                    error,
+                    serializable,
+                    true,
+                    claimed,
+                );
+            }));
         Self { binding, host }
     }
 
@@ -528,6 +563,7 @@ impl WasmDbInner {
         if let Some(error) = &write.rejected {
             self.report_unclaimed(&write, error, Rc::clone(&claimed));
         }
+        self.binding.hooks.track(&write, &claimed);
         Ok(WasmWrite {
             inner: Some(self.clone()),
             write,
@@ -539,42 +575,73 @@ impl WasmDbInner {
     /// claims it first: the caller gets until the current task ends (its
     /// promise chain included) to call `wait`.
     fn report_unclaimed(&self, write: &Write, error: &Error, claimed: Rc<std::cell::Cell<bool>>) {
-        let host = Rc::clone(&self.host);
-        let event = mutation_error_event(&write.tx_id.to_string(), error);
-        let report = Closure::once_into_js(move || {
-            if claimed.get() {
-                return;
-            }
-            let callback = host.mutation_errors.borrow().clone();
-            if let (Some(callback), Ok(event)) = (callback, event) {
-                let _ = callback.call1(&JsValue::NULL, &event);
-            }
-        });
-        let set_timeout = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("setTimeout"))
-            .ok()
-            .and_then(|f| f.dyn_into::<js_sys::Function>().ok());
-        if let Some(set_timeout) = set_timeout {
-            let _ = set_timeout.call2(&JsValue::NULL, &report, &JsValue::from_f64(0.0));
-        }
+        report_later(
+            &self.host,
+            &write.tx_id.to_string(),
+            error,
+            write.serializable,
+            false,
+            Some(claimed),
+        );
     }
 }
 
-/// A `MutationErrorEvent` for transaction `tx` rejected with `error`.
-fn mutation_error_event(tx: &str, error: &Error) -> Result<JsValue, JsValue> {
-    let code = error.code.as_str();
+/// Tell the mutation-error callback of transaction `tx`'s rejection (by
+/// the authority, if `upstream`) on a later task, unless a wait set
+/// `claimed` by then.
+fn report_later(
+    host: &Rc<Host>,
+    tx: &str,
+    error: &Error,
+    serializable: bool,
+    upstream: bool,
+    claimed: Option<Rc<std::cell::Cell<bool>>>,
+) {
+    let host = Rc::clone(host);
+    let event = mutation_error_event(tx, error, serializable, upstream);
+    let report = Closure::once_into_js(move || {
+        if claimed.is_some_and(|claimed| claimed.get()) {
+            return;
+        }
+        let callback = host.mutation_errors.borrow().clone();
+        if let (Some(callback), Ok(event)) = (callback, event) {
+            let _ = callback.call1(&JsValue::NULL, &event);
+        }
+    });
+    let set_timeout = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("setTimeout"))
+        .ok()
+        .and_then(|f| f.dyn_into::<js_sys::Function>().ok());
+    if let Some(set_timeout) = set_timeout {
+        let _ = set_timeout.call2(&JsValue::NULL, &report, &JsValue::from_f64(0.0));
+    }
+}
+
+/// A `MutationErrorEvent` for transaction `tx` rejected with `error` (by
+/// the authority, if `upstream`).
+fn mutation_error_event(
+    tx: &str,
+    error: &Error,
+    serializable: bool,
+    upstream: bool,
+) -> Result<JsValue, JsValue> {
+    let (code, reason) = binding_host::mutation_error_parts(error, upstream);
     let rejected = js_sys::Object::new();
     set_prop(&rejected, "kind", JsValue::from_str("rejected"))?;
     set_prop(&rejected, "transactionId", JsValue::from_str(tx))?;
     set_prop(&rejected, "code", JsValue::from_str(code))?;
-    set_prop(&rejected, "reason", JsValue::from_str(&error.message))?;
+    set_prop(&rejected, "reason", JsValue::from_str(&reason))?;
     let transaction = js_sys::Object::new();
     set_prop(&transaction, "transactionId", JsValue::from_str(tx))?;
-    set_prop(&transaction, "kind", JsValue::from_str("mergeable"))?;
+    set_prop(
+        &transaction,
+        "kind",
+        JsValue::from_str(binding_host::transaction_kind(serializable)),
+    )?;
     set_prop(&transaction, "sealed", JsValue::TRUE)?;
     set_prop(&transaction, "latestSettlement", rejected.into())?;
     let event = js_sys::Object::new();
     set_prop(&event, "code", JsValue::from_str(code))?;
-    set_prop(&event, "reason", JsValue::from_str(&error.message))?;
+    set_prop(&event, "reason", JsValue::from_str(&reason))?;
     set_prop(&event, "transaction", transaction.into())?;
     Ok(event.into())
 }
@@ -726,7 +793,10 @@ impl WasmDbInner {
         action: HostResult<jazz::protocol::PermissionAdviceAction>,
     ) -> Result<WasmPermissionAdviceRequest, JsValue> {
         let action = action.map_err(host_error)?;
-        let (id, advice) = self.binding.request_permission_advice(action);
+        let (id, advice) = self
+            .binding
+            .request_permission_advice(action, None, None)
+            .map_err(host_error)?;
         Ok(WasmPermissionAdviceRequest {
             promise: host_promise(advice, JsValue::from_str),
             db: self.clone(),
@@ -1096,15 +1166,16 @@ impl WasmDb {
         &self,
         table: String,
         row_id: Vec<u8>,
-        cells: Vec<u8>,
+        cells: Option<Vec<u8>>,
         options: JsValue,
     ) -> Result<WasmWrite, JsValue> {
         let inner = self.open_inner()?;
-        inner.write(
-            inner
-                .binding
-                .restore(&table, &row_id, &cells, &self::options(options)),
-        )
+        inner.write(inner.binding.restore(
+            &table,
+            &row_id,
+            cells.as_deref(),
+            &self::options(options),
+        ))
     }
 
     #[wasm_bindgen(js_name = restoreInTransaction)]
@@ -1113,7 +1184,7 @@ impl WasmDb {
         open_transaction_id: String,
         table: String,
         row_id: Vec<u8>,
-        cells: Vec<u8>,
+        cells: Option<Vec<u8>>,
         options: JsValue,
     ) -> Result<(), JsValue> {
         self.binding()?
@@ -1121,7 +1192,7 @@ impl WasmDb {
                 &open_transaction_id,
                 &table,
                 &row_id,
-                &cells,
+                cells.as_deref(),
                 &self::options(options),
             )
             .map_err(host_error)
@@ -1151,10 +1222,9 @@ impl WasmDb {
                 "cached catalogue open cannot initialise a standalone authority",
             )));
         }
-        let db = block_on(binding_host::open_memory(
-            binding_host::db_config(schema, &config, identity),
-            &config,
-        ))
+        let db = block_on(binding_host::open_memory(binding_host::db_config(
+            schema, &config, identity,
+        )))
         .map_err(to_js_error)?;
         if let Some(capture) = cached_catalogue {
             // SAFETY: the host loads the opaque capture from its app-scoped
@@ -1225,21 +1295,21 @@ impl WasmDb {
     /// Open the durable store a browser worker owns. `storage` selects the
     /// SQLite VFS: `{ backend: "indexeddb" | "opfs", path?: string }`
     /// (IndexedDB when omitted; see [`browser`]). The default file is named
-    /// after `storage_owner`, the worker's admitted ownership marker.
+    /// after `database`, the physical database name the worker admitted.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen(js_name = openBrowser)]
     pub async fn open_browser(
         storage: JsValue,
         schema: Vec<u8>,
         config: Vec<u8>,
-        storage_owner: String,
+        database: String,
         cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
         Self::open_browser_as(
             storage,
             schema,
             config,
-            storage_owner,
+            database,
             OpenAs::Untrusted,
             cached_catalogue,
         )
@@ -1257,7 +1327,7 @@ impl WasmDb {
         token: String,
         app_id: String,
         claimed_author: String,
-        storage_owner: String,
+        database: String,
         cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
         let how = OpenAs::SelfSigned {
@@ -1265,15 +1335,7 @@ impl WasmDb {
             app_id: &app_id,
             claimed_author: &claimed_author,
         };
-        Self::open_browser_as(
-            storage,
-            schema,
-            config,
-            storage_owner,
-            how,
-            cached_catalogue,
-        )
-        .await
+        Self::open_browser_as(storage, schema, config, database, how, cached_catalogue).await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1281,7 +1343,7 @@ impl WasmDb {
         storage: JsValue,
         schema: Vec<u8>,
         config: Vec<u8>,
-        storage_owner: String,
+        database: String,
         how: OpenAs<'_>,
         cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
@@ -1292,7 +1354,7 @@ impl WasmDb {
             binding_host::open_identity(&mut config, how).map_err(host_error)?;
         // Every SQLite store keeps full history, so `history_complete`
         // needs nothing extra.
-        let spec = browser::StoreSpec::from_js(&storage, &storage_owner)?;
+        let spec = browser::StoreSpec::from_js(&storage, &database)?;
         let (db, store) =
             browser::open(&spec, binding_host::db_config(schema, &config, identity)).await?;
         if let Some(capture) = cached_catalogue {
@@ -1311,9 +1373,9 @@ impl WasmDb {
     #[wasm_bindgen(js_name = destroyBrowserStorage)]
     pub async fn destroy_browser_storage(
         storage: JsValue,
-        storage_owner: String,
+        database: String,
     ) -> Result<(), JsValue> {
-        let spec = browser::StoreSpec::from_js(&storage, &storage_owner)?;
+        let spec = browser::StoreSpec::from_js(&storage, &database)?;
         browser::destroy(&spec).await
     }
 
@@ -1702,11 +1764,19 @@ impl WasmDb {
 
     /// Mark an in-memory foreground whose local-first reads must first receive
     /// its storage owner's cache. Authority waits remain separately qualified.
-    /// New writes require the private owner's subject- and schema-bound reply.
     #[wasm_bindgen(js_name = setNonDurableClient)]
     pub fn set_non_durable_client(&self) -> Result<(), JsValue> {
-        self.open_inner()?.binding.db.set_non_durable_client();
+        self.binding()?.set_non_durable_client();
         Ok(())
+    }
+
+    /// Require the private owner's subject- and schema-bound admission before
+    /// this E2EE foreground can stage writes or recover pending owner inputs.
+    #[wasm_bindgen(js_name = setPrivateOwnerClient)]
+    pub fn set_private_owner_client(&self) -> Result<(), JsValue> {
+        self.binding()?
+            .set_private_owner_client()
+            .map_err(host_error)
     }
 
     /// Admit this authenticated replica as the private owner of one subject's
@@ -1777,23 +1847,38 @@ impl WasmDb {
     pub fn connect_upstream(&self) -> Result<js_sys::Promise, JsValue> {
         let link = self.binding()?.connect_upstream();
         Ok(js_sys::Promise::resolve(&JsValue::from(
-            WasmTransport::new(link),
+            WasmTransport::new(link, None),
         )))
     }
 
-    /// Connect after the carrier accepted the server Hello. The session
-    /// context (authority endpoints, negotiated features) has no counterpart
-    /// on SQLite's sync, so this is [`Self::connect_upstream`].
+    /// Connect after the carrier accepted the server Hello. Check the admitted
+    /// version and features against this artifact before allocating a link.
+    /// Endpoint tuples remain carrier metadata, not identity or permission grants.
     #[wasm_bindgen(js_name = connectUpstreamWithSession)]
     pub fn connect_upstream_with_session(
         &self,
-        _protocol_version: u16,
-        _features: u32,
+        protocol_version: u16,
+        features: u32,
         remote_node: Vec<u8>,
         _remote_epoch: u64,
         local_node: Vec<u8>,
         _local_epoch: u64,
     ) -> Result<js_sys::Promise, JsValue> {
+        let protocol_error =
+            |message: String| core_error_to_js(&Error::new(jazz::db::ErrorCode::Protocol, message));
+        if protocol_version != jazz::wire::WIRE_PROTOCOL_VERSION {
+            return Err(protocol_error(format!(
+                "server negotiated wire protocol {protocol_version}, but this WASM binding supports only {}",
+                jazz::wire::WIRE_PROTOCOL_VERSION
+            )));
+        }
+        let features = features as u64;
+        let unsupported = features & !jazz::wire::current_wire_features();
+        if unsupported != 0 {
+            return Err(protocol_error(format!(
+                "server negotiated wire features {features:#x}, but this WASM binding was not compiled with {unsupported:#x}"
+            )));
+        }
         let _: [u8; 16] = remote_node
             .try_into()
             .map_err(|_| JsValue::from_str("server hello authority node must be 16 bytes"))?;
@@ -1841,9 +1926,10 @@ impl WasmDb {
         claims: JsValue,
     ) -> Result<js_sys::Promise, JsValue> {
         let claims = binding_host::claims(identity, json_or_null(claims)?).map_err(host_error)?;
-        let link = self.binding()?.accept_subscriber(identity, claims);
+        let inner = self.open_inner()?;
+        let link = inner.binding.accept_subscriber(identity, claims);
         Ok(js_sys::Promise::resolve(&JsValue::from(
-            WasmTransport::new(link),
+            WasmTransport::new(link, Some(inner.host)),
         )))
     }
 
@@ -1864,6 +1950,9 @@ impl WasmDb {
             if owns_runtime {
                 let closed = inner.binding.close().await;
                 let retired = inner.binding.db.retire_storage_owner();
+                // A wait may have polled during close's final tick, before
+                // retirement became visible. Wake it after installing the fence.
+                inner.binding.hooks.progress.wake_all();
                 let flushed = inner.host.flush(inner.binding.db.seq_high_water()).await;
                 #[cfg(target_arch = "wasm32")]
                 inner.host.store.borrow_mut().take();
@@ -1883,11 +1972,74 @@ impl WasmDb {
 #[wasm_bindgen]
 pub struct WasmTransport {
     link: binding_host::Link,
+    // Only a durable worker's downstream publication needs this barrier.
+    // Upstream chunk requests must remain able to drive a pending core tick.
+    persistence: Option<Rc<Host>>,
+    outbound: Rc<RefCell<DurableOutbound>>,
+}
+
+#[derive(Default)]
+struct DurableOutbound {
+    ready: Vec<Vec<u8>>,
+    in_flight: usize,
+    failed: Option<JsValue>,
+    scheduler: Option<js_sys::Function>,
+    closed: bool,
 }
 
 impl WasmTransport {
-    fn new(link: binding_host::Link) -> Self {
-        Self { link }
+    fn new(link: binding_host::Link, persistence: Option<Rc<Host>>) -> Self {
+        Self {
+            link,
+            persistence: persistence.filter(|host| host.has_store()),
+            outbound: Rc::default(),
+        }
+    }
+
+    /// Keep each downstream batch in order until its writes have reached the
+    /// backing store. In particular, Stored/Fate must not acknowledge a tab's
+    /// Local wait while IndexedDB still owns an uncommitted transaction.
+    fn take_durable_outbound(&self) -> Result<Vec<Vec<u8>>, JsValue> {
+        let Some(host) = self.persistence.as_ref() else {
+            return Ok(self.link.take_outbound());
+        };
+        let mut outbound = self.outbound.borrow_mut();
+        if outbound.closed {
+            return Ok(Vec::new());
+        }
+        if let Some(error) = &outbound.failed {
+            return Err(error.clone());
+        }
+        let ready = std::mem::take(&mut outbound.ready);
+        if outbound.in_flight == 0 && self.link.outbound_len() != 0 {
+            let frames = self.link.take_outbound();
+            outbound.in_flight = frames.len();
+            let host = Rc::clone(host);
+            let state = Rc::clone(&self.outbound);
+            wasm_bindgen_futures::spawn_local(async move {
+                // A link has no database sequence. Flush the store without
+                // advancing the checkpoint used by direct database waits.
+                let result = host.flush(0).await;
+                let scheduler = {
+                    let mut outbound = state.borrow_mut();
+                    outbound.in_flight = 0;
+                    if outbound.closed {
+                        return;
+                    }
+                    match result {
+                        Ok(()) => outbound.ready.extend(frames),
+                        Err(error) => outbound.failed = Some(error),
+                    }
+                    outbound.scheduler.clone()
+                };
+                // The host must drain again on both success and failure. A
+                // failed flush terminates the peer transport, never write Fate.
+                if let Some(scheduler) = scheduler {
+                    let _ = scheduler.call0(&JsValue::NULL);
+                }
+            });
+        }
+        Ok(ready)
     }
 }
 
@@ -1940,30 +2092,40 @@ impl WasmTransport {
     pub fn set_auxiliary_trace_enabled(&self, _enabled: bool) {}
 
     #[wasm_bindgen(js_name = sendWireFrame)]
-    pub fn send_wire_frame(&self, frame: Vec<u8>) {
+    pub fn send_wire_frame(&self, frame: Vec<u8>) -> Result<(), JsValue> {
+        jazz::sync_codec::decode_sync_message(&frame).map_err(|error| core_error_to_js(&error))?;
         self.link.receive([frame]);
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = sendWireFrames)]
-    pub fn send_wire_frames(&self, frames: js_sys::Array) {
-        self.link.receive(
-            frames
-                .iter()
-                .map(|frame| js_sys::Uint8Array::new(&frame).to_vec()),
-        );
+    pub fn send_wire_frames(&self, frames: js_sys::Array) -> Result<(), JsValue> {
+        let frames: Vec<Vec<u8>> = frames
+            .iter()
+            .map(|frame| js_sys::Uint8Array::new(&frame).to_vec())
+            .collect();
+        // Validate the complete batch before exposing even its valid prefix to
+        // the database or scheduling a tick, matching the native host boundary.
+        for frame in &frames {
+            jazz::sync_codec::decode_sync_message(frame)
+                .map_err(|error| core_error_to_js(&error))?;
+        }
+        self.link.receive(frames);
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = recvWireFrames)]
-    pub fn recv_wire_frames(&self) -> js_sys::Array {
+    pub fn recv_wire_frames(&self) -> Result<js_sys::Array, JsValue> {
         let frames = js_sys::Array::new();
-        for frame in self.link.take_outbound() {
+        for frame in self.take_durable_outbound()? {
             frames.push(&js_sys::Uint8Array::from(frame.as_slice()).into());
         }
-        frames
+        Ok(frames)
     }
 
     #[wasm_bindgen(js_name = setOutboundScheduler)]
     pub fn set_outbound_scheduler(&self, callback: js_sys::Function) {
+        self.outbound.borrow_mut().scheduler = Some(callback.clone());
         self.link.set_outbound_ready(Some(Box::new(move || {
             let _ = callback.call0(&JsValue::NULL);
         })));
@@ -1971,6 +2133,7 @@ impl WasmTransport {
 
     #[wasm_bindgen(js_name = clearOutboundScheduler)]
     pub fn clear_outbound_scheduler(&self) {
+        self.outbound.borrow_mut().scheduler = None;
         self.link.set_outbound_ready(None);
     }
 
@@ -1980,14 +2143,24 @@ impl WasmTransport {
     pub fn tick(&self) -> js_sys::Promise {
         let binding = self.link.binding().clone();
         let pending = self.link.outbound_counter();
+        let outbound = Rc::clone(&self.outbound);
         future_to_promise(async move {
             binding.tick().await.map_err(host_error)?;
-            Ok(JsValue::from_f64(pending() as f64))
+            let outbound = outbound.borrow();
+            Ok(JsValue::from_f64(
+                (pending() + outbound.ready.len() + outbound.in_flight) as f64,
+            ))
         })
     }
 
     #[wasm_bindgen(js_name = close)]
     pub fn close(&mut self) -> bool {
+        let mut outbound = self.outbound.borrow_mut();
+        outbound.closed = true;
+        outbound.ready.clear();
+        outbound.scheduler = None;
+        drop(outbound);
+        self.link.set_outbound_ready(None);
         self.link.close()
     }
 }
@@ -2064,7 +2237,7 @@ fn event_chunk_to_js(chunk: EventChunk) -> Result<JsValue, JsValue> {
         EventChunk::Rejected { detail } => {
             let reason = js_sys::Object::new();
             set_prop(&reason, "type", JsValue::from_str("ServerFailure"))?;
-            set_prop(&reason, "detail", JsValue::from_str(&detail))?;
+            set_prop(&reason, "code", JsValue::from_str(&detail))?;
             set_prop(&object, "type", JsValue::from_str("rejected"))?;
             set_prop(&object, "reason", reason.into())?;
         }
@@ -2182,9 +2355,9 @@ fn call_controller_method(
 /// Convert a Rust error into the value a binding rejects or throws with.
 ///
 /// A core [`Error`] becomes a real JavaScript `Error` whose `message` is the
-/// unchanged `Display` text and whose `code` is the stable
-/// [`ErrorCode::as_str`] string, so callers classify it without matching the
-/// message. Every other error keeps its historical bare-string form.
+/// unchanged `Display` text, whose `code` is the stable [`ErrorCode::as_str`]
+/// string and, when it has one, whose `reason` is the stable `Reason::as_str`
+/// name, so callers classify it without matching the message. Every other error keeps its historical bare-string form.
 fn to_js_error(error: impl std::fmt::Display + 'static) -> JsValue {
     let any = &error as &dyn std::any::Any;
     if let Some(core) = any.downcast_ref::<Error>() {
@@ -2201,6 +2374,13 @@ fn core_error_to_js(error: &Error) -> JsValue {
         &JsValue::from_str("code"),
         &JsValue::from_str(error.code.as_str()),
     );
+    if let Some(reason) = error.reason {
+        let _ = js_sys::Reflect::set(
+            &js_error,
+            &JsValue::from_str("reason"),
+            &JsValue::from_str(reason.as_str()),
+        );
+    }
     js_error.into()
 }
 

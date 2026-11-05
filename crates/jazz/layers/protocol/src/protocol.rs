@@ -1,9 +1,8 @@
 //! Simulation-first wire vocabulary for sync messages, commit payloads, view
 //! updates, catalogue messages, and migration lens publication. This module owns
-//! serializable shapes that cross node or facade boundaries; storage encoders
-//! live in `jazz::node::codec`, transaction semantics in [`crate::tx`], and
-//! query AST semantics in [`crate::query`]. It connects the node layer to peers,
-//! tests, and the `Db` facade without owning validation or persistence.
+//! serializable shapes that cross replica or facade boundaries; transaction
+//! semantics are in [`crate::tx`] and query AST semantics in [`crate::query`].
+//! Storage and sync live in `jazz-db`.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -2033,7 +2032,7 @@ impl VersionRecord {
 
         // Decode every descriptor field, then reproduce the record. Besides
         // validating user cells, equality proves that no trailing or alternate
-        // Groove spelling survived deferred `OwnedRecord` construction.
+        // spelling survived deferred `OwnedRecord` construction.
         let values = (0..fields.len())
             .map(|index| borrowed.get_idx(index).map_err(|_| malformed()))
             .collect::<Result<Vec<_>, _>>()?;
@@ -2785,7 +2784,7 @@ impl VersionBundleRunOverride {
 /// Validation failures for malformed packed version-bundle runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VersionBundleRunError {
-    /// A deferred Groove record failed structural or canonical validation.
+    /// A deferred record failed structural or canonical validation.
     MalformedVersionRecord {
         /// Table declared by the enclosing version.
         table: String,
@@ -3030,7 +3029,7 @@ pub struct CoverageKey {
 pub struct PolicyBindingKey {
     /// Logical session subject selected at subscription admission.
     pub identity: AuthorSubject,
-    /// Canonical named Groove values retained rather than hashed so distinct
+    /// Canonical named values retained rather than hashed so distinct
     /// snapshots can never share coverage on a hash collision.
     pub canonical_claims: CanonicalPolicyClaims,
 }
@@ -3038,7 +3037,7 @@ pub struct PolicyBindingKey {
 /// Exact ordered policy claims with a private canonical comparison key.
 ///
 /// The comparison bytes are process-local bookkeeping only. Serde persists or
-/// transports the ordinary named Groove values and reconstructs them on read.
+/// transports the ordinary named values and reconstructs them on read.
 #[derive(Clone, Debug)]
 pub struct CanonicalPolicyClaims {
     claims: BTreeMap<String, Value>,
@@ -5443,7 +5442,7 @@ fn collect_enum_variant_counts(
 // Publication validation runs before a node has installed any local physical
 // aliases, so the authority-side permanence rule lives with the wire manifest
 // rather than the local descriptor lowering.  Keep this definition aligned
-// with `node::physical::physical_column_epoch_is_compatible`.
+// with `crate::schema::physical_column_epoch_is_compatible`.
 impl SchemaLineagePublication {
     /// Author one schema from all its predecessors. Only coordinates actually
     /// preserved by an incoming lens may inherit identities from that source.
@@ -6175,7 +6174,7 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
         }
         Value::Enum(_) => {
             panic!(
-                "union-valued values are an internal Groove representation, not a Jazz protocol value"
+                "union-valued values are an internal storage representation, not a Jazz protocol value"
             )
         }
         Value::U48(_) => {
@@ -6741,7 +6740,7 @@ mod tests {
     #[test]
     fn policy_binding_directory_uses_typed_claim_nodes_without_an_opaque_blob() {
         // A relay durable directory must preserve the exact session snapshot,
-        // including nested claim arrays, in normal Groove fields. The test
+        // including nested claim arrays, in normal record fields. The test
         // intentionally checks the carrier shape as well as round-tripping:
         // replacing it with postcard-in-Bytes would make the first assertion
         // fail even if the logical values still happened to decode.
@@ -7701,21 +7700,31 @@ mod tests {
         }
     }
 
+    /// Alice's internal row member uses the complete ResultKey v2 identity.
+    /// This lower-layer byte fixture also rejects the superseded unversioned
+    /// identity; peer source-closure delivery does not transmit result members.
     #[test]
-    fn legacy_row_member_postcard_golden_decodes() {
+    fn row_member_postcard_pins_result_key_v2_and_rejects_legacy_identity() {
         const LEGACY: &[u8] = &[
             0, 1, 116, 16, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16, 1, 1, 1, 1, 1, 1,
             1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 2, 16, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
             3, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        const RESULT_KEY_V2: &[u8] = &[
+            0, 1, 116, 16, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 26, 2, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 16, 3, 3, 3, 3, 3, 3,
+            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0,
         ];
         let member = ResultMemberEntry::Row(RealRowMemberEntry::current_content((
             jazz_types::Intern::new("t".to_owned()),
             RowUuid::from_bytes([1; 16]),
             TxId::new(TxTime(2), NodeUuid::from_bytes([3; 16])),
         )));
-        assert_eq!(postcard::to_allocvec(&member).unwrap(), LEGACY);
-        let decoded: ResultMemberEntry = postcard::from_bytes(LEGACY).unwrap();
+        assert_eq!(postcard::to_allocvec(&member).unwrap(), RESULT_KEY_V2);
+        let decoded: ResultMemberEntry = postcard::from_bytes(RESULT_KEY_V2).unwrap();
         assert_eq!(decoded, member);
+        assert!(postcard::from_bytes::<ResultMemberEntry>(LEGACY).is_err());
     }
 
     #[test]

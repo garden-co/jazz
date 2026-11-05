@@ -575,94 +575,15 @@ export type BenchmarkSection = {
   description: string;
   /** Repository-relative directories whose metadata sources belong here. */
   sources: string[];
-  /**
-   * Benchmarks without metadata (the engine benches) listed here, by CodSpeed
-   * benchmark id: one bench name repeats once per scenario module, so a name
-   * alone does not identify a row.
-   */
-  benchmarks?: readonly EngineBenchmark[];
 };
-
-/** One engine row: a CodSpeed benchmark id and the scenario that tells it apart. */
-export type EngineBenchmark = {
-  /** CodSpeed's benchmark id, stable for the URI below. */
-  id: string;
-  /** CodSpeed name, shared by every scenario of the same bench. */
-  name: string;
-  scenario: string;
-  /** CodSpeed URI: `crates/groove/benches/<bench>.rs::<scenario module>::<name>`. */
-  uri: string;
-};
-
-const scenarioLabels: Record<string, string> = {
-  author_posts: "Author posts",
-  feed: "Feed",
-  feed_top20: "Top-20 feed",
-  tasks: "Tasks",
-};
-
-function engineBenchmark(id: string, bench: string, module: string, name: string): EngineBenchmark {
-  return {
-    id,
-    name,
-    scenario: scenarioLabels[module],
-    uri: `crates/groove/benches/${bench}.rs::${module}::${name}`,
-  };
-}
-
-/**
- * The Groove cases CodSpeed measures on every merge, and only those: the IVM
- * engines at the measured size. Smaller sizes and the reference engines run
- * in the nightly CodSpeed run (`GROOVE_BENCH_SWEEP=1`); they are not listed,
- * so a size that stops being measured is not shown with a frozen number.
- */
-export const engineBenchmarks: readonly EngineBenchmark[] = [
-  engineBenchmark(
-    "6ab494d0ad9a6239bfdd8982",
-    "pull_vs_snapshot",
-    "author_posts",
-    "prepared_warm[5000]",
-  ),
-  engineBenchmark("6ab494d0ad9a6239bfdd8992", "pull_vs_snapshot", "feed", "prepared_warm[5000]"),
-  engineBenchmark(
-    "6ab494d0ad9a6239bfdd898a",
-    "pull_vs_snapshot",
-    "feed_top20",
-    "prepared_warm[5000]",
-  ),
-  engineBenchmark(
-    "6ab494d0ad9a6239bfdd8980",
-    "pull_vs_snapshot",
-    "author_posts",
-    "prepared_cold[5000]",
-  ),
-  engineBenchmark("6ab494d0ad9a6239bfdd8990", "pull_vs_snapshot", "feed", "prepared_cold[5000]"),
-  engineBenchmark(
-    "6ab494d0ad9a6239bfdd8988",
-    "pull_vs_snapshot",
-    "feed_top20",
-    "prepared_cold[5000]",
-  ),
-  engineBenchmark("6ab4a076ad9a6239bfddd0c7", "steady_state", "feed", "ivm[100]"),
-  engineBenchmark("6ab4a076ad9a6239bfddd0bd", "steady_state", "feed_top20", "ivm[100]"),
-  engineBenchmark("6ab4a076ad9a6239bfddd0d1", "steady_state", "tasks", "ivm[100]"),
-];
 
 export const moreBenchmarkSections: BenchmarkSection[] = [
   {
     id: "adopter-workloads",
     title: "Anonymized adopter workloads",
     description:
-      "Synthetic fixtures shaped like real adopters' schemas and data, with invented names and values. Permissioned resources brings a brand-new device from empty to a fully settled, permission-filtered view of a deep-permission resource catalogue through a device-local persistence relay, with every row authorized by the server.",
+      "Synthetic fixtures shaped like real adopters' schemas and data, with invented names and values. Permissioned resources brings a brand-new device from empty to a fully settled, permission-filtered view of a deep-permission resource catalogue straight from Core, with every row authorized by the server.",
     sources: ["examples/permissioned-resources/"],
-  },
-  {
-    id: "engine",
-    title: "Engine",
-    description:
-      "What no product owns: Groove's incremental view maintenance measured directly, for one-shot reads through prepared shapes (author posts, feed and top-20 feed) and for keeping 100 live subscriptions current as writes arrive (feed, top-20 feed and tasks). The reference engines they are compared against (SQLite re-query, hand-written pull plans, snapshot re-runs) and the smaller sizes run in the nightly CodSpeed run, not on every merge.",
-    sources: ["crates/"],
-    benchmarks: engineBenchmarks,
   },
 ];
 
@@ -672,8 +593,7 @@ const loadTimeScenarios = "dev/benchmarks/example-load-times/scenarios/";
  * Where the examples page lists a benchmark with metadata: the id of the hero
  * example whose suite holds its metadata source, the id of a "More benchmarks"
  * section, or null for a result no current suite produces (a retired name
- * still in the CodSpeed history). Engine rows have no metadata and are listed
- * by id instead (`BenchmarkSection.benchmarks`).
+ * still in the CodSpeed history).
  */
 export function placeBenchmark(source: string | undefined): string | null {
   if (!source) return null;
@@ -693,41 +613,25 @@ export function placeBenchmark(source: string | undefined): string | null {
   return section?.id ?? null;
 }
 
-/** A row of a benchmark table: a benchmark and, for engine rows, its scenario. */
-export type Placed<E> = E & { scenario?: string };
-
 /**
  * Every current benchmark that is not a metric card, grouped by the hero
- * example or "More benchmarks" section that lists it, sorted by name (then
- * scenario). `byName` holds the newest result per name for benchmarks with
- * metadata; engine rows come from `byId`, one per catalogued id. Retired
- * names and unmeasured engine sizes are left out.
+ * example or "More benchmarks" section that lists it, sorted by name.
+ * `byName` holds the newest result per name. Retired names are left out.
  */
 export function groupBenchmarks<E extends { bench: { id: string; name: string } }>(
   byName: ReadonlyMap<string, E>,
-  byId: ReadonlyMap<string, E>,
   sourceOf: (name: string) => string | undefined,
-): Map<string, Placed<E>[]> {
-  const grouped = new Map<string, Placed<E>[]>();
-  const add = (place: string, entry: Placed<E>) =>
+): Map<string, E[]> {
+  const grouped = new Map<string, E[]>();
+  const add = (place: string, entry: E) =>
     grouped.set(place, [...(grouped.get(place) ?? []), entry]);
   for (const [name, entry] of byName) {
     if (heroBenchmarkNames.has(name)) continue;
     const place = placeBenchmark(sourceOf(name));
     if (place) add(place, entry);
   }
-  for (const section of moreBenchmarkSections) {
-    for (const row of section.benchmarks ?? []) {
-      const entry = byId.get(row.id);
-      if (entry) add(section.id, { ...entry, scenario: row.scenario });
-    }
-  }
   for (const entries of grouped.values())
-    entries.sort(
-      (a, b) =>
-        a.bench.name.localeCompare(b.bench.name) ||
-        (a.scenario ?? "").localeCompare(b.scenario ?? ""),
-    );
+    entries.sort((a, b) => a.bench.name.localeCompare(b.bench.name));
   return grouped;
 }
 

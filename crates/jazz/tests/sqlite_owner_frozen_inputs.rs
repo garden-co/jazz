@@ -158,7 +158,7 @@ fn a_reloaded_frozen_draft_uses_the_historical_base_not_the_live_base() {
     let owner = open(50, Some(&path));
     owner.set_remote_link_hint(RemoteLinkHint::Failed);
     let tab = open(2, None);
-    tab.set_non_durable_client();
+    tab.set_private_owner_client().unwrap();
     connect(&tab, &owner);
     let q = tab.prepare_query(&query(4)).unwrap();
     let mut stream = block_on(tab.subscribe(&q, ReadOpts::default())).unwrap();
@@ -244,7 +244,7 @@ fn multiple_frozen_cuts_recover_without_replacing_the_current_base() {
     draft(&owner, row, 4, first);
     draft(&owner, row, 5, second);
     let tab = open(2, None);
-    tab.set_non_durable_client();
+    tab.set_private_owner_client().unwrap();
     connect(&tab, &owner);
     let q = tab.prepare_query(&Query::from("notes")).unwrap();
     let _stream = block_on(tab.subscribe(&q, ReadOpts::default())).unwrap();
@@ -290,6 +290,9 @@ fn frozen_input_requires_exact_history_manifest_and_accepted_prefix() {
     peer.send(SyncMessage::OwnerProjectionV1 { known: Vec::new() })
         .unwrap();
     peer.send(SyncMessage::Fetch {
+        view: jazz::protocol::ReadViewSourceSpec::Current,
+        tier: jazz::db::ReadTier::LocalOnly,
+        wait: None,
         id: 7,
         query: query(4),
         binding: BTreeMap::new(),
@@ -316,7 +319,7 @@ fn frozen_input_requires_exact_history_manifest_and_accepted_prefix() {
         "optimistic prefix",
     ] {
         let tab = open(2, None);
-        tab.set_non_durable_client();
+        tab.set_private_owner_client().unwrap();
         let (link, mut source) = duplex_transport::duplex();
         block_on(tab.connect_upstream(link));
         for mut message in messages.clone() {

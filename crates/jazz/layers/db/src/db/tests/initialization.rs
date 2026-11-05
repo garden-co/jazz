@@ -343,7 +343,7 @@ fn initialization_catalogue_readiness_requires_requested_schema_admission() {
         Some(known_identity)
     );
     let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
-    let local_error = block_on(Box::pin(pending.all_serialized_query(
+    let local_error = block_on(Box::pin(pending.all_serialized_query_as(
         &query,
         ReadOpts::default(),
         None,
@@ -357,7 +357,7 @@ fn initialization_catalogue_readiness_requires_requested_schema_admission() {
     .expect("unpublished requested schema must reject a Local read");
     assert_eq!(local_error.code, ErrorCode::Schema);
     let empty_query = postcard::to_allocvec(&Query::from("todos").limit(0)).unwrap();
-    let empty_error = block_on(Box::pin(pending.all_serialized_query(
+    let empty_error = block_on(Box::pin(pending.all_serialized_query_as(
         &empty_query,
         ReadOpts::default(),
         None,
@@ -409,7 +409,7 @@ fn initialization_catalogue_readiness_requires_requested_schema_admission() {
     let drained = block_on(pending.take_authenticated_catalogue_state()).unwrap();
     assert!(!drained.ready);
     assert!(drained.capture.is_none());
-    let global_error = block_on(Box::pin(pending.all_serialized_query(
+    let global_error = block_on(Box::pin(pending.all_serialized_query_as(
         &query,
         ReadOpts {
             tier: ReadTier::Remote,
@@ -487,7 +487,7 @@ fn initialization_catalogue_readiness_requires_requested_schema_admission() {
             .ready
     );
     let controls = postcard::to_allocvec(&Query::from("controls")).unwrap();
-    let result = block_on(Box::pin(pending.all_serialized_query(
+    let result = block_on(Box::pin(pending.all_serialized_query_as(
         &controls,
         ReadOpts::default(),
         None,

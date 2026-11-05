@@ -50,6 +50,111 @@ describe("NativeRuntimeAdapter server transport", () => {
     globalThis.WebSocket = previousWebSocket;
   });
 
+  it("reports a live core hint only after upstream admission without a connection manager", async () => {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const admission = deferred<Transport>();
+    const hints: string[] = [];
+    const started = deferred<void>();
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setRemoteLinkHint: (hint: string) => hints.push(hint),
+            connectUpstreamWithSession: () => {
+              started.resolve();
+              return admission.promise;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      expect(hints).toEqual(["attempting"]);
+      await started.promise;
+      expect(hints).toEqual(["attempting"]);
+      admission.resolve(new FakeTransport([]));
+      await runtime.waitForUpstreamServerConnection();
+      // A SharedWorker has no foreground ConnectionManager to replace the
+      // five-second attempting hint. Its own admission must report liveness.
+      expect(hints).toEqual(["attempting", "live"]);
+      expect(runtime.remoteLinkState()).toBe("connected");
+    } finally {
+      admission.resolve(new FakeTransport([]));
+      await runtime.close();
+    }
+  });
+
+  it("lets a tab reach Local through its healthy worker after a remote server failure", async () => {
+    const persisted = deferred<void>();
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({
+        setNonDurableClient: () => undefined,
+        insert: () => ({ ...fakeWrite(), wait: () => persisted.promise }),
+        tick: () => undefined,
+      }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      false,
+    );
+    runtime.setNonDurableClient();
+    try {
+      const receipt = runtime.insert("todos", { title: { type: "Text", value: "offline" } });
+      const wait = runtime.waitForTransaction(await committedTxId(receipt), "local");
+      runtime.reportRemoteServerTransportError(new Error("cloud disconnected"));
+      persisted.resolve();
+      await expect(wait).resolves.toBeUndefined();
+      await expect(runtime.flushLocalSettlements()).resolves.toBeUndefined();
+    } finally {
+      persisted.resolve();
+      await runtime.close();
+    }
+  });
+
+  it("allows new Local waits after a failed worker is replaced", async () => {
+    const persisted = deferred<void>();
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({
+        setNonDurableClient: () => undefined,
+        connectUpstream: () => new FakeTransport([]),
+        insert: () => ({ ...fakeWrite(), wait: () => persisted.promise }),
+        tick: () => undefined,
+      }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      false,
+    );
+    runtime.setNonDurableClient();
+    try {
+      const receipt = runtime.insert("todos", { title: { type: "Text", value: "replayed" } });
+      const txId = await committedTxId(receipt);
+      const wait = runtime.waitForTransaction(txId, "local");
+      const failure = new Error("worker storage failed");
+      runtime.reportLocalRelayError(failure);
+      await expect(wait).rejects.toBe(failure);
+      await expect(runtime.waitForTransaction(txId, "local")).rejects.toBe(failure);
+      const replacement = await runtime.connectUpstreamPeer();
+      persisted.resolve();
+      await expect(runtime.waitForTransaction(txId, "local")).resolves.toBeUndefined();
+      replacement.close();
+    } finally {
+      persisted.resolve();
+      await runtime.close();
+    }
+  });
+
   it("coalesces receive deadlines, advances earlier wakes and re-arms later peers", async () => {
     vi.useFakeTimers();
     let schedule: ((urgency: "immediate" | "deferred" | `after:${number}`) => void) | undefined;

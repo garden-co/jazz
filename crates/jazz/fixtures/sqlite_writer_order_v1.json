@@ -1,0 +1,12 @@
+{
+  "role": "jazz.sqlite.writer-order.v1",
+  "version": 1,
+  "profile_role": "jazz.sqlite.writer-order-profile.v1",
+  "profile": "4a415a5a2d53514c4954452d5752495445522d4f524445520001",
+  "values": [
+    { "tx": 1, "bytes": "0000000000000001" },
+    { "tx": 256, "bytes": "0000000000000100" },
+    { "tx": 4503599627370497, "bytes": "0010000000000001" },
+    { "tx": 9223372036854775806, "bytes": "7ffffffffffffffe" }
+  ]
+}

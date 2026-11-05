@@ -1,0 +1,6 @@
+{
+  "role": "jazz.sqlite.permission-history-index.v1",
+  "version": 1,
+  "name": "grants__h_permission_v1(resource)",
+  "sql": "CREATE INDEX \"grants__h_permission_v1(resource)\" ON \"grants__h\"(\"resource\",id,_b,_seq)"
+}

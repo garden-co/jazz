@@ -27,6 +27,11 @@ import {
   createNapiRuntimeFixture,
 } from "./testing/napi-runtime-test-utils.js";
 import { testAccountId, testAuthorBytes } from "./testing/account-fixtures.js";
+import {
+  markTrustedReservedSession,
+  TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
+  trustedReservedSessionToken,
+} from "./client-session.js";
 import { SubscriptionManager } from "./subscription-manager.js";
 import type { WasmRow } from "../drivers/types.js";
 import {
@@ -696,6 +701,75 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     });
   }, 15_000);
 
+  it("reports an unclaimed authority rejection once and keeps observer waits unclaimed", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+    const { NapiDb } = await loadNapiModule();
+    const appId = "00000000-0000-0000-0000-00000000d007";
+    const node = deterministicBytes("jazz-napi-rejection-observation:node");
+    const author = testExternalAuthorBytes(ALICE_ID);
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      backendSecret: "core-napi-rejection-observation-backend",
+      adminSecret: "core-napi-rejection-observation-admin",
+      schema: OWNED_TODOS_SCHEMA,
+      permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
+    });
+    const nativeDb = NapiDb.openMemory(
+      encodeSchema(OWNED_TODOS_SCHEMA),
+      openConfig(node, author, 1, true),
+    );
+    const events: unknown[] = [];
+    nativeDb.onMutationError((event: unknown) => events.push(event));
+    const runtime = NativeRuntimeAdapter.fromDb(
+      nativeDb as never,
+      OWNED_TODOS_SCHEMA,
+      node,
+      author,
+      1,
+      true,
+    );
+    runtimes.push(runtime);
+    runtime.connect(
+      webSocketUrl(server.url, appId),
+      JSON.stringify({
+        backend_secret: server.backendSecret,
+        backend_session: testExternalSession(ALICE_ID, { sub: ALICE_ID }),
+      }),
+    );
+    const denied = (title: string) =>
+      runtime.insert("todos", {
+        title: { type: "Text", value: title },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: BOB_ID },
+      });
+    const observed = await committedTxId(denied("observer only"));
+    const claimed = await committedTxId(denied("claimed by caller"));
+    const observerWait = runtime.waitForTransaction(observed, "global", { observeOnly: true });
+    const claimedWait = runtime.waitForTransaction(claimed, "global");
+    const outcomes = await Promise.allSettled([observerWait, claimedWait]);
+    for (const outcome of outcomes) {
+      expect(outcome).toMatchObject({ status: "rejected", reason: { code: "permission_denied" } });
+    }
+    await waitFor(
+      async () => (events.length > 0 ? events : undefined),
+      "authority rejection was not reported",
+    );
+    // Additional owner turns must not repeat the unclaimed rejection or
+    // report the rejection already delivered to the caller's real wait.
+    for (let i = 0; i < 4; i++) {
+      nativeDb.tick();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    expect(events).toEqual([
+      expect.objectContaining({
+        code: "permission_denied",
+        reason: "Write rejected by server authorization",
+        transaction: expect.objectContaining({ transactionId: observed, kind: "mergeable" }),
+      }),
+    ]);
+  }, 15_000);
+
   it("admits concurrent reads and cancels a subscription before callback admission", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(
@@ -776,6 +850,53 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     runtime.delete("todos", inserted.id);
 
     await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
+  });
+
+  it("writes with a client's own local-first session as the runtime itself", async () => {
+    const napi = await loadNapiModule();
+    const appId = "00000000-0000-0000-0000-00000000d0f1";
+    const token = napi.mintLocalFirstToken(Buffer.alloc(32, 7).toString("base64url"), appId, 600);
+    const claims = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString()) as {
+      iss: string;
+      sub: string;
+    };
+    const session = markTrustedReservedSession({
+      issuer: claims.iss,
+      user_id: claims.sub,
+      authMode: "local-first" as const,
+      claims: {},
+    });
+    const claimedAuthor = JSON.stringify([session.issuer, session.user_id]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: (schema, config) => napi.NapiDb.openMemory(schema, config) as never,
+        openMemoryWithSelfSignedProof: (schema, config, token, appId, author) =>
+          napi.NapiDb.openMemoryWithSelfSignedProof(schema, config, token, appId, author) as never,
+      },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-native-runtime-own-session:node"),
+      new TextEncoder().encode(claimedAuthor),
+      1,
+      true,
+      { selfSignedClientProof: { token, appId, claimedAuthor } },
+    );
+    runtimes.push(runtime);
+
+    const inserted = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "own session row" },
+        done: { type: "Boolean", value: false },
+      },
+      JSON.stringify({
+        ...session,
+        [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(session),
+      }),
+    );
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toMatchObject([
+      { id: inserted.id },
+    ]);
   });
 
   it("streams a typed text column through NAPI before publishing the row", async () => {
@@ -1215,170 +1336,145 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
   );
 
   it.skipIf(debugSubscriptionEventFixture === undefined)(
-    "debug addons normalize real Rust rejection and closed subscription events",
-    async () => {
-      const { NapiDb } = await loadNapiModule();
-      const fixture = debugSubscriptionEventFixture!;
-      const [
-        unsupportedEvent,
-        pendingEvent,
-        serverFailureEvent,
-        invalidAuthorityEvent,
-        closedEvent,
-      ] = fixture();
-      expect([
-        unsupportedEvent,
-        pendingEvent,
-        serverFailureEvent,
-        invalidAuthorityEvent,
-        closedEvent,
-      ]).toStrictEqual([
+    "debug addons preserve the SQLite rejection and closed events",
+    () => {
+      expect(debugSubscriptionEventFixture!()).toStrictEqual([
         {
           type: "rejected",
-          reason: {
-            type: "UnsupportedShapeCapability",
-            detail: "fixture unsupported shape",
-          },
-        },
-        {
-          type: "rejected",
-          reason: { type: "ShapeRegistrationPendingCatalogueAdmission" },
-        },
-        {
-          type: "rejected",
-          reason: { type: "ServerFailure", code: "QueryValidation" },
-        },
-        {
-          type: "rejected",
-          reason: {
-            type: "InvalidAuthoritySourceClosure",
-            transition: "fixture invalid transition",
-          },
+          reason: { type: "ServerFailure", code: "fixture SQLite subscription refusal" },
         },
         { type: "closed" },
       ]);
-      if (
-        !unsupportedEvent ||
-        !pendingEvent ||
-        !serverFailureEvent ||
-        !invalidAuthorityEvent ||
-        !closedEvent
-      ) {
-        throw new Error("jazz-napi test fixture returned incomplete events");
-      }
-
-      const openHarness = (label: string) => {
-        const injectedEvents: NapiSubscriptionEvent[] = [];
-        const observedEvents: NapiSubscriptionEvent[] = [];
-        const observeDb = (nativeDb: ReturnType<typeof NapiDb.openMemory>) =>
-          new Proxy(nativeDb, {
-            get(target, property) {
-              const value = Reflect.get(target, property, target) as unknown;
-              if (property === "subscribe" && typeof value === "function") {
-                return (...args: unknown[]) => {
-                  const source = Reflect.apply(value, target, args) as object;
-                  return new Proxy(source, {
-                    get(sourceTarget, sourceProperty) {
-                      const sourceValue = Reflect.get(
-                        sourceTarget,
-                        sourceProperty,
-                        sourceTarget,
-                      ) as unknown;
-                      if (sourceProperty === "readAll" && typeof sourceValue === "function") {
-                        return () => {
-                          const events = Reflect.apply(
-                            sourceValue,
-                            sourceTarget,
-                            [],
-                          ) as NapiSubscriptionEvent[];
-                          const injected = injectedEvents.splice(0);
-                          observedEvents.push(...injected, ...events);
-                          return [...injected, ...events];
-                        };
-                      }
-                      return typeof sourceValue === "function"
-                        ? sourceValue.bind(sourceTarget)
-                        : sourceValue;
-                    },
-                  });
-                };
-              }
-              return typeof value === "function" ? value.bind(target) : value;
-            },
-          });
-        const runtime = new NativeRuntimeAdapter(
-          {
-            openMemory: (schema, config) => observeDb(NapiDb.openMemory(schema, config)) as never,
-          },
-          TEST_SCHEMA,
-          deterministicBytes(`jazz-napi-native-runtime-event-variants:${label}:node`),
-          testAuthorBytes(`jazz-napi-native-runtime-event-variants:${label}:author`),
-          24,
-          true,
-        );
-        runtimes.push(runtime);
-        const notifications: unknown[][] = [];
-        const handle = runtime.createSubscription(
-          JSON.stringify({ table: "todos" }),
-          null,
-          "local-first",
-        );
-        runtime.executeSubscription(handle, (...args: unknown[]) => notifications.push(args));
-        expect(notifications).toHaveLength(1);
-        return { runtime, injectedEvents, observedEvents, notifications };
-      };
-
-      const pending = openHarness("pending");
-      pending.injectedEvents.push(pendingEvent);
-      expect(pending.notifications).toHaveLength(1);
-      pending.runtime.insert("todos", {
-        title: { type: "Text", value: "still subscribed after pending admission" },
-        done: { type: "Boolean", value: false },
-      });
-      expect(pending.observedEvents).toContainEqual({
-        type: "rejected",
-        reason: { type: "ShapeRegistrationPendingCatalogueAdmission" },
-      });
-      expect(pending.notifications).toHaveLength(2);
-
-      const unsupported = openHarness("unsupported");
-      unsupported.injectedEvents.push(unsupportedEvent);
-      unsupported.runtime.insert("todos", {
-        title: { type: "Text", value: "unsupported before delivery" },
-        done: { type: "Boolean", value: false },
-      });
-      expect(unsupported.notifications).toHaveLength(2);
-      expect(unsupported.notifications[1]?.[0]).toBeInstanceOf(Error);
-      expect(String(unsupported.notifications[1]?.[0])).toContain(
-        "UnsupportedShapeCapability: fixture unsupported shape",
-      );
-      expect(unsupported.notifications[1]?.[1]).toBeUndefined();
-
-      const rejected = openHarness("rejected");
-      rejected.injectedEvents.push(serverFailureEvent);
-      rejected.runtime.insert("todos", {
-        title: { type: "Text", value: "rejected before delivery" },
-        done: { type: "Boolean", value: false },
-      });
-      expect(rejected.observedEvents).toContainEqual({
-        type: "rejected",
-        reason: { type: "ServerFailure", code: "QueryValidation" },
-      });
-      expect(rejected.notifications).toHaveLength(2);
-      expect(rejected.notifications[1]?.[0]).toBeInstanceOf(Error);
-      expect(String(rejected.notifications[1]?.[0])).toContain("ServerFailure: QueryValidation");
-      expect(rejected.notifications[1]?.[1]).toBeUndefined();
-
-      const closed = openHarness("closed");
-      closed.injectedEvents.push(closedEvent);
-      closed.runtime.insert("todos", {
-        title: { type: "Text", value: "not delivered after close" },
-        done: { type: "Boolean", value: false },
-      });
-      expect(closed.observedEvents).toContainEqual({ type: "closed" });
-      expect(closed.notifications).toHaveLength(1);
     },
   );
+
+  it("the runtime still handles legacy carrier rejection and closed variants", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const unsupportedEvent: NapiSubscriptionEvent = {
+      type: "rejected",
+      reason: { type: "UnsupportedShapeCapability", detail: "fixture unsupported shape" },
+    };
+    const pendingEvent: NapiSubscriptionEvent = {
+      type: "rejected",
+      reason: { type: "ShapeRegistrationPendingCatalogueAdmission" },
+    };
+    const serverFailureEvent: NapiSubscriptionEvent = {
+      type: "rejected",
+      reason: { type: "ServerFailure", code: "QueryValidation" },
+    };
+    const closedEvent: NapiSubscriptionEvent = { type: "closed" };
+
+    const openHarness = (label: string) => {
+      const injectedEvents: NapiSubscriptionEvent[] = [];
+      const observedEvents: NapiSubscriptionEvent[] = [];
+      const observeDb = (nativeDb: ReturnType<typeof NapiDb.openMemory>) =>
+        new Proxy(nativeDb, {
+          get(target, property) {
+            const value = Reflect.get(target, property, target) as unknown;
+            if (property === "subscribe" && typeof value === "function") {
+              return (...args: unknown[]) => {
+                const source = Reflect.apply(value, target, args) as object;
+                return new Proxy(source, {
+                  get(sourceTarget, sourceProperty) {
+                    const sourceValue = Reflect.get(
+                      sourceTarget,
+                      sourceProperty,
+                      sourceTarget,
+                    ) as unknown;
+                    if (sourceProperty === "readAll" && typeof sourceValue === "function") {
+                      return () => {
+                        const events = Reflect.apply(
+                          sourceValue,
+                          sourceTarget,
+                          [],
+                        ) as NapiSubscriptionEvent[];
+                        const injected = injectedEvents.splice(0);
+                        observedEvents.push(...injected, ...events);
+                        return [...injected, ...events];
+                      };
+                    }
+                    return typeof sourceValue === "function"
+                      ? sourceValue.bind(sourceTarget)
+                      : sourceValue;
+                  },
+                });
+              };
+            }
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: (schema, config) => observeDb(NapiDb.openMemory(schema, config)) as never,
+        },
+        TEST_SCHEMA,
+        deterministicBytes(`jazz-napi-native-runtime-event-variants:${label}:node`),
+        testAuthorBytes(`jazz-napi-native-runtime-event-variants:${label}:author`),
+        24,
+        true,
+      );
+      runtimes.push(runtime);
+      const notifications: unknown[][] = [];
+      const handle = runtime.createSubscription(
+        JSON.stringify({ table: "todos" }),
+        null,
+        "local-first",
+      );
+      runtime.executeSubscription(handle, (...args: unknown[]) => notifications.push(args));
+      expect(notifications).toHaveLength(1);
+      return { runtime, injectedEvents, observedEvents, notifications };
+    };
+
+    const pending = openHarness("pending");
+    pending.injectedEvents.push(pendingEvent);
+    expect(pending.notifications).toHaveLength(1);
+    pending.runtime.insert("todos", {
+      title: { type: "Text", value: "still subscribed after pending admission" },
+      done: { type: "Boolean", value: false },
+    });
+    expect(pending.observedEvents).toContainEqual({
+      type: "rejected",
+      reason: { type: "ShapeRegistrationPendingCatalogueAdmission" },
+    });
+    expect(pending.notifications).toHaveLength(2);
+
+    const unsupported = openHarness("unsupported");
+    unsupported.injectedEvents.push(unsupportedEvent);
+    unsupported.runtime.insert("todos", {
+      title: { type: "Text", value: "unsupported before delivery" },
+      done: { type: "Boolean", value: false },
+    });
+    expect(unsupported.notifications).toHaveLength(2);
+    expect(unsupported.notifications[1]?.[0]).toBeInstanceOf(Error);
+    expect(String(unsupported.notifications[1]?.[0])).toContain(
+      "UnsupportedShapeCapability: fixture unsupported shape",
+    );
+    expect(unsupported.notifications[1]?.[1]).toBeUndefined();
+
+    const rejected = openHarness("rejected");
+    rejected.injectedEvents.push(serverFailureEvent);
+    rejected.runtime.insert("todos", {
+      title: { type: "Text", value: "rejected before delivery" },
+      done: { type: "Boolean", value: false },
+    });
+    expect(rejected.observedEvents).toContainEqual({
+      type: "rejected",
+      reason: { type: "ServerFailure", code: "QueryValidation" },
+    });
+    expect(rejected.notifications).toHaveLength(2);
+    expect(rejected.notifications[1]?.[0]).toBeInstanceOf(Error);
+    expect(String(rejected.notifications[1]?.[0])).toContain("ServerFailure: QueryValidation");
+    expect(rejected.notifications[1]?.[1]).toBeUndefined();
+
+    const closed = openHarness("closed");
+    closed.injectedEvents.push(closedEvent);
+    closed.runtime.insert("todos", {
+      title: { type: "Text", value: "not delivered after close" },
+      done: { type: "Boolean", value: false },
+    });
+    expect(closed.observedEvents).toContainEqual({ type: "closed" });
+    expect(closed.notifications).toHaveLength(1);
+  });
 
   it("delivers a multi-write mergeable transaction as one subscription delta", async () => {
     const { NapiDb } = await loadNapiModule();
@@ -1645,15 +1741,34 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
   });
 
   it("uses session identity for trusted-serving NAPI reads", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
     const { NapiDb } = await loadNapiModule();
+    const appId = "00000000-0000-0000-0000-00000000d008";
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      backendSecret: "core-napi-delete-policy-backend",
+      adminSecret: "core-napi-delete-policy-admin",
+      schema: OWNED_TODOS_SCHEMA,
+      permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
+    });
     const runtime = new NativeRuntimeAdapter(
-      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      {
+        openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never,
+        openMemoryAsBackend: (schema, config) =>
+          NapiDb.openMemoryAsBackend(schema, config) as never,
+      },
       OWNED_TODOS_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-delete-policy:node"),
       testAuthorBytes("jazz-napi-native-runtime-delete-policy:author"),
       12,
       true,
-      { readAuthorizationHost: "trusted-serving" },
+      { readAuthorizationHost: "trusted-serving", backendMode: true },
+    );
+    runtimes.push(runtime);
+    runtime.connect(
+      webSocketUrl(server.url, appId),
+      JSON.stringify({ backend_secret: server.backendSecret }),
     );
     const aliceSession = testExternalSessionJson(ALICE_ID);
     const bobSession = testExternalSessionJson(BOB_ID);
@@ -1678,8 +1793,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     );
 
     await Promise.all([
-      runtime.waitForTransaction(await committedTxId(aliceTodo), "local"),
-      runtime.waitForTransaction(await committedTxId(bobTodo), "local"),
+      runtime.waitForTransaction(await committedTxId(aliceTodo), "global"),
+      runtime.waitForTransaction(await committedTxId(bobTodo), "global"),
     ]);
 
     await expect(
@@ -1689,13 +1804,29 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       runtime.query(JSON.stringify({ table: "todos" }), bobSession, "local-first"),
     ).resolves.toEqual([expect.objectContaining({ id: bobTodo.id })]);
 
-    // This adapter's direct writes are advisory: capture both cross-identity
-    // deletes and prove their local effects through identity-scoped reads.
-    const aliceDeletesBob = runtime.delete("todos", bobTodo.id, aliceSession);
-    const bobDeletesAlice = runtime.delete("todos", aliceTodo.id, bobSession);
+    // NAPI is a replica: Local confirms storage, while the authority evaluates
+    // DELETE permission at Global. Neither session can delete the other's row.
+    const aliceDeletesForeign = runtime.delete("todos", bobTodo.id, aliceSession);
+    await expect(
+      runtime.waitForTransaction(await committedTxId(aliceDeletesForeign), "global"),
+    ).rejects.toMatchObject({ code: "permission_denied" });
+    const bobDeletesForeign = runtime.delete("todos", aliceTodo.id, bobSession);
+    await expect(
+      runtime.waitForTransaction(await committedTxId(bobDeletesForeign), "global"),
+    ).rejects.toMatchObject({ code: "permission_denied" });
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local-first"),
+    ).resolves.toEqual([expect.objectContaining({ id: aliceTodo.id })]);
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), bobSession, "local-first"),
+    ).resolves.toEqual([expect.objectContaining({ id: bobTodo.id })]);
+
+    // Receipt rejection must not poison later permitted writes for either user.
+    const aliceDeletesOwn = runtime.delete("todos", aliceTodo.id, aliceSession);
+    const bobDeletesOwn = runtime.delete("todos", bobTodo.id, bobSession);
     await Promise.all([
-      runtime.waitForTransaction(await committedTxId(aliceDeletesBob), "local"),
-      runtime.waitForTransaction(await committedTxId(bobDeletesAlice), "local"),
+      runtime.waitForTransaction(await committedTxId(aliceDeletesOwn), "global"),
+      runtime.waitForTransaction(await committedTxId(bobDeletesOwn), "global"),
     ]);
 
     await expect(
@@ -1963,16 +2094,66 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const aliceRejection = await aliceDenied.catch((error) => error);
     expect(Object.getOwnPropertyDescriptor(aliceRejection, "message")).toMatchObject({
       enumerable: false,
-      value: expect.stringContaining("AuthorizationDenied"),
+      value: expect.stringContaining("authorization_denied"),
     });
-    await expect(aliceDenied).rejects.toThrow("AuthorizationDenied");
+    await expect(aliceDenied).rejects.toThrow("authorization_denied");
     const bobDenied = runtime.waitForTransaction(await committedTxId(bobTodo), "global");
     await expect(bobDenied).rejects.toMatchObject({
       kind: "rejected",
       code: "permission_denied",
       reason: "Write rejected by server authorization",
     });
-    await expect(bobDenied).rejects.toThrow("AuthorizationDenied");
+    await expect(bobDenied).rejects.toThrow("authorization_denied");
+  }, 15_000);
+
+  it("rejects a session write stamped too far ahead of the authority's clock with its own code", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+
+    const { NapiDb } = await loadNapiModule();
+    const appId = "00000000-0000-0000-0000-00000000d00a";
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      backendSecret: "core-napi-clock-skew-backend",
+      adminSecret: "core-napi-clock-skew-admin",
+      schema: OWNED_TODOS_SCHEMA,
+      permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
+    });
+
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      OWNED_TODOS_SCHEMA,
+      deterministicBytes("jazz-napi-native-runtime-clock-skew:node"),
+      testAuthorBytes("jazz-napi-native-runtime-clock-skew:author"),
+      13,
+      true,
+    );
+    runtimes.push(runtime);
+    runtime.connect(
+      webSocketUrl(server.url, appId),
+      JSON.stringify({ backend_secret: server.backendSecret }),
+    );
+
+    // An hour ahead: far beyond the authority's skew tolerance.
+    const future = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "from the future" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: ALICE_ID },
+      },
+      JSON.stringify({
+        session: testExternalSession(ALICE_ID),
+        updated_at: Date.now() + 3_600_000,
+      }),
+    );
+    const refused = runtime.waitForTransaction(await committedTxId(future), "global");
+    await expect(refused).rejects.toMatchObject({
+      kind: "rejected",
+      code: "client_clock_too_far_ahead",
+      reason: "Client clock is too far ahead",
+    });
+    await expect(refused).rejects.toThrow("client_clock_too_far_ahead");
   }, 15_000);
 
   it("keeps persistent client-local session writes optimistic until the authority rejects them", async () => {
@@ -2042,10 +2223,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
       await expect(
         runtime.waitForTransaction(await committedTxId(aliceTodo), "global"),
-      ).rejects.toThrow("AuthorizationDenied");
+      ).rejects.toThrow("authorization_denied");
       await expect(
         runtime.waitForTransaction(await committedTxId(bobTodo), "global"),
-      ).rejects.toThrow("AuthorizationDenied");
+      ).rejects.toThrow("authorization_denied");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

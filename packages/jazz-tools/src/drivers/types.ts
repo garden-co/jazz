@@ -176,6 +176,8 @@ export interface TablePolicies {
 }
 
 export interface TableSchema {
+  /** Versioned references from system-provided account UUID fields; no stored columns. */
+  synthetic_references_v1?: Record<string, string>;
   /** Authoring metadata; excluded from storage schema identity. */
   relations?: import("../relationships.js").Relationships;
   columns: ColumnDescriptor[];
@@ -197,7 +199,7 @@ export type WasmSchema = Schema;
 /**
  * Interface for storage backend implementations.
  *
- * - `persistent`: local persistence enabled (IndexedDB in browser, Fjall in backend)
+ * - `persistent`: local persistence enabled (SQLite on IndexedDB in the browser, a SQLite file in the backend)
  * - `memory`: non-persistent in-memory runtime only
  */
 export type StorageDriver =

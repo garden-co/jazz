@@ -22,7 +22,7 @@ example apps is [Examples & Benchmarks Program](../../EXAMPLES_AND_BENCHMARKS_PR
 
 These definitions are run locally only. CI performance coverage lives in the
 hero examples' CodSpeed benches, which own these workloads (see the program
-plan above); the SQLite runs are StagePlan's nightly `_sqlite` cases.
+plan above).
 
 ## Native Runner
 
@@ -42,98 +42,6 @@ RUST_LOG=warn cargo run --release -p jazz-native-transport --example realistic_b
   --scenario dev/benchmarks/realistic/scenarios/w3_offline_reconnect.json \
   --server-url http://127.0.0.1:1625
 ```
-
-## Rust Criterion (active core baseline)
-
-Run the local realistic benchmark suite:
-
-```bash
-cargo bench -p jazz --features rocksdb --bench realistic_phase1
-```
-
-It currently hard-codes the S profile inside
-`crates/jazz/benches/realistic_phase1.rs` and runs the active
-core ports of selected realistic scenarios.
-
-Current topology coverage:
-
-- CRUD: `realistic_phase1/r1_crud`
-- reads: `realistic_phase1/r2_reads`
-- persisted cold-load (`M1_rocksdb`): `realistic_phase1/r3_rocksdb_cold_load` (requires `--features rocksdb`)
-- hot task history with multiple subscriptions: `realistic_phase1/r4_hot_task_history`
-- subscribed write path: `realistic_phase1/r9_subscribed_write`
-- writer/server/reader sync fanout: `realistic_phase1/r10_sync_fanout`
-- byte-wire reconnect/resume canary: `realistic_phase1/r11_byte_wire_resume`
-- recursive permission read/subscription visibility: `realistic_phase1/r12_recursive_permissions`
-- permission-filtered reconnect/resume transitions: `realistic_phase1/r13_permission_filtered_resume`
-
-Run only the cold-load benchmark:
-
-```bash
-cargo bench -p jazz --features rocksdb --bench realistic_phase1 -- realistic_phase1/r3_rocksdb_cold_load
-```
-
-R3 preserves the historical combined Criterion measurement and also emits one
-JSON phase receipt per selected profile/cache mode. The receipt separates
-RocksDB storage open, Jazz `Db` open, query preparation, and first
-materialization. First materialization is further split into view resolution,
-program compilation, plan selection, Groove execution, row
-decode/materialization, row finishing, projection, and an unattributed
-facade/clock residual. Its default is the existing 120-task CI profile with the
-OS page cache left uncontrolled after fixture seeding:
-
-Each `*_p50_us` field is the median of that field across all samples. These
-independent medians describe the typical cost of each phase, but they need not
-add up to `total_p50_us` or `first_read_p50_us`; use an individual sample when
-an exactly balanced timing decomposition is required.
-
-```bash
-JAZZ_R3_PROFILES=ci \
-  cargo bench -p jazz --features rocksdb --bench realistic_phase1 -- \
-  realistic_phase1/r3_rocksdb_cold_load
-```
-
-For local characterization, select any comma-separated subset of `ci,s,m`
-(120/3,000/100,000 tasks). `JAZZ_R3_PHASE_ONLY=1` skips the combined Criterion
-loop after emitting the phase receipts:
-
-```bash
-JAZZ_R3_PROFILES=ci,s,m \
-JAZZ_R3_CACHE_MODES=warm,evicted \
-JAZZ_R3_PHASE_SAMPLES=3 \
-JAZZ_R3_PHASE_ONLY=1 \
-  cargo bench -p jazz --features rocksdb --bench realistic_phase1 -- \
-  realistic_phase1/r3_rocksdb_cold_load
-```
-
-`warm` means a fresh RocksDB/Jazz instance over files whose OS page-cache state
-is uncontrolled after seeding. On Linux, `evicted` calls
-`posix_fadvise(POSIX_FADV_DONTNEED)` for each RocksDB file before every sample;
-eviction is outside the measured window and does not drop the machine-wide page
-cache. Both modes are process-cold. The M fixture is intentionally opt-in
-because its public-API seed takes several minutes.
-
-To attribute Jazz's internal open work, enable the test/bench-only diagnostic
-feature:
-
-```bash
-JAZZ_R3_PROFILES=m \
-JAZZ_R3_CACHE_MODES=warm \
-JAZZ_R3_CLOSE_MODES=clean,unclean \
-JAZZ_R3_PHASE_SAMPLES=3 \
-JAZZ_R3_PHASE_ONLY=1 \
-  cargo bench -p jazz --features r3-open-attribution \
-    --bench realistic_phase1 -- realistic_phase1/r3_rocksdb_cold_load
-```
-
-This adds timings and work counts for catalogue recovery, full database open,
-global-time recovery, known-state recovery, ahead-current index
-reconstruction, and final catalogue persistence. The retained legacy
-current-row-validation fields report zero now that startup uses bounded recovery. `clean`
-calls `Db::close` after seeding and after every measured read; `unclean` drops
-the database without closing. Lifecycle setup and close happen outside the
-measured window. The default remains `unclean`. See
-`dev/benchmarks/R3_JAZZ_OPEN_ATTRIBUTION.md` for the initial local receipt.
 
 ## Browser Runner (IndexedDB Worker)
 

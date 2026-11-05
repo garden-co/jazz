@@ -736,7 +736,7 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             );
             put_bytes(bytes, record.raw());
         }
-        // These Groove-native arms are rejected by value_type before a
+        // These internal arms are rejected by value_type before a
         // validated query reaches canonicalization. Keep their fallback
         // encodings total for defensive callers such as binding identities.
         Value::Enum(value) => {

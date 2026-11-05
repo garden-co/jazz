@@ -108,6 +108,8 @@ export async function createServer(
     env: "dev",
     jwksUrl: options.jwksUrl ?? process.env.JAZZ_JWKS_URL,
     jwtPublicKey: process.env.JAZZ_JWT_PUBLIC_KEY,
+    // This demo uses local-first tokens, including when NODE_ENV is production.
+    allowLocalFirstAuth: true,
   });
   // Preserve the programmatic administrative handle for embedding and tests.
   // Network routes below exclusively use request-scoped databases.

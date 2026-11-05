@@ -61,7 +61,7 @@ fn stage(db: &Db, n: u8) -> OpenTransactionId {
     block_on(db.begin_serializable(id)).unwrap();
     db.prepare_initialization_insert(id, "notes", row(n))
         .unwrap();
-    block_on(db.serializable_tx_ref(id).insert(
+    block_on(db.tx_ref(id).insert(
         "notes",
         cells("founder"),
         jazz::db::InsertOptions {
@@ -123,7 +123,7 @@ fn seal_is_private_frozen_and_publishes_the_exact_identity() {
     );
     assert!(
         block_on(
-            db.serializable_tx_ref(id)
+            db.tx_ref(id)
                 .insert("notes", cells("late"), Default::default())
         )
         .is_err()
@@ -161,7 +161,7 @@ fn interleaved_writes_and_snapshots_use_publication_order() {
     block_on(db.begin_serializable(before)).unwrap();
     let query = db.prepare_query(&Query::from("notes")).unwrap();
     assert_eq!(
-        block_on(db.serializable_tx_ref(before).all_prepared(&query))
+        block_on(db.tx_ref(before).all_prepared(&query))
             .unwrap()
             .len(),
         1
@@ -169,7 +169,7 @@ fn interleaved_writes_and_snapshots_use_publication_order() {
     let published = db.publish_initialization_transaction(seal).unwrap();
     assert_eq!(rows(&db).len(), 2);
     assert_eq!(
-        block_on(db.serializable_tx_ref(before).all_prepared(&query))
+        block_on(db.tx_ref(before).all_prepared(&query))
             .unwrap()
             .len(),
         1
@@ -246,17 +246,16 @@ fn reserved_upload_and_dependent_transaction_reach_authority() {
     block_on(alice.begin_serializable(id)).unwrap();
     let query = alice.prepare_query(&Query::from("notes")).unwrap();
     assert_eq!(
-        block_on(alice.serializable_tx_ref(id).all_prepared(&query))
+        block_on(alice.tx_ref(id).all_prepared(&query))
             .unwrap()
             .len(),
         1
     );
-    block_on(alice.serializable_tx_ref(id).update(
-        "notes",
-        row(1),
-        cells("dependent"),
-        Default::default(),
-    ))
+    block_on(
+        alice
+            .tx_ref(id)
+            .update("notes", row(1), cells("dependent"), Default::default()),
+    )
     .unwrap();
     let second = block_on(alice.commit_serializable_handle(id)).unwrap();
     connect(&alice, &bob, "alice");
@@ -490,17 +489,14 @@ fn new_lease_transaction_depends_on_original_initialization() {
     block_on(alice.begin_serializable(id)).unwrap();
     let q = alice.prepare_query(&Query::from("notes")).unwrap();
     assert_eq!(
-        block_on(alice.serializable_tx_ref(id).all_prepared(&q))
-            .unwrap()
-            .len(),
+        block_on(alice.tx_ref(id).all_prepared(&q)).unwrap().len(),
         1
     );
-    block_on(alice.serializable_tx_ref(id).update(
-        "notes",
-        row(1),
-        cells("after restart"),
-        Default::default(),
-    ))
+    block_on(
+        alice
+            .tx_ref(id)
+            .update("notes", row(1), cells("after restart"), Default::default()),
+    )
     .unwrap();
     let receipt = block_on(alice.commit_serializable_handle(id)).unwrap();
     let bob = open(3, "bob", None, true);
@@ -722,13 +718,15 @@ fn initialization_wire_encoding_fixture() {
     let message:jazz::db::SyncMessage=serde_json::from_value(serde_json::json!({"Commit":{
         "node":vec![2;16],"tx":4503599627370499u64,
         "kind":{"SerializableOriginsV1":{"snapshot":7,"reads":[],"own":[[4503599627370498u64,vec![1;16],4503599627370497u64]]}},
-        "ops":[],"author":null,"session":null,"updated_at":null
+        "ops":[],"author":null,"session":null,"expect":[]
     }})).unwrap();
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_initialization_v1.json")).unwrap();
-    let bytes = postcard::to_allocvec(&message).unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/sqlite-sync-v3/initialization.json"
+    ))
+    .unwrap();
+    let bytes = jazz::db::encode_message(&message).unwrap();
     assert_eq!(hex::encode(&bytes), fixture["commitHex"].as_str().unwrap());
-    let roundtrip: jazz::db::SyncMessage = postcard::from_bytes(&bytes).unwrap();
+    let roundtrip = jazz::db::decode_message(&bytes).unwrap();
     assert_eq!(
         serde_json::to_value(&roundtrip).unwrap(),
         serde_json::to_value(&message).unwrap()
@@ -829,8 +827,8 @@ impl jazz::db::Transport for TamperOrigins {
         self.transport.try_recv()
     }
 }
-/// Bob rejects malformed origin mappings and Mallory attribution on Alice's
-/// ordinary connection. The appended wire variant does not bypass admission.
+/// Bob rejects malformed origin mappings. A changed author on Alice's ordinary
+/// session link is normalized to Alice, including the persisted row provenance.
 #[test]
 fn origin_dependencies_still_validate_shape_and_authenticated_scope() {
     for mode in ["duplicate", "invalid-position", "forged-author"] {
@@ -842,12 +840,11 @@ fn origin_dependencies_still_validate_shape_and_authenticated_scope() {
         alice.publish_initialization_transaction(seal).unwrap();
         let id = OpenTransactionId::new();
         block_on(alice.begin_serializable(id)).unwrap();
-        block_on(alice.serializable_tx_ref(id).update(
-            "notes",
-            row(1),
-            cells("must reject"),
-            Default::default(),
-        ))
+        block_on(
+            alice
+                .tx_ref(id)
+                .update("notes", row(1), cells("follow-up"), Default::default()),
+        )
         .unwrap();
         let receipt = block_on(alice.commit_serializable_handle(id)).unwrap();
         let (up, down) = duplex();
@@ -856,15 +853,20 @@ fn origin_dependencies_still_validate_shape_and_authenticated_scope() {
             mode,
         })));
         bob.accept_subscriber(down, author("alice"));
-        assert!(
-            drive(
-                &[&alice, &bob],
-                alice.wait_for_transaction(receipt.0, DurabilityTier::Global)
-            )
-            .is_err(),
-            "{mode}"
+        let result = drive(
+            &[&alice, &bob],
+            alice.wait_for_transaction(receipt.0, DurabilityTier::Global),
         );
-        assert_eq!(rows(&bob), vec![(row(1), "founder".into())], "{mode}");
+        if mode == "forged-author" {
+            result.unwrap();
+            assert_eq!(rows(&bob), vec![(row(1), "follow-up".into())]);
+            let provenance = bob.row_provenance("notes", row(1)).unwrap().unwrap();
+            assert_eq!(provenance.1, author("alice").canonical());
+            assert_eq!(provenance.3, author("alice").canonical());
+        } else {
+            assert!(result.is_err(), "{mode}");
+            assert_eq!(rows(&bob), vec![(row(1), "founder".into())], "{mode}");
+        }
     }
 }
 /// Bob's authority-local initialization reports the reserved transaction in
@@ -961,7 +963,10 @@ fn write_only_ack_preserves_exact_initialization_image() {
         )
         .is_err()
     );
-    assert_eq!(rows(&alice), vec![(row(1), "founder".into())]);
+    assert!(
+        rows(&alice).is_empty(),
+        "the write-only image is evicted from Alice's cache"
+    );
     assert_eq!(rows(&bob), vec![(row(1), "founder".into())]);
 }
 

@@ -56,9 +56,21 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
   const listeners = new Set<AuthStateListener>();
 
   const emit = () => {
+    let failed = false;
+    let firstError: unknown;
     for (const listener of listeners) {
-      listener(state);
+      try {
+        listener(state);
+      } catch (error) {
+        if (!failed) {
+          failed = true;
+          firstError = error;
+        }
+      }
     }
+    // The state is already committed: finish publication before reporting an
+    // observer failure, since an identical update will not notify again.
+    if (failed) throw firstError;
   };
 
   const assertSamePrincipal = (nextSession: PublicSession | null): void => {

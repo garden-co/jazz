@@ -65,7 +65,7 @@ default results within revision 3; the requested page size alone does not
 prove bounded scan work.
 
 CodSpeed runs the 100k table scale on every merge (the `nightly` target, measured nightly, also has 10k), three
-samples of one first query each, with mimalloc and RocksDB WalNoSync. Each input reopens the seeded store
+samples of one first query each, with mimalloc and a SQLite file (WAL, `synchronous=NORMAL`). Each input reopens the seeded store
 and prepares the query outside the timer. Only `all_for_identity` execution and
 result construction are measured. Teardown, seed transactions, public query
 preparation, and storage-counter extraction are excluded. This is runtime-cold,
@@ -87,9 +87,8 @@ an authority settlement receipt this no-network fixture does not supply. The
 seed has no pending writes, but these remain separately named endpoints, not
 interchangeable timing samples. Subscription finalization is outside the timer.
 
-The standalone receipt reports seed, reopen split into RocksDB and Jazz
-recovery, public preparation, query and close phases separately, plus
-**logical** storage read counters (not physical disk I/O). It sweeps limits
+The standalone receipt reports seed, reopen, public preparation, query and
+close phases separately, plus **logical** storage read counters (not physical disk I/O). It sweeps limits
 1/10/50 and includes the owner-policy org diagnostic. An optional fourth
 argument deletes that many trailing document rows before reads. This leaves
 the owner 2 and organization 0 pages intact while measuring the cost of a

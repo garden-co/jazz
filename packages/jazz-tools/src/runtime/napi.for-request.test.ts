@@ -748,6 +748,27 @@ describe("forRequest concurrent session isolation", () => {
       'Upsert failed: WriteError("read policy denied UPSERT on table todos: the operation requires read permission on the target row")',
     );
 
+    // None of the rejected UPDATE/UPSERT attempts may alter either owner's row.
+    await vi.waitFor(
+      async () => {
+        const [aliceRows, bobRows] = await Promise.all([
+          aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
+          bobDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
+        ]);
+        expect(aliceRows).toEqual([
+          expect.objectContaining({
+            id: aliceRow.id,
+            title: "alice-upserted",
+            owner_id: alice.user,
+          }),
+        ]);
+        expect(bobRows).toEqual([
+          expect.objectContaining({ id: bobRow.id, title: "bob-updated", owner_id: bob.user }),
+        ]);
+      },
+      { timeout: 10_000 },
+    );
+
     // A synchronous admission denial has no returned write handle. It must be
     // terminal and quiet: a later permitted write cannot inherit a stale queued
     // failure from the rejected attempt.
@@ -801,12 +822,32 @@ describe("forRequest concurrent session isolation", () => {
         .wait({ tier: "global" }),
     ]);
 
-    // Cross-user deletes stage locally but are rejected by the serving authority.
-    await expect(aliceDb.delete(todoApp.todos, bobRow.id).wait({ tier: "global" })).rejects.toThrow(
-      /AuthorizationDenied|Write rejected by server authorization/,
-    );
-    await expect(bobDb.delete(todoApp.todos, aliceRow.id).wait({ tier: "global" })).rejects.toThrow(
-      /AuthorizationDenied|Write rejected by server authorization/,
+    // DELETE permission rejects each foreign target through its write receipt;
+    // SELECT denial is independent and neither rejected write may remove a row.
+    await expect(
+      aliceDb.delete(todoApp.todos, bobRow.id).wait({ tier: "global" }),
+    ).rejects.toMatchObject({
+      code: "permission_denied",
+    });
+    await expect(
+      bobDb.delete(todoApp.todos, aliceRow.id).wait({ tier: "global" }),
+    ).rejects.toMatchObject({
+      code: "permission_denied",
+    });
+    await vi.waitFor(
+      async () => {
+        const [aliceRows, bobRows] = await Promise.all([
+          aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
+          bobDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
+        ]);
+        expect(aliceRows).toEqual([
+          expect.objectContaining({ id: aliceRow.id, title: "alice-todo", owner_id: alice.user }),
+        ]);
+        expect(bobRows).toEqual([
+          expect.objectContaining({ id: bobRow.id, title: "bob-todo", owner_id: bob.user }),
+        ]);
+      },
+      { timeout: 10_000 },
     );
 
     // Each user can delete their own row concurrently.

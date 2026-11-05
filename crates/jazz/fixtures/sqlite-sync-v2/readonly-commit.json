@@ -1,0 +1,23 @@
+{
+  "role": "jazz.sqlite.sync.read-only-commit.v1",
+  "version": 2,
+  "hex": "4a53514c02040101010101010101010101010101010181808080808080080107000000000000",
+  "message": {
+    "Commit": {
+      "node": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+      "tx": 4503599627370497,
+      "kind": {
+        "Serializable": {
+          "snapshot": 7,
+          "reads": [],
+          "own": []
+        }
+      },
+      "ops": [],
+      "author": null,
+      "session": null,
+      "expect": []
+    }
+  },
+  "encoding": "jazz.sqlite.sync.v2"
+}

@@ -32,9 +32,8 @@ for.
 
 When you register a query subscription with the server, it remembers.
 
-The server keeps a live query graph for that subscription. When local writes, remote replay, or
-schema/policy changes affect the result, it re-settles only the changed parts of the query and
-pushes the relevant row updates downstream.
+The server keeps that subscription live. When a write, a replayed change, or a schema/policy change
+could affect its result, the server re-evaluates it and pushes only the rows that changed.
 
 That means:
 

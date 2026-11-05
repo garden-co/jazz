@@ -1,5 +1,10 @@
+import { usesSpaceAdministration } from "./encrypted-schema.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { maintainSpaceMember, initialisePermissionSpace } from "./current-membership.js";
+import {
+  maintainSpaceMember,
+  initialisePermissionSpace,
+  initialiseSpaceAdministration,
+} from "./current-membership.js";
 import {
   beginDbTransactionAfter,
   serializableE2eeTransaction,
@@ -89,7 +94,9 @@ const recoverySnapshotBatchSize = 8;
 function isTransactionConflict(error: unknown): boolean {
   return (
     (error instanceof PersistedWriteRejectedError &&
-      (error.code === "exclusive_conflict" || error.code === "transaction_conflict")) ||
+      (error.code === "exclusive_conflict" ||
+        error.code === "transaction_conflict" ||
+        error.code === "serialization_conflict")) ||
     (error instanceof Error && error.message.startsWith("(transaction_conflict):"))
   );
 }
@@ -850,10 +857,7 @@ export class Spaces {
       } catch (error) {
         // Retry only rejected maintenance, never the original initialization or
         // its source. Each attempt reopens keys and revalidates accepted history.
-        const conflict =
-          (error instanceof PersistedWriteRejectedError &&
-            (error.code === "exclusive_conflict" || error.code === "transaction_conflict")) ||
-          (error instanceof Error && error.message.startsWith("(transaction_conflict):"));
+        const conflict = isTransactionConflict(error);
         if (!conflict || attempt >= 2) throw error;
       }
     }
@@ -977,6 +981,13 @@ export class Spaces {
       throw new Error("E2EE space already exists");
     const pending = seed && initialSeeds.get(seed);
     const recipientsToUse = pending?.recipients ?? initialRecipientIds(recipientIds);
+    if (
+      usesSpaceAdministration(scope._schema, scope._table) &&
+      (recipientsToUse.length !== 1 || recipientsToUse[0] !== this.accountId)
+    )
+      throw new Error(
+        "Explicit initial recipients are not supported with space administration helpers yet; create the space for its creator, then grant recipients",
+      );
     const eligibility = await this.initialEligibility(tx, device.id, recipientsToUse);
     if (pending) {
       if (
@@ -1021,6 +1032,14 @@ export class Spaces {
         id: grantId,
       });
     initialisePermissionSpace(tx, scope._schema, scope._table, identifier);
+    initialiseSpaceAdministration(
+      tx,
+      scope._schema,
+      scope._table,
+      id,
+      identifier,
+      signedRoot.creatorAccountId,
+    );
     for (const grant of initialGrants)
       maintainSpaceMember(
         tx,
@@ -2474,10 +2493,7 @@ export class Spaces {
         // Key preparation may follow another client's completed maintenance.
         // Delivery may race another maintainer. Explicit rotation still reports
         // its losing contender; never retry use() itself.
-        const conflict =
-          (error instanceof PersistedWriteRejectedError &&
-            (error.code === "exclusive_conflict" || error.code === "transaction_conflict")) ||
-          (error instanceof Error && error.message.startsWith("(transaction_conflict):"));
+        const conflict = isTransactionConflict(error);
         if (conflict && (use || !state.rotationRequired) && conflicts < 2) {
           this.assertCurrentReconciliation(reconciliation);
           return this.explainAddress(

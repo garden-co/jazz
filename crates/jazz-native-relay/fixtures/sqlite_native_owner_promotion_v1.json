@@ -1,0 +1,17 @@
+{
+  "protocol": "jazz.sqlite.native-owner-promotion.v1",
+  "native_marker": "jazz.sqlite.native-relay-file.v1",
+  "core_marker": "jazz.sqlite.owner-scope.v1",
+  "generic": {
+    "owner_utf8": null,
+    "subject_utf8": null
+  },
+  "core_bound": {
+    "owner_utf8": null,
+    "subject_utf8": "5b2268747470733a2f2f6973737565722e6578616d706c65222c22616c696365225d"
+  },
+  "admitted": {
+    "owner_utf8": "6a617a7a2d6e61746976652d72656c61792d6f776e65722d76313a31393a73716c6974652d6e61746976652d72656c6179373a64656661756c74353a616c696365",
+    "subject_utf8": "5b2268747470733a2f2f6973737565722e6578616d706c65222c22616c696365225d"
+  }
+}

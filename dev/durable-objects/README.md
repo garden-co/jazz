@@ -1,15 +1,15 @@
 # jazz-db on Durable Object SQLite
 
-A de-risk spike: can jazz-db (the SQLite engine on the SQLite-only branch)
-run on Cloudflare Durable Object SQLite (`ctx.storage.sql`)? Measured in a
+A de-risk spike: can jazz-db run on Cloudflare Durable Object SQLite
+(`ctx.storage.sql`)? Measured in a
 local workerd (`workerd 2026-07-30`, via Miniflare 4), which enforces the
 same authorizer and limits as production.
 
 **Verdict: yes, with no design change to the data model.** Every statement
 jazz-db issues across the whole workspace test suite (2.4M statements,
 17k distinct texts, 1,624 connections) prepares on Durable Object SQLite
-once the fixes in this branch are in, except the transaction statements,
-which need a scoped transaction API (below). The work left is a storage
+with the fixes now in jazz-db (the `durable-object-limits` feature), except
+the transaction statements, which need a scoped transaction API (below). The work left is a storage
 seam, not a redesign.
 
 ## How it was checked
@@ -68,7 +68,7 @@ too).
 | Internal tables                                                                                                                       | `_cf_*` names reserved; `_cf_KV` appears in the file                                                                                                                                               | The "fresh store" check counted non-`_jazz_` tables. **Fixed.**                                                                                                       |
 | Exec cost                                                                                                                             | ~2.3 us per `exec` with a repeated text (workerd caches statements), ~7.4 us for a new text                                                                                                        | rusqlite statement cache, 512 entries                                                                                                                                 |
 
-## Fixes in this branch
+## Fixes in jazz-db
 
 - **Long IN lists bind one JSON array.** Past 16 values, `x IN (?1, …, ?n)`
   becomes `x IN (SELECT value FROM json_each(?k))` (`unhex(value)` for

@@ -1,0 +1,166 @@
+{
+  "encoding": "jazz.sqlite.sync.v3",
+  "cases": [
+    {
+      "name": "Fate-unnamed",
+      "variant": "Fate",
+      "reason": null,
+      "reader": "client",
+      "message": {
+        "Fate": {
+          "tx": 127,
+          "through": 128,
+          "result": {
+            "Err": {
+              "Rejected": {
+                "reason": null,
+                "message": "denied"
+              }
+            }
+          },
+          "held": [],
+          "global": true
+        }
+      },
+      "frame_hex": "4a53514c030e7f80010101000664656e6965640001"
+    },
+    {
+      "name": "Fate-named",
+      "variant": "Fate",
+      "reason": "client_clock_too_far_ahead",
+      "reader": "client",
+      "message": {
+        "Fate": {
+          "tx": 127,
+          "through": 128,
+          "result": {
+            "Err": {
+              "Rejected": {
+                "reason": "client_clock_too_far_ahead",
+                "message": "client_clock_too_far_ahead: future write"
+              }
+            }
+          },
+          "held": [],
+          "global": true
+        }
+      },
+      "frame_hex": "4a53514c030e7f80010101011a636c69656e745f636c6f636b5f746f6f5f6661725f616865616428636c69656e745f636c6f636b5f746f6f5f6661725f61686561643a206675747572652077726974650001"
+    },
+    {
+      "name": "FateV1-unnamed",
+      "variant": "FateV1",
+      "reason": null,
+      "reader": "client",
+      "message": {
+        "FateV1": {
+          "tx": 127,
+          "through": 128,
+          "result": {
+            "Err": {
+              "Rejected": {
+                "reason": null,
+                "message": "denied"
+              }
+            }
+          },
+          "node": [17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17]
+        }
+      },
+      "frame_hex": "4a53514c031d111111111111111111111111111111117f80010101000664656e696564"
+    },
+    {
+      "name": "FateV1-named",
+      "variant": "FateV1",
+      "reason": "client_clock_too_far_ahead",
+      "reader": "client",
+      "message": {
+        "FateV1": {
+          "tx": 127,
+          "through": 128,
+          "result": {
+            "Err": {
+              "Rejected": {
+                "reason": "client_clock_too_far_ahead",
+                "message": "client_clock_too_far_ahead: future write"
+              }
+            }
+          },
+          "node": [17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17]
+        }
+      },
+      "frame_hex": "4a53514c031d111111111111111111111111111111117f80010101011a636c69656e745f636c6f636b5f746f6f5f6661725f616865616428636c69656e745f636c6f636b5f746f6f5f6661725f61686561643a20667574757265207772697465"
+    },
+    {
+      "name": "OriginFateV2-unnamed",
+      "variant": "OriginFateV2",
+      "reason": null,
+      "reader": "client",
+      "message": {
+        "OriginFateV2": {
+          "tx": 127,
+          "through": 128,
+          "result": {
+            "Err": {
+              "Rejected": {
+                "reason": null,
+                "message": "denied"
+              }
+            }
+          },
+          "node": [17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17],
+          "held": [],
+          "global": true
+        }
+      },
+      "frame_hex": "4a53514c032d111111111111111111111111111111117f80010101000664656e6965640001"
+    },
+    {
+      "name": "OriginFateV2-named",
+      "variant": "OriginFateV2",
+      "reason": "client_clock_too_far_ahead",
+      "reader": "client",
+      "message": {
+        "OriginFateV2": {
+          "tx": 127,
+          "through": 128,
+          "result": {
+            "Err": {
+              "Rejected": {
+                "reason": "client_clock_too_far_ahead",
+                "message": "client_clock_too_far_ahead: future write"
+              }
+            }
+          },
+          "node": [17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17],
+          "held": [],
+          "global": true
+        }
+      },
+      "frame_hex": "4a53514c032d111111111111111111111111111111117f80010101011a636c69656e745f636c6f636b5f746f6f5f6661725f616865616428636c69656e745f636c6f636b5f746f6f5f6661725f61686561643a206675747572652077726974650001"
+    },
+    {
+      "name": "Fate-unknown-reason",
+      "variant": "Fate",
+      "reason": "future_reason",
+      "reader": "client",
+      "message": {
+        "Fate": {
+          "tx": 127,
+          "through": 128,
+          "result": {
+            "Err": {
+              "Rejected": {
+                "reason": "future_reason",
+                "message": "client_clock_too_far_ahead: future write"
+              }
+            }
+          },
+          "held": [],
+          "global": true
+        }
+      },
+      "frame_hex": "4a53514c030e7f80010101010d6675747572655f726561736f6e28636c69656e745f636c6f636b5f746f6f5f6661725f61686561643a206675747572652077726974650001"
+    }
+  ]
+}

@@ -29,6 +29,7 @@ export async function createAccountManager(config: AccountManagerConfig) {
     appId: config.appId,
     registry,
     store: config.store,
+    retainAccountAssignment: true,
     generateSecret: () => formatAuthSecret(generateSecret()),
     mintToken: (secret, audience) =>
       mintToken(parseAuthSecret(secret), audience, 3600, Math.floor(Date.now() / 1000)),

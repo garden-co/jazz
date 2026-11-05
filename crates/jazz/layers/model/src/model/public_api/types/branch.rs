@@ -68,6 +68,18 @@ impl SchemaHash {
 
             // Hash row descriptor in declared column order
             hash_row_descriptor(&mut hasher, &table_schema.columns);
+            if !table_schema.synthetic_references_v1.is_empty() {
+                hasher.update(b"synthetic_references_v1\0");
+                let references = table_schema
+                    .synthetic_references_v1
+                    .iter()
+                    .map(|(column, target)| (column.as_str(), target.as_str()))
+                    .collect::<Vec<_>>();
+                hasher.update(
+                    &serde_json::to_vec(&references).expect("synthetic references serialize"),
+                );
+                hasher.update(&[0]);
+            }
 
             if let Some(indexed_columns) = &table_schema.indexed_columns {
                 // `None` must hash exactly like pre-index-override schemas so

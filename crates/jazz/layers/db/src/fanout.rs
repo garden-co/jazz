@@ -1,8 +1,8 @@
 //! Subscription fan-out: shared execution and keyed invalidation.
 //!
-//! Subscriptions whose compiled SQL and parameters are identical share one
-//! live result (a `Group`); a session-independent shape (a public feed) is
-//! one group however many identities watch it. Each group declares
+//! Subscriptions with identical compiled output and executing author/claim
+//! scope share one live result (a `Group`). A public policy still retains
+//! each reader's scope so later policy changes remain isolated. Each group declares
 //! `Watch`es: the tables it reads, narrowed where the query or its read
 //! policy pins a column to one value (a root filter `room = R`, a policy
 //! `EXISTS memberships WHERE member = session.user`). A commit's changed
@@ -32,9 +32,15 @@ struct GroupKey {
     renames: String,
     sql: String,
     params: String,
-    /// Set only when the SQL depends on the identity's session (array
-    /// relations, read as the identity, always may).
-    identity: Option<String>,
+    /// The SQL selects stored columns; output aliases and types also belong
+    /// to a shared result's identity.
+    projection: String,
+    /// A later policy may use an author even when today's policy is public.
+    identity: String,
+    /// Preserve registry-following versus explicit, including empty, claims.
+    request_claims: String,
+    /// Preserve the executing policy source and every retained read mode.
+    read_context: String,
     /// The array relations nested in each row: queries that differ only
     /// in them compile to the same root SQL.
     relations: String,
@@ -48,6 +54,8 @@ struct Member {
     /// it was told.
     settled: sync::SettledBy,
     told: std::cell::Cell<Option<DurabilityTier>>,
+    accepted_evidence: bool,
+    support_inputs: bool,
 }
 
 /// One shared live result.
@@ -58,6 +66,9 @@ pub(super) struct Group {
     root: String,
     identity: Option<AuthorSubject>,
     read: ReadSpec,
+    /// Pending-state tracking for ordinary UNION previews, independent of
+    /// the occurrence/evidence coverage used by scoped UNIONs.
+    preview_pending: Option<(BTreeSet<String>, Rc<std::cell::Cell<bool>>)>,
     pub(super) rows: Vec<CurrentRow>,
     members: Vec<Member>,
     watches: Vec<Watch>,
@@ -82,11 +93,61 @@ pub(super) struct Group {
     awaiting: bool,
     /// Whether the opening was published.
     opened: bool,
+    pub(super) failure: Option<Error>,
+    #[cfg(any(test, feature = "testing"))]
+    refresh_failure_for_test: Option<Error>,
 }
 
 type SortKey = Vec<(Sql, bool)>;
 
 impl Group {
+    fn reject(&mut self, error: Error) {
+        self.failure = Some(error.clone());
+        self.push(SubscriptionEvent::Rejected {
+            reason: error.to_string(),
+        });
+    }
+
+    /// Remote query and permission support streams also need changed input
+    /// witnesses when the visible row result is unchanged.
+    pub(super) fn observe_support_inputs(&mut self, queue: &Queue) {
+        let queue = Rc::downgrade(queue);
+        if let Some(member) = self
+            .members
+            .iter_mut()
+            .find(|member| member.queue.ptr_eq(&queue))
+        {
+            member.support_inputs = true;
+        }
+    }
+
+    fn notify_support_inputs(&self) {
+        if self.awaiting || !self.opened || self.read.frozen() {
+            return;
+        }
+        for member in self.members.iter().filter(|member| member.support_inputs) {
+            if let Some(queue) = member.queue.upgrade() {
+                let mut event = delta(false, Vec::new(), Vec::new(), Vec::new());
+                if let SubscriptionEvent::Delta { settled, tier, .. } = &mut event {
+                    *settled = member.settled.get();
+                    *tier = member.settled.tier();
+                }
+                queue.borrow_mut().push_back(event);
+            }
+        }
+    }
+
+    pub(super) fn observe_accepted_evidence(&mut self, queue: &Queue) {
+        let queue = Rc::downgrade(queue);
+        if let Some(member) = self
+            .members
+            .iter_mut()
+            .find(|member| member.queue.ptr_eq(&queue))
+        {
+            member.accepted_evidence = true;
+        }
+    }
+
     /// Whether the last run waits on large-value chunks still to arrive.
     pub(super) fn awaiting(&self) -> bool {
         self.awaiting
@@ -102,6 +163,14 @@ impl Group {
         &self.prepared.query
     }
 
+    pub(super) fn includes_deleted(&self) -> bool {
+        self.read.include_deleted
+    }
+
+    pub(super) fn union_cut(&self) -> Option<u64> {
+        self.read.union_live.as_ref().and_then(|live| live.cut())
+    }
+
     fn live(&self) -> bool {
         self.members.iter().any(|m| m.queue.strong_count() > 0)
     }
@@ -114,6 +183,10 @@ pub struct FanoutStats {
     pub shared_joins: u64,
     pub woken: u64,
     pub skipped: u64,
+    /// Woken groups that applied their root rows by re-checking ids.
+    pub rechecked: u64,
+    /// Woken groups that re-ran their query and diffed the whole result.
+    pub reran: u64,
 }
 
 #[derive(Default)]
@@ -139,6 +212,22 @@ fn canon_value(value: &Value) -> Option<String> {
 }
 
 impl Fanout {
+    #[cfg(any(test, feature = "testing"))]
+    pub(super) fn fail_next_membership_refresh_for_test(
+        &mut self,
+        table: &str,
+        error: Error,
+    ) -> bool {
+        for group in self.groups.values() {
+            let mut group = group.borrow_mut();
+            if group.root == table && !group.prepared.query.array_subqueries.is_empty() {
+                group.refresh_failure_for_test = Some(error);
+                return true;
+            }
+        }
+        false
+    }
+
     fn index(&mut self, gid: u64, watches: &[Watch]) {
         for watch in watches {
             match watch {
@@ -183,7 +272,9 @@ impl Fanout {
     fn drop_group(&mut self, gid: u64) {
         if let Some(group) = self.groups.remove(&gid) {
             let group = group.borrow();
-            self.by_key.remove(&group.key);
+            if self.by_key.get(&group.key) == Some(&gid) {
+                self.by_key.remove(&group.key);
+            }
             self.unindex(gid, &group.watches);
         }
     }
@@ -258,6 +349,97 @@ impl Fanout {
 }
 
 impl Inner {
+    /// Reuse keyed dependency routing for fresh authority evidence. It may
+    /// qualify already-visible optimistic contents, so ordinary row diffing
+    /// cannot signal it. Only explicitly opted-in members receive an empty delta.
+    pub(super) fn notify_accepted_evidence(&self, changes: Vec<(String, RowUuid, Vec<u8>)>) {
+        let mut woken = BTreeSet::new();
+        for (table, row, key) in changes.into_iter().collect::<BTreeSet<_>>() {
+            if let Some(groups) = self.fan.tables.get(&table) {
+                woken.extend(groups);
+            }
+            let Some(columns) = self.fan.key_columns.get(&table) else {
+                continue;
+            };
+            for image in self.images(&table, row, &key, columns) {
+                for (column, value) in image {
+                    if let Some(groups) = self.fan.keys.get(&(table.clone(), column, value)) {
+                        woken.extend(groups);
+                    }
+                }
+            }
+        }
+        for gid in woken {
+            let Some(group) = self.fan.groups.get(gid) else {
+                continue;
+            };
+            let group = group.borrow();
+            if group.awaiting || !group.opened || group.read.frozen() {
+                continue;
+            }
+            for member in group
+                .members
+                .iter()
+                .filter(|member| member.accepted_evidence)
+            {
+                if let Some(queue) = member.queue.upgrade() {
+                    let mut event = delta(false, Vec::new(), Vec::new(), Vec::new());
+                    if let SubscriptionEvent::Delta { settled, tier, .. } = &mut event {
+                        *settled = member.settled.get();
+                        *tier = member.settled.tier();
+                    }
+                    queue.borrow_mut().push_back(event);
+                }
+            }
+        }
+    }
+
+    /// Compile-sharing identity retains author, claims, governor and E17 modes.
+    fn group_key(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        compiled: &Compiled,
+    ) -> GroupKey {
+        GroupKey {
+            renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
+            sql: compiled.sql.clone(),
+            params: format!("{:?}", compiled.params),
+            projection: format!("{:?}", compiled.projection),
+            identity: format!("{identity:?}"),
+            request_claims: format!("{:?}", prepared.request_claims),
+            read_context: format!(
+                "{:?}",
+                (
+                    prepared.authority_policies,
+                    prepared
+                        .schema
+                        .as_ref()
+                        .is_some_and(|schema| schema.policies_from.is_some()),
+                    read.members_only,
+                    read.scoped_live,
+                    read.scoped_evidence,
+                    read.readable_inheritance,
+                    read.permission_cut,
+                    read.permission_own,
+                    read.include_deleted,
+                    read.settled_only,
+                    &read.view,
+                    &read.cut,
+                )
+            ),
+            relations: format!(
+                "{:?}{:?}{:?}",
+                prepared.query.array_subqueries,
+                read.scoped_live.then_some(&prepared.request_claims),
+                read.union_live
+                    .as_ref()
+                    .map(|live| (Rc::as_ptr(live) as usize, read.union_preview))
+            ),
+        }
+    }
+
     /// Open a subscription: join the group with identical SQL, or start one.
     pub(super) fn subscribe_member(
         &mut self,
@@ -266,14 +448,45 @@ impl Inner {
         read: ReadSpec,
         settled: sync::SettledBy,
     ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
-        let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
-        let key = GroupKey {
-            renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
-            sql: compiled.sql.clone(),
-            params: format!("{:?}", compiled.params),
-            identity: (session_used || !prepared.query.array_subqueries.is_empty())
-                .then(|| format!("{identity:?}")),
-            relations: format!("{:?}", prepared.query.array_subqueries),
+        let (compiled, _) = self.compile_tracked(prepared, identity, &read)?;
+        if let Some(live) = &read.union_live {
+            live.tables
+                .borrow_mut()
+                .extend(compiled.tables.iter().cloned());
+        }
+        let key = self.group_key(prepared, identity, &read, &compiled);
+        let existing = self
+            .fan
+            .by_key
+            .get(&key)
+            .and_then(|gid| self.fan.groups.get(gid))
+            .cloned();
+        let preview_pending = if compiled.union
+            && read.union_preview
+            && !read.settled_only
+            && read.union_live.is_none()
+            && self.client.is_some()
+        {
+            let pending = existing
+                .as_ref()
+                .and_then(|group| group.borrow().preview_pending.clone())
+                .unwrap_or_else(|| {
+                    (
+                        compiled.tables.clone(),
+                        Rc::new(std::cell::Cell::new(false)),
+                    )
+                });
+            pending.1.set(self.union_has_pending_inputs(&pending.0)?);
+            Some(pending)
+        } else {
+            None
+        };
+        let settled = match &preview_pending {
+            Some((_, pending)) => sync::SettledBy::Preview {
+                upstream: Box::new(settled),
+                pending: pending.clone(),
+            },
+            None => settled,
         };
         let now = settled.get();
         let member = |queue: &Queue| Member {
@@ -282,6 +495,8 @@ impl Inner {
             bound: !prepared.binding.is_empty(),
             settled: settled.clone(),
             told: std::cell::Cell::new(now.then(|| settled.tier())),
+            accepted_evidence: false,
+            support_inputs: false,
         };
         let tier = settled.tier();
         let open = |rows: &[CurrentRow]| {
@@ -295,13 +510,7 @@ impl Inner {
             }
             event
         };
-        if let Some(handle) = self
-            .fan
-            .by_key
-            .get(&key)
-            .and_then(|gid| self.fan.groups.get(gid))
-            .cloned()
-        {
+        if let Some(handle) = existing {
             let mut group = handle.borrow_mut();
             let queue: Queue = Rc::new(RefCell::new(if group.opened {
                 VecDeque::from([open(&group.rows)])
@@ -313,19 +522,22 @@ impl Inner {
             return Ok((queue, Rc::downgrade(&handle)));
         }
         // A replica missing chunks the result needs opens it once they arrive.
-        let (rows, awaiting) = match self
-            .execute(&compiled, &prepared.query.table)
-            .and_then(|rows| self.nest_relations(prepared, identity, rows))
-        {
-            Ok(rows) => (rows, false),
-            Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
-            Err(error) => return Err(error),
+        let initial = if read.union_live.is_some() {
+            self.run(prepared, identity, &read)
+        } else {
+            self.execute(&compiled, &prepared.query.table)
         };
+        let (rows, awaiting) =
+            match initial.and_then(|rows| self.nest_relations(prepared, identity, &read, rows)) {
+                Ok(rows) => (rows, false),
+                Err(error) if crate::large::is_missing(&error) || sync::union_waiting(&error) => {
+                    (Vec::new(), true)
+                }
+                Err(error) => return Err(error),
+            };
         let watches = self.watches(prepared, identity, &read, &compiled)?;
-        let root = prepared
-            .schema
-            .as_ref()
-            .unwrap_or(&self.owner)
+        let schema = self.read_schema(prepared, &read)?;
+        let root = schema
             .stored_table(
                 history_source_table(&prepared.query.table).unwrap_or(&prepared.query.table),
             )?
@@ -343,11 +555,14 @@ impl Inner {
         self.fan.index(gid, &watches);
         self.fan.by_key.insert(key.clone(), gid);
         let handle = Rc::new(RefCell::new(Group {
+            #[cfg(any(test, feature = "testing"))]
+            refresh_failure_for_test: None,
             key,
             prepared: prepared.clone(),
             root,
             identity,
             read,
+            preview_pending,
             rows,
             members: vec![member(&queue)],
             watches,
@@ -357,9 +572,13 @@ impl Inner {
             includes,
             awaiting,
             opened: !awaiting,
+            failure: None,
         }));
         self.read_keys(&mut handle.borrow_mut());
         let weak = Rc::downgrade(&handle);
+        if let Some(live) = &handle.borrow().read.union_live {
+            live.groups.borrow_mut().push(weak.clone());
+        }
         self.fan.groups.insert(gid, handle);
         Ok((queue, weak))
     }
@@ -378,11 +597,12 @@ impl Inner {
         if query.includes.iter().all(|include| include.require) {
             return Ok(Vec::new());
         }
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        let schema = self.read_schema(prepared, read)?;
         let root = schema.table(&query.table)?;
         let mut bare = prepared.clone();
         bare.query.includes.retain(|include| include.require);
-        let others = self.compile_tracked(&bare, identity, read)?.0.tables;
+        let bare_compiled = self.compile_tracked(&bare, identity, read)?.0;
+        let others = self.with_relation_tables(&bare, identity, read, &bare_compiled.tables)?;
         let mut out = Vec::new();
         for include in query.includes.iter().filter(|include| !include.require) {
             let column = include.path.split('.').next().unwrap_or_default();
@@ -407,13 +627,9 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<(Compiled, bool), Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
-        let schema = self.effective_schema(prepared.schema.as_ref().unwrap_or(&self.owner));
-        self.require_catalogue_schema(&schema)?;
-        let compiled = Ctx::new(&schema, policy.as_ref(), &claims, &prepared.binding)
-            .with_view(read.view.clone())
-            .with_cut(read.cut.clone())
-            .with_history_origin(self.history_origin())
-            .with_members_only(read.members_only)
+        let schema = self.read_schema(prepared, read)?;
+        let compiled = self
+            .read_ctx(&schema, prepared, identity, policy.as_ref(), &claims, read)
             .compile_query(&prepared.query, read.include_deleted)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
         Ok((compiled, used))
@@ -427,7 +643,7 @@ impl Inner {
         read: &ReadSpec,
         compiled: &Compiled,
     ) -> Result<Vec<Watch>, Error> {
-        let schema = self.effective_schema(prepared.schema.as_ref().unwrap_or(&self.owner));
+        let schema = self.read_schema(prepared, read)?;
         // Watches name stored tables and columns: changed rows do.
         let stored = |name: &str| schema.stored_table(name).map(str::to_owned);
         // Under a branch view, inherited rows read with the head's branch
@@ -459,6 +675,10 @@ impl Inner {
             Ok(())
         }
         joins(&mut structural, &query.joins, &stored)?;
+        if crate::db::relation::is_union(query) {
+            // Each arm can reach these tables independently of the root policy.
+            structural.extend(compiled.tables.iter().cloned());
+        }
         fn arrays(
             out: &mut BTreeSet<String>,
             list: &[crate::query::ArraySubquery],
@@ -471,6 +691,7 @@ impl Inner {
             Ok(())
         }
         arrays(&mut structural, &query.array_subqueries, &stored)?;
+        structural.extend(self.relation_read_tables(prepared, identity, read)?);
         for source in query.flat_join.iter().flat_map(|flat| &flat.sources) {
             let table = &source.table;
             structural.insert(stored(history_source_table(table).unwrap_or(table))?);
@@ -514,13 +735,23 @@ impl Inner {
             })
             .and_then(|(column, value)| {
                 let governing = policies.by_stored(&root.stored)?;
-                Some((governing.stored_name(&column).to_owned(), value))
+                // As for a query key: only an application column is in a
+                // changed row's image (`$createdBy.account` is not).
+                governing
+                    .columns
+                    .iter()
+                    .any(|c| c.name == column)
+                    .then(|| (governing.stored_name(&column).to_owned(), value))
             });
         let mut watches = Vec::new();
         let root_key = if structural.contains(&root.stored) {
             None
         } else {
             root_key(query, &prepared.binding)
+                // Only an application column is in a changed row's image;
+                // a key on anything else (`$createdBy.identity.subject`,
+                // `id`) would never be hit.
+                .filter(|(column, _)| root.columns.iter().any(|c| c.name == *column))
                 .map(|(column, value)| (root.stored_name(&column).to_owned(), value))
                 .or(policy_root_key)
         }
@@ -631,11 +862,16 @@ impl Inner {
             let mut group = group.borrow_mut();
             // Only include targets changed: the result's rows are as before.
             if ids.as_ref().is_none_or(|ids| !ids.is_empty()) {
-                self.refresh_group(&mut group, ids.as_ref());
+                if self.refresh_group(&mut group, ids.as_ref()) {
+                    self.fan.stats.reran += 1;
+                } else {
+                    self.fan.stats.rechecked += 1;
+                }
             }
             if let Some(changed) = targets.remove(&gid) {
                 refresh_includes(&mut group, &changed);
             }
+            group.notify_support_inputs();
         }
     }
 
@@ -683,10 +919,54 @@ impl Inner {
             }
             let old = std::mem::take(&mut group.watches);
             self.fan.unindex(gid, &old);
+            if self.fan.by_key.get(&group.key) == Some(&gid) {
+                self.fan.by_key.remove(&group.key);
+            }
             let watches = self
                 .compile(&group.prepared, group.identity, &group.read)
                 .and_then(|compiled| {
-                    self.watches(&group.prepared, group.identity, &group.read, &compiled)
+                    let prepared = &group.prepared;
+                    let read = &group.read;
+                    let schema = self.read_schema(prepared, read)?;
+                    let root = schema
+                        .stored_table(
+                            history_source_table(&prepared.query.table)
+                                .unwrap_or(&prepared.query.table),
+                        )?
+                        .to_owned();
+                    let watches = self.watches(prepared, group.identity, read, &compiled)?;
+                    let tables = self.with_relation_tables(
+                        prepared,
+                        group.identity,
+                        read,
+                        &compiled.tables,
+                    )?;
+                    let includes =
+                        self.output_only_includes(prepared, group.identity, read, &compiled)?;
+                    let pending = group
+                        .preview_pending
+                        .as_ref()
+                        .map(|_| self.union_has_pending_inputs(&tables))
+                        .transpose()?;
+                    let recheck = recheckable(&prepared.query, &root, read, &compiled);
+                    let projected = order_projected(&prepared.query, &compiled);
+                    let key = self.group_key(prepared, group.identity, read, &compiled);
+                    // Publish the complete derived state only after fallible work.
+                    group.root = root;
+                    group.includes = includes;
+                    group.recheck = recheck;
+                    group.projected = projected;
+                    group.keys.clear();
+                    if let Some((prior_tables, flag)) = &mut group.preview_pending {
+                        *prior_tables = tables.clone();
+                        flag.set(pending.expect("existing preview"));
+                    }
+                    if let Some(live) = &group.read.union_live {
+                        live.tables.borrow_mut().extend(tables);
+                    }
+                    group.key = key;
+                    self.fan.by_key.entry(group.key.clone()).or_insert(gid);
+                    Ok(watches)
                 })
                 .unwrap_or(old);
             self.fan.index(gid, &watches);
@@ -887,11 +1167,13 @@ impl Inner {
                     previous_index: None,
                     index,
                 }),
-                // A row whose order key moved is reported even when its
-                // shown cells did not change: it changed place.
+                // A row whose order key moved, or that a same-value write
+                // gave a newer version, is reported even when its shown
+                // cells did not change.
                 Some((previous, prior, prior_key))
                     if prior.cells != row.cells
                         || prior.deleted != row.deleted
+                        || new_version(prior, row)
                         || prior_key != key =>
                 {
                     updated.push(SubscriptionOutputRow {
@@ -912,6 +1194,7 @@ impl Inner {
                 row_uuid: *id,
                 joined: Vec::new(),
                 version: None,
+                union_arm: None,
                 index: *index,
             })
             .collect();
@@ -928,6 +1211,7 @@ impl Inner {
                     row_uuid: row.id,
                     joined: Vec::new(),
                     version: None,
+                    union_arm: None,
                     index,
                 })
             }));
@@ -949,7 +1233,13 @@ impl Inner {
         projected: bool,
         rows: &[CurrentRow],
     ) -> Option<Result<Vec<SortKey>, Error>> {
-        let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), false);
+        // Same tie-break as the compiled ORDER BY: id in the last key's
+        // direction.
+        let tie_desc = matches!(
+            order.last().map(|by| by.direction),
+            Some(crate::query::OrderDirection::Desc)
+        );
+        let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), tie_desc);
         if projected {
             let mut keys = Vec::with_capacity(rows.len());
             for row in rows {
@@ -1073,13 +1363,21 @@ impl Inner {
 
     /// A group's rows, with array relations nested in their cells.
     fn group_rows(&self, group: &Group) -> Result<Vec<CurrentRow>, Error> {
+        if let Some((tables, pending)) = &group.preview_pending {
+            pending.set(self.union_has_pending_inputs(tables)?);
+        }
         let rows = self.run(&group.prepared, group.identity, &group.read)?;
-        self.nest_relations(&group.prepared, group.identity, rows)
+        self.nest_relations(&group.prepared, group.identity, &group.read, rows)
     }
 
     fn reset_group(&self, group: &mut Group) {
+        if group.failure.is_some() {
+            return;
+        }
         match self.group_rows(group) {
-            Err(error) if crate::large::is_missing(&error) => group.awaiting = true,
+            Err(error) if crate::large::is_missing(&error) || sync::union_waiting(&error) => {
+                group.awaiting = true
+            }
             Ok(rows) => {
                 group.awaiting = false;
                 // Rows that left the result go out as removals before the
@@ -1098,6 +1396,7 @@ impl Inner {
                             row_uuid: row.id,
                             joined: row.joined.to_vec(),
                             version: row.version,
+                            union_arm: row.union_arm.clone(),
                             index,
                         })
                         .collect();
@@ -1111,39 +1410,45 @@ impl Inner {
                 group.keys.clear();
                 self.read_keys(group);
             }
-            Err(error) => group.push(SubscriptionEvent::Rejected {
-                reason: error.to_string(),
-            }),
+            Err(error) => group.reject(error),
         }
     }
 
-    fn refresh_group(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) {
+    /// Bring a group's result up to date; true when it re-ran the query.
+    fn refresh_group(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) -> bool {
+        if group.failure.is_some() {
+            return false;
+        }
+        #[cfg(any(test, feature = "testing"))]
+        if let Some(error) = group.refresh_failure_for_test.take() {
+            group.reject(error);
+            return true;
+        }
         if let Some(ids) = ids.filter(|_| group.recheck) {
             match self.recheck_rows(group, ids) {
-                Some(Ok(Some(event))) => return group.push(event),
-                Some(Ok(None)) => return,
+                Some(Ok(Some(event))) => {
+                    group.push(event);
+                    return false;
+                }
+                Some(Ok(None)) => return false,
                 // Missing chunks: the full run below decides to wait.
                 Some(Err(error)) if crate::large::is_missing(&error) => {}
                 Some(Err(error)) => {
-                    return group.push(SubscriptionEvent::Rejected {
-                        reason: error.to_string(),
-                    });
+                    group.reject(error);
+                    return false;
                 }
                 None => {}
             }
         }
         let rows = match self.group_rows(group) {
             Ok(rows) => rows,
-            Err(error) if crate::large::is_missing(&error) => {
+            Err(error) if crate::large::is_missing(&error) || sync::union_waiting(&error) => {
                 group.awaiting = true;
-                return;
+                return true;
             }
             Err(error) => {
-                let event = SubscriptionEvent::Rejected {
-                    reason: error.to_string(),
-                };
-                group.push(event);
-                return;
+                group.reject(error);
+                return true;
             }
         };
         let was_awaiting = std::mem::take(&mut group.awaiting);
@@ -1158,6 +1463,66 @@ impl Inner {
         group.rows = rows;
         group.keys.clear();
         self.read_keys(group);
+        true
+    }
+
+    /// An upload recorded after row notifications changes preview settlement.
+    pub(super) fn refresh_union_pending(&self, tables: &BTreeSet<String>) {
+        // UNION watches include every physical input table. The existing
+        // table index keeps a new upload from visiting unrelated groups.
+        let groups = tables
+            .iter()
+            .filter_map(|table| self.fan.tables.get(table))
+            .flatten()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        for id in groups {
+            let Some(group) = self.fan.groups.get(&id) else {
+                continue;
+            };
+            let mut group = group.borrow_mut();
+            if group.read.union_live.is_some() || group.preview_pending.is_some() {
+                self.refresh_group(&mut group, None);
+                // Standalone writes can enqueue their row delta before the
+                // upload journal records pending status. Correct those queued
+                // previews before the caller can observe the completed write.
+                for member in &group.members {
+                    if let Some(queue) = member.queue.upgrade() {
+                        for event in queue.borrow_mut().iter_mut() {
+                            if let SubscriptionEvent::Delta { settled, tier, .. } = event {
+                                *settled = member.settled.get();
+                                *tier = member.settled.tier();
+                                member.told.set(settled.then_some(*tier));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Coverage can change without row writes, including an empty answer.
+    /// Receipt-only changes wake just the attached groups.
+    pub(super) fn refresh_union_coverage(&self, slots: &[Rc<sync::UnionLive>]) {
+        for live in slots {
+            live.groups
+                .borrow_mut()
+                .retain(|group| group.strong_count() > 0);
+            let groups = live
+                .groups
+                .borrow()
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect::<Vec<_>>();
+            for group in groups {
+                let mut group = group.borrow_mut();
+                if group.opened {
+                    self.refresh_group(&mut group, None);
+                } else {
+                    self.reset_group(&mut group);
+                }
+            }
+        }
     }
 
     /// Reads the sort keys of a re-checkable group whose order is not
@@ -1216,12 +1581,14 @@ impl Group {
 }
 
 /// Whether a group may apply root-only commits by re-checking ids: a
-/// single-table query, unbounded or a first page, (no joins, arrays, required includes,
-/// aggregates, windows), outside branch views and cuts, whose compiled SQL
+/// single-table query (not a union), unbounded or a first page, (no joins, arrays, required includes,
+/// aggregates, windows), outside branch views and cuts (a settled-only
+/// read is one), whose compiled SQL
 /// reads its root table exactly once (a read policy that looks at other
 /// rows of the same table would let one row's change move another).
 fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) -> bool {
-    !is_history_table(&query.table)
+    !crate::db::relation::is_union(query)
+        && !is_history_table(&query.table)
         && query.offset == 0
         && query.aggregate.is_none()
         && query.joins.is_empty()
@@ -1232,13 +1599,18 @@ fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) 
         && query.includes.iter().all(|include| !include.require)
         && read.view.is_none()
         && read.cut.is_none()
-        && !read.members_only
+        && !read.settled_only
         && !compiled.aggregate
         && compiled.sql.matches(&quote(root)).count() == 1
 }
 
 /// Whether every order column of a query is among its shown columns.
 fn order_projected(query: &Query, compiled: &Compiled) -> bool {
+    // A shown alias may have the name of a different source sort column.
+    // Read physical sort keys through the existing bounded lookup instead.
+    if query.relation.is_some() {
+        return query.order_by.iter().all(|key| key.column == "id");
+    }
     query.order_by.iter().all(|key| {
         key.column == "id"
             || compiled
@@ -1296,9 +1668,14 @@ pub(super) fn opening(rows: &[CurrentRow]) -> SubscriptionEvent {
 }
 
 /// What identifies a result row across runs: its id, plus its seq for a
-/// history read, whose versions share their row's id, and a flat join's
-/// joined rows (the occurrence).
-type RowKey = (RowUuid, u64, Arc<[crate::values::JoinedRow]>);
+/// history read, whose versions share their row's id, a flat join's
+/// joined rows, and a union read's arm (the occurrence).
+type RowKey = (
+    RowUuid,
+    u64,
+    Arc<[crate::values::JoinedRow]>,
+    Option<Arc<str>>,
+);
 
 fn row_key(row: &CurrentRow) -> RowKey {
     let version = if is_history_table(&row.table) {
@@ -1306,7 +1683,7 @@ fn row_key(row: &CurrentRow) -> RowKey {
     } else {
         0
     };
-    (row.id, version, row.joined.clone())
+    (row.id, version, row.joined.clone(), row.union_arm.clone())
 }
 
 /// The keyed diff of two results, or `None` when nothing changed.
@@ -1317,7 +1694,7 @@ fn new_version(prior: &CurrentRow, row: &CurrentRow) -> bool {
     prior.seq != row.seq && !(prior.seq >= crate::db::LOCAL_BASE && row.seq < crate::db::LOCAL_BASE)
 }
 
-fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent> {
+pub(super) fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent> {
     let old: HashMap<RowKey, (usize, &CurrentRow)> = before
         .iter()
         .enumerate()
@@ -1358,6 +1735,7 @@ fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent
             row_uuid: row.id,
             joined: row.joined.to_vec(),
             version: row.version,
+            union_arm: row.union_arm.clone(),
             index,
         })
         .collect();

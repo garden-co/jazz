@@ -2,7 +2,9 @@
 //! hosts (Cloudflare Durable Objects). With `JAZZ_SQL_TRACE=<file>` set,
 //! every top-level statement appends one JSON line: the connection, the
 //! statement text, its bound-parameter count, and what its bound values
-//! need from the host (largest blob or text, integers beyond 2^53).
+//! need from the host (largest blob or text, integers beyond 2^53). With
+//! `JAZZ_SQL_TRACE_EXPANDED=1` it also logs the text with parameters
+//! expanded, for replaying writes.
 
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::io::Write;
@@ -85,9 +87,11 @@ unsafe extern "C" fn record(
         "params": params,
         "max_value": max_value,
         "big_int": big_int,
-    })
-    .to_string()
-    .into_bytes();
+    });
+    if std::env::var_os("JAZZ_SQL_TRACE_EXPANDED").is_some() {
+        line["expanded"] = expanded.into();
+    }
+    let mut line = line.to_string().into_bytes();
     line.push(b'\n');
     if let Some(file) = SINK.lock().unwrap().as_mut() {
         let _ = file.write_all(&line);

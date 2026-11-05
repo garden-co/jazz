@@ -1,14 +1,14 @@
 import { expect, it } from "vitest";
-import { createKeyStore } from "../../src/account-store.js";
+import { resolveE2eeStore } from "../../../../packages/jazz-tools/src/e2ee/browser-key-store.js";
 
-it("serialises overlapping key updates across connections and survives reopening", async () => {
+it("uses the default SDK store for overlapping updates and survives reopening", async () => {
   const scope = {
-    registry: `https://registry.test/${crypto.randomUUID()}`,
+    registry: `https://registry.test/apps/${crypto.randomUUID()}/accounts`,
     env: "dev",
     accountId: crypto.randomUUID(),
   };
-  const first = createKeyStore(scope);
-  const second = createKeyStore(scope);
+  const first = resolveE2eeStore(undefined, scope);
+  const second = resolveE2eeStore(undefined, scope);
   await Promise.all(
     Array.from({ length: 24 }, (_, index) =>
       (index % 2 ? first : second).update((value) =>
@@ -16,7 +16,7 @@ it("serialises overlapping key updates across connections and survives reopening
       ),
     ),
   );
-  const reopened = createKeyStore(scope);
+  const reopened = resolveE2eeStore(undefined, scope);
   expect(JSON.parse((await reopened.read())!).sort((a: number, b: number) => a - b)).toEqual(
     Array.from({ length: 24 }, (_, index) => index),
   );
@@ -27,7 +27,11 @@ it("serialises overlapping key updates across connections and survives reopening
     }),
   ).rejects.toThrow("transform refused");
   expect(await reopened.read()).toBe(beforeFailedUpdate);
-  expect(await createKeyStore({ ...scope, env: "production" }).read()).toBeNull();
-  expect(await createKeyStore({ ...scope, accountId: crypto.randomUUID() }).read()).toBeNull();
-  expect(await createKeyStore({ ...scope, registry: `${scope.registry}/other` }).read()).toBeNull();
+  expect(await resolveE2eeStore(undefined, { ...scope, env: "production" }).read()).toBeNull();
+  expect(
+    await resolveE2eeStore(undefined, { ...scope, accountId: crypto.randomUUID() }).read(),
+  ).toBeNull();
+  expect(
+    await resolveE2eeStore(undefined, { ...scope, registry: `${scope.registry}/other` }).read(),
+  ).toBeNull();
 });

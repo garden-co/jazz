@@ -64,8 +64,8 @@ const toolBundleValidator = fs.readFileSync(
   path.join(root, "dev/ci/validate-tool-bundle.mjs"),
   "utf8",
 );
-const m3Differential = fs.readFileSync(
-  path.join(root, "crates/jazz/layers/node/src/node/tests/m3_differential.rs"),
+const differentialOracle = fs.readFileSync(
+  path.join(root, "crates/jazz/tests/maintained_differential.rs"),
   "utf8",
 );
 const jobs = (() => {
@@ -112,13 +112,10 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
 const rnNativeArtifactPushPaths = [
   "Cargo.lock",
   "Cargo.toml",
-  "crates/groove/**",
-  "crates/idb-tree/**",
   "crates/jazz/**",
   "crates/jazz-compression/**",
   "crates/jazz-native-relay/**",
   "crates/jazz-native-transport/**",
-  "crates/jazz-storage-sqlite/**",
   "crates/jazz-rn/**",
 ];
 const assertRnNativeArtifactPushPaths = (paths) =>
@@ -468,7 +465,7 @@ test("continuous soak precompiles outside seed watchdogs and preserves failure a
     assert.match(run, /timeout --kill-after=30s "\$\{PRECOMPILE_TIMEOUT_SECONDS\}s"/);
     assert.match(
       run,
-      /cargo test -p jazz-node --lib --no-default-features \\\n\s+--features testing,transport-compression-zstd --no-run \\\n/,
+      /cargo test -p jazz --no-default-features \\\n\s+--features testing,transport-compression-zstd --no-run \\\n\s+--test integration --test maintained_differential \\\n/,
     );
     assert.doesNotMatch(run, /--no-exec/);
   };
@@ -732,7 +729,7 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
 
   assert.match(workspace, /local-ci-equivalent\.mjs --ci-partition rust-workspace/);
   assert.match(storageCompat, /local-ci-equivalent\.mjs --ci-partition storage-compat/);
-  // The oracle reuses the lib-test unit the native corpus just built, and it
+  // The oracle links the jazz library the native corpus just built, and it
   // still reports when the corpus step fails.
   assert.match(
     storageCompat,
@@ -744,16 +741,16 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
   );
   assert.match(
     localCi,
-    /cargo test -p jazz-node --lib --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json/,
+    /cargo test -p jazz --test maintained_differential --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json/,
   );
-  assert.match(localCi, /message\.target\.name === "jazz_node"/);
+  assert.match(localCi, /message\.target\.name === "maintained_differential"/);
   assert.match(
     localCi,
-    /timeout 60s env[\s\S]*JAZZ_SEED=11[\s\S]*JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000[\s\S]*JAZZ_DIFFERENTIAL_STEP_COUNT=3[\s\S]*m3_maintained_one_shot_differential_oracle --exact --ignored/,
+    /timeout 60s env[\s\S]*JAZZ_SEED=11[\s\S]*JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000[\s\S]*JAZZ_DIFFERENTIAL_STEP_COUNT=60[\s\S]*maintained_one_shot_differential_oracle --exact --ignored/,
   );
   assert.match(
-    m3Differential,
-    /#\[ignore = "#\d+: manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
+    differentialOracle,
+    /#\[ignore = "#\d+: manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn maintained_one_shot_differential_oracle\(/,
   );
   assert.match(aggregate, /if: always\(\)/);
   assert.match(aggregate, /needs: \[test-rust-workspace, test-storage-compat\]/);
@@ -1337,11 +1334,11 @@ test("benchmark correctness stays on ordinary CI while API compilation runs nigh
   const scenarioMode = benchmarkSmokeMode("ci");
   const compileMode = benchmarkSmokeMode("compile-ci");
   const requiredSmokeTests = [
-    "jazz::legacy_benchmark_smoke=cold_subscription_correctness_smoke",
-    "jazz::legacy_benchmark_smoke=sync_correctness_smoke",
-    "jazz::legacy_benchmark_smoke=validation_correctness_smoke",
-    "jazz::legacy_benchmark_smoke=relation_include_delivery_correctness_smoke",
-    "jazz::legacy_benchmark_smoke=route_subscription_curve_correctness_smoke",
+    "jazz-sim::core_benchmark_smoke=cold_subscription_correctness_smoke",
+    "jazz-sim::core_benchmark_smoke=sync_correctness_smoke",
+    "jazz-sim::core_benchmark_smoke=validation_correctness_smoke",
+    "jazz-sim::core_benchmark_smoke=relation_include_delivery_correctness_smoke",
+    "jazz-sim::core_benchmark_smoke=route_subscription_curve_correctness_smoke",
     "jazz-sim::scenario_smoke=s1_saas_smoke",
     "jazz-sim::scenario_smoke=micro_correctness_smoke",
     "jazz-sim::scenario_smoke=s1_saas_db_surface_smoke",
@@ -1355,9 +1352,9 @@ test("benchmark correctness stays on ordinary CI while API compilation runs nigh
   ];
   assert.match(workspace, /local-ci-equivalent\.mjs --ci-partition rust-workspace/);
   assert.deepEqual(
-    [
-      ...localCi.matchAll(/"(?:jazz|jazz-sim)::(?:legacy_benchmark_smoke|scenario_smoke)=[^"]+"/g),
-    ].map((match) => match[0].slice(1, -1)),
+    [...localCi.matchAll(/"jazz-sim::(?:core_benchmark_smoke|scenario_smoke)=[^"]+"/g)].map(
+      (match) => match[0].slice(1, -1),
+    ),
     requiredSmokeTests,
   );
   assert.doesNotMatch(
@@ -1385,7 +1382,7 @@ test("benchmark correctness stays on ordinary CI while API compilation runs nigh
   assert.doesNotMatch(compileMode, /cargo test -p (?:jazz|jazz-sim)/);
   assert.match(benchmarkSmokeGate, /cargo metadata --no-deps --format-version 1/);
   assert.match(benchmarkSmokeGate, /required-features/);
-  assert.match(scenarioMode, /cargo test -p jazz --features testing --test legacy_benchmark_smoke/);
+  assert.match(scenarioMode, /cargo test -p jazz-sim --test core_benchmark_smoke/);
   assert.match(scenarioMode, /cargo test -p jazz-sim --test scenario_smoke/);
   assert.match(benchmarkSmokeGate, /benchmark-smoke phase=%s duration_seconds=%s status=%s/);
   assert.throws(
@@ -1496,15 +1493,14 @@ test("the jazz-tools launcher reports Windows as unsupported instead of a missin
   assert.doesNotMatch(probe.stderr, /Bundled binary missing/);
 });
 
-test("Windows NAPI release builds provision libclang for RocksDB bindgen", () => {
-  const windowsNapiSetup =
-    /name: Install libclang for Windows bindgen[\s\S]*if: matrix\.platform == 'win32-x64-msvc'[\s\S]*choco install llvm --version=21\.1\.8 --yes --no-progress --limit-output[\s\S]*Test-Path \(Join-Path \$libclangPath "libclang\.dll"\)[\s\S]*LIBCLANG_PATH=\$libclangPath[\s\S]*\$env:GITHUB_PATH/;
-  assert.match(packageBuild, windowsNapiSetup);
-  assert.throws(
-    () =>
-      assert.match(packageBuild.replace('"LIBCLANG_PATH=$libclangPath" | ', ""), windowsNapiSetup),
-    /LIBCLANG_PATH/,
-  );
+test("native release builds need no libclang because no Rust dependency uses bindgen", () => {
+  // RocksDB's sys crates pulled in bindgen, which needed libclang on every
+  // build host. If bindgen returns, provision libclang where it is needed
+  // (Windows MSVC runners, the Bullseye NAPI image, Vercel) before updating this.
+  const lockfile = fs.readFileSync(path.join(root, "Cargo.lock"), "utf8");
+  for (const crate of ["bindgen", "clang-sys", "rust-librocksdb-sys"])
+    assert.doesNotMatch(lockfile, new RegExp(`^name = "${crate}"$`, "m"), crate);
+  assert.doesNotMatch(packageBuild, /libclang|LIBCLANG_PATH/);
 });
 
 test("pkg.pr.new previews omit Windows while release package builds retain it", () => {

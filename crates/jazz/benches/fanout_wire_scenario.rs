@@ -1,20 +1,23 @@
 // Fan-out through the sync path: one server Db, N client Dbs each signed in
-// as its own user over an in-memory duplex transport. Written once against
-// the Jazz `Db` API and built twice (Groove and SQLite) by
-// benches/fanout_wire.rs; included with `db` bound to `jazz::db` or
-// `jazz::db` and `SyncMsg` to that engine's sync message.
+// as its own user over an in-memory duplex transport. Run by
+// benches/fanout_wire.rs.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use jazz::records::Value;
+use jazz::db;
+use jazz::db::SyncMessage as SyncMsg;
+use jazz::db::TransportError;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
-use super::common::{allow_all_policies, compile_schema, exists, outer_eq, read_and_allow_all_writes, session_eq};
+use super::common::{
+    allow_all_policies, compile_schema, exists, outer_eq, read_and_allow_all_writes, session_eq,
+};
 use super::{Config, WireReport, rss_kib};
 
 struct Duplex {
@@ -34,12 +37,22 @@ impl db::Transport for Duplex {
 }
 
 /// (client side, server side, server→client queue for counting).
-fn duplex() -> (Box<dyn db::Transport>, Box<dyn db::Transport>, Rc<RefCell<VecDeque<SyncMsg>>>) {
+fn duplex() -> (
+    Box<dyn db::Transport>,
+    Box<dyn db::Transport>,
+    Rc<RefCell<VecDeque<SyncMsg>>>,
+) {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
     (
-        Box::new(Duplex { outbound: up.clone(), inbound: down.clone() }),
-        Box::new(Duplex { outbound: down.clone(), inbound: up }),
+        Box::new(Duplex {
+            outbound: up.clone(),
+            inbound: down.clone(),
+        }),
+        Box::new(Duplex {
+            outbound: down.clone(),
+            inbound: up,
+        }),
         down,
     )
 }
@@ -67,7 +80,10 @@ fn text(value: impl Into<String>) -> Value {
 }
 
 fn cells(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
-    pairs.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect()
+    pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), v.clone()))
+        .collect()
 }
 
 fn room_of(user: usize, k: usize, cfg: &Config) -> usize {
@@ -78,7 +94,11 @@ pub fn run(cfg: &Config) -> WireReport {
     let me = ["user", "identity", "subject"];
     let schema = compile_schema(
         &SchemaBuilder::new()
-            .table(TableSchemaBuilder::new("rooms").column("name", ColumnType::Text).policies(allow_all_policies()))
+            .table(
+                TableSchemaBuilder::new("rooms")
+                    .column("name", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
             .table(
                 TableSchemaBuilder::new("memberships")
                     .fk_column("room", "rooms")
@@ -110,16 +130,31 @@ pub fn run(cfg: &Config) -> WireReport {
     let config = |node: [u8; 16], author: AuthorSubject| {
         db::DbConfig::new(
             schema.clone(),
-            db::DbIdentity { node: NodeUuid::from_bytes(node), author },
+            db::DbIdentity {
+                node: NodeUuid::from_bytes(node),
+                author,
+            },
         )
     };
-    let open = |node: [u8; 16], author: AuthorSubject| db::block_on(db::Db::open(config(node, author))).unwrap();
-    let server = db::block_on(db::Db::open_history_complete(config([0x11; 16], AuthorSubject::SYSTEM))).unwrap();
+    let open = |node: [u8; 16], author: AuthorSubject| {
+        db::block_on(db::Db::open(config(node, author))).unwrap()
+    };
+    let server = db::block_on(db::Db::open_history_complete(config(
+        [0x11; 16],
+        AuthorSubject::SYSTEM,
+    )))
+    .unwrap();
     let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
-        server.seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values).unwrap();
+        server
+            .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
+            .unwrap();
     };
     for r in 0..cfg.rooms {
-        seed("rooms", id(1, r), cells(&[("name", text(format!("room {r}")))]));
+        seed(
+            "rooms",
+            id(1, r),
+            cells(&[("name", text(format!("room {r}")))]),
+        );
     }
     let mut membership = 0;
     for u in 0..cfg.users {
@@ -127,7 +162,10 @@ pub fn run(cfg: &Config) -> WireReport {
             seed(
                 "memberships",
                 id(2, membership),
-                cells(&[("room", Value::Uuid(id(1, room_of(u, k, cfg)).0)), ("member", text(subject(u)))]),
+                cells(&[
+                    ("room", Value::Uuid(id(1, room_of(u, k, cfg)).0)),
+                    ("member", text(subject(u))),
+                ]),
             );
             membership += 1;
         }
@@ -149,7 +187,14 @@ pub fn run(cfg: &Config) -> WireReport {
         }
     }
     for a in 0..20 {
-        seed("announcements", id(4, a), cells(&[("body", text(format!("a{a}"))), ("posted_at", Value::I64(a as i64))]));
+        seed(
+            "announcements",
+            id(4, a),
+            cells(&[
+                ("body", text(format!("a{a}"))),
+                ("posted_at", Value::I64(a as i64)),
+            ]),
+        );
     }
     db::block_on(server.tick()).unwrap();
 
@@ -174,13 +219,21 @@ pub fn run(cfg: &Config) -> WireReport {
     for (u, client) in clients.iter().enumerate() {
         let room = id(1, room_of(u, 0, cfg));
         let queries = [
-            Query::from("messages").filter(eq(col("room"), lit(Value::Uuid(room.0)))).order_by("sent_at", OrderDirection::Desc).limit(30),
+            Query::from("messages")
+                .filter(eq(col("room"), lit(Value::Uuid(room.0))))
+                .order_by("sent_at", OrderDirection::Desc)
+                .limit(30),
             Query::from("memberships"),
-            Query::from("announcements").order_by("posted_at", OrderDirection::Desc).limit(20),
+            Query::from("announcements")
+                .order_by("posted_at", OrderDirection::Desc)
+                .limit(20),
         ];
         for query in queries {
             let prepared = client.prepare_query(&query).unwrap();
-            streams.push((u, db::block_on(client.subscribe(&prepared, db::ReadOpts::default())).unwrap()));
+            streams.push((
+                u,
+                db::block_on(client.subscribe(&prepared, db::ReadOpts::default())).unwrap(),
+            ));
         }
     }
     let pump = |active: &[usize]| -> (Duration, Duration) {
@@ -208,11 +261,18 @@ pub fn run(cfg: &Config) -> WireReport {
     for (u, client) in clients.iter().enumerate() {
         let room = id(1, room_of(u, 0, cfg));
         for query in [
-            Query::from("messages").filter(eq(col("room"), lit(Value::Uuid(room.0)))).order_by("sent_at", OrderDirection::Desc).limit(30),
-            Query::from("announcements").order_by("posted_at", OrderDirection::Desc).limit(20),
+            Query::from("messages")
+                .filter(eq(col("room"), lit(Value::Uuid(room.0))))
+                .order_by("sent_at", OrderDirection::Desc)
+                .limit(30),
+            Query::from("announcements")
+                .order_by("posted_at", OrderDirection::Desc)
+                .limit(20),
         ] {
             let prepared = client.prepare_query(&query).unwrap();
-            held += db::block_on(client.all(&prepared, db::ReadOpts::default())).unwrap().len();
+            held += db::block_on(client.all(&prepared, db::ReadOpts::default()))
+                .unwrap()
+                .len();
         }
     }
     eprintln!("initial rows held across clients (messages + announcements windows): {held}");
@@ -243,7 +303,12 @@ pub fn run(cfg: &Config) -> WireReport {
             }
             for (_, stream) in streams.iter_mut() {
                 while let Some(event) = stream.try_next_event() {
-                    if let db::SubscriptionEvent::Delta { added, updated, removed, .. } = event
+                    if let db::SubscriptionEvent::Delta {
+                        added,
+                        updated,
+                        removed,
+                        ..
+                    } = event
                         && !(added.is_empty() && updated.is_empty() && removed.is_empty())
                     {
                         events += 1;
@@ -257,11 +322,25 @@ pub fn run(cfg: &Config) -> WireReport {
         server_times.sort();
         client_times.sort();
         totals.sort();
-        ops.push((name, server_times[n / 2], client_times[n / 2], totals[n / 2], events / n));
+        ops.push((
+            name,
+            server_times[n / 2],
+            client_times[n / 2],
+            totals[n / 2],
+            events / n,
+        ));
         let _ = messages;
     };
     let insert = |client: &db::Db, table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
-        db::block_on(client.insert(table, values, db::InsertOptions { row_id: Some(row), ..Default::default() })).unwrap();
+        db::block_on(client.insert(
+            table,
+            values,
+            db::InsertOptions {
+                row_id: Some(row),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     };
     measure("post message", cfg.ops, &mut |i| {
         let u = (i * 31) % cfg.users;
@@ -281,7 +360,13 @@ pub fn run(cfg: &Config) -> WireReport {
     });
     measure("edit visible message", cfg.ops, &mut |i| {
         let u = (i * 31) % cfg.users;
-        db::block_on(clients[u].update("messages", id(5, i), cells(&[("body", text("edited"))]), Default::default())).unwrap();
+        db::block_on(clients[u].update(
+            "messages",
+            id(5, i),
+            cells(&[("body", text("edited"))]),
+            Default::default(),
+        ))
+        .unwrap();
         u
     });
     measure("join room", cfg.ops, &mut |i| {
@@ -290,13 +375,24 @@ pub fn run(cfg: &Config) -> WireReport {
             &clients[u],
             "memberships",
             id(6, i),
-            cells(&[("room", Value::Uuid(id(1, (i * 13 + 5) % cfg.rooms).0)), ("member", text(subject(u)))]),
+            cells(&[
+                ("room", Value::Uuid(id(1, (i * 13 + 5) % cfg.rooms).0)),
+                ("member", text(subject(u))),
+            ]),
         );
         u
     });
     measure("post announcement", cfg.ops.min(20), &mut |i| {
         let u = i % cfg.users;
-        insert(&clients[u], "announcements", id(7, i), cells(&[("body", text("news")), ("posted_at", Value::I64(1_000 + i as i64))]));
+        insert(
+            &clients[u],
+            "announcements",
+            id(7, i),
+            cells(&[
+                ("body", text("news")),
+                ("posted_at", Value::I64(1_000 + i as i64)),
+            ]),
+        );
         u
     });
     WireReport {

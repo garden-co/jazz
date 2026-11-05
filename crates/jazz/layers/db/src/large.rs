@@ -1,7 +1,7 @@
 //! Chunked large values in SQLite cells.
 //!
-//! `string`, `json` and `bytes` columns keep Groove's large-value format
-//! (`jazz_types::large_values`): a value above the inline threshold is a
+//! `string`, `json` and `bytes` columns use the large-value format of
+//! `jazz_types::large_values`: a value above the inline threshold is a
 //! descriptor over an immutable, content-defined chunk tree. Every such
 //! column stores both arms as SQLite TEXT, so one collation sees them all:
 //!
@@ -26,6 +26,7 @@
 //! transaction; per-root reference counts are kept by triggers on every
 //! table that has a large-capable column.
 
+use crate::values::CachedRow;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -37,21 +38,23 @@ use jazz_types::large_values::{
 };
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::options::{Error, ErrorCode};
+use crate::options::{Error, ErrorCode, Reason};
 use crate::values::{Column, Table, quote, storage};
 
-/// First byte of an inline bytes cell.
 #[cfg(feature = "testing")]
-static FULL_MATERIALIZATIONS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-/// How many chunked values have been rebuilt whole, so tests can tell a
-/// range read from a full materialization.
-#[cfg(feature = "testing")]
-pub fn full_materializations_for_test() -> usize {
-    FULL_MATERIALIZATIONS.load(std::sync::atomic::Ordering::Relaxed)
+thread_local! {
+    static FULL_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// How many chunked values have been rebuilt whole on this thread, so tests
+/// can tell a range read from a full materialization. Per thread, so tests
+/// running in parallel in one process do not count each other's reads.
+#[cfg(feature = "testing")]
+pub fn full_materializations_for_test() -> usize {
+    FULL_MATERIALIZATIONS.with(std::cell::Cell::get)
+}
+
+/// First byte of an inline bytes cell.
 pub(crate) const BYTES: u8 = 0xFE;
 /// First byte of a chunked cell.
 pub(crate) const CHUNKED: u8 = 0xFF;
@@ -81,11 +84,13 @@ const CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// store built or validated it; later descriptors over the same root are
 /// checked against it instead of walking the tree again.
 /// `_jazz_lv_receipt` holds nodes a client pushed ahead of the commit that
-/// references them, until `expires` (ms); `_jazz_lv_unpushed` holds nodes
+/// references them, until that commit lands or `expires` (ms); `_jazz_lv_unpushed` holds nodes
 /// this replica wrote that its upstream may not have yet; `_jazz_lv_upload`
 /// leases a local streaming upload's nodes (`_jazz_lv_upload_node`) until
 /// its row commits, it is aborted, or it goes untouched past the staging
-/// policy's maximum age.
+/// policy's maximum age. `_jazz_lv_relay_root_v1` retains the roots referenced
+/// by pending own or relayed uploads until their authority fate, independently
+/// of whether their local row representation still names those roots.
 pub(crate) const DDL: &str = "\
 CREATE TABLE IF NOT EXISTS _jazz_lv_node (locator BLOB PRIMARY KEY, hash BLOB NOT NULL, \
  bytes BLOB NOT NULL) WITHOUT ROWID;
@@ -139,68 +144,112 @@ pub(crate) fn kind(column: &Column) -> LargeValueKind {
 
 /// The triggers that count every chunked cell of `table`'s large-capable
 /// columns, in the current and history tables, against its root, and a
-/// partial index of the rows holding one. Plain SQL: the root sits at a
-/// fixed offset in a chunked cell.
-pub(crate) fn triggers(table: &Table, columns: &[&Column]) -> String {
+/// partial index per column of the rows holding one. Plain SQL: the root
+/// sits at a fixed offset in a chunked cell.
+///
+/// One trigger per event and bounded column group covers the table: each schema
+/// object costs SQLite a scan of `sqlite_schema` when it is created, so a
+/// trigger per column made opening a wide schema quadratic. A store that
+/// gains large-capable columns later adds a set for them, named after the
+/// first (`set`), beside the table's earlier ones.
+pub(crate) fn triggers(table: &Table, columns: &[&Column], set: Option<&str>) -> String {
+    // Keep each stored trigger below restricted hosts' statement/depth limits.
+    // Subsequent groups use their first new physical column, just like schema
+    // additions. Existing groups never gain a second counter for an old column.
+    columns
+        .chunks(32)
+        .enumerate()
+        .map(|(index, columns)| {
+            let set = if index == 0 {
+                set
+            } else {
+                Some(columns[0].stored.as_str())
+            };
+            trigger_set_v1(table, columns, set)
+        })
+        .collect()
+}
+
+/// Stored SQL role jazz.sqlite.large-value-trigger-set.v1; byte-pinned below.
+fn trigger_set_v1(table: &Table, columns: &[&Column], set: Option<&str>) -> String {
     let mut sql = String::new();
+    if columns.is_empty() {
+        return sql;
+    }
+    let names: Vec<String> = columns.iter().map(|c| quote(&c.stored)).collect();
+    let any = |test: &dyn Fn(&str) -> String| {
+        names
+            .iter()
+            .map(|name| test(name))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    };
+    // Each statement acts only on a chunked cell: a NULL root matches no
+    // row and inserts none.
+    let retain = |cell: &str, unless: Option<&str>| {
+        let unless = unless.map_or(String::new(), |old| {
+            format!(" AND r IS NOT {}", root_sql(old))
+        });
+        format!(
+            "INSERT INTO _jazz_lv_root (root, durable) SELECT r, 1 FROM \
+             (SELECT {} AS r) WHERE r IS NOT NULL{unless} \
+             ON CONFLICT (root) DO UPDATE SET durable = durable + 1;",
+            root_sql(cell)
+        )
+    };
+    let release = |cell: &str, unless: Option<&str>| {
+        let unless = unless.map_or(String::new(), |new| {
+            format!(" AND {} IS NOT {}", root_sql(cell), root_sql(new))
+        });
+        format!(
+            "UPDATE _jazz_lv_root SET durable = durable - 1 WHERE root = {}{unless};",
+            root_sql(cell)
+        )
+    };
     for target in [table.stored.clone(), format!("{}__h", table.stored)] {
-        for column in columns {
-            let name = quote(&column.stored);
-            let trigger = |what: &str| quote(&format!("{target}__lv_{what}_{}", column.stored));
-            let add = |cell: &str| {
-                format!(
-                    "INSERT INTO _jazz_lv_root (root, durable) VALUES ({}, 1) \
-                     ON CONFLICT (root) DO UPDATE SET durable = durable + 1;",
-                    root_sql(cell)
-                )
-            };
-            let sub = |cell: &str| {
-                format!(
-                    "UPDATE _jazz_lv_root SET durable = durable - 1 WHERE root = {};",
-                    root_sql(cell)
-                )
-            };
-            let (new, old) = (format!("NEW.{name}"), format!("OLD.{name}"));
-            let on = quote(&target);
-            // Each update statement acts only on a chunked side: a NULL
-            // root matches no row and inserts none.
-            let release = format!(
-                "UPDATE _jazz_lv_root SET durable = durable - 1 WHERE root = {};",
-                root_sql(&old)
-            );
-            let retain = format!(
-                "INSERT INTO _jazz_lv_root (root, durable) SELECT r, 1 FROM \
-                 (SELECT {} AS r) WHERE r IS NOT NULL \
-                 ON CONFLICT (root) DO UPDATE SET durable = durable + 1;",
-                root_sql(&new)
-            );
+        let on = quote(&target);
+        let trigger = |what: &str| match set {
+            None => quote(&format!("{target}__lv_v1_{what}")),
+            Some(set) => quote(&format!("{target}__lv_v1_{what}_{set}")),
+        };
+        for (column, name) in columns.iter().zip(&names) {
             // Only chunked rows: what a prep scans, near-empty otherwise.
             sql.push_str(&format!(
                 "CREATE INDEX IF NOT EXISTS {} ON {on} (id) WHERE {};\n",
                 quote(&format!("{target}__lv_{}", column.stored)),
-                chunked_sql(&name)
-            ));
-            sql.push_str(&format!(
-                "CREATE TRIGGER IF NOT EXISTS {} AFTER INSERT ON {on} \
-                 WHEN {} BEGIN {} END;\n\
-                 CREATE TRIGGER IF NOT EXISTS {} AFTER DELETE ON {on} \
-                 WHEN {} BEGIN {} END;\n\
-                 CREATE TRIGGER IF NOT EXISTS {} AFTER UPDATE OF {name} ON {on} \
-                 WHEN {} IS NOT {} BEGIN \
-                 {} {} END;\n",
-                trigger("ins"),
-                chunked_sql(&new),
-                add(&new),
-                trigger("del"),
-                chunked_sql(&old),
-                sub(&old),
-                trigger("upd"),
-                root_sql(&old),
-                root_sql(&new),
-                release,
-                retain,
+                chunked_sql(name)
             ));
         }
+        let each = |statement: &dyn Fn(&str) -> String| -> String {
+            names
+                .iter()
+                .map(|name| statement(name))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        sql.push_str(&format!(
+            "CREATE TRIGGER IF NOT EXISTS {ins} AFTER INSERT ON {on} WHEN {} BEGIN {} END;\n\
+             CREATE TRIGGER IF NOT EXISTS {del} AFTER DELETE ON {on} WHEN {} BEGIN {} END;\n\
+             CREATE TRIGGER IF NOT EXISTS {upd} AFTER UPDATE OF {} ON {on} WHEN {} BEGIN {} END;\n",
+            any(&|name| chunked_sql(&format!("NEW.{name}"))),
+            each(&|name| retain(&format!("NEW.{name}"), None)),
+            any(&|name| chunked_sql(&format!("OLD.{name}"))),
+            each(&|name| release(&format!("OLD.{name}"), None)),
+            names.join(", "),
+            any(&|name| format!(
+                "{} IS NOT {}",
+                root_sql(&format!("OLD.{name}")),
+                root_sql(&format!("NEW.{name}"))
+            )),
+            each(&|name| format!(
+                "{} {}",
+                release(&format!("OLD.{name}"), Some(&format!("NEW.{name}"))),
+                retain(&format!("NEW.{name}"), Some(&format!("OLD.{name}")))
+            )),
+            ins = trigger("ins"),
+            del = trigger("del"),
+            upd = trigger("upd"),
+        ));
     }
     sql
 }
@@ -320,12 +369,12 @@ const MISSING: &str = "large-value chunks are not available locally yet; they we
      from upstream, so retry after the next sync tick";
 
 pub(crate) fn missing() -> Error {
-    Error::new(ErrorCode::NotObserved, MISSING)
+    Error::with_reason(ErrorCode::NotObserved, Reason::MissingChunks, MISSING)
 }
 
 /// Whether `error` is a statement that needed chunks this store lacks.
 pub(crate) fn is_missing(error: &Error) -> bool {
-    error.code == ErrorCode::NotObserved && error.message == MISSING
+    error.reason == Some(Reason::MissingChunks)
 }
 
 /// Verified chunks this process has read or written, and the way to read
@@ -434,6 +483,14 @@ impl Chunks {
         }
     }
 
+    /// Close the read-only connection. The store's own connection must be
+    /// the last one on the file when it closes: only the last connection
+    /// checkpoints the WAL into the file and removes it, and a read-only one
+    /// cannot.
+    pub(crate) fn close_reader(&self) {
+        self.state.lock().expect("chunk cache").reader = None;
+    }
+
     /// The open transaction ended: its nodes are readable from the file (or
     /// were rolled back, and are unreferenced but still correct bytes).
     pub(crate) fn unpin(&self) {
@@ -452,6 +509,13 @@ impl Chunks {
     /// Whether the cache is the store's only readable copy of its nodes.
     pub(crate) fn in_memory(&self) -> bool {
         self.state.lock().expect("chunk cache").budget.is_none()
+    }
+
+    /// Whether a read recorded chunks to request, beyond those `settled`
+    /// accounts for, that the next send has not taken yet.
+    pub(crate) fn has_demand_beyond(&self, settled: impl Fn(&ChunkRequest) -> bool) -> bool {
+        let state = self.state.lock().expect("chunk cache");
+        state.demand.iter().any(|request| !settled(request))
     }
 
     /// The chunks statements needed since the last call.
@@ -570,7 +634,7 @@ impl Chunks {
     /// The whole logical value of a descriptor.
     pub(crate) fn value_bytes(&self, value: &LargeValueRef) -> Result<Vec<u8>, Error> {
         #[cfg(feature = "testing")]
-        FULL_MATERIALIZATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        FULL_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
         self.run(|inputs| lv::materialize_attempt(value, inputs))
     }
 
@@ -770,6 +834,46 @@ fn order_runs(
     Ok(())
 }
 
+/// Rank only the supplied chunked cells. Callers choose their evidence scope;
+/// this helper does not enumerate any table or column.
+fn rank_cells(
+    conn: &Connection,
+    chunks: &Chunks,
+    slot: i64,
+    cells: impl IntoIterator<Item = Vec<u8>>,
+) -> Result<bool, Error> {
+    let mut insert = conn
+        .prepare_cached(
+            "INSERT OR REPLACE INTO _jazz_lv_scratch (slot, cell, v) VALUES (?1, ?2, ?3)",
+        )
+        .map_err(storage)?;
+    let mut groups: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
+    for cell in cells {
+        groups
+            .entry(cell_prefix(&cell)?.to_vec())
+            .or_default()
+            .push(cell);
+    }
+    let mut ties = false;
+    for (_, cells) in groups {
+        if cells.len() < 2 {
+            continue;
+        }
+        ties = true;
+        let mut runs = Vec::new();
+        order_runs(chunks, cells, 0, &mut runs)?;
+        // Cells of one logical value share a rank.
+        for (rank, run) in runs.iter().enumerate() {
+            for cell in run {
+                insert
+                    .execute(rusqlite::params![slot, cell, rank as i64])
+                    .map_err(storage)?;
+            }
+        }
+    }
+    Ok(ties)
+}
+
 /// Answer one prep into `_jazz_lv_scratch`. Returns whether a rank prep
 /// found chunked values that share a sort key.
 pub(crate) fn answer(
@@ -779,6 +883,14 @@ pub(crate) fn answer(
 ) -> Result<bool, Error> {
     use crate::compile::{MatchTest, Prep};
     use crate::tools::CmpOp;
+    if let Prep::Rank { table, column, .. } = prep {
+        return rank_cells(
+            conn,
+            chunks,
+            prep.slot(),
+            chunked_cells(conn, table, column)?,
+        );
+    }
     let mut insert = conn
         .prepare_cached(
             "INSERT OR REPLACE INTO _jazz_lv_scratch (slot, cell, v) VALUES (?1, ?2, ?3)",
@@ -816,33 +928,7 @@ pub(crate) fn answer(
             }
             Ok(false)
         }
-        Prep::Rank { table, column, .. } => {
-            let mut groups: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
-            for cell in chunked_cells(conn, table, column)? {
-                groups
-                    .entry(cell_prefix(&cell)?.to_vec())
-                    .or_default()
-                    .push(cell);
-            }
-            let mut ties = false;
-            for (_, cells) in groups {
-                if cells.len() < 2 {
-                    continue;
-                }
-                ties = true;
-                let mut runs = Vec::new();
-                order_runs(chunks, cells, 0, &mut runs)?;
-                // Cells of one logical value share a rank.
-                for (rank, run) in runs.iter().enumerate() {
-                    for cell in run {
-                        insert
-                            .execute(rusqlite::params![slot, cell, rank as i64])
-                            .map_err(storage)?;
-                    }
-                }
-            }
-            Ok(ties)
-        }
+        Prep::Rank { .. } => unreachable!("rank preparation handled above"),
         Prep::Class { columns, .. } => {
             for (table, column) in columns {
                 for cell in chunked_cells(conn, table, column)? {
@@ -892,7 +978,7 @@ fn record_base(conn: &Connection, value: &LargeValueRef) -> Result<(), Error> {
     Ok(())
 }
 
-fn mark_unpushed(conn: &Connection, locator: &lv::Locator) -> Result<(), Error> {
+pub(crate) fn mark_unpushed(conn: &Connection, locator: &lv::Locator) -> Result<(), Error> {
     conn.prepare_cached("INSERT OR IGNORE INTO _jazz_lv_unpushed (locator) VALUES (?1)")
         .and_then(|mut statement| statement.execute([locator.as_bytes().as_slice()]))
         .map_err(storage)?;
@@ -901,6 +987,7 @@ fn mark_unpushed(conn: &Connection, locator: &lv::Locator) -> Result<(), Error> 
 
 /// Store one node, caching it pinned when `cache` is given. A new branch
 /// records an edge to each child, whether or not the child is stored yet.
+/// The caller verified `chunk` against its hash (or produced it).
 fn store_chunk(
     conn: &Connection,
     cache: Option<&Chunks>,
@@ -933,8 +1020,7 @@ fn store_chunk(
     if inserted == 0 {
         return Ok(());
     }
-    let node = lv::decode_node_untyped_authenticated(chunk.node_ref.object_hash, &chunk.encoded)
-        .map_err(corrupt)?;
+    let node = lv::decode_node_untyped_verified(&chunk.encoded).map_err(corrupt)?;
     if let ChunkNode::Branch { children, .. } = node {
         let mut edge = conn
             .prepare_cached("INSERT OR IGNORE INTO _jazz_lv_edge (child, parent) VALUES (?1, ?2)")
@@ -984,31 +1070,22 @@ pub(crate) fn stage_upload(
     replica: bool,
 ) -> Result<(), Error> {
     let cache = (!conn.is_autocommit() || chunks.in_memory()).then_some(chunks);
-    conn.execute_batch("SAVEPOINT jazz_lv_upload")
-        .map_err(storage)?;
-    let result = staged.iter().try_for_each(|chunk| {
-        store_chunk(conn, cache, chunk)?;
-        if replica {
-            mark_unpushed(conn, &chunk.node_ref.locator)?;
-        }
-        conn.prepare_cached(
-            "INSERT OR IGNORE INTO _jazz_lv_upload_node (id, locator) VALUES (?1, ?2)",
-        )
-        .and_then(|mut statement| {
-            statement.execute([id.as_slice(), chunk.node_ref.locator.as_bytes().as_slice()])
+    crate::values::in_savepoint(conn, "jazz_lv_upload", || {
+        staged.iter().try_for_each(|chunk| {
+            store_chunk(conn, cache, chunk)?;
+            if replica {
+                mark_unpushed(conn, &chunk.node_ref.locator)?;
+            }
+            conn.prepare_cached(
+                "INSERT OR IGNORE INTO _jazz_lv_upload_node (id, locator) VALUES (?1, ?2)",
+            )
+            .and_then(|mut statement| {
+                statement.execute([id.as_slice(), chunk.node_ref.locator.as_bytes().as_slice()])
+            })
+            .map_err(storage)?;
+            Ok(())
         })
-        .map_err(storage)?;
-        Ok(())
-    });
-    match result {
-        Ok(()) => conn
-            .execute_batch("RELEASE jazz_lv_upload")
-            .map_err(storage),
-        Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK TO jazz_lv_upload; RELEASE jazz_lv_upload");
-            Err(error)
-        }
-    }
+    })
 }
 
 /// Record the finished value's tail-free base, so binding it trusts it.
@@ -1035,16 +1112,27 @@ pub(crate) fn end_upload(conn: &Connection, id: &[u8; 32]) -> Result<(), Error> 
     Ok(())
 }
 
-/// End every upload not touched since `before` (ms); returns how many.
-/// Prepare permission comparisons for an explicitly bounded set of dependency
+/// Prepare comparisons and ordering for an explicitly bounded set of dependency
 /// cells. Unlike `answer`, this never enumerates a table or column's contents.
+/// Returns whether a rank prep found chunked cells sharing a sort prefix.
 pub(crate) fn answer_cells(
     conn: &Connection,
     chunks: &Chunks,
     prep: &crate::compile::Prep,
     cells: &BTreeSet<Vec<u8>>,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
     use crate::compile::{MatchTest, Prep};
+    if matches!(prep, Prep::Rank { .. }) {
+        return rank_cells(
+            conn,
+            chunks,
+            prep.slot(),
+            cells
+                .iter()
+                .filter(|cell| cell.first() == Some(&CHUNKED))
+                .cloned(),
+        );
+    }
     let mut insert = conn
         .prepare_cached("INSERT OR REPLACE INTO _jazz_lv_scratch(slot,cell,v) VALUES(?1,?2,?3)")
         .map_err(storage)?;
@@ -1077,17 +1165,13 @@ pub(crate) fn answer_cells(
                 }
                 None
             }
-            Prep::Rank { .. } => {
-                return Err(crate::values::unsupported(
-                    "rank preparations in candidate-created permission proofs",
-                ));
-            }
+            Prep::Rank { .. } => unreachable!("rank preparation handled above"),
         };
         insert
             .execute(rusqlite::params![prep.slot(), cell, value])
             .map_err(storage)?;
     }
-    Ok(())
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -1174,8 +1258,10 @@ fn walk(
         if !descend(&request, bytes)? {
             continue;
         }
+        // Stored nodes were verified on the way in.
         if let Some(bytes) = bytes
-            && let ChunkNode::Branch { children, .. } = authenticate(&request, bytes)?
+            && let ChunkNode::Branch { children, .. } =
+                lv::decode_node_untyped_verified(bytes).map_err(corrupt)?
         {
             stack.extend(children.iter().map(|child| request_of(&child.node_ref)));
         }
@@ -1296,6 +1382,22 @@ pub(crate) fn receive_pushed(
     Ok(())
 }
 
+/// Drop the receipts of the pushed nodes under `root`, which a commit now
+/// references: the cell holds the tree from here on. Walks only nodes that
+/// still hold a receipt, so an append settles just the nodes it pushed.
+pub(crate) fn settle_receipts(conn: &Connection, root: &lv::Locator) -> Result<(), Error> {
+    conn.prepare_cached(
+        "WITH RECURSIVE pushed (locator) AS ( \
+           SELECT locator FROM _jazz_lv_receipt WHERE locator = ?1 \
+           UNION SELECT e.child FROM _jazz_lv_edge e JOIN pushed p ON e.parent = p.locator \
+           WHERE EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE locator = e.child)) \
+         DELETE FROM _jazz_lv_receipt WHERE locator IN (SELECT locator FROM pushed)",
+    )
+    .and_then(|mut statement| statement.execute([root.as_bytes().as_slice()]))
+    .map_err(storage)?;
+    Ok(())
+}
+
 /// Drop receipts that expired by `now`; their nodes are reclaimed unless a
 /// commit referenced them meanwhile.
 pub(crate) fn expire_receipts(conn: &Connection, now: i64) -> Result<(), Error> {
@@ -1387,7 +1489,7 @@ pub(crate) fn admit(
 
 /// Whether the root `value` names is stored here.
 pub(crate) fn root_is_local(conn: &Connection, value: &LargeValueRef) -> Result<bool, Error> {
-    conn.query_row(
+    conn.cached_row(
         "SELECT EXISTS (SELECT 1 FROM _jazz_lv_node WHERE locator = ?1)",
         [value.root.locator.as_bytes().as_slice()],
         |r| r.get(0),
@@ -1424,7 +1526,7 @@ pub(crate) fn reclaim(conn: &Connection, chunks: &Chunks, budget: usize) -> Resu
             continue;
         }
         let referenced: bool = conn
-            .query_row(
+            .cached_row(
                 "SELECT EXISTS (SELECT 1 FROM _jazz_lv_root WHERE root = ?1 \
                  AND durable > 0) \
                  OR EXISTS (SELECT 1 FROM _jazz_lv_edge WHERE child = ?1) \
@@ -1439,7 +1541,7 @@ pub(crate) fn reclaim(conn: &Connection, chunks: &Chunks, budget: usize) -> Resu
             continue;
         }
         let node: Option<(Vec<u8>, Vec<u8>)> = conn
-            .query_row(
+            .cached_row(
                 "SELECT hash, bytes FROM _jazz_lv_node WHERE locator = ?1",
                 [&locator],
                 |r| Ok((r.get(0)?, r.get(1)?)),
@@ -1643,7 +1745,8 @@ mod tests {
             json: false,
             merge: Default::default(),
         };
-        conn.execute_batch(&triggers(&table, &[&column])).unwrap();
+        conn.execute_batch(&triggers(&table, &[&column], None))
+            .unwrap();
         let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
         // Cells are TEXT, as the engine binds them.
         let text_cell = |cell: Vec<u8>| crate::values::Sql::Text(cell);
@@ -1681,6 +1784,123 @@ mod tests {
         while reclaim(&conn, &chunks, 3).unwrap() > 0 {}
         assert_eq!(count("SELECT count(*) FROM _jazz_lv_node"), 0);
         assert_eq!(count("SELECT count(*) FROM _jazz_lv_reclaim"), 0);
+    }
+
+    /// Alice's two large columns share a trigger set, and a later column gets
+    /// a disjoint set. Physical counters need this lower-level test because
+    /// public reads cannot detect a leaked reference while its tree still exists.
+    #[test]
+    fn one_trigger_set_counts_every_column_and_later_sets_add_columns() {
+        let (conn, chunks) = chunks();
+        conn.execute_batch(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, a, b);
+             CREATE TABLE t__h (id INTEGER, a, b);",
+        )
+        .unwrap();
+        let table = Table {
+            name: "t".to_owned(),
+            stored: "t".to_owned(),
+            columns: Vec::new(),
+            references: Default::default(),
+            policies: Default::default(),
+            indexes: Vec::new(),
+            branch_by: Vec::new(),
+            provenance: Vec::new(),
+            stored_provenance: Vec::new(),
+        };
+        let column = |name: &str| Column {
+            name: name.to_owned(),
+            stored: name.to_owned(),
+            ty: crate::records::ValueType::String,
+            default: None,
+            json: false,
+            merge: Default::default(),
+        };
+        let (a, b, c) = (column("a"), column("b"), column("c"));
+        conn.execute_batch(&triggers(&table, &[&a, &b], None))
+            .unwrap();
+        let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        // One insert, delete and update trigger per table and history table.
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name IN ('t', 't__h')"
+            ),
+            6
+        );
+        let cell = |seed| {
+            crate::values::Sql::Text(chunked(
+                &conn,
+                &chunks,
+                LargeValueKind::String,
+                &text(seed, 300_000),
+            ))
+        };
+        let (one, two, three) = (cell(7), cell(8), cell(9));
+        let durable = |cell: &crate::values::Sql| {
+            let crate::values::Sql::Text(bytes) = cell else {
+                unreachable!()
+            };
+            conn.query_row(
+                &format!(
+                    "SELECT coalesce(sum(durable), 0) FROM _jazz_lv_root WHERE root = {}",
+                    root_sql("?1")
+                ),
+                [bytes],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        conn.execute("INSERT INTO t (id, a, b) VALUES (1, ?1, ?2)", [&one, &two])
+            .unwrap();
+        assert_eq!((durable(&one), durable(&two)), (1, 1));
+        // Swapping one column's tree releases the old and retains the new;
+        // an unchanged column keeps its count.
+        conn.execute("UPDATE t SET a = ?1, b = b WHERE id = 1", [&three])
+            .unwrap();
+        assert_eq!((durable(&one), durable(&two), durable(&three)), (0, 1, 1));
+        // A column added later gets its own set beside the first.
+        conn.execute_batch("ALTER TABLE t ADD COLUMN c; ALTER TABLE t__h ADD COLUMN c;")
+            .unwrap();
+        conn.execute_batch(&triggers(&table, &[&c], Some("c")))
+            .unwrap();
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name IN ('t', 't__h')"
+            ),
+            12
+        );
+        conn.execute("UPDATE t SET c = ?1 WHERE id = 1", [&one])
+            .unwrap();
+        assert_eq!((durable(&one), durable(&two), durable(&three)), (1, 1, 1));
+        conn.execute("DELETE FROM t WHERE id = 1", []).unwrap();
+        assert_eq!((durable(&one), durable(&two), durable(&three)), (0, 0, 0));
+    }
+
+    /// Pin the stored trigger SQL for Alice's initial and later columns. This
+    /// is a lower-level byte fixture: public rows do not expose sqlite_schema.
+    #[test]
+    fn trigger_set_v1_ddl_fixture() {
+        use jazz_model::model::public_schema::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("a", ColumnType::Text)
+                    .column("b", ColumnType::Text)
+                    .column("c", ColumnType::Text),
+            )
+            .build();
+        let schema = crate::values::Schema::new(&crate::schema::JazzSchema::new(&source).unwrap());
+        let table = schema.table("notes").unwrap();
+        let columns = table.columns.iter().collect::<Vec<_>>();
+        let actual = format!(
+            "-- jazz.sqlite.large-value-trigger-set.v1\n{}{}",
+            triggers(table, &columns[..2], None),
+            triggers(table, &columns[2..], Some("c"))
+        );
+        assert_eq!(
+            actual,
+            include_str!("../../../fixtures/sqlite_large_value_trigger_set_v1.sql")
+        );
     }
 
     #[test]
@@ -1754,6 +1974,39 @@ mod tests {
         expire_receipts(&conn, 1_000).unwrap();
         while reclaim(&conn, &chunks, 64).unwrap() > 0 {}
         assert_eq!(count(), 0, "nothing referenced them");
+    }
+
+    #[test]
+    fn a_commit_settles_the_receipts_of_the_tree_it_references() {
+        let (conn, chunks) = chunks();
+        let receipts = || {
+            conn.query_row("SELECT count(*) FROM _jazz_lv_receipt", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+        let push = |built: &lv::PreparedLargeValue| {
+            for chunk in &built.staged_chunks {
+                receive_pushed(
+                    &conn,
+                    &chunks,
+                    &request_of(&chunk.node_ref),
+                    chunk.encoded.clone(),
+                    1_000,
+                )
+                .unwrap();
+            }
+        };
+        let referenced = lv::prepare(LargeValueKind::String, &text(11, 300_000)).unwrap();
+        let pending = lv::prepare(LargeValueKind::String, &text(12, 300_000)).unwrap();
+        push(&referenced);
+        push(&pending);
+        let pending_nodes = pending.staged_chunks.len() as i64;
+        assert!(receipts() > pending_nodes);
+        settle_receipts(&conn, &referenced.value_ref.root.locator).unwrap();
+        // Only the other push, still ahead of its commit, keeps receipts,
+        // so expiring them later touches nothing the commit holds.
+        assert_eq!(receipts(), pending_nodes);
     }
 
     #[test]

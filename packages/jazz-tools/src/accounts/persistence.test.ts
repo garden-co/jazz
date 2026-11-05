@@ -5,7 +5,6 @@ import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { generateAuthSecret } from "../runtime/auth-secret-store.js";
 import { accountToken, accountGeneratedHere, exportLocalFirstSecret } from "./enrollment.js";
 import type { AccountHandle } from "./state.js";
-import { settleAccountSelection } from "./selection-durability.js";
 
 const registry = "https://core.example/apps/test/accounts";
 // Controlled crypto boundary: these tests prove storage ordering and recovery;
@@ -35,7 +34,7 @@ it("restores local selection and retains its root after logout", async () => {
   expect(restarted.getLoggedIn()?.id).toBe(handle.id);
   const root = exportLocalFirstSecret(handle);
   restarted.logout();
-  await settleAccountSelection(restarted);
+  await restarted.settleSelection();
   const loggedOut = await prepareAccountManager(options);
   expect(loggedOut.getLoggedIn()).toBeUndefined();
   expect(JSON.parse(value!).roots).toEqual([root]);
@@ -425,7 +424,7 @@ it.each([
   await expect(accountGeneratedHere(reopened.getLoggedIn()!)).resolves.toBe(true);
   expect(JSON.parse(value).roots).toEqual([secret]);
   reopened.logout();
-  await settleAccountSelection(reopened);
+  await reopened.settleSelection();
   expect(JSON.parse(value)).toMatchObject({
     roots: [secret],
     selected: null,
@@ -531,7 +530,7 @@ it("preserves candidate-v2 founder ownership through selection, stale-manager lo
   const generated = manager.restoreLocalFirst(corpus.roots[0]);
   await expect(accountGeneratedHere(generated)).resolves.toBe(true);
   await expect(accountToken(generated, registry)).resolves.toBe(mintRootToken(corpus.roots[0]));
-  await settleAccountSelection(manager);
+  await manager.settleSelection();
   expect(JSON.parse(value)).toMatchObject({
     roots: corpus.roots,
     selected: 0,
@@ -541,7 +540,7 @@ it("preserves candidate-v2 founder ownership through selection, stale-manager lo
   });
 
   stale.logout();
-  await settleAccountSelection(stale);
+  await stale.settleSelection();
   expect(() => exportLocalFirstSecret(staleHandle)).toThrow(/recovery_unavailable/);
   await expect(accountToken(staleHandle, registry)).rejects.toMatchObject({
     code: "invalid_account_handle",
@@ -556,7 +555,7 @@ it("preserves candidate-v2 founder ownership through selection, stale-manager lo
   // Logging out one manager must not revoke another manager's live handles.
   await expect(accountToken(generated, registry)).resolves.toBe(mintRootToken(corpus.roots[0]));
   manager.logout();
-  await settleAccountSelection(manager);
+  await manager.settleSelection();
   for (const handle of [imported, generated]) {
     expect(() => exportLocalFirstSecret(handle)).toThrow(/recovery_unavailable/);
     await expect(accountToken(handle, registry)).rejects.toMatchObject({
@@ -621,7 +620,7 @@ it.each([
   await expect(accountGeneratedHere(selected)).resolves.toBe(true);
   await expect(accountToken(selected, registry)).resolves.toBe(mintRootToken(secret));
   manager.logout();
-  await settleAccountSelection(manager);
+  await manager.settleSelection();
   expect(JSON.parse(value)).toMatchObject({
     roots: [secret],
     selected: null,

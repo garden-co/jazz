@@ -9,6 +9,9 @@
 extern "C" {
 #endif
 
+/* The relay ABI this header describes (Rust `NATIVE_RELAY_ABI_V1`). */
+#define JAZZ_NATIVE_RELAY_ABI_VERSION 3
+
 /*
  * Return the shared native relay ABI version embedded in this artifact.
  *
@@ -17,7 +20,7 @@ extern "C" {
  */
 uint16_t jazz_native_relay_abi_version(void);
 
-/* Optional foreground capture support; existing ABI 2 commands are unchanged. */
+/* Optional foreground capture support, a feature query outside the command layout. */
 bool jazz_native_relay_supports_snapshot_capture(void);
 
 typedef struct jazz_native_relay_bytes {

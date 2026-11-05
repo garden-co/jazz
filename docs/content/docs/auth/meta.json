@@ -4,6 +4,7 @@
     "authentication",
     "lifecycle",
     "local-first-auth",
+    "e2ee-quickstart",
     "end-to-end-encryption",
     "sessions",
     "permissions"

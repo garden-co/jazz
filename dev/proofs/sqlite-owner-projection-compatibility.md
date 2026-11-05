@@ -11,6 +11,57 @@ worker store. A foreground can write once its current owner acknowledges the
 same subject and schema. Authority connectivity is not required. This port does
 not establish that every E2EE application path or pending snapshot is supported.
 
+A new offline account opens with the public, policy-free schema. Until its
+private owner receives its first authority policy descriptor, the same admitted
+identity
+can also recover its pending previews from a sibling or reopened foreground.
+The ordinary query adds an exact pending-coordinate index probe for provisional
+rows; it does not enumerate the outbox or grant SELECT on accepted rows. Query
+filters still select the roots, and the existing bounded input closure supplies
+the complete matching transactions with their original attribution and receipts.
+Another identity, a generic relay, historical reads and permission evidence
+queries do not gain this preview capability. Policy dependencies are unchanged.
+
+A structural catalogue capture contains no read policies, so installing it does
+not close this bootstrap preview path. The first authority policy descriptor
+closes it and revalidates subscriptions, including when that descriptor denies
+every read. A retained descriptor keeps the preview path closed even when a
+newer catalogue head has invalidated it and the replacement policy is still in
+flight. Offline reopening preserves that restriction. Accepted live and frozen
+bases always require their existing accepted read evidence, even while a pending
+preview is selected. This changes no storage
+or wire bytes. The cold-owner tests in `sqlite_owner_inputs.rs` cover filtered
+complete-unit recovery, durable reopen, cross-identity refusal and an accepted
+insert whose SELECT is denied, alongside the existing unreadable-base tests.
+The split-policy regression in `sqlite_owner_session_reads.rs` keeps a pending
+row physically present while checking that a newer head revokes its preview
+before the new descriptor arrives, including after reopening.
+
+An admitted same-schema foreground also receives the owner's retained authority
+position when a cached query has accepted rows but no pending input units. The
+existing `OwnerInputsV1` envelope carries empty unit/base lists in this case.
+This lets a new local accepted-at-begin observation use the proofs delivered
+with those rows. The cached query still settles at Local, pending writes still
+need their own receipts, and a transaction begun before hydration does not gain
+later evidence. The public reopen regression in `sqlite_owner_inputs.rs` checks
+all three boundaries. The message encoding and durable values are unchanged.
+
+An owner can retain its opened schema while the authority renames tables or
+columns. It resolves the current policy's names through accepted catalogue
+identities to the same stored table and column epochs. Retained reads, newly
+connected foregrounds and offline reopens use that policy governor without
+changing the owner's public schema. A new head revokes stale policies
+immediately; a replacement grant becomes visible only after the complete
+metadata batch commits. A later invalid frame cannot leak a rolled-back grant
+through subscription events. The catalogue rename regression and authenticated
+view revocation regression cover these boundaries.
+
+Forwarded catalogue requests pin the owner's structural schema and upstream
+connection. Installing an authority policy does not change either, so the first
+policy handshake cannot cancel an otherwise valid in-flight request. The reply
+must still match the exact accepted head and requested opened schema. Neither
+change adds storage or wire fields.
+
 ## Storage contracts
 
 Three additive SQL encodings have independent versioned names. Existing
@@ -126,8 +177,10 @@ Pending images are removed from ordinary Rows output. Retained accepted bases
 travel through the existing Rows, Origins, content witness and accepted-row
 pipeline before the pending envelope, which precedes the query answer. The owner
 checks accepted bases against accepted policy dependencies; a pending grant does
-not supply accepted read evidence. A unit with an unreadable coordinate or base
-is refused rather than partially disclosed. Referenced large-value nodes use
+not supply accepted read evidence. Before the first authority policy descriptor, pending
+coordinates for the admitted identity may qualify as the private previews
+described above; accepted bases cannot. A unit with another unreadable coordinate
+or base is refused rather than partially disclosed. Referenced large-value nodes use
 the ordinary authenticated chunk request/response path. Before installing an
 input envelope, the foreground fetches the verified chunks needed to reconstruct
 its index keys. Later semantic frames, including query answers and receipts,
@@ -153,6 +206,14 @@ and the private owner's own durable uploads. Only captured, still-pending
 identities receive Local receipts after the backing-store flush. Later arrivals
 require another barrier; rejection during a flush cannot be undone by its late
 confirmation. Reopen reconstructs the journals and requires a new barrier.
+
+A standalone empty update keeps the existing row receipt and does not publish
+another upload under that receipt's transaction identity. Previously that upload
+could replace a pending insert's journal entry with an update that the authority
+could not apply after restart. Operations inside an open transaction remain part
+of that complete unit. The `sqlite_write_state.rs` regressions cover accepted and
+rejected inserts across reopen and a transaction containing an empty update;
+neither case changes receipt or journal encodings.
 A session observes only identities actually delivered to it or declared
 as already known on reconnect. Those observers receive the same original-pair
 OwnerStoredV1 receipts as uploaders, including replay after a lost receipt.

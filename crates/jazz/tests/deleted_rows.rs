@@ -1,13 +1,13 @@
-//! Deleted rows on SQLite: `includeDeleted` subscriptions and the
+//! Deleted rows: `includeDeleted` subscriptions and the
 //! `$deletedAt` / `$deletedBy` columns. A deleted row's deletion metadata
 //! is the update stamp of its deleted current version; live and restored
 //! rows read NULL, and every history version reads its row's current
 //! deletion. Include-deleted subscriptions keep deleted rows through their
 //! deletion and restoration, locally and synced (a server ships a deleted
 //! row's current version, and a resumed client keeps the deleted versions
-//! it holds). Ported from #4173 and #4182's Groove behaviour.
+//! it holds).
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 
@@ -604,16 +604,9 @@ impl Synced {
     fn alice_reads(&self, query: &Query, opts: ReadOpts) -> Vec<CurrentRow> {
         use std::future::Future;
         let bytes = postcard::to_allocvec(query).unwrap();
-        let read = self.alice.all_serialized_query(
-            &bytes,
-            opts,
-            None,
-            None,
-            None,
-            false,
-            || false,
-            |attachment| self.alice.detach_query(attachment),
-        );
+        let read = self
+            .alice
+            .all_serialized_query(&bytes, opts, None, None, None);
         let mut read = std::pin::pin!(read);
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
         for _ in 0..50 {
@@ -720,5 +713,152 @@ fn synced_include_deleted_subscriptions_keep_deleted_rows() {
             .map(|(title, at, _)| (title.as_str(), at.is_some()))
             .collect::<Vec<_>>(),
         [("first", false), ("second", true), ("third", true)]
+    );
+}
+
+/// A remote read asked right after a write, before any tick sent it, goes
+/// out behind that write: the server answers with the writer's own row.
+#[test]
+fn a_remote_read_after_an_unsent_write_sees_it() {
+    let synced = Synced::new();
+    synced.pump();
+    insert(&synced.alice, row(7), "mine");
+    assert_eq!(
+        titles(&synced.alice_reads(&notes().select(["title"]), remote(ReadOpts::default()))),
+        ["mine"]
+    );
+}
+
+/// A subscription's first answer (an empty result) and a row the server
+/// committed after it arrive in one batch: the answer lists its result as of
+/// its own seq, so the later row stays listed and reaches the subscription.
+#[test]
+fn a_row_arriving_with_an_earlier_empty_answer_stays_listed() {
+    let synced = Synced::new();
+    synced.pump();
+    let prepared = synced
+        .alice
+        .prepare_query(&notes().select(["title"]))
+        .unwrap();
+    let mut subscription =
+        block_on(synced.alice.subscribe(&prepared, ReadOpts::default())).unwrap();
+    // The Subscribe goes out and the server answers it, empty.
+    block_on(synced.alice.tick()).unwrap();
+    block_on(synced.server.tick()).unwrap();
+    // A write lands before Alice reads that answer.
+    insert(&synced.server, row(5), "from bob");
+    block_on(synced.server.tick()).unwrap();
+    synced.pump();
+    assert_eq!(
+        titles(&read(
+            &synced.alice,
+            &notes().select(["title"]),
+            local_only(ReadOpts::default())
+        )),
+        ["from bob"]
+    );
+    let (added, ..) = drain(&mut subscription);
+    assert_eq!(added.len(), 1, "the subscription shows the row");
+}
+
+/// A row Alice deleted stays on her replica as a deletion once the server
+/// has the deletion, so she can restore it without a round trip.
+#[test]
+fn a_client_restores_a_row_it_deleted_after_the_deletion_synced() {
+    let synced = Synced::new();
+    insert(&synced.alice, row(1), "mine");
+    synced.pump();
+    delete(&synced.alice, row(1));
+    synced.pump();
+    restore(&synced.alice, row(1));
+    synced.pump();
+    assert_eq!(
+        titles(&read(
+            &synced.server,
+            &notes().select(["title"]),
+            ReadOpts::default()
+        )),
+        ["mine"]
+    );
+}
+
+/// SPEC 4, INV-HIST-8: Alice edits a note offline while the server deletes
+/// it. Her edit was made over an image older than the delete, so it applies
+/// to the note's content and leaves the note deleted; the other write in her
+/// commit applies, and her own delete of the note is accepted alongside the
+/// server's. A restore reveals her edit. A write Alice makes over a deletion
+/// she already holds is still refused.
+///
+/// ```text
+/// server ──delete n1──────────────────────────► n1 deleted
+/// alice  ═offline═ tx{ n1="edited"; n2="also" }; delete n1 ──► accepted
+///                                               n1 deleted {edited}, n2 {also}
+/// server ──restore n1──► n1 {edited}
+/// ```
+#[test]
+fn an_offline_edit_of_a_row_deleted_meanwhile_applies_and_leaves_it_deleted() {
+    let mut synced = Synced::new();
+    insert(&synced.server, row(1), "first");
+    insert(&synced.server, row(2), "second");
+    let prepared = synced.alice.prepare_query(&notes()).unwrap();
+    let _subscription = block_on(synced.alice.subscribe(&prepared, deleted())).unwrap();
+    synced.pump();
+
+    synced.disconnect();
+    delete(&synced.server, row(1));
+    block_on(synced.alice.transaction(async |tx| {
+        tx.update("notes", row(1), title("edited"), Default::default())
+            .await?;
+        tx.update("notes", row(2), title("also"), Default::default())
+            .await
+    }))
+    .expect("alice commits offline");
+    delete(&synced.alice, row(1));
+    synced.connect();
+    synced.pump();
+
+    let at_server = read(&synced.server, &notes(), deleted());
+    assert_eq!(titles(&at_server), ["edited", "also"]);
+    assert!(
+        millis(&at_server[0], "$deletedAt").is_some(),
+        "n1 stays deleted"
+    );
+    assert!(millis(&at_server[1], "$deletedAt").is_none());
+    assert_eq!(
+        seen(&read(&synced.alice, &notes(), local_only(deleted()))),
+        seen(&at_server)
+    );
+
+    let refused = block_on(synced.alice.update(
+        "notes",
+        row(1),
+        title("again"),
+        Default::default(),
+    ))
+    .err()
+    .expect("alice holds the deletion");
+    assert!(
+        refused.message.contains("row already deleted"),
+        "{}",
+        refused.message
+    );
+    let refused = block_on(synced.alice.delete("notes", row(1), Default::default()))
+        .err()
+        .expect("alice holds the deletion");
+    assert!(
+        refused.message.contains("row already deleted"),
+        "{}",
+        refused.message
+    );
+
+    restore(&synced.server, row(1));
+    synced.pump();
+    assert_eq!(
+        titles(&read(
+            &synced.alice,
+            &notes().select(["title"]),
+            local_only(ReadOpts::default())
+        )),
+        ["edited", "also"]
     );
 }

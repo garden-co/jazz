@@ -72,7 +72,9 @@ const comparePosition = (a: bigint, b: bigint) => (a < b ? -1 : a > b ? 1 : 0);
 
 const isTransactionConflict = (error: unknown): boolean =>
   (error instanceof PersistedWriteRejectedError &&
-    (error.code === "exclusive_conflict" || error.code === "transaction_conflict")) ||
+    (error.code === "exclusive_conflict" ||
+      error.code === "transaction_conflict" ||
+      error.code === "serialization_conflict")) ||
   (error instanceof Error && error.message.startsWith("(transaction_conflict):"));
 
 /** Internal account-device handshake. Ordinary Jazz policies own record authorisation. */

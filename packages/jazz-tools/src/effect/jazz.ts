@@ -280,7 +280,9 @@ function makeJazzDb(db: Db): JazzDb {
           catch: toJazzError("transaction"),
         });
         const rollback = Effect.ignore(Effect.tryPromise(() => transaction.rollback()));
-        const exit = yield* Effect.exit(restore(body(makeJazzTransaction(transaction))));
+        const exit = yield* Effect.exit(
+          restore(Effect.suspend(() => body(makeJazzTransaction(transaction)))),
+        );
         if (Exit.isFailure(exit)) {
           yield* rollback;
           return yield* exit;

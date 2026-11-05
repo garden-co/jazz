@@ -123,13 +123,13 @@ async function firstWriterRace(grantLoser: boolean) {
     const loserIndex = 1 - winnerIndex;
     expect(outcomes[loserIndex]).toMatchObject({
       status: "rejected",
-      reason: { code: "exclusive_conflict" },
+      reason: { code: "serialization_conflict" },
     });
     const winner = writers[winnerIndex]!;
     const loser = writers[loserIndex]!;
     const roots = await winner.all(app.__e2ee_spaces, { tier: "remote" });
     expect(roots).toHaveLength(1);
-    expect(roots[0]).toMatchObject({ accountId: accounts[winnerIndex]!.account.id });
+    expect(roots[0]).toMatchObject({ creatorAccountId: accounts[winnerIndex]!.account.id });
     expect(await winner.all(app.__e2ee_space_grants, { tier: "remote" })).toMatchObject([
       { spaceId: roots[0]!.id, recipientId: accounts[winnerIndex]!.account.id },
     ]);

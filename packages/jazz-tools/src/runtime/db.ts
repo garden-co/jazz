@@ -1,3 +1,4 @@
+import { checkTransactionSettlements } from "./transaction-settlements.js";
 import { isHistoryTable, resolveQueryTable } from "./history-relation.js";
 import type { ConnectionRequirement } from "./connection-manager/types.js";
 import type { DbAccessContext } from "./db-access-context.js";
@@ -131,7 +132,11 @@ import {
   decryptedIndexBytes,
 } from "../e2ee/cell-data.js";
 import { TypedTableQueryBuilder, type AnyTableMeta } from "../typed-app.js";
-import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
+import {
+  applySubscriptionDelta,
+  SubscriptionManager,
+  type SubscriptionDelta,
+} from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { AuthRenewalBackoff } from "./auth-renewal-backoff.js";
 import {
@@ -292,6 +297,7 @@ export type QueryOptions = ReadTierOptions & {
 type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
   tier?: InternalQueryExecutionOptions["tier"];
   visibility?: InternalQueryExecutionOptions["visibility"];
+  observeAcceptedEvidence?: boolean;
 };
 /**
  * Callbacks for a public live query subscription.
@@ -371,6 +377,37 @@ export interface DbSubscriptionSource {
 export type SubscriptionHandle = (() => void) & { readonly ready?: Promise<void> };
 
 const dbSubscriptionSources = new WeakMap<Db, DbSubscriptionSource>();
+const acceptedEvidenceSubscriptions = new WeakMap<
+  Db,
+  (
+    query: QueryBuilder<{ id: string }>,
+    callbacks: DbDeltaSubscriptionCallbacks<{ id: string }>,
+    options: QueryOptions,
+  ) => SubscriptionHandle
+>();
+
+/** @internal E2EE dependency invalidation; a notification is not acceptance proof. */
+export function observeAcceptedQueryDependencies(
+  db: Db,
+  query: QueryBuilder<{ id: string }>,
+  onChange: () => void,
+  onError: (error: Error) => void,
+  options: QueryOptions,
+  onRows?: (rows: { id: string }[]) => void,
+): SubscriptionHandle {
+  const rows: { id: string }[] = [];
+  return acceptedEvidenceSubscriptions.get(db)!(
+    query,
+    {
+      onDelta: (delta) => {
+        if (onRows) onRows(applySubscriptionDelta(rows, delta));
+        onChange();
+      },
+      onError,
+    },
+    options,
+  );
+}
 
 /** @internal Retrieve the incremental source associated with a public Db. */
 export function getDbSubscriptionSource(db: Db): DbSubscriptionSource {
@@ -929,7 +966,7 @@ function jsonPointerValue(value: unknown, pointer: string): unknown {
 
 /**
  * Temporary binding-level materialization until #2090 carries exact terminal
- * demand into Groove. It preserves the public result/coordinate contract and
+ * demand into the engine. It preserves the public result/coordinate contract and
  * only touches selected columns; it must not be used as a chunk-demand model.
  */
 function applyPartialValueSelections<T>(
@@ -2611,7 +2648,6 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     }
     // `edits` is valid ordinary JSON data. Only `update`'s `applyDiffs` option interprets the
     // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
-    writeRecord("Upsert", table, data);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("upsert");
     this.prepareMutation(
@@ -2672,17 +2708,16 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     this.encryptedUpdateBatch = undefined;
     this.bindTable(table);
     const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
-    const transformedData = transformInputColumns(table, data);
     const encrypted = encryptedSchemas.get(table._schema)?.tables.get(table._table);
     if (
       encrypted &&
-      (Object.hasOwn(transformedData, encrypted.space) ||
-        encrypted.columns.some((name) => Object.hasOwn(transformedData, name)))
+      (Object.hasOwn(data, encrypted.space) ||
+        encrypted.columns.some((name) => Object.hasOwn(data, name)))
     ) {
       return this.updateEncrypted(
         table,
         id,
-        transformedData,
+        transformInputColumns(table, data),
         options,
         "update",
         undefined,
@@ -3090,7 +3125,11 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         propagation,
         snapshotAtBegin,
       );
-      checkTransactionSettlements(rows, settlements);
+      checkTransactionSettlements(
+        rows,
+        settlements,
+        normalizeBuiltQuery(JSON.parse(query._build())).union !== undefined,
+      );
       return { rows, settlements };
     })();
     this.pendingReads.add(reading);
@@ -3165,23 +3204,6 @@ export type E2eeTransactionScope = Pick<
 >;
 
 type SettledRows<T> = { rows: T[]; settlements: RowSettlement[] };
-
-function checkTransactionSettlements(rows: { id: string }[], settlements: RowSettlement[]): void {
-  const ids = new Set(rows.map((row) => row.id));
-  if (
-    ids.size !== rows.length ||
-    settlements.length !== ids.size ||
-    settlements.some(
-      (entry) =>
-        !ids.delete(entry.rowId) ||
-        typeof entry.transactionId !== "string" ||
-        typeof entry.position !== "string" ||
-        !/^[0-9]+$/.test(entry.position) ||
-        BigInt(entry.position) > 18446744073709551615n,
-    )
-  )
-    throw new Error("Incomplete E2EE authority settlement metadata");
-}
 
 type TransactionRowDecoder = (
   table: string,
@@ -3441,9 +3463,11 @@ async function readTransactionRows<T>(
         "Computed projections over encrypted equality queries are not supported by the draft SQLite restack yet",
       );
     const queryJson = equality?.json ?? builderJson;
-    const translated = equality
-      ? queryJson
-      : translateQuery(builderJson, planningSchema, prepared.physical);
+    const translated = translateQuery(
+      queryJson,
+      planningSchema,
+      equality ? undefined : prepared.physical,
+    );
     const result = await queryClient.call(
       client,
       translated,
@@ -3599,7 +3623,11 @@ function preparedTransactionScope(
         binding,
         transactionHistoryQueries(io, propagation, snapshotAtBegin),
       );
-      checkTransactionSettlements(rows, settlements);
+      checkTransactionSettlements(
+        rows,
+        settlements,
+        normalizeBuiltQuery(JSON.parse(query._build())).union !== undefined,
+      );
       return { rows, settlements };
     },
   };
@@ -3683,6 +3711,12 @@ export class Db {
     const inspectorAttachmentRequested =
       config.runtimeSources?.browserWorkerPort !== undefined &&
       config.runtimeSources.inspectorHostPhysicalDbName !== undefined;
+    acceptedEvidenceSubscriptions.set(this, (query, callbacks, options) =>
+      this.subscribeDelta(query, callbacks, {
+        ...lowerPublicDbQueryOptions(options),
+        observeAcceptedEvidence: true,
+      }),
+    );
     dbSubscriptionSources.set(this, {
       // Cache identity is reserved before the async worker receipt arrives so
       // an Inspector entry can never share a host application's query cache.
@@ -3838,10 +3872,12 @@ export class Db {
   }
 
   protected markUnauthenticated(reason: AuthFailureReason): void {
-    this.authStateStore.markUnauthenticated(reason);
-    // A self-minted local-first token can always be reminted, so expiry is
-    // recoverable: renew and let the auth update reconnect.
-    if (reason === "expired" && this.localFirstRefreshOwned) this.renewExpiredLocalFirstToken();
+    try {
+      this.authStateStore.markUnauthenticated(reason);
+    } finally {
+      // Observer failures must not skip renewal of an owned local-first token.
+      if (reason === "expired" && this.localFirstRefreshOwned) this.renewExpiredLocalFirstToken();
+    }
   }
 
   private renewExpiredLocalFirstToken(): void {
@@ -4270,7 +4306,11 @@ export class Db {
             binding,
             local,
           );
-          checkTransactionSettlements(snapshot.rows, snapshot.settlements);
+          checkTransactionSettlements(
+            snapshot.rows,
+            snapshot.settlements,
+            normalizeBuiltQuery(JSON.parse(query._build())).union !== undefined,
+          );
           return snapshot;
         }),
       );
@@ -4289,6 +4329,10 @@ export class Db {
     const runtime = client.getRuntime();
     if (!runtime.tableIdentity)
       throw new Error("Runtime does not expose catalogue table identities");
+    if (localOnly && !(await client.hasAuthenticatedCatalogue())) {
+      this.assertOpen();
+      return null;
+    }
     if (!localOnly) {
       const initialOfflineState = this.connection.initialExplicitOfflineState();
       if (initialOfflineState) await initialOfflineState;
@@ -4325,7 +4369,7 @@ export class Db {
     column: string,
     localOnly = false,
   ): Promise<string | null> {
-    await this.tableIdentity(table, localOnly);
+    if ((await this.tableIdentity(table, localOnly)) === null) return null;
     const runtime = this.getClient(table._schema).getRuntime();
     if (!runtime.columnIdentity)
       throw new Error("Runtime does not expose catalogue column identities");
@@ -5510,9 +5554,11 @@ export class Db {
         throw new Error(
           "Computed projections over encrypted equality queries are not supported by the draft SQLite restack yet",
         );
-      const wasmQuery = equality?.json
-        ? equality.json
-        : translateQuery(builderJson, planningSchema, prepared.physical);
+      const wasmQuery = translateQuery(
+        equality?.json ?? builderJson,
+        planningSchema,
+        equality ? undefined : prepared.physical,
+      );
       const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
       const context = this.getAccessContext();
       const effectiveTier = resolveEffectiveQueryExecutionOptions(this.config, queryOptions).tier;

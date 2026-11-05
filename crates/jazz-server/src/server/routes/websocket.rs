@@ -795,24 +795,6 @@ async fn handle_ws_connection(
                 return;
             }
         };
-    // The relay tier is designed but not built on SQLite: refuse a valid
-    // relay request for good rather than as a retryable failure.
-    if matches!(
-        link_admission,
-        ServerLinkAdmission::ScopeIsolatedClientRelay { .. }
-    ) {
-        send_ws_error(
-            &mut socket,
-            WireError::new(
-                WireErrorCode::UnsupportedFeature,
-                WireRetry::Never,
-                "scope-isolated client relays are not supported yet on SQLite",
-            ),
-        )
-        .await;
-        let _ = socket.close().await;
-        return;
-    }
     let session = match core_server_shell
         .open_with_session_context(
             admission.identity,
@@ -1181,7 +1163,7 @@ mod tests {
     };
     use jazz::ids::{NodeUuid, RowAuthor};
     use jazz::protocol_limits::MAX_WIRE_BATCH_FRAMES;
-    use jazz::schema::{JazzSchema, TableSchema};
+    use jazz::schema::JazzSchema;
     use jazz::tx::DurabilityTier;
     use jazz::wire::decode_frame;
     use jazz::wire::{TransportError, WIRE_PROTOCOL_VERSION};
@@ -1576,19 +1558,6 @@ mod tests {
         jazz::schema::JazzSchema::new(&source).expect("websocket public schema compiles")
     }
 
-    fn compiled_table(schema: &JazzSchema, table: &str) -> TableSchema {
-        schema
-            .tables
-            .iter()
-            .find(|candidate| candidate.name == table)
-            .unwrap_or_else(|| panic!("compiled websocket schema contains {table}"))
-            .clone()
-    }
-
-    fn ws_todos_table_schema() -> TableSchema {
-        compiled_table(&ws_public_schema_convert(), "todos")
-    }
-
     fn ws_private_docs_schema_convert() -> JazzSchema {
         let source = SchemaBuilder::new()
             .table(
@@ -1607,10 +1576,6 @@ mod tests {
             .build();
         jazz::schema::JazzSchema::new(&source)
             .expect("websocket private docs public schema compiles")
-    }
-
-    fn ws_private_docs_table_schema() -> TableSchema {
-        compiled_table(&ws_private_docs_schema_convert(), "docs")
     }
 
     async fn make_ws_convergence_test_state() -> Arc<ServerState> {
@@ -2084,38 +2049,6 @@ mod tests {
         );
     }
 
-    /// The relay tier is not built on SQLite: a negotiated relay request is
-    /// refused with a final, explicit error.
-    async fn expect_ws_relay_not_supported_yet(
-        ws: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    ) {
-        ws.send(WsMessage::Binary(
-            ws_client_hello_batch_with_features(jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY)
-                .into(),
-        ))
-        .await
-        .expect("send client relay hello");
-        let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
-            .await
-            .expect("wait for relay refusal")
-            .expect("server response")
-            .expect("server websocket result");
-        let WsMessage::Binary(response) = response else {
-            panic!("expected binary relay refusal, got {response:?}");
-        };
-        let frames: Vec<Vec<u8>> = postcard::from_bytes(&response).expect("decode refusal batch");
-        match decode_frame(&frames[0]).expect("decode refusal") {
-            WireFrame::Error(WireError {
-                code: WireErrorCode::UnsupportedFeature,
-                retry: WireRetry::Never,
-                message,
-            }) => assert!(message.contains("not supported yet"), "{message}"),
-            other => panic!("expected relay refusal, got {other:?}"),
-        }
-    }
-
     async fn oversized_ws_prelude_never_reaches_admission(message: WsMessage, url: String) {
         let (mut ws, _) = connect_async(url).await.expect("connect websocket");
         // The server may enforce the cap before the oversized send finishes.
@@ -2258,11 +2191,12 @@ mod tests {
                 WsMessage::Binary(json.into_bytes().into())
             };
             ws.send(message).await.expect("send writer prelude");
-            if entry["requested_link"] == "scope_isolated_client_relay" {
-                expect_ws_relay_not_supported_yet(&mut ws).await;
+            let features = if entry["requested_link"] == "scope_isolated_client_relay" {
+                jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
             } else {
-                expect_ws_server_hello(&mut ws, 0).await;
-            }
+                0
+            };
+            expect_ws_server_hello(&mut ws, features).await;
         }
     }
 
@@ -2642,6 +2576,9 @@ mod tests {
             self.received.borrow_mut().push(message.clone());
             Some(message)
         }
+        fn take_failure(&mut self) -> Option<TransportError> {
+            self.adapter.take_failure()
+        }
     }
 
     /// A remote subscription held open by a test; it is covered once the
@@ -2654,7 +2591,6 @@ mod tests {
     struct TestClient {
         db: Db,
         transport: TestWireTransport,
-        todos_table: TableSchema,
         received: Rc<RefCell<Vec<SyncMessage>>>,
     }
 
@@ -2697,7 +2633,6 @@ mod tests {
             Self {
                 db,
                 transport,
-                todos_table: ws_todos_table_schema(),
                 received,
             }
         }
@@ -2797,16 +2732,16 @@ mod tests {
         }
 
         async fn remote_todo_titles(&self, query: &PreparedQuery) -> Vec<String> {
-            self.remote_titles(query, &self.todos_table).await
+            self.remote_titles(query).await
         }
 
-        async fn remote_titles(&self, query: &PreparedQuery, table: &TableSchema) -> Vec<String> {
+        async fn remote_titles(&self, query: &PreparedQuery) -> Vec<String> {
             self.db
                 .all(query, ReadOpts::default())
                 .await
                 .expect("read synced rows")
                 .into_iter()
-                .filter_map(|row| match row.cell(table, "title") {
+                .filter_map(|row| match row.cell("title") {
                     Some(CoreValue::String(title)) => Some(title),
                     _ => None,
                 })
@@ -3604,8 +3539,11 @@ mod tests {
                     .borrow_mut()
                     .drain(..)
                     .filter_map(|message| {
-                        if let SyncMessage::Fate { tx, .. } | SyncMessage::FateV1 { tx, .. } =
-                            message
+                        if let SyncMessage::Fate { tx, .. }
+                        | SyncMessage::FateV1 { tx, .. }
+                        | SyncMessage::OriginFateV2 {
+                            tx, global: true, ..
+                        } = message
                         {
                             Some(tx)
                         } else {
@@ -3913,7 +3851,6 @@ mod tests {
             "Alice must upload the private row through the websocket route"
         );
 
-        let docs_table = ws_private_docs_table_schema();
         let client_b = TestClient::new(schema, 0xb2, 0xb200).await;
         let mut ws_b = open_negotiated_ws_session(addr, &state, bob).await;
         let (client_b_docs, client_b_docs_attachment) = client_b.attach_table_query("docs");
@@ -3931,10 +3868,7 @@ mod tests {
             "Bob's docs query must be covered by the websocket route"
         );
         assert!(
-            client_b
-                .remote_titles(&client_b_docs, &docs_table)
-                .await
-                .is_empty(),
+            client_b.remote_titles(&client_b_docs).await.is_empty(),
             "Bob must receive empty remote rows for Alice's private row"
         );
     }

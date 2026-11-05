@@ -447,7 +447,7 @@ async function cleanupTempRuntimeData(data: TempRuntimeData | null): Promise<voi
 }
 
 describe("NAPI integration", () => {
-  it("releases a persistent RocksDB lock after closing an upstream transport", async () => {
+  it("releases the persistent store's lock after closing an upstream transport", async () => {
     const { wasmSchema, permissions } = await loadTodoServerProject();
     const runtimeData = await createTempRuntimeData("jazz-napi-transport-close-reopen-");
     const previousWebSocket = globalThis.WebSocket;

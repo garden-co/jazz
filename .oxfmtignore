@@ -12,3 +12,6 @@ dev/benchmarks/**/*.html
 
 # Generated pinned Android toolchain, not repository source.
 .cache/android-device-acceptance/**
+
+# Frozen historical wire fixture; preserve its original file bytes.
+crates/jazz/fixtures/sqlite_union_answer_v1.json

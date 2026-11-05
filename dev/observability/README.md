@@ -31,7 +31,7 @@ cargo build -p jazz-cli --features otel
 
 ```sh
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
-RUST_LOG=jazz_tools=debug,groove=debug \
+RUST_LOG=jazz_tools=debug,jazz_db=debug \
 cargo run -p jazz-cli --features otel --bin jazz-tools -- server <APP_ID>
 ```
 

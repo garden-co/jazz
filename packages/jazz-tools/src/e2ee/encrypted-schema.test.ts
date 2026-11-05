@@ -72,6 +72,7 @@ it.each(["before", "after"])(
       ["reviewerIds", { type: "Array", element: { type: "Uuid" } }, "people"],
       ["privateId", { type: "Bytea" }, undefined],
       ["title", { type: "Bytea" }, undefined],
+      ["__e2ee_permission_space", { type: "Uuid" }, "__e2ee_v1_permission_spaces_projects"],
     ]);
     const query = app.projects.include({
       notes: app.notes.include({ project: true, reviewers: true }),

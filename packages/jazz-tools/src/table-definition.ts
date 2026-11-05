@@ -14,7 +14,12 @@ import {
   type ColumnBuilderSqlType,
   type ColumnBuilderValue,
 } from "./dsl.js";
-import { assertUserTableColumnNameAllowed, type NoExplicitIdColumn } from "./magic-columns.js";
+import {
+  assertUserTableColumnNameAllowed,
+  isProvenanceAccountColumn,
+  type NoExplicitIdColumn,
+  type ProvenanceAccountColumn,
+} from "./magic-columns.js";
 import { validateTransformDependencies } from "./runtime/column-transforms.js";
 import type { TSTypeFromSqlType } from "./schema.js";
 
@@ -37,11 +42,11 @@ export class DefinedTable<
 > {
   public readonly __jazzTableDefinition = true as const;
 
-  encrypted(options: {
-    space: StoredColumnKeys<TColumns>;
+  encrypted<const Space extends StoredColumnKeys<TColumns>>(options: {
+    space: Space;
     columns?: readonly StoredColumnKeys<TColumns>[];
     indexes?: Partial<Record<StoredColumnKeys<TColumns>, "equality">>;
-  }): DefinedTable<TColumns, TRelations, EncryptionDeclaration> {
+  }): DefinedTable<TColumns, TRelations, EncryptionDeclaration & { space: Space }> {
     const referenceColumns = new Set<string>();
     for (const relation of Object.values(this.relations)) {
       if (relation.kind === "forward") referenceColumns.add(relation.column);
@@ -255,7 +260,7 @@ type ValidateLocalRelations<C extends TableDefinition, R extends Relationships> 
     | `$${string}`
     ? never
     : R[K] extends ForwardRelationship<infer Target, infer Col>
-      ? Col extends RelationColumns<C>
+      ? Col extends RelationColumns<C> | ProvenanceAccountColumn
         ? [ConflictingTargets<R, Col, Target>] extends [never]
           ? R[K]
           : never
@@ -316,6 +321,7 @@ export function defineTable<
       if (previous && previous !== relation.table)
         throw new Error(`Conflicting relationship targets for column "${relation.column}".`);
       targets.set(relation.column, relation.table);
+      if (isProvenanceAccountColumn(relation.column)) continue;
       const builder = columns[relation.column];
       const column =
         Object.hasOwn(columns, relation.column) && builder && !isComputedColumn(builder)

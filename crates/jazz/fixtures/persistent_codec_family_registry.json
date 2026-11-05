@@ -619,7 +619,7 @@
         "anchor": "### IndexedDB page-store physical format"
       },
       "semantic_fixture": {
-        "path": "crates/idb-tree/fixtures/page-v1-leaf.hex",
+        "path": "packages/jazz-tools/tests/browser/fixtures/page-v1-leaf.hex",
         "anchor": "49444254524545"
       },
       "rejection_receipt": {

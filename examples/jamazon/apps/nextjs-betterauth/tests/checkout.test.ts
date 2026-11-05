@@ -203,7 +203,6 @@ describe("conflict retries", () => {
   it("retry local and authority serializable conflicts", () => {
     expect(isRetryableConflict(rejection("transaction_conflict"))).toBe(true);
     expect(isRetryableConflict(rejection("serialization_conflict"))).toBe(true);
-    expect(isRetryableConflict(rejection("cascade_rejected"))).toBe(true);
   });
 
   it("do not retry other rejections or untyped errors", () => {

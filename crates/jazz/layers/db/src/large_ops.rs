@@ -4,7 +4,7 @@
 //! chunks its range covers, and an append or splice adds one entry to the
 //! value's bounded edit tail instead of rewriting it; when the tail is full
 //! the value is consolidated, rechunking only until content boundaries
-//! resynchronize (Groove SPEC ch. 9 §9.3). Every edit is published as one
+//! resynchronize (see `jazz_types::large_values`). Every edit is published as one
 //! ordinary row update, so policies, history and sync see a new version.
 
 use super::*;
@@ -139,6 +139,12 @@ impl Inner {
     /// Drop queues contain only this owner's uploads. SQL errors retain the
     /// receipt for the next maintenance pass; crash recovery uses lease expiry.
     pub(super) fn release_dropped_uploads(&self) -> Result<(), Error> {
+        // Removing an in-memory receipt must not outlive a SQL rollback.
+        // Callback transactions can tick while suspended; defer cleanup until
+        // its deletes can commit independently of that application unit.
+        if !self.conn.is_autocommit() {
+            return Ok(());
+        }
         let mut cleanup = self.upload_cleanup.borrow_mut();
         while let Some(id) = cleanup.last() {
             crate::large::end_upload(&self.conn, id)?;
@@ -192,6 +198,7 @@ impl Inner {
             shape: Shape([0; 16]),
             binding_id: Binding([0; 16]),
             request_claims: None,
+            authority_policies: false,
             schema: None,
         };
         let compiled = self.compile(&prepared, identity, &ReadSpec::default())?;
@@ -501,6 +508,7 @@ impl Db {
         edit: Edit,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
+        self.inner().require_mutation_admission()?;
         let value = {
             let mut inner = self.inner();
             let (col, cell) =
@@ -527,6 +535,7 @@ impl Db {
         mutations: Vec<LargeValueUpdate>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
+        self.inner().require_mutation_admission()?;
         let lowered = {
             let mut inner = self.inner();
             let identity = identity_of(opts.identity);
@@ -643,6 +652,7 @@ impl Db {
         cells: &BTreeMap<String, Value>,
         column: &str,
     ) -> Result<StreamingValueUpload, Error> {
+        self.inner().require_mutation_admission()?;
         let col = streaming_column(&self.inner(), table, column)?;
         if cells.contains_key(column) {
             return Err(Error::new(
@@ -685,6 +695,7 @@ impl Db {
         upload: &mut StreamingValueUpload,
         bytes: &[u8],
     ) -> Result<(), Error> {
+        self.inner().require_mutation_admission()?;
         self.check_streaming_upload(upload)?;
         let inner = self.inner();
         let now = streaming_now_ms();
@@ -761,17 +772,24 @@ impl Db {
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
     ) -> Result<WriteHandle, Error> {
+        self.inner().require_mutation_admission()?;
         if cells.contains_key(column) {
             return Err(rejected(
                 "the streamed column is also set in the other cells",
             ));
         }
         let (col, value) = self.finalize_streaming_upload(&mut upload, table, column)?;
-        self.inner().derived.push(value.clone());
-        cells.insert(
-            column.to_owned(),
-            nullable(&col, Value::Large(Box::new(value))),
-        );
+        // A value that fits inline is written as an ordinary inline cell, as
+        // the store keeps it: its commit carries the bytes, not a
+        // descriptor of chunks the store then reclaims.
+        let logical = if value.byte_length <= lv::INLINE_VALUE_MAX_BYTES as u64 {
+            let bytes = self.inner().chunks.value_bytes(&value)?;
+            logical_value(value.kind, bytes)?
+        } else {
+            self.inner().derived.push(value.clone());
+            Value::Large(Box::new(value))
+        };
+        cells.insert(column.to_owned(), nullable(&col, logical));
         let result = match mutation {
             StreamingMutationKind::Insert if base.is_some() => Err(Error::new(
                 ErrorCode::WriteRejected,
@@ -896,6 +914,7 @@ impl Db {
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
     ) -> Result<StagedStreamingValue, Error> {
+        self.inner().require_mutation_admission()?;
         self.check_streaming_upload(&upload)?;
         if head.is_some()
             || base.is_some()
@@ -970,6 +989,7 @@ impl Db {
             .pending
             .take()
             .ok_or_else(|| schema_error("staged streaming upload is closed"))?;
+        self.inner().require_mutation_admission()?;
         self.check_staged_streaming_owner(staged)?;
         {
             let inner = self.inner();
@@ -1031,6 +1051,21 @@ impl Db {
         self.inner().staging = policy;
     }
 
+    /// Persisted local upload leases, including dropped handles awaiting
+    /// maintenance. Observing the inventory must not perform that cleanup.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn pending_upload_count_for_test(&self) -> Result<usize, Error> {
+        self.inner
+            .borrow()
+            .conn
+            .query_row("SELECT count(*) FROM _jazz_lv_upload", [], |row| {
+                let count: i64 = row.get(0)?;
+                usize::try_from(count)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, count))
+            })
+            .map_err(storage)
+    }
+
     /// End every streaming upload left untouched past the staging policy's
     /// maximum age, and every pushed-node receipt past it; returns how
     /// many uploads ended.
@@ -1089,7 +1124,7 @@ type Stage = Box<dyn FnMut(lv::StagedChunk) -> Result<(), lv::Error>>;
 /// the lease that holds its stored nodes.
 pub struct StreamingValueUpload {
     id: [u8; 32],
-    owner: std::rc::Weak<RefCell<Inner>>,
+    owner: std::rc::Weak<Store>,
     schema: SchemaViewId,
     table: String,
     column: String,
@@ -1103,7 +1138,7 @@ pub struct StreamingValueUpload {
 /// An opaque capability for one completed upload. It cannot expose or change
 /// its descriptor, mutation target or identity after staging.
 pub struct StagedStreamingValue {
-    owner: std::rc::Weak<RefCell<Inner>>,
+    owner: std::rc::Weak<Store>,
     schema: SchemaViewId,
     pending: Option<StagedStreamingMutation>,
 }
@@ -1191,7 +1226,7 @@ fn closed() -> Error {
 
 /// Splices in a page's coordinates, lowered to byte coordinates of the
 /// current value. Each later splice is relative to the value the earlier
-/// ones produced, as in main's `apply_inline_splices`.
+/// ones produced.
 fn lower_splices(
     inner: &Inner,
     column: &crate::values::Column,
@@ -1362,6 +1397,7 @@ impl TxRef<'_> {
         mutations: Vec<LargeValueUpdate>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
+        self.db.inner().require_mutation_admission()?;
         let edits = self.db.in_overlay(self.id, None, |inner, _| {
             let batch = inner.batches.get(&self.id).expect("validated overlay");
             if opts.identity != WriteIdentity::Database && opts.identity != batch.identity {

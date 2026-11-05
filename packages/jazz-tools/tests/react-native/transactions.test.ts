@@ -22,12 +22,18 @@ describe("React Native transaction reads through the native C ABI", () => {
           kind === "serializable" ? db.beginSerializableTransaction() : db.beginTransaction();
         first.update(app.todos, base.id, { title: "first draft" });
         second.update(app.todos, base.id, { title: "second draft" });
-        const draft = first.insert(app.todos, { title: "inserted draft", done: true });
+        const draft = first.insert(app.todos, {
+          title: "inserted draft",
+          done: true,
+        });
         expect(await first.all(app.todos.orderBy("title"))).toEqual([
           { ...base, title: "first draft" },
           draft,
         ]);
-        expect(await second.one(app.todos)).toEqual({ ...base, title: "second draft" });
+        expect(await second.one(app.todos)).toEqual({
+          ...base,
+          title: "second draft",
+        });
         expect(await db.one(app.todos)).toEqual(base);
         first.delete(app.todos, base.id);
         expect(await first.all(app.todos)).toEqual([draft]);
@@ -54,13 +60,19 @@ describe("React Native transaction reads through the native C ABI", () => {
     });
   });
 
-  it("anchors a serializable snapshot at begin while ordinary reads advance", async () => {
+  // A replica pins a serializable snapshot at the transaction's first read
+  // (the authority's state then, or its own known cut offline).
+  it("keeps a serializable snapshot pinned while ordinary reads advance", async () => {
     await withNativeRelayFixture(app, {}, async (fixture) => {
       const db = await fixture.createDb();
-      const before = db.insert(app.todos, { title: "before", done: false }).value;
+      const before = db.insert(app.todos, {
+        title: "before",
+        done: false,
+      }).value;
       await db.all(app.todos);
       const tx = db.beginSerializableTransaction();
-      db.insert(app.todos, { title: "after", done: false });
+      expect(await tx.all(app.todos)).toEqual([before]);
+      await db.insert(app.todos, { title: "after", done: false }).wait({ tier: "local" });
       expect(await tx.all(app.todos)).toEqual([before]);
       expect(await db.all(app.todos)).toHaveLength(2);
       await tx.rollback();
@@ -154,7 +166,10 @@ it("waits for native upstream authority before accepting a serializable commit",
           claims: { role: "user" },
           authMode: "external",
         },
-        upstream: { serverUrl: server.url, jwt: issuer.jwtForUser("rn-serializable-writer") },
+        upstream: {
+          serverUrl: server.url,
+          jwt: issuer.jwtForUser("rn-serializable-writer"),
+        },
       },
     );
   } finally {

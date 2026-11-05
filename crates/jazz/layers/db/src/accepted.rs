@@ -41,7 +41,16 @@ impl AcceptedContent {
 pub(super) const ACCEPTED_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_accepted_rows_v1 (\
         observed INTEGER PRIMARY KEY AUTOINCREMENT, t TEXT NOT NULL, id BLOB NOT NULL,\
-        k BLOB NOT NULL, seq INTEGER NOT NULL, content BLOB NOT NULL, UNIQUE (t,id,k,seq));";
+        k BLOB NOT NULL, seq INTEGER NOT NULL, content BLOB NOT NULL, UNIQUE (t,id,k,seq));\
+    CREATE INDEX IF NOT EXISTS _jazz_accepted_rows_by_seq_v1 \
+        ON _jazz_accepted_rows_v1(seq,observed);";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettledSnapshot {
+    Transaction,
+    ObservedAtBegin,
+    AuthorityAtBegin,
+}
 
 impl Inner {
     pub(super) fn accepted_content(
@@ -170,7 +179,7 @@ impl Inner {
 impl Inner {
     /// The local evidence frontier, distinct from the authority's commit order.
     /// Duplicate proof deliveries do not move it; rollback reverts it with rows.
-    fn accepted_observed(&self) -> Result<u64, Error> {
+    pub(super) fn accepted_observed(&self) -> Result<u64, Error> {
         self.conn
             .query_row(
                 "SELECT COALESCE(MAX(observed),0) FROM _jazz_accepted_rows_v1",
@@ -179,6 +188,52 @@ impl Inner {
             )
             .map(|n| n as u64)
             .map_err(storage)
+    }
+
+    /// Newly usable evidence: both its proof and its authority coordinate must
+    /// have arrived. Separate indexed ranges cover late proofs at a known cut
+    /// and earlier proofs whose cut just became known. Neither visits unrelated
+    /// retained history; rollback and duplicate delivery cannot advance them.
+    pub(super) fn accepted_notifications(
+        &mut self,
+    ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, Error> {
+        let through = self.accepted_observed()?;
+        let known = self.client.as_ref().map_or(self.seq, |client| client.known);
+        let rows = {
+            let mut statement = self
+                .conn
+                .prepare_cached(
+                    "SELECT t,id,k FROM _jazz_accepted_rows_v1 WHERE observed>?1 AND observed<=?2 AND seq<=?4 \
+                     UNION ALL SELECT t,id,k FROM _jazz_accepted_rows_v1 INDEXED BY _jazz_accepted_rows_by_seq_v1 \
+                     WHERE seq>?3 AND seq<=?4 AND observed<=?1",
+                )
+                .map_err(storage)?;
+            statement
+                .query_map(
+                    rusqlite::params![
+                        self.accepted_notifications_through as i64,
+                        through as i64,
+                        self.accepted_notifications_known as i64,
+                        known as i64
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, [u8; 16]>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                        ))
+                    },
+                )
+                .map_err(storage)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(storage)?
+        };
+        self.accepted_notifications_through = through;
+        self.accepted_notifications_known = known;
+        Ok(rows
+            .into_iter()
+            .map(|(table, id, key)| (table, RowUuid::from_bytes(id), key))
+            .collect())
     }
 
     pub(super) fn accepted_cut(&self, seq: u64) -> Result<Cut, Error> {
@@ -195,14 +250,17 @@ impl Inner {
 }
 
 impl Db {
-    /// Paired metadata describes one stored root per row id. Relationships and
-    /// effective branch rows need a separate content-witness tree.
+    /// Each returned occurrence describes one stored root. UNIONs retain their
+    /// semantic arm; nested output and effective branches need a witness tree.
     pub(super) fn check_accepted_query(&self, prepared: &PreparedQuery) -> Result<(), Error> {
         let q = &prepared.query;
+        if crate::db::relation::is_union(q) {
+            self.check_scoped_fetch(prepared)?;
+            return self.inner().check_union_shape(prepared);
+        }
         if crate::schema::history::is_history_table(&q.table)
             || q.aggregate.is_some()
             || q.flat_join.is_some()
-            || q.relation.is_some()
             || !q.includes.is_empty()
             || !q.joins.is_empty()
             || !q.array_subqueries.is_empty()
@@ -270,7 +328,7 @@ impl ReadGuard {
     pub(super) fn require_success(&mut self) {
         self.poison = true;
     }
-    fn watch(&self, waker: &Waker) {
+    pub(super) fn watch(&self, waker: &Waker) {
         let mut state = self.state.borrow_mut();
         if !state.wakers.iter().any(|w| w.will_wake(waker)) {
             state.wakers.push(waker.clone());
@@ -322,7 +380,7 @@ impl Drop for ReadGuard {
 /// Exactly as a served request, a batch's frozen claims apply only while its
 /// synchronous commit is evaluated and encoded; ambient claims are restored.
 pub(super) struct ClaimsScope {
-    inner: Rc<RefCell<Inner>>,
+    inner: Rc<Store>,
     previous: Option<(AuthorSubject, Option<BTreeMap<String, Value>>)>,
 }
 impl ClaimsScope {
@@ -411,15 +469,61 @@ impl Db {
     /// only evidence admitted at begin; Remote requires an authority answer.
     pub fn all_settled(
         &self,
-        mut prepared: PreparedQuery,
+        prepared: PreparedQuery,
         opts: ReadOpts,
         id: OpenTransactionId,
         snapshot_at_begin: bool,
         author: Option<AuthorSubject>,
     ) -> Result<impl Future<Output = Result<BindingSettledRead, Error>> + 'static, Error> {
+        self.all_settled_with_snapshot(
+            prepared,
+            opts,
+            id,
+            if snapshot_at_begin {
+                SettledSnapshot::ObservedAtBegin
+            } else {
+                SettledSnapshot::Transaction
+            },
+            author,
+        )
+    }
+
+    /// Hydrate accepted history at the authority coordinate captured at begin.
+    /// Unlike local observation, this may fetch previously unseen evidence, but
+    /// never content accepted after that coordinate. Requires remote coverage;
+    /// an earlier read at another cut cannot be silently rewound.
+    pub fn all_settled_at_authority_begin(
+        &self,
+        prepared: PreparedQuery,
+        opts: ReadOpts,
+        id: OpenTransactionId,
+        author: Option<AuthorSubject>,
+    ) -> Result<impl Future<Output = Result<BindingSettledRead, Error>> + 'static, Error> {
+        self.all_settled_with_snapshot(
+            prepared,
+            opts,
+            id,
+            SettledSnapshot::AuthorityAtBegin,
+            author,
+        )
+    }
+
+    fn all_settled_with_snapshot(
+        &self,
+        mut prepared: PreparedQuery,
+        opts: ReadOpts,
+        id: OpenTransactionId,
+        snapshot: SettledSnapshot,
+        author: Option<AuthorSubject>,
+    ) -> Result<impl Future<Output = Result<BindingSettledRead, Error>> + 'static, Error> {
         let mut guard = self.transaction_read_guard(id, true)?;
         let admission = (|| {
             self.check_accepted_query(&prepared)?;
+            if snapshot == SettledSnapshot::AuthorityAtBegin && opts.tier != ReadTier::Remote {
+                return Err(unsupported(
+                    "authority-at-begin history without remote coverage",
+                ));
+            }
             if opts.read_view.source != Default::default() {
                 return Err(unsupported(
                     "branch or snapshot read views in paired accepted reads",
@@ -494,8 +598,7 @@ impl Db {
             let result = async {
                 guard.wait().await?;
                 db.check_read_guard(id, &guard)?;
-                db.settled_read(&prepared, opts, id, snapshot_at_begin, &guard)
-                    .await
+                db.settled_read(&prepared, opts, id, snapshot, &guard).await
             }
             .await;
             guard.finish(&result);
@@ -508,7 +611,7 @@ impl Db {
         prepared: &PreparedQuery,
         opts: ReadOpts,
         id: OpenTransactionId,
-        snapshot_at_begin: bool,
+        snapshot_mode: SettledSnapshot,
         guard: &ReadGuard,
     ) -> Result<BindingSettledRead, Error> {
         let include_deleted = opts.read_view.include_deleted;
@@ -529,7 +632,15 @@ impl Db {
             };
             (*snapshot, *pinned, accepted_begin.clone(), batch.reader())
         };
+        let authority_begin = snapshot_mode == SettledSnapshot::AuthorityAtBegin;
+        if authority_begin && pinned && snapshot != begin.seq {
+            return Err(not_observed(
+                "transaction already read beyond its begin coordinate",
+            ));
+        }
         let mut expected = None;
+        let mut qualified = None;
+        let mut bound_prepared = prepared.clone();
         if !local && self.is_client() {
             let scope = reader.map(|author| {
                 (
@@ -539,7 +650,11 @@ impl Db {
             });
             let mut fetch = std::pin::pin!(self.fetch_answer(
                 prepared,
-                pinned.then_some(snapshot),
+                if authority_begin {
+                    Some(begin.seq)
+                } else {
+                    pinned.then_some(snapshot)
+                },
                 include_deleted,
                 Some(deadline),
                 scope,
@@ -555,7 +670,23 @@ impl Db {
             .await?
             .ok_or_else(|| not_observed("authority coverage unavailable for paired read"))?;
             self.check_read_guard(id, guard)?;
-            let (through, rows) = answer;
+            let (through, rows, evidence, union) = answer;
+            if authority_begin && through != begin.seq {
+                return Err(not_observed(
+                    "authority answered beyond the begin coordinate",
+                ));
+            }
+            bound_prepared.authority_policies =
+                self.inner().needs_authority_policies(prepared, reader)?;
+            if evidence.is_some() || union.is_some() {
+                bound_prepared.authority_policies |= evidence.is_some();
+                qualified = Some(QualifiedReadSnapshot {
+                    through,
+                    roots: rows.clone(),
+                    evidence,
+                    union,
+                });
+            }
             let mut inner = self.inner();
             let batch = inner.batches.get_mut(&id).expect("guarded");
             if let BatchKind::Serializable {
@@ -571,21 +702,22 @@ impl Db {
                     ));
                 }
             }
-            // The authority answered the hydrated prefix. The original query
-            // applies its offset locally, and the read set retains that query.
-            expected = Some(
-                rows.into_iter()
-                    .skip(prepared.query.offset)
-                    .collect::<Vec<_>>(),
-            );
+            // Both ordinary and UNION answers hydrate a prefix. Compare the
+            // requested page, while retaining the full query for commit-time
+            // read and phantom validation.
+            expected = Some(if crate::db::relation::is_union(&prepared.query) {
+                union_page(&prepared.query, rows)
+            } else {
+                rows.into_iter().skip(prepared.query.offset).collect()
+            });
         }
+        let prepared = &bound_prepared;
         let cut = {
             let mut inner = self.inner();
             let batch = inner.batches.get_mut(&id).expect("guarded");
             let BatchKind::Serializable {
                 snapshot,
                 pinned,
-                own,
                 reads,
                 ..
             } = &mut batch.kind
@@ -601,45 +733,132 @@ impl Db {
                 *snapshot = begin.seq;
                 *pinned = true;
                 begin.clone()
+            } else if authority_begin {
+                // Pending own writes and late acceptance cannot extend the
+                // recipient-eligibility cut beyond the captured global coordinate.
+                Cut::at(begin.seq)
             } else {
-                let (snapshot, own) = (*snapshot, own.clone());
-                inner.serializable_cut(snapshot, &own)?
+                // Paired reads return only the authority's pinned state. Own
+                // writes pending at begin may settle after that cut; including
+                // them would disagree with the authority answer or substitute
+                // later content for a row whose id still matches. Ordinary
+                // transaction reads retain their read-your-writes overlay.
+                Cut::at(*snapshot)
             }
+        };
+        let overlay_checked = if qualified.is_some() {
+            let needs_check = {
+                let inner = self.inner();
+                let dependencies = inner
+                    .compile(
+                        prepared,
+                        reader,
+                        &ReadSpec {
+                            cut: Some(cut.clone()),
+                            include_deleted,
+                            ..ReadSpec::default()
+                        },
+                    )?
+                    .tables;
+                inner
+                    .batches
+                    .get(&id)
+                    .expect("guarded")
+                    .ops
+                    .iter()
+                    .any(|(schema, op)| {
+                        schema
+                            .stored_table(op.table())
+                            .is_ok_and(|table| dependencies.contains(table))
+                    })
+            };
+            if needs_check {
+                let (count, ops) = self.accepted_overlay_ops(id)?;
+                let mut check = std::pin::pin!(self.check_accepted_overlay(
+                    prepared,
+                    cut.seq,
+                    include_deleted,
+                    deadline,
+                    ops
+                ));
+                poll_fn(|cx| {
+                    guard.watch(cx.waker());
+                    if let Err(error) = self.check_read_guard(id, guard) {
+                        return Poll::Ready(Err(error));
+                    }
+                    check.as_mut().poll(cx)
+                })
+                .await?;
+                self.check_read_guard(id, guard)?;
+                Some(count)
+            } else {
+                None
+            }
+        } else {
+            None
         };
         poll_fn(|cx| {
             guard.watch(cx.waker());
             let result = (|| {
                 self.check_read_guard(id, guard)?;
-                // The overlay includes only staged writes beyond the selected cut.
-                // Committed pending writes are deliberately absent from LocalOnly cuts.
-                let actual = self.in_overlay(id, None, |inner, overlay| {
-                    let mut overlaid = cut.clone();
-                    overlaid.own = overlay.map_or(0, |cut| cut.own);
-                    inner.run(
+                let rows = if let Some(qualified) = &qualified {
+                    let inner = self.inner();
+                    let dependencies = inner
+                        .compile(
+                            prepared,
+                            reader,
+                            &ReadSpec {
+                                cut: Some(cut.clone()),
+                                include_deleted,
+                                ..ReadSpec::default()
+                            },
+                        )?
+                        .tables;
+                    let batch = inner.batches.get(&id).expect("guarded");
+                    let touches = batch.ops.iter().any(|(schema, op)| {
+                        schema
+                            .stored_table(op.table())
+                            .is_ok_and(|table| dependencies.contains(table))
+                    });
+                    if touches && overlay_checked != Some(batch.ops.len()) {
+                        return Err(not_observed(
+                            "staged writes changed while awaiting authority overlay evidence",
+                        ));
+                    }
+                    inner.run_qualified_snapshot(prepared, reader, include_deleted, qualified)?
+                } else {
+                    // Existing local/ordinary paired reads compare their full
+                    // staged projection with the accepted snapshot.
+                    let actual = self.in_overlay(id, None, |inner, overlay| {
+                        let mut overlaid = cut.clone();
+                        overlaid.own = overlay.map_or(0, |cut| cut.own);
+                        inner.run(
+                            prepared,
+                            reader,
+                            &ReadSpec {
+                                cut: Some(overlaid),
+                                include_deleted,
+                                ..ReadSpec::default()
+                            },
+                        )
+                    })?;
+                    let rows = self.inner().run(
                         prepared,
                         reader,
                         &ReadSpec {
-                            cut: Some(overlaid),
+                            cut: Some(cut.clone()),
                             include_deleted,
                             ..ReadSpec::default()
                         },
-                    )
-                })?;
+                    )?;
+                    if rows != actual {
+                        return Err(not_observed(
+                            "paired read contains staged or provisional content",
+                        ));
+                    }
+                    rows
+                };
                 let mut inner = self.inner();
-                let rows = inner.run(
-                    prepared,
-                    reader,
-                    &ReadSpec {
-                        cut: Some(cut.clone()),
-                        include_deleted,
-                        ..ReadSpec::default()
-                    },
-                )?;
-                if rows != actual {
-                    return Err(not_observed(
-                        "paired read contains staged or provisional content",
-                    ));
-                }
                 if let Some(expected) = &expected {
                     let actual: Vec<_> = rows.iter().map(|row| *row.id.0.as_bytes()).collect();
                     if actual.as_slice() != expected.as_slice() {
@@ -649,7 +868,7 @@ impl Db {
                     }
                 }
                 let settlements = inner.settlements(prepared, &rows, &cut)?;
-                if !local && snapshot_at_begin {
+                if !local && snapshot_mode == SettledSnapshot::ObservedAtBegin {
                     let observed = inner.run(
                         prepared,
                         reader,
@@ -672,6 +891,7 @@ impl Db {
                 };
                 reads.push(ReadRecord {
                     prepared: prepared.clone(),
+                    qualified: qualified.clone(),
                     include_deleted,
                     rows: versions(&rows),
                     content: read_contents(&rows)?,

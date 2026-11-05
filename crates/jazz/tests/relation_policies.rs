@@ -1,8 +1,8 @@
-//! Relation-backed policies on SQLite: a gather whose step walks an edge
+//! Relation-backed policies: a gather whose step walks an edge
 //! table and joins back to the seed table reaches the joined rows, so an
-//! access edge on an ancestor team grants. Not ported from Jazz.
+//! access edge on an ancestor team grants.
 
-mod common;
+use crate::common;
 use common::compile_schema;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};

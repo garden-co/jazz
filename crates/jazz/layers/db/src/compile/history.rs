@@ -38,7 +38,7 @@ impl Ctx<'_> {
             || !query.array_subqueries.is_empty()
             || !query.reachable.is_empty()
         {
-            return Err(unsupported("joins or relationships in history queries"));
+            return Err(history_unsupported("joins or relationships"));
         }
         if let Some(aggregate) = &query.aggregate {
             let metadata = |column: &str| {
@@ -52,14 +52,11 @@ impl Ctx<'_> {
                     .iter()
                     .any(|output| output.column.as_deref().is_some_and(metadata));
             if reads_metadata {
-                return Err(query_error(
-                    "unsupported relation query: Reading aggregates over history metadata is \
-                     not supported in history queries yet",
-                ));
+                return Err(history_unsupported("aggregates over history metadata"));
             }
         }
         let Some(bound) = query.filters.iter().find_map(bounding_id) else {
-            return Err(unsupported(
+            return Err(history_unsupported(
                 "history without an id equality or IN constraint",
             ));
         };
@@ -69,14 +66,16 @@ impl Ctx<'_> {
             })
         };
         if query.filters.iter().any(names_transaction) {
-            return Err(unsupported("$transactionId predicates in history queries"));
+            return Err(history_unsupported(
+                "user-provided $transactionId predicates",
+            ));
         }
         if query
             .order_by
             .iter()
             .any(|order| order.column == TRANSACTION_ID_COLUMN)
         {
-            return Err(unsupported("ordering history by $transactionId"));
+            return Err(history_unsupported("ordering by $transactionId"));
         }
         let (source, versions) =
             self.history_source(source, HistoryBound::Filter(bound), include_deleted)?;
@@ -108,8 +107,10 @@ impl Ctx<'_> {
         let offset = self.bind(Sql::Integer(query.offset as i64));
         let statement = |order: &str| {
             format!(
-                "SELECT {alias}.id, {alias}._seq, {alias}._del{columns} FROM {source} AS {alias} \
-                 WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
+                "SELECT {alias}.id, {alias}._seq, {alias}._del, {alias}.{} \
+                 {columns} FROM {source} AS {alias} WHERE {} ORDER BY {order} LIMIT {limit} \
+                 OFFSET {offset}",
+                quote(TRANSACTION_ID_COLUMN),
                 and(&wheres),
             )
         };
@@ -121,6 +122,8 @@ impl Ctx<'_> {
             tables: self.tables,
             aggregate: false,
             joined: 0,
+            versioned: true,
+            union: false,
             preps: self.preps,
         })
     }
@@ -134,13 +137,11 @@ impl Ctx<'_> {
         bound: HistoryBound<'_>,
         include_deleted: bool,
     ) -> Result<(String, Table), Error> {
-        if self.cut.is_some() {
-            return Err(unsupported("history reads at a snapshot"));
+        if self.cut.is_some() && !self.settled_only {
+            return Err(history_unsupported("history at a snapshot"));
         }
         if self.view.as_ref().is_some_and(|view| view.base.is_some()) {
-            return Err(unsupported(
-                "history reads through a branch view with a base",
-            ));
+            return Err(history_unsupported("history with a branch base"));
         }
         let table = self.table(source)?;
         let versions = versions_table(table);
@@ -281,4 +282,11 @@ pub(super) fn bounding_id(predicate: &Predicate) -> Option<&Predicate> {
         }
         _ => None,
     }
+}
+
+/// The error for a history shape that is not supported yet.
+fn history_unsupported(pattern: &str) -> Error {
+    query_error(format!(
+        "unsupported relation query: Reading {pattern} is not supported in history queries yet"
+    ))
 }

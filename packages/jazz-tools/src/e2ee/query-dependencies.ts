@@ -1,4 +1,9 @@
-import type { Db, QueryBuilder, QueryOptions } from "../runtime/db.js";
+import {
+  observeAcceptedQueryDependencies,
+  type Db,
+  type QueryBuilder,
+  type QueryOptions,
+} from "../runtime/db.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
 import { groupQueryDependencies, type DependencyWatch } from "./group-query-dependencies.js";
@@ -23,17 +28,7 @@ export function queryKeyDependencies(
   let started = false;
   let stopped = false;
   const watch: DependencyWatch = (query, onRows) =>
-    db.subscribe(
-      query,
-      {
-        onUpdate: (rows) => {
-          onRows?.(rows);
-          onChange();
-        },
-        onError,
-      },
-      options,
-    );
+    observeAcceptedQueryDependencies(db, query, onChange, onError, options, onRows);
   const groups = groupQueryDependencies(schema, watch);
   return {
     async update(required: QuerySpace[]) {

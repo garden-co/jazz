@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { strict as assert } from "node:assert";
 import { schema as s } from "../../schema-namespace.js";
@@ -29,7 +29,7 @@ export const permissions = {
   }),
 };
 
-function store(path: string) {
+export function store(path: string) {
   let writes = Promise.resolve();
   const read = async () => {
     try {
@@ -42,9 +42,18 @@ function store(path: string) {
   return {
     read,
     update(transform: (value: string | null) => string) {
-      const result = writes.then(async () =>
-        writeFile(path, transform(await read()), { mode: 0o600 }),
-      );
+      const result = writes.then(async () => {
+        const next = transform(await read());
+        // This fixture has one writer per path. Publish a complete replacement
+        // so concurrent journal reads never observe a truncated JSON file.
+        const pending = `${path}.pending`;
+        try {
+          await writeFile(pending, next, { mode: 0o600, flush: true });
+          await rename(pending, path);
+        } finally {
+          await rm(pending, { force: true });
+        }
+      });
       writes = result.catch(() => {});
       return result;
     },

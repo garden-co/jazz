@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import {
   createAccountManager,
   createDb,
+  TypedTableQueryBuilder,
   schema as s,
   type AccountStore,
   type Db,
@@ -39,6 +40,10 @@ const physical = s.defineApp({
     { chat: s.rel("chats", "chatId") },
   ),
 });
+
+const physicalMessages = new TypedTableQueryBuilder("messages", {
+  ...app.wasmSchema,
+}) as unknown as typeof physical.messages;
 
 function store(): AccountStore {
   let value: string | null = null;
@@ -203,7 +208,7 @@ it("retries enrollment and keeps immutable administration isolated", async () =>
           app.__e2ee_spaces,
           {
             ...rootValues,
-            accountId: configs[2]!.account.id,
+            creatorAccountId: configs[2]!.account.id,
           },
           { id: duplicateRootId },
         )
@@ -284,7 +289,7 @@ it("keeps image ciphertext separate from ordinary membership and decryption auth
       driver: { type: "memory" },
     });
     clients.push(observer);
-    const stored = await observer.one(physical.messages.where({ id: image.value.id }), {
+    const stored = await observer.one(physicalMessages.where({ id: image.value.id }), {
       tier: "remote",
     });
     expect(stored).not.toBeNull();

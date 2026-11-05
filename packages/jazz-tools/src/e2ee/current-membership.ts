@@ -2,6 +2,8 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { E2eeTransactionScope } from "../runtime/db.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
+import { usesCurrentMembership, usesSpaceAdministration } from "./encrypted-schema.js";
+import { spaceAdministrationTable } from "./space-administration-schema.js";
 import {
   currentGroupMembersTable,
   currentSpaceMembersTable,
@@ -33,7 +35,7 @@ export function maintainGroupMember(
   recipient: string,
   operation: "add" | "remove",
 ): void {
-  if (!schema[currentGroupMembersTable]) return;
+  if (!usesCurrentMembership(schema)) return;
   tx.upsert(
     new TypedTableQueryBuilder(currentGroupMembersTable, schema),
     currentMembershipId("group", groupId, kind, recipient),
@@ -56,7 +58,7 @@ export function maintainSpaceMember(
   operation: "add" | "remove",
 ): void {
   const table = currentSpaceMembersTable(scope);
-  if (!schema[table]) return;
+  if (!usesCurrentMembership(schema, scope)) return;
   tx.upsert(
     new TypedTableQueryBuilder(table, schema),
     currentMembershipId(scopeIdentity, identifier, kind, recipient),
@@ -74,7 +76,26 @@ export function initialisePermissionSpace(
   scope: string,
   identifier: string,
 ): void {
+  if (!usesCurrentMembership(schema, scope)) return;
   const table = permissionSpacesTable(scope);
   if (schema[table])
     tx.upsert(new TypedTableQueryBuilder(table, schema), identifier, { scopeId: identifier });
+}
+
+export function initialiseSpaceAdministration(
+  tx: E2eeTransactionScope,
+  schema: WasmSchema,
+  scope: string,
+  rootId: string,
+  identifier: string,
+  creatorAccountId: string,
+): void {
+  if (!usesSpaceAdministration(schema, scope)) return;
+  const table = spaceAdministrationTable(scope);
+  if (!schema[table]) throw new Error("Missing E2EE space administration schema");
+  tx.insert(
+    new TypedTableQueryBuilder(table, schema),
+    { rootId, identifier, creatorAccountId },
+    { id: rootId },
+  );
 }

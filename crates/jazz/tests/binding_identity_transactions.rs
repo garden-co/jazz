@@ -39,6 +39,25 @@ fn open(node: u8, backend: bool, path: Option<&Path>) -> Binding {
     open_with_policy(node, backend, path, policy)
 }
 
+// Binding hosts default to replicas. Tests that provide the authoritative
+// endpoint select that role explicitly without promoting backend replicas.
+fn open_authority(node: u8, backend: bool, path: Option<&Path>) -> Binding {
+    let policy = PolicyExpr::eq_session(
+        "owner",
+        vec!["user".into(), "identity".into(), "subject".into()],
+    );
+    open_authority_with_policy(node, backend, path, policy)
+}
+
+fn open_authority_with_policy(
+    node: u8,
+    backend: bool,
+    path: Option<&Path>,
+    policy: PolicyExpr,
+) -> Binding {
+    open_role(node, backend, path, policy, true)
+}
+
 fn file_table(policy: PolicyExpr) -> TableSchemaBuilder {
     TableSchemaBuilder::new("files")
         .column("owner", ColumnType::Text)
@@ -54,6 +73,16 @@ fn file_table(policy: PolicyExpr) -> TableSchemaBuilder {
 }
 
 fn open_with_policy(node: u8, backend: bool, path: Option<&Path>, policy: PolicyExpr) -> Binding {
+    open_role(node, backend, path, policy, false)
+}
+
+fn open_role(
+    node: u8,
+    backend: bool,
+    path: Option<&Path>,
+    policy: PolicyExpr,
+    authority: bool,
+) -> Binding {
     let schema = common::compile_schema(&SchemaBuilder::new().table(file_table(policy)).build());
     let id = identity(
         node,
@@ -69,6 +98,9 @@ fn open_with_policy(node: u8, backend: bool, path: Option<&Path>, policy: Policy
         None => block_on(Db::open(config)),
     }
     .unwrap();
+    if authority {
+        db.set_authority();
+    }
     Binding::new(db, id, backend)
 }
 
@@ -155,7 +187,7 @@ fn core_error(error: HostError) -> jazz::db::Error {
 /// admission and provenance; uncommitted uploads remain invisible.
 #[test]
 fn authenticated_binding_batches_apply_session_policies_to_uploads_and_companions() {
-    let backend = open(1, true, None);
+    let backend = open_authority(1, true, None);
     let alice = author("alice").canonical().to_owned();
     let mallory = author("mallory").canonical().to_owned();
     let tx = OpenTransactionId::new().to_string();
@@ -376,20 +408,20 @@ fn companion(backend: &Binding, tx: &str, id: u8) {
         .unwrap();
 }
 
-/// A backend may stage Bob's attributed or session batch, but an Alice session
-/// connection cannot vouch for Bob. The authority rejects the whole upload and
-/// companion transaction, and the replica retracts both optimistic rows.
-/// backend --Bob batch--> Alice link --reject--> authority
+/// A backend may stage Bob's attributed or session batch, but an ordinary Alice
+/// connection cannot vouch for Bob. The authority rejects backend attribution
+/// and normalizes session writes to Alice, including ciphertext and companions.
+/// backend --Bob batch--> Alice link --reject attribution / normalize session
 #[test]
-fn attributed_batch_cannot_escape_through_replica_sync() {
+fn ordinary_session_normalizes_session_batches_and_rejects_backend_attribution() {
     for session in [false, true] {
         let backend = open(5, true, None);
-        let authority = open(8, true, None);
+        let authority = open_authority(8, true, None);
         let bob = author("bob").canonical().to_owned();
         let tx = OpenTransactionId::new().to_string();
         let session_identity = session.then_some(bob.as_bytes());
         let attribution = (!session).then_some(bob.as_bytes());
-        // Preserve the role-change case: open before becoming a replica.
+        // Open the transaction before connecting the replica.
         backend
             .begin_transaction(&tx, "serializable", session_identity, attribution)
             .unwrap();
@@ -408,11 +440,24 @@ fn attributed_batch_cannot_escape_through_replica_sync() {
             &down,
             backend.wait_for_write(&write, "global").unwrap(),
         );
-        let error = core_error(result.unwrap_err());
-        assert_eq!(error.code, ErrorCode::WriteRejected);
-        assert!(error.message.contains("trusted serving node"), "{error:?}");
-        assert!(rows(&authority).is_empty());
-        assert!(rows(&backend).is_empty());
+        if !session {
+            let error = core_error(result.unwrap_err());
+            assert_eq!(error.code, ErrorCode::WriteRejected);
+            assert!(error.message.contains("trusted serving node"), "{error:?}");
+            assert!(rows(&authority).is_empty());
+            assert!(rows(&backend).is_empty());
+            continue;
+        }
+        result.unwrap();
+        for db in [&authority, &backend] {
+            let committed = rows(db);
+            assert_eq!(committed.len(), 2);
+            assert_eq!(committed[0].seq(), committed[1].seq());
+            for row in committed {
+                assert_eq!(subject(&row, "$createdBy.identity.subject"), "alice");
+                assert_eq!(subject(&row, "$updatedBy.identity.subject"), "alice");
+            }
+        }
     }
 }
 
@@ -443,7 +488,7 @@ fn attributed_replica_upload_survives_restart_and_settles_atomically() {
     drop(backend);
 
     let backend = open(9, true, Some(&path));
-    let authority = open(10, true, None);
+    let authority = open_authority(10, true, None);
     let up = backend.connect_upstream();
     let down = authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
     drive(
@@ -490,7 +535,7 @@ fn attributed_replica_upload_survives_restart_and_settles_atomically() {
 fn trusted_replica_session_batches_enforce_authority_policy_atomically() {
     for name in ["alice", "mallory"] {
         let backend = open(11, true, None);
-        let authority = open(12, true, None);
+        let authority = open_authority(12, true, None);
         let up = backend.connect_upstream();
         let down = authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
         let session = author(name).canonical().to_owned();
@@ -544,7 +589,7 @@ fn trusted_replica_session_batches_enforce_authority_policy_atomically() {
 /// database-local author codes never become another peer's identities.
 #[test]
 fn attributed_provenance_survives_authority_to_replica_sync() {
-    let backend = open(6, true, None);
+    let backend = open_authority(6, true, None);
     let alice = open(7, false, None);
     let bob = author("bob").canonical().to_owned();
     let tx = OpenTransactionId::new().to_string();
@@ -597,7 +642,7 @@ fn attributed_provenance_survives_authority_to_replica_sync() {
 /// backend replica and authority, even when Bob's rows are already cached.
 #[test]
 fn replica_session_read_sets_validate_as_the_bound_session() {
-    let authority = open(13, true, None);
+    let authority = open_authority(13, true, None);
     let backend = open(14, true, None);
     for (id, owner) in [(1, "alice"), (2, "bob")] {
         authority
@@ -617,7 +662,7 @@ fn replica_session_read_sets_validate_as_the_bound_session() {
         )
         .unwrap();
     let query = backend.db.prepare_query(&Query::from("files")).unwrap();
-    let transaction = backend.db.serializable_tx_ref(tx);
+    let transaction = backend.db.tx_ref(tx);
     let visible = drive(&up, &down, transaction.all_prepared(&query)).unwrap();
     assert_eq!(visible.len(), 1);
     assert_eq!(subject(&visible[0], "owner"), "alice");
@@ -639,8 +684,7 @@ fn replica_session_read_sets_validate_as_the_bound_session() {
 #[test]
 fn session_transaction_relations_keep_the_bound_reader() {
     for replica in [false, true] {
-        let authority = open(15, true, None);
-        authority.db.set_authority();
+        let authority = open_authority(15, true, None);
         authority
             .insert("files", &cells("alice"), &json!({"rowId": vec![1; 16]}))
             .unwrap();
@@ -687,7 +731,7 @@ fn session_transaction_relations_keep_the_bound_reader() {
                     .array_subquery(ArraySubquery::new("children", "files", "parent", "id")),
             )
             .unwrap();
-        let transaction = db.db.serializable_tx_ref(tx);
+        let transaction = db.db.tx_ref(tx);
         let future = transaction.all_prepared(&query);
         let visible = match &links {
             Some((up, down)) => drive(up, down, future),
@@ -733,7 +777,7 @@ fn decode_read(bytes: &[u8], relation: bool) -> Vec<jazz::binding_codec::Decoded
 #[test]
 fn one_shot_binding_reads_keep_the_requested_session() {
     for replica in [false, true] {
-        let authority = open(20, true, None);
+        let authority = open_authority(20, true, None);
         for (id, owner) in [(1, "alice"), (2, "bob")] {
             authority
                 .insert("files", &cells(owner), &json!({"rowId": vec![id; 16]}))
@@ -849,8 +893,7 @@ fn one_shot_binding_reads_keep_the_requested_session() {
 /// writes, and successful rows share one commit.
 #[test]
 fn mergeable_session_batches_are_atomic_and_policy_checked() {
-    let backend = open(22, true, None);
-    backend.db.set_authority();
+    let backend = open_authority(22, true, None);
     backend
         .insert("files", &cells("bob"), &json!({"rowId": vec![9; 16]}))
         .unwrap();
@@ -1011,7 +1054,8 @@ fn attributed_mergeable_batches_keep_backend_authority_and_capability_boundaries
 }
 
 /// Trusted replica links preserve Bob's mergeable attribution or enforce Alice's
-/// session policy. Ordinary Alice links reject Bob's forged attribution/session.
+/// session policy. Ordinary Alice links reject backend attribution and bind
+/// claimed session writes to authenticated Alice.
 /// backend -> atomic two-row commit -> trusted or Alice link -> authority verdict
 #[test]
 fn mergeable_replica_identity_batches_enforce_link_and_session_boundaries() {
@@ -1020,10 +1064,10 @@ fn mergeable_replica_identity_batches_enforce_link_and_session_boundaries() {
         (true, true, "alice", true),
         (true, true, "mallory", false),
         (false, false, "bob", false),
-        (false, true, "bob", false),
+        (false, true, "bob", true),
     ] {
         let backend = open(25, true, None);
-        let authority = open(26, true, None);
+        let authority = open_authority(26, true, None);
         let up = backend.connect_upstream();
         let down = authority.accept_subscriber(
             if trusted {
@@ -1058,7 +1102,10 @@ fn mergeable_replica_identity_batches_enforce_link_and_session_boundaries() {
             assert_eq!(committed.len(), 2);
             assert_eq!(committed[0].seq(), committed[1].seq());
             for row in committed {
-                assert_eq!(subject(&row, "$createdBy.identity.subject"), name);
+                assert_eq!(
+                    subject(&row, "$createdBy.identity.subject"),
+                    if trusted { name } else { "alice" }
+                );
             }
         } else {
             let error = core_error(result.unwrap_err());
@@ -1157,7 +1204,7 @@ fn pending_mergeable_session_claims_survive_restart_without_leaking() {
     drop(up);
     drop(backend);
     let backend = open_with_policy(28, true, Some(&path), policy());
-    let authority = open_with_policy(29, true, None, policy());
+    let authority = open_authority_with_policy(29, true, None, policy());
     authority
         .set_identity_claims(alice.as_bytes(), json!({"owner": "bob"}))
         .unwrap();
@@ -1217,7 +1264,7 @@ fn remote_as(
 #[test]
 fn scoped_remote_reads_isolate_concurrent_claims_and_ship_only_permitted_roots() {
     let policy = || PolicyExpr::eq_session("owner", vec!["claims".into(), "owner".into()]);
-    let authority = open_with_policy(31, true, None, policy());
+    let authority = open_authority_with_policy(31, true, None, policy());
     for (id, owner) in [(1, "alice"), (2, "bob"), (3, "mallory")] {
         authority
             .insert("files", &cells(owner), &json!({"rowId": vec![id; 16]}))
@@ -1287,7 +1334,7 @@ fn scoped_remote_reads_isolate_concurrent_claims_and_ship_only_permitted_roots()
 #[test]
 fn untrusted_connections_cannot_submit_scoped_reads() {
     for name in ["alice", "bob"] {
-        let authority = open_with_policy(
+        let authority = open_authority_with_policy(
             33,
             true,
             None,
@@ -1321,7 +1368,7 @@ fn untrusted_connections_cannot_submit_scoped_reads() {
 /// authorized answer stays empty even while the cache contains Alice rows.
 #[test]
 fn scoped_remote_answers_exclude_stale_and_pending_rows_and_preserve_windows() {
-    let authority = open(35, true, None);
+    let authority = open_authority(35, true, None);
     for id in 1..=4 {
         authority
             .insert("files", &cells("alice"), &json!({"rowId": vec![id; 16]}))
@@ -1374,7 +1421,7 @@ fn scoped_remote_answers_exclude_stale_and_pending_rows_and_preserve_windows() {
     let mut deferred = Vec::new();
     for frame in outbound {
         if matches!(
-            postcard::from_bytes::<jazz::db::SyncMessage>(&frame).unwrap(),
+            jazz::db::decode_message(&frame).unwrap(),
             jazz::db::SyncMessage::Commit { .. }
         ) {
             deferred.push(frame);
@@ -1430,7 +1477,7 @@ fn scoped_wire_requests_reject_unported_shapes_and_malformed_authors() {
                 vec!["user".into(), "identity".into(), "subject".into()],
             )
         };
-        let authority = open_with_policy(37, true, None, policy);
+        let authority = open_authority_with_policy(37, true, None, policy);
         let down = authority.accept_subscriber(
             if kind == "forged-system" {
                 author("alice")
@@ -1459,12 +1506,12 @@ fn scoped_wire_requests_reject_unported_shapes_and_malformed_authors() {
             claims: BTreeMap::new(),
             include_deleted: false,
         };
-        down.receive([postcard::to_allocvec(&request).unwrap()]);
+        down.receive([jazz::db::encode_message(&request).unwrap()]);
         block_on(authority.tick()).unwrap();
         let messages: Vec<jazz::db::SyncMessage> = down
             .take_outbound()
             .iter()
-            .map(|frame| postcard::from_bytes(frame).unwrap())
+            .map(|frame| jazz::db::decode_message(frame).unwrap())
             .collect();
         let expected = if kind == "forged-system" {
             ErrorCode::WriteRejected
@@ -1493,7 +1540,7 @@ fn scoped_wire_requests_reject_unported_shapes_and_malformed_authors() {
 /// while a read waits yields a typed error rather than reusing old request claims.
 #[test]
 fn scoped_reads_cancel_cleanly_and_fail_on_reconnect() {
-    let authority = open(38, true, None);
+    let authority = open_authority(38, true, None);
     let backend = open(39, true, None);
     let up = backend.connect_upstream();
     let down = authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
@@ -1515,7 +1562,7 @@ fn scoped_reads_cancel_cleanly_and_fail_on_reconnect() {
     }
     block_on(backend.tick()).unwrap();
     assert!(!up.take_outbound().iter().any(|frame| matches!(
-        postcard::from_bytes::<jazz::db::SyncMessage>(frame).unwrap(),
+        jazz::db::decode_message(frame).unwrap(),
         jazz::db::SyncMessage::ScopedFetchV1 { .. }
     )));
     let mut read = remote_as(&backend, Query::from("files"), "alice", None);
@@ -1533,7 +1580,7 @@ fn scoped_reads_cancel_cleanly_and_fail_on_reconnect() {
 /// the authority cannot promote the backend's cached Alice rows to a remote read.
 #[test]
 fn scoped_remote_reads_preserve_deleted_rows_and_fail_without_authority() {
-    let authority = open(40, true, None);
+    let authority = open_authority(40, true, None);
     for (id, owner) in [(1, "alice"), (2, "bob")] {
         authority
             .insert("files", &cells(owner), &json!({"rowId": vec![id; 16]}))
@@ -1600,7 +1647,7 @@ fn drive_network<T>(links: &[(&Link, &Link)], future: impl Future<Output = T>) -
 }
 
 fn scoped_request(id: u64, name: &str) -> Vec<u8> {
-    postcard::to_allocvec(&jazz::db::SyncMessage::ScopedFetchV1 {
+    jazz::db::encode_message(&jazz::db::SyncMessage::ScopedFetchV1 {
         id,
         query: Query::from("files"),
         binding: BTreeMap::new(),
@@ -1617,7 +1664,7 @@ fn scoped_request(id: u64, name: &str) -> Vec<u8> {
 #[test]
 fn scoped_reads_cross_multiple_relays_with_isolated_claims_and_windows() {
     let policy = || PolicyExpr::eq_session("owner", vec!["claims".into(), "owner".into()]);
-    let authority = open_with_policy(50, true, None, policy());
+    let authority = open_authority_with_policy(50, true, None, policy());
     for (id, owner) in [(1, "alice"), (2, "alice"), (3, "bob"), (4, "mallory")] {
         authority
             .insert("files", &cells(owner), &json!({"rowId": vec![id;16]}))
@@ -1653,10 +1700,24 @@ fn scoped_reads_cross_multiple_relays_with_isolated_claims_and_windows() {
         assert_eq!(rows[0].row_id, RowUuid::from_bytes([expected; 16]));
         assert_eq!(rows[0].cells["owner"], Value::String(owner.into()));
     }
-    assert_eq!(rows(&alice).len(), 1);
-    assert_eq!(rows(&bob).len(), 1);
-    assert_eq!(rows(&outer).len(), 2);
-    assert_eq!(rows(&inner).len(), 2);
+    // Upstream prefix delivery retains permitted predecessors before the page,
+    // while every hop excludes Mallory and unrelated rows from the other read.
+    for (db, expected) in [
+        (&alice, vec![1, 2]),
+        (&bob, vec![3]),
+        (&outer, vec![1, 2, 3]),
+        (&inner, vec![1, 2, 3]),
+    ] {
+        let mut cached: Vec<_> = rows(db).into_iter().map(|row| row.row_uuid()).collect();
+        cached.sort();
+        assert_eq!(
+            cached,
+            expected
+                .into_iter()
+                .map(|id| RowUuid::from_bytes([id; 16]))
+                .collect::<Vec<_>>()
+        );
+    }
     authority
         .update("files", &[2; 16], &cells("bob"), &json!({}))
         .unwrap();
@@ -1677,7 +1738,7 @@ fn scoped_reads_cross_multiple_relays_with_isolated_claims_and_windows() {
 #[test]
 fn scoped_relay_reads_require_trusted_connections_at_every_hop() {
     for untrusted in 0..3 {
-        let authority = open(55, true, None);
+        let authority = open_authority(55, true, None);
         authority
             .insert("files", &cells("bob"), &json!({"rowId":vec![1;16]}))
             .unwrap();
@@ -1722,7 +1783,7 @@ fn scoped_relay_reads_require_trusted_connections_at_every_hop() {
 /// excluded. Raw frame timing is necessary to put the update ahead of delivery.
 #[test]
 fn scoped_relay_answers_preserve_authority_cuts_and_exclude_pending_rows() {
-    let authority = open(59, true, None);
+    let authority = open_authority(59, true, None);
     authority
         .insert("files", &cells("alice"), &json!({"rowId":vec![1;16]}))
         .unwrap();
@@ -1751,7 +1812,7 @@ fn scoped_relay_answers_preserve_authority_cuts_and_exclude_pending_rows() {
     // Delay the relay's upload while letting the read overtake it.
     rd.receive(ru.take_outbound().into_iter().filter(|frame| {
         !matches!(
-            postcard::from_bytes::<jazz::db::SyncMessage>(frame).unwrap(),
+            jazz::db::decode_message(frame).unwrap(),
             jazz::db::SyncMessage::Commit { .. }
         )
     }));
@@ -1798,7 +1859,7 @@ fn scoped_relay_answers_preserve_authority_cuts_and_exclude_pending_rows() {
 /// test disconnect precisely after forwarding but before the authority answers.
 #[test]
 fn scoped_relay_disconnect_drops_late_answers_before_session_reuse() {
-    let authority = open(62, true, None);
+    let authority = open_authority(62, true, None);
     for (id, owner) in [(1, "alice"), (2, "bob")] {
         authority
             .insert("files", &cells(owner), &json!({"rowId":vec![id;16]}))
@@ -1826,7 +1887,7 @@ fn scoped_relay_disconnect_drops_late_answers_before_session_reuse() {
         messages.extend(
             new.take_outbound()
                 .into_iter()
-                .map(|f| postcard::from_bytes::<jazz::db::SyncMessage>(&f).unwrap()),
+                .map(|f| jazz::db::decode_message(&f).unwrap()),
         );
         if messages
             .iter()
@@ -1850,7 +1911,7 @@ fn scoped_relay_disconnect_drops_late_answers_before_session_reuse() {
 #[test]
 fn scoped_relay_reads_fail_on_upstream_loss_and_recover_with_fresh_requests() {
     for reconnect in [false, true] {
-        let authority = open(64, true, None);
+        let authority = open_authority(64, true, None);
         authority
             .insert("files", &cells("alice"), &json!({"rowId":vec![1;16]}))
             .unwrap();
@@ -1881,7 +1942,7 @@ fn scoped_relay_reads_fail_on_upstream_loss_and_recover_with_fresh_requests() {
         block_on(relay.tick()).unwrap();
         let frames = ru.take_outbound();
         assert!(!frames.iter().any(|frame| matches!(
-            postcard::from_bytes::<jazz::db::SyncMessage>(frame).unwrap(),
+            jazz::db::decode_message(frame).unwrap(),
             jazz::db::SyncMessage::ScopedFetchV1 { .. }
         )));
         if !reconnect {
@@ -1910,7 +1971,7 @@ fn scoped_relay_reads_reject_schema_changes_while_pending() {
     let down = relay.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
     down.receive([scoped_request(41, "alice")]);
     block_on(relay.tick()).unwrap();
-    down.receive([postcard::to_allocvec(&jazz::db::SyncMessage::Schema {
+    down.receive([jazz::db::encode_message(&jazz::db::SyncMessage::Schema {
         version: [0x99; 16],
     })
     .unwrap()]);
@@ -1918,7 +1979,7 @@ fn scoped_relay_reads_reject_schema_changes_while_pending() {
     let messages: Vec<jazz::db::SyncMessage> = down
         .take_outbound()
         .into_iter()
-        .map(|f| postcard::from_bytes(&f).unwrap())
+        .map(|f| jazz::db::decode_message(&f).unwrap())
         .collect();
     assert!(messages.iter().any(|m| matches!(
         m,
@@ -1974,7 +2035,7 @@ fn scoped_relay_reads_reject_cross_version_forwarding() {
     assert_eq!(error.code, ErrorCode::Query);
     assert!(error.message.contains("different schema versions"));
     assert!(!ru.take_outbound().iter().any(|frame| matches!(
-        postcard::from_bytes::<jazz::db::SyncMessage>(frame).unwrap(),
+        jazz::db::decode_message(frame).unwrap(),
         jazz::db::SyncMessage::ScopedFetchV1 { .. }
     )));
 }
@@ -1998,11 +2059,11 @@ fn scoped_relay_schema_activation_requires_a_new_upstream_handshake() {
     let messages: Vec<jazz::db::SyncMessage> = down
         .take_outbound()
         .into_iter()
-        .map(|f| postcard::from_bytes(&f).unwrap())
+        .map(|f| jazz::db::decode_message(&f).unwrap())
         .collect();
     assert!(messages.iter().any(|m|matches!(m,jazz::db::SyncMessage::Refused {id:41,code:ErrorCode::Query,message} if message.contains("without upstream reconnect"))));
     assert!(!old_up.take_outbound().iter().any(|f| matches!(
-        postcard::from_bytes::<jazz::db::SyncMessage>(f).unwrap(),
+        jazz::db::decode_message(f).unwrap(),
         jazz::db::SyncMessage::ScopedFetchV1 { .. }
     )));
     let new_up = relay.connect_upstream();
@@ -2011,7 +2072,7 @@ fn scoped_relay_schema_activation_requires_a_new_upstream_handshake() {
     let messages: Vec<jazz::db::SyncMessage> = new_up
         .take_outbound()
         .into_iter()
-        .map(|f| postcard::from_bytes(&f).unwrap())
+        .map(|f| jazz::db::decode_message(&f).unwrap())
         .collect();
     assert!(
         matches!(&messages[0],jazz::db::SyncMessage::Schema {version} if version == schema.version_id().as_bytes())
@@ -2025,4 +2086,354 @@ fn scoped_relay_schema_activation_requires_a_new_upstream_handshake() {
         down.take_outbound().is_empty(),
         "the relay still waits for the authority"
     );
+}
+
+/// Alice's native host supplies an already-verified session identity. Bob's
+/// provenance alone cannot grant a normal runtime backend admission.
+#[test]
+fn typed_native_transaction_admission_retains_backend_and_session_checks() {
+    use jazz::binding_host::TransactionKind;
+    let alice = open(0xa8, false, None);
+    let id = OpenTransactionId::new();
+    let refused = alice.begin_transaction_with_identity(
+        id,
+        TransactionKind::Mergeable,
+        WriteIdentity::Attribution(author("bob")),
+    );
+    assert!(matches!(refused, Err(HostError::Argument(message)) if message.contains("backend")));
+    assert!(rows(&alice).is_empty());
+
+    let backend = open(0xa9, true, None);
+    backend
+        .begin_transaction_with_identity(
+            id,
+            TransactionKind::Serializable,
+            WriteIdentity::Session(author("alice")),
+        )
+        .unwrap();
+    let staged = block_on(backend.db.tx_ref(id).insert(
+        "files",
+        BTreeMap::from([("owner".into(), Value::String("alice".into()))]),
+        Default::default(),
+    ));
+    backend.staged(id, staged).unwrap();
+    let write = backend
+        .commit_transaction(&id.to_string(), Some("serializable"))
+        .unwrap();
+    assert!(write.rejected.is_none());
+    let committed = rows(&backend);
+    assert_eq!(committed.len(), 1);
+    assert_eq!(
+        subject(&committed[0], "$createdBy.identity.subject"),
+        "alice"
+    );
+}
+
+/// Alice stages a valid insert then an incomplete upsert through native typed
+/// lowerings. Catching the stage refusal cannot commit the earlier insert.
+#[test]
+fn typed_native_stage_refusal_rejects_the_entire_batch() {
+    use jazz::binding_host::TransactionKind;
+    let alice = open(0xaa, true, None);
+    let id = OpenTransactionId::new();
+    alice
+        .begin_transaction_with_identity(
+            id,
+            TransactionKind::Mergeable,
+            WriteIdentity::Session(author("alice")),
+        )
+        .unwrap();
+    alice
+        .staged(
+            id,
+            block_on(alice.db.tx_ref(id).insert(
+                "files",
+                BTreeMap::from([("owner".into(), Value::String("alice".into()))]),
+                Default::default(),
+            )),
+        )
+        .unwrap();
+    let missing = RowUuid::from_bytes([0xef; 16]);
+    let staged = block_on(alice.db.tx_ref(id).upsert(
+        "files",
+        missing,
+        BTreeMap::new(),
+        Default::default(),
+    ));
+    alice.staged(id, staged).unwrap();
+    let write = alice.commit_transaction(&id.to_string(), None).unwrap();
+    assert!(block_on(alice.wait_for_write(&write, "local").unwrap()).is_err());
+    assert!(rows(&alice).is_empty());
+}
+
+/// Alice catches a refused streamed attachment after staging another insert.
+/// The binding rejects the complete unit and rollback retires the refusal.
+#[test]
+fn streamed_stage_refusal_rejects_companion_writes_and_retires_on_rollback() {
+    let alice = open(0xac, true, None);
+    alice
+        .insert("files", &cells("alice"), &json!({ "rowId": vec![1; 16] }))
+        .unwrap();
+    for rollback in [false, true] {
+        let mut duplicate = stage(&alice, 1, None, None);
+        let id = OpenTransactionId::new().to_string();
+        alice
+            .begin_transaction(&id, "serializable", None, None)
+            .unwrap();
+        alice
+            .insert_in_transaction(
+                &id,
+                "files",
+                &cells("alice"),
+                &json!({ "rowId": vec![2; 16] }),
+            )
+            .unwrap();
+        let attachment = duplicate.attach(&id);
+        if rollback {
+            alice.rollback_transaction(&id).unwrap();
+        } else {
+            let write = alice.commit_transaction(&id, Some("serializable")).unwrap();
+            assert!(
+                write.rejected.is_some(),
+                "a caught attachment refusal cannot publish its companion"
+            );
+            assert!(block_on(alice.wait_for_write(&write, "local").unwrap()).is_err());
+        }
+        assert!(
+            attachment.is_ok(),
+            "the refusal belongs to the transaction receipt: {attachment:?}"
+        );
+        assert!(
+            !duplicate.abort().unwrap(),
+            "attachment consumes the capability"
+        );
+        assert_eq!(rows(&alice).len(), 1);
+    }
+    let id = OpenTransactionId::new().to_string();
+    alice
+        .begin_transaction(&id, "serializable", None, None)
+        .unwrap();
+    alice
+        .insert_in_transaction(
+            &id,
+            "files",
+            &cells("alice"),
+            &json!({ "rowId": vec![2; 16] }),
+        )
+        .unwrap();
+    let write = alice.commit_transaction(&id, Some("serializable")).unwrap();
+    assert!(write.rejected.is_none());
+    assert_eq!(rows(&alice).len(), 2);
+}
+
+/// Alice opens a native session batch. Bob's explicit read scope must fail
+/// before reading that batch; Alice can still read it after the failed attempt.
+#[test]
+fn typed_native_read_cannot_replace_the_transaction_session() {
+    use jazz::binding_host::TransactionKind;
+    let backend = open(0xab, true, None);
+    let id = OpenTransactionId::new();
+    backend
+        .begin_transaction_with_identity(
+            id,
+            TransactionKind::Mergeable,
+            WriteIdentity::Session(author("alice")),
+        )
+        .unwrap();
+    let query = postcard::to_allocvec(&Query::from("files")).unwrap();
+    let read = |who| {
+        block_on(backend.db.all_serialized_query_as(
+            &query,
+            ReadOpts::for_read_tier(ReadTier::LocalOnly),
+            Some(id),
+            Some((who, BTreeMap::new())),
+            Some(who),
+            false,
+            || false,
+            |_| {},
+        ))
+    };
+    let rejected = read(author("bob")).unwrap_err();
+    assert_eq!(rejected.code, ErrorCode::WriteRejected);
+    assert!(rejected.message.contains("bound identity"));
+    assert!(read(author("alice")).is_ok());
+    backend.rollback_transaction(&id.to_string()).unwrap();
+}
+
+/// Ordinary Alice runtimes cannot turn local claims into authority credentials,
+/// including persisted explicit session batches. Backend and admitted private
+/// owners may vouch for a session; ordinary links use server-admitted claims.
+/// Alice -> [optional restart] -> authenticated link -> authority receipt
+#[test]
+fn upstream_session_claims_require_host_admission_even_after_restart() {
+    for kind in ["mergeable", "serializable"] {
+        for restart in [false, true] {
+            for route in [
+                "ordinary-backend",
+                "ordinary-session",
+                "backend",
+                "private-owner",
+            ] {
+                let policy =
+                    || PolicyExpr::eq_session("owner", vec!["claims".into(), "owner".into()]);
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("claims.sqlite");
+                let open_client = || {
+                    let binding = open_with_policy(80, route == "backend", Some(&path), policy());
+                    if route == "private-owner" {
+                        binding.db.set_scope_isolated_storage_owner().unwrap();
+                    }
+                    binding
+                };
+                let client = open_client();
+                let up = client.connect_upstream();
+                let alice = author("alice").canonical().to_owned();
+                client
+                    .set_identity_claims(alice.as_bytes(), json!({"owner":"alice"}))
+                    .unwrap();
+                let tx = OpenTransactionId::new().to_string();
+                client
+                    .begin_transaction(&tx, kind, Some(alice.as_bytes()), None)
+                    .unwrap();
+                companion(&client, &tx, 1);
+                let write = client.commit_transaction(&tx, Some(kind)).unwrap();
+                let (client, up) = if restart {
+                    drop(up);
+                    drop(client);
+                    let client = open_client();
+                    let up = client.connect_upstream();
+                    (client, up)
+                } else {
+                    (client, up)
+                };
+                let authority = open_authority_with_policy(81, true, None, policy());
+                let (peer, claims) = if route == "ordinary-session" {
+                    (
+                        author("alice"),
+                        jazz::binding_host::claims(author("alice"), json!({"owner": "alice"}))
+                            .unwrap(),
+                    )
+                } else {
+                    (AuthorSubject::SYSTEM, BTreeMap::new())
+                };
+                let down = authority.accept_subscriber(peer, claims);
+                let result = drive(&up, &down, client.wait_for_write(&write, "global").unwrap());
+                let allowed = route != "ordinary-backend";
+                assert_eq!(
+                    result.is_ok(),
+                    allowed,
+                    "{route}, {kind}, restart={restart}: {result:?}"
+                );
+                assert_eq!(
+                    rows(&authority).len(),
+                    usize::from(allowed),
+                    "{route}, {kind}, restart={restart}"
+                );
+                if !allowed {
+                    assert_eq!(
+                        core_error(result.unwrap_err()).code,
+                        ErrorCode::WriteRejected
+                    );
+                    assert!(
+                        rows(&client).is_empty(),
+                        "authority rejection retracts the optimistic row"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Alice's foreground reserves and publishes through her admitted durable
+/// owner. The reservation envelope cannot vouch for forged claims; the owner
+/// supplies its authenticated session and the authority decides the fate.
+/// Frame inspection pins this binding security boundary, then real receipts
+/// prove that removing claims neither bypasses checks nor blocks valid writes.
+#[test]
+fn foreground_initialization_envelopes_keep_claim_admission_and_real_receipts() {
+    for requested_owner in ["alice", "mallory"] {
+        let policy = || PolicyExpr::eq_session("owner", vec!["claims".into(), "owner".into()]);
+        let authority = open_authority_with_policy(85, true, None, policy());
+        let owner = open_with_policy(86, false, None, policy());
+        owner.db.set_scope_isolated_storage_owner().unwrap();
+        let owner_up = owner.connect_upstream();
+        let authority_down = authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+        let foreground = open_with_policy(87, false, None, policy());
+        foreground.db.set_private_owner_client().unwrap();
+        let foreground_up = foreground.connect_upstream();
+        let owner_down = owner.accept_subscriber(
+            author("alice"),
+            jazz::binding_host::claims(author("alice"), json!({"owner":"alice"})).unwrap(),
+        );
+        let links = [(&foreground_up, &owner_down), (&owner_up, &authority_down)];
+        drive_network(&links, foreground.db.wait_for_storage_owner()).unwrap();
+        let alice = author("alice").canonical().to_owned();
+        foreground
+            .set_identity_claims(alice.as_bytes(), json!({"owner": requested_owner}))
+            .unwrap();
+        let tx = OpenTransactionId::new().to_string();
+        foreground
+            .begin_transaction(&tx, "serializable", Some(alice.as_bytes()), None)
+            .unwrap();
+        foreground
+            .record_initialization_insert_absence(&tx, "files", &[1; 16])
+            .unwrap();
+        foreground
+            .insert_in_transaction(
+                &tx,
+                "files",
+                &cells(requested_owner),
+                &json!({"rowId":vec![1;16]}),
+            )
+            .unwrap();
+        let seal = drive_network(
+            &links,
+            foreground.seal_initialization_transaction_with_owner(&tx),
+        )
+        .unwrap();
+        let write = foreground
+            .publish_initialization_transaction(&seal.token)
+            .unwrap();
+        block_on(foreground.tick()).unwrap();
+        let frames = foreground_up.take_outbound();
+        let mut published = false;
+        for frame in &frames {
+            if let jazz::db::SyncMessage::OwnerInitializationPublishV1 { commit, .. } =
+                jazz::db::decode_message(frame).unwrap()
+            {
+                let jazz::db::SyncMessage::Commit { session, .. } =
+                    postcard::from_bytes(&commit).unwrap()
+                else {
+                    panic!("initialization body must be a Commit")
+                };
+                assert_eq!(
+                    session,
+                    Some(BTreeMap::new()),
+                    "untrusted foreground cannot vouch for claims in a reserved publication"
+                );
+                published = true;
+            }
+        }
+        assert!(
+            published,
+            "the real sealed publication crossed the binding link"
+        );
+        owner_down.receive(frames);
+        let result = drive_network(&links, foreground.wait_for_write(&write, "global").unwrap());
+        assert_eq!(
+            result.is_ok(),
+            requested_owner == "alice",
+            "{requested_owner}: {result:?}"
+        );
+        assert_eq!(
+            rows(&authority).len(),
+            usize::from(requested_owner == "alice")
+        );
+        if requested_owner != "alice" {
+            assert_eq!(
+                core_error(result.unwrap_err()).code,
+                ErrorCode::WriteRejected
+            );
+        }
+    }
 }

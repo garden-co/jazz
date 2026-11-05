@@ -298,10 +298,16 @@ impl Forwarder {
                 held.row_uuid() == row.row_uuid
                     && held.table() == row.table
                     && held.joined_rows() == row.joined.as_slice()
+                    && held.union_arm() == row.union_arm.as_deref()
             });
             let id = match held {
                 Some(at) => decoder.key(&self.rows.remove(at))?,
-                None => jazz_db::values::occurrence_key(row.row_uuid, row.version, &row.joined),
+                None => jazz_db::values::occurrence_key(
+                    row.row_uuid,
+                    row.version,
+                    &row.joined,
+                    row.union_arm.as_deref(),
+                ),
             };
             delta.removed.push(OrderedRemoved {
                 id,
@@ -313,6 +319,7 @@ impl Forwarder {
                 held.row_uuid() == row.row_uuid()
                     && held.table() == row.table()
                     && held.joined_rows() == row.joined_rows()
+                    && held.union_arm() == row.union_arm()
             });
             // A row that only moved, or got a new version with the same
             // shown cells, carries no payload: they are what it was
@@ -506,7 +513,12 @@ impl JazzClient {
                 .await
             }
         }
-        .map_err(|error| JazzError::Storage(error.to_string()))?;
+        .map_err(|error| match error.code {
+            crate::db::ErrorCode::UnsupportedStorageCodecs => {
+                JazzError::UnsupportedStorage(error.message)
+            }
+            _ => JazzError::Storage(error.to_string()),
+        })?;
         if let Some(session) = default_session.as_ref() {
             db.set_identity_claims(identity.author, session_claims_to_core_claims(session)?);
         }
@@ -873,10 +885,7 @@ impl JazzClient {
             // A client's serializable read hydrates from the authority,
             // which needs ticks to answer.
             self.shared
-                .settle(
-                    db.serializable_tx_ref(transaction_id)
-                        .all_prepared(&prepared),
-                )
+                .settle(db.tx_ref(transaction_id).all_prepared(&prepared))
                 .await?
                 .map_err(|error| JazzError::Query(error.to_string()))?
         } else if opts.tier == ReadTier::Remote
@@ -1025,7 +1034,7 @@ impl JazzClient {
         let row_id = object_id.into().map(RowUuid);
         let db = self.db()?;
         if let Some(transaction_id) = self.open_transaction()? {
-            let write = crate::db::block_on(db.serializable_tx_ref(transaction_id).insert(
+            let write = crate::db::block_on(db.tx_ref(transaction_id).insert(
                 table,
                 cells,
                 InsertOptions {
@@ -1067,7 +1076,7 @@ impl JazzClient {
         let row = RowUuid(object_id);
         let db = self.db()?;
         if let Some(transaction_id) = self.open_transaction()? {
-            crate::db::block_on(db.serializable_tx_ref(transaction_id).upsert(
+            crate::db::block_on(db.tx_ref(transaction_id).upsert(
                 table,
                 row,
                 cells,
@@ -1110,7 +1119,7 @@ impl JazzClient {
         let row = RowUuid(*object_id.uuid());
         let db = self.db()?;
         if let Some(transaction_id) = self.open_transaction()? {
-            crate::db::block_on(db.serializable_tx_ref(transaction_id).update(
+            crate::db::block_on(db.tx_ref(transaction_id).update(
                 table,
                 row,
                 cells,
@@ -1147,7 +1156,7 @@ impl JazzClient {
         let row = RowUuid(*object_id.uuid());
         let db = self.db()?;
         if let Some(transaction_id) = self.open_transaction()? {
-            crate::db::block_on(db.serializable_tx_ref(transaction_id).delete(
+            crate::db::block_on(db.tx_ref(transaction_id).delete(
                 table,
                 row,
                 DeleteOptions {
@@ -1188,7 +1197,7 @@ impl JazzClient {
         let row = RowUuid(*object_id.uuid());
         let db = self.db()?;
         if let Some(transaction_id) = self.open_transaction()? {
-            crate::db::block_on(db.serializable_tx_ref(transaction_id).restore(
+            crate::db::block_on(db.tx_ref(transaction_id).restore(
                 table,
                 row,
                 cells,
@@ -1277,7 +1286,7 @@ impl JazzClient {
     pub fn rollback_transaction(&self, transaction_id: OpenTransactionId) -> Result<bool> {
         self.ensure_transaction_open(transaction_id)?;
         self.db()?
-            .abandon_serializable_handle(transaction_id)
+            .abandon_transaction_handle(transaction_id)
             .map_err(write_error)?;
         let mut state = self.shared.state();
         state.transactions.remove(&transaction_id);
@@ -1927,11 +1936,7 @@ impl Decoder<'_> {
                 NodeUuid(*node),
             )));
         }
-        Ok(jazz_db::values::occurrence_key(
-            row.row_uuid(),
-            row.root_version(),
-            row.joined_rows(),
-        ))
+        Ok(row.occurrence_key())
     }
 
     fn values(&self, row: &CurrentRow) -> Result<Vec<QueryResultField>> {

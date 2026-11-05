@@ -39,7 +39,7 @@ const permissions = s.definePermissions(app, ({ policy }) => [
   policy.values.allowDelete.always(),
 ]);
 
-// This deliberately keeps the ordinary write API: `body` crosses Groove's
+// This deliberately keeps the ordinary write API: `body` crosses the
 // automatic 64 KiB promotion boundary during one user transaction which also
 // authors a referenced project. It is distinct from the streaming receipts
 // below, which each create one row in their own transaction.

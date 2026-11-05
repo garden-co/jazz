@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "allowJs": true,
+    "jsx": "react-jsx",
+    "noEmit": true,
+    "types": ["node", "vite/client"],
+    "paths": {
+      "jazz-tools": ["../../src/index.ts"],
+      "jazz-tools/e2ee": ["../../src/e2ee/index.ts"],
+      "jazz-tools/react": ["../../src/react/index.ts"],
+      "jazz-tools/permissions": ["../../src/permissions/index.ts"],
+      "jazz-tools/_dev/schema-hash": ["../../src/_dev/schema-hash.ts"]
+    },
+    "typeRoots": ["../../node_modules/@types"]
+  },
+  "files": [
+    "../../src/types/fs-native-extensions.d.ts",
+    "../../src/types/native-artifact-fingerprints.d.ts"
+  ],
+  "include": ["./*.ts", "./*.tsx"]
+}

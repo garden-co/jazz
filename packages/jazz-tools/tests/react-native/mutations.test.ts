@@ -278,7 +278,12 @@ it("preserves branch head/base targets and restores only the selected head", asy
       .table({ branch: schema.string(), title: schema.string(), done: schema.boolean() }, {})
       .branchBy("branch"),
   });
-  await withNativeRelayFixture(branches, {}, async (fixture) => {
+  // Rows a session cannot read are evicted from its replica, so the branch
+  // rows need a read policy to stay.
+  const permissions = schema.definePermissions(branches, ({ policy }) => [
+    policy.documents.allowRead.always(),
+  ]);
+  await withNativeRelayFixture(branches, permissions, async (fixture) => {
     const db = await fixture.createDb();
     const row = await db
       .insert(

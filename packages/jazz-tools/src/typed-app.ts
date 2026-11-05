@@ -34,7 +34,17 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import { hasExternalProvenanceNameAllowance, isComputedColumn } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import { deviceRequestSchema, groupSchema, spaceSchema } from "./e2ee/managed-schema.js";
-import { permissionSpacesTable } from "./e2ee/current-membership-names.js";
+import {
+  currentGroupMembersTable,
+  currentSpaceMembersPrefix,
+  currentSpaceMembersTable,
+  permissionSpacesTable,
+} from "./e2ee/current-membership-names.js";
+import { encryptionSpacePolicySchema } from "./e2ee/current-membership-schema.js";
+import {
+  spaceAdministrationSchema,
+  spaceAdministrationTable,
+} from "./e2ee/space-administration-schema.js";
 import {
   encryptedSchemas,
   encryptedTableToPhysical,
@@ -49,6 +59,7 @@ import {
   assertUserTableColumnNameAllowed,
 } from "./magic-columns.js";
 import { assertSchemaNameAllowed } from "./schema-name.js";
+import { isProvenanceAccountColumn, type ProvenanceAccountColumn } from "./magic-columns.js";
 import { WHERE_OPERATORS, type WhereOperator } from "./where-operators.js";
 import type { ColumnTransformMap, ColumnTransformRegistry, QueryBuilder } from "./runtime/db.js";
 import type { StreamingValueSource } from "./runtime/client.js";
@@ -85,7 +96,18 @@ type ValidateSchemaColumnNames<TSchema extends SchemaDefinition> = {
   [TTable in keyof TSchema]: TSchema[TTable] extends DefinedTable ? unknown : NoExplicitIdColumn;
 };
 export type Simplify<T> = { [K in keyof T]: T[K] } & {};
-type ManagedEncryptionSchema = typeof deviceRequestSchema & typeof groupSchema & typeof spaceSchema;
+type EncryptionScope<Relations extends Relationships, Space extends string> = {
+  [Key in keyof Relations]: Relations[Key] extends ForwardRelationship<infer Target, Space>
+    ? Target
+    : never;
+}[keyof Relations];
+type EncryptionScopes<TSchema extends SchemaDefinition> = {
+  [Key in keyof TSchema]: TSchema[Key] extends DefinedTable<any, infer Relations, infer Encryption>
+    ? Encryption extends EncryptionDeclaration
+      ? EncryptionScope<Relations, Encryption["space"]>
+      : never
+    : never;
+}[keyof TSchema];
 type AutomaticEncryptionSchema<TSchema extends SchemaDefinition> = [
   {
     [K in keyof TSchema]: TSchema[K] extends DefinedTable<any, any, infer TEncryption>
@@ -96,7 +118,7 @@ type AutomaticEncryptionSchema<TSchema extends SchemaDefinition> = [
   }[keyof TSchema],
 ] extends [never]
   ? {}
-  : ManagedEncryptionSchema;
+  : ReturnType<typeof encryptionSpacePolicySchema<Extract<EncryptionScopes<TSchema>, string>>>;
 
 export type CompactSchema<TSchema extends SchemaDefinition> = Simplify<{
   [TTable in keyof TSchema]: NormalizeTableDefinition<TSchema[TTable]>;
@@ -139,11 +161,13 @@ type InvalidRelationshipEntries<S extends SchemaDefinition> = {
   }[keyof SourceRelations<S[T]> & string];
 }[keyof S & string];
 type ValidateSchemaRefs<TSchema extends SchemaDefinition> = [
-  InvalidRelationshipEntries<TSchema>,
+  InvalidRelationshipEntries<TSchema & AutomaticEncryptionSchema<TSchema>>,
 ] extends [never]
   ? unknown
   : {
-      readonly __relationshipValidationError__: InvalidRelationshipEntries<TSchema>;
+      readonly __relationshipValidationError__: InvalidRelationshipEntries<
+        TSchema & AutomaticEncryptionSchema<TSchema>
+      >;
     };
 
 type NormalizedSchema<TSchema extends SchemaLike> =
@@ -413,14 +437,16 @@ type ForwardRelationEntries<TSchema extends SchemaLike, TTable extends TableName
     TTable
   >[N] extends ForwardRelationship<infer Target, infer Col>
     ? Target extends TableName<TSchema>
-      ? Col extends ColumnName<TSchema, TTable>
-        ? {
-            name: N;
-            toTable: Target;
-            isArray: IsArrayRelation<BuilderForColumn<TSchema, TTable, Col>>;
-            nullable: ColumnBuilderOptional<BuilderForColumn<TSchema, TTable, Col>>;
-          }
-        : never
+      ? Col extends ProvenanceAccountColumn
+        ? { name: N; toTable: Target; isArray: false; nullable: false }
+        : Col extends ColumnName<TSchema, TTable>
+          ? {
+              name: N;
+              toTable: Target;
+              isArray: IsArrayRelation<BuilderForColumn<TSchema, TTable, Col>>;
+              nullable: ColumnBuilderOptional<BuilderForColumn<TSchema, TTable, Col>>;
+            }
+          : never
       : never
     : never;
 }[keyof DeclaredRelations<TSchema, TTable> & string];
@@ -957,6 +983,10 @@ type BuiltRelation = {
   table?: string;
   conditions?: BuiltCondition[];
   hops?: string[];
+  select?: string[];
+  orderBy?: Array<[string, "asc" | "desc"]>;
+  limit?: number;
+  offset?: number;
   gather?: BuiltGather;
   union?: {
     inputs: BuiltUnionArm[];
@@ -1000,6 +1030,16 @@ function cloneBuiltRelation(relation: BuiltRelation): BuiltRelation {
     ...(relation.table ? { table: relation.table } : {}),
     ...(relation.conditions ? { conditions: relation.conditions.map(cloneBuiltCondition) } : {}),
     ...(relation.hops ? { hops: [...relation.hops] } : {}),
+    ...(relation.select ? { select: [...relation.select] } : {}),
+    ...(relation.orderBy
+      ? {
+          orderBy: relation.orderBy.map(
+            ([key, direction]) => [key, direction] as [string, "asc" | "desc"],
+          ),
+        }
+      : {}),
+    ...(relation.limit !== undefined ? { limit: relation.limit } : {}),
+    ...(relation.offset !== undefined ? { offset: relation.offset } : {}),
     ...(relation.gather ? { gather: cloneBuiltGather(relation.gather) } : {}),
     ...(relation.union
       ? {
@@ -1403,14 +1443,33 @@ export class TypedTableQueryBuilder<
   }
 
   _serializeRelation(): BuiltRelation {
+    if (Object.keys(this._includes).length > 0 || this._requireIncludes || this._includeDeleted) {
+      throw new Error("UNION and gather seeds do not support includes or deleted-row output.");
+    }
+    if (this._partialSelect || (this._select && !Array.isArray(this._select))) {
+      throw new Error("UNION and gather seeds do not support partial large-value selections.");
+    }
+    const output = {
+      ...(this._select ? { select: [...this._select] } : {}),
+      ...(this._orderBys.length
+        ? {
+            orderBy: this._orderBys.map(
+              ([key, direction]) => [key, direction] as [string, "asc" | "desc"],
+            ),
+          }
+        : {}),
+      ...(this._limitVal !== undefined ? { limit: this._limitVal } : {}),
+      ...(this._offsetVal !== undefined ? { offset: this._offsetVal } : {}),
+    };
     if (this._unionVal) {
-      return cloneBuiltRelation(this._unionVal);
+      return { ...cloneBuiltRelation(this._unionVal), ...output };
     }
     return {
       table: this._table,
       conditions: this._conditions.map(cloneBuiltCondition),
       hops: [...this._hops],
       ...(this._gatherVal ? { gather: cloneBuiltGather(this._gatherVal) } : {}),
+      ...output,
     };
   }
 }
@@ -1552,20 +1611,20 @@ export type App<TSchema extends SchemaLike> = Simplify<
         TableWhereFromMeta<SchemaMeta<TTable, TSchema>>
       >;
     };
-    union<TTable extends TableName<TSchema>>(
-      relations: readonly RelationSeedQuery<TTable>[],
+    union<const TInputs extends readonly RelationSeedQuery<TableName<TSchema>>[]>(
+      relations: TInputs,
     ): TypedTableQueryBuilder<
-      SchemaMeta<TTable, TSchema>,
+      SchemaMeta<TInputs[number]["_table"], TSchema>,
       {},
-      DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
+      keyof RowOf<TInputs[number]>,
       false
     >;
-    union<TTable extends TableName<TSchema>>(
-      relations: Readonly<Record<string, RelationSeedQuery<TTable>>>,
+    union<const TInputs extends Readonly<Record<string, RelationSeedQuery<TableName<TSchema>>>>>(
+      relations: TInputs,
     ): TypedTableQueryBuilder<
-      SchemaMeta<TTable, TSchema>,
+      SchemaMeta<TInputs[keyof TInputs]["_table"], TSchema>,
       {},
-      DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
+      keyof RowOf<TInputs[keyof TInputs]>,
       false
     >;
     wasmSchema: WasmSchema;
@@ -1737,6 +1796,7 @@ function definitionToColumns(
   }
   for (const [name, relation] of Object.entries(tableRelationships(definition))) {
     if (relation.kind !== "forward") continue;
+    if (isProvenanceAccountColumn(relation.column)) continue;
     const column = columns.find((candidate) => candidate.name === relation.column);
     if (!column)
       throw new Error(`Relationship "${name}" references unknown column "${relation.column}".`);
@@ -1825,12 +1885,14 @@ export function defineSchema<const TSchema extends SchemaDefinition>(
       assertUserTableColumnNameAllowed(column);
     }
   }
-  schemaToWasm(definitionToSchema(definition));
+  schemaToWasm(definitionToSchema(withManagedEncryptionTables(definition)));
   return definition as unknown as Schema<TSchema>;
 }
 
 /** Internal package-owned tables shared by app compilation and catalogue publication. */
 export const managedEncryptionSchema = { ...deviceRequestSchema, ...groupSchema, ...spaceSchema };
+
+const explicitMembershipScopesByDefinition = new WeakMap<SchemaDefinition, ReadonlySet<string>>();
 
 /** Internal: keep app compilation and migration witnesses on the same managed tables. */
 export function withManagedEncryptionTables(definition: SchemaDefinition): SchemaDefinition {
@@ -1839,12 +1901,41 @@ export function withManagedEncryptionTables(definition: SchemaDefinition): Schem
       (table) => table instanceof DefinedTable && table.encryption !== undefined,
     )
   ) {
+    const explicitMembershipScopes =
+      explicitMembershipScopesByDefinition.get(definition) ??
+      new Set(
+        Object.keys(definition)
+          .filter((name) => name.startsWith(currentSpaceMembersPrefix))
+          .map((name) => name.slice(currentSpaceMembersPrefix.length)),
+      );
+    // Keep generated entries out of reusable application definitions. Otherwise
+    // spreading a previously compiled definition looks like a legacy opt-in.
+    definition = { ...definition };
     for (const [name, table] of Object.entries(managedEncryptionSchema)) {
       if (Object.hasOwn(definition, name) && definition[name] !== table) {
         throw new Error(`Cannot replace managed E2EE table "${name}"`);
       }
     }
     definition = { ...managedEncryptionSchema, ...definition };
+    for (const source of Object.values(definition)) {
+      if (!(source instanceof DefinedTable) || !source.encryption) continue;
+      const reference = Object.values(source.relations as Relationships).find(
+        (relation) => relation.kind === "forward" && relation.column === source.encryption!.space,
+      );
+      if (!reference) continue;
+      const scope = reference.table;
+      for (const [name, table] of Object.entries(encryptionSpacePolicySchema(scope))) {
+        if (Object.hasOwn(definition, name) && definition[name] !== table)
+          throw new Error(`Cannot replace managed E2EE table "${name}"`);
+        definition[name] = table;
+      }
+      const name = spaceAdministrationTable(scope);
+      if (Object.hasOwn(definition, name)) {
+        if (definition[name] !== spaceAdministrationSchema(scope))
+          throw new Error(`Cannot replace managed E2EE table "${name}"`);
+      } else definition[name] = spaceAdministrationSchema(scope);
+    }
+    explicitMembershipScopesByDefinition.set(definition, explicitMembershipScopes);
   }
   return definition;
 }
@@ -1880,6 +1971,7 @@ function compileAppSchema(definition: SchemaDefinition) {
     logical: schemaToWasm(logical),
     tables: encrypted,
     scopes: new Set([...encrypted.values()].map((table) => table.scope)),
+    explicitMembershipScopes: explicitMembershipScopesByDefinition.get(definition) ?? new Set(),
   });
   return { schema, wasmSchema };
 }
@@ -1984,13 +2076,19 @@ function createAppForTables(
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
   const history = {} as App<Schema<SchemaDefinition>>["$history"];
 
-  if (encryptedSchemas.has(wasmSchema)) {
+  const encryption = encryptedSchemas.get(wasmSchema);
+  if (encryption) {
     tableNames = [
       ...new Set([
         ...tableNames,
         ...Object.keys(deviceRequestSchema),
         ...Object.keys(groupSchema),
         ...Object.keys(spaceSchema),
+        currentGroupMembersTable,
+        ...[...encryption.scopes].flatMap((scope) => [
+          currentSpaceMembersTable(scope),
+          permissionSpacesTable(scope),
+        ]),
       ]),
     ];
   }
@@ -2088,12 +2186,21 @@ function derivedUnionArmLabel(relation: BuiltRelation): string {
 }
 
 function canonicalUnionRelation(relation: BuiltRelation): string {
+  // jazz.sdk.union-arm-output.v1 extends only seeds with output modifiers.
+  // Existing unmodified seeds retain their exact canonical bytes and labels.
+  const output = {
+    ...(relation.select ? { select: relation.select } : {}),
+    ...(relation.orderBy ? { orderBy: relation.orderBy } : {}),
+    ...(relation.limit !== undefined ? { limit: relation.limit } : {}),
+    ...(relation.offset !== undefined ? { offset: relation.offset } : {}),
+  };
   const normalized = {
     ...(relation.table ? { table: relation.table } : {}),
     conditions: [...(relation.conditions ?? [])]
       .map((condition) => canonicalJson(condition))
       .sort(),
     hops: relation.hops ?? [],
+    ...(Object.keys(output).length ? { output_v1: output } : {}),
     ...(relation.gather ? { gather: relation.gather } : {}),
     ...(relation.union
       ? {

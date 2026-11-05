@@ -168,6 +168,13 @@ it("rejects an initial recipient ID that resolves to both an accepted account an
     ).toEqual([]);
     expect(await creator.all(app.__e2ee_space_grants, { tier: "remote" })).toEqual([]);
     expect(await creator.all(app.__e2ee_space_deliveries, { tier: "remote" })).toEqual([]);
+    const parent = await creator.e2ee.groups.create().wait();
+    for (const operation of ["add", "remove"] as const) {
+      await expect(
+        creator.e2ee.groups[operation](parent.id, bob.account.id).wait(),
+      ).rejects.toThrow("Ambiguous E2EE group recipient ID");
+    }
+    expect(await creator.all(app.__e2ee_group_membership, { tier: "remote" })).toEqual([]);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();

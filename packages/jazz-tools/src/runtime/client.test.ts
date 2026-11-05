@@ -753,6 +753,27 @@ describe("public read tiers", () => {
 });
 
 describe("internal read tiers", () => {
+  it("forwards accepted-evidence notifications internally and strips public option injection", () => {
+    const runtime = makeFakeRuntime();
+    runtime.createSubscription.mockReturnValue(7);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const query = '{"relation_ir":{"table":"todos"}}';
+    const internal = client.subscribeInternal(query, () => {}, { observeAcceptedEvidence: true });
+    const internalOptions = runtime.createSubscription.mock.calls[0]?.[3];
+    if (typeof internalOptions !== "string") throw new Error("Expected encoded internal options");
+    expect(JSON.parse(internalOptions)).toEqual({
+      observe_accepted_evidence: true,
+    });
+    client.unsubscribe(internal);
+    runtime.createSubscription.mockClear();
+    const publicSubscription = client.subscribe(query, () => {}, {
+      tier: ReadTier.Remote,
+      observeAcceptedEvidence: true,
+    } as QueryExecutionOptions);
+    expect(runtime.createSubscription.mock.calls[0]?.[3]).toBeUndefined();
+    client.unsubscribe(publicSubscription);
+  });
+
   it("preserves the internal local-only read tier", () => {
     expect(resolveEffectiveQueryExecutionOptions({}, { tier: "local-only" })).toMatchObject({
       tier: "local-only",

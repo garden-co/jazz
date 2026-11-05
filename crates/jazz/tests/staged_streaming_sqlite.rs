@@ -150,7 +150,7 @@ fn expire(db: &Db) -> usize {
 }
 
 fn manifest(db: &Db, tx: OpenTransactionId, id: u8) {
-    block_on(db.serializable_tx_ref(tx).insert(
+    block_on(db.tx_ref(tx).insert(
         "manifests",
         BTreeMap::from([("label".to_owned(), Value::String("attachment".to_owned()))]),
         InsertOptions {
@@ -181,7 +181,7 @@ fn staged_ciphertext_and_manifest_publish_atomically() {
     assert!(rows(&db, "files").is_empty());
     assert!(rows(&db, "manifests").is_empty());
     assert!(
-        block_on(db.serializable_tx_ref(tx).read("files", row(1)))
+        block_on(db.tx_ref(tx).read("files", row(1)))
             .unwrap()
             .is_some()
     );
@@ -395,29 +395,26 @@ fn session_batches_preserve_permissions_on_reads_and_commit() {
     let mallory = OpenTransactionId::new();
     block_on(db.begin_serializable_for_identity(mallory, user(2))).unwrap();
     assert!(
-        block_on(db.serializable_tx_ref(mallory).read("files", row(2)))
+        block_on(db.tx_ref(mallory).read("files", row(2)))
             .unwrap()
             .is_none()
     );
     // Partial edits must read as the batch's session too, before deriving bytes.
-    let error = block_on(
-        db.serializable_tx_ref(mallory)
-            .update_with_large_value_mutations(
-                "files",
-                row(2),
-                BTreeMap::new(),
-                vec![jazz::db::LargeValueUpdate::Splice {
-                    column: "ciphertext".to_owned(),
-                    within: jazz::db::LargeValueUpdatePage::Bytes { from: 0, to: 1 },
-                    splices: vec![jazz::db::LargeValueUpdateSplice {
-                        at: 0,
-                        delete: 1,
-                        insert: vec![0],
-                    }],
-                }],
-                Default::default(),
-            ),
-    )
+    let error = block_on(db.tx_ref(mallory).update_with_large_value_mutations(
+        "files",
+        row(2),
+        BTreeMap::new(),
+        vec![jazz::db::LargeValueUpdate::Splice {
+            column: "ciphertext".to_owned(),
+            within: jazz::db::LargeValueUpdatePage::Bytes { from: 0, to: 1 },
+            splices: vec![jazz::db::LargeValueUpdateSplice {
+                at: 0,
+                delete: 1,
+                insert: vec![0],
+            }],
+        }],
+        Default::default(),
+    ))
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::NotObserved);
     let mut staged = stage(
@@ -440,7 +437,7 @@ fn serializable_conflict_rolls_back_every_staged_row() {
     block_on(db.begin_serializable(tx)).unwrap();
     let query = db.prepare_query(&Query::from("manifests")).unwrap();
     assert!(
-        block_on(db.serializable_tx_ref(tx).all_prepared(&query))
+        block_on(db.tx_ref(tx).all_prepared(&query))
             .unwrap()
             .is_empty()
     );

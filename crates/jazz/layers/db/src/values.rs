@@ -1,6 +1,6 @@
 //! Jazz values in SQLite cells, the schema as SQLite sees it, and rows.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::ids::RowUuid;
@@ -19,6 +19,26 @@ pub(crate) fn query_error(what: impl std::fmt::Display) -> Error {
     Error::new(ErrorCode::Query, what.to_string())
 }
 
+/// One-row queries through the connection's statement cache. jazz-db asks
+/// the same few shapes per row (a row's state, an interned author), so
+/// re-parsing each one costs more than running it.
+pub(crate) trait CachedRow {
+    fn cached_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
+    where
+        P: rusqlite::Params,
+        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>;
+}
+
+impl CachedRow for rusqlite::Connection {
+    fn cached_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
+    where
+        P: rusqlite::Params,
+        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        self.prepare_cached(sql)?.query_row(params, f)
+    }
+}
+
 pub(crate) fn storage(error: rusqlite::Error) -> Error {
     // Only the large-value collation and functions interrupt a statement,
     // when a chunk it needs is not local (see `crate::large`).
@@ -26,6 +46,44 @@ pub(crate) fn storage(error: rusqlite::Error) -> Error {
         return crate::large::missing();
     }
     Error::new(ErrorCode::Storage, error.to_string())
+}
+
+/// Open `SAVEPOINT name`; [`end_savepoint`] closes it.
+pub(crate) fn begin_savepoint(conn: &rusqlite::Connection, name: &str) -> Result<(), Error> {
+    conn.execute_batch(&format!("SAVEPOINT {name}"))
+        .map_err(storage)
+}
+
+/// Release `SAVEPOINT name` (`keep`), or roll back everything since it. SQLite
+/// rolls a whole transaction back by itself after some errors (a full disk,
+/// an I/O error); then the savepoint is gone and there is nothing to undo.
+pub(crate) fn end_savepoint(
+    conn: &rusqlite::Connection,
+    name: &str,
+    keep: bool,
+) -> Result<(), Error> {
+    let sql = if keep {
+        format!("RELEASE {name}")
+    } else {
+        format!("ROLLBACK TO {name}; RELEASE {name}")
+    };
+    match conn.execute_batch(&sql) {
+        Ok(()) => Ok(()),
+        Err(_) if !keep && conn.is_autocommit() => Ok(()),
+        Err(error) => Err(storage(error)),
+    }
+}
+
+/// Run `f` inside `SAVEPOINT name`: kept if it succeeds, undone if not.
+pub(crate) fn in_savepoint<T>(
+    conn: &rusqlite::Connection,
+    name: &str,
+    f: impl FnOnce() -> Result<T, Error>,
+) -> Result<T, Error> {
+    begin_savepoint(conn, name)?;
+    let result = f();
+    end_savepoint(conn, name, result.is_ok())?;
+    result
 }
 
 /// One SQLite value, as bound or read. Text holds raw bytes: large-capable
@@ -545,6 +603,20 @@ impl Table {
         name == "id" || self.column(name).is_some()
     }
 
+    /// An inherited capability concerns the accepted old row. UPDATE's CHECK
+    /// validates a replacement, so a CHECK-only policy declares an unrestricted
+    /// old-row capability; absence of the entire operation still denies.
+    pub fn inherited_policy(&self, operation: crate::tools::Operation) -> Option<&PolicyExpr> {
+        if operation == crate::tools::Operation::Update {
+            return match &self.policies.update.using {
+                Some(policy) => Some(policy),
+                None if self.policies.update.with_check.is_some() => Some(&PolicyExpr::True),
+                None => None,
+            };
+        }
+        self.policy(operation)
+    }
+
     /// The policy that gates `operation`, or `None` (deny).
     pub fn policy(&self, operation: crate::tools::Operation) -> Option<&PolicyExpr> {
         use crate::tools::Operation::*;
@@ -587,7 +659,7 @@ impl Schema {
                     stored: column.name.clone(),
                     ty: column.column_type.clone(),
                     default: column.default.clone(),
-                    json: format!("{:?}", column.large_value_kind) == "Json",
+                    json: column.large_value_kind == crate::schema::LargeValueSemanticKind::Json,
                     merge: table
                         .merge_strategies
                         .get(&column.name)
@@ -604,6 +676,13 @@ impl Schema {
             indexes.extend(table.composite_indexes.iter().cloned());
             indexes.sort();
             indexes.dedup();
+            // An index that leads another serves no read the longer one
+            // cannot, and costs every write a second entry.
+            let all = indexes.clone();
+            indexes.retain(|index| {
+                !all.iter()
+                    .any(|other| other.len() > index.len() && other.starts_with(index))
+            });
             tables.insert(
                 table.name.clone(),
                 Table {
@@ -724,6 +803,7 @@ impl Schema {
                     self.tables.insert(name.clone(), table.physical());
                 }
                 Some(physical) => {
+                    let mut large = Vec::new();
                     for column in &table.columns {
                         if physical.column(&column.stored).is_some() {
                             continue;
@@ -742,9 +822,17 @@ impl Schema {
                         let mut stored = column.clone();
                         stored.name = column.stored.clone();
                         if crate::large::large_capable(column) {
-                            ddl.push_str(&crate::large::triggers(physical, &[&stored]));
+                            large.push(stored.clone());
                         }
                         physical.columns.push(stored);
+                    }
+                    if let Some(first) = large.first() {
+                        let columns: Vec<&Column> = large.iter().collect();
+                        ddl.push_str(&crate::large::triggers(
+                            physical,
+                            &columns,
+                            Some(&first.stored),
+                        ));
                     }
                     for index in &table.indexes {
                         let index = table.stored_index(index);
@@ -753,6 +841,9 @@ impl Schema {
                             physical.indexes.push(index);
                         }
                     }
+                    // Also install the additive derived index on stores created
+                    // before scoped historical permission reads were available.
+                    ddl.push_str(&table.permission_history_indexes_ddl());
                 }
             }
         }
@@ -824,6 +915,47 @@ impl Table {
         )
     }
 
+    /// jazz.sqlite.permission-history-index.v1: a derived UUID lookup over
+    /// historical images. The row bytes and primary key are unchanged.
+    pub(crate) fn permission_history_index_name(&self, column: &str) -> Option<String> {
+        if !self.branch_by.is_empty()
+            || !self
+                .indexes
+                .iter()
+                .any(|index| index.first().is_some_and(|first| first == column))
+        {
+            return None;
+        }
+        let field = self.column(column)?;
+        let ty = match &field.ty {
+            ValueType::Nullable(inner) => inner.as_ref(),
+            ty => ty,
+        };
+        matches!(ty, ValueType::Uuid)
+            .then(|| format!("{}__h_permission_v1({})", self.stored, field.stored))
+    }
+
+    fn permission_history_indexes_ddl(&self) -> String {
+        self.indexes
+            .iter()
+            .filter_map(|index| index.first())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|column| {
+                self.permission_history_index_name(column)
+                    .map(|name| (column, name))
+            })
+            .map(|(column, name)| {
+                format!(
+                    "CREATE INDEX IF NOT EXISTS {} ON {}({},id,_b,_seq);\n",
+                    quote(&name),
+                    quote(&format!("{}__h", self.stored)),
+                    quote(self.stored_name(column))
+                )
+            })
+            .collect()
+    }
+
     /// DDL for one table. Columns are declared without a type so SQLite
     /// keeps every value's storage class as bound (no affinity coercion).
     pub fn ddl(&self) -> String {
@@ -854,11 +986,12 @@ impl Table {
         for index in &table.indexes {
             sql.push_str(&table.index_ddl(index));
         }
+        sql.push_str(&table.permission_history_indexes_ddl());
         let large: Vec<&Column> = table
             .stored()
             .filter(|c| crate::large::large_capable(c))
             .collect();
-        sql.push_str(&crate::large::triggers(table, &large));
+        sql.push_str(&crate::large::triggers(table, &large, None));
         sql
     }
 }
@@ -1009,6 +1142,8 @@ pub struct CurrentRow {
     pub(crate) joined: Arc<[JoinedRow]>,
     /// A flat join's root version when the root is a history source.
     pub(crate) version: Option<SourceVersion>,
+    /// A union read's arm label: with the row, its occurrence.
+    pub(crate) union_arm: Option<Arc<str>>,
 }
 
 /// A history version's transaction identity, `(tx, node)` as its
@@ -1016,12 +1151,24 @@ pub struct CurrentRow {
 pub type SourceVersion = (u64, crate::ids::NodeUuid);
 
 /// A row's result key: the row itself, or a flat join's root followed by
-/// its joined source rows, each with its history version if it has one.
+/// its joined source rows, each with its history version if it has one,
+/// and for a union read the arm that matched it (at the root's position).
 /// Relations arrive as nested rows, not joined outputs.
 pub fn occurrence_key(
     root: RowUuid,
     version: Option<SourceVersion>,
     joined: &[JoinedRow],
+    union_arm: Option<&str>,
+) -> jazz_types::object::ResultKey {
+    occurrence_key_with_union_arm(root, version, joined, union_arm)
+}
+
+/// The existing result-key v2 encoding, including a UNION leaf discriminator.
+pub fn occurrence_key_with_union_arm(
+    root: RowUuid,
+    version: Option<SourceVersion>,
+    joined: &[JoinedRow],
+    union_arm: Option<&str>,
 ) -> jazz_types::object::ResultKey {
     use jazz_types::object::{ObjectId, OutputOccurrenceId, ResultKey, SourceOccurrenceId};
     let source = |row: RowUuid, version: Option<SourceVersion>| {
@@ -1031,7 +1178,7 @@ pub fn occurrence_key(
             None => SourceOccurrenceId::current(id),
         }
     };
-    if joined.is_empty() && version.is_none() {
+    if joined.is_empty() && version.is_none() && union_arm.is_none() {
         return ResultKey::from_occurrence(OutputOccurrenceId::single_source(ObjectId::from_uuid(
             root.0,
         )));
@@ -1042,9 +1189,9 @@ pub fn occurrence_key(
             joined
                 .iter()
                 .map(|joined| source(joined.row, joined.version)),
-            [],
+            union_arm.map(|label| (0, label.to_owned())),
         )
-        .expect("an occurrence without union arms is valid"),
+        .expect("a union arm label is 1..=4096 bytes, as union_plan checks"),
     )
 }
 
@@ -1057,6 +1204,11 @@ pub struct JoinedRow {
 }
 
 impl CurrentRow {
+    /// The UNION leaf label; nested labels use the relation path encoding.
+    pub fn union_arm(&self) -> Option<&str> {
+        self.union_arm.as_deref()
+    }
+
     pub fn row_uuid(&self) -> RowUuid {
         self.id
     }
@@ -1076,6 +1228,11 @@ impl CurrentRow {
         self.version
     }
 
+    /// The row's result key ([`occurrence_key`]).
+    pub fn occurrence_key(&self) -> jazz_types::object::ResultKey {
+        occurrence_key(self.id, self.version, &self.joined, self.union_arm())
+    }
+
     pub fn is_deleted(&self) -> bool {
         self.deleted
     }
@@ -1086,7 +1243,7 @@ impl CurrentRow {
     }
 
     /// A projected cell by column name.
-    pub fn cell(&self, _table: &crate::schema::TableSchema, column: &str) -> Option<Value> {
+    pub fn cell(&self, column: &str) -> Option<Value> {
         self.cells
             .iter()
             .find(|(name, _)| name == column)

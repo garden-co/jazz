@@ -481,7 +481,7 @@ mod tests {
                 .catalogue
                 .publish_lens(&server.state.catalogue_store, &lens)
                 .unwrap();
-            publish_runtime_catalogue(&server.state, &[target.clone()], &[lens])
+            publish_runtime_catalogue(&server.state, std::slice::from_ref(target), &[lens])
                 .await
                 .unwrap();
         }
@@ -498,7 +498,6 @@ mod tests {
             None,
         )
         .await
-        .ok()
         .expect("activate left sibling");
         let second = publish_permissions_and_runtime(
             &server.state,
@@ -507,7 +506,6 @@ mod tests {
             Some(first.bundle_object_id),
         )
         .await
-        .ok()
         .expect("activate right sibling");
         let replay = publish_permissions_and_runtime(
             &server.state,
@@ -516,7 +514,6 @@ mod tests {
             Some(second.bundle_object_id),
         )
         .await
-        .ok()
         .expect("retry selection");
         assert_eq!(replay.version, second.version);
         let runtime = server.state.runtime().unwrap();
@@ -547,7 +544,6 @@ mod tests {
             None,
         )
         .await
-        .ok()
         .expect("activate left sibling");
         let runtime = server.state.runtime().unwrap();
         // Simulate a runtime ahead of the administrative store. The proposed

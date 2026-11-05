@@ -102,9 +102,16 @@ Chromium tests exercise real IndexedDB persistence and the SDK's seal/status ABI
 single-use owner/view tokens and close during pending seal delivery. Existing
 transaction, sync, permissions, accepted-history and catalogue tests also run.
 
-This ports the SQLite core and WASM initialization primitives. It does not
-qualify the complete encrypted application: browser-worker storage admission,
-foreground mutation forwarding/durable acknowledgements, NAPI/native-relay
-integration, candidate-created permissions and encrypted projections/subscriptions
-remain separate runtime work. The existing SDK journal orchestration still needs
-validation through those complete owner/worker paths. All stack PRs stay draft.
+These tests cover the SQLite core and WASM initialization primitives. The later
+[foreground initialization port](sqlite-foreground-initialization-compatibility.md)
+extends sealing, publication and journal recovery through a private durable
+owner. [Browser storage admission](sqlite-browser-storage-compatibility.md),
+[foreground write recovery](sqlite-owner-projection-compatibility.md) and
+[owner flush receipts](sqlite-owner-stored-compatibility.md) are also implemented
+under their documented admission and durability rules.
+
+The [React quickstart checks](sqlite-browser-reload-qualification.md) exercise
+encrypted chat creation, sharing, live replies and concurrent reloads through
+the production worker. They do not qualify every encrypted query shape, crash
+schedule or permission graph. NAPI/native-relay publication and the remaining
+full-stack checks are still outstanding; E17 remains draft.

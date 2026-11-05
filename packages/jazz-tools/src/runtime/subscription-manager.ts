@@ -338,7 +338,7 @@ export function resultIdentity(item: { id: string }): string {
 export class SubscriptionManager<T extends { id: string }> {
   private currentResults = new JournaledMap<string, T>();
   private terminalRows = new JournaledMap<string, WasmRow>();
-  /** Exact ordered Groove root key -> opaque ResultKey sidecar address. */
+  /** Exact ordered root key -> opaque ResultKey sidecar address. */
   private terminalOccurrenceAddresses = new JournaledMap<string, string>();
   private orderedIds: string[] = [];
   private orderedIdIndex = new JournaledMap<string, number>();
@@ -946,7 +946,7 @@ export class SubscriptionManager<T extends { id: string }> {
 }
 
 /**
- * Reconstruct the exact Groove ordered root key from a complete ResultKey.
+ * Reconstruct the exact ordered root key from a complete ResultKey.
  * This is metadata-driven: a terminal key is accepted as typed only when it
  * byte-for-byte matches the sidecar's root, joined UUIDs, and union-arm
  * discriminators. It intentionally does not infer meaning from a string in an
@@ -1046,7 +1046,7 @@ function terminalKeyId(encoded: readonly number[]): string {
   if (bytes.length === 17 && bytes[0] === 10) {
     return readUuid(bytes, 1);
   }
-  // Groove terminal operations address roots by an ordered Record key. A
+  // Terminal operations address roots by an ordered Record key. A
   // multi-source row is therefore `Uuid, Uuid, …`, while the packed stream's
   // occurrence sidecar uses the equivalent ResultKey (`2, root UUID,
   // joined count, joined UUIDs, label count, per-source transaction flags`). Normalize only this exact
@@ -1083,7 +1083,7 @@ function isUuidOnlyTerminalKey(encoded: ArrayLike<number>): boolean {
   );
 }
 
-/** Decode the leading UUID key field from Groove's ordered record-key carrier. */
+/** Decode the leading UUID key field from the ordered record-key carrier. */
 function terminalPayloadRowId(encoded: readonly number[]): string {
   const bytes = Uint8Array.from(encoded);
   if (bytes.length < 17 || bytes[0] !== 10) {

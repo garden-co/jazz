@@ -1,0 +1,38 @@
+{
+  "wireRole": "jazz.sqlite.sync.content-witness.v1",
+  "storageRole": "jazz.sqlite.content-witness.v1",
+  "version": 2,
+  "message": {
+    "ContentWitnessesV1": {
+      "witnesses": [
+        {
+          "table": "notes",
+          "id": [34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34],
+          "key": [153],
+          "row_seq": 9,
+          "content_seq": 7
+        }
+      ]
+    }
+  },
+  "hex": "4a53514c021601056e6f7465732222222222222222222222222222222201990907",
+  "durableValues": [
+    {
+      "value": 1,
+      "hex": "01"
+    },
+    {
+      "value": 127,
+      "hex": "7f"
+    },
+    {
+      "value": 128,
+      "hex": "8001"
+    },
+    {
+      "value": 16384,
+      "hex": "808001"
+    }
+  ],
+  "encoding": "jazz.sqlite.sync.v2"
+}

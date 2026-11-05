@@ -253,6 +253,7 @@ export interface TablePolicies {
 }
 
 export interface Table {
+  syntheticReferencesV1?: Record<string, string>;
   /** Authoring metadata; excluded from storage schema identity. */
   relations?: import("./relationships.js").Relationships;
   name: string;

@@ -76,6 +76,70 @@ describe("auth-state", () => {
     ).toThrow("Changing auth principal on a live client is not supported. Recreate the Db.");
   });
 
+  it.each([new Error("first observer failed"), undefined])(
+    "finishes auth-loss notification before rethrowing the first failure (%s)",
+    (firstFailure) => {
+      const store = createAuthStateStore({ appId: "a", jwtToken: validJwt });
+      const calls: string[] = [];
+      store.onChange((state) => {
+        if (!state.error) return;
+        calls.push("first");
+        throw firstFailure;
+      });
+      store.onChange((state) => {
+        if (!state.error) return;
+        calls.push("second");
+        throw new Error("second observer failed");
+      });
+      const states: AuthState[] = [];
+      store.onChange((state) => {
+        if (!state.error) return;
+        calls.push("last");
+        states.push(state);
+      });
+
+      const failures: unknown[] = [];
+      try {
+        store.markUnauthenticated("expired");
+      } catch (error) {
+        failures.push(error);
+      }
+      expect(failures).toEqual([firstFailure]);
+      expect(calls).toEqual(["first", "second", "last"]);
+      expect(states).toEqual([store.getState()]);
+      expect(states[0]?.error).toBe("expired");
+
+      store.markUnauthenticated("expired");
+      expect(calls).toEqual(["first", "second", "last"]);
+    },
+  );
+
+  it("finishes clearing an auth error while respecting unsubscribe during notification", () => {
+    const store = createAuthStateStore({ appId: "a", jwtToken: validJwt });
+    store.markUnauthenticated("expired");
+    const failure = new Error("observer failed");
+    const calls: string[] = [];
+    let stopRemoved = () => {};
+    store.onChange((state) => {
+      if (state.error) return;
+      calls.push("first");
+      stopRemoved();
+      throw failure;
+    });
+    stopRemoved = store.onChange((state) => {
+      if (!state.error) calls.push("removed");
+    });
+    store.onChange((state) => {
+      if (!state.error) calls.push("last");
+    });
+
+    expect(() => store.clearError()).toThrow(failure);
+    expect(store.getState().error).toBeUndefined();
+    expect(calls).toEqual(["first", "last"]);
+    store.clearError();
+    expect(calls).toEqual(["first", "last"]);
+  });
+
   it("treats the issuer as part of the live principal identity", () => {
     const store = createAuthStateStore({
       appId: "test-app",
