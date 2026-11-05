@@ -52,6 +52,8 @@ export const realtimeOptions = [
   {
     value: "mostly-form-like",
     label: "Mostly form-like apps",
+    /** How the calculator names the choice once it is picked. */
+    chosen: "Form-like interaction",
     recipientsPerWrite: 1,
     activeShare: 0.25,
     averageSessionMinutes: 3,
@@ -65,6 +67,7 @@ export const realtimeOptions = [
   {
     value: "collaborative",
     label: "Collaborative / shared state",
+    chosen: "Collaborative interaction",
     recipientsPerWrite: 4,
     activeShare: 0.7,
     averageSessionMinutes: 20,
@@ -78,6 +81,7 @@ export const realtimeOptions = [
   {
     value: "live",
     label: "Live streams / fan-out",
+    chosen: "Live fan-out interaction",
     recipientsPerWrite: 50,
     activeShare: 0.9,
     averageSessionMinutes: 45,

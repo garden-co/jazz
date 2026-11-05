@@ -116,9 +116,9 @@ function TickSlider({
 }) {
   return (
     <div className="space-y-3">
-      <div className="flex items-end justify-between gap-4">
-        <span className="text-sm font-medium">{label}</span>
-        <span className="text-sm leading-relaxed text-fd-muted-foreground">{valueLabel}</span>
+      <div>
+        <span className="text-sm font-medium text-fd-muted-foreground">{label}</span>
+        <p className="font-display mt-1 text-3xl font-black tracking-[-0.03em]">{valueLabel}</p>
       </div>
       <input
         className="w-full"
@@ -333,7 +333,7 @@ function AssumptionSlider({
 const shortName = (tier: keyof typeof jazzTiers) => jazzTiers[tier].name.replace(/ \(.*\)$/, "");
 
 export function PricingCalculator() {
-  const [mauLogValue, setMauLogValue] = useState(2.5);
+  const [mauLogValue, setMauLogValue] = useState(3);
   const [frequencyIndex, setFrequencyIndex] = useState(2);
   const [realtimeIndex, setRealtimeIndex] = useState(1);
   const [blobLogMb, setBlobLogMb] = useState(Math.log10(32));
@@ -380,7 +380,7 @@ export function PricingCalculator() {
           step={0.05}
           ticks={mauTicks}
           value={mauLogValue}
-          valueLabel={`${formatCount(mau)} MAUs`}
+          valueLabel={`${formatCount(mau)} MAU`}
           onChange={setMauLogValue}
         />
         <TickSlider
@@ -389,7 +389,7 @@ export function PricingCalculator() {
           min={0}
           ticks={frequencyTicks}
           value={frequencyIndex}
-          valueLabel={selectedFrequency.label}
+          valueLabel={`${selectedFrequency.label} use`}
           onChange={(value) => setFrequencyIndex(Math.round(value))}
         />
         <TickSlider
@@ -398,7 +398,7 @@ export function PricingCalculator() {
           min={0}
           ticks={realtimeTicks}
           value={realtimeIndex}
-          valueLabel={selectedRealtime.label}
+          valueLabel={selectedRealtime.chosen}
           onChange={(value) => setRealtimeIndex(Math.round(value))}
         />
         <TickSlider
@@ -408,7 +408,7 @@ export function PricingCalculator() {
           step={0.05}
           ticks={blobTicks}
           value={blobLogMb}
-          valueLabel={formatMb(blobStoragePerUserMb)}
+          valueLabel={`${formatMb(blobStoragePerUserMb)} blob per user`}
           onChange={setBlobLogMb}
         />
         {SHOW_MODEL_DETAILS ? (
