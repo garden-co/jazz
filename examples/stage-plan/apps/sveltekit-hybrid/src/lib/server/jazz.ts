@@ -17,8 +17,6 @@ export function jazz(): Promise<Jazz> {
   const started = createJazz({
     app,
     permissions,
-    // The browser names the same app id, so it can tell backend-signed-in
-    // accounts (issuer `jazz:app:<appId>`) from local-first guests.
     store: config.remote
       ? remote({ url: config.remote.url, appId: config.appId, secret: config.remote.adminSecret })
       : sqlite({ path: config.dataPath, appId: config.appId }),

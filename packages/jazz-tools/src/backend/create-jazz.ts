@@ -50,6 +50,7 @@ import {
   backendClientVerifier,
   type BackendClientTrust,
 } from "./backend-clients.js";
+import { BACKEND_USER_ISSUER } from "./backend-issuer.js";
 import { earlyDb, type EarlyDb } from "./early-db.js";
 import {
   defaultCoreName,
@@ -1078,7 +1079,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
           })
         : await openInProcessCore(store, bundle);
   const appId = core.appId;
-  const issuer = `jazz:app:${appId}`;
+  const issuer = BACKEND_USER_ISSUER;
 
   /** Publish `next`'s bundle: what it is pinned by. Publishing one already published changes nothing. */
   const publish = (next: CreateJazzOptions) =>

@@ -51,7 +51,7 @@ it("signs up, signs in to Jazz through the backend with the Better Auth cookie, 
     const admitted = await jazzSignIn(cookie);
     expect(admitted.status).toBe(200);
     expect(await admitted.json()).toMatchObject({
-      identity: { issuer: `jazz:app:${appId}`, subject: signed.user.id },
+      identity: { issuer: "jazz:backend", subject: signed.user.id },
       claims: { role: "member" },
     });
 
