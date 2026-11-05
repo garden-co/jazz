@@ -1259,6 +1259,7 @@ type DbTransactionHandleBinding = {
   preparation: WritePreparation;
   committing?: boolean;
   begun: boolean;
+  registeredInserts?: WeakMap<WasmSchema, Set<string>>;
 };
 
 const dbTxHandleBindings = new WeakMap<Transaction, DbTransactionHandleBinding>();
@@ -1932,7 +1933,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): T {
     assertWritableTable(table);
-    this.bindTable(table);
+    const binding = this.bindTable(table);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution, preparation } = this.requireBinding("insert");
     let id = options?.id ?? (hasDependentTransforms(table) ? reserveRowId() : undefined);
@@ -1957,12 +1958,19 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         }),
       );
     try {
-      return (
+      const result: T =
         value ??
         (row
           ? transformOutputRow(table, transformRow(row, table._schema, table._table))
-          : immediateWriteRow(table, id!, values))
-      );
+          : immediateWriteRow(table, id!, values));
+      const registeredId = id ?? row?.id;
+      if (registeredId && !options?.branch && !table._schema[table._table]?.branchBy?.length) {
+        const bySchema = (binding.registeredInserts ??= new WeakMap());
+        let rows = bySchema.get(table._schema);
+        if (!rows) bySchema.set(table._schema, (rows = new Set()));
+        rows.add(`${table._table}\0${registeredId}`);
+      }
+      return result;
     } catch (error) {
       preparation.failure = error;
       throw error;
@@ -2202,7 +2210,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): void {
     assertWritableTable(table);
-    this.bindTable(table);
+    const binding = this.bindTable(table);
+    binding.registeredInserts?.get(table._schema)?.delete(`${table._table}\0${id}`);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution, preparation } = this.requireBinding("delete");
     const normalizedOptions = normalizeViewOptions(table._schema, table._table, options);
@@ -2332,6 +2341,21 @@ export function beginDbTransactionAfter(
   readCapability?: TransactionReadCapability,
 ): Transaction<"serializable"> {
   return db.createTransaction("serializable", prepare, readCapability);
+}
+
+/** @internal Registered insert intent, not accepted data or proof of authority. */
+export function transactionHasRegisteredInsert<T, Init>(
+  transaction: Transaction<"serializable">,
+  table: TableProxy<T, Init>,
+  id: string,
+): boolean {
+  transaction.openTransactionId();
+  const binding = getDbTxHandleBinding(transaction, "registered insert");
+  if (binding.preparation.cancelled)
+    throw new Error("Transaction was rolled back before preparation");
+  if (binding.resolveClient(table._schema) !== binding.ownerClient)
+    throw new Error("Registered insert belongs to a different owner");
+  return binding.registeredInserts?.get(table._schema)?.has(`${table._table}\0${id}`) ?? false;
 }
 
 /** @internal Revocable typed IO for work registered before commit. */
