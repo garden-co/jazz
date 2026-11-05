@@ -536,4 +536,28 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
     },
     60000,
   );
+
+  it(`refuses changed initial recipients before metadata staging (${runtime})`, async () => {
+    const { db, app } = fixture;
+    const tx = beginInitialSpaceTransaction(db);
+    const project = tx.insert(app.projects, { title: "Allowed" });
+    let prepared = false;
+    await expect(
+      prepareInitialSpaceForTransaction(
+        db,
+        tx,
+        app.projects,
+        project.id,
+        async () => {
+          prepared = true;
+        },
+        [globalThis.crypto.randomUUID()],
+      ),
+    ).rejects.toThrow("Initial space recipients changed after authority registration");
+    expect(prepared).toBe(false);
+    expect(await db.all(app.projects.where({ id: project.id }), { tier: "remote" })).toEqual([]);
+    expect(
+      await db.all(app.__e2ee_spaces.where({ identifier: project.id }), { tier: "remote" }),
+    ).toEqual([]);
+  });
 }

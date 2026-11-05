@@ -2,7 +2,6 @@ import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
-import { createAccountManager } from "../accounts/create-account-manager.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer, startTestJazz } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
@@ -109,18 +108,9 @@ it("rejects an initial recipient ID that resolves to both an accepted account an
       },
     };
     const alice = await localAccountConfig(server.appId, server.url);
-    const bobUser = await front.as("bob");
-    const bobAccounts = await createAccountManager({
-      appId: server.appId,
-      serverUrl: bobUser.serverUrl,
-      store: store(),
-    });
-    const bob = {
-      appId: server.appId,
-      serverUrl: bobUser.serverUrl,
-      account: await bobAccounts.loginWithBackend(),
-      driver: { type: "memory" as const },
-    };
+    // Both identities share the same application registry, so the signed
+    // group is valid in the creator's account context as well as the owner's.
+    const bob = await localAccountConfig(server.appId, server.url);
     const creator = await createDb({ ...alice, e2ee: { app, store: store() } });
     const bobStore = store();
     const recipient = await createDb({ ...bob, e2ee: { app, store: bobStore } });

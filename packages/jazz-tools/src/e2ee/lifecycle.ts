@@ -65,7 +65,10 @@ const contexts = new WeakMap<Db, E2ee>();
 const initialSpacePreparers = new WeakMap<Db, Spaces["prepareInitial"]>();
 const initialSpaceAuthorityPreparers = new WeakMap<Db, Spaces["prepareInitialAuthority"]>();
 type InitialAuthorityMemo = WeakMap<WasmSchema, Map<string, AcceptedRows<unknown>>>;
-const initialAuthorityMemos = new WeakMap<Transaction<"serializable">, InitialAuthorityMemo>();
+const initialAuthorityMemos = new WeakMap<
+  Transaction<"serializable">,
+  { recipients: string; reads: InitialAuthorityMemo }
+>();
 const initialSpacePrerequisites = new WeakMap<
   Db,
   (recipientIds?: readonly string[]) => Promise<void>
@@ -86,7 +89,10 @@ export function beginInitialSpaceTransaction(
     "accepted-evidence",
   );
   const memo: InitialAuthorityMemo = new WeakMap();
-  initialAuthorityMemos.set(transaction, memo);
+  initialAuthorityMemos.set(transaction, {
+    recipients: JSON.stringify(recipients ?? null),
+    reads: memo,
+  });
   // Register before returning: even an immediate caller insert remains behind
   // this authority-only prefix in the normal FIFO preparation queue.
   const preparing = prepareDbTransaction(transaction, async (scope) => {
@@ -123,8 +129,11 @@ export async function prepareInitialSpaceForTransaction<T, Init>(
   const ownScopeInsert = transactionHasRegisteredInsert(tx, scope, identifier);
   try {
     await prepareDbTransaction(tx, async (prepared) => {
-      const memo = initialAuthorityMemos.get(tx);
-      if (!memo) throw new Error("Initial space authority was not registered before staging");
+      const authority = initialAuthorityMemos.get(tx);
+      if (!authority) throw new Error("Initial space authority was not registered before staging");
+      if (authority.recipients !== JSON.stringify(recipients ?? null))
+        throw new Error("Initial space recipients changed after authority registration");
+      const memo = authority.reads;
       await prepareInitialSpaceRows(
         db,
         {
