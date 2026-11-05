@@ -636,6 +636,13 @@ struct Inner {
     /// A replica whose store does not outlive it (a foreground over a
     /// durable relay): its local reads wait for the upstream's view too.
     non_durable: bool,
+    /// This store lives in a file, which may reopen as an older state than
+    /// it last uploaded from: a lost tail (an IndexedDB commit still queued
+    /// at a crash, power loss under `synchronous=NORMAL`) or a restored
+    /// backup. As a replica it numbers its own commits after its wall
+    /// clock too, so a reopened file never hands out a transaction id it
+    /// may already have uploaded (see [`Inner::next_seq`]).
+    pub(crate) reopenable: bool,
     /// Rows the authority named as written for this replica's own commits
     /// whose version was not this replica's image of them (see
     /// `Inner::as_written_images`), asked for whole instead.
@@ -1521,6 +1528,7 @@ impl Db {
                 publications: Vec::new(),
                 client: None,
                 non_durable: false,
+                reopenable: path.is_some(),
                 as_written_mismatches: 0,
                 authority: false,
                 pins_required: false,
@@ -7760,7 +7768,7 @@ impl Inner {
 
     /// The clock commit HLCs read (Unix ms): this store's configured clock
     /// (`DbConfig::with_clock`), or the one a test set.
-    fn hlc_clock_ms(&self) -> u64 {
+    pub(crate) fn hlc_clock_ms(&self) -> u64 {
         self.clock_for_test
             .map_or_else(|| (self.shard.clock)(), |ms| ms.max(0) as u64)
     }
