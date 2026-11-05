@@ -156,7 +156,15 @@ function roundMau(value: number) {
 // Header, totals, cost breakdown, sharding note, one row per trait, cost note.
 const resultRows = 5 + traitRows.length;
 
-function PlatformResult({ estimate }: { estimate: PlatformEstimate }) {
+function PlatformResult({
+  estimate,
+  assumptions,
+  onHibernateChange,
+}: {
+  estimate: PlatformEstimate;
+  assumptions: Assumptions;
+  onHibernateChange: (hibernate: boolean) => void;
+}) {
   const {
     platform,
     size,
@@ -171,6 +179,8 @@ function PlatformResult({ estimate }: { estimate: PlatformEstimate }) {
     largest,
   } = estimate;
   const sharded = instances > 1;
+  const traits = { ...platform.traits, ...platform.traitsFor?.(assumptions) };
+  const hibernate = assumptions["vercel.hibernate"] >= 0.5;
   return (
     <div
       className="grid grid-rows-subgrid gap-y-4 border-t pt-6"
@@ -188,6 +198,16 @@ function PlatformResult({ estimate }: { estimate: PlatformEstimate }) {
         <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
           One {largest.label}: {roundMau(mauPerInstance)} MAU at this usage
         </p>
+        {platform.id === "vercel" ? (
+          <label className="mt-2 flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={hibernate}
+              onChange={(event) => onHibernateChange(event.target.checked)}
+            />
+            Hibernate when idle
+          </label>
+        ) : null}
       </div>
       <div className="grid grid-cols-2 gap-4">
         <div>
@@ -213,7 +233,11 @@ function PlatformResult({ estimate }: { estimate: PlatformEstimate }) {
         <dd className="text-right">{formatCurrency(platformCost)}</dd>
         <dt className="text-fd-muted-foreground">Jazz</dt>
         <dd className="text-right">
-          {sharded ? `Jazz Pro ${formatCurrency(licenseCost)}` : "Free (MIT)"}
+          {!sharded
+            ? "Free (MIT)"
+            : licenseCost > 0
+              ? `Jazz Pro ${formatCurrency(licenseCost)}`
+              : `Free (under ${assumptions["global.freeRamGb"]} GB)`}
         </dd>
       </dl>
       <p className="text-sm leading-relaxed">
@@ -223,7 +247,9 @@ function PlatformResult({ estimate }: { estimate: PlatformEstimate }) {
               ? `Sharded: even the largest size needs ${formatCount(requiredShards)} shards.`
               : "Sharded: cheaper than one larger instance with headroom."}{" "}
             <span className="text-fd-muted-foreground">
-              Jazz Pro is billed on {formatCount(peakActiveSessions)} peak active sessions.
+              {licenseCost > 0
+                ? `Jazz Pro is billed on ${formatCount(peakActiveSessions)} peak active sessions.`
+                : `Jazz Pro stays free while all shards together have ${assumptions["global.freeRamGb"]} GB of RAM or less.`}
             </span>
           </>
         ) : null}
@@ -231,7 +257,7 @@ function PlatformResult({ estimate }: { estimate: PlatformEstimate }) {
       {traitRows.map((row) => (
         <div key={row.key} className="border-t pt-3 text-sm leading-relaxed">
           <p className="text-xs text-fd-muted-foreground">{row.label}</p>
-          <p className="mt-0.5">{platform.traits[row.key]}</p>
+          <p className="mt-0.5">{traits[row.key]}</p>
         </div>
       ))}
       <p className="text-xs leading-relaxed text-fd-muted-foreground">{platform.costNote}</p>
@@ -296,6 +322,13 @@ export function PricingCalculator() {
   const assumptions = { ...defaultAssumptions, ...overrides };
   const groups = paramGroups(selectedFrequency.value, selectedRealtime.value);
   const changedCount = Object.keys(overrides).length;
+  const setParam = (key: string, value: number, tolerance = 1e-9) =>
+    setOverrides((current) => {
+      const next = { ...current };
+      if (Math.abs(value - defaultAssumptions[key]) < tolerance) delete next[key];
+      else next[key] = value;
+      return next;
+    });
 
   const estimates = estimatePlatforms(
     {
@@ -379,16 +412,22 @@ export function PricingCalculator() {
           view together. */}
       <div className="grid gap-x-8 gap-y-10 sm:grid-cols-2 xl:grid-cols-4">
         {estimates.map((estimate) => (
-          <PlatformResult key={estimate.platform.id} estimate={estimate} />
+          <PlatformResult
+            key={estimate.platform.id}
+            estimate={estimate}
+            assumptions={assumptions}
+            onHibernateChange={(hibernate) => setParam("vercel.hibernate", hibernate ? 1 : 0)}
+          />
         ))}
       </div>
       <p className="max-w-[40rem] text-sm leading-relaxed text-fd-muted-foreground">
         Very rough estimates from our example-app benchmarks and each platform&apos;s list prices.
-        Each platform picks the cheapest size and shard count, license included. One instance is
-        free under MIT; sharded Jazz Pro is ${licensePer1k} a month per 1,000 peak active sessions
-        (sessions that wrote, subscribed or got an update in the busiest minute), from $
-        {licenseMinimum}. Vercel cold wakes are from our October measurements (0.6 to 1 s);
-        Cloudflare&apos;s are estimates until its runtime ships.
+        Each platform picks the cheapest size and shard count, license included. One instance of any
+        size is free under MIT. Sharding with Jazz Pro is free while all shards together have{" "}
+        {assumptions["global.freeRamGb"]} GB of RAM or less, then ${licensePer1k} a month per 1,000
+        peak active sessions (sessions that wrote, subscribed or got an update in the busiest
+        minute), from ${licenseMinimum}. Vercel cold wakes are from our October measurements (0.6 to
+        1 s); Cloudflare&apos;s are estimates until its runtime ships.
       </p>
       {SHOW_MODEL_DETAILS ? (
         <details open className="border-t pt-6">
@@ -414,14 +453,7 @@ export function PricingCalculator() {
                     key={p.key}
                     param={p}
                     value={assumptions[p.key]}
-                    onChange={(value) =>
-                      setOverrides((current) => {
-                        const next = { ...current };
-                        if (Math.abs(value - p.default) < p.step / 2) delete next[p.key];
-                        else next[p.key] = value;
-                        return next;
-                      })
-                    }
+                    onChange={(value) => setParam(p.key, value, p.step / 2)}
                   />
                 ))}
               </fieldset>

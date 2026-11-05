@@ -193,12 +193,14 @@ const globalParams = [
   param("global.kbPerWatchedRow", "Memory per watched row (KB)", 1.25, 0.05, 10, 0.05),
   param("global.rowsPerWrite", "Rows per write", 10, 1, 100, 1),
   param("global.idleGraceMinutes", "Idle time before sleeping (min)", 5, 0, 60, 1),
+  param("global.freeRamGb", "Jazz Pro free up to total RAM (GB)", 16, 0, 192, 1),
 ];
 
 type PlatformId = "vercel" | "cloudflare" | "server" | "aws";
 
 /** One instance size a platform offers. */
-export type Size = { label: string; vcpus: number; memoryGb: number };
+/** `ramGb` is what the platform provisions; `memoryGb` what Jazz can use of it. */
+export type Size = { label: string; vcpus: number; ramGb: number; memoryGb: number };
 
 export type Platform = {
   id: PlatformId;
@@ -213,6 +215,8 @@ export type Platform = {
   costNote: string;
   /** The properties besides cost that shape the choice, keyed like `traitRows`. */
   traits: Record<TraitKey, string>;
+  /** Trait text that depends on the assumptions, such as a toggle. */
+  traitsFor?: (a: Assumptions) => Partial<Record<TraitKey, string>>;
 };
 
 /** Rows shown under every platform, in this order. */
@@ -255,7 +259,9 @@ export const platforms: Platform[] = [
       param("cloudflare.storageGb", "SQLite storage ($/GB-month)", 0.2, 0, 1, 0.01),
       param("cloudflare.r2Gb", "R2 storage ($/GB-month)", 0.015, 0, 0.1, 0.001),
     ],
-    sizes: (a) => [{ label: "Durable Object", vcpus: 1, memoryGb: a["cloudflare.memoryGb"] }],
+    sizes: (a) => [
+      { label: "Durable Object", vcpus: 1, ramGb: 0.128, memoryGb: a["cloudflare.memoryGb"] },
+    ],
     diskGb: (a) => a["cloudflare.diskGb"],
     cost: (d, a, _size, shards) => {
       const gbSeconds = shards * 0.128 * d.upHours * 3600;
@@ -292,6 +298,7 @@ export const platforms: Platform[] = [
     params: [
       ...engineParams("vercel", 2, 110, 3.5),
       param("vercel.maxVcpus", "Largest Sandbox (vCPUs)", 8, 1, 8, 1),
+      param("vercel.hibernate", "Hibernate when idle (1 = yes)", 1, 0, 1, 1),
       param("vercel.plan", "Pro plan ($/mo)", 20, 0, 100, 1),
       param("vercel.memoryGbHour", "Memory ($/GB-hour)", 0.0106, 0, 0.05, 0.0002),
       param("vercel.cpuHour", "Active CPU ($/vCPU-hour)", 0.128, 0, 0.5, 0.002),
@@ -307,14 +314,17 @@ export const platforms: Platform[] = [
         .map((vcpus) => ({
           label: `${vcpus} vCPU / ${vcpus * 2} GB Sandbox`,
           vcpus,
+          ramGb: vcpus * 2,
           memoryGb: vcpus * 2 - 0.5,
         })),
     diskGb: () => Infinity,
     cost: (d, a, size, shards, cpu) => {
-      const hours = d.upHours;
+      // Memory and the proxy bill while the Sandbox is up; active CPU only
+      // while it works, which is the busy hours either way.
+      const hours = a["vercel.hibernate"] >= 0.5 ? d.upHours : HOURS_PER_MONTH;
       const memory = shards * size.vcpus * 2 * a["vercel.memoryGbHour"] * hours;
       const activeCpu =
-        shards * size.vcpus * Math.max(cpu * 0.4, 0.05) * hours * a["vercel.cpuHour"];
+        shards * size.vcpus * Math.max(cpu * 0.4, 0.05) * d.upHours * a["vercel.cpuHour"];
       const proxy = shards * a["vercel.proxy"] * (hours / HOURS_PER_MONTH);
       const storage = d.structuredGb * a["vercel.driveGb"] + d.blobGb * a["vercel.blobGb"];
       const egress = over(d.egressGb, a["vercel.includedEgressGb"]) * a["vercel.egressGb"];
@@ -332,6 +342,13 @@ export const platforms: Platform[] = [
       transfer: "1 TB included, then $0.15/GB",
       operations: "Nothing beyond your Vercel project",
     },
+    traitsFor: (a) =>
+      a["vercel.hibernate"] >= 0.5
+        ? {}
+        : {
+            coldWake: "None, always on",
+            idle: "Always on: memory billed around the clock, CPU only while active",
+          },
   },
   {
     id: "aws",
@@ -353,6 +370,7 @@ export const platforms: Platform[] = [
         .map((vcpus) => ({
           label: `${vcpus} vCPU / ${vcpus * 4} GB EC2 instance`,
           vcpus,
+          ramGb: vcpus * 4,
           memoryGb: vcpus * 4 - 2,
         })),
     // EBS volumes grow with the data.
@@ -400,6 +418,7 @@ export const platforms: Platform[] = [
         .map((vcpus) => ({
           label: `${vcpus} vCPU / ${vcpus * 4} GB Hetzner server`,
           vcpus,
+          ramGb: vcpus * 4,
           memoryGb: vcpus * 4 - 2,
         })),
     // Attach volumes as the data grows.
@@ -553,8 +572,12 @@ function shardsFor(platform: Platform, size: Size, d: Demand, a: Assumptions, li
   return high;
 }
 
-export function licenseCost(d: Demand, usage: Usage, shards: number) {
-  if (shards <= 1) return 0;
+/**
+ * Jazz Pro is free on one instance of any size, and for any number of shards
+ * whose RAM adds up to no more than the free threshold.
+ */
+export function licenseCost(d: Demand, usage: Usage, size: Size, shards: number, a: Assumptions) {
+  if (shards <= 1 || shards * size.ramGb <= a["global.freeRamGb"]) return 0;
   const billed = Math.ceil(d.peakActiveSessions / 1000) * usage.licensePer1k;
   return Math.max(usage.licenseMinimum, billed);
 }
@@ -606,7 +629,7 @@ export function estimatePlatforms(
       if (!Number.isFinite(instances)) continue;
       const cpu = utilization(platform, size, d, a, instances).cpu;
       const platformCost = platform.cost(d, a, size, instances, cpu);
-      const license = licenseCost(d, usage, instances);
+      const license = licenseCost(d, usage, size, instances, a);
       if (!best || platformCost + license < best.platformCost + best.license) {
         best = { size, instances, platformCost, license };
       }
