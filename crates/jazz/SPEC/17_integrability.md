@@ -161,8 +161,10 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
    load config, open storage, admit one authenticated session, serve a
    WebSocket/byte-transport listener, publish health/metrics, and drain
    connections on shutdown while all product behavior still flows through the
-   client API and shared sync protocol. The shell is `jazz-tools server`
-   (the `jazz-server` crate); its WebSocket route sends
+   client API and shared sync protocol. The shell is the `jazz-server`
+   crate's `run`, served by the jazz-napi addon's `serveCore` (a `vercel()`
+   Sandbox) and by the internal `jazz-tools` build Jazz Cloud runs; its
+   WebSocket route sends
    postcard batches of sync frames as binary messages.
    HTTP schema routes are exercised through the production Axum router.
    The alpha TS/WASM gate now spawns the WebSocket listener as a Rust process

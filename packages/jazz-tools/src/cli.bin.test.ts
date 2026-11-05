@@ -1,15 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { constants } from "node:fs";
-import {
-  access,
-  chmod,
-  copyFile,
-  mkdir,
-  mkdtemp,
-  readFile,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { APP_ID_ENV_VARS, SERVER_URL_ENV_VARS } from "./cli.js";
 import { describe, expect, it } from "vitest";
@@ -18,8 +8,6 @@ import { createCliFixtures } from "../tests/cli/fixtures.js";
 const {
   distIndexPath,
   distCliPath,
-  binPath,
-  bootstrapVerifierPath,
   tmpBase,
   tempRoots,
   APP_ID,
@@ -30,7 +18,6 @@ const {
   runBin,
   runCli,
   listenForDeployRequest,
-  hostNativeBinaryName,
 } = createCliFixtures(import.meta.url);
 
 describe("bin integration", () => {
@@ -258,41 +245,6 @@ describe("bin integration", () => {
     },
   );
 
-  it("verifies packed runtime bootstrap with a native-only help probe", async () => {
-    const hostBinaryName = hostNativeBinaryName();
-
-    if (!hostBinaryName) {
-      return;
-    }
-
-    const { root } = await createWorkspace();
-    const packageRoot = join(root, "package");
-    const nativeDir = join(packageRoot, "bin", "native");
-    const argsPath = join(root, "captured-args.txt");
-    const binaryPath = join(nativeDir, hostBinaryName);
-
-    await mkdir(nativeDir, { recursive: true });
-    await copyFile(binPath, join(packageRoot, "bin", "jazz-tools.js"));
-    await writeFile(
-      binaryPath,
-      `#!/bin/sh
-printf '%s\n' "$@" > ${JSON.stringify(argsPath)}
-exit 0
-`,
-      "utf8",
-    );
-    await chmod(binaryPath, 0o644);
-
-    const result = spawnSync(process.execPath, [bootstrapVerifierPath, packageRoot], {
-      encoding: "utf8",
-      env: process.env,
-    });
-
-    expect(result.status).toBe(0);
-    expect(await readFile(argsPath, "utf8")).toBe("create\n--help\n");
-    await expect(access(binaryPath, constants.X_OK)).resolves.toBeUndefined();
-  });
-
   it("shows the wrapper command surface in --help output", () => {
     const result = runBin(["--help"]);
 
@@ -302,8 +254,8 @@ exit 0
     expect(result.stdout).not.toMatch(/^\s+deploy\b/m);
     expect(result.stdout).not.toContain("migrations push");
     expect(result.stdout).not.toContain("permissions status");
-    expect(result.stdout).toContain("server");
-    expect(result.stdout).toContain("create");
+    expect(result.stdout).not.toMatch(/^\s+server\b/m);
+    expect(result.stdout).not.toMatch(/^\s+create\b/m);
   });
 });
 

@@ -68,6 +68,10 @@ tungstenite = { version = "0.29", default-features = false, features = ["handsha
 name = "jazz-tools"
 path = "src/bin/jazz-tools.rs"
 
+[[bin]]
+name = "jazz-alpha59-import"
+path = "src/bin/jazz-alpha59-import.rs"
+
 [[test]]
 name = "client_restart_integration"
 path = "tests/client_restart_integration.rs"
