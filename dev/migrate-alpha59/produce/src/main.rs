@@ -49,16 +49,17 @@ fn allow_all() -> TablePolicies {
         .with_delete(PolicyExpr::True)
 }
 
-fn projects() -> TableSchemaBuilder {
+/// v2 drops the `paused` variant, which a v1 row keeps.
+fn projects(v2: bool) -> TableSchemaBuilder {
+    let variants: Vec<String> = if v2 {
+        vec!["active".into(), "done".into()]
+    } else {
+        vec!["active".into(), "paused".into(), "done".into()]
+    };
     TableSchemaBuilder::new("projects")
         .column("name", ColumnType::Text)
         .column("archived", ColumnType::Boolean)
-        .column(
-            "status",
-            ColumnType::Enum {
-                variants: vec!["active".into(), "paused".into(), "done".into()],
-            },
-        )
+        .column("status", ColumnType::Enum { variants })
 }
 
 fn documents(title: &str, pinned: bool) -> TableSchemaBuilder {
@@ -80,14 +81,14 @@ fn documents(title: &str, pinned: bool) -> TableSchemaBuilder {
 /// Structural schemas, as `deploy` publishes them (permissions go separately).
 fn v1() -> Schema {
     SchemaBuilder::new()
-        .table(projects())
+        .table(projects(false))
         .table(documents("title", false))
         .build()
 }
 
 fn v2() -> Schema {
     SchemaBuilder::new()
-        .table(projects())
+        .table(projects(true))
         .table(documents("heading", true))
         .build()
 }
@@ -547,7 +548,7 @@ fn v2_rows(db: &Db) {
     let updated = block_on(db.update(
         "projects",
         row(1, 5),
-        cells(&[("status", s("paused"))]),
+        cells(&[("status", s("done"))]),
         UpdateOptions {
             identity: WriteIdentity::Session(user(2)),
             updated_at_ms: at(18),

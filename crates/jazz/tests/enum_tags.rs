@@ -476,6 +476,22 @@ fn a_replica_tags_variants_itself_and_rows_travel_by_name() {
     assert_eq!(statuses(&server, by_status()), declared);
 }
 
+/// An import of rows another store kept (alpha.59 keeps a variant a later
+/// schema removed) writes such a variant rather than refusing it; it reads
+/// back, and sorts after the declared ones.
+#[test]
+fn an_import_keeps_a_variant_its_schema_no_longer_declares() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = authority_at(v1(), &dir.path().join("authority.sqlite"));
+    insert(&db, 1, "done");
+    db.keep_undeclared_variants_for_import();
+    try_insert(&db, 2, &[("title", name("t")), ("status", name("later"))]).unwrap();
+    assert_eq!(
+        statuses(&db, by_status()),
+        [(1, "done".into()), (2, "later".into())]
+    );
+}
+
 /// A write is checked against its version's variants, and an enum value
 /// is never a large value.
 #[test]

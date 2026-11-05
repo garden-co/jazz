@@ -748,6 +748,9 @@ impl RowImport {
         self.written += writes.len() as u64;
         runtime
             .migrate_import_with_db(move |db| {
+                // alpha.59 keeps a variant a later schema removed in rows
+                // written before; the store keeps it too.
+                db.keep_undeclared_variants_for_import();
                 let mut views: HashMap<jazz::ids::SchemaVersionId, Db> = HashMap::new();
                 for write in writes {
                     let id = write.schema.version_id();

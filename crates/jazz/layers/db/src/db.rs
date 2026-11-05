@@ -468,6 +468,9 @@ struct Inner {
     conn: Connection,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
+    /// Writes keep an enum variant their schema does not declare rather
+    /// than refusing it: only an import of rows another store kept does.
+    keep_undeclared_variants: bool,
     /// Errors the next ticks fail with, for tests of a tick driver.
     #[cfg(any(test, feature = "testing"))]
     failing_ticks: VecDeque<ErrorCode>,
@@ -1398,6 +1401,7 @@ impl Db {
             inner: Rc::new(Store::new(Inner {
                 conn,
                 mutation_admission_closed: false,
+                keep_undeclared_variants: false,
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),
                 chunks,
@@ -2064,6 +2068,15 @@ impl Db {
                 result => return result,
             }
         }
+    }
+
+    /// From now on, writes keep an enum variant their schema no longer
+    /// declares instead of refusing it, as rows a lens or merge carries
+    /// already can. Only for importing rows another store kept: alpha.59
+    /// keeps a variant a later schema removed in rows written before.
+    #[doc(hidden)]
+    pub fn keep_undeclared_variants_for_import(&self) {
+        self.inner().keep_undeclared_variants = true;
     }
 
     /// Run this store's wall clock at `ms` (Unix ms) from now on, or the
@@ -5187,7 +5200,7 @@ impl Inner {
         Ok(parts)
     }
 
-    fn validate_cells(table: &Table, cells: &BTreeMap<String, Value>) -> Result<(), Error> {
+    fn validate_cells(&self, table: &Table, cells: &BTreeMap<String, Value>) -> Result<(), Error> {
         for name in cells.keys() {
             if name.starts_with('$') {
                 return Err(rejected(format!(
@@ -5198,7 +5211,9 @@ impl Inner {
             let Some(column) = table.column(name) else {
                 return Err(rejected(format!("unknown column `{}.{name}`", table.name)));
             };
-            if let Some(variants) = &column.variants {
+            if let Some(variants) = &column.variants
+                && !self.keep_undeclared_variants
+            {
                 for variant in crate::values::enum_names(&cells[name]) {
                     if !variants.iter().any(|v| v == variant) {
                         return Err(rejected(format!(
@@ -6064,7 +6079,7 @@ impl Inner {
     ) -> Result<WriteHandle, Error> {
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
-        Self::validate_cells(table, &cells)?;
+        self.validate_cells(table, &cells)?;
         if let Target::Exact(selector) | Target::View { head: selector, .. } = target
             && !table.branch_by.is_empty()
         {
@@ -6305,7 +6320,7 @@ impl Inner {
         let verb = if upsert { "UPSERT" } else { "UPDATE" };
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
-        Self::validate_cells(table, &cells)?;
+        self.validate_cells(table, &cells)?;
         let located = self.locate(table, row, target)?;
         // A row's branch columns are its branch key: a write cannot move it
         // to another branch.
@@ -6593,7 +6608,7 @@ impl Inner {
         self.snapshot(table, row, &key, seq)?;
         let mut cells = BTreeMap::new();
         if let Some(content) = &content {
-            Self::validate_cells(table, content)?;
+            self.validate_cells(table, content)?;
             for column in &table.columns {
                 if table.branch_by.contains(&column.name) {
                     continue;
