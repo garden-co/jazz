@@ -3017,6 +3017,34 @@ export class Db {
     });
   }
 
+  /** @internal Fresh structural catalogue identity; never row or membership proof. */
+  async tableIdentity<T, Init>(table: TableProxy<T, Init>): Promise<string | null> {
+    this.assertOpen();
+    const client = this.getClient(table._schema);
+    const readSession = this.getAccessContext()?.readSession;
+    const name = table._table;
+    await this.ensureReady("server");
+    this.assertOpen();
+    if (this.getClient(table._schema) !== client)
+      throw new Error("Catalogue preparation owner changed");
+    const prepared = await client.prepareCatalogueIdentitiesInternal(
+      [{ table: name }],
+      readSession,
+    );
+    this.assertOpen();
+    if (this.getClient(table._schema) !== client)
+      throw new Error("Catalogue preparation owner changed");
+    const result = prepared[0];
+    if (prepared.length !== 1 || result?.table !== name)
+      throw new Error("Invalid catalogue preparation result");
+    if (
+      result.identity !== null &&
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(result.identity)
+    )
+      throw new Error("Invalid catalogue table identity");
+    return result.identity;
+  }
+
   /**
    * Attach a fallback listener for write rejections that are not handled by an
    * active {@link WriteHandle.wait} call.
