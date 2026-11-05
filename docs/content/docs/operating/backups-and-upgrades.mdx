@@ -60,7 +60,11 @@ Alpha.60 changes how Jazz runs, so an alpha.59 app needs more than a version bum
   users on their old accounts, return the old token's `sub` as `userId` (see
   [Custom auth](/docs/setup/auth/custom)).
 - **Clients and backends upgrade together.** Alpha.59 clients can't sync with an alpha.60 backend.
-  Ship the new client in the same release as the new backend.
+  Ship the new client in the same release as the new backend. A client left on alpha.59 looks
+  healthy: its session reports ready and local writes succeed, but nothing syncs, nothing is
+  logged and it doesn't retry. The only sign is a rejected query promise, starting with the first
+  query that waits for the server, with the error "this Jazz client speaks wire protocol 3..=3,
+  older than this server's 6".
 - **The storage engine is now SQLite.** Alpha.59's data directory doesn't open in alpha.60.
 
 ### Data on Jazz Cloud
