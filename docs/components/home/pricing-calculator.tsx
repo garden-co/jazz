@@ -19,7 +19,7 @@ import {
 const SHOW_MODEL_DETAILS = false;
 
 /** License list prices, used while the details are hidden. */
-const LICENSE = { pro: 20, scaleBase: 199, per1k: 49 };
+const LICENSE = { pro: 20, scaleBase: 200, per1k: 50 };
 
 const compactFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 1,
@@ -213,16 +213,6 @@ function PlatformResult({
             One {largest.label}: {roundMau(mauPerInstance)} MAU at this usage
           </p>
         ) : null}
-        {platform.id === "vercel" ? (
-          <label className="mt-2 flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={hibernate}
-              onChange={(event) => onHibernateChange(event.target.checked)}
-            />
-            Hibernate when idle
-          </label>
-        ) : null}
       </div>
       <div className="grid grid-cols-2 gap-4">
         <div>
@@ -281,6 +271,16 @@ function PlatformResult({
         <div key={row.key} className="border-t pt-3 text-sm leading-relaxed">
           <p className="text-xs text-fd-muted-foreground">{row.label}</p>
           <p className="mt-0.5">{traits[row.key]}</p>
+          {row.key === "coldWake" && platform.id === "vercel" ? (
+            <label className="mt-1 flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={hibernate}
+                onChange={(event) => onHibernateChange(event.target.checked)}
+              />
+              Hibernate when idle
+            </label>
+          ) : null}
         </div>
       ))}
       <p className="text-xs leading-relaxed text-fd-muted-foreground">{platform.costNote}</p>

@@ -592,7 +592,7 @@ export const jazzTiers: Record<TierId, { name: string; price: string; summary: s
   },
   scale: {
     name: "Jazz Scale",
-    price: "$199/mo + $49/mo per 1,000 peak active sessions",
+    price: "$200/mo + $50/mo per 1,000 peak active sessions",
     summary: "Unlimited sharded instances",
   },
 };

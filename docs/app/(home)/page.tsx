@@ -358,8 +358,8 @@ export default function HomePage() {
             </Heading>
             <Text as="p" display="block" className="max-w-[40em] text-xl leading-relaxed">
               Jazz is a relational database that runs inside your backend, with live queries and
-              permissions built in. Query it from your server, or straight from your frontend with a
-              thin client or a local-first one that works offline.
+              permissions built in. Query it from your server, or straight from your frontend with
+              thin or local-first clients.
             </Text>
           </div>
         </div>
@@ -508,15 +508,17 @@ export default function HomePage() {
                 <Text as="p" display="block" color="secondary">
                   {jazzTiers[id].summary}
                 </Text>
+                {id === "scale" ? (
+                  <div className="mt-2">
+                    <Button
+                      label={"Talk to us about Jazz\u00a0Scale"}
+                      variant="secondary"
+                      href="https://cal.com/anselm-io/cloud-pro-intro"
+                    />
+                  </div>
+                ) : null}
               </div>
             ))}
-          </div>
-          <div className="mt-6 flex flex-wrap gap-3">
-            <Button
-              label={"Talk to us about Jazz\u00a0Scale"}
-              variant="secondary"
-              href="https://cal.com/anselm-io/cloud-pro-intro"
-            />
           </div>
           <div className="mt-12 grid gap-8">
             <Heading level={3} id="pricing" className="home-anchor">
