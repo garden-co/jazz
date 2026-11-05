@@ -12,8 +12,8 @@
 //! serving the server's host tables (catalogue, account registry), and the
 //! runtime's [`Db`] opens on the same connection once a schema is known.
 
-pub mod auth_admission;
 pub mod alpha59_alpha60;
+pub mod auth_admission;
 mod thin;
 
 use std::cell::RefCell;
