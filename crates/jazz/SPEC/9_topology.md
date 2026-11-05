@@ -319,7 +319,13 @@ bundle's own schema, so by its defaults (a default is the writer's, filled in
 when a row is inserted); the stored indexes are the union of every admitted
 hash's, and an index is never dropped; and the value a stored column holds for
 rows written before it existed is the default of the admission that added the
-column, which a later default-only deployment never rewrites.
+column, which a later default-only deployment never rewrites. Deploying the
+same schema again admits nothing. Building an index is a `CREATE INDEX` inside
+the admission's transaction: the Core serves nothing else while it runs, which
+on a large table can take a while. A store that already published such a
+bundle without building its index (before this rule) gets no index from
+redeploying it, since its row is recorded; a later deployment under a new hash
+that keeps the index builds it.
 
 Retiring a bundle is the app's own job: there is no revocation list. A bundle
 stays pinnable for as long as a deployment that publishes it is reachable, so a

@@ -244,6 +244,33 @@ fn an_index_only_deploy_builds_its_index_and_pins_both_bundles() {
 /// Both bundles of one version resolve on the live store and after
 /// reopening under either of its schemas: a bundle's schema is read from
 /// the catalogue by its hash, and only its version must be admitted.
+/// Deploying the index-only schema again admits nothing (admitting resets
+/// every session): its row is stored and its version admitted, though `n`
+/// stays with the hash first admitted as that version. Both bundles still
+/// pin, and the index stays.
+#[test]
+fn a_repeated_index_only_deploy_admits_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("jazz.sqlite");
+    let (a, b) = (users(false, None), users(true, None));
+    let server = core_at(&a, &path);
+    let (bundle_a, _) = deploy(&server, &a);
+    let (bundle_b, admitted) = deploy(&server, &b);
+    assert_eq!(admitted, 1, "the first index-only deploy admits B");
+    let (again, admitted) = deploy(&server, &b);
+    assert_eq!(again, bundle_b);
+    assert_eq!(admitted, 0, "a repeated deploy of B admits nothing");
+    pin(&server, bundle_a).unwrap();
+    pin(&server, bundle_b).unwrap();
+    assert_eq!(user_indexes(&path).len(), 1);
+    drop(server);
+    // Also after reopening under the genesis, as a server core does.
+    let server = core_at(&a, &path);
+    let (_, admitted) = deploy(&server, &b);
+    assert_eq!(admitted, 0, "after reopen too");
+    pin(&server, bundle_b).unwrap();
+}
+
 #[test]
 fn bundles_of_one_version_pin_live_and_after_reopen_under_either_schema() {
     let (plain, indexed) = (users(false, None), users(true, None));

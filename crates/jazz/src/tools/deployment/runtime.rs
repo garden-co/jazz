@@ -175,12 +175,13 @@ pub fn prepare_catalogue_change(
         // only defaults or indexes) adds no version, but its bundle selects
         // it: it is admitted too, with no lens (its version's lenses are
         // admitted already), so the store builds its indexes and keeps its
-        // definition. Admitting it again changes nothing.
+        // definition. Once its row is stored and its version admitted, it is
+        // not admitted again: `n` stays `NULL` on such a row (it belongs to
+        // the hash first admitted as the version), and admitting resets
+        // every session.
         let hash = SchemaHash::compute(target.public_schema());
-        let recorded = stored
-            .schemas
-            .iter()
-            .any(|schema| schema.hash == hash && schema.admitted.is_some());
+        let recorded = admitted.contains(&target.version_id())
+            && stored.schemas.iter().any(|schema| schema.hash == hash);
         let admitting = admit
             .iter()
             .any(|(schema, _)| SchemaHash::compute(schema.public_schema()) == hash);
@@ -276,7 +277,9 @@ mod tests {
         };
         let mut schemas = vec![row(&a, Some(0))];
         if indexed_admitted {
-            schemas.push(row(&indexed, Some(0)));
+            // As the store records it: `n` stays with `a`, the hash first
+            // admitted as the version.
+            schemas.push(row(&indexed, None));
         }
         let stored = CatalogueRows {
             schemas,
