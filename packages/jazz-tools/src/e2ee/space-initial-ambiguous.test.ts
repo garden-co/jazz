@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
+import { createJazzSession } from "../backend/create-jazz-session.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer, startTestJazz } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
@@ -47,6 +48,7 @@ it("rejects an initial recipient ID that resolves to both an accepted account an
     inMemory: true,
   });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
+  let recipientSession: Awaited<ReturnType<typeof createJazzSession>> | undefined;
   const store = () => {
     let value: string | null = null;
     return {
@@ -108,13 +110,23 @@ it("rejects an initial recipient ID that resolves to both an accepted account an
       },
     };
     const alice = await localAccountConfig(server.appId, server.url);
-    // Both identities share the same application registry, so the signed
-    // group is valid in the creator's account context as well as the owner's.
-    const bob = await localAccountConfig(server.appId, server.url);
     const creator = await createDb({ ...alice, e2ee: { app, store: store() } });
     const bobStore = store();
-    const recipient = await createDb({ ...bob, e2ee: { app, store: bobStore } });
-    clients.push(creator, recipient);
+    // A normal backend-assigned account has a v7 ID that can also name a
+    // valid group. Use the app's bearer transport at the SAME registry origin;
+    // a separate test-user origin would change the signed E2EE application scope.
+    recipientSession = await createJazzSession({
+      appId: server.appId,
+      serverUrl: server.url,
+      app,
+      permissions: { ...deviceRequestPermissions, ...policies },
+      credential: front.bearer("bob"),
+      driver: { type: "memory" },
+      e2ee: { app, store: bobStore },
+    });
+    const recipient = recipientSession.getSnapshot().client!.db;
+    const bob = { account: recipientSession.getSnapshot().account! };
+    clients.push(creator);
     await creator.e2ee.devices.list();
     await recipient.e2ee.devices.list();
     const stored = JSON.parse((await bobStore.read())!).devices[0];
@@ -188,6 +200,7 @@ it("rejects an initial recipient ID that resolves to both an accepted account an
     expect(await creator.all(app.__e2ee_space_grants, { tier: "remote" })).toEqual([]);
     expect(await creator.all(app.__e2ee_space_deliveries, { tier: "remote" })).toEqual([]);
   } finally {
+    await recipientSession?.close();
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
   }
