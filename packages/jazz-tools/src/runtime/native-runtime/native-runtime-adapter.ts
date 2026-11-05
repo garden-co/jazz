@@ -22,6 +22,8 @@ import type {
 } from "../../drivers/types.js";
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
 import { parseRelationQueryJsonLossless } from "../../ir.js";
+import { streamingChunks } from "../streaming-source.js";
+import { assertRequiredRowColumnsPresent } from "../row-validation.js";
 import type {
   TxId,
   InsertResult,
@@ -32,6 +34,7 @@ import type {
   Runtime,
   RuntimeWriteWaitOptions,
   StreamingInsertResult,
+  StagedStreamingMutation,
   StreamingMutationKind,
   StreamingValueSource,
   TransactionKind,
@@ -446,6 +449,12 @@ type NativeDb = {
 type NativeStreamingMutation = {
   push(chunk: Uint8Array): void | Promise<void>;
   finish(): Write | Promise<Write>;
+  stage?(): NativeStagedStreamingMutation | Promise<NativeStagedStreamingMutation>;
+  abort(): boolean | Promise<boolean>;
+};
+
+type NativeStagedStreamingMutation = {
+  attach(openTransactionId: string): void | Promise<void>;
   abort(): boolean | Promise<boolean>;
 };
 
@@ -1559,7 +1568,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.finishInsert(table, suppliedRowId ?? write.rowId, values, write);
   }
 
-  async streamingMutation(
+  streamingMutation(
     mutation: StreamingMutationKind,
     table: string,
     values: InsertValues,
@@ -1568,6 +1577,49 @@ export class NativeRuntimeAdapter implements Runtime {
     writeContext?: string | null,
     objectId?: string | null,
   ): Promise<StreamingInsertResult> {
+    return this.consumeStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      writeContext,
+      objectId,
+      false,
+    ) as Promise<StreamingInsertResult>;
+  }
+
+  stageStreamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    writeContext?: string | null,
+    objectId?: string | null,
+  ): Promise<StagedStreamingMutation> {
+    return this.consumeStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      writeContext,
+      objectId,
+      true,
+    ) as Promise<StagedStreamingMutation>;
+  }
+
+  private async consumeStreamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    writeContext: string | null | undefined,
+    objectId: string | null | undefined,
+    stageOnly: boolean,
+  ): Promise<StreamingInsertResult | StagedStreamingMutation> {
     const begin = this.db.beginStreamingMutation;
     const operation =
       mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
@@ -1582,6 +1634,8 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     rejectAttributedBranchWrite(attribution, branchView);
+    if (stageOnly && branchView)
+      throw new Error("Staged streaming mutations require the root view");
     if (!begin) throw new Error("Native runtime does not expose streaming mutations");
 
     const definition = this.table(table);
@@ -1610,6 +1664,10 @@ export class NativeRuntimeAdapter implements Runtime {
       branchView?.head,
       branchView?.base,
     );
+    if (stageOnly && !upload.stage) {
+      await upload.abort();
+      throw new Error("Native runtime does not expose staged streaming mutations");
+    }
     const owner = this.ownerRuntime;
     let releaseAdmission!: () => void;
     const admission = new Promise<void>((resolve) => {
@@ -1656,6 +1714,25 @@ export class NativeRuntimeAdapter implements Runtime {
       await previousFinalization;
       let receipt: MutationResult;
       try {
+        if (stageOnly) {
+          const staged = await upload.stage!();
+          return {
+            id: formatUuid(rowId),
+            attach: async (openTransactionId) => {
+              this.assertMutationAdmission(operation);
+              const pending = owner.pendingTxs.get(openTransactionId);
+              if (!pending || pending.kind !== "serializable")
+                throw new Error(
+                  "Staged streaming mutation requires an open serializable transaction",
+                );
+              this.assertTransactionWriteIdentity(pending, attribution ? undefined : writeIdentity);
+              this.assertTransactionAttribution(pending, attribution);
+              await staged.attach(openTransactionId);
+              pending.hasStagedMutations = true;
+            },
+            abort: () => staged.abort(),
+          };
+        }
         receipt = this.finishMutation(await upload.finish());
       } finally {
         releaseFinalization();
@@ -2228,7 +2305,7 @@ export class NativeRuntimeAdapter implements Runtime {
       settlementMetadata &&
       (pendingTx?.kind !== "serializable" || !this.db.allSettlementMetadata)
     )
-      throw new Error("E2EE settlement reads require a supported exclusive transaction");
+      throw new Error("E2EE settlement reads require a supported serializable transaction");
     // The Rust serialized-query boundary rejects relation reads in transactions.
     if (settlementMetadata && queryHasArraySubqueries(coreQueryJson))
       throw new Error("E2EE settlement reads require ordinary stored rows");
@@ -6114,29 +6191,6 @@ function encodeCellsForStreamingPatch(
   return encodeCells(columns, (column) => row[column.name], false);
 }
 
-async function* streamingChunks(source: StreamingValueSource): AsyncGenerator<Uint8Array | string> {
-  const readable = source as ReadableStream<Uint8Array | string>;
-  if (typeof readable.getReader !== "function") {
-    yield* source as AsyncIterable<Uint8Array | string>;
-    return;
-  }
-  const reader = readable.getReader();
-  let completed = false;
-  try {
-    while (true) {
-      const result = await reader.read();
-      if (result.done) {
-        completed = true;
-        return;
-      }
-      yield result.value;
-    }
-  } finally {
-    if (!completed) await reader.cancel().catch(() => undefined);
-    reader.releaseLock();
-  }
-}
-
 export function encodeCellsForPatch(
   definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
   patch: Record<string, Value>,
@@ -6160,23 +6214,6 @@ function encodeCells(
   writeDescriptor(writer, descriptor);
   writer.bytes(createRecord(descriptor, values));
   return writer.finish();
-}
-
-function assertRequiredRowColumnsPresent(
-  columns: ColumnDescriptor[],
-  row: InsertValues,
-  table?: string,
-): void {
-  for (const column of columns) {
-    const value = row[column.name] ?? column.default;
-    if (value && value.type !== "Null") continue;
-    if (column.nullable) continue;
-    throw new Error(
-      table
-        ? `encoding error: missing required field \`${column.name}\` on table \`${table}\``
-        : `missing required column ${column.name}`,
-    );
-  }
 }
 
 /**

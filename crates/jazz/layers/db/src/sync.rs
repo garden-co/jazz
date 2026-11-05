@@ -182,6 +182,19 @@ pub struct Image {
     pub cells: Vec<(String, Cell)>,
 }
 
+/// `jazz.sqlite.content-witness.v1`: the exact content version retained by a
+/// later deletion or content-free restore. Row state and content have distinct
+/// sequences. A partial replica must retain this link, never infer it from the
+/// newest history version it happens to have cached.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentWitnessRef {
+    pub table: String,
+    pub id: [u8; 16],
+    pub key: Vec<u8>,
+    pub row_seq: u64,
+    pub content_seq: u64,
+}
+
 /// Which branch a replicated write addresses.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireTarget {
@@ -454,12 +467,74 @@ pub enum SyncMessage {
         version: [u8; 16],
     },
     // server → client
-    /// The transactions behind the versions a history read ships, as
-    /// (seq, writer node, writer tx), sent ahead of their `Rows`: a
-    /// replica lists a history version only once it knows its
-    /// `$transactionId`.
+    /// `jazz.sqlite.sync.content-origins.v1`: the transactions behind
+    /// shipped content, as (seq, writer node, writer tx), ahead of `Rows`.
+    /// Ordinary reads carry these too. This identifies a version; only
+    /// a Global settlement/receipt establishes authority coverage.
     Origins {
         commits: Vec<(u64, [u8; 16], u64)>,
+    },
+    /// `jazz.sqlite.sync.scoped-fetch.v1`: a trusted backend's one-shot
+    /// read as a served identity, with immutable request claims. Append-only
+    /// tag; ordinary session connections cannot submit this request.
+    /// Uses the existing Rows/Answer/Refused responses and never persists.
+    ScopedFetchV1 {
+        id: u64,
+        query: Query,
+        binding: BTreeMap<String, Value>,
+        author: String,
+        claims: BTreeMap<String, Value>,
+        include_deleted: bool,
+    },
+    /// Append-only tag 20, `jazz.sqlite.sync.content-witness.v1`. Sent with
+    /// ordinary Rows/Origins; the receiver persists the exact retained-content
+    /// link. This is provenance, not a Global coverage or acceptance receipt.
+    ContentWitnessesV1 {
+        witnesses: Vec<ContentWitnessRef>,
+    },
+    /// Append-only tag 21: authority-qualified row evidence, separate from
+    /// ordinary Origins and from query-completeness answers.
+    AcceptedRowsV1 {
+        rows: Vec<AcceptedRow>,
+    },
+    /// Tag 22, `jazz.sqlite.sync.accepted-fetch.v1`: require a complete
+    /// authority answer at one cut. Scope must match the authenticated session,
+    /// unless a trusted backend link vouches for a delegated request.
+    AcceptedFetchV1 {
+        id: u64,
+        query: Query,
+        binding: BTreeMap<String, Value>,
+        at: Option<u64>,
+        include_deleted: bool,
+        scope: Option<(String, BTreeMap<String, Value>)>,
+    },
+    /// Tag 23: exact root ids at the authority cut requested above. Ordinary
+    /// cache answers cannot satisfy this request, even on an otherwise live link.
+    AcceptedAnswerV1 {
+        id: u64,
+        through: u64,
+        rows: Vec<[u8; 16]>,
+    },
+    /// Tag 24, jazz.sqlite.sync.catalogue-metadata.v1. Cached authority
+    /// metadata is useful offline but never asserts fresh query coverage.
+    CatalogueMetadataV1 {
+        head: CatalogueHeadV1,
+        schemas: Vec<CatalogueSchemaV1>,
+    },
+    /// Tag 25, jazz.sqlite.sync.catalogue-fetch.v1. Evaluate the opened
+    /// schema's zero-row query under this authenticated or trusted scope.
+    CatalogueFetchV1 {
+        id: u64,
+        table: String,
+        opened: crate::ids::SchemaVersionId,
+        scope: Option<(String, BTreeMap<String, Value>)>,
+    },
+    /// Tag 26, jazz.sqlite.sync.catalogue-covered.v1. The metadata must be
+    /// admitted before this fresh authority answer can complete its request.
+    CatalogueCoveredV1 {
+        id: u64,
+        head: CatalogueHeadV1,
+        opened: crate::ids::SchemaVersionId,
     },
 }
 
@@ -528,6 +603,8 @@ pub(crate) struct Client {
     sent: Vec<SyncMessage>,
     node: [u8; 16],
     connection: u64,
+    /// Schema declared when this upstream connection opened.
+    upstream_schema: Option<crate::ids::SchemaVersionId>,
     fates: HashMap<u64, Result<(), Error>>,
     shadow: HashMap<(String, RowUuid, Vec<u8>), Option<Image>>,
     /// Highest server seq any answer was complete through.
@@ -535,6 +612,9 @@ pub(crate) struct Client {
     /// The `known` cut last written to `_jazz_meta`.
     persisted_known: u64,
     answers: HashMap<u64, Option<Result<(u64, Vec<[u8; 16]>), Error>>>,
+    accepted_answers: HashSet<u64>,
+    catalogue_answers:
+        HashMap<u64, Option<Result<(CatalogueHeadV1, crate::ids::SchemaVersionId), Error>>>,
     /// Permission preflights asked for; `None` until answered.
     advice: HashMap<u64, Option<PermissionAdvice>>,
     /// Large-value nodes asked for and not yet answered.
@@ -575,6 +655,11 @@ pub(crate) struct Gate {
     pub(crate) live: bool,
     /// `None`: wait for the server however long (the Remote tier).
     pub(crate) deadline: Option<Instant>,
+    /// A fresh foreground must receive its owner's cache before any fallback.
+    pub(crate) wait_for_owner: bool,
+    pub(crate) require_global: bool,
+    pub(crate) _wake: Option<Rc<Instant>>,
+    pub(crate) _attempt_wake: Option<Rc<Instant>>,
 }
 
 impl Gate {
@@ -587,7 +672,10 @@ impl Gate {
     }
 
     pub(crate) fn open(&self) -> bool {
-        if self.answered.get() {
+        if self.wait_for_owner && !self.answered.get() {
+            return false;
+        }
+        if self.answered.get() && (!self.require_global || self.global.get()) {
             return true;
         }
         let link = self.hint.get();
@@ -611,12 +699,15 @@ pub(crate) enum SettledBy {
     /// By the upstream's answer, and whether that answer is the global
     /// authority's.
     Remote(Rc<StdCell<bool>>, Rc<StdCell<bool>>),
+    /// The relay can answer from its cache immediately, but global settlement
+    /// still requires the upstream authority's answer.
+    Relay(Rc<StdCell<bool>>, Rc<StdCell<bool>>),
 }
 
 impl SettledBy {
     pub(crate) fn get(&self) -> bool {
         match self {
-            SettledBy::Always(_) => true,
+            SettledBy::Always(_) | SettledBy::Relay(..) => true,
             SettledBy::Never => false,
             SettledBy::Remote(answered, _) => answered.get(),
         }
@@ -627,7 +718,9 @@ impl SettledBy {
         let global = match self {
             SettledBy::Always(authority) => *authority,
             SettledBy::Never => false,
-            SettledBy::Remote(answered, global) => answered.get() && global.get(),
+            SettledBy::Remote(answered, global) | SettledBy::Relay(answered, global) => {
+                answered.get() && global.get()
+            }
         };
         if global {
             DurabilityTier::Global
@@ -641,6 +734,33 @@ impl SettledBy {
 
 /// An upstream subscription's identity: query, binding, include_deleted.
 type RemoteRead = (Query, BTreeMap<String, Value>, bool);
+
+/// A downstream request keeps its own upstream ID and immutable prepared scope.
+struct ForwardedFetch {
+    upstream: u64,
+    connection: u64,
+    owner: Rc<Schema>,
+    downstream_version: Option<crate::ids::SchemaVersionId>,
+    prepared: PreparedQuery,
+    identity: AuthorSubject,
+    include_deleted: bool,
+    accepted: bool,
+    // Retain the timer so missing content cannot leave a relay request open forever.
+    deadline: Option<Rc<Instant>>,
+}
+
+struct ForwardedCatalogue {
+    upstream: u64,
+    connection: u64,
+    opened: crate::ids::SchemaVersionId,
+    owner: Rc<Schema>,
+    deadline: Rc<Instant>,
+}
+
+struct ReleasedReads {
+    subscriptions: Vec<RemoteRead>,
+    fetches: Vec<u64>,
+}
 
 pub(crate) struct Session {
     transport: Box<dyn Transport>,
@@ -698,6 +818,9 @@ pub(crate) struct Session {
     /// subscriptions holds (query, binding, include_deleted): its results
     /// settle once the upstream answers, never from the relay's store.
     relayed: BTreeMap<u64, RemoteRead>,
+    forwarded: BTreeMap<u64, ForwardedFetch>,
+    forwarded_catalogue: BTreeMap<u64, ForwardedCatalogue>,
+    catalogue_pending: bool,
     /// That version's schema, governed by the current schema's policies,
     /// as built for the current schema it holds.
     schema: Option<(Rc<Schema>, Rc<Schema>)>,
@@ -732,22 +855,33 @@ impl Session {
             version: None,
             schema: None,
             relayed: BTreeMap::new(),
+            forwarded: BTreeMap::new(),
+            forwarded_catalogue: BTreeMap::new(),
+            catalogue_pending: false,
         }
     }
 
     /// Release everything the session holds; its shared results are swept
     /// once no other member reads them.
-    /// Returns the upstream subscriptions it relayed, for the caller to
-    /// release.
+    /// Returns the upstream subscriptions and one-shot reads to release.
     #[must_use]
-    fn close(&mut self, dropped: &std::cell::Cell<usize>) -> Vec<RemoteRead> {
+    fn close(&mut self, dropped: &std::cell::Cell<usize>) -> ReleasedReads {
         dropped.set(dropped.get() + self.subs.len());
         let relayed = std::mem::take(&mut self.relayed);
+        let fetches = self
+            .forwarded
+            .values()
+            .map(|read| read.upstream)
+            .chain(self.forwarded_catalogue.values().map(|read| read.upstream))
+            .collect();
         *self = Session {
             open: false,
             ..Session::new(Box::new(ClosedTransport), self.identity)
         };
-        relayed.into_values().collect()
+        ReleasedReads {
+            subscriptions: relayed.into_values().collect(),
+            fetches,
+        }
     }
 
     /// Nothing to send this tick: no queued result events, no rows its
@@ -1264,25 +1398,167 @@ impl Inner {
         Ok(images)
     }
 
-    /// Who committed each of `seqs`, as (seq, node, tx): `_jazz_settled`
-    /// for uploads, this authority's node for its own commits.
-    fn origins(&self, seqs: &BTreeSet<u64>) -> Result<Vec<(u64, [u8; 16], u64)>, Error> {
+    /// Add the exact content witness behind each already-authorized image.
+    /// Local complete stores resolve it by (id, branch, seq); replicas may
+    /// forward only an explicit upstream link, because their history has gaps.
+    /// Missing links/content stay missing rather than becoming guessed evidence.
+    fn content_witnesses(
+        &self,
+        images: &mut Vec<Image>,
+        seqs: &mut BTreeSet<u64>,
+    ) -> Result<Vec<ContentWitnessRef>, Error> {
+        let mut seen = HashSet::new();
+        images.retain(|image| {
+            seen.insert((image.table.clone(), image.id, image.key.clone(), image.seq))
+        });
+        let mut witnesses = Vec::new();
+        let mut refs = Vec::new();
+        for image in images.iter().filter(|image| image.seq < LOCAL_BASE) {
+            if image.content {
+                seqs.insert(image.seq);
+                continue;
+            }
+            let id = image.id.to_vec();
+            // A non-content image's content is earlier, hence in history.
+            let (filter, seq) = if self.client.is_none() {
+                (
+                    "id = ?1 AND _b = ?2 AND _seq < ?3 AND _c = 1 \
+                     ORDER BY _seq DESC LIMIT 1",
+                    image.seq,
+                )
+            } else if let Some(seq) =
+                self.content_witness_seq(&image.table, &image.id, &image.key, image.seq)?
+            {
+                ("id = ?1 AND _b = ?2 AND _seq = ?3 AND _c = 1", seq)
+            } else {
+                continue;
+            };
+            let witness = self
+                .images_where(
+                    &image.table,
+                    true,
+                    filter,
+                    &[&id, &image.key, &(seq as i64)],
+                )?
+                .pop();
+            if let Some(witness) = witness {
+                seqs.insert(witness.seq);
+                refs.push(ContentWitnessRef {
+                    table: image.table.clone(),
+                    id: image.id,
+                    key: image.key.clone(),
+                    row_seq: image.seq,
+                    content_seq: witness.seq,
+                });
+                if seen.insert((
+                    witness.table.clone(),
+                    witness.id,
+                    witness.key.clone(),
+                    witness.seq,
+                )) {
+                    witnesses.push(witness);
+                }
+            }
+        }
+        images.extend(witnesses);
+        Ok(refs)
+    }
+
+    /// Durable `jazz.sqlite.content-witness.v1`: postcard u64, with no trailing
+    /// bytes. The SQL primary key names the state whose content it identifies.
+    fn content_witness_seq(
+        &self,
+        table: &str,
+        id: &[u8; 16],
+        key: &[u8],
+        row_seq: u64,
+    ) -> Result<Option<u64>, Error> {
+        let bytes = self
+            .conn
+            .query_row(
+                "SELECT content FROM _jazz_content_witness_v1 \
+             WHERE t = ?1 AND id = ?2 AND k = ?3 AND seq = ?4",
+                rusqlite::params![table, id.as_slice(), key, row_seq as i64],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        bytes
+            .map(|bytes| {
+                let (seq, remaining) =
+                    postcard::take_from_bytes::<u64>(&bytes).map_err(|error| {
+                        Error::new(
+                            ErrorCode::Storage,
+                            format!("invalid content-witness-v1: {error}"),
+                        )
+                    })?;
+                if !remaining.is_empty() || seq == 0 || seq >= row_seq || row_seq >= LOCAL_BASE {
+                    return Err(Error::new(
+                        ErrorCode::Storage,
+                        "invalid content-witness-v1 sequence",
+                    ));
+                }
+                Ok(seq)
+            })
+            .transpose()
+    }
+
+    fn record_content_witness(&self, witness: &ContentWitnessRef) -> Result<(), Error> {
+        if witness.content_seq == 0
+            || witness.content_seq >= witness.row_seq
+            || witness.row_seq >= LOCAL_BASE
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "invalid content-witness-v1 sequence",
+            ));
+        }
+        if let Some(previous) =
+            self.content_witness_seq(&witness.table, &witness.id, &witness.key, witness.row_seq)?
+        {
+            if previous != witness.content_seq {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "conflicting content-witness-v1 reference",
+                ));
+            }
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT INTO _jazz_content_witness_v1 (t, id, k, seq, content) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![&witness.table, witness.id.as_slice(), &witness.key, witness.row_seq as i64, encode(&witness.content_seq)],
+        ).map_err(storage)?;
+        Ok(())
+    }
+
+    /// Who wrote each accepted content sequence. A local store identifies its
+    /// own commits; a replica forwards only recorded upstream origins. Neither
+    /// an optimistic sequence nor a missing origin becomes relay provenance.
+    pub(super) fn origins(&self, seqs: &BTreeSet<u64>) -> Result<Vec<(u64, [u8; 16], u64)>, Error> {
         let mut statement = self
             .conn
             .prepare_cached("SELECT node, tx FROM _jazz_settled WHERE seq = ?1")
             .map_err(storage)?;
         let mut out = Vec::with_capacity(seqs.len());
-        for &seq in seqs {
+        for &seq in seqs.iter().filter(|&&seq| seq < LOCAL_BASE) {
             let recorded = statement
                 .query_row([seq as i64], |r| {
                     Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)? as u64))
                 })
                 .optional()
                 .map_err(storage)?;
-            out.push(match recorded {
-                Some((node, tx)) => (seq, node.try_into().unwrap_or([0; 16]), tx),
-                None => (seq, *self.identity.node.as_bytes(), seq),
-            });
+            match recorded {
+                Some((node, tx)) => {
+                    let node = node.try_into().map_err(|_| {
+                        Error::new(ErrorCode::Storage, "invalid stored content origin node")
+                    })?;
+                    out.push((seq, node, tx));
+                }
+                None if self.client.is_none() => {
+                    out.push((seq, *self.identity.node.as_bytes(), seq));
+                }
+                None => {}
+            }
         }
         Ok(out)
     }
@@ -1576,7 +1852,7 @@ impl Inner {
     }
 
     /// Row images selected from `table` (or its history) by `filter`.
-    fn images_where(
+    pub(super) fn images_where(
         &self,
         table: &str,
         history: bool,
@@ -1963,6 +2239,7 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB NOT NULL, PRIMARY KEY (node, tx));\
     CREATE TABLE IF NOT EXISTS _jazz_settled (node BLOB NOT NULL, tx INTEGER NOT NULL, seq INTEGER, PRIMARY KEY (node, tx));\
     CREATE INDEX IF NOT EXISTS _jazz_settled_by_seq ON _jazz_settled (seq);\
+    CREATE TABLE IF NOT EXISTS _jazz_content_witness_v1 (t TEXT NOT NULL, id BLOB NOT NULL, k BLOB NOT NULL, seq INTEGER NOT NULL, content BLOB NOT NULL, PRIMARY KEY (t, id, k, seq)) WITHOUT ROWID;\
     CREATE TABLE IF NOT EXISTS _jazz_revoked (t TEXT NOT NULL, id BLOB NOT NULL, k BLOB NOT NULL, PRIMARY KEY (t, id, k)) WITHOUT ROWID;";
 
 type RowKey = (String, RowUuid, Vec<u8>);
@@ -1972,6 +2249,67 @@ fn encode<T: Serialize>(value: &T) -> Vec<u8> {
 }
 
 impl Inner {
+    fn write_rejection(&self, tx: u64) -> Result<Option<Error>, Error> {
+        if let Some(Err(error)) = self
+            .client
+            .as_ref()
+            .and_then(|client| client.fates.get(&tx))
+        {
+            return Ok(Some(error.clone()));
+        }
+        let node = *self.identity.node.as_bytes();
+        if let Some(Err(error)) = self.applied_fate(node, tx)? {
+            return Ok(Some(from_wire_error(error)));
+        }
+        if self.settled(node, tx)? == Some(None) {
+            // Earlier SQLite replicas retained the rejection but not its reason.
+            // Never interpret that absence of detail as successful acceptance.
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "write was rejected; stored rejection detail is unavailable",
+            ));
+        }
+        Ok(None)
+    }
+
+    fn write_state(&self, tx: u64) -> Result<WriteState, Error> {
+        if let Some(error) = self.write_rejection(tx)? {
+            return Ok(WriteState::rejected(&error, DurabilityTier::None));
+        }
+        let node = *self.identity.node.as_bytes();
+        if let Some(Some(seq)) = self.settled(node, tx)? {
+            if seq >= LOCAL_BASE {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "upstream write receipt is not an authority sequence",
+                ));
+            }
+            return Ok(WriteState {
+                fate: Fate::Accepted,
+                global_time: Some(GlobalTime(seq)),
+                durability: DurabilityTier::Global,
+            });
+        }
+        if tx > self.seq {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "write has not been observed by this database",
+            ));
+        }
+        if self.authority && self.client.is_none() && tx < LOCAL_BASE {
+            return Ok(WriteState {
+                fate: Fate::Accepted,
+                global_time: Some(GlobalTime(tx)),
+                durability: DurabilityTier::Global,
+            });
+        }
+        Ok(WriteState {
+            fate: Fate::Pending,
+            global_time: None,
+            durability: DurabilityTier::Local,
+        })
+    }
+
     /// Store requested nodes the server sent.
     fn receive_chunks(
         &mut self,
@@ -2095,6 +2433,70 @@ impl Inner {
         Ok(())
     }
 
+    /// Durable allocator floor, including transactions that publish no rows.
+    /// Named encoding jazz.sqlite.issued-sequence.v1: one exact postcard u64.
+    pub(crate) fn record_issued_seq(&self, seq: u64) -> Result<(), Error> {
+        if seq >= i64::MAX as u64 {
+            return Err(Error::new(
+                ErrorCode::Storage,
+                "issued-sequence-v1 range exhausted",
+            ));
+        }
+        self.persist_meta("issued-seq-v1", seq)
+    }
+
+    /// Rows alone cannot recover ids consumed by empty, rejected, or rebased
+    /// transactions. The floor joins each commit's existing SQLite savepoint.
+    pub(crate) fn restore_issued_seq(&mut self) -> Result<(), Error> {
+        let stored: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT v FROM _jazz_meta WHERE k = 'issued-seq-v1'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        if let Some(bytes) = stored {
+            let (seq, rest): (u64, _) = postcard::take_from_bytes(&bytes).map_err(|e| {
+                Error::new(
+                    ErrorCode::Storage,
+                    format!("invalid issued-sequence-v1: {e}"),
+                )
+            })?;
+            if !rest.is_empty() || seq >= i64::MAX as u64 {
+                return Err(Error::new(
+                    ErrorCode::Storage,
+                    "invalid issued-sequence-v1 range or trailing bytes",
+                ));
+            }
+            self.seq = self.seq.max(seq);
+        }
+        // Recover transaction evidence already present in an older SQLite
+        // file too; never mistake another replica's local ids for ours.
+        let known: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MAX(v) FROM (SELECT MAX(tx) AS v FROM _jazz_pending \
+             UNION ALL SELECT MAX(tx) FROM _jazz_applied WHERE node = ?1 \
+             UNION ALL SELECT MAX(tx) FROM _jazz_settled WHERE node = ?1 \
+             UNION ALL SELECT MAX(seq) FROM _jazz_settled WHERE seq < ?2)",
+                rusqlite::params![self.identity.node.as_bytes().to_vec(), LOCAL_BASE as i64],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        if let Some(known) = known {
+            if known < 0 {
+                return Err(Error::new(
+                    ErrorCode::Storage,
+                    "negative persisted transaction sequence",
+                ));
+            }
+            self.seq = self.seq.max(known as u64);
+        }
+        Ok(())
+    }
+
     fn persist_meta(&self, key: &str, value: u64) -> Result<(), Error> {
         self.exec(
             "INSERT OR REPLACE INTO _jazz_meta (k, v) VALUES (?1, ?2)",
@@ -2126,7 +2528,12 @@ impl Inner {
             rusqlite::params![node.to_vec(), tx as i64],
             |r| r.get::<_, Vec<u8>>(0),
         ) {
-            Ok(bytes) => Ok(postcard::from_bytes(&bytes).ok()),
+            Ok(bytes) => postcard::from_bytes(&bytes).map(Some).map_err(|error| {
+                Error::new(
+                    ErrorCode::Storage,
+                    format!("invalid stored write fate: {error}"),
+                )
+            }),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(error) => Err(storage(error)),
         }
@@ -2346,10 +2753,25 @@ impl Inner {
 }
 
 impl Client {
+    fn cancel_fetch(&mut self, id: u64) {
+        self.answers.remove(&id);
+        self.accepted_answers.remove(&id);
+        self.catalogue_answers.remove(&id);
+        self.outbox.retain(|message| {
+            !matches!(message,
+                SyncMessage::Fetch { id: request, .. }
+                    | SyncMessage::ScopedFetchV1 { id: request, .. }
+                    | SyncMessage::AcceptedFetchV1 { id: request, .. }
+                    | SyncMessage::CatalogueFetchV1 { id: request, .. }
+                    if *request == id)
+        });
+    }
+
     fn new(node: [u8; 16]) -> Self {
         Client {
             node,
             connection: 0,
+            upstream_schema: None,
             sent: Vec::new(),
             transport: None,
             hint: Rc::new(StdCell::new(Link {
@@ -2369,6 +2791,8 @@ impl Client {
             known: 0,
             persisted_known: 0,
             answers: HashMap::new(),
+            accepted_answers: HashSet::new(),
+            catalogue_answers: HashMap::new(),
             advice: HashMap::new(),
             requested: BTreeSet::new(),
             wanted: BTreeSet::new(),
@@ -2432,11 +2856,21 @@ impl Db {
                     | SyncMessage::Commit { .. }
                     | SyncMessage::PushChunks { .. }
                     | SyncMessage::ChunkRequests { .. }
+                    | SyncMessage::Fetch { .. }
+                    | SyncMessage::ScopedFetchV1 { .. }
+                    | SyncMessage::AcceptedFetchV1 { .. }
+                    | SyncMessage::CatalogueFetchV1 { .. }
             )
         });
-        let version = *inner.owner.jazz.version_id().as_bytes();
+        let version = inner.owner.jazz.version_id();
         let client = inner.client.as_mut().expect("client");
-        client.outbox.insert(0, SyncMessage::Schema { version });
+        client.upstream_schema = Some(version);
+        client.outbox.insert(
+            0,
+            SyncMessage::Schema {
+                version: *version.as_bytes(),
+            },
+        );
         // Every settled row the replica holds, whether or not a live query
         // still reads it: the new session watches them, so a later change
         // (a deletion, lost access) still reaches the cached copy.
@@ -2521,6 +2955,9 @@ impl Db {
             reported: true,
             ..link
         });
+        drop(inner);
+        self.schedule_read_deadlines();
+        self.schedule_pending_tick();
     }
 
     pub(crate) fn is_client(&self) -> bool {
@@ -2529,7 +2966,13 @@ impl Db {
 
     /// Record a local commit for upload (client only). Inside an open
     /// transaction the ops join it.
-    pub(crate) fn record_upload(&self, ops: Vec<StagedOp>, seq: u64, _mark: usize, kind: Kind) {
+    pub(crate) fn record_upload(
+        &self,
+        ops: Vec<StagedOp>,
+        seq: u64,
+        identity: Option<WriteIdentity>,
+        kind: Kind,
+    ) {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_none() {
             return;
@@ -2538,18 +2981,28 @@ impl Db {
             inner.capture.extend(ops);
             return;
         }
-        if ops.is_empty() || seq != inner.seq {
+        if seq != inner.seq {
             return;
         }
         // The writer the authority stamps: an explicit identity, or the
         // system at this node (the authority stamps its own writes as its
         // node, so a trusted link names its own).
-        let author = ops.iter().find_map(StagedOp::author).or_else(|| {
-            (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
-        });
+        // A read-only batch has no operation from which to infer its session.
+        // Carry its bound identity through the same trusted-link checks as writes.
+        let author = match identity {
+            Some(WriteIdentity::Session(author) | WriteIdentity::Attribution(author)) => {
+                Some(author)
+            }
+            _ => ops.iter().find_map(StagedOp::author).or_else(|| {
+                (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
+            }),
+        };
         // A session's writes carry its claims, for the authority's check.
         let session_claims = author
-            .filter(|_| ops.iter().any(StagedOp::is_session))
+            .filter(|_| {
+                matches!(identity, Some(WriteIdentity::Session(_)))
+                    || ops.iter().any(StagedOp::is_session)
+            })
             .map(|author| inner.claims.get(&author).cloned().unwrap_or_default());
         let rows = inner.written_rows(&ops, seq).unwrap_or_default();
         let mut shadows = Vec::new();
@@ -2746,6 +3199,20 @@ impl Inner {
     }
 }
 
+struct FetchRequest {
+    inner: Rc<RefCell<Inner>>,
+    id: u64,
+}
+
+impl Drop for FetchRequest {
+    fn drop(&mut self) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(client) = inner.client.as_mut() {
+            client.cancel_fetch(self.id);
+        }
+    }
+}
+
 impl Db {
     /// Ask the server for one read and wait for its answer, unless the
     /// link cannot answer or `deadline` passes. Returns the server seq the
@@ -2757,7 +3224,21 @@ impl Db {
         include_deleted: bool,
         deadline: Option<Instant>,
     ) -> Result<Option<u64>, Error> {
-        let id = {
+        self.fetch_answer(prepared, at, include_deleted, deadline, None, false)
+            .await
+            .map(|answer| answer.map(|(through, _)| through))
+    }
+
+    pub(super) async fn fetch_answer(
+        &self,
+        prepared: &PreparedQuery,
+        at: Option<u64>,
+        include_deleted: bool,
+        deadline: Option<Instant>,
+        scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        accepted: bool,
+    ) -> Result<Option<(u64, Vec<[u8; 16]>)>, Error> {
+        let (id, connection) = {
             let mut inner = self.inner.borrow_mut();
             let Some(client) = inner.client.as_mut() else {
                 return Ok(None);
@@ -2768,21 +3249,70 @@ impl Db {
             let id = client.next_id;
             client.next_id += 1;
             client.answers.insert(id, None);
-            client.outbox.push(SyncMessage::Fetch {
-                id,
-                query: remote_query(&prepared.query).into_owned(),
-                binding: prepared.binding.clone(),
-                at,
-                include_deleted,
-            });
-            id
+            if accepted {
+                client.accepted_answers.insert(id);
+            }
+            // A paired read hydrates the prefix so local re-evaluation of its
+            // original offset/window has the same predecessors as the authority.
+            // Scoped ordinary answers retain their exact-window contract.
+            let query = if !accepted && scope.is_some() {
+                prepared.query.clone()
+            } else {
+                remote_query(&prepared.query).into_owned()
+            };
+            let binding = prepared.binding.clone();
+            let message = if accepted {
+                SyncMessage::AcceptedFetchV1 {
+                    id,
+                    query,
+                    binding,
+                    at,
+                    include_deleted,
+                    scope: scope.map(|(author, claims)| (author.canonical().to_owned(), claims)),
+                }
+            } else {
+                match scope {
+                    Some((author, claims)) => SyncMessage::ScopedFetchV1 {
+                        id,
+                        query,
+                        binding,
+                        author: author.canonical().to_owned(),
+                        claims,
+                        include_deleted,
+                    },
+                    None => SyncMessage::Fetch {
+                        id,
+                        query,
+                        binding,
+                        at,
+                        include_deleted,
+                    },
+                }
+            };
+            client.outbox.push(message);
+            (id, client.connection)
+        };
+        if accepted {
+            self.schedule_pending_tick();
+        }
+        let _deadline = self.read_deadline(deadline);
+        let _attempt_deadline = self.read_attempt_deadline();
+        let _request = FetchRequest {
+            inner: self.inner.clone(),
+            id,
         };
         poll_fn(|_| {
             let mut inner = self.inner.borrow_mut();
             let client = inner.client.as_mut().expect("client");
+            if client.connection != connection {
+                return Poll::Ready(Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "one-shot read interrupted by an upstream reconnect",
+                )));
+            }
             if let Some(Some(_)) = client.answers.get(&id) {
                 let answer = client.answers.remove(&id).flatten().expect("answered");
-                return Poll::Ready(answer.map(|(through, _)| Some(through)));
+                return Poll::Ready(answer.map(Some));
             }
             if !may_wait(client.hint.get()) || deadline.is_some_and(|d| Instant::now() >= d) {
                 client.answers.remove(&id);
@@ -2847,21 +3377,41 @@ impl Db {
 
     /// Wait for a local transaction's fate at `tier`.
     pub async fn wait_for_transaction(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
-        if tier < DurabilityTier::Global || !self.is_client() {
-            return Ok(tx);
-        }
         poll_fn(|_| {
             let inner = self.inner.borrow();
-            let client = inner.client.as_ref().expect("client");
-            match client.fates.get(&tx) {
-                Some(Ok(())) => Poll::Ready(Ok(tx)),
-                Some(Err(error)) => Poll::Ready(Err(error.clone())),
-                None if client.pending.iter().any(|p| p.tx == tx) => Poll::Pending,
-                // Not pending and no fate: a local no-op or pre-connection commit.
-                None => Poll::Ready(Ok(tx)),
+            if let Some(error) = inner.write_rejection(tx)? {
+                return Poll::Ready(Err(error));
             }
+            if tier < DurabilityTier::Global {
+                return Poll::Ready(Ok(tx));
+            }
+            let state = inner.write_state(tx)?;
+            if matches!(state.fate, Fate::Accepted) && state.global_time.is_some() {
+                return Poll::Ready(Ok(tx));
+            }
+            if inner
+                .client
+                .as_ref()
+                .is_some_and(|client| client.pending.iter().any(|p| p.tx == tx))
+            {
+                return Poll::Pending;
+            }
+            Poll::Ready(Err(Error::new(
+                ErrorCode::NotObserved,
+                "write has no observed authority acceptance",
+            )))
         })
         .await
+    }
+
+    /// Snapshot this node's write without consuming rejection reporting or
+    /// waiting. Hosts with asynchronous local persistence qualify durability.
+    pub fn write_state(&self, tx: u64) -> Result<WriteState, Error> {
+        let inner = self
+            .inner
+            .try_borrow()
+            .map_err(|_| Error::new(ErrorCode::NotObserved, "write state is temporarily busy"))?;
+        inner.write_state(tx)
     }
 
     /// Wait until every transaction pending upload when called (recovered
@@ -3134,6 +3684,12 @@ impl Db {
                         global,
                     } => {
                         let client = inner.client.as_mut().expect("client");
+                        if global && through >= LOCAL_BASE {
+                            return Err(Error::new(
+                                ErrorCode::Protocol,
+                                "global read settlement carries an optimistic sequence",
+                            ));
+                        }
                         client.known = client.known.max(through);
                         let Some(key) = client.remote_ids.get(&id).cloned() else {
                             continue;
@@ -3154,6 +3710,54 @@ impl Db {
                             ));
                         }
                     }
+                    SyncMessage::CatalogueMetadataV1 { head, schemas } => {
+                        inner.record_catalogue(&head, &schemas)?;
+                        for session in &mut inner.sessions {
+                            session.catalogue_pending = true;
+                        }
+                    }
+                    SyncMessage::CatalogueCoveredV1 { id, head, opened } => {
+                        let result = if inner.catalogue_head()?.as_ref() != Some(&head)
+                            || inner.catalogue_schema(opened)?.is_none()
+                        {
+                            Err(Error::new(
+                                ErrorCode::NotObserved,
+                                "catalogue coverage lacks its exact accepted metadata",
+                            ))
+                        } else {
+                            Ok((head, opened))
+                        };
+                        if let Some(slot) = inner
+                            .client
+                            .as_mut()
+                            .expect("client")
+                            .catalogue_answers
+                            .get_mut(&id)
+                        {
+                            *slot = Some(result);
+                        }
+                    }
+                    SyncMessage::AcceptedRowsV1 { rows } => {
+                        for mut row in rows {
+                            let Ok(table) = inner.owner.stored_table(&row.table).map(str::to_owned)
+                            else {
+                                continue;
+                            };
+                            row.table = table;
+                            inner.record_accepted_row(&row)?;
+                        }
+                    }
+                    SyncMessage::ContentWitnessesV1 { witnesses } => {
+                        for mut witness in witnesses {
+                            let Ok(table) =
+                                inner.owner.stored_table(&witness.table).map(str::to_owned)
+                            else {
+                                continue;
+                            };
+                            witness.table = table;
+                            inner.record_content_witness(&witness)?;
+                        }
+                    }
                     SyncMessage::Origins { commits } => {
                         for (seq, node, tx) in commits {
                             inner.record_settled(node, tx, Some(seq))?;
@@ -3166,8 +3770,32 @@ impl Db {
                             *slot = Some(advice);
                         }
                     }
+                    SyncMessage::AcceptedAnswerV1 { id, through, rows } => {
+                        let client = inner.client.as_mut().expect("client");
+                        if through >= LOCAL_BASE {
+                            return Err(Error::new(
+                                ErrorCode::Protocol,
+                                "accepted answer has an optimistic cut",
+                            ));
+                        }
+                        if client.accepted_answers.contains(&id) {
+                            client.known = client.known.max(through);
+                            if let Some(slot) = client.answers.get_mut(&id) {
+                                *slot = Some(Ok((through, rows)));
+                            }
+                        }
+                    }
                     SyncMessage::Answer { id, through, rows } => {
                         let client = inner.client.as_mut().expect("client");
+                        if client.accepted_answers.contains(&id) {
+                            if let Some(slot) = client.answers.get_mut(&id) {
+                                *slot = Some(Err(Error::new(
+                                    ErrorCode::NotObserved,
+                                    "ordinary cache answer cannot cover an accepted read",
+                                )));
+                            }
+                            continue;
+                        }
                         client.known = client.known.max(through);
                         if let Some(slot) = client.answers.get_mut(&id) {
                             *slot = Some(Ok((through, rows)));
@@ -3176,7 +3804,9 @@ impl Db {
                     SyncMessage::Refused { id, code, message } => {
                         let client = inner.client.as_mut().expect("client");
                         let error = Error::new(code, message);
-                        if let Some(slot) = client.answers.get_mut(&id) {
+                        if let Some(slot) = client.catalogue_answers.get_mut(&id) {
+                            *slot = Some(Err(error));
+                        } else if let Some(slot) = client.answers.get_mut(&id) {
                             *slot = Some(Err(error));
                         } else if let Some(key) = client.remote_ids.get(&id)
                             && let Some(remote) = client.remote.get(key)
@@ -3193,6 +3823,27 @@ impl Db {
                         if accepted {
                             inner.keep_unlisted_own(tx, through)?;
                         }
+                        let node = inner.client.as_ref().expect("client").node;
+                        inner
+                            .conn
+                            .execute_batch("SAVEPOINT jazz_write_fate")
+                            .map_err(storage)?;
+                        let persisted = inner
+                            .record_fate(node, tx, &result)
+                            .and_then(|()| {
+                                inner.record_settled(node, tx, accepted.then_some(through))
+                            })
+                            .and_then(|()| inner.forget_pending(tx));
+                        if let Err(error) = persisted {
+                            inner
+                                .rollback_savepoint("jazz_write_fate")
+                                .map_err(storage)?;
+                            return Err(error);
+                        }
+                        inner
+                            .conn
+                            .execute_batch("RELEASE jazz_write_fate")
+                            .map_err(storage)?;
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
                         client.pending.retain(|p| p.tx != tx);
@@ -3200,12 +3851,9 @@ impl Db {
                             |m| !matches!(m, SyncMessage::Commit { tx: sent, .. } if *sent == tx),
                         );
                         client.fates.insert(tx, result.map_err(from_wire_error));
-                        let node = client.node;
                         if let Some(locators) = client.pushed.remove(&tx) {
                             crate::large::mark_pushed(&inner.conn, &locators)?;
                         }
-                        inner.record_settled(node, tx, accepted.then_some(through))?;
-                        inner.forget_pending(tx)?;
                         rebase = true;
                     }
                     other => return Err(unsupported(format!("client received {other:?}"))),
@@ -3347,6 +3995,17 @@ impl Db {
 }
 
 impl Inner {
+    fn release_session_reads(&mut self, released: ReleasedReads) {
+        for (query, binding, include_deleted) in released.subscriptions {
+            self.release_remote(&query, &binding, include_deleted);
+        }
+        if let Some(client) = self.client.as_mut() {
+            for id in released.fetches {
+                client.cancel_fetch(id);
+            }
+        }
+    }
+
     /// The schema session `index` reads and writes by, when it declared an
     /// admitted version other than the current one: that version's names,
     /// governed by the current schema's policies. `None` is the current
@@ -3462,9 +4121,8 @@ impl Db {
         let mut inner = self.inner.borrow_mut();
         let dropped = inner.fan.dropped.clone();
         if let Some(session) = inner.sessions.get_mut(subscriber.0) {
-            for (query, binding, include_deleted) in session.close(&dropped) {
-                inner.release_remote(&query, &binding, include_deleted);
-            }
+            let released = session.close(&dropped);
+            inner.release_session_reads(released);
         }
     }
 
@@ -3507,6 +4165,9 @@ impl Db {
         }
         crate::large::expire_receipts(&self.inner.borrow().conn, now_ms())?;
         for index in 0..sessions {
+            if self.inner.borrow().sessions[index].catalogue_pending {
+                self.queue_catalogue_metadata(index)?;
+            }
             let inbound: Vec<SyncMessage> = {
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
@@ -3565,7 +4226,11 @@ impl Db {
                 // A read the server cannot serve is refused to the client,
                 // which would otherwise wait on it.
                 let read = match &message {
-                    SyncMessage::Subscribe { id, .. } | SyncMessage::Fetch { id, .. } => Some(*id),
+                    SyncMessage::Subscribe { id, .. }
+                    | SyncMessage::Fetch { id, .. }
+                    | SyncMessage::ScopedFetchV1 { id, .. }
+                    | SyncMessage::AcceptedFetchV1 { id, .. }
+                    | SyncMessage::CatalogueFetchV1 { id, .. } => Some(*id),
                     _ => None,
                 };
                 match (self.serve(index, message), read) {
@@ -3586,9 +4251,16 @@ impl Db {
                 self.inner.borrow_mut().sessions[index].backlog = held;
             }
         }
+        self.progress_scoped_fetches();
+        self.progress_catalogue_fetches();
         self.notify();
         let mut inner = self.inner.borrow_mut();
-        let through = inner.seq;
+        // A relay's optimistic sequence is not an authority cut. Even its
+        // owner-local answer carries at most the accepted prefix it has seen.
+        let through = inner
+            .client
+            .as_ref()
+            .map_or(inner.seq, |client| client.known);
         let mut cache: HashMap<(String, RowUuid, u64), Vec<Image>> = HashMap::new();
         // Rows written since the last tick, with the watch keys they match.
         let written = std::mem::take(&mut inner.since_tick);
@@ -3936,19 +4608,24 @@ impl Db {
                     )));
                 }
             }
+            let witnesses = inner.content_witnesses(&mut images, &mut history_seqs)?;
+            let accepted_rows = inner.accepted_images(&images)?;
             let mut out = std::mem::take(&mut inner.sessions[index].stale);
-            if !history_seqs.is_empty() {
-                out.push(SyncMessage::Origins {
-                    commits: inner.origins(&history_seqs)?,
+            let origins = inner.origins(&history_seqs)?;
+            if !origins.is_empty() {
+                out.push(SyncMessage::Origins { commits: origins });
+            }
+            if !witnesses.is_empty() {
+                out.push(SyncMessage::ContentWitnessesV1 { witnesses });
+            }
+            if !accepted_rows.is_empty() {
+                out.push(SyncMessage::AcceptedRowsV1 {
+                    rows: accepted_rows,
                 });
             }
             let session = &mut inner.sessions[index];
             session.watch = watch;
             session.held = held_rows;
-            let mut seen = HashSet::new();
-            images.retain(|image| {
-                seen.insert((image.table.clone(), image.id, image.key.clone(), image.seq))
-            });
             if !images.is_empty() {
                 out.push(SyncMessage::Rows { images });
             }
@@ -3965,14 +4642,347 @@ impl Db {
                 // reconnects and resumes from its last settled seq.
                 if session.transport.send(message).is_err() {
                     let released = session.close(&dropped);
-                    for (query, binding, include_deleted) in released {
-                        inner.release_remote(&query, &binding, include_deleted);
-                    }
+                    inner.release_session_reads(released);
                     break;
                 }
             }
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn serve_fetch(
+        &self,
+        index: usize,
+        id: u64,
+        query: &Query,
+        prepared: &PreparedQuery,
+        policy: Option<AuthorSubject>,
+        at: Option<u64>,
+        include_deleted: bool,
+        accepted: bool,
+        expected: Option<&[[u8; 16]]>,
+    ) -> Result<(), Error> {
+        let mut inner = self.inner();
+        // A history read ships versions of its source table.
+        let history = history_source_table(&query.table);
+        let table = inner
+            .schema
+            .stored_table(history.unwrap_or(&query.table))?
+            .to_owned();
+        let read = ReadSpec {
+            cut: at.map(Cut::at),
+            include_deleted,
+            ..ReadSpec::default()
+        };
+        let rows = inner.run(prepared, policy, &read)?;
+        if let Some(expected) = expected {
+            let actual: Vec<_> = rows.iter().map(|row| *row.id.0.as_bytes()).collect();
+            if actual != expected {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "relay lacks the exact accepted query result",
+                ));
+            }
+        }
+        let mut images = Vec::new();
+        // Seqs of shipped history versions, for their origins.
+        let mut seqs = BTreeSet::new();
+        // A flat join ships each occurrence's joined rows.
+        let joined_tables = query
+            .flat_join
+            .iter()
+            .flat_map(|flat| &flat.sources)
+            .map(|source| {
+                let table = &source.table;
+                inner
+                    .schema
+                    .stored_table(history_source_table(table).unwrap_or(table))
+                    .map(str::to_owned)
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        for row in &rows {
+            for (table, joined) in joined_tables.iter().zip(row.joined_rows()) {
+                images.extend(inner.joined_images(table, joined, &mut seqs)?);
+            }
+        }
+        if history.is_some() {
+            let versions = rows.iter().map(|row| (row.id, row.seq));
+            inner.history_versions(&table, versions, &mut images, &mut seqs)?;
+        } else {
+            for row in &rows {
+                let rid = row.id.0.as_bytes().to_vec();
+                let seq = row.seq as i64;
+                let mut found = inner.images_where(&table, false, ID_AT_SEQ, &[&rid, &seq])?;
+                if found.is_empty() {
+                    found = inner.images_where(&table, true, ID_AT_SEQ, &[&rid, &seq])?;
+                }
+                images.extend(found);
+            }
+        }
+        let support = inner.support_of(query)?;
+        let mut extra = Vec::new();
+        let mut watch = std::mem::take(&mut inner.sessions[index].watch);
+        let mut held = std::mem::take(&mut inner.sessions[index].held);
+        // The replica keeps current rows it fetched: like supporting
+        // rows, a policy dependency's commit re-checks them.
+        if policy.is_some() && at.is_none() && history.is_none() {
+            for image in images.iter().filter(|image| image.table == table) {
+                held.entry(table.clone())
+                    .or_default()
+                    .insert((RowUuid::from_bytes(image.id), image.key.clone()), true);
+            }
+        }
+        for image in &images {
+            inner.follow_support(&support, image, policy, &mut extra, &mut watch, &mut held)?;
+        }
+        images.extend(extra);
+        for image in &images {
+            watch.insert(wk((
+                image.table.clone(),
+                "id".to_owned(),
+                watch_key(&Sql::Blob(image.id.to_vec())),
+            )));
+        }
+        let witnesses = inner.content_witnesses(&mut images, &mut seqs)?;
+        let accepted_rows = inner.accepted_images(&images)?;
+        let origins = inner.origins(&seqs)?;
+        let through = at.unwrap_or(inner.seq);
+        let session = &mut inner.sessions[index];
+        session.watch = watch;
+        session.held = held;
+        if !origins.is_empty() {
+            session
+                .outbox
+                .push(SyncMessage::Origins { commits: origins });
+        }
+        if !witnesses.is_empty() {
+            session
+                .outbox
+                .push(SyncMessage::ContentWitnessesV1 { witnesses });
+        }
+        if !accepted_rows.is_empty() {
+            session.outbox.push(SyncMessage::AcceptedRowsV1 {
+                rows: accepted_rows,
+            });
+        }
+        if !images.is_empty() {
+            session.outbox.push(SyncMessage::Rows { images });
+        }
+        let rows = rows.iter().map(|r| *r.id.0.as_bytes()).collect();
+        session.outbox.push(if accepted {
+            SyncMessage::AcceptedAnswerV1 { id, through, rows }
+        } else {
+            SyncMessage::Answer { id, through, rows }
+        });
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_scoped_fetch(
+        &self,
+        index: usize,
+        id: u64,
+        prepared: PreparedQuery,
+        identity: AuthorSubject,
+        include_deleted: bool,
+        at: Option<u64>,
+        accepted: bool,
+    ) -> Result<(), Error> {
+        let deadline = self
+            .read_deadline(accepted.then(|| Instant::now() + std::time::Duration::from_secs(15)));
+        let mut inner = self.inner();
+        let owner = inner.owner.clone();
+        let downstream_version = inner.sessions[index].version;
+        if downstream_version.is_some_and(|version| version != owner.jazz.version_id()) {
+            return Err(unsupported(
+                "scoped relay reads across different schema versions",
+            ));
+        }
+        if inner.sessions[index].forwarded.contains_key(&id)
+            || inner.sessions[index].forwarded_catalogue.contains_key(&id)
+        {
+            return Err(query_error("duplicate pending scoped relay request ID"));
+        }
+        let client = inner.client.as_mut().expect("relay");
+        if client.transport.is_none() || !may_wait(client.hint.get()) {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "scoped relay read has no available authority",
+            ));
+        }
+        if client.upstream_schema != Some(owner.jazz.version_id()) {
+            return Err(unsupported(
+                "scoped relay reads after a schema change without upstream reconnect",
+            ));
+        }
+        let upstream = client.next_id;
+        client.next_id += 1;
+        let connection = client.connection;
+        let claims = prepared
+            .request_claims
+            .as_ref()
+            .expect("scoped claims")
+            .1
+            .clone();
+        client.answers.insert(upstream, None);
+        if accepted {
+            client.accepted_answers.insert(upstream);
+        }
+        let message = if accepted {
+            SyncMessage::AcceptedFetchV1 {
+                id: upstream,
+                query: prepared.query.clone(),
+                binding: prepared.binding.clone(),
+                at,
+                include_deleted,
+                scope: Some((identity.canonical().to_owned(), claims)),
+            }
+        } else {
+            SyncMessage::ScopedFetchV1 {
+                id: upstream,
+                query: prepared.query.clone(),
+                binding: prepared.binding.clone(),
+                author: identity.canonical().to_owned(),
+                claims,
+                include_deleted,
+            }
+        };
+        client.outbox.push(message);
+        inner.sessions[index].forwarded.insert(
+            id,
+            ForwardedFetch {
+                upstream,
+                connection,
+                owner,
+                downstream_version,
+                prepared,
+                identity,
+                include_deleted,
+                accepted,
+                deadline,
+            },
+        );
+        Ok(())
+    }
+
+    /// A relay answers only after its upstream does. Each hop uses normal row
+    /// sync, then the same fetch response path constrained to that exact cut.
+    fn progress_scoped_fetches(&self) {
+        let ready = {
+            let mut inner = self.inner.borrow_mut();
+            let mut ready = Vec::new();
+            for index in 0..inner.sessions.len() {
+                let mut completed = Vec::new();
+                for (&id, request) in &inner.sessions[index].forwarded {
+                    let error = if request
+                        .deadline
+                        .as_ref()
+                        .is_some_and(|at| Instant::now() >= **at)
+                    {
+                        Some(Error::new(
+                            ErrorCode::NotObserved,
+                            "accepted relay read timed out",
+                        ))
+                    } else if !Rc::ptr_eq(&request.owner, &inner.owner)
+                        || request.downstream_version != inner.sessions[index].version
+                    {
+                        Some(Error::new(
+                            ErrorCode::NotObserved,
+                            "scoped relay read interrupted by a schema change",
+                        ))
+                    } else if inner
+                        .client
+                        .as_ref()
+                        .is_none_or(|client| client.connection != request.connection)
+                    {
+                        Some(Error::new(
+                            ErrorCode::NotObserved,
+                            "scoped relay read interrupted by an upstream reconnect",
+                        ))
+                    } else {
+                        None
+                    };
+                    let answer = error.map(Err).or_else(|| {
+                        let client = inner.client.as_ref().expect("same connection");
+                        client
+                            .answers
+                            .get(&request.upstream)
+                            .cloned()
+                            .flatten()
+                            .or_else(|| {
+                                (client.transport.is_none() || !may_wait(client.hint.get())).then(
+                                    || {
+                                        Err(Error::new(
+                                            ErrorCode::NotObserved,
+                                            "scoped relay read has no available authority",
+                                        ))
+                                    },
+                                )
+                            })
+                    });
+                    if let Some(answer) = answer {
+                        if request.accepted
+                            && let Ok((through, rows)) = &answer
+                        {
+                            // Rows can precede their chunks. Keep the request alive while
+                            // normal chunk demand hydrates this exact authority result.
+                            let exact = scoped_result_query(&request.prepared, rows.clone());
+                            let read = ReadSpec {
+                                cut: Some(Cut::at(*through)),
+                                include_deleted: request.include_deleted,
+                                ..ReadSpec::default()
+                            };
+                            if let Err(error) = inner.run(&exact, Some(request.identity), &read) {
+                                if crate::large::is_missing(&error) {
+                                    continue;
+                                }
+                                completed.push((id, Err(error)));
+                                continue;
+                            }
+                        }
+                        completed.push((id, answer));
+                    }
+                }
+                for (id, answer) in completed {
+                    let request = inner.sessions[index]
+                        .forwarded
+                        .remove(&id)
+                        .expect("pending");
+                    if let Some(client) = inner.client.as_mut() {
+                        client.cancel_fetch(request.upstream);
+                    }
+                    ready.push((index, id, request, answer));
+                }
+            }
+            ready
+        };
+        for (index, id, request, answer) in ready {
+            let result = answer.and_then(|(through, rows)| {
+                let expected = request.accepted.then_some(rows.clone());
+                let exact = scoped_result_query(&request.prepared, rows);
+                self.session_db(index).serve_fetch(
+                    index,
+                    id,
+                    &exact.query,
+                    &exact,
+                    Some(request.identity),
+                    Some(through),
+                    request.include_deleted,
+                    request.accepted,
+                    expected.as_deref(),
+                )
+            });
+            if let Err(error) = result {
+                self.inner.borrow_mut().sessions[index]
+                    .outbox
+                    .push(SyncMessage::Refused {
+                        id,
+                        code: error.code,
+                        message: error.message,
+                    });
+            }
+        }
     }
 
     /// A handle that reads and writes through session `index`'s schema.
@@ -4014,7 +5024,87 @@ impl Db {
         message: SyncMessage,
         claims: Option<BTreeMap<String, Value>>,
     ) -> Result<(), Error> {
-        let identity = self.inner.borrow().sessions[index].identity;
+        let connection_identity = self.inner.borrow().sessions[index].identity;
+        // Delegation changes only this request, never the connection identity
+        // or the authority's cached claims for another request.
+        let accepted = matches!(&message, SyncMessage::AcceptedFetchV1 { .. });
+        let (message, identity, claims, scoped) = match message {
+            SyncMessage::AcceptedFetchV1 {
+                id,
+                query,
+                binding,
+                at,
+                include_deleted,
+                scope,
+            } => {
+                let scoped = scope.is_some();
+                let (identity, claims) = match scope {
+                    Some((author, requested_claims)) => {
+                        let author = AuthorSubject::from_canonical(&author)
+                            .map_err(|e| Error::new(ErrorCode::Query, e.to_string()))?;
+                        if connection_identity != AuthorSubject::SYSTEM {
+                            let authenticated = claims.clone().unwrap_or_else(|| {
+                                self.inner()
+                                    .claims
+                                    .get(&connection_identity)
+                                    .cloned()
+                                    .unwrap_or_default()
+                            });
+                            if author != connection_identity || requested_claims != authenticated {
+                                return Err(Error::new(
+                                    ErrorCode::WriteRejected,
+                                    "accepted read scope differs from its authenticated connection",
+                                ));
+                            }
+                        }
+                        (author, Some(requested_claims))
+                    }
+                    None => (connection_identity, claims),
+                };
+                (
+                    SyncMessage::Fetch {
+                        id,
+                        query,
+                        binding,
+                        at,
+                        include_deleted,
+                    },
+                    identity,
+                    claims,
+                    scoped,
+                )
+            }
+            SyncMessage::ScopedFetchV1 {
+                id,
+                query,
+                binding,
+                author,
+                claims,
+                include_deleted,
+            } => {
+                if connection_identity != AuthorSubject::SYSTEM {
+                    return Err(Error::new(
+                        ErrorCode::WriteRejected,
+                        "scoped reads require a trusted backend connection",
+                    ));
+                }
+                let author = AuthorSubject::from_canonical(&author)
+                    .map_err(|error| Error::new(ErrorCode::Query, error.to_string()))?;
+                (
+                    SyncMessage::Fetch {
+                        id,
+                        query,
+                        binding,
+                        at: None,
+                        include_deleted,
+                    },
+                    author,
+                    Some(claims),
+                    true,
+                )
+            }
+            message => (message, connection_identity, claims, false),
+        };
         // A subscription's group keeps the session's claims for later runs.
         let with_claims = |prepared: PreparedQuery| match &claims {
             Some(claims) => prepared.with_identity_claims(identity, claims.clone()),
@@ -4030,6 +5120,66 @@ impl Db {
                 let session = &mut inner.sessions[index];
                 session.version = Some(crate::ids::SchemaVersionId::from_bytes(version));
                 session.schema = None;
+                drop(inner);
+                self.queue_catalogue_metadata(index)?;
+            }
+            SyncMessage::CatalogueFetchV1 {
+                id,
+                table,
+                opened,
+                scope,
+            } => {
+                let (author, scope_claims) = match scope {
+                    Some((author, requested)) => {
+                        let author = AuthorSubject::from_canonical(&author)
+                            .map_err(|e| query_error(e.to_string()))?;
+                        let authenticated = claims.clone().unwrap_or_else(|| {
+                            self.inner()
+                                .claims
+                                .get(&connection_identity)
+                                .cloned()
+                                .unwrap_or_default()
+                        });
+                        if connection_identity != AuthorSubject::SYSTEM
+                            && (author != connection_identity || requested != authenticated)
+                        {
+                            return Err(Error::new(
+                                ErrorCode::WriteRejected,
+                                "catalogue request scope differs from its authenticated connection",
+                            ));
+                        }
+                        (author, requested)
+                    }
+                    None => (
+                        connection_identity,
+                        claims.unwrap_or_else(|| {
+                            self.inner()
+                                .claims
+                                .get(&connection_identity)
+                                .cloned()
+                                .unwrap_or_default()
+                        }),
+                    ),
+                };
+                if self.is_client() {
+                    self.forward_catalogue_fetch(index, id, table, opened, (author, scope_claims))?;
+                } else {
+                    let (head, schemas) = self.authority_catalogue_coverage(
+                        &table,
+                        opened,
+                        Some((author, scope_claims)),
+                    )?;
+                    let mut inner = self.inner();
+                    inner.sessions[index]
+                        .outbox
+                        .push(SyncMessage::CatalogueMetadataV1 {
+                            head: head.clone(),
+                            schemas,
+                        });
+                    inner.sessions[index]
+                        .outbox
+                        .push(SyncMessage::CatalogueCoveredV1 { id, head, opened });
+                }
             }
             SyncMessage::Subscribe {
                 id,
@@ -4056,7 +5206,7 @@ impl Db {
                     },
                     match &relayed {
                         Some((answered, _, global)) => {
-                            SettledBy::Remote(answered.clone(), global.clone())
+                            SettledBy::Relay(answered.clone(), global.clone())
                         }
                         None => SettledBy::Always(authority),
                     },
@@ -4220,99 +5370,57 @@ impl Db {
                 include_deleted,
             } => {
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
-                let mut inner = db.inner();
-                // A history read ships versions of its source table.
-                let history = history_source_table(&query.table);
-                let table = inner
-                    .schema
-                    .stored_table(history.unwrap_or(&query.table))?
-                    .to_owned();
-                let read = ReadSpec {
-                    cut: at.map(Cut::at),
-                    include_deleted,
-                    ..ReadSpec::default()
-                };
-                let rows = inner.run(&prepared, policy, &read)?;
-                let mut images = Vec::new();
-                // Seqs of shipped history versions, for their origins.
-                let mut seqs = BTreeSet::new();
-                // A flat join ships each occurrence's joined rows.
-                let joined_tables = query
-                    .flat_join
-                    .iter()
-                    .flat_map(|flat| &flat.sources)
-                    .map(|source| {
-                        let table = &source.table;
-                        inner
-                            .schema
-                            .stored_table(history_source_table(table).unwrap_or(table))
-                            .map(str::to_owned)
-                    })
-                    .collect::<Result<Vec<_>, Error>>()?;
-                for row in &rows {
-                    for (table, joined) in joined_tables.iter().zip(row.joined_rows()) {
-                        images.extend(inner.joined_images(table, joined, &mut seqs)?);
-                    }
+                if accepted {
+                    db.check_accepted_query(&prepared)?;
+                } else if scoped {
+                    db.check_scoped_fetch(&prepared)?;
                 }
-                if history.is_some() {
-                    let versions = rows.iter().map(|row| (row.id, row.seq));
-                    inner.history_versions(&table, versions, &mut images, &mut seqs)?;
+                if (scoped || accepted) && self.is_client() {
+                    let claims = prepared
+                        .request_claims
+                        .as_ref()
+                        .map(|(_, claims)| claims.clone())
+                        .unwrap_or_else(|| {
+                            db.inner()
+                                .claims
+                                .get(&identity)
+                                .cloned()
+                                .unwrap_or_default()
+                        });
+                    let prepared = prepared.with_identity_claims(identity, claims);
+                    db.forward_scoped_fetch(
+                        index,
+                        id,
+                        prepared,
+                        identity,
+                        include_deleted,
+                        at,
+                        accepted,
+                    )?;
                 } else {
-                    for row in &rows {
-                        let rid = row.id.0.as_bytes().to_vec();
-                        let seq = row.seq as i64;
-                        let mut found =
-                            inner.images_where(&table, false, ID_AT_SEQ, &[&rid, &seq])?;
-                        if found.is_empty() {
-                            found = inner.images_where(&table, true, ID_AT_SEQ, &[&rid, &seq])?;
+                    if accepted {
+                        let inner = db.inner();
+                        if !inner.authority
+                            || at.is_some_and(|cut| cut > inner.seq || cut >= LOCAL_BASE)
+                        {
+                            return Err(Error::new(
+                                ErrorCode::NotObserved,
+                                "accepted read requires an available authority snapshot",
+                            ));
                         }
-                        images.extend(found);
                     }
-                }
-                let support = inner.support_of(&query)?;
-                let mut extra = Vec::new();
-                let mut watch = std::mem::take(&mut inner.sessions[index].watch);
-                let mut held = std::mem::take(&mut inner.sessions[index].held);
-                // The replica keeps current rows it fetched: like supporting
-                // rows, a policy dependency's commit re-checks them.
-                if policy.is_some() && at.is_none() && history.is_none() {
-                    for image in images.iter().filter(|image| image.table == table) {
-                        held.entry(table.clone())
-                            .or_default()
-                            .insert((RowUuid::from_bytes(image.id), image.key.clone()), true);
-                    }
-                }
-                for image in &images {
-                    inner.follow_support(
-                        &support, image, policy, &mut extra, &mut watch, &mut held,
+                    db.serve_fetch(
+                        index,
+                        id,
+                        &query,
+                        &prepared,
+                        policy,
+                        at,
+                        include_deleted,
+                        accepted,
+                        None,
                     )?;
                 }
-                images.extend(extra);
-                for image in &images {
-                    watch.insert(wk((
-                        image.table.clone(),
-                        "id".to_owned(),
-                        watch_key(&Sql::Blob(image.id.to_vec())),
-                    )));
-                }
-                let origins = inner.origins(&seqs)?;
-                let through = at.unwrap_or(inner.seq);
-                let session = &mut inner.sessions[index];
-                session.watch = watch;
-                session.held = held;
-                if !origins.is_empty() {
-                    session
-                        .outbox
-                        .push(SyncMessage::Origins { commits: origins });
-                }
-                if !images.is_empty() {
-                    session.outbox.push(SyncMessage::Rows { images });
-                }
-                session.outbox.push(SyncMessage::Answer {
-                    id,
-                    through,
-                    rows: rows.iter().map(|r| *r.id.0.as_bytes()).collect(),
-                });
             }
             SyncMessage::Commit {
                 node,
@@ -4348,7 +5456,7 @@ impl Db {
                                 )
                             });
                             let result =
-                                db.authorize_commit(who, policy, kind, ops, updated_at, (node, tx));
+                                db.authorize_commit(who, kind, ops, updated_at, (node, tx));
                             if let Some((author, previous)) = previous {
                                 let mut inner = self.inner.borrow_mut();
                                 match previous {
@@ -4448,19 +5556,30 @@ impl Db {
         Ok(())
     }
 
-    /// Validate (serializable) and apply one uploaded commit as `identity`.
+    /// Validate (serializable) and apply one uploaded commit as `who`.
     /// Returns the rows the client must hear about either way: the rows it
     /// wrote, so a rejected client rebases onto the authority's versions.
     #[allow(clippy::type_complexity)]
     fn authorize_commit(
         &self,
         who: Who,
-        identity: Option<AuthorSubject>,
         kind: WireKind,
         ops: Vec<WireOp>,
         updated_at: Option<u64>,
         origin: ([u8; 16], u64),
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, (Error, Vec<(String, RowUuid, Vec<u8>)>)> {
+        if self.is_client() {
+            return Err((
+                unsupported("write uploads through a SQLite relay"),
+                Vec::new(),
+            ));
+        }
+        // A trusted backend's session batch validates reads under the same
+        // session as its writes, not under the transport's SYSTEM privilege.
+        let identity = match who {
+            Who::Session(author) => Some(author),
+            Who::Local | Who::Attributed(_) => None,
+        };
         let mut ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>()
         {
             Ok(ops) => ops,
@@ -4577,10 +5696,17 @@ impl Db {
                 let rows = mentioned(&inner);
                 return Err((error, rows));
             }
-            inner
+            if let Err(error) = inner
                 .record_fate(origin.0, origin.1, &Ok(()))
                 .and_then(|()| inner.record_settled(origin.0, origin.1, Some(seq)))
-                .map_err(|e| (e, Vec::new()))?;
+                .and_then(|()| inner.record_issued_seq(seq))
+            {
+                inner
+                    .rollback_savepoint("upload")
+                    .map_err(|e| (storage(e), Vec::new()))?;
+                inner.changed.borrow_mut().truncate(mark);
+                return Err((error, Vec::new()));
+            }
             inner
                 .conn
                 .execute_batch("RELEASE upload")
@@ -4687,6 +5813,9 @@ fn overtakes_writes(message: &SyncMessage) -> bool {
         SyncMessage::Subscribe { .. }
             | SyncMessage::Unsubscribe { .. }
             | SyncMessage::Fetch { .. }
+            | SyncMessage::ScopedFetchV1 { .. }
+            | SyncMessage::AcceptedFetchV1 { .. }
+            | SyncMessage::CatalogueFetchV1 { .. }
             | SyncMessage::Advise { .. }
     )
 }
@@ -4742,6 +5871,24 @@ fn message_out(schema: &Schema, message: SyncMessage) -> Option<SyncMessage> {
                 .filter_map(|image| image_out(schema, image))
                 .collect(),
         },
+        SyncMessage::AcceptedRowsV1 { rows } => SyncMessage::AcceptedRowsV1 {
+            rows: rows
+                .into_iter()
+                .filter_map(|mut row| {
+                    row.table = schema.by_stored(&row.table)?.name.clone();
+                    Some(row)
+                })
+                .collect(),
+        },
+        SyncMessage::ContentWitnessesV1 { witnesses } => SyncMessage::ContentWitnessesV1 {
+            witnesses: witnesses
+                .into_iter()
+                .filter_map(|mut witness| {
+                    witness.table = schema.by_stored(&witness.table)?.name.clone();
+                    Some(witness)
+                })
+                .collect(),
+        },
         SyncMessage::Evict { table, id, key } => SyncMessage::Evict {
             table: schema.by_stored(&table)?.name.clone(),
             id,
@@ -4777,7 +5924,76 @@ pub struct RelationSnapshot {
 #[derive(Debug)]
 pub struct QueryAttachment;
 
+fn scoped_result_query(prepared: &PreparedQuery, rows: Vec<[u8; 16]>) -> PreparedQuery {
+    let mut exact = prepared.clone();
+    exact.query.filters.push(crate::query::in_list(
+        crate::query::col("id"),
+        rows.into_iter()
+            .map(|row| crate::query::lit(Value::Uuid(RowUuid::from_bytes(row).0))),
+    ));
+    // The authority has already applied this window.
+    exact.query.limit = None;
+    exact.query.offset = 0;
+    exact
+}
+
+fn row_local_policy(policy: &PolicyExpr) -> bool {
+    match policy {
+        PolicyExpr::And(items) | PolicyExpr::Or(items) => items.iter().all(row_local_policy),
+        PolicyExpr::Not(item) => row_local_policy(item),
+        PolicyExpr::Cmp { .. }
+        | PolicyExpr::IsNull { .. }
+        | PolicyExpr::IsNotNull { .. }
+        | PolicyExpr::Contains { .. }
+        | PolicyExpr::In { .. }
+        | PolicyExpr::InList { .. }
+        | PolicyExpr::SessionCmp { .. }
+        | PolicyExpr::SessionIsNull { .. }
+        | PolicyExpr::SessionIsNotNull { .. }
+        | PolicyExpr::SessionContains { .. }
+        | PolicyExpr::SessionInList { .. }
+        | PolicyExpr::True
+        | PolicyExpr::False => true,
+        _ => false,
+    }
+}
+
 impl Db {
+    fn check_scoped_fetch(&self, prepared: &PreparedQuery) -> Result<(), Error> {
+        let query = &prepared.query;
+        if history_source_table(&query.table).is_some()
+            || !query.joins.is_empty()
+            || query.flat_join.is_some()
+            || !query.policy_branches.is_empty()
+            || !query.reachable.is_empty()
+            || !query.inherits.is_empty()
+            || !query.includes.is_empty()
+            || !query.array_subqueries.is_empty()
+            || query.aggregate.is_some()
+            || query.relation.is_some()
+        {
+            return Err(unsupported(
+                "scoped remote reads of relations, aggregates or history",
+            ));
+        }
+        let inner = self.inner();
+        let schema = prepared.schema.as_ref().unwrap_or(&inner.owner);
+        let table = schema.table(&query.table)?;
+        if !table.branch_by.is_empty() {
+            return Err(unsupported("scoped remote reads of branched tables"));
+        }
+        let policy = schema
+            .policy_schema()
+            .by_stored(&table.stored)
+            .and_then(|table| table.policy(crate::tools::Operation::Select));
+        if policy.is_some_and(|policy| !row_local_policy(policy)) {
+            return Err(unsupported(
+                "scoped remote reads with cross-row permission evidence",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn detach_query(&self, _attachment: QueryAttachment) {}
 
     /// The bindings' one-shot read: a postcard query, optionally inside an
@@ -4790,7 +6006,7 @@ impl Db {
         opts: ReadOpts,
         open_tx: Option<OpenTransactionId>,
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
-        _author: Option<AuthorSubject>,
+        author: Option<AuthorSubject>,
         _require_coverage: bool,
         _coverage_expired: E,
         _release_coverage: F,
@@ -4826,6 +6042,49 @@ impl Db {
             return Ok(result(rows));
         }
         let frozen = ReadSpec::of(&opts, &self.inner())?.frozen();
+        if self.inner().non_durable
+            && self.is_client()
+            && opts.tier != ReadTier::LocalOnly
+            && !frozen
+        {
+            if prepared.request_claims.is_some()
+                || author.is_some_and(|id| {
+                    id != self.inner().identity.author && id != AuthorSubject::SYSTEM
+                })
+            {
+                return Err(unsupported(
+                    "request-scoped foreground reads through a storage owner",
+                ));
+            }
+            // A temporary normal subscription provides both owner-local and
+            // authority settlement, including an empty answer. Its drop releases
+            // the upstream attachment on success, refusal or cancellation.
+            let mut stream = self.open_subscription(&prepared, author, opts)?;
+            let rows = poll_fn(|_| {
+                if let Some(error) = stream
+                    .refused
+                    .as_ref()
+                    .and_then(|slot| slot.borrow().clone())
+                {
+                    return Poll::Ready(Err(error));
+                }
+                match stream.try_next_event() {
+                    Some(SubscriptionEvent::Delta { added, .. }) => {
+                        Poll::Ready(Ok(added.into_iter().map(|row| row.row).collect()))
+                    }
+                    Some(SubscriptionEvent::Rejected { reason }) => {
+                        Poll::Ready(Err(Error::new(ErrorCode::Query, reason)))
+                    }
+                    Some(SubscriptionEvent::Closed) => Poll::Ready(Err(Error::new(
+                        ErrorCode::NotObserved,
+                        "foreground owner read closed before answering",
+                    ))),
+                    None => Poll::Pending,
+                }
+            })
+            .await?;
+            return Ok(result(rows));
+        }
         if self.is_client() && opts.tier != ReadTier::LocalOnly && !frozen {
             let wait = match (opts.tier, &opts.first_load) {
                 (ReadTier::Remote, _) => Some(None),
@@ -4835,30 +6094,78 @@ impl Db {
                 _ => None,
             };
             if let Some(deadline) = wait {
-                Self::remote_shape(&prepared.query)?;
-                self.fetch(&prepared, None, opts.read_view.include_deleted, deadline)
-                    .await?;
+                if author.is_some_and(|author| {
+                    author != AuthorSubject::SYSTEM && author != self.inner().identity.author
+                }) || prepared.request_claims.is_some()
+                {
+                    self.check_scoped_fetch(&prepared)?;
+                    let identity = author.unwrap_or(self.inner().identity.author);
+                    let claims = match &prepared.request_claims {
+                        Some((requested, claims)) if *requested == identity => claims.clone(),
+                        Some(_) => {
+                            return Err(Error::new(
+                                ErrorCode::Query,
+                                "request claims differ from the read identity",
+                            ));
+                        }
+                        None => self
+                            .inner()
+                            .claims
+                            .get(&identity)
+                            .cloned()
+                            .unwrap_or_default(),
+                    };
+                    let answer = self
+                        .fetch_answer(
+                            &prepared,
+                            None,
+                            opts.read_view.include_deleted,
+                            deadline,
+                            Some((identity, claims)),
+                            false,
+                        )
+                        .await?;
+                    if let Some((through, rows)) = answer {
+                        // Only these authority-approved roots, at this cut, belong
+                        // to this request. Other cached or pending rows do not.
+                        let exact = scoped_result_query(&prepared, rows);
+                        let read = ReadSpec {
+                            cut: Some(Cut::at(through)),
+                            include_deleted: opts.read_view.include_deleted,
+                            ..ReadSpec::default()
+                        };
+                        let rows = self.inner().run(&exact, Some(identity), &read)?;
+                        return Ok(result(rows));
+                    }
+                    if opts.tier == ReadTier::Remote {
+                        return Err(Error::new(
+                            ErrorCode::NotObserved,
+                            "scoped remote read has no available authority",
+                        ));
+                    }
+                    // A local-first deadline may return the locally permitted
+                    // cache; it never promotes it to an authoritative answer.
+                } else {
+                    Self::remote_shape(&prepared.query)?;
+                    self.fetch(&prepared, None, opts.read_view.include_deleted, deadline)
+                        .await?;
+                }
             }
         }
-        let roots = self
-            .all(
-                &prepared,
-                ReadOpts {
-                    first_load: FirstLoad::Deliver,
-                    ..opts
-                },
-            )
-            .await?;
-        Ok(result(self.nest_relations(&prepared, roots)?))
+        let inner = self.inner();
+        let roots = inner.run(&prepared, author, &ReadSpec::of(&opts, &inner)?)?;
+        Ok(result(inner.nest_relations(&prepared, author, roots)?))
     }
 }
 
 impl Db {
     /// Mark this store as a non-durable foreground over a durable relay:
     /// its own store starts empty each time, so a subscription's opening,
-    /// whatever its tier, waits for the upstream's answer (the relay's
-    /// stored view, or its upstream's once that answers).
+    /// unless explicitly LocalOnly, waits for its storage owner's answer.
+    /// Authority waits separately require global settlement. Foreground writes
+    /// are unsupported until relay forwarding and durability are implemented.
     pub fn set_non_durable_client(&self) {
+        self.ensure_client();
         self.inner.borrow_mut().non_durable = true;
     }
 
@@ -4866,8 +6173,71 @@ impl Db {
         unimplemented!("coverage attachments are not modelled on SQLite")
     }
 
-    pub fn set_tick_scheduler(&self, _scheduler: Option<Rc<dyn TickScheduler>>) {
-        unimplemented!("host tick schedulers are not supported on SQLite yet")
+    pub fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
+        self.inner.borrow_mut().scheduler = scheduler;
+        self.schedule_read_deadlines();
+    }
+
+    pub(crate) fn read_deadline(&self, at: Option<Instant>) -> Option<Rc<Instant>> {
+        let deadline = at.map(Rc::new)?;
+        self.inner
+            .borrow_mut()
+            .read_deadlines
+            .push(Rc::downgrade(&deadline));
+        self.schedule_read_deadlines();
+        Some(deadline)
+    }
+
+    pub(crate) fn read_attempt_deadline(&self) -> Option<Rc<Instant>> {
+        let link = self.link_hint()?.get();
+        self.read_deadline(
+            (link.hint == RemoteLinkHint::Attempting)
+                .then_some(link.since + crate::options::REMOTE_LINK_ATTEMPT_WINDOW),
+        )
+    }
+
+    pub(crate) fn schedule_pending_tick(&self) {
+        let scheduler = self.inner.borrow().scheduler.clone();
+        if let Some(scheduler) = scheduler {
+            scheduler.schedule_tick(TickUrgency::Immediate);
+        }
+    }
+
+    /// Hosts may keep only their earliest timer. Every tick re-arms the next
+    /// outstanding deadline, even if the read whose timer fired was cancelled.
+    pub(crate) fn schedule_read_deadlines(&self) {
+        let (scheduler, next) = {
+            let mut inner = self.inner.borrow_mut();
+            let now = Instant::now();
+            let mut next = None;
+            inner.read_deadlines.retain(|weak| {
+                let Some(deadline) = weak.upgrade() else {
+                    return false;
+                };
+                if *deadline > now {
+                    next = Some(next.map_or(*deadline, |at: Instant| at.min(*deadline)));
+                }
+                // Keep live guards even after their original wake expires:
+                // the host may restart a connection attempt while they wait.
+                true
+            });
+            if !inner.read_deadlines.is_empty()
+                && let Some(client) = &inner.client
+            {
+                let link = client.hint.get();
+                let at = link.since + crate::options::REMOTE_LINK_ATTEMPT_WINDOW;
+                if link.hint == RemoteLinkHint::Attempting && at > now {
+                    next = Some(next.map_or(at, |pending| pending.min(at)));
+                }
+            }
+            (inner.scheduler.clone(), next)
+        };
+        if let (Some(scheduler), Some(next)) = (scheduler, next) {
+            // Round up: an early timer must not consume the final sub-ms wait.
+            let nanos = next.saturating_duration_since(Instant::now()).as_nanos();
+            let millis = nanos.div_ceil(1_000_000).max(1).min(u128::from(u64::MAX)) as u64;
+            scheduler.schedule_tick_after(millis);
+        }
     }
 }
 
@@ -4907,5 +6277,227 @@ impl Db {
                 .collect::<BTreeMap<_, _>>(),
             client.transport.is_some(),
         )
+    }
+}
+
+impl Db {
+    pub(super) async fn fetch_catalogue(
+        &self,
+        table: &str,
+        opened: crate::ids::SchemaVersionId,
+        scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    ) -> Result<(), Error> {
+        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        let _wake = self.read_deadline(Some(deadline));
+        let _attempt = self.read_attempt_deadline();
+        let (id, connection) = {
+            let mut inner = self.inner();
+            let client = inner.client.as_mut().expect("client");
+            if client.transport.is_none() || !may_wait(client.hint.get()) {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "catalogue coverage has no available authority",
+                ));
+            }
+            let id = client.next_id;
+            client.next_id += 1;
+            client.catalogue_answers.insert(id, None);
+            client.outbox.push(SyncMessage::CatalogueFetchV1 {
+                id,
+                table: table.into(),
+                opened,
+                scope: scope.map(|(author, claims)| (author.canonical().to_owned(), claims)),
+            });
+            (id, client.connection)
+        };
+        let _request = FetchRequest {
+            inner: self.inner.clone(),
+            id,
+        };
+        self.schedule_pending_tick();
+        poll_fn(|_| {
+            let mut inner = self.inner();
+            let client = inner.client.as_mut().expect("client");
+            if client.connection != connection {
+                return Poll::Ready(Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "catalogue coverage interrupted by reconnect",
+                )));
+            }
+            if let Some(Some(answer)) = client.catalogue_answers.remove(&id) {
+                return Poll::Ready(answer.and_then(|(head, version)| {
+                    if inner.catalogue_head()?.as_ref() != Some(&head)
+                        || inner.catalogue_schema(opened)?.is_none()
+                    {
+                        Err(Error::new(
+                            ErrorCode::NotObserved,
+                            "catalogue coverage metadata changed before completion",
+                        ))
+                    } else if version == opened {
+                        Ok(())
+                    } else {
+                        Err(Error::new(
+                            ErrorCode::Protocol,
+                            "catalogue coverage answered another schema",
+                        ))
+                    }
+                }));
+            }
+            // Keep an unanswered slot; removing it would lose a later answer.
+            client.catalogue_answers.insert(id, None);
+            if client.transport.is_none()
+                || !may_wait(client.hint.get())
+                || Instant::now() >= deadline
+            {
+                return Poll::Ready(Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "fresh catalogue coverage unavailable",
+                )));
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
+    pub(super) fn broadcast_catalogue_metadata(&self) -> Result<(), Error> {
+        let count = self.inner.borrow().sessions.len();
+        for index in 0..count {
+            self.queue_catalogue_metadata(index)?;
+        }
+        Ok(())
+    }
+    fn queue_catalogue_metadata(&self, index: usize) -> Result<(), Error> {
+        let mut inner = self.inner();
+        if !inner.sessions[index].open {
+            return Ok(());
+        }
+        inner.sessions[index].catalogue_pending = false;
+        if inner.catalogue_head()?.is_none() {
+            return Ok(());
+        }
+        let opened = inner.sessions[index]
+            .version
+            .unwrap_or(inner.owner.jazz.version_id());
+        let (head, schemas) = inner.catalogue_records(opened)?;
+        inner.sessions[index]
+            .outbox
+            .push(SyncMessage::CatalogueMetadataV1 { head, schemas });
+        Ok(())
+    }
+    fn forward_catalogue_fetch(
+        &self,
+        index: usize,
+        id: u64,
+        table: String,
+        opened: crate::ids::SchemaVersionId,
+        scope: (AuthorSubject, BTreeMap<String, Value>),
+    ) -> Result<(), Error> {
+        let deadline = self
+            .read_deadline(Some(Instant::now() + std::time::Duration::from_secs(15)))
+            .expect("deadline");
+        let mut inner = self.inner();
+        if inner.sessions[index].forwarded.contains_key(&id)
+            || inner.sessions[index].forwarded_catalogue.contains_key(&id)
+        {
+            return Err(query_error("duplicate forwarded request ID"));
+        }
+        let owner = inner.owner.clone();
+        let client = inner.client.as_mut().expect("relay");
+        if client.transport.is_none() || !may_wait(client.hint.get()) {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "catalogue relay has no available authority",
+            ));
+        }
+        let upstream = client.next_id;
+        client.next_id += 1;
+        let connection = client.connection;
+        client.catalogue_answers.insert(upstream, None);
+        client.outbox.push(SyncMessage::CatalogueFetchV1 {
+            id: upstream,
+            table,
+            opened,
+            scope: Some((scope.0.canonical().to_owned(), scope.1)),
+        });
+        inner.sessions[index].forwarded_catalogue.insert(
+            id,
+            ForwardedCatalogue {
+                upstream,
+                connection,
+                opened,
+                owner,
+                deadline,
+            },
+        );
+        Ok(())
+    }
+    fn progress_catalogue_fetches(&self) {
+        let mut inner = self.inner();
+        for index in 0..inner.sessions.len() {
+            let mut ready = Vec::new();
+            for (&id, request) in &inner.sessions[index].forwarded_catalogue {
+                let answer = if !Rc::ptr_eq(&request.owner, &inner.owner)
+                    || Instant::now() >= *request.deadline
+                    || inner.client.as_ref().is_none_or(|c| {
+                        c.connection != request.connection
+                            || c.transport.is_none()
+                            || !may_wait(c.hint.get())
+                    }) {
+                    Some(Err(Error::new(
+                        ErrorCode::NotObserved,
+                        "catalogue relay coverage interrupted or unavailable",
+                    )))
+                } else {
+                    inner
+                        .client
+                        .as_ref()
+                        .expect("relay")
+                        .catalogue_answers
+                        .get(&request.upstream)
+                        .cloned()
+                        .flatten()
+                };
+                if let Some(answer) = answer {
+                    ready.push((id, answer));
+                }
+            }
+            for (id, answer) in ready {
+                let request = inner.sessions[index]
+                    .forwarded_catalogue
+                    .remove(&id)
+                    .expect("pending");
+                if let Some(client) = inner.client.as_mut() {
+                    client.cancel_fetch(request.upstream);
+                }
+                let result = answer.and_then(|(head, opened)| {
+                    let (cached, schemas) = inner.catalogue_records(opened)?;
+                    if cached != head || opened != request.opened {
+                        return Err(Error::new(
+                            ErrorCode::NotObserved,
+                            "catalogue relay lacks the exact covered metadata",
+                        ));
+                    }
+                    Ok((head, opened, schemas))
+                });
+                match result {
+                    Ok((head, opened, schemas)) => {
+                        inner.sessions[index]
+                            .outbox
+                            .push(SyncMessage::CatalogueMetadataV1 {
+                                head: head.clone(),
+                                schemas,
+                            });
+                        inner.sessions[index]
+                            .outbox
+                            .push(SyncMessage::CatalogueCoveredV1 { id, head, opened });
+                    }
+                    Err(error) => inner.sessions[index].outbox.push(SyncMessage::Refused {
+                        id,
+                        code: error.code,
+                        message: error.message,
+                    }),
+                }
+            }
+        }
     }
 }

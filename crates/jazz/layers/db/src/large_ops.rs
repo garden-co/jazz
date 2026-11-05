@@ -136,6 +136,17 @@ fn utf16_byte(text: &str, at: u64) -> Option<usize> {
 }
 
 impl Inner {
+    /// Drop queues contain only this owner's uploads. SQL errors retain the
+    /// receipt for the next maintenance pass; crash recovery uses lease expiry.
+    pub(super) fn release_dropped_uploads(&self) -> Result<(), Error> {
+        let mut cleanup = self.upload_cleanup.borrow_mut();
+        while let Some(id) = cleanup.last() {
+            crate::large::end_upload(&self.conn, id)?;
+            cleanup.pop();
+        }
+        Ok(())
+    }
+
     /// Forget what the finished write's edits derived.
     pub(crate) fn clear_derived(&mut self) {
         self.pending_nodes.clear();
@@ -642,8 +653,17 @@ impl Db {
         let kind = crate::large::kind(&col);
         let emitted = Rc::new(RefCell::new(Vec::new()));
         let stage = Rc::clone(&emitted);
+        let id = *lv::Locator::random().as_bytes();
         Ok(StreamingValueUpload {
-            id: *lv::Locator::random().as_bytes(),
+            id,
+            owner: Rc::downgrade(&self.inner),
+            schema: self.schema_view_id(),
+            table: table.to_owned(),
+            column: column.to_owned(),
+            lease: Rc::new(UploadLease {
+                id,
+                cleanup: self.inner().upload_cleanup.clone(),
+            }),
             kind,
             initialized: false,
             preparation: Some(lv::PushStreamingPreparation::new(
@@ -665,6 +685,7 @@ impl Db {
         upload: &mut StreamingValueUpload,
         bytes: &[u8],
     ) -> Result<(), Error> {
+        self.check_streaming_upload(upload)?;
         let inner = self.inner();
         let now = streaming_now_ms();
         if upload.preparation.is_none() {
@@ -707,8 +728,20 @@ impl Db {
         &self,
         mut upload: StreamingValueUpload,
     ) -> Result<(), Error> {
+        self.check_streaming_upload(&upload)?;
         upload.preparation.take();
         crate::large::end_upload(&self.inner().conn, &upload.id)
+    }
+
+    fn check_streaming_upload(&self, upload: &StreamingValueUpload) -> Result<(), Error> {
+        if !upload.owner.ptr_eq(&Rc::downgrade(&self.inner))
+            || upload.schema != self.schema_view_id()
+        {
+            return Err(schema_error(
+                "streaming upload belongs to another database or schema",
+            ));
+        }
+        Ok(())
     }
 
     /// Finish an upload and publish its row mutation. Whether or not the
@@ -728,46 +761,12 @@ impl Db {
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
     ) -> Result<WriteHandle, Error> {
-        let value = {
-            let inner = self.inner();
-            let now = streaming_now_ms();
-            let alive = if upload.initialized {
-                crate::large::touch_upload(&inner.conn, &upload.id, now)?
-            } else {
-                crate::large::begin_upload(&inner.conn, &upload.id, now)?;
-                true
-            };
-            let finished = match upload.preparation.take() {
-                _ if !alive => Err(expired()),
-                None => Err(closed()),
-                Some(preparation) => preparation.finish().map_err(|e| rejected(e.to_string())),
-            };
-            let staged = std::mem::take(&mut *upload.emitted.borrow_mut());
-            let value = finished.and_then(|(value, _)| {
-                let col = streaming_column(&inner, table, column)?;
-                if crate::large::kind(&col) != upload.kind {
-                    return Err(not_large(table, column));
-                }
-                admit_ingress(&inner, &staged, now)?;
-                crate::large::stage_upload(
-                    &inner.conn,
-                    &inner.chunks,
-                    &upload.id,
-                    &staged,
-                    inner.client.is_some(),
-                )?;
-                crate::large::finish_upload(&inner.conn, &value)?;
-                Ok((col, value))
-            });
-            match value {
-                Ok(value) => value,
-                Err(error) => {
-                    crate::large::end_upload(&inner.conn, &upload.id)?;
-                    return Err(error);
-                }
-            }
-        };
-        let (col, value) = value;
+        if cells.contains_key(column) {
+            return Err(rejected(
+                "the streamed column is also set in the other cells",
+            ));
+        }
+        let (col, value) = self.finalize_streaming_upload(&mut upload, table, column)?;
         self.inner().derived.push(value.clone());
         cells.insert(
             column.to_owned(),
@@ -826,6 +825,207 @@ impl Db {
         result
     }
 
+    fn finalize_streaming_upload(
+        &self,
+        upload: &mut StreamingValueUpload,
+        table: &str,
+        column: &str,
+    ) -> Result<(crate::values::Column, lv::LargeValueRef), Error> {
+        self.check_streaming_upload(upload)?;
+        if upload.table != table || upload.column != column {
+            return Err(schema_error(
+                "streaming upload target differs from its original table or column",
+            ));
+        }
+        let value = {
+            let inner = self.inner();
+            let now = streaming_now_ms();
+            let alive = if upload.initialized {
+                crate::large::touch_upload(&inner.conn, &upload.id, now)?
+            } else {
+                crate::large::begin_upload(&inner.conn, &upload.id, now)?;
+                true
+            };
+            let finished = match upload.preparation.take() {
+                _ if !alive => Err(expired()),
+                None => Err(closed()),
+                Some(preparation) => preparation.finish().map_err(|e| rejected(e.to_string())),
+            };
+            let staged = std::mem::take(&mut *upload.emitted.borrow_mut());
+            let value = finished.and_then(|(value, _)| {
+                let col = streaming_column(&inner, table, column)?;
+                if crate::large::kind(&col) != upload.kind {
+                    return Err(not_large(table, column));
+                }
+                admit_ingress(&inner, &staged, now)?;
+                crate::large::stage_upload(
+                    &inner.conn,
+                    &inner.chunks,
+                    &upload.id,
+                    &staged,
+                    inner.client.is_some(),
+                )?;
+                crate::large::finish_upload(&inner.conn, &value)?;
+                Ok((col, value))
+            });
+            match value {
+                Ok(value) => value,
+                Err(error) => {
+                    crate::large::end_upload(&inner.conn, &upload.id)?;
+                    return Err(error);
+                }
+            }
+        };
+        Ok(value)
+    }
+
+    /// Finish staging without publishing a row. The opaque, single-use
+    /// capability binds the mutation, schema and trusted identity. Its chunks
+    /// stay under the upload's existing lease until attachment or abandonment.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stage_streaming_value_upload(
+        &self,
+        mut upload: StreamingValueUpload,
+        mutation: StreamingMutationKind,
+        table: &str,
+        row: RowUuid,
+        mut cells: BTreeMap<String, Value>,
+        column: &str,
+        identity: WriteIdentity,
+        now_ms: Option<u64>,
+        head: Option<BranchSelector>,
+        base: Option<BranchViewBase>,
+    ) -> Result<StagedStreamingValue, Error> {
+        self.check_streaming_upload(&upload)?;
+        if head.is_some()
+            || base.is_some()
+            || !self.inner().schema.table(table)?.branch_by.is_empty()
+        {
+            return Err(schema_error("staged streaming requires a root-view target"));
+        }
+        if matches!(identity, WriteIdentity::Attribution(_)) {
+            self.inner().require_attribution_backend()?;
+        }
+        if cells.contains_key(column) {
+            return Err(rejected(
+                "the streamed column is also set in the other cells",
+            ));
+        }
+        let (col, value) = self.finalize_streaming_upload(&mut upload, table, column)?;
+        cells.insert(
+            column.to_owned(),
+            nullable(&col, Value::Large(Box::new(value))),
+        );
+        let op = match mutation {
+            StreamingMutationKind::Insert => StagedOp::Insert(
+                table.to_owned(),
+                cells,
+                InsertOptions {
+                    row_id: Some(row),
+                    identity,
+                    updated_at_ms: now_ms,
+                    ..Default::default()
+                },
+            ),
+            StreamingMutationKind::Update => StagedOp::Update(
+                table.to_owned(),
+                row,
+                cells,
+                UpdateOptions {
+                    identity,
+                    updated_at_ms: now_ms,
+                    ..Default::default()
+                },
+            ),
+            StreamingMutationKind::Upsert => StagedOp::Upsert(
+                table.to_owned(),
+                row,
+                cells,
+                UpsertOptions {
+                    identity,
+                    updated_at_ms: now_ms,
+                    ..Default::default()
+                },
+            ),
+        };
+        Ok(StagedStreamingValue {
+            owner: upload.owner.clone(),
+            schema: upload.schema,
+            pending: Some(StagedStreamingMutation {
+                op,
+                lease: upload.lease.clone(),
+            }),
+        })
+    }
+
+    /// Attach to an open serializable batch. Every attempt consumes the
+    /// capability, including a rejected attachment; the batch takes over its
+    /// lease only after the normal transaction overlay validates the write.
+    pub async fn attach_staged_streaming_value(
+        &self,
+        tx: OpenTransactionId,
+        staged: &mut StagedStreamingValue,
+    ) -> Result<(), Error> {
+        let pending = staged
+            .pending
+            .take()
+            .ok_or_else(|| schema_error("staged streaming upload is closed"))?;
+        self.check_staged_streaming_owner(staged)?;
+        {
+            let inner = self.inner();
+            let batch = inner
+                .batches
+                .get(&tx)
+                .ok_or_else(|| rejected(format!("transaction {tx:?} is not open")))?;
+            if !matches!(batch.kind, BatchKind::Serializable { .. }) {
+                return Err(unsupported(
+                    "staged streaming attachment to a mergeable transaction",
+                ));
+            }
+            if Some(batch.identity) != pending.op.identity() {
+                return Err(rejected(
+                    "staged upload identity differs from its transaction",
+                ));
+            }
+            if !crate::large::touch_upload(&inner.conn, &pending.lease.id, streaming_now_ms())? {
+                return Err(expired());
+            }
+        }
+        self.stage(tx, pending.op)?;
+        self.inner()
+            .batches
+            .get_mut(&tx)
+            .expect("validated")
+            .uploads
+            .push(pending.lease);
+        Ok(())
+    }
+
+    fn check_staged_streaming_owner(&self, staged: &StagedStreamingValue) -> Result<(), Error> {
+        if !staged.owner.ptr_eq(&Rc::downgrade(&self.inner))
+            || staged.schema != self.schema_view_id()
+        {
+            return Err(schema_error(
+                "staged upload belongs to another database or schema",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Release an unattached capability. Consumed capabilities are harmless;
+    /// history and open batches keep their own references to committed chunks.
+    pub async fn abort_staged_streaming_value(
+        &self,
+        staged: &mut StagedStreamingValue,
+    ) -> Result<bool, Error> {
+        self.check_staged_streaming_owner(staged)?;
+        let Some(pending) = staged.pending.take() else {
+            return Ok(false);
+        };
+        crate::large::end_upload(&self.inner().conn, &pending.lease.id)?;
+        Ok(true)
+    }
+
     /// Replace the limits on local streaming uploads.
     pub fn set_large_value_staging_policy(&self, policy: LargeValueStagingPolicy) {
         self.inner().staging = policy;
@@ -838,8 +1038,14 @@ impl Db {
         let inner = self.inner();
         let now = streaming_now_ms();
         let max_age = i64::try_from(inner.staging.max_age_ms).unwrap_or(i64::MAX);
+        inner.release_dropped_uploads()?;
         crate::large::expire_receipts(&inner.conn, now)?;
-        crate::large::expire_uploads(&inner.conn, now.saturating_sub(max_age))
+        let pinned = inner
+            .batches
+            .values()
+            .flat_map(|batch| batch.uploads.iter().map(|lease| lease.id))
+            .collect();
+        crate::large::expire_uploads_except(&inner.conn, now.saturating_sub(max_age), &pinned)
     }
 }
 
@@ -883,10 +1089,41 @@ type Stage = Box<dyn FnMut(lv::StagedChunk) -> Result<(), lv::Error>>;
 /// the lease that holds its stored nodes.
 pub struct StreamingValueUpload {
     id: [u8; 32],
+    owner: std::rc::Weak<RefCell<Inner>>,
+    schema: SchemaViewId,
+    table: String,
+    column: String,
+    lease: Rc<UploadLease>,
     kind: lv::LargeValueKind,
     initialized: bool,
     preparation: Option<lv::PushStreamingPreparation<fn(lv::ContentHash) -> lv::Locator, Stage>>,
     emitted: Rc<RefCell<Vec<lv::StagedChunk>>>,
+}
+
+/// An opaque capability for one completed upload. It cannot expose or change
+/// its descriptor, mutation target or identity after staging.
+pub struct StagedStreamingValue {
+    owner: std::rc::Weak<RefCell<Inner>>,
+    schema: SchemaViewId,
+    pending: Option<StagedStreamingMutation>,
+}
+
+struct StagedStreamingMutation {
+    op: StagedOp,
+    lease: Rc<UploadLease>,
+}
+
+/// A capability or batch owns this lease; Drop schedules bounded cleanup on
+/// the next maintenance tick without borrowing the database recursively.
+pub(super) struct UploadLease {
+    pub(super) id: [u8; 32],
+    cleanup: Rc<RefCell<Vec<[u8; 32]>>>,
+}
+
+impl Drop for UploadLease {
+    fn drop(&mut self) {
+        self.cleanup.borrow_mut().push(self.id);
+    }
 }
 
 fn streaming_column(
@@ -1126,7 +1363,11 @@ impl TxRef<'_> {
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
         let edits = self.db.in_overlay(self.id, None, |inner, _| {
-            let identity = identity_of(opts.identity);
+            let batch = inner.batches.get(&self.id).expect("validated overlay");
+            if opts.identity != WriteIdentity::Database && opts.identity != batch.identity {
+                return Err(rejected("write identity differs from its transaction"));
+            }
+            let identity = identity_of(batch.identity);
             let lowered = inner.lower_large_mutations(table, row, &mut patch, mutations, identity);
             let edits = crate::db::LargeEdits {
                 derived: std::mem::take(&mut inner.derived),

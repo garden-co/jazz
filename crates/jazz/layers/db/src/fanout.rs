@@ -47,7 +47,7 @@ struct Member {
     /// Where this member's `settled` flag comes from, and the last value
     /// it was told.
     settled: sync::SettledBy,
-    told: std::cell::Cell<bool>,
+    told: std::cell::Cell<Option<DurabilityTier>>,
 }
 
 /// One shared live result.
@@ -241,10 +241,10 @@ impl Fanout {
             }
             for member in &group.members {
                 if member.settled.get()
-                    && !member.told.get()
+                    && member.told.get() != Some(member.settled.tier())
                     && let Some(queue) = member.queue.upgrade()
                 {
-                    member.told.set(true);
+                    member.told.set(Some(member.settled.tier()));
                     let mut event = delta(false, Vec::new(), Vec::new(), Vec::new());
                     if let SubscriptionEvent::Delta { settled, tier, .. } = &mut event {
                         *settled = true;
@@ -281,7 +281,7 @@ impl Inner {
             shape: prepared.shape,
             bound: !prepared.binding.is_empty(),
             settled: settled.clone(),
-            told: std::cell::Cell::new(now),
+            told: std::cell::Cell::new(now.then(|| settled.tier())),
         };
         let tier = settled.tier();
         let open = |rows: &[CurrentRow]| {
@@ -1207,7 +1207,7 @@ impl Group {
                 if let SubscriptionEvent::Delta { settled, tier, .. } = &mut event {
                     *settled = member.settled.get();
                     *tier = member.settled.tier();
-                    member.told.set(*settled);
+                    member.told.set(settled.then_some(*tier));
                 }
                 queue.borrow_mut().push_back(event);
             }

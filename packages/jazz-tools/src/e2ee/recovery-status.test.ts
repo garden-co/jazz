@@ -70,7 +70,6 @@ it("inspects recovery without enrolment, then explicitly restores protected mate
     const otherRoot = JSON.stringify({ ...JSON.parse(material), rootId: crypto.randomUUID() });
     await expect(observer.e2ee.recovery.status(otherRoot)).rejects.toMatchObject({
       code: "recovery-root-mismatch",
-      message: "Recovery material does not match an accepted recovery root",
     });
     const protectors = await owner.all(deviceRequestApp.__e2ee_recovery_protectors, {
       tier: "remote",

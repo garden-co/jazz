@@ -15,7 +15,7 @@ use crate::records::{Value, ValueType};
 use crate::schema::{JazzSchema, MergeStrategy};
 use crate::tools::OpenTransactionId;
 use crate::tools::Operation;
-use crate::tx::DurabilityTier;
+use crate::tx::{DurabilityTier, Fate, RejectionReason};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, params_from_iter};
 
@@ -35,8 +35,13 @@ pub use fanout::FanoutStats;
 mod large_ops;
 pub use large_ops::{
     JsonSetEdit, LargeValueStagingPolicy, LargeValueUpdate, LargeValueUpdatePage,
-    LargeValueUpdateSplice, StreamingMutationKind, StreamingValueUpload,
+    LargeValueUpdateSplice, StagedStreamingValue, StreamingMutationKind, StreamingValueUpload,
 };
+#[path = "catalogue.rs"]
+mod catalogue;
+pub use catalogue::{CatalogueHeadV1, CatalogueSchemaV1};
+#[path = "accepted.rs"]
+mod accepted;
 #[path = "sync.rs"]
 pub(crate) mod sync;
 pub use crate::names::LensEffects;
@@ -46,10 +51,11 @@ pub use crate::values::CurrentRow;
 use crate::values::{
     AuthorKey, Schema, Sql, Table, author_key, from_sql, quote, storage, to_sql, unsupported,
 };
+pub use accepted::{AcceptedContent, AcceptedRow, BindingSettledRead};
 pub use sync::{
-    Cell as SyncCell, FirstLoad, Image, LOCAL_BASE, QueryAttachment, RelationSnapshot,
-    RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
-    Upstream, WireError, WireTransport, WireTransportAdapter, duplex,
+    Cell as SyncCell, ContentWitnessRef, FirstLoad, Image, LOCAL_BASE, QueryAttachment,
+    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
+    TransportError, Upstream, WireError, WireTransport, WireTransportAdapter, duplex,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -116,6 +122,32 @@ impl PreparedQuery {
 
 fn short(hash: blake3::Hash) -> [u8; 16] {
     hash.as_bytes()[..16].try_into().expect("16 bytes")
+}
+
+/// Application-visible fate and durability for a local write transaction.
+/// Mirrors the existing binding contract; this is not a persisted encoding.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct WriteState {
+    pub fate: Fate,
+    pub global_time: Option<jazz_types::time::GlobalTime>,
+    pub durability: DurabilityTier,
+}
+
+impl WriteState {
+    pub(crate) fn rejected(error: &Error, durability: DurabilityTier) -> Self {
+        let reason = match error.code {
+            ErrorCode::TransactionConflict => RejectionReason::SerializableConflict,
+            ErrorCode::WriteRejected if !error.is_apply_time_rejection() => {
+                RejectionReason::AuthorizationDenied
+            }
+            _ => RejectionReason::MalformedCommit(error.message.clone()),
+        };
+        Self {
+            fate: Fate::Rejected(reason),
+            global_time: None,
+            durability,
+        }
+    }
 }
 
 /// Result of a standalone write.
@@ -285,7 +317,7 @@ impl SubscriptionStream {
             }
             // The opening lists rows whose large values are complete: while
             // their chunks may still arrive, it waits for them.
-            if gate.may_still_wait()
+            if (gate.wait_for_owner || gate.may_still_wait())
                 && self
                     .group
                     .upgrade()
@@ -356,6 +388,9 @@ struct Inner {
     /// Limits on local streaming uploads and on pushed nodes awaiting
     /// their commit.
     staging: LargeValueStagingPolicy,
+    /// Upload leases dropped by capabilities or completed/abandoned batches.
+    /// The queue is separate from the owner borrow, so Drop never re-enters it.
+    upload_cleanup: Rc<RefCell<Vec<[u8; 32]>>>,
     /// The staging ingress window: (start ms, encoded bytes admitted).
     ingress: RefCell<(u64, u64)>,
     /// The schema the current operation runs under: the owner's, or the
@@ -397,6 +432,8 @@ struct Inner {
     /// A replica whose store does not outlive it (a foreground over a
     /// durable relay): its local reads wait for the upstream's view too.
     non_durable: bool,
+    scheduler: Option<Rc<dyn TickScheduler>>,
+    read_deadlines: Vec<Weak<web_time::Instant>>,
     /// The global authority: what it settles is durable at `Global`.
     authority: bool,
     /// Clients this store serves.
@@ -863,6 +900,9 @@ impl Db {
         };
         names.admit(&conn, &schema)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
+        conn.execute_batch(accepted::ACCEPTED_DDL)
+            .map_err(storage)?;
+        conn.execute_batch(catalogue::DDL).map_err(storage)?;
         // The commit seq resumes after the newest stored version.
         let mut seq = 0u64;
         for table in physical.tables.keys() {
@@ -886,6 +926,7 @@ impl Db {
                 pending_nodes: Vec::new(),
                 derived: Vec::new(),
                 staging: LargeValueStagingPolicy::default(),
+                upload_cleanup: Rc::default(),
                 ingress: RefCell::new((0, 0)),
                 schema: owner.clone(),
                 owner,
@@ -909,6 +950,8 @@ impl Db {
                 publications: Vec::new(),
                 client: None,
                 non_durable: false,
+                scheduler: None,
+                read_deadlines: Vec::new(),
                 authority: false,
                 sessions: Vec::new(),
                 since_tick: Vec::new(),
@@ -919,6 +962,7 @@ impl Db {
         {
             let mut inner = db.inner.borrow_mut();
             inner.seq = seq;
+            inner.restore_issued_seq()?;
             inner.load_client()?;
             if inner.client.is_some() {
                 inner.seq = inner.seq.max(LOCAL_BASE);
@@ -947,6 +991,7 @@ impl Db {
     pub async fn open_history_complete(config: DbConfig) -> Result<Self, Error> {
         let db = Self::open(config).await?;
         db.set_authority();
+        db.initialize_authority_catalogue()?;
         Ok(db)
     }
 
@@ -979,6 +1024,8 @@ impl Db {
         let mut inner = self.inner();
         inner.fan.collect();
         inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
+        drop(inner);
+        self.schedule_read_deadlines();
         Ok(())
     }
 
@@ -1180,36 +1227,48 @@ impl Db {
             (None, true) => sync::SettledBy::Never,
             (None, false) => sync::SettledBy::Always(self.inner().authority),
         };
+        let foreground = self.inner().non_durable;
         let gate = match (&remote, self.link_hint()) {
             (Some((answered, _, global)), Some(hint)) => {
-                let deadline = match (opts.tier, &opts.first_load) {
-                    (ReadTier::Remote, _) => Some(None),
-                    _ if self.inner().non_durable => Some(None),
-                    (_, FirstLoad::WaitForRemote { timeout_ms })
-                        if *timeout_ms > 0 && sync::may_wait(hint.get()) =>
-                    {
-                        Some(Some(
-                            web_time::Instant::now()
-                                + std::time::Duration::from_millis(*timeout_ms),
-                        ))
-                    }
-                    _ => None,
+                let remote_wait = match &opts.first_load {
+                    FirstLoad::WaitForRemote { timeout_ms } => *timeout_ms,
+                    _ => 0,
                 };
-                let live = hint.get().hint == RemoteLinkHint::Live;
-                deadline.map(|deadline| sync::Gate {
-                    answered: answered.clone(),
-                    global: global.clone(),
-                    hint,
-                    live,
-                    deadline,
-                })
+                let strict = opts.tier == ReadTier::Remote;
+                let wait_for_remote = strict || (remote_wait > 0 && sync::may_wait(hint.get()));
+                if strict || foreground || wait_for_remote {
+                    let deadline = (!strict && wait_for_remote).then(|| {
+                        web_time::Instant::now() + std::time::Duration::from_millis(remote_wait)
+                    });
+                    Some(sync::Gate {
+                        answered: answered.clone(),
+                        global: global.clone(),
+                        live: hint.get().hint == RemoteLinkHint::Live,
+                        hint,
+                        deadline,
+                        wait_for_owner: foreground,
+                        require_global: foreground && wait_for_remote,
+                        _wake: self.read_deadline(deadline),
+                        _attempt_wake: self.read_attempt_deadline(),
+                    })
+                } else {
+                    None
+                }
             }
             _ => None,
         };
         let include_deleted = read.include_deleted;
         let mut inner = self.inner();
-        let (queue, group) = inner.subscribe_member(prepared, identity, read, settled)?;
-        Ok(SubscriptionStream {
+        let (queue, group) = match inner.subscribe_member(prepared, identity, read, settled) {
+            Ok(member) => member,
+            Err(error) => {
+                if remote.is_some() {
+                    inner.release_remote(&prepared.query, &prepared.binding, include_deleted);
+                }
+                return Err(error);
+            }
+        };
+        let stream = SubscriptionStream {
             queue,
             dropped: inner.fan.dropped.clone(),
             gate,
@@ -1223,7 +1282,10 @@ impl Db {
                     include_deleted,
                 )
             }),
-        })
+        };
+        drop(inner);
+        self.schedule_pending_tick();
+        Ok(stream)
     }
 
     /// A row's provenance as Jazz's row metadata spells it: created at, by
@@ -1375,6 +1437,9 @@ impl Db {
     /// One write. On a client, a local (unauthenticated) write is also an
     /// upload: it is recorded for the authority, which decides its fate.
     fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
+        if matches!(op.identity(), Some(WriteIdentity::Attribution(_))) {
+            self.inner().require_attribution_backend()?;
+        }
         self.with_upload(|| {
             let table = op.table().to_owned();
             let handle = self.write(&table, |inner, seq| {
@@ -1385,7 +1450,7 @@ impl Db {
                 inner.clear_derived();
                 applied
             })?;
-            self.record_upload(vec![op], handle.seq, 0, sync::Kind::Mergeable);
+            self.record_upload(vec![op], handle.seq, None, sync::Kind::Mergeable);
             Ok(handle)
         })
     }
@@ -1436,7 +1501,13 @@ impl Db {
             };
             inner.conn.execute_batch("SAVEPOINT w").map_err(storage)?;
             let mark = inner.changed.borrow().len();
-            match apply(&mut inner, seq) {
+            let applied = apply(&mut inner, seq).and_then(|handle| {
+                if standalone && handle.seq == seq {
+                    inner.record_issued_seq(seq)?;
+                }
+                Ok(handle)
+            });
+            match applied {
                 Ok(handle) => {
                     inner.conn.execute_batch("RELEASE w").map_err(storage)?;
                     if handle.seq == seq {
@@ -1481,6 +1552,11 @@ impl Db {
     ) -> Result<(T, TxReceipt), Error> {
         {
             let mut inner = self.inner();
+            if inner.non_durable {
+                return Err(unsupported(
+                    "commits from a non-durable foreground through its storage owner",
+                ));
+            }
             if inner.tx.is_some() {
                 return Err(unsupported("nested transactions"));
             }
@@ -1501,9 +1577,12 @@ impl Db {
             captured = std::mem::take(&mut inner.capture);
             match &result {
                 Ok(_) => {
-                    if !tables.is_empty() {
-                        inner.seq = seq;
+                    if let Err(error) = inner.record_issued_seq(seq) {
+                        inner.rollback_savepoint("tx").map_err(storage)?;
+                        inner.changed.borrow_mut().clear();
+                        return Err(error);
                     }
+                    inner.seq = seq;
                     Some((seq, tables))
                 }
                 Err(_) => {
@@ -1516,7 +1595,14 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        self.record_upload(captured, seq, 0, sync::Kind::Mergeable);
+        let identity = captured
+            .is_empty()
+            .then_some(if author == AuthorSubject::SYSTEM {
+                WriteIdentity::Database
+            } else {
+                WriteIdentity::Session(author)
+            });
+        self.record_upload(captured, seq, identity, sync::Kind::Mergeable);
         self.inner
             .borrow()
             .conn
@@ -2534,6 +2620,7 @@ impl Inner {
 
     /// Delete up to `budget` large-value nodes no cell or branch references.
     fn reclaim_large_values(&mut self, budget: usize) -> Result<usize, Error> {
+        self.release_dropped_uploads()?;
         self.conn
             .execute_batch("SAVEPOINT reclaim")
             .map_err(storage)?;
@@ -3810,17 +3897,32 @@ impl Db {
 /// view that staged them) and applied at commit; reads overlay them.
 struct Batch {
     kind: BatchKind,
+    identity: WriteIdentity,
     ops: Vec<(Rc<Schema>, StagedOp)>,
+    /// Hold staged ciphertext until the commit (including its upload record)
+    /// is durable, or the batch is abandoned. Maintenance cannot expire it.
+    uploads: Vec<Rc<large_ops::UploadLease>>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
     edits: LargeEdits,
+    reads_state: Rc<RefCell<accepted::ReadState>>,
+    paired_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
 }
 
 #[derive(Default)]
 pub(crate) struct LargeEdits {
     pub(crate) derived: Vec<jazz_types::large_values::LargeValueRef>,
     pub(crate) pending_nodes: Vec<jazz_types::large_values::PreparedLargeValue>,
+}
+
+impl Batch {
+    fn reader(&self) -> Option<AuthorSubject> {
+        match who(self.identity) {
+            Who::Session(author) => Some(author),
+            Who::Local | Who::Attributed(_) => None,
+        }
+    }
 }
 
 enum BatchKind {
@@ -3832,6 +3934,7 @@ enum BatchKind {
     /// known cut when the first read answers offline.
     Serializable {
         snapshot: u64,
+        accepted_begin: Cut,
         reads: Vec<ReadRecord>,
         pinned: bool,
         /// On a client, its own commits still unsettled at begin: the
@@ -3975,8 +4078,24 @@ impl Inner {
         self.apply_as(op, who, seq)
     }
 
+    /// Attributed writes require a SYSTEM backend. On a replica the authority
+    /// additionally requires a trusted connection before accepting attribution.
+    fn require_attribution_backend(&self) -> Result<(), Error> {
+        if self.identity.author != AuthorSubject::SYSTEM {
+            return Err(unsupported(
+                "backend-attributed writes outside a SYSTEM SQLite backend",
+            ));
+        }
+        Ok(())
+    }
+
     /// Apply one write as `who`: policies apply for a session identity.
     fn apply_as(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
+        if self.non_durable {
+            return Err(unsupported(
+                "writes from a non-durable foreground through its storage owner",
+            ));
+        }
         let author = match who {
             Who::Session(author) | Who::Attributed(author) => author,
             Who::Local => self.stamp_author(),
@@ -4112,6 +4231,34 @@ impl Db {
         self.begin(id, BatchKind::Mergeable)
     }
 
+    /// Open a mergeable batch whose reads and writes use an authenticated
+    /// session. Replica commits are checked by the authority under that session.
+    pub async fn begin_mergeable_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.begin_mergeable(id).await?;
+        self.inner().batches.get_mut(&id).expect("opened").identity =
+            WriteIdentity::Session(author);
+        Ok(())
+    }
+
+    /// Open a SYSTEM backend mergeable batch with separate row provenance.
+    /// Replica attribution still requires a trusted connection to the authority.
+    /// Staged upload attachment continues to require a serializable batch.
+    pub async fn begin_mergeable_for_attribution(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.inner().require_attribution_backend()?;
+        self.begin_mergeable(id).await?;
+        self.inner().batches.get_mut(&id).expect("opened").identity =
+            WriteIdentity::Attribution(author);
+        Ok(())
+    }
+
     /// A serializable transaction: snapshot reads, validated at commit.
     /// On a client the snapshot is the server seq the replica is known
     /// complete through.
@@ -4124,15 +4271,51 @@ impl Db {
                 .map_or(inner.seq, |client| client.known);
             (snapshot, inner.unsettled_own())
         };
+        let accepted_begin = self.inner().accepted_cut(snapshot)?;
         self.begin(
             id,
             BatchKind::Serializable {
                 snapshot,
+                accepted_begin,
                 reads: Vec::new(),
                 pinned: !self.is_client(),
                 own,
             },
         )
+    }
+
+    /// Open a serializable batch for an authenticated session.
+    /// The identity governs its reads, every write and staged upload attachment.
+    /// A replica's authority checks the transport identity; only a trusted
+    /// backend link may submit a different session's writes and claims.
+    pub async fn begin_serializable_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.begin_serializable(id).await?;
+        self.inner
+            .borrow_mut()
+            .batches
+            .get_mut(&id)
+            .expect("opened")
+            .identity = WriteIdentity::Session(author);
+        Ok(())
+    }
+
+    /// Open a SYSTEM backend batch with separate row provenance.
+    /// Upload capabilities must bind the same author. On a replica, attribution
+    /// is accepted only over a trusted backend connection to the authority.
+    pub async fn begin_serializable_for_attribution(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.inner().require_attribution_backend()?;
+        self.begin_serializable(id).await?;
+        self.inner().batches.get_mut(&id).expect("opened").identity =
+            WriteIdentity::Attribution(author);
+        Ok(())
     }
 
     fn begin(&self, id: OpenTransactionId, kind: BatchKind) -> Result<(), Error> {
@@ -4144,8 +4327,12 @@ impl Db {
             id,
             Batch {
                 kind,
+                identity: WriteIdentity::Database,
                 ops: Vec::new(),
+                uploads: Vec::new(),
                 edits: LargeEdits::default(),
+                reads_state: Rc::new(RefCell::new(accepted::ReadState::default())),
+                paired_scope: None,
             },
         );
         Ok(())
@@ -4165,12 +4352,7 @@ impl Db {
     }
 
     pub fn abandon_transaction_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
-        self.inner
-            .borrow_mut()
-            .batches
-            .remove(&id)
-            .map(drop)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
+        self.take_batch(id).map(drop)
     }
 
     pub fn abandon_serializable_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
@@ -4178,15 +4360,22 @@ impl Db {
     }
 
     fn take_batch(&self, id: OpenTransactionId) -> Result<Batch, Error> {
-        self.inner
+        let batch = self
+            .inner
             .borrow_mut()
             .batches
             .remove(&id)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        accepted::close_pending_reads(&batch.reads_state);
+        Ok(batch)
     }
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
+        batch.reads_state.borrow().check_commit()?;
+        if !matches!(batch.kind, BatchKind::Mergeable) {
+            return Err(rejected(format!("transaction {id:?} is not mergeable")));
+        }
         self.commit_ops(&batch, sync::Kind::Mergeable)
     }
 
@@ -4201,6 +4390,7 @@ impl Db {
         id: OpenTransactionId,
     ) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
+        batch.reads_state.borrow().check_commit()?;
         let BatchKind::Serializable {
             snapshot,
             reads,
@@ -4243,7 +4433,7 @@ impl Db {
                         include_deleted: read.include_deleted,
                         ..ReadSpec::default()
                     };
-                    let now = inner.read_versions(&read.prepared, None, &spec)?;
+                    let now = inner.read_versions(&read.prepared, batch.reader(), &spec)?;
                     let changed = now.len() != read.rows.len()
                         || now.iter().zip(&read.rows).any(|(now, then)| {
                             now.0 != then.0
@@ -4297,7 +4487,7 @@ impl Db {
                     include_deleted: read.include_deleted,
                     ..ReadSpec::default()
                 };
-                if inner.read_versions(&read.prepared, None, &spec)? != read.rows {
+                if inner.read_versions(&read.prepared, batch.reader(), &spec)? != read.rows {
                     return Err(conflict(
                         "a row read by the transaction changed since its snapshot",
                     ));
@@ -4308,10 +4498,16 @@ impl Db {
     }
 
     fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+        let _scope = accepted::ClaimsScope::new(self, batch.paired_scope.as_ref());
         self.with_upload(|| self.commit_ops_now(batch, kind))
     }
 
     fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+        if self.inner().non_durable {
+            return Err(unsupported(
+                "commits from a non-durable foreground through its storage owner",
+            ));
+        }
         let ops = &batch.ops;
         let seq = {
             let mut inner = self.inner();
@@ -4321,7 +4517,9 @@ impl Db {
                 .execute_batch("SAVEPOINT commit_batch")
                 .map_err(storage)?;
             let mark = inner.changed.borrow().len();
-            let applied = inner.apply_with_edits(ops, &batch.edits, ops.len(), seq);
+            let applied = inner
+                .apply_with_edits(ops, &batch.edits, 0, seq)
+                .and_then(|()| inner.record_issued_seq(seq));
             if let Err(error) = applied {
                 inner.rollback_savepoint("commit_batch").map_err(storage)?;
                 inner.changed.borrow_mut().truncate(mark);
@@ -4331,12 +4529,15 @@ impl Db {
                 .conn
                 .execute_batch("RELEASE commit_batch")
                 .map_err(storage)?;
-            if !ops.is_empty() {
-                inner.seq = seq;
-            }
+            inner.seq = seq;
             seq
         };
-        self.record_upload(ops.iter().map(|(_, op)| op.clone()).collect(), seq, 0, kind);
+        self.record_upload(
+            ops.iter().map(|(_, op)| op.clone()).collect(),
+            seq,
+            Some(batch.identity),
+            kind,
+        );
         self.notify();
         Ok(TxReceipt(seq))
     }
@@ -4389,6 +4590,23 @@ impl Db {
     }
 
     fn stage_op(&self, id: OpenTransactionId, mut op: StagedOp) -> Result<(), Error> {
+        {
+            let inner = self.inner.borrow();
+            let batch = inner
+                .batches
+                .get(&id)
+                .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+            let identity = op.identity().unwrap_or(WriteIdentity::Database);
+            if identity != WriteIdentity::Database && identity != batch.identity {
+                return Err(rejected("write identity differs from its transaction"));
+            }
+            if let WriteIdentity::Session(author) = batch.identity {
+                op.attribute(author, true);
+            } else if let WriteIdentity::Attribution(author) = batch.identity {
+                inner.require_attribution_backend()?;
+                op.attribute(author, false);
+            }
+        }
         // A counter write's change is from what the transaction sees.
         self.in_overlay(id, None, |inner, _| inner.counter_deltas(&mut op))?;
         // Validate against the overlay now, so errors surface at the call.
@@ -4442,10 +4660,12 @@ impl Db {
         include_deleted: bool,
     ) -> Result<(), Error> {
         let mut inner = self.inner();
-        let Some(Batch {
-            kind: BatchKind::Serializable { snapshot, own, .. },
-            ..
-        }) = inner.batches.get(&id)
+        let Some(
+            batch @ Batch {
+                kind: BatchKind::Serializable { snapshot, own, .. },
+                ..
+            },
+        ) = inner.batches.get(&id)
         else {
             return Ok(());
         };
@@ -4454,7 +4674,16 @@ impl Db {
             cut: Some(inner.serializable_cut(*snapshot, own)?),
             ..ReadSpec::default()
         };
-        let rows = inner.read_versions(prepared, None, &read)?;
+        let rows = inner.read_versions(prepared, batch.reader(), &read)?;
+        let prepared = if prepared.request_claims.is_none() {
+            let author = batch.reader().unwrap_or(inner.identity.author);
+            prepared.clone().with_identity_claims(
+                author,
+                inner.claims.get(&author).cloned().unwrap_or_default(),
+            )
+        } else {
+            prepared.clone()
+        };
         if let Some(Batch {
             kind: BatchKind::Serializable { reads, .. },
             ..
@@ -4553,6 +4782,44 @@ impl TxRef<'_> {
         prepared: &PreparedQuery,
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let mut guard = self.db.transaction_read_guard(self.id, false)?;
+        guard.wait().await?;
+        self.db.check_read_guard(self.id, &guard)?;
+        let scope = self
+            .db
+            .inner()
+            .batches
+            .get(&self.id)
+            .and_then(|batch| batch.paired_scope.clone());
+        let prepared = match scope {
+            Some((author, claims)) => {
+                guard.require_success();
+                if prepared
+                    .request_claims
+                    .as_ref()
+                    .is_some_and(|scope| *scope != (author, claims.clone()))
+                {
+                    return Err(rejected(
+                        "transaction read claims differ from its paired reads",
+                    ));
+                }
+                prepared.clone().with_identity_claims(author, claims)
+            }
+            None => prepared.clone(),
+        };
+        let result = self
+            .all_prepared_with_inner(&prepared, include_deleted, &guard)
+            .await;
+        guard.finish(&result);
+        result
+    }
+
+    async fn all_prepared_with_inner(
+        &self,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+        guard: &accepted::ReadGuard,
+    ) -> Result<Vec<CurrentRow>, Error> {
         // A client hydrates a serializable read from the authority at the
         // snapshot first, unless the link cannot answer (then the replica
         // answers and the authority's validation decides).
@@ -4607,6 +4874,7 @@ impl TxRef<'_> {
             let at = pinned.then_some(snapshot);
             Db::remote_shape(&prepared.query)?;
             let through = self.db.fetch(prepared, at, include_deleted, None).await?;
+            self.db.check_read_guard(self.id, guard)?;
             if let Some(Batch {
                 kind:
                     BatchKind::Serializable {
@@ -4626,16 +4894,17 @@ impl TxRef<'_> {
         }
         // Relations nest inside the overlay, so they see staged rows too.
         let rows = self.db.in_overlay(self.id, None, |inner, cut| {
+            let reader = inner.batches.get(&self.id).and_then(Batch::reader);
             let roots = inner.run(
                 prepared,
-                None,
+                reader,
                 &ReadSpec {
                     include_deleted,
                     cut,
                     ..ReadSpec::default()
                 },
             )?;
-            inner.nest_relations(prepared, None, roots)
+            inner.nest_relations(prepared, reader, roots)
         })?;
         self.db.record_read(self.id, prepared, include_deleted)?;
         Ok(rows)

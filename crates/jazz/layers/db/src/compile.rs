@@ -256,6 +256,9 @@ pub struct Cut {
     pub seq: u64,
     pub own: u64,
     pub extra: Vec<u64>,
+    /// Restrict every source, including policy dependencies, to authority
+    /// evidence admitted locally no later than this observation ordinal.
+    pub accepted_observed: Option<u64>,
 }
 
 impl Cut {
@@ -367,6 +370,38 @@ impl<'a> Ctx<'a> {
         };
         let seq = self.bind(Sql::Integer(cut.seq as i64));
         let own = self.bind(Sql::Integer(cut.own as i64));
+        if let Some(observed) = cut.accepted_observed {
+            let observed = self.bind(Sql::Integer(observed as i64));
+            let stored = self.bind(Sql::Text(table.stored.as_bytes().to_vec()));
+            let eligible = |alias: &str| {
+                format!(
+                    "({alias}._seq = {own} OR ({alias}._seq <= {seq} AND EXISTS \
+                 (SELECT 1 FROM _jazz_accepted_rows_v1 a WHERE a.t={stored} \
+                  AND a.id={alias}.id AND a.k={alias}._b AND a.seq={alias}._seq \
+                  AND a.observed<={observed})))"
+                )
+            };
+            let history = quote(&format!("{}__h", table.stored));
+            let qualified = |alias: &str, keep_rid: bool| {
+                columns
+                    .split(", ")
+                    .filter(|column| keep_rid || *column != "rid")
+                    .map(|column| format!("{alias}.{column}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            return format!(
+                "(SELECT {} FROM {name} c WHERE {} UNION ALL \
+                 SELECT NULL, {} FROM {history} h JOIN {name} c ON c.id=h.id AND c._b=h._b \
+                 WHERE NOT {} AND h._seq=(SELECT MAX(h2._seq) FROM {history} h2 \
+                 WHERE h2.id=h.id AND h2._b=h._b AND {}))",
+                qualified("c", true),
+                eligible("c"),
+                qualified("h", false),
+                eligible("c"),
+                eligible("h2")
+            );
+        }
         // Seqs are integers, so the extra commits are inlined.
         let extra = cut
             .extra

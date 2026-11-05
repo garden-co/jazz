@@ -19,22 +19,24 @@ use serde_json::json;
 
 use common::{allow_all_policies, compile_schema};
 
+fn public_schema() -> jazz::tools::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("notes")
+                .column("title", ColumnType::Text)
+                .policies(allow_all_policies()),
+        )
+        .table(
+            TableSchemaBuilder::new("comments")
+                .column("note", ColumnType::Uuid)
+                .column("body", ColumnType::Text)
+                .policies(allow_all_policies()),
+        )
+        .build()
+}
+
 fn schema() -> JazzSchema {
-    compile_schema(
-        &SchemaBuilder::new()
-            .table(
-                TableSchemaBuilder::new("notes")
-                    .column("title", ColumnType::Text)
-                    .policies(allow_all_policies()),
-            )
-            .table(
-                TableSchemaBuilder::new("comments")
-                    .column("note", ColumnType::Uuid)
-                    .column("body", ColumnType::Text)
-                    .policies(allow_all_policies()),
-            )
-            .build(),
-    )
+    compile_schema(&public_schema())
 }
 
 fn identity(node: u8) -> DbIdentity {
@@ -426,6 +428,84 @@ fn empty_cells() -> Vec<u8> {
     .unwrap()
 }
 
+/// Alice stages a large value through the host binding, edits it in the same
+/// serializable batch, and publishes both writes together. Invalid attachment
+/// consumes its capability; neither rollback nor retry can publish it later.
+#[test]
+fn staged_upload_and_partial_edit_share_one_binding_transaction() {
+    use jazz::db::{LargeValueUpdate, LargeValueUpdatePage, LargeValueUpdateSplice};
+    let alice = open(0xa1);
+    let upload = |id: u8| {
+        let mut streaming = alice
+            .begin_streaming_mutation(
+                "notes".to_owned(),
+                &[id; 16],
+                &empty_cells(),
+                "title".to_owned(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        streaming.push("x".repeat(200 * 1024).as_bytes()).unwrap();
+        let staged = streaming.stage().unwrap();
+        assert!(streaming.finish().is_err());
+        staged
+    };
+    let tx = OpenTransactionId::new().to_string();
+    alice
+        .begin_transaction(&tx, "serializable", None, None)
+        .unwrap();
+    let mut staged = upload(3);
+    staged.attach(&tx).unwrap();
+    assert!(!staged.abort().unwrap());
+    alice
+        .update_large_values_in_transaction(
+            &tx,
+            "notes",
+            &[3; 16],
+            &empty_cells(),
+            vec![LargeValueUpdate::Splice {
+                column: "title".to_owned(),
+                within: LargeValueUpdatePage::TextUtf8 { from: 0, to: 1 },
+                splices: vec![LargeValueUpdateSplice {
+                    at: 0,
+                    delete: 1,
+                    insert: b"A".to_vec(),
+                }],
+            }],
+            None,
+        )
+        .unwrap();
+    alice
+        .insert_in_transaction(&tx, "notes", &title("manifest"), &none())
+        .unwrap();
+    assert!(titles(&alice).is_empty());
+    alice.commit_transaction(&tx, Some("serializable")).unwrap();
+    assert_eq!(
+        titles(&alice),
+        [
+            format!("A{}", "x".repeat(200 * 1024 - 1)),
+            "manifest".to_owned()
+        ]
+    );
+
+    let mut invalid = upload(4);
+    assert!(invalid.attach("invalid transaction").is_err());
+    assert!(invalid.attach(&tx).is_err());
+    assert!(!invalid.abort().unwrap());
+    let tx = OpenTransactionId::new().to_string();
+    alice
+        .begin_transaction(&tx, "serializable", None, None)
+        .unwrap();
+    upload(5).attach(&tx).unwrap();
+    alice.rollback_transaction(&tx).unwrap();
+    assert_eq!(titles(&alice).len(), 2);
+}
+
 fn comment(note: RowUuid, body: &str) -> Vec<u8> {
     let descriptor =
         RecordDescriptor::new([("note", ValueType::Uuid), ("body", ValueType::String)]);
@@ -511,4 +591,43 @@ fn a_relation_read_nests_each_relation_in_its_parents_cells() {
             (Value::String("without".to_owned()), vec![]),
         ]
     );
+}
+
+/// A receipt belongs to its database node, including shared schema views; a
+/// different database with the same numeric sequence cannot reinterpret it.
+#[test]
+fn write_state_and_wait_preserve_receipt_ownership() {
+    use jazz::tx::{DurabilityTier, Fate, RejectionReason};
+    let alice = open(1);
+    let bob = open(2);
+    let write = alice
+        .insert("notes", &title("first"), &json!({"rowId": vec![9;16]}))
+        .unwrap();
+    assert_eq!(alice.write_state(&write).unwrap().fate, Fate::Pending);
+    assert!(argument(bob.write_state(&write)).contains("different database node"));
+    assert!(matches!(
+        bob.wait_for_write(&write, "local"),
+        Err(HostError::Argument(_))
+    ));
+    let view = alice
+        .register_schema(&serde_json::to_vec(&public_schema()).unwrap())
+        .unwrap();
+    assert_eq!(
+        view.write_state(&write).unwrap(),
+        alice.write_state(&write).unwrap()
+    );
+    block_on(view.wait_for_write(&write, "local").unwrap()).unwrap();
+    let rejected = alice
+        .insert("notes", &title("duplicate"), &json!({"rowId": vec![9;16]}))
+        .unwrap();
+    let state = alice.write_state(&rejected).unwrap();
+    assert!(matches!(
+        state.fate,
+        Fate::Rejected(RejectionReason::MalformedCommit(_))
+    ));
+    assert_eq!(state.durability, DurabilityTier::None);
+    for _ in 0..2 {
+        assert!(block_on(alice.wait_for_write(&rejected, "local").unwrap()).is_err());
+    }
+    assert_eq!(alice.write_state(&rejected).unwrap(), state);
 }
