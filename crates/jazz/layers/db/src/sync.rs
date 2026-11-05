@@ -1708,7 +1708,12 @@ struct LiveRead {
     /// drops them. Kept across reconnects until the read's first `Holds`
     /// on the new connection replaces them, so a resumed read the server
     /// answers from what the replica held finds them still there.
-    holds: HashSet<(String, [u8; 16])>,
+    ///
+    /// Two cases over-retain, by design: a row held only under the holds a
+    /// replacing `Holds` dropped is not judged again until a later listing
+    /// leaves it out, and a read the server never answers again (its
+    /// upstream gone for good) keeps its holds until it closes.
+    holds: HashMap<String, HashSet<[u8; 16]>>,
     /// Whether this connection told the read what it holds yet.
     told: bool,
 }
@@ -2373,59 +2378,98 @@ struct Watches {
     by_owner: HashMap<u64, HashSet<u64>>,
     /// The row each row watch names (stored table and id): what a
     /// subscription holds, as the replica is told it (see
-    /// [`SyncMessage::Holds`]).
+    /// [`SyncMessage::Holds`]). Table names are shared.
     names: HashMap<u64, RowName>,
-    /// The named rows each subscription was last told it holds.
-    told: HashMap<u64, HashMap<u64, RowName>>,
-    /// Subscriptions whose holds changed since they were last told.
-    dirty: HashSet<u64>,
+    tables: HashSet<Rc<str>>,
+    /// Subscriptions whose opening went out: only they are told what
+    /// they hold, all of it with the opening, then each change.
+    opened: HashSet<u64>,
+    /// Opened since last told: owed all they hold.
+    opening: HashSet<u64>,
+    /// Each told subscription's row watches held (true) or released
+    /// (false) since it was last told, as they happen.
+    changes: HashMap<u64, HashMap<u64, (bool, RowName)>>,
 }
 
 /// A row by stored table and id.
-type RowName = (String, [u8; 16]);
+type RowName = (Rc<str>, [u8; 16]);
 
 impl Watches {
     /// The watch on row `id` of stored table `table`, named so a
     /// subscription's rows can be told to the replica.
     fn row(&mut self, table: &str, id: [u8; 16]) -> u64 {
         let key = id_watch(table, id);
-        self.names
-            .entry(key)
-            .or_insert_with(|| (table.to_owned(), id));
+        if !self.names.contains_key(&key) {
+            let table = match self.tables.get(table) {
+                Some(shared) => shared.clone(),
+                None => {
+                    let shared: Rc<str> = Rc::from(table);
+                    self.tables.insert(shared.clone());
+                    shared
+                }
+            };
+            self.names.insert(key, (table, id));
+        }
         key
     }
 
-    /// What each subscription whose held rows changed holds now that it
-    /// was not told, and what it was told that it holds no more.
+    /// Subscription `owner`'s opening went out: what it holds is told
+    /// with the next `Holds`, never before (an unsettled delta may hold
+    /// rows ahead of it, and the replica takes a read's first `Holds` on
+    /// a connection for all it holds).
+    fn opened(&mut self, owner: u64) {
+        if self.opened.insert(owner) {
+            self.opening.insert(owner);
+            self.changes.remove(&owner);
+        }
+    }
+
+    /// Record that `owner` holds (or no longer holds) row watch `key`.
+    fn note(&mut self, owner: u64, key: u64, held: bool) {
+        if !self.opened.contains(&owner) || self.opening.contains(&owner) {
+            return;
+        }
+        if let Some(name) = self.names.get(&key) {
+            self.changes
+                .entry(owner)
+                .or_default()
+                .insert(key, (held, name.clone()));
+        }
+    }
+
+    /// For each opened subscription whose held rows changed since it was
+    /// last told: all it holds, with its opening, else what it holds now
+    /// and what it holds no more.
     fn take_holds(&mut self) -> Vec<SyncMessage> {
-        let mut dirty: Vec<u64> = self.dirty.drain().collect();
-        dirty.sort_unstable();
+        let wire = |name: &RowName| (name.0.to_string(), name.1);
         let mut out = Vec::new();
-        for owner in dirty {
-            let now: HashMap<u64, RowName> = self
+        let mut opening: Vec<u64> = self.opening.drain().collect();
+        opening.sort_unstable();
+        for owner in opening {
+            let mut added: Vec<(String, [u8; 16])> = self
                 .by_owner
                 .get(&owner)
                 .into_iter()
                 .flatten()
-                .filter_map(|key| Some((*key, self.names.get(key)?.clone())))
+                .filter_map(|key| self.names.get(key).map(wire))
                 .collect();
-            // A read's first word on a connection is all it holds, even
-            // nothing: it replaces what the replica kept from before.
-            let first = !self.told.contains_key(&owner);
-            let told = self.told.entry(owner).or_default();
-            let mut added: Vec<RowName> = now
-                .iter()
-                .filter(|(key, _)| !told.contains_key(key))
-                .map(|(_, name)| name.clone())
-                .collect();
-            let mut removed: Vec<RowName> = told
-                .iter()
-                .filter(|(key, _)| !now.contains_key(key))
-                .map(|(_, name)| name.clone())
-                .collect();
-            *told = now;
-            if !first && added.is_empty() && removed.is_empty() {
-                continue;
+            added.sort_unstable();
+            out.push(SyncMessage::Holds {
+                id: owner,
+                added,
+                removed: Vec::new(),
+            });
+        }
+        let mut changed: Vec<(u64, HashMap<u64, (bool, RowName)>)> = self.changes.drain().collect();
+        changed.sort_unstable_by_key(|(owner, _)| *owner);
+        for (owner, keys) in changed {
+            let (mut added, mut removed) = (Vec::new(), Vec::new());
+            for (held, name) in keys.values() {
+                if *held {
+                    added.push(wire(name));
+                } else {
+                    removed.push(wire(name));
+                }
             }
             added.sort_unstable();
             removed.sort_unstable();
@@ -2463,7 +2507,7 @@ impl Watches {
         let new = self.by_owner.entry(owner).or_default().insert(key);
         if new {
             *self.holders.entry(key).or_default() += 1;
-            self.dirty.insert(owner);
+            self.note(owner, key, true);
         }
         (fresh, new)
     }
@@ -2488,7 +2532,7 @@ impl Watches {
             .get_mut(&owner)
             .is_some_and(|keys| keys.remove(&key))
         {
-            self.dirty.insert(owner);
+            self.note(owner, key, false);
             self.drop_hold(key);
         }
     }
@@ -2496,8 +2540,9 @@ impl Watches {
     /// Everything `owner` held: it ended, so the replica drops what it
     /// was told along with the read.
     fn release(&mut self, owner: u64) {
-        self.told.remove(&owner);
-        self.dirty.remove(&owner);
+        self.opened.remove(&owner);
+        self.opening.remove(&owner);
+        self.changes.remove(&owner);
         for key in self.by_owner.remove(&owner).unwrap_or_default() {
             self.drop_hold(key);
         }
@@ -2506,10 +2551,13 @@ impl Watches {
     /// An evicted row: the replica holds no copy, so nobody watches it.
     fn forget(&mut self, key: u64) {
         if self.holders.remove(&key).is_some() {
-            for (owner, keys) in self.by_owner.iter_mut() {
-                if keys.remove(&key) {
-                    self.dirty.insert(*owner);
-                }
+            let owners: Vec<u64> = self
+                .by_owner
+                .iter_mut()
+                .filter_map(|(owner, keys)| keys.remove(&key).then_some(*owner))
+                .collect();
+            for owner in owners {
+                self.note(owner, key, false);
             }
         }
         self.unwatched(key);
@@ -7047,12 +7095,12 @@ impl Db {
             // for that read and would not ship it again.
             if let Some(client) = inner.client.as_ref() {
                 stale.retain(|row| {
-                    let name = (table.clone(), *row.0.as_bytes());
                     !client
                         .reads
                         .values()
                         .filter_map(ActiveRead::live)
-                        .any(|live| live.holds.contains(&name))
+                        .filter_map(|live| live.holds.get(&table))
+                        .any(|rows| rows.contains(row.0.as_bytes()))
                 });
             }
             if stale.is_empty() || stale == previous {
@@ -7568,7 +7616,7 @@ impl Inner {
                 refused: refused.clone(),
                 global: global.clone(),
                 visible: None,
-                holds: HashSet::new(),
+                holds: HashMap::new(),
                 told: false,
             }),
         );
@@ -8662,10 +8710,17 @@ impl Db {
                             if !std::mem::replace(&mut live.told, true) {
                                 live.holds.clear();
                             }
-                            for row in removed {
-                                live.holds.remove(&row);
+                            for (table, row) in removed {
+                                if let Some(rows) = live.holds.get_mut(&table) {
+                                    rows.remove(&row);
+                                    if rows.is_empty() {
+                                        live.holds.remove(&table);
+                                    }
+                                }
                             }
-                            live.holds.extend(added);
+                            for (table, row) in added {
+                                live.holds.entry(table).or_default().insert(row);
+                            }
                         }
                     }
                     SyncMessage::ConnectionSettled { through } => {
@@ -10798,9 +10853,9 @@ impl Db {
                         global,
                     });
                     // Its first `Holds` on this connection goes with its
-                    // opening, even if it holds nothing: not before, so
-                    // what the replica kept stands until then.
-                    watch.dirty.insert(id);
+                    // opening, even if it holds nothing, and none before
+                    // it: what the replica kept stands until then.
+                    watch.opened(id);
                     // The settled opening listed the result.
                     if let Some((.., opened)) = inner.sessions[index].subs.get_mut(&id) {
                         *opened = true;
@@ -13302,6 +13357,44 @@ impl Db {
 mod tests {
     use super::*;
     use crate::ids::NodeUuid;
+
+    fn holds(message: &SyncMessage) -> (u64, Vec<[u8; 16]>, Vec<[u8; 16]>) {
+        let SyncMessage::Holds { id, added, removed } = message else {
+            panic!("not a Holds: {message:?}");
+        };
+        let ids = |rows: &[(String, [u8; 16])]| rows.iter().map(|(_, id)| *id).collect();
+        (*id, ids(added), ids(removed))
+    }
+
+    /// A read is told nothing it holds before its opening (an unsettled
+    /// delta at a relay may hold rows ahead of it, and the replica takes
+    /// the first `Holds` for all of them), then all it holds, then each
+    /// change.
+    #[test]
+    fn holds_wait_for_the_opening_then_carry_changes() {
+        let mut watch = Watches::default();
+        let (a, b) = ([1; 16], [2; 16]);
+        let key_a = watch.row("rooms", a);
+        watch.hold(7, key_a);
+        assert!(watch.take_holds().is_empty(), "not opened yet");
+
+        watch.opened(7);
+        let key_b = watch.row("rooms", b);
+        watch.hold(7, key_b);
+        let told = watch.take_holds();
+        assert_eq!(told.len(), 1);
+        assert_eq!(holds(&told[0]), (7, vec![a, b], vec![]), "all it holds");
+        assert!(watch.take_holds().is_empty(), "nothing changed since");
+
+        watch.release_key(7, key_a);
+        let told = watch.take_holds();
+        assert_eq!(holds(&told[0]), (7, vec![], vec![a]), "what it lost");
+
+        // An opened read that holds nothing is still told so.
+        watch.opened(8);
+        let told = watch.take_holds();
+        assert_eq!(holds(&told[0]), (8, vec![], vec![]));
+    }
 
     #[test]
     fn replace_name_rewrites_only_whole_names() {
