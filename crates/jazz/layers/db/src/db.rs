@@ -2778,6 +2778,7 @@ impl Db {
             let (notify, handle) = self.write_unnotified(&table, |inner, seq| {
                 let edits = inner.chunk_large_cells(&mut op)?;
                 inner.counter_deltas(&mut op)?;
+                inner.derived.extend(edits.derived);
                 inner.pending_nodes.extend(edits.pending_nodes);
                 let applied = inner.apply_as(&op, who, seq);
                 inner.clear_derived();
@@ -5508,8 +5509,7 @@ impl Inner {
             Value::Large(large) => return self.bind_large(column, large, cells),
             _ => return Self::bind_value(value),
         };
-        if logical.len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES
-            || !crate::large::large_capable(column)
+        if logical.len() <= crate::large::inline_max(column) || !crate::large::large_capable(column)
         {
             return Self::bind_value(value);
         }
@@ -5591,7 +5591,7 @@ impl Inner {
         if let Some(possession) = &self.possession {
             possession.settle.borrow_mut().push(large.root.object_hash);
         }
-        self.large_cell(large)
+        self.large_cell(large, crate::large::inline_max(column))
     }
 
     /// Settle the receipts of the trees the applied commit's cells proved
@@ -5606,14 +5606,33 @@ impl Inner {
         Ok(())
     }
 
-    /// The cell of a chunked value this store holds the chunks for. A value
-    /// an edit shrank to the inline threshold is stored inline, so each
-    /// logical value has exactly one inline cell.
-    pub(crate) fn large_cell(
+    /// The cell of a chunked value received from upstream: always the
+    /// chunked cell. Receiving a descriptor never pulls nodes (SPEC 19.8),
+    /// so one at or under this column's threshold (from a peer under
+    /// another threshold or schema) is not read to inline it; cells are
+    /// store-local, and its first local write stores it canonically.
+    pub(crate) fn received_cell(
         &self,
         large: &jazz_types::large_values::LargeValueRef,
     ) -> Result<Sql, Error> {
-        if large.byte_length <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES as u64 {
+        Ok(Sql::Integer(crate::large::intern(
+            &self.conn,
+            &self.chunks,
+            large,
+        )?))
+    }
+
+    /// The cell of a chunked value this store holds the chunks for, in a
+    /// column whose inline threshold is `inline_max`
+    /// ([`crate::large::inline_max`]). A value an edit shrank to the
+    /// threshold is stored inline, so each logical value has exactly one
+    /// inline cell.
+    pub(crate) fn large_cell(
+        &self,
+        large: &jazz_types::large_values::LargeValueRef,
+        inline_max: usize,
+    ) -> Result<Sql, Error> {
+        if large.byte_length <= inline_max as u64 {
             let bytes = self.chunks.value_bytes(large)?;
             return Ok(crate::large::inline_cell(large.kind, bytes));
         }
@@ -5645,21 +5664,7 @@ impl Inner {
         let Some(column) = table.columns.iter().find(|c| c.name == column) else {
             return Ok(None);
         };
-        let sql = format!(
-            "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2",
-            quote(&column.stored),
-            quote(&table.stored)
-        );
-        let cell: Option<Sql> = self
-            .conn
-            .cached_row(
-                &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), key],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(storage)?;
-        match cell {
+        match self.stored_cell(table, row, key, column)? {
             Some(cell) => column_from_sql(column, cell.as_ref(), &self.chunks),
             None => Ok(None),
         }
@@ -5671,13 +5676,24 @@ impl Inner {
     /// write then travels (to the authority, in a pending upload, through
     /// every overlay replay) as that reference instead of the whole value,
     /// and its nodes are pushed as chunks ahead of it.
-    pub(crate) fn chunk_large_cells(&self, op: &mut StagedOp) -> Result<LargeEdits, Error> {
+    ///
+    /// A root update over a chunked value writes the edit that makes it
+    /// ([`Self::whole_write_as_edit`]): an editor that writes its document
+    /// whole on every keystroke costs a few bytes per keystroke, on the wire
+    /// and in history.
+    pub(crate) fn chunk_large_cells(&mut self, op: &mut StagedOp) -> Result<LargeEdits, Error> {
         let mut edits = LargeEdits::default();
-        let (table_name, cells) = match op {
-            StagedOp::Insert(t, c, _)
-            | StagedOp::Update(t, _, c, _)
-            | StagedOp::Upsert(t, _, c, _, _) => (t.clone(), c),
-            StagedOp::Restore(t, _, Some(c), _) => (t.clone(), c),
+        let (table_name, row, cells) = match op {
+            StagedOp::Insert(t, c, _) => (t.clone(), None, c),
+            StagedOp::Update(t, r, c, o) => {
+                let root = matches!(o.target, crate::options::WriteTarget::Root);
+                (t.clone(), root.then_some((*r, o.identity)), c)
+            }
+            StagedOp::Upsert(t, r, c, _, o) => {
+                let root = matches!(o.target, crate::options::WriteTarget::Root);
+                (t.clone(), root.then_some((*r, o.identity)), c)
+            }
+            StagedOp::Restore(t, _, Some(c), _) => (t.clone(), None, c),
             _ => return Ok(edits),
         };
         let schema = self.schema.clone();
@@ -5697,8 +5713,22 @@ impl Inner {
                 Value::Bytes(bytes) => bytes.as_slice(),
                 _ => continue,
             };
-            if logical.len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES {
+            if logical.len() <= crate::large::inline_max(column) {
                 continue;
+            }
+            if let Some((row, identity)) = &row {
+                let marks = (self.derived.len(), self.pending_nodes.len());
+                if let Some(edited) =
+                    self.whole_write_as_edit(&table_name, *row, column, logical, *identity)
+                {
+                    // The write carries what the edit made, as any edit's does.
+                    edits.derived.extend(self.derived.drain(marks.0..));
+                    edits
+                        .pending_nodes
+                        .extend(self.pending_nodes.drain(marks.1..));
+                    *value = edited;
+                    continue;
+                }
             }
             let prepared = jazz_types::large_values::prepare(crate::large::kind(column), logical)
                 .map_err(|e| rejected(format!("`{}`: {e}", column.name)))?;
@@ -5757,7 +5787,7 @@ impl Inner {
     /// merged over the write's base. `at` is the branch key and seq the
     /// write lands at.
     fn merged_cells(
-        &self,
+        &mut self,
         table: &Table,
         row: RowUuid,
         held: Option<&[u8]>,
@@ -5772,10 +5802,7 @@ impl Inner {
                 MergeStrategy::Lww => continue,
                 MergeStrategy::Text | MergeStrategy::Markdown | MergeStrategy::Html => {
                     match self.text_merged(table, row, held, at, column, value)? {
-                        Some(merged) if column.nullable() => {
-                            Value::Nullable(Some(Box::new(Value::String(merged))))
-                        }
-                        Some(merged) => Value::String(merged),
+                        Some(merged) => self.merged_text(table, row, held, column, merged)?,
                         None => continue,
                     }
                 }
@@ -5799,6 +5826,60 @@ impl Inner {
             cells.insert(column.name.clone(), merged);
         }
         Ok(cells)
+    }
+
+    /// A text merge's result as the column stores it. Over a chunked held
+    /// value, it is that value with the one splice that makes the merge, so
+    /// the merge costs its epoch a few bytes and travels as an edit, as the
+    /// keystrokes it merges did; any other merge is written whole.
+    fn merged_text(
+        &mut self,
+        table: &Table,
+        row: RowUuid,
+        held: Option<&[u8]>,
+        column: &crate::values::Column,
+        merged: String,
+    ) -> Result<Value, Error> {
+        // A held value this store cannot read here (its chunks not fetched)
+        // leaves the merge whole, as a whole write is left.
+        let edited = match held {
+            Some(held) if merged.len() > crate::large::inline_max(column) => self
+                .stored_cell(table, row, held, column)
+                .ok()
+                .flatten()
+                .and_then(|cell| self.as_edit_of(&table.name, column, cell, merged.as_bytes())),
+            _ => None,
+        };
+        let value = edited.unwrap_or(Value::String(merged));
+        Ok(if column.nullable() {
+            Value::Nullable(Some(Box::new(value)))
+        } else {
+            value
+        })
+    }
+
+    /// A column's stored cell in branch `key` of a row: its SQLite value,
+    /// before chunks are read.
+    fn stored_cell(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        column: &crate::values::Column,
+    ) -> Result<Option<Sql>, Error> {
+        let sql = format!(
+            "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2",
+            quote(&column.stored),
+            quote(&table.stored)
+        );
+        self.conn
+            .cached_row(
+                &sql,
+                rusqlite::params![row.0.as_bytes().to_vec(), key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)
     }
 
     /// A text write merged on the authority (SPEC 4 §4.3): when a version
@@ -8590,11 +8671,14 @@ impl Db {
         mut op: StagedOp,
         mut edits: LargeEdits,
     ) -> Result<(), Error> {
+        // A whole write over a chunked value becomes its edit of the value
+        // the batch sees: its earlier writes applied, no other batch's.
+        let chunked = self.in_overlay(id, None, |inner, _| inner.chunk_large_cells(&mut op))?;
         let marks = {
             let mut inner = self.inner.staging();
             inner.require_mutation_admission()?;
             inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
-            let chunked = inner.chunk_large_cells(&mut op)?;
+            edits.derived.extend(chunked.derived);
             edits.pending_nodes.extend(chunked.pending_nodes);
             let batch = inner
                 .batches

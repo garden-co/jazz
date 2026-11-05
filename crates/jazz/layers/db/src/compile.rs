@@ -188,6 +188,8 @@ struct LargeColumn {
     cell: String,
     table: String,
     column: String,
+    /// The column's inline threshold ([`crate::large::inline_max`]).
+    inline_max: usize,
 }
 
 /// SQL text plus its positional parameters.
@@ -3224,9 +3226,7 @@ fn flip(op: &CmpOp) -> CmpOp {
 fn long_literal(column: &LargeColumn) -> Error {
     unsupported(format!(
         "comparing `{}.{}` with a literal over {} bytes",
-        column.table,
-        column.column,
-        jazz_types::large_values::INLINE_VALUE_MAX_BYTES
+        column.table, column.column, column.inline_max
     ))
 }
 
@@ -3267,6 +3267,7 @@ impl Ctx<'_> {
                     cell: sql,
                     table: table.stored.clone(),
                     column: col.stored.clone(),
+                    inline_max: crate::large::inline_max(col),
                 })
             }
             _ => Term::Sql(sql),
@@ -3468,8 +3469,7 @@ impl Ctx<'_> {
         value: &Sql,
     ) -> Result<String, Error> {
         let c = &column.cell;
-        if literal_of(value)
-            .is_some_and(|literal| literal.len() > jazz_types::large_values::INLINE_VALUE_MAX_BYTES)
+        if literal_of(value).is_some_and(|literal| literal.len() > column.inline_max)
             && matches!(op, CmpOp::Eq | CmpOp::Ne)
         {
             return Err(long_literal(column));
@@ -3527,9 +3527,9 @@ impl Ctx<'_> {
             // A chunked cell is in no list of inline values; a longer
             // literal is refused as `=` refuses it.
             let long = |option: &Term| match option {
-                Term::Bound(_, value) => literal_of(value).is_some_and(|literal| {
-                    literal.len() > jazz_types::large_values::INLINE_VALUE_MAX_BYTES
-                }),
+                Term::Bound(_, value) => {
+                    literal_of(value).is_some_and(|literal| literal.len() > column.inline_max)
+                }
                 _ => false,
             };
             if options.iter().any(long) {

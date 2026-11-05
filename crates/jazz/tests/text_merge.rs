@@ -688,18 +688,20 @@ fn large_values_merge_edits_at_both_ends() {
     // The merged value is stored as a local write's would be: chunked.
     let stored = net.core.stored_bytes_for_test("docs", row, "body").unwrap();
     assert!(stored < 64 * 1024, "{stored} bytes stored inline");
-    // Bob's write as sent is kept, chunked too: the seed, alice's version,
-    // the merge and bob's value as sent each hold a tree.
+    // Bob's write as sent is kept, chunked too. Each whole write was stored
+    // as the splice that makes it, and the merge as a splice of the held
+    // value, so the seed, alice's version, the merge and bob's value as
+    // sent all share the seed's tree.
     assert_eq!(net.core.as_sent_versions_for_test().unwrap(), 1);
     let (_, roots) = net.core.large_value_nodes_for_test().unwrap();
-    assert_eq!(roots, 4);
+    assert_eq!(roots, 1);
     // Bob's next write is built on the merge, settled: his value as sent
     // goes, and with it its tree's reference.
     let next = net.edit(1, row, &[("body", "short")]);
     net.settle(1, next);
     assert_eq!(net.core.as_sent_versions_for_test().unwrap(), 0);
     let (_, roots) = net.core.large_value_nodes_for_test().unwrap();
-    assert_eq!(roots, 3);
+    assert_eq!(roots, 1);
 }
 
 #[test]

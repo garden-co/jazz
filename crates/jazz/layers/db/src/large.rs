@@ -264,6 +264,18 @@ pub(crate) fn large_capable(column: &Column) -> bool {
     matches!(ty, ValueType::String | ValueType::Bytes)
 }
 
+/// The most logical bytes a value of `column` keeps inline; a longer one
+/// is chunked. Text-merge columns chunk early
+/// ([`lv::TEXT_MERGE_INLINE_MAX_BYTES`]), every other column at
+/// [`lv::INLINE_VALUE_MAX_BYTES`].
+pub(crate) fn inline_max(column: &Column) -> usize {
+    if column.merge.text_format().is_some() {
+        lv::TEXT_MERGE_INLINE_MAX_BYTES
+    } else {
+        lv::INLINE_VALUE_MAX_BYTES
+    }
+}
+
 /// The column's declared kind.
 pub(crate) fn kind(column: &Column) -> LargeValueKind {
     use crate::records::ValueType;
