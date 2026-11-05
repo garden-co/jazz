@@ -104,7 +104,7 @@ afterEach(async () => {
 
 async function mount(child: ReturnType<typeof defineComponent>): Promise<Mounted> {
   const session = await createJazzClient({
-    appId: APP_ID,
+    scope: APP_ID,
     serverUrl: SERVER_URL,
     driver: { type: "memory" },
     initial: "local-first",
