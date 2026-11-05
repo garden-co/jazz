@@ -591,6 +591,8 @@ export const jazzTiers: Record<
     /** A second price line, such as a usage charge. */
     priceExtra?: string;
     summary: string;
+    /** A short footnote under the summary. */
+    note?: string;
   }
 > = {
   oss: { name: "Jazz OSS (MIT)", price: "Free", summary: "A single server instance of any size" },
@@ -604,6 +606,7 @@ export const jazzTiers: Record<
     price: "$200/mo",
     priceExtra: "+ $50/mo per 1,000 peak active sessions",
     summary: "Unlimited sharded instances",
+    note: "Peak active sessions: the monthly 95th percentile of sessions active per minute. A session is active when it writes, subscribes or receives an update.",
   },
 };
 

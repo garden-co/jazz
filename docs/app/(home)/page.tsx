@@ -518,6 +518,11 @@ export default function HomePage() {
                 <Text as="p" display="block" color="secondary">
                   {jazzTiers[id].summary}
                 </Text>
+                {jazzTiers[id].note ? (
+                  <Text as="p" display="block" type="supporting" color="secondary">
+                    {jazzTiers[id].note}
+                  </Text>
+                ) : null}
                 {id === "scale" ? (
                   <div className="mt-2">
                     <Button
