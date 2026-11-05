@@ -28,3 +28,7 @@ path = "src/bin/do_cost.rs"
 [[bin]]
 name = "doc-shelf-threshold"
 path = "src/bin/threshold.rs"
+
+[[bin]]
+name = "doc-shelf-splice-wire"
+path = "src/bin/splice_wire.rs"
