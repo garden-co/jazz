@@ -120,6 +120,7 @@ export function OpenTodos() {
   // As an alternative to traditional querying via api/todos
   // you can query and write to Jazz directly from the client
   // which will do real-time sync through the /jazz route
+  // either through a thin client or fully local-first with offline support
   const db = useDb();
   const { data: todos = [] } = useAll(
     app.todos.where({ done: false }),
