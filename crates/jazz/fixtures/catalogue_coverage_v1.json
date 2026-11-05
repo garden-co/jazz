@@ -1,0 +1,6 @@
+{
+  "format": "jazz.sqlite.catalogue-coverage.v1",
+  "request_hex": "0001000000000000000000000000010000000000000100000003444444444444444444444444444444441c5b2275726e3a6a617a7a3a73797374656d222c2273797374656d225d00",
+  "reply_hex": "15014444444444444444444444444444444455555555555555555555555555555555666666666666666666666666666666661c5b2275726e3a6a617a7a3a73797374656d222c2273797374656d225d00",
+  "assembly": "Independent field assembly: Read=0,id=1. Query empty table, filters, joins, flat_join, policy_branches, reachable, inherits, includes, array_subqueries, select, order_by, aggregate (12 zero tags/counts); limit Some(0)=01 00; offset/relation/partial=00 00 00. Then empty binding, include_deleted false, Remote=1, wait None, Current=0, since None, CatalogueOnce=3; fixed schema UUID; canonical SYSTEM author string (length 28), empty claims. Reply CatalogueCovered=21,id=1, fixed schema/namespace/names-digest 16 bytes each, same scope. No authority row coordinate, row payload or durable encoding."
+}
