@@ -23,7 +23,7 @@ import {
 import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
 import { DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
-import { followUser, type UserFollowingSession } from "./follow-user.js";
+import { firstBackendAnswer, followUser, type UserFollowingSession } from "./follow-user.js";
 
 export type { LocalFirstLoader };
 
@@ -175,6 +175,7 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
     }),
   });
   if (loadLocalFirst) upgradeInBackground(session, loadLocalFirst);
+  await firstBackendAnswer(session);
   return session;
 }
 

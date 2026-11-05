@@ -1398,8 +1398,27 @@ impl Db {
             physical.union(&schema)?;
             physical
         } else {
+            // SQLite knows a stored column by name only. Every version the
+            // file admitted gives the columns it stores their types, in
+            // admission order and then the opening schema, as the live
+            // store's union grew: the opening schema is not always the
+            // newest (a server core reopens under its genesis while later
+            // versions' tables and columns take writes, #4769).
             let mut physical = stored_schema(&conn, &config.schema)?;
-            let ddl = physical.union(&schema)?;
+            let mut ddl = String::new();
+            for (version, earlier) in &admitted {
+                if *version == config.schema.version_id() {
+                    continue;
+                }
+                if let Some(stored) = names.get(version) {
+                    ddl.push_str(&physical.union(&Schema::stored_as(
+                        earlier,
+                        stored,
+                        names.tags(),
+                    ))?);
+                }
+            }
+            ddl.push_str(&physical.union(&schema)?);
             execute_script(&conn, &ddl)?;
             physical
         };
