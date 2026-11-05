@@ -363,16 +363,67 @@ struct ChunkStoreChoice {
 /// While a batch is out or backing off, the nodes reads wait on are
 /// fetched beside it on a second thread
 /// ([`jazz::db::Db::take_chunk_fetches`]), so a read never waits for a
-/// batch's uploads, nor for the backoff of puts that failed.
+/// batch's uploads, nor for the backoff of puts that failed. Fetches that
+/// fail back off the same way, in both lanes: until the wait is over,
+/// batches go out without fetches
+/// ([`jazz::db::Db::take_chunk_io_holding_fetches`]), so uploads that
+/// succeed do not ask the store again for what it refused.
 struct ChunkIoRunner {
     batches: Lane,
     out: std::cell::Cell<bool>,
-    /// Consecutive failed batches, and when the next may start.
-    failures: std::cell::Cell<u32>,
-    not_before: std::cell::Cell<Option<std::time::Instant>>,
+    /// How long until the next batch, after batches failed.
+    backoff: Backoff,
     fetches: Lane,
     /// Whether fetches are out on [`Self::fetches`].
     fetching: std::cell::Cell<bool>,
+    /// How long until the next fetches, after fetches failed.
+    fetch_backoff: Backoff,
+}
+
+/// What a [`ChunkIoRunner`] may hand over: a batch (`fetches`: with what
+/// reads wait on in it), and fetches on their own lane.
+#[derive(Debug, PartialEq, Eq)]
+struct Plan {
+    batch: bool,
+    fetches: bool,
+    fetch_lane: bool,
+}
+
+/// Consecutive failures of one kind of chunk I/O, and when it may go
+/// again: 1 s after the first, doubling up to a minute.
+#[derive(Default)]
+struct Backoff {
+    failures: std::cell::Cell<u32>,
+    not_before: std::cell::Cell<Option<std::time::Instant>>,
+}
+
+impl Backoff {
+    /// Whether the last failure's wait is still on.
+    fn waiting(&self) -> bool {
+        self.not_before
+            .get()
+            .is_some_and(|at| std::time::Instant::now() < at)
+    }
+
+    /// An attempt ended; `failed` delays the next. Returns whether to log
+    /// the failure: the first of a run, then once the wait is at its
+    /// longest.
+    fn ended(&self, failed: bool) -> bool {
+        if !failed {
+            self.failures.set(0);
+            self.not_before.set(None);
+            return false;
+        }
+        let failures = self.failures.get().saturating_add(1);
+        self.failures.set(failures);
+        let (first, longest) = CHUNK_IO_BACKOFF;
+        let wait = first
+            .checked_mul(1 << (failures - 1).min(16))
+            .unwrap_or(longest)
+            .min(longest);
+        self.not_before.set(Some(std::time::Instant::now() + wait));
+        failures == 1 || wait == longest
+    }
 }
 
 /// A thread that runs chunk I/O and hands each outcome to `finish` on the
@@ -458,23 +509,29 @@ impl ChunkIoRunner {
                 Owner::finish_chunk_io,
             )?,
             out: std::cell::Cell::new(false),
-            failures: std::cell::Cell::new(0),
-            not_before: std::cell::Cell::new(None),
+            backoff: Backoff::default(),
             fetches: Lane::start("jazz-chunk-fetch", store, work, Owner::finish_chunk_fetches)?,
             fetching: std::cell::Cell::new(false),
+            fetch_backoff: Backoff::default(),
         })
     }
 
     /// Hand the runtime's next batch over, unless one is out or the last
-    /// failed too recently; then hand over what reads wait on beside it.
+    /// failed too recently; then hand over what reads wait on beside it,
+    /// unless fetches are out or failed too recently.
     fn pump(&self, owner: &Owner) {
-        if !(self.out.get()
-            || self
-                .not_before
-                .get()
-                .is_some_and(|at| std::time::Instant::now() < at))
-        {
-            match owner.db.take_chunk_io() {
+        let Plan {
+            batch,
+            fetches,
+            fetch_lane,
+        } = self.plan();
+        if batch {
+            let taken = if fetches {
+                owner.db.take_chunk_io()
+            } else {
+                owner.db.take_chunk_io_holding_fetches()
+            };
+            match taken {
                 // Nothing to do: dropping an empty batch ends it.
                 Ok(Some(io)) if io.is_empty() => {}
                 Ok(Some(io)) => {
@@ -487,7 +544,7 @@ impl ChunkIoRunner {
                 Err(error) => tracing::warn!(%error, "take large-value store I/O"),
             }
         }
-        if self.fetching.get() {
+        if !fetch_lane {
             return;
         }
         match owner.db.take_chunk_fetches() {
@@ -502,24 +559,28 @@ impl ChunkIoRunner {
         }
     }
 
+    /// What [`Self::pump`] may hand over now.
+    fn plan(&self) -> Plan {
+        let fetches = !self.fetch_backoff.waiting();
+        Plan {
+            batch: !self.out.get() && !self.backoff.waiting(),
+            fetches,
+            fetch_lane: fetches && !self.fetching.get(),
+        }
+    }
+
     /// A batch came back; `failed` delays the next. Returns whether to log
     /// the failure: the first of a run, then once the wait is at its longest.
     fn returned(&self, failed: bool) -> bool {
         self.out.set(false);
-        if !failed {
-            self.failures.set(0);
-            self.not_before.set(None);
-            return false;
-        }
-        let failures = self.failures.get().saturating_add(1);
-        self.failures.set(failures);
-        let (first, longest) = CHUNK_IO_BACKOFF;
-        let wait = first
-            .checked_mul(1 << (failures - 1).min(16))
-            .unwrap_or(longest)
-            .min(longest);
-        self.not_before.set(Some(std::time::Instant::now() + wait));
-        failures == 1 || wait == longest
+        self.backoff.ended(failed)
+    }
+
+    /// Fetches came back; `failed` delays the next, in both lanes. Returns
+    /// whether to log the failure, as [`Self::returned`] does.
+    fn fetched(&self, failed: bool) -> bool {
+        self.fetching.set(false);
+        self.fetch_backoff.ended(failed)
     }
 }
 
@@ -2285,13 +2346,18 @@ impl Owner {
     /// A network chunk store's batch came back: apply it (the tick that
     /// follows this job hands the next one over).
     /// Fetches run beside a batch came back: install them. A failure
-    /// refuses the reads waiting on them; it does not delay batches.
+    /// refuses the reads waiting on them, and holds fetches back (batches
+    /// go on without them) for the backoff.
     fn finish_chunk_fetches(&mut self, done: jazz::chunk_store::ChunkIoDone) {
-        if let Some(runner) = &self.chunk_io {
-            runner.fetching.set(false);
-        }
-        if let Err(error) = self.db.finish_chunk_fetches(done) {
-            tracing::warn!(%error, app = self.app.as_deref().unwrap_or("?"), "large-value store fetch failed; the reads waiting on it are refused");
+        let finished = self.db.finish_chunk_fetches(done);
+        let log = match &self.chunk_io {
+            Some(runner) => runner.fetched(finished.is_err()),
+            None => finished.is_err(),
+        };
+        if let Err(error) = finished
+            && log
+        {
+            tracing::warn!(%error, app = self.app.as_deref().unwrap_or("?"), "large-value store fetch failed; the reads waiting on it are refused, and fetches retry with backoff");
         }
     }
 
@@ -3040,7 +3106,7 @@ mod tests {
         );
         let runner = ChunkIoRunner::start(store, work).unwrap();
         let wait = |runner: &ChunkIoRunner| {
-            runner.not_before.get().map(|at| {
+            runner.backoff.not_before.get().map(|at| {
                 at.saturating_duration_since(Instant::now())
                     .as_secs_f64()
                     .round() as u64
@@ -3059,5 +3125,49 @@ mod tests {
         );
         assert!(!runner.returned(false));
         assert_eq!(wait(&runner), None);
+    }
+
+    /// What the runner hands over as lanes go out, come back and fail:
+    /// failed fetches hold fetches back in both lanes for their backoff,
+    /// while batches (of uploads) still go; a failed batch does not hold
+    /// fetches back.
+    #[test]
+    fn failed_fetches_back_off_in_both_lanes() {
+        let (work, _work) = std_mpsc::channel();
+        let store: Arc<dyn jazz::chunk_store::ChunkStore> = Arc::new(
+            jazz::chunk_store::FileChunkStore::new(tempfile::tempdir().unwrap().keep()).unwrap(),
+        );
+        let runner = ChunkIoRunner::start(store, work).unwrap();
+        let plan = |batch, fetches, fetch_lane| Plan {
+            batch,
+            fetches,
+            fetch_lane,
+        };
+        assert_eq!(runner.plan(), plan(true, true, true));
+        runner.out.set(true);
+        runner.fetching.set(true);
+        assert_eq!(runner.plan(), plan(false, true, false), "both out");
+
+        // Fetches fail: batches go on without fetches, the lane waits.
+        assert!(runner.fetched(true), "the first failure is logged");
+        runner.out.set(false);
+        assert_eq!(runner.plan(), plan(true, false, false));
+        assert!(
+            !runner.fetched(true),
+            "nor the next ones, until the longest wait"
+        );
+        assert_eq!(runner.plan(), plan(true, false, false));
+
+        // Once fetches succeed, both lanes fetch again.
+        runner.fetch_backoff.not_before.set(None);
+        assert_eq!(runner.plan(), plan(true, true, true));
+        runner.fetching.set(true);
+        assert!(!runner.fetched(false));
+        assert_eq!(runner.fetch_backoff.failures.get(), 0);
+
+        // A failed batch waits, and fetches go on beside it.
+        runner.out.set(true);
+        assert!(runner.returned(true));
+        assert_eq!(runner.plan(), plan(false, true, true));
     }
 }

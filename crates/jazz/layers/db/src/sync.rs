@@ -13371,8 +13371,7 @@ struct Answered {
 impl Inner {
     /// The chunk store is asked again: every session's pulls it failed to
     /// answer are answered again with it (as deferred pulls, once the
-    /// session's outbox drains), and their nodes are wanted in the batch
-    /// that starts now. Whether there were any.
+    /// session's outbox drains). Whether there were any.
     pub(crate) fn retry_store_failed_pulls(&mut self) -> bool {
         let mut any = false;
         for index in 0..self.sessions.len() {
@@ -13381,14 +13380,8 @@ impl Inner {
                 continue;
             }
             any = true;
-            for pull in &pulls {
-                self.chunks.add_demand(
-                    pull.nodes
-                        .iter()
-                        .map(|hash| ChunkRequest { object_hash: *hash }),
-                    pull.span.map(|(start, end)| (pull.root, start..end)),
-                );
-            }
+            // Answered again, they want from the store what it holds of
+            // them (their offloaded leaves), as any pull does.
             self.sessions[index].deferred_pulls.extend(pulls);
         }
         any
