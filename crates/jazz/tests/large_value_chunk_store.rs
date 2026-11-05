@@ -1192,6 +1192,36 @@ fn a_batch_reports_the_fetches_it_failed() {
     assert_eq!(run_elsewhere(uploads, store.clone()).fetches_failed(), None);
 }
 
+/// A batch that fetched an object that is not the one asked for (a bucket
+/// handing back the wrong bytes) failed that fetch, as the fetch lane does.
+#[test]
+fn a_batch_counts_the_wrong_object_as_a_failed_fetch() {
+    let (_dir, path) = scratch();
+    let remote = Remote::default();
+    let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
+    let value = text(76, LARGE);
+    moved_to(&path, &store, &value);
+    for bytes in remote.objects().map.values_mut() {
+        bytes[0] ^= 0xff;
+    }
+    let server = open_host_io(&path, store.clone());
+    let sub = subscribe_to(&server);
+    let mut reported = None;
+    for _ in 0..16 {
+        block_on(sub.alice.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+        if let Some(io) = server.take_chunk_io().unwrap() {
+            let done = run_elsewhere(io, store.clone());
+            reported = done.fetches_failed();
+            let _ = server.finish_chunk_io(done);
+            if reported.is_some() {
+                break;
+            }
+        }
+    }
+    assert_eq!(reported, Some(true));
+}
+
 /// A batch that holds fetches back (the host's fetches are backing off)
 /// takes no fetches and leaves the reads refused for the last failed ones
 /// refused; the next fetches ask again.
