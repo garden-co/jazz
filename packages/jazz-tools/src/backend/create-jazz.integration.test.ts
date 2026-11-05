@@ -19,6 +19,7 @@ import {
   memory,
   remote,
   sqlite,
+  vercel,
   type Jazz,
 } from "./index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
@@ -1250,10 +1251,15 @@ describe("createJazz", () => {
     const second = await createJazz({ app, permissions, store: sqlite({ path: dir }) }).ready();
     cleanups.push(() => second.close());
     expect(second.appId).toBe(appId);
-    // Naming another app for this store is refused; naming its own is fine.
+    // The store keeps its own id: naming one is refused, not ignored.
     expect(() =>
-      createJazz({ app, permissions, store: sqlite({ path: dir, appId: randomUUID() }) }),
-    ).toThrow(/belongs to app/);
+      sqlite({ path: dir, appId: randomUUID() } as unknown as Parameters<typeof sqlite>[0]),
+    ).toThrow(/appId is not an option.*migrate-alpha59/);
+    expect(() => memory({ appId: randomUUID() } as never)).toThrow(/appId is not an option/);
+    // vercel() too, when called: in dev its local store would never read it.
+    expect(() => vercel({ appId: randomUUID() } as never)).toThrow(
+      /vercel\(\): appId is not an option/,
+    );
     const rows = await second.db.all(app.todos.where({ id: inserted.id }));
     expect(rows.map((todo) => todo.title)).toEqual(["kept"]);
   }, 60_000);

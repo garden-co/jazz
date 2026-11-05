@@ -10,7 +10,7 @@ import { prepareTestAccount } from "../../../testing/accounts.js";
 import { describe, it, expect, afterEach } from "vitest";
 import { render } from "solid-js/web";
 import { App } from "../../src/App.js";
-import { APP_ID, SERVER_URL } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 import type { DbConfig } from "jazz-tools";
 
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
@@ -131,11 +131,11 @@ describe("Solid Todo App E2E", () => {
     const serverUrl = SERVER_URL;
 
     const el1 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
     });
     const el2 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
     });
 

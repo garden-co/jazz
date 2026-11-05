@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -87,11 +86,10 @@ function memoryStore(): AccountStore {
 
 describe("browser session against the app's backend", () => {
   it("signs in on the thin client and upgrades with a client loader", async () => {
-    const appId = randomUUID();
     const jazz = await createJazz({
       app,
       permissions,
-      store: memory({ appId }),
+      store: memory(),
       authenticate,
     }).ready();
     cleanups.push(() => jazz.close());
