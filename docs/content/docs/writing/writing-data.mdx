@@ -4,23 +4,29 @@ description: "Learn how to insert, update and delete rows, show sync status and 
 reviewedAt: "b29b48d1a"
 ---
 
-## Local-first writes
+## How writes work
 
-Ordinary mutations execute against the local database first. `insert`, `restore`, `upsert`,
-`update`, and `delete` return a `MutationResult` immediately. Each result contains:
+Writes are methods on the `Db` handle: `insert`, `upsert`, `update`, `delete` and `restore`. Each
+call commits as its own transaction, which the server checks against your
+[declarative permissions](/docs/schemas/policies) and accepts or rejects as a whole. To make several
+reads and writes commit together, group them in a [transaction](#transactions).
 
-- `value`&hairsp;—&hairsp;The local result. `insert` and `restore` return the row; `upsert`, `update`,
-  and `delete` return `undefined`.
-- `txId`&hairsp;—&hairsp;A promise for the committed transaction ID. This is the durable identity
-  of this write; it does not mean the write has reached a server yet.
-- `wait(...)`&hairsp;—&hairsp;A method that waits for the mutation to reach a specific
-  [durability tier](#write-durability-tiers).
+Every write returns a `MutationResult`:
 
-The local `value` does not mean that the mutation has reached a server.
+- `value`&hairsp;—&hairsp;The written result. `insert` and `restore` return the row; `upsert`,
+  `update`, and `delete` return `undefined`.
+- `txId`&hairsp;—&hairsp;A promise for the committed transaction ID, the durable identity of this
+  write.
+- `wait(...)`&hairsp;—&hairsp;A method that waits until the write is confirmed at a
+  [durability tier](#write-durability-tiers), for example accepted by the server.
 
-Jazz also allows grouping writes together using [transactions](#transactions).
 Writes made through an open transaction are not individually waitable. Wait on the result returned
 by the transaction or its `commit()` call instead.
+
+When a write shows up depends on the client. A thin client shows it after the server answers. A
+[local-first client](/docs/setup/web-client/local-first-client) applies it to its local database
+first, so it shows at once, before the server has seen it.
+[Write durability tiers](#write-durability-tiers) covers what that means when you wait.
 
 ## Getting a `Db` handle
 
@@ -79,8 +85,8 @@ Mutations are methods on the database handle. All three take a table as their fi
 ### Upsert with a known ID
 
 Use `upsert(...)` when your app already knows the row ID and wants to create that row if it does
-not exist, or update it if it does. Like `insert`, `update`, and `delete`, it applies locally first
-and returns a `MutationResult<void>` that can be awaited for durability.
+not exist, or update it if it does. Like `insert`, `update`, and `delete`, it returns a
+`MutationResult<void>` that can be awaited for durability.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
@@ -218,9 +224,19 @@ await db.transaction(async (tx) => {
 Only the pages a diff touches are rewritten, so streaming many small appends
 into a long value stays cheap however long it grows.
 
+## Transactions
+
+Use a transaction when several reads and writes must share one commit. Use a mergeable transaction
+for most work. Use a serializable transaction only when the authority must check the whole
+operation against one stable view of the data.
+
+See [Transactions](/docs/writing/transactions) for examples, error handling and the differences
+between commit and authority acceptance.
+
 ## Write durability tiers
 
-For ordinary mutations and mergeable transactions, `wait({ tier })` controls which
+A write can be confirmed at two points: when the client has saved it, and when the server has
+accepted it. For ordinary mutations and mergeable transactions, `wait({ tier })` controls which
 confirmation the caller waits for:
 
 | Tier     | Resolves when                           |
@@ -388,12 +404,3 @@ flight when the process stopped and are settled on restart, go to whichever `Db`
 first. Jazz keeps up to 256 of them and reports how many it dropped beyond that. A dropped or
 shut-down `Db` releases its listeners, so register long-lived listeners on `jazz.db`: a listener on a
 per-request `Db` stops firing once that `Db` is garbage-collected.
-
-## Transactions
-
-Use a transaction when several reads and writes must share one commit. Use a mergeable transaction
-for normal local-first work. Use a serializable transaction only when the authority must check the
-whole operation against one stable view of the data.
-
-See [Transactions](/docs/writing/transactions) for examples, error handling and the differences
-between commit and authority acceptance.
