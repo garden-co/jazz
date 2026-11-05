@@ -315,6 +315,27 @@ again. Unpinned links (`SYSTEM`, an admin's) are pinned to no bundle and are
 never ended by a publish. Schema-only changes need no reconnect: lenses carry
 sessions across schema versions.
 
+A bundle selects its write schema by structural hash, and several hashes
+compile to one schema version: an index or a column default changes the hash,
+not the version. A deployment that only adds an index or changes a default
+therefore publishes a new bundle for a version the Core admitted already, and
+both bundles stay pinnable side by side (a canary beside production, or the
+older deployment until it is retired). The Core admits that schema too, so it
+builds the new index, and keeps its definition; a bundle resolves whenever its
+version is admitted, whichever hash of it the Core admitted first or reopens
+under. While both are live: a session pinned to a bundle writes by that
+bundle's own schema, so by its defaults (a default is the writer's, filled in
+when a row is inserted); the stored indexes are the union of every admitted
+hash's, and an index is never dropped; and the value a stored column holds for
+rows written before it existed is the default of the admission that added the
+column, which a later default-only deployment never rewrites. Deploying the
+same schema again admits nothing. Building an index is a `CREATE INDEX` inside
+the admission's transaction: the Core serves nothing else while it runs, which
+on a large table can take a while. A store that already published such a
+bundle without building its index (before this rule) gets no index from
+redeploying it, since its row is recorded; a later deployment under a new hash
+that keeps the index builds it.
+
 Retiring a bundle is the app's own job: there is no revocation list. A bundle
 stays pinnable for as long as a deployment that publishes it is reachable, so a
 deployment whose permissions leak is stopped by deleting every deployment that

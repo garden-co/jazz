@@ -9377,12 +9377,18 @@ impl Inner {
     }
 
     /// Admitted `version` under its stored names, governed by `policies`'
-    /// policies.
+    /// policies. A published bundle's own write version is the bundle's
+    /// structural schema (see `Inner::bundle`): its sessions write by its
+    /// defaults, whichever schema of that version this store admitted or
+    /// opened under.
     pub(crate) fn governed_by(
         &self,
         version: crate::ids::SchemaVersionId,
         policies: Rc<Schema>,
     ) -> Option<Rc<Schema>> {
+        if policies.bundle.is_some() && policies.jazz.version_id() == version {
+            return Some(Rc::new((*policies).clone().with_policies_of(policies)));
+        }
         let jazz = if version == self.owner_version {
             &self.owner.jazz
         } else {

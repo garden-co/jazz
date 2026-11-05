@@ -127,6 +127,8 @@ mod relay_serves_on_arrival;
 mod reopened_admitted_versions;
 #[path = "../replica_lost_tail.rs"]
 mod replica_lost_tail;
+#[path = "../same_version_bundles.rs"]
+mod same_version_bundles;
 #[path = "../schema_activation.rs"]
 mod schema_activation;
 #[path = "../schema_renames.rs"]
