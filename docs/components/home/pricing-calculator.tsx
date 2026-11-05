@@ -277,17 +277,21 @@ function PlatformResult({
       {rows.map((row) => (
         <div key={row.key} className="border-t pt-3 text-sm leading-relaxed">
           <p className="text-xs text-fd-muted-foreground">{row.label}</p>
-          <p className="mt-0.5">{traits[row.key]}</p>
           {row.key === "coldWake" && platform.id === "vercel" ? (
-            <label className="mt-1 flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={hibernate}
-                onChange={(event) => onHibernateChange(event.target.checked)}
-              />
-              Hibernate when idle
-            </label>
-          ) : null}
+            <div className="mt-0.5 flex flex-wrap items-baseline justify-between gap-x-3">
+              <p>{traits[row.key]}</p>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={hibernate}
+                  onChange={(event) => onHibernateChange(event.target.checked)}
+                />
+                Hibernate when idle
+              </label>
+            </div>
+          ) : (
+            <p className="mt-0.5">{traits[row.key]}</p>
+          )}
         </div>
       ))}
       {showMore ? (
