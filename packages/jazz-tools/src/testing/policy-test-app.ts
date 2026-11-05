@@ -108,7 +108,7 @@ const LOCAL_FIRST_TOKEN_TTL_SECONDS = 3600;
 /**
  * Build the session a real local-first client presents to a backend: a
  * self-signed local-first token for a key derived from `user_id`, verified and
- * bound to the registry's founding account exactly as `forRequest()` does.
+ * bound to the registry's founding account exactly as `forReqUser()` does.
  * The native runtime then admits it through the same proof check, so no
  * reserved-issuer check is bypassed.
  */

@@ -21,7 +21,7 @@ declare global {
  * BigLabel's Jazz, inside this Next app, mounted under `/jazz` (see
  * app/jazz/[...path]/route.ts). Its `db` holds backend authority: Better Auth
  * persists its rows through it, and the API routes bootstrap labels with it.
- * `forRequest` reads as the signed-in user, under their permissions. Shared
+ * `forReqUser` reads as the signed-in user, under their permissions. Shared
  * across concurrent requests and Next hot reloads.
  */
 export function jazz(): Promise<Jazz> {
