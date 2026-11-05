@@ -451,7 +451,7 @@ export const platforms: Platform[] = [
     traits: {
       coldWake: "None, always on",
       idle: "Billed around the clock",
-      security: "Shield Standard included; WAF, OS patches and TLS are yours",
+      security: "Shield Standard included; WAF, OS patches and TLS are up to you",
       durability: "EBS replicated within one zone, plus snapshots",
       regions: "Any AWS region",
       scale: "48 vCPU / 192 GB (or larger)",
@@ -499,7 +499,7 @@ export const platforms: Platform[] = [
     traits: {
       coldWake: "None, always on",
       idle: "Flat monthly price",
-      security: "Firewall, OS patches and TLS are yours",
+      security: "Firewall, OS patches and TLS are up to you",
       durability: "Server disks plus the backups you schedule",
       regions: "Wherever your provider runs (Hetzner: EU, US, Singapore)",
       scale: "48 vCPU / 192 GB (or larger)",
