@@ -55,20 +55,41 @@ const frameworks = [
   { label: "Cloudflare Workers", href: "/docs/setup/deployment", path: siCloudflareworkers.path },
 ];
 
-/** The frameworks and runtimes Jazz supports, as a row of muted logos. */
+// One line each for frontend, backend and platforms.
+const groups = [
+  { label: "Frontend", end: "Expo" },
+  { label: "Backend", end: "Effect" },
+  { label: "Platforms", end: undefined },
+].map((group, index, all) => {
+  const start = index === 0 ? 0 : frameworks.findIndex((f) => f.label === all[index - 1].end) + 1;
+  const end = group.end
+    ? frameworks.findIndex((f) => f.label === group.end) + 1
+    : frameworks.length;
+  return { label: group.label, items: frameworks.slice(start, end) };
+});
+
+/** The frameworks and runtimes Jazz supports, as lines of muted logos. */
 export function FrameworkLogos() {
   return (
-    <ul className="home-logos" aria-label="Supported frameworks and runtimes">
-      {frameworks.map((framework) => (
-        <li key={framework.label}>
-          <NextLink href={framework.href} className="home-logo">
-            <svg viewBox="0 0 24 24" aria-hidden="true" className="home-logo-mark">
-              <path d={framework.path} />
-            </svg>
-            {framework.label}
-          </NextLink>
-        </li>
+    <div className="flex flex-col gap-3">
+      {groups.map((group) => (
+        <ul
+          key={group.label}
+          className="home-logos"
+          aria-label={`Supported ${group.label.toLowerCase()}`}
+        >
+          {group.items.map((framework) => (
+            <li key={framework.label}>
+              <NextLink href={framework.href} className="home-logo">
+                <svg viewBox="0 0 24 24" aria-hidden="true" className="home-logo-mark">
+                  <path d={framework.path} />
+                </svg>
+                {framework.label}
+              </NextLink>
+            </li>
+          ))}
+        </ul>
       ))}
-    </ul>
+    </div>
   );
 }
