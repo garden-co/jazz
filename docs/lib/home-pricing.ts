@@ -221,8 +221,6 @@ export type Platform = {
   costNote: string;
   /** The properties besides cost that shape the choice, keyed like `traitRows`. */
   traits: Record<TraitKey, string>;
-  /** The button under the prices: a guide to follow, or none yet. */
-  cta: { label: string; href?: string };
   /** Trait text that depends on the assumptions, such as a toggle. */
   traitsFor?: (a: Assumptions) => Partial<Record<TraitKey, string>>;
 };
@@ -303,7 +301,6 @@ function vercelBill(d: Demand, a: Assumptions, size: Size, shards: number, cpu: 
 export const platforms: Platform[] = [
   {
     id: "cloudflare",
-    cta: { label: "Coming soon" },
     name: "Cloudflare Durable Objects",
     billLabel: "Est. Cloudflare bill",
     comingSoon: true,
@@ -366,7 +363,6 @@ export const platforms: Platform[] = [
   },
   {
     id: "vercel",
-    cta: { label: "Deploy on Vercel", href: "/docs/setup/deployment/vercel" },
     name: "Vercel Sandbox",
     billLabel: "Est. Vercel bill",
     params: [
@@ -419,7 +415,6 @@ export const platforms: Platform[] = [
   },
   {
     id: "aws",
-    cta: { label: "Host yourself", href: "/docs/setup/deployment/own-server" },
     name: "AWS EC2",
     billLabel: "Est. AWS bill",
     params: [
@@ -469,7 +464,6 @@ export const platforms: Platform[] = [
   },
   {
     id: "server",
-    cta: { label: "Host yourself", href: "/docs/setup/deployment/own-server" },
     name: "Your own server",
     billLabel: "Est. hosting bill",
     params: [

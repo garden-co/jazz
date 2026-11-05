@@ -190,7 +190,7 @@ function PlatformResult({
   const rows = visibleTraitRows(showMore);
   // Header, button, totals, cost breakdown, sharding note, one row per trait, and the cost
   // note with the details.
-  const resultRows = (SHOW_MODEL_DETAILS ? 5 : 4) + rows.length + (showMore ? 1 : 0);
+  const resultRows = (SHOW_MODEL_DETAILS ? 4 : 3) + rows.length + (showMore ? 1 : 0);
   const {
     platform,
     size,
@@ -220,14 +220,6 @@ function PlatformResult({
             One {largest.label}: {roundMau(mauPerInstance)} MAU at this usage
           </p>
         ) : null}
-      </div>
-      <div>
-        <Button
-          label={platform.cta.label}
-          variant={platform.id === "vercel" ? "primary" : "secondary"}
-          href={platform.cta.href}
-          isDisabled={!platform.cta.href}
-        />
       </div>
       <div className="grid grid-cols-2 gap-4">
         <div>
