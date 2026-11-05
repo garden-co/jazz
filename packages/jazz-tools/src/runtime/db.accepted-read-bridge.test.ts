@@ -182,7 +182,10 @@ it("keeps typed accepted preparation inside an immediate commit and preserves th
     const tx = beginDbTransactionAfter(db, async () => {}, "accepted-evidence");
     const nativeCommit = vi.spyOn(source.client.getRuntime(), "commitTransaction");
     let observed: Awaited<ReturnType<typeof readAcceptedTransactionRows>> | undefined;
+    let assertPreparationActive!: () => void;
     const preparing = prepareDbTransaction(tx, async (scope) => {
+      assertPreparationActive = scope.assertActive;
+      scope.assertActive();
       observed = await scope.readAccepted(app.notes);
       entered();
       await gate;
@@ -192,6 +195,7 @@ it("keeps typed accepted preparation inside an immediate commit and preserves th
     preparing.catch(() => {});
     committed.catch(() => {});
     await started;
+    expect(() => assertPreparationActive()).not.toThrow();
     expect(nativeCommit).not.toHaveBeenCalled();
     expect(() => prepareDbTransaction(tx, async () => {})).toThrow("commit has been requested");
     expect(observed?.rows).toEqual([original.value]);
@@ -202,6 +206,7 @@ it("keeps typed accepted preparation inside an immediate commit and preserves th
     );
     release();
     await Promise.all([preparing, committed]);
+    expect(() => assertPreparationActive()).toThrow(/no longer active/);
     expect(nativeCommit).toHaveBeenCalledOnce();
     expect((await db.all(app.notes, { tier: "remote" })).map((row) => row.body).sort()).toEqual([
       "covered authority content",
