@@ -12,6 +12,9 @@ on:
       - "crates/jazz/**"
       - "crates/jazz-compression/**"
       - "crates/jazz-native-transport/**"
+      - "crates/jazz-napi/**"
+      - "crates/jazz-wasm/**"
+      - "dev/artifacts/**"
       - "packages/jazz-tools/src/**"
       - "package.json"
       - "pnpm-lock.yaml"
@@ -93,12 +96,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
-          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
           prefix-key: rn-device-ios-macos-15
-          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-transport/**') }}
+          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-transport/**', 'crates/jazz-napi/**', 'crates/jazz-wasm/**', 'dev/artifacts/**') }}
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
@@ -108,8 +111,25 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Verify synthetic scope authorization and generated native fixture
         run: cargo test -p jazz-native-relay --example rn_server_session_harness --no-fail-fast
+      # Apple's clang and ar cannot build or archive the WASM build's SQLite
+      # objects. The build finds Homebrew's llvm-ar on its own; point cc-rs at
+      # Homebrew's clang for the wasm32 target.
+      - name: Install LLVM for the WASM build's SQLite
+        run: |
+          set -euo pipefail
+          brew list llvm >/dev/null 2>&1 || brew install llvm
+          echo "CC_wasm32_unknown_unknown=$(brew --prefix llvm)/bin/clang" >> "${GITHUB_ENV}"
+      # The backend loads jazz-tools on Node, whose runtime checks the native
+      # fingerprints staged from release NAPI and fast WASM builds.
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
+      - name: Build the Node runtime of the device app's backend
+        run: pnpm --filter rn-device-acceptance build:device-backend
+      # build:device-backend already builds jazz-tools' React Native entry after
+      # staging the fingerprints, so only jazz-rn is left to build here.
       - name: Build the React Native JavaScript workspace entrypoints
-        run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
+        run: pnpm --filter jazz-rn build
       - name: Build and stage the relay XCFramework
         run: |
           pnpm --filter jazz-rn build:relay:ios
@@ -181,11 +201,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
           prefix-key: rn-device-android-ubuntu-2404
-          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-transport/**') }}
+          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-transport/**', 'crates/jazz-napi/**', 'crates/jazz-wasm/**', 'dev/artifacts/**') }}
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: .cache/android-device-acceptance
@@ -193,8 +214,17 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Verify synthetic scope authorization and generated native fixture
         run: cargo test -p jazz-native-relay --example rn_server_session_harness --no-fail-fast
+      # The backend loads jazz-tools on Node, whose runtime checks the native
+      # fingerprints staged from release NAPI and fast WASM builds.
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
+      - name: Build the Node runtime of the device app's backend
+        run: pnpm --filter rn-device-acceptance build:device-backend
+      # build:device-backend already builds jazz-tools' React Native entry after
+      # staging the fingerprints, so only jazz-rn is left to build here.
       - name: Build the React Native JavaScript workspace entrypoints
-        run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
+        run: pnpm --filter jazz-rn build
       - name: Bootstrap pinned lane-local Android toolchain
         run: dev/rn-device-acceptance/scripts/bootstrap-android.sh --emulator
       - name: Stage and verify all relay ABI artifacts

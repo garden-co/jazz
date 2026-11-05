@@ -26,6 +26,7 @@ import {
   nativeAcceptancePhase,
   recordDeviceDiagnostic,
   recordScopeWriterReadDiagnostic,
+  recordPublicClientWriteDiagnostic,
   recordDeviceReceipt,
   recordNativeSeedBoundary,
   recordSameRuntimeWakeBoundary,
@@ -48,6 +49,11 @@ import { rowIdForRun } from "./src/run-marker";
 async function observeTrustedAdmissionLifecycleInner(
   markFailure: (code: DeviceDiagnosticCode) => void,
 ) {
+  const reportPublicClientWriteFailure = (detail: string) => {
+    try {
+      void recordPublicClientWriteDiagnostic(detail).catch(() => {});
+    } catch {}
+  };
   const reportWriterReadDiagnostic = (detail: string) => {
     try {
       return recordScopeWriterReadDiagnostic(detail).catch(() => {});
@@ -144,6 +150,7 @@ async function observeTrustedAdmissionLifecycleInner(
       markFailure,
       waitForNativeCoreObservation,
       recordNativeSeedBoundary,
+      reportPublicClientWriteFailure,
     );
     const tick = foregroundCodec.decode(rawSibling.execute(foregroundCodec.encode("tick")));
     if (tick.type !== "ticked") throw new Error("public shutdown invalidated its raw sibling");
@@ -194,7 +201,7 @@ async function observeTrustedAdmissionLifecycleInner(
   // This remains byte-only JSI transport: the fixed test record envelope is
   // decoded by the compiled Rust relay, never reconstructed as a JS row API.
   markFailure("foreground-write-failed");
-  proveForegroundWriteAbi(foregroundFactory, scopeB.capability, foregroundCodec);
+  proveForegroundWriteAbi(foregroundFactory, scopeB.capability, foregroundCodec, markFailure);
   // Two aliases opened in this one installed JSI runtime communicate only
   // through their common admitted native relay; B must observe A's committed
   // binding delta. This is deliberately not evidence for two physical JSI

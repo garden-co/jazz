@@ -1,5 +1,7 @@
 //! Local-only Core harness for Android/iOS installed-artifact acceptance.
 //! The device retains its own accounts; the host supplies only endpoint/control metadata.
+//! Devices reach this Core through the app's backend (`scripts/device-backend.mjs`),
+//! which the host driver starts with the admin secret it gives both.
 
 use std::{
     collections::HashMap,
@@ -38,12 +40,15 @@ async fn run() {
     let title = format!("high-level-foreground-row:{run_nonce}");
     let app_id = AppId::from_name("jazz-device-acceptance");
     let schema = device_fixture::schema();
+    let admin_secret =
+        std::env::var("JAZZ_DEVICE_ADMIN_SECRET").expect("host admin secret is required");
     let server_storage = tempfile::tempdir().expect("persistent Core storage");
     let core = JazzServer::builder()
         .with_app_id(app_id)
         .with_data_dir(server_storage.path())
         .with_persistent_storage()
         .with_schema(schema.clone())
+        .with_admin_secret(admin_secret.clone())
         .start()
         .await
         .expect("start test server");
@@ -74,6 +79,7 @@ async fn run() {
     // process means the same harness remains usable by non-Android hosts.
     let receipt = serde_json::json!({
         "server_port": core.port(),
+        "app_id": core.app_id().to_string(),
     });
     println!("JAZZ_RN_SERVER_SESSION {receipt}");
     std::io::stdout().flush().expect("flush harness receipt");
@@ -111,7 +117,6 @@ async fn run() {
     .expect("join control reader");
     assert_eq!(line.trim(), "interrupt-server");
     let server_port = core.port();
-    let admin_secret = core.admin_secret().to_owned();
     assert_eq!(
         core.shutdown().await,
         jazz_server::ShutdownPhase::StorageClosed
