@@ -7130,6 +7130,18 @@ impl Db {
         kind: Kind,
         relayed: Option<Relayed>,
     ) -> Result<(), Error> {
+        self.record_stored_upload_with_identity(ops, seq, kind, relayed, None)
+    }
+
+    /// An explicit batch identity also governs read-only serializable uploads.
+    pub(crate) fn record_stored_upload_with_identity(
+        &self,
+        ops: Vec<StagedOp>,
+        seq: u64,
+        kind: Kind,
+        relayed: Option<Relayed>,
+        identity: Option<WriteIdentity>,
+    ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_none() {
             return Ok(());
@@ -7138,7 +7150,7 @@ impl Db {
         let view = inner.stored_view();
         let active = std::mem::replace(&mut inner.schema, view);
         drop(inner);
-        let recorded = self.record_upload_under_stored_view(ops, seq, kind, relayed);
+        let recorded = self.record_upload_under_stored_view(ops, seq, kind, relayed, identity);
         self.inner.borrow_mut().schema = active;
         recorded
     }
@@ -7149,6 +7161,7 @@ impl Db {
         seq: u64,
         kind: Kind,
         relayed: Option<Relayed>,
+        identity: Option<WriteIdentity>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.tx.is_some() {
@@ -7163,10 +7176,15 @@ impl Db {
         // The writer the authority stamps: an explicit identity, or the
         // system at this node (the authority stamps its own writes as its
         // node, so a trusted link names its own).
-        let session = ops.iter().any(StagedOp::is_session);
-        let author = ops.iter().find_map(StagedOp::author).or_else(|| {
-            (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
-        });
+        let selected = identity.map(who);
+        let session =
+            matches!(selected, Some(Who::Session(_))) || ops.iter().any(StagedOp::is_session);
+        let author = match selected {
+            Some(Who::Session(author) | Who::Attributed(author)) => Some(author),
+            _ => ops.iter().find_map(StagedOp::author).or_else(|| {
+                (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
+            }),
+        };
         // A session's writes carry its claims, for the authority's check.
         let acting = match author {
             None => Acting::Own,
@@ -12028,15 +12046,7 @@ impl Db {
                             };
                             let vouched = vouched(policy, who, acting);
                             self.with_claims(vouched, || {
-                                db.authorize_commit(
-                                    who,
-                                    policy,
-                                    kind,
-                                    ops,
-                                    (node, tx),
-                                    clock,
-                                    possession,
-                                )
+                                db.authorize_commit(who, kind, ops, (node, tx), clock, possession)
                             })
                         }) {
                         // The accepted commit recorded its fate atomically.
@@ -12496,7 +12506,6 @@ impl Db {
     fn authorize_commit(
         &self,
         who: Who,
-        identity: Option<AuthorSubject>,
         mut kind: WireKind,
         ops: Vec<WireOp>,
         id: ([u8; 16], u64),
@@ -12514,6 +12523,12 @@ impl Db {
             .enumerate()
             .flat_map(|(index, op)| op.bases.iter().map(move |base| (index, base.clone())))
             .collect();
+        // A trusted backend's session batch validates reads under the same
+        // session as its writes, not under the transport's SYSTEM privilege.
+        let identity = match who {
+            Who::Session(author) => Some(author),
+            Who::Local | Who::Attributed(_) => None,
+        };
         let ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>() {
             Ok(ops) => ops,
             Err(error) => return Err((error, Vec::new())),
