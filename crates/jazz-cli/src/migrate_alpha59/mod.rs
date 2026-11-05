@@ -136,6 +136,16 @@ struct Head {
     currents: Vec<dump::Current>,
 }
 
+/// alpha.59's winner rule: a settled version replaces a row's `winner` in its
+/// layer (content, or deletion) when it was written on top of it, or later
+/// than it by its transaction's time, then node.
+pub(crate) fn replaces(winner: Option<&dump::TxRef>, version: &dump::Version) -> bool {
+    winner.is_none_or(|winner| {
+        version.parents.contains(winner)
+            || (version.tx_time, version.tx_node) > (winner.time, winner.node)
+    })
+}
+
 /// A row: the active-schema table it lands in, and its id. A row id names a
 /// row within one table, so the same id can occur in several.
 pub(crate) type RowKey = (String, [u8; 16]);
@@ -157,7 +167,9 @@ pub(crate) fn keyed_currents(
             }
             std::collections::hash_map::Entry::Occupied(entry) => {
                 let held = entry.get();
-                if (held.content, held.deletion) != (current.content, current.deletion) {
+                if (&held.content, &held.deletion, &held.created)
+                    != (&current.content, &current.deletion, &current.created)
+                {
                     return Err(format!(
                         "{} row {} has two current states in alpha.59, under two schemas: \
                          not supported yet",
@@ -658,10 +670,7 @@ impl RowImport {
                 time: version.tx_time,
             };
             let layer = (key.clone(), version.deletion.is_some());
-            if let Some(winner) = self.winners.get(&layer)
-                && !version.parents.contains(winner)
-                && (tx.time, tx.node) <= (winner.time, winner.node)
-            {
+            if !replaces(self.winners.get(&layer), &version) {
                 self.superseded += 1;
                 continue;
             }
@@ -1152,6 +1161,13 @@ mod tests {
         };
         assert!(keyed_currents(&to_head, vec![current(1), current(1)]).is_ok());
         let error = keyed_currents(&to_head, vec![current(1), current(2)]).unwrap_err();
+        assert!(error.contains("two current states"), "{error}");
+        let created = |subject| dump::Current {
+            created: Some((author(subject), 3)),
+            ..current(1)
+        };
+        assert!(keyed_currents(&to_head, vec![created("user1"), created("user1")]).is_ok());
+        let error = keyed_currents(&to_head, vec![created("user1"), created("user2")]).unwrap_err();
         assert!(error.contains("two current states"), "{error}");
     }
 

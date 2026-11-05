@@ -31,10 +31,65 @@ use serde_json::{Value as Json, json};
 use super::active::{ToHead, Translated};
 use super::{
     Args, RowKey, active_deployment, convert_author, convert_value, err, keyed_currents,
-    match_schemas, uuid_string,
+    match_schemas, replaces, uuid_string,
 };
 
 const MAX_REPORTED: usize = 20;
+
+/// The latest run of one kind of deletion event on a row.
+struct DeletionRun {
+    deleting: bool,
+    /// Whether the row was deleted before the run.
+    deleted_before: bool,
+}
+
+/// The import's rule for deletion events, replayed alongside: a run of the
+/// same event collapses to its last one, and a run of restores on a live
+/// row writes nothing, so leaves the row's update as it was.
+#[derive(Default)]
+struct DeletionRuns {
+    runs: HashMap<RowKey, DeletionRun>,
+    /// Whether the row was deleted when its last run was closed by content.
+    stored_deleted: HashMap<RowKey, bool>,
+}
+
+impl DeletionRuns {
+    /// Records a version that won its layer of the row.
+    fn accept(&mut self, key: &RowKey, deletion: Option<dump::Deletion>) {
+        match deletion {
+            None => {
+                if let Some(run) = self.runs.remove(key) {
+                    self.stored_deleted.insert(key.clone(), run.deleting);
+                }
+            }
+            Some(event) => {
+                let deleting = event == dump::Deletion::Deleted;
+                let before = match self.runs.get(key) {
+                    Some(run) if run.deleting == deleting => None,
+                    Some(run) => Some(run.deleting),
+                    None => Some(self.stored_deleted.get(key).copied().unwrap_or(false)),
+                };
+                if let Some(deleted_before) = before {
+                    self.runs.insert(
+                        key.clone(),
+                        DeletionRun {
+                            deleting,
+                            deleted_before,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    /// Whether the row's last deletion events are restores of a live row,
+    /// which the import drops.
+    fn live_restore(&self, key: &RowKey) -> bool {
+        self.runs
+            .get(key)
+            .is_some_and(|run| !run.deleting && !run.deleted_before)
+    }
+}
 
 /// A row as alpha.59 reads it.
 struct Expected {
@@ -96,6 +151,8 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
     let mut content: HashMap<RowKey, (u64, dump::Version)> = HashMap::new();
     let mut deletion: HashMap<RowKey, (u64, dump::Version)> = HashMap::new();
     let mut position = 0u64;
+    let mut layer_winners: HashMap<(RowKey, bool), dump::TxRef> = HashMap::new();
+    let mut runs = DeletionRuns::default();
     while let Some(record) = reader.next_record().map_err(err)? {
         match record {
             dump::Record::Schema(schema) => runtime_schemas.push(schema),
@@ -129,6 +186,15 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
                     continue;
                 };
                 let key: RowKey = (table, version.row);
+                if version.fate == "accepted"
+                    && replaces(
+                        layer_winners.get(&(key.clone(), version.deletion.is_some())),
+                        &version,
+                    )
+                {
+                    layer_winners.insert((key.clone(), version.deletion.is_some()), tx);
+                    runs.accept(&key, version.deletion);
+                }
                 let Some(current) = currents.get(&key) else {
                     continue;
                 };
@@ -192,8 +258,12 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
             continue;
         }
         report.check("alpha.59 current state", true, label);
+        // A restore of a live row changed nothing the new store keeps.
+        let live_restore = runs.live_restore(key);
         let (updated_by, updated_at) = match &deletion {
-            Some((at, event)) if *at > content_at => (event.updated_by.clone(), event.updated_at),
+            Some((at, event)) if *at > content_at && !live_restore => {
+                (event.updated_by.clone(), event.updated_at)
+            }
             _ => (content.updated_by.clone(), content.updated_at),
         };
         rows.insert(
@@ -468,4 +538,47 @@ fn canonical(author: &AuthorSubject) -> String {
         serde_json::to_string(&(account.to_string(), issuer, subject))
     }
     .expect("author parts have a JSON spelling")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key() -> RowKey {
+        ("notes".to_owned(), [1; 16])
+    }
+
+    fn replay(events: &[Option<dump::Deletion>]) -> bool {
+        let mut runs = DeletionRuns::default();
+        for event in events {
+            runs.accept(&key(), *event);
+        }
+        runs.live_restore(&key())
+    }
+
+    #[test]
+    fn a_restore_of_a_live_row_keeps_the_rows_update() {
+        use dump::Deletion::{Deleted, Restored};
+        assert!(replay(&[None, Some(Restored)]));
+        assert!(replay(&[None, Some(Restored), Some(Restored)]));
+        assert!(!replay(&[None, Some(Deleted)]));
+        assert!(!replay(&[None, Some(Deleted), Some(Restored)]));
+        assert!(!replay(&[
+            None,
+            Some(Deleted),
+            Some(Deleted),
+            Some(Restored)
+        ]));
+        // Content closes a run; a restore after it is of a deleted row.
+        assert!(!replay(&[None, Some(Deleted), None, Some(Restored)]));
+        // Restored, then content, then restored again: the last restore is
+        // of a live row.
+        assert!(replay(&[
+            None,
+            Some(Deleted),
+            Some(Restored),
+            None,
+            Some(Restored)
+        ]));
+    }
 }

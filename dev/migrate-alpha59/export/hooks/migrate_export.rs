@@ -125,9 +125,6 @@ where
         Ok(versions)
     }
 
-    /// What this node itself reads as each row's current state: the
-    /// transactions of its settled content and deletion winners. `rows` names
-    /// each row by a schema and table it was written under.
     /// What alpha.59 reads as each row's current state, once per physical
     /// table and row the versions touch: its content and deletion winners,
     /// and the creation it reads off the content winner.
