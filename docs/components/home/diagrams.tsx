@@ -31,21 +31,26 @@ function Diagram({
       xmlns="http://www.w3.org/2000/svg"
     >
       <defs>
-        {(["ink", "blue", "mint", "periwinkle", "muted"] as const).map((tone) => (
-          <marker
-            key={tone}
-            id={`dg-arrow-${tone}`}
-            viewBox="0 0 10 10"
-            refX="9"
-            refY="5"
-            markerWidth="10"
-            markerHeight="10"
-            markerUnits="userSpaceOnUse"
-            orient="auto-start-reverse"
-          >
-            <path d="M2 1 L9 5 L2 9" className={`dg-chevron dg-stroke-${tone}`} />
-          </marker>
-        ))}
+        {(["ink", "blue", "mint", "periwinkle", "muted"] as const).map(
+          (tone) => (
+            <marker
+              key={tone}
+              id={`dg-arrow-${tone}`}
+              viewBox="0 0 10 10"
+              refX="9"
+              refY="5"
+              markerWidth="10"
+              markerHeight="10"
+              markerUnits="userSpaceOnUse"
+              orient="auto-start-reverse"
+            >
+              <path
+                d="M2 1 L9 5 L2 9"
+                className={`dg-chevron dg-stroke-${tone}`}
+              />
+            </marker>
+          ),
+        )}
       </defs>
       {children}
     </svg>
@@ -95,17 +100,52 @@ function Wire({
   );
 }
 
-function Frame({ x, y, w, h, tone }: { x: number; y: number; w: number; h: number; tone: Tone }) {
+function Frame({
+  x,
+  y,
+  w,
+  h,
+  tone,
+}: {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  tone: Tone;
+}) {
   if (tone === "shared") {
     // Mint underneath, blue dashes on top: reads as alternating blue/mint.
     return (
       <g>
-        <rect x={x} y={y} width={w} height={h} rx={2} className="dg-box dg-stroke-mint" />
-        <rect x={x} y={y} width={w} height={h} rx={2} className="dg-box-dash dg-stroke-blue" />
+        <rect
+          x={x}
+          y={y}
+          width={w}
+          height={h}
+          rx={2}
+          className="dg-box dg-stroke-mint"
+        />
+        <rect
+          x={x}
+          y={y}
+          width={w}
+          height={h}
+          rx={2}
+          className="dg-box-dash dg-stroke-blue"
+        />
       </g>
     );
   }
-  return <rect x={x} y={y} width={w} height={h} rx={2} className={`dg-box dg-stroke-${tone}`} />;
+  return (
+    <rect
+      x={x}
+      y={y}
+      width={w}
+      height={h}
+      rx={2}
+      className={`dg-box dg-stroke-${tone}`}
+    />
+  );
 }
 
 /** A box with a mono title and optional mono detail lines. */
@@ -149,7 +189,8 @@ function Box({
         ) : null}
       </text>
       {lines?.map((line, index) => {
-        const { text, tone: lineTone } = typeof line === "string" ? { text: line } : line;
+        const { text, tone: lineTone } =
+          typeof line === "string" ? { text: line } : line;
         return (
           <text
             key={text}
@@ -180,7 +221,12 @@ function Label({
   anchor?: "start" | "middle" | "end";
 }) {
   return (
-    <text x={x} y={y} textAnchor={anchor} className={`dg-label dg-fill-${tone}`}>
+    <text
+      x={x}
+      y={y}
+      textAnchor={anchor}
+      className={`dg-label dg-fill-${tone}`}
+    >
       {children}
     </text>
   );
@@ -206,7 +252,9 @@ function Grid({
 }) {
   const w = cols.reduce((sum, col) => sum + col.w, 0);
   const h = rowH * (rows.length + 1);
-  const colX = cols.map((_, index) => x + cols.slice(0, index).reduce((sum, c) => sum + c.w, 0));
+  const colX = cols.map(
+    (_, index) => x + cols.slice(0, index).reduce((sum, c) => sum + c.w, 0),
+  );
   return (
     <g>
       <Frame x={x} y={y} w={w} h={h} tone={tone} />
@@ -218,12 +266,21 @@ function Grid({
           y1={y + rowH * (index + 1)}
           y2={y + rowH * (index + 1)}
           className={
-            index === 0 ? `dg-rule dg-stroke-${tone === "shared" ? "blue" : tone}` : "dg-grid"
+            index === 0
+              ? `dg-rule dg-stroke-${tone === "shared" ? "blue" : tone}`
+              : "dg-grid"
           }
         />
       ))}
       {colX.slice(1).map((cx) => (
-        <line key={`c${cx}`} x1={cx} x2={cx} y1={y} y2={y + h} className="dg-grid" />
+        <line
+          key={`c${cx}`}
+          x1={cx}
+          x2={cx}
+          y1={y}
+          y2={y + h}
+          className="dg-grid"
+        />
       ))}
       {cols.map((col, index) => (
         <text
@@ -251,85 +308,115 @@ function Grid({
   );
 }
 
-/** Clients and server modules each hold a partial copy; Jazz Cloud holds all data. */
+/** Clients sync with Jazz inside your backend, which keeps all data in one store. */
 export function StackDiagram() {
-  const copy = (where: string) => [
-    { text: "partial local copy", tone: "blue" as const },
-    { text: `(${where})`, tone: "blue" as const },
+  const w = 252;
+  const clientY = 16;
+  const clientH = 98;
+  const backendY = 176;
+  const backendH = 82;
+  const storeY = 318;
+  const storeH = 64;
+  const xs = [8, 274, 540];
+  const clients = [
+    {
+      title: "web app",
+      lines: [
+        "thin client, or",
+        { text: "local-first copy (on disk)", tone: "blue" as const },
+        "react · svelte · vue · …",
+      ],
+    },
+    {
+      title: "mobile app",
+      lines: [
+        { text: "local-first copy (on disk)", tone: "blue" as const },
+        "react native",
+      ],
+    },
+    {
+      title: "backend clients",
+      lines: ["trusted machines", "jobs · agents · scripts"],
+    },
   ];
-  const w = 188;
-  const peers = [
-    { x: 8, title: "web app", lines: [...copy("on disk"), "react · svelte · vue · …"] },
-    { x: 206, title: "mobile app", lines: [...copy("on disk"), "react native"] },
-    { x: 404, title: "backend", lines: [...copy("in memory"), "typescript · rust"] },
-    { x: 602, title: "agents & jobs", lines: [...copy("in memory"), "any server"] },
+  const stores = [
+    { title: "sqlite()", lines: ["a file on your server"] },
+    { title: "vercel()", lines: ["sandbox + blob store"] },
+    { title: "remote()", lines: ["jazz cloud"] },
   ];
-  // Jazz Cloud sits left-aligned with the web app. Every peer's wire enters it
-  // from below, at evenly spaced points along its bottom edge: the web app's
-  // goes straight up, the others turn, the farthest peer turning highest so
-  // wires never cross. The one "sync" label by their entries covers them all.
-  const coreX = 8;
-  const coreW = 340;
-  const coreY = 16;
-  const coreH = 82;
-  const coreBottom = coreY + coreH;
-  const peerY = 180;
-  const firstX = peers[0].x + w / 2;
-  // The last entry sits 54px in from the cloud's right edge; the rest share
-  // the span evenly.
-  const lastEntryX = coreX + coreW - 54;
-  const entryGap = (lastEntryX - firstX) / (peers.length - 1);
-  const turnGap = (peerY - coreBottom) / peers.length;
-  const wires: Point[][] = peers.map((peer, index) => {
-    const entryX = firstX + index * entryGap;
-    const peerX = peer.x + w / 2;
-    if (index === 0) {
-      return [
-        [entryX, coreBottom],
-        [peerX, peerY],
-      ];
-    }
-    const turnY = coreBottom + turnGap * (peers.length - index);
-    return [
-      [entryX, coreBottom],
-      [entryX, turnY],
-      [peerX, turnY],
-      [peerX, peerY],
-    ];
-  });
   return (
     <Diagram
-      viewBox="0 0 800 316"
-      label="Web apps, mobile apps, backends and agents each keep a partial local copy of the data they use, on disk or in memory, and sync it with Jazz Cloud, which holds all data and authorizes every write."
+      viewBox="0 0 800 420"
+      label="Web apps, mobile apps and backend clients sync with Jazz running inside your own backend, on your own origin. Your backend signs users in, checks every read and write against your permissions, and keeps all data in one store: SQLite on your server, Vercel, or Jazz Cloud."
     >
-      <Box
-        x={coreX}
-        y={coreY}
-        w={coreW}
-        h={coreH}
-        title="jazz cloud"
-        note="(or self-hosted via CLI)"
-        lines={[{ text: "all data", tone: "blue" }, "authorizes every write"]}
-      />
-      {wires.map((points) => (
-        <Wire key={points[points.length - 1][0]} points={points} start />
-      ))}
-      <Label x={firstX + entryGap / 2} y={coreBottom + 18} anchor="middle">
-        sync
-      </Label>
-      {peers.map((peer) => (
+      {clients.map((client, index) => (
         <Box
-          key={peer.title}
-          x={peer.x}
-          y={peerY}
+          key={client.title}
+          x={xs[index]}
+          y={clientY}
           w={w}
-          h={98}
-          title={peer.title}
-          lines={peer.lines}
+          h={clientH}
+          title={client.title}
+          lines={client.lines}
         />
       ))}
-      <Label x={8} y={304} tone="muted">
-        the clients and server modules making up your app
+      {xs.map((x) => (
+        <Wire
+          key={`c${x}`}
+          points={[
+            [x + w / 2, clientY + clientH],
+            [x + w / 2, backendY],
+          ]}
+          start
+        />
+      ))}
+      <Label x={xs[0] + w / 2 + 10} y={clientY + clientH + 34}>
+        sync over /jazz, same origin
+      </Label>
+      <Box
+        x={8}
+        y={backendY}
+        w={784}
+        h={backendH}
+        tone="mint"
+        title="your backend"
+        note="createJazz()"
+        lines={[
+          {
+            text: "authenticate · permissions · live queries · all data",
+            tone: "mint",
+          },
+          "next.js · hono · express · bun · effect",
+        ]}
+      />
+      {xs.map((x) => (
+        <Wire
+          key={`s${x}`}
+          points={[
+            [x + w / 2, backendY + backendH],
+            [x + w / 2, storeY],
+          ]}
+          tone="muted"
+          dashed
+        />
+      ))}
+      <Label x={xs[0] + w / 2 + 10} y={backendY + backendH + 34} tone="muted">
+        one store, your pick
+      </Label>
+      {stores.map((store, index) => (
+        <Box
+          key={store.title}
+          x={xs[index]}
+          y={storeY}
+          w={w}
+          h={storeH}
+          tone="muted"
+          title={store.title}
+          lines={store.lines}
+        />
+      ))}
+      <Label x={8} y={410} tone="muted">
+        no separate database server, no deploy step
       </Label>
     </Diagram>
   );
@@ -481,7 +568,13 @@ export function PermissionsDiagram() {
 export function HistoryDiagram() {
   const mainY = 70;
   const draftY = 170;
-  const commit = (x: number, y: number, tone: Tone, label: string, below?: boolean) => (
+  const commit = (
+    x: number,
+    y: number,
+    tone: Tone,
+    label: string,
+    below?: boolean,
+  ) => (
     <g key={`${x}-${y}`}>
       <rect
         x={x - 7}
@@ -507,7 +600,13 @@ export function HistoryDiagram() {
       <Label x={16} y={draftY + 5} tone="blue">
         draft
       </Label>
-      <line x1={80} x2={624} y1={mainY} y2={mainY} className="dg-lane dg-stroke-mint" />
+      <line
+        x1={80}
+        x2={624}
+        y1={mainY}
+        y2={mainY}
+        className="dg-lane dg-stroke-mint"
+      />
       <path
         d={rounded(
           [
@@ -527,7 +626,14 @@ export function HistoryDiagram() {
       {commit(310, draftY, "blue", "agent", true)}
       {commit(390, draftY, "blue", "agent", true)}
       {commit(410, mainY, "mint", "sam")}
-      <rect x={513} y={mainY - 7} width={14} height={14} rx={2} className="dg-box dg-stroke-mint" />
+      <rect
+        x={513}
+        y={mainY - 7}
+        width={14}
+        height={14}
+        rx={2}
+        className="dg-box dg-stroke-mint"
+      />
       <rect
         x={513}
         y={mainY - 7}
@@ -554,13 +660,22 @@ export function SchemaDiagram() {
     ["ship v2", "", "doing", "v2"],
     ["fix bug", "", "done", "v2"],
   ];
-  const tone = (version: string): Tone => (version === "v1" ? "blue" : "periwinkle");
+  const tone = (version: string): Tone =>
+    version === "v1" ? "blue" : "periwinkle";
   return (
     <Diagram
       viewBox="0 0 640 336"
       label="A raw table holds the superset of columns from every schema version: title, done from version 1 and status from version 2. Rows written by each version fill only their own columns. App v1 reads and writes it through a lens that maps status to done; app v2 through a lens that maps done to status."
     >
-      <Box x={16} y={16} w={200} h={56} tone="blue" title="app v1" lines={["title · done"]} />
+      <Box
+        x={16}
+        y={16}
+        w={200}
+        h={56}
+        tone="blue"
+        title="app v1"
+        lines={["title · done"]}
+      />
       <Box
         x={424}
         y={16}
@@ -586,7 +701,15 @@ export function SchemaDiagram() {
         tone="periwinkle"
         start
       />
-      <Box x={16} y={108} w={200} h={56} tone="blue" title="lens v1" lines={["status → done"]} />
+      <Box
+        x={16}
+        y={108}
+        w={200}
+        h={56}
+        tone="blue"
+        title="lens v1"
+        lines={["status → done"]}
+      />
       <Box
         x={424}
         y={108}
@@ -628,7 +751,9 @@ export function SchemaDiagram() {
         ]}
         rows={rows.map((row) => row.map((cell) => cell || "·"))}
         rowH={20}
-        cellTone={(r, c) => (c === 0 ? "ink" : rows[r][c] ? tone(rows[r][3]) : "muted")}
+        cellTone={(r, c) =>
+          c === 0 ? "ink" : rows[r][c] ? tone(rows[r][3]) : "muted"
+        }
       />
     </Diagram>
   );
@@ -644,10 +769,35 @@ export function LargeValuesDiagram() {
     append?: boolean;
     op: string;
   }[] = [
-    { name: "events", kind: "stream", chunks: 8, hot: [], append: true, op: "append · stream out" },
-    { name: "video", kind: "binary · 2GB", chunks: 10, hot: [4, 5, 6], op: "read a byte range" },
-    { name: "settings", kind: "json", chunks: 6, hot: [2], op: "read /theme by pointer" },
-    { name: "body", kind: "markdown", chunks: 9, hot: [5], op: "edit mid-document" },
+    {
+      name: "events",
+      kind: "stream",
+      chunks: 8,
+      hot: [],
+      append: true,
+      op: "append · stream out",
+    },
+    {
+      name: "video",
+      kind: "binary · 2GB",
+      chunks: 10,
+      hot: [4, 5, 6],
+      op: "read a byte range",
+    },
+    {
+      name: "settings",
+      kind: "json",
+      chunks: 6,
+      hot: [2],
+      op: "read /theme by pointer",
+    },
+    {
+      name: "body",
+      kind: "markdown",
+      chunks: 9,
+      hot: [5],
+      op: "edit mid-document",
+    },
   ];
   const chunkX = (index: number) => 176 + index * 26;
   return (

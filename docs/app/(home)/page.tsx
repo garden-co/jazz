@@ -37,6 +37,32 @@ export const metadata: Metadata = {
   title: "Jazz - The database that syncs.",
 };
 
+const serverCode = `import { createJazz, sqlite } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+
+export const jazz = createJazz({
+  app,
+  permissions,
+  store: sqlite({ path: "./data/jazz" }),
+  // Your own auth: return { userId } or null
+  authenticate: (request) => getSignedInUser(request),
+});`;
+
+const routeCode = `import { jazz } from "@/jazz.server";
+import { app } from "@/schema";
+
+// Runs as the signed-in user: only their todos
+export async function GET(request: Request) {
+  const db = await jazz.forRequest(request);
+  const todos = await db.all(app.todos.where({ done: false }));
+  return Response.json(todos);
+}`;
+
+const mountCode = `// Sync for browsers, on your own origin
+import { jazz } from "@/jazz.server";
+
+export const { GET, POST, DELETE } = jazz.next();`;
+
 const schemaCode = `import { schema as s } from "jazz-tools";
 
 const schema = {
@@ -50,12 +76,9 @@ const schema = {
   ),
 };
 
-export const app = s.defineApp(schema);`;
+export const app = s.defineApp(schema);
 
-const permissionsCode = `import { schema as s } from "jazz-tools";
-import { app } from "./schema";
-
-export default s.definePermissions(
+export const permissions = s.definePermissions(
   app,
   ({ policy, session }) => {
     const mine = { owner_id: session.user.account };
@@ -93,16 +116,16 @@ export function OpenTodos() {
 
 const principles = [
   {
-    title: "Local copies",
-    body: "Every client and server keeps the rows its queries need, so reads never wait on the network.",
+    title: "Inside your backend",
+    body: "Jazz is a library your server imports. Its schema and permissions are the code you deploy, with no database server to run.",
   },
   {
-    title: "Partial sync",
-    body: "Only the rows a query touches move, on demand. First load is fast, later loads are instant.",
+    title: "Live queries everywhere",
+    body: "Query from a route handler or straight from a component. Results stay up to date as anyone writes.",
   },
   {
-    title: "One source of truth",
-    body: "Core authorizes every write and stores it durably. Everyone converges on the same data.",
+    title: "Local-first when you want it",
+    body: "Clients start thin. Switch one to local-first for offline use and instant reads, with the same queries.",
   },
 ];
 
@@ -120,12 +143,13 @@ const features: {
     body: (
       <>
         <p>
-          Permissions are policies over your data and the user&apos;s JWT claims, defined in code
-          and testable like the rest of your app.
+          Permissions are policies over your data and the user your backend
+          signed in, defined in code and testable like the rest of your app.
         </p>
         <p>
-          Jazz optimizes each query together with the policies that apply to it, which removes work
-          from your backend and gives you zero-roundtrip security.
+          Jazz optimizes each query together with the policies that apply to it,
+          so the same rules hold whether a query runs in a route handler or
+          comes straight from the browser.
         </p>
       </>
     ),
@@ -139,18 +163,28 @@ const features: {
     body: (
       <>
         <p>
-          Jazz is designed to efficiently handle all kinds, sizes, shapes and intensities of data,
-          while still representing everything in a simple relational model.
+          Jazz is designed to efficiently handle all kinds, sizes, shapes and
+          intensities of data, while still representing everything in a simple
+          relational model.
         </p>
         <ul>
-          <li>Durable streams? Just keep appending to a column, or stream out of one.</li>
+          <li>
+            Durable streams? Just keep appending to a column, or stream out of
+            one.
+          </li>
           <li>Binary blobs? Just put 2GB in a column, and read ranges.</li>
-          <li>Giant JSON document? Just put it in a column and stream parts with JSON pointers.</li>
-          <li>Long markdown document? It&apos;s just a very big string column.</li>
+          <li>
+            Giant JSON document? Just put it in a column and stream parts with
+            JSON pointers.
+          </li>
+          <li>
+            Long markdown document? It&apos;s just a very big string column.
+          </li>
         </ul>
         <p>
-          This allows you to truly keep all data in one place, with no external links and no
-          separate systems. And permission policies apply exactly like on normal data.
+          This allows you to truly keep all data in one place, with no external
+          links and no separate systems. And permission policies apply exactly
+          like on normal data.
         </p>
       </>
     ),
@@ -161,17 +195,19 @@ const features: {
   },
   {
     id: "consistency",
-    title: "Local-first data with tunable consistency",
+    title: "Server-first, local-first when it pays off",
     body: (
       <>
         <p>
-          Like an embedded database, Jazz brings durable data directly into your frontend and
-          backend, and syncs it to the cloud. It feels like shared reactive state that abstracts
-          away networking.
+          By default your backend holds the data and clients read through it,
+          like any server database. Writes still show up at once and sync in the
+          background.
         </p>
         <p>
-          Jazz is eventually consistent by default. Where transactionality matters, trade latency
-          for globally consistent transactions, in the same database.
+          Turn a client local-first and it keeps its own durable copy, so it
+          works offline and reads never wait on the network. Where
+          transactionality matters, trade latency for globally consistent
+          transactions, in the same database.
         </p>
       </>
     ),
@@ -188,12 +224,13 @@ const features: {
     body: (
       <>
         <p>
-          People and agents now edit the same data at a much higher rate, and you need to reason
-          about it afterwards.
+          People and agents now edit the same data at a much higher rate, and
+          you need to reason about it afterwards.
         </p>
         <p>
-          Jazz gives you flexible, branch-like views over your data. Build anything from drafts to
-          complex git-like workflows on them, including permissions over branches.
+          Jazz gives you flexible, branch-like views over your data. Build
+          anything from drafts to complex git-like workflows on them, including
+          permissions over branches.
         </p>
       </>
     ),
@@ -210,12 +247,12 @@ const features: {
     body: (
       <>
         <p>
-          Instead of stop-the-world migrations, Jazz migrations are live compatibility layers that
-          translate between the versions of your app.
+          Instead of stop-the-world migrations, Jazz migrations are live
+          compatibility layers that translate between the versions of your app.
         </p>
         <p>
-          Old clients keep working, new features ship without complicated rollouts, and apps with
-          many feature flags stay safe to change.
+          Old clients keep working, new features ship without complicated
+          rollouts, and apps with many feature flags stay safe to change.
         </p>
       </>
     ),
@@ -229,18 +266,20 @@ const features: {
     body: (
       <>
         <p>
-          Networking, permissions, auth integration and a collaboration-native data model are
-          standard in Jazz, so your backend holds business logic instead of glue.
+          Networking, permissions, auth integration and a collaboration-native
+          data model are standard in Jazz, so your backend holds business logic
+          instead of glue.
         </p>
         <p>
-          Jazz also covers roles that usually need their own infrastructure or vendors: blob
-          storage, file and image CDN, durable streams and real-time message queues.
+          Jazz also covers roles that usually need their own infrastructure or
+          vendors: blob storage, durable streams and real-time messaging, all
+          under the same permissions.
         </p>
       </>
     ),
     links: [
-      { label: "Server setup", href: "/docs/setup/deployment" },
-      { label: "Auth providers", href: "/docs/setup/auth/custom" },
+      { label: "Main backend", href: "/docs/setup/deployment" },
+      { label: "Auth", href: "/docs/setup/auth/backend" },
       { label: "Permissions", href: "/docs/schemas/policies" },
       { label: "How sync works", href: "/docs/how-jazz-works" },
     ],
@@ -291,7 +330,13 @@ const hostingRows: {
         <Text as="p" display="block" weight="medium">
           {meter.price} {meter.unit}
         </Text>
-        <Text as="p" display="block" type="supporting" color="secondary" className="mt-1">
+        <Text
+          as="p"
+          display="block"
+          type="supporting"
+          color="secondary"
+          className="mt-1"
+        >
           {meter.note} {meter.included}.
         </Text>
       </>
@@ -311,7 +356,12 @@ function SectionHeader({
 }) {
   return (
     <div className="grid gap-4">
-      <Heading level={2} type="display-3" id={id} className="home-anchor max-w-3xl">
+      <Heading
+        level={2}
+        type="display-3"
+        id={id}
+        className="home-anchor max-w-3xl"
+      >
         {title}
       </Heading>
       {children ? <div className="home-prose max-w-2xl">{children}</div> : null}
@@ -338,7 +388,9 @@ function Figure({
       <div className="home-figure">{children}</div>
       {caption ? (
         <figcaption className="home-figcaption">
-          {number ? <span className="home-figcaption-number">Fig. {number}</span> : null}
+          {number ? (
+            <span className="home-figcaption-number">Fig. {number}</span>
+          ) : null}
           {caption}
         </figcaption>
       ) : null}
@@ -351,7 +403,11 @@ const dateFormatter = new Intl.DateTimeFormat("en-US", { dateStyle: "medium" });
 
 function latestPosts(count: number) {
   return [...blogSource.getPages()]
-    .sort((left, right) => new Date(right.data.date).getTime() - new Date(left.data.date).getTime())
+    .sort(
+      (left, right) =>
+        new Date(right.data.date).getTime() -
+        new Date(left.data.date).getTime(),
+    )
     .slice(0, count);
 }
 export default function HomePage() {
@@ -367,11 +423,16 @@ export default function HomePage() {
               <span className="block -ml-[0.04em]">database</span>
               <span className="block">that syncs</span>
             </Heading>
-            <Text as="p" display="block" className="max-w-[40em] text-xl leading-relaxed">
-              Jazz is a relational database built on real-time sync.
+            <Text
+              as="p"
+              display="block"
+              className="max-w-[40em] text-xl leading-relaxed"
+            >
+              Jazz is a relational database that runs inside your backend, with
+              live queries and permissions built in.
               <br />
-              It runs across the cloud, your backend, frontend, native apps, CLIs and agent VMs. Mix
-              and match ACID and eventually consistent / local-first.
+              Query it from your server, or straight from your frontend with a
+              thin client or a local-first one that works offline.
             </Text>
           </div>
         </div>
@@ -379,11 +440,14 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="how-it-works" title="One database from the client to the cloud" />
+          <SectionHeader
+            id="how-it-works"
+            title="One database, from your backend to every client"
+          />
           <Figure
             className="home-figure-wide mt-6"
             number={1}
-            caption="Jazz uses the same Rust database engine core everywhere: as WebAssembly in the browser, as a native module in React Native and Node, and as the database server in Jazz Cloud and the jazz-tools CLI."
+            caption="Jazz runs inside your backend and keeps all data in one store you pick. Browsers, mobile apps and backend clients sync with it on your own origin. Local-first clients run the same Rust engine on the device, as WebAssembly in the browser and a native module in React Native."
           >
             <StackDiagram />
           </Figure>
@@ -402,18 +466,35 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="code" title="Use straight from the client as simple reactive state">
-            <Text as="p" display="block" type="large" color="secondary" weight="normal">
-              Define tables and permissions in TypeScript, then query from any component. Writes
-              apply locally at once and sync in the background.
+          <SectionHeader
+            id="code"
+            title="Mount it in your backend, query it from anywhere"
+          >
+            <Text
+              as="p"
+              display="block"
+              type="large"
+              color="secondary"
+              weight="normal"
+            >
+              Define tables and permissions in TypeScript and mount Jazz in your
+              server. Then query from route handlers, or from any component as
+              simple reactive state. Writes show up at once and sync in the
+              background.
             </Text>
           </SectionHeader>
           <div className="home-code-grid mt-6">
             <CodeWindow
               files={[
-                { name: "OpenTodos.tsx", language: "tsx", code: componentCode },
+                { name: "jazz.server.ts", language: "ts", code: serverCode },
                 { name: "schema.ts", language: "ts", code: schemaCode },
-                { name: "permissions.ts", language: "ts", code: permissionsCode },
+                { name: "api/todos/route.ts", language: "ts", code: routeCode },
+                {
+                  name: "jazz/[...path]/route.ts",
+                  language: "ts",
+                  code: mountCode,
+                },
+                { name: "OpenTodos.tsx", language: "tsx", code: componentCode },
               ]}
             />
             <Figure
@@ -421,7 +502,10 @@ export default function HomePage() {
               number={2}
               caption="StagePlan on two devices, recorded from the running app."
               after={
-                <AppLink href="/examples" className="home-video-link font-medium">
+                <AppLink
+                  href="/examples"
+                  className="home-video-link font-medium"
+                >
                   More examples and benchmarks →
                 </AppLink>
               }
@@ -437,8 +521,9 @@ export default function HomePage() {
             </Figure>
           </div>
           <Text as="p" display="block" color="secondary" className="mt-6">
-            Also for Vue, Svelte, Solid, React Native, plain TypeScript and Rust.{" "}
-            <AppLink href="/docs/setup/web-client/local-first-client">Install guides</AppLink>
+            Backends on Next.js, Hono, Express, Bun and Effect. Clients for
+            React, Vue, Svelte, Solid, React Native and plain TypeScript.{" "}
+            <AppLink href="/docs">Get started</AppLink>
           </Text>
         </div>
       </section>
@@ -453,7 +538,12 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <Heading level={2} type="display-3" id="features" className="home-anchor home-statement">
+          <Heading
+            level={2}
+            type="display-3"
+            id="features"
+            className="home-anchor home-statement"
+          >
             A database responsible for more.
           </Heading>
           <div className="mt-6">
@@ -466,7 +556,11 @@ export default function HomePage() {
                   <div className="home-prose mt-4">{feature.body}</div>
                   <div className="mt-5 flex flex-wrap gap-x-6 gap-y-2">
                     {feature.links.map((link) => (
-                      <AppLink key={link.href} href={link.href} className="font-medium">
+                      <AppLink
+                        key={link.href}
+                        href={link.href}
+                        className="font-medium"
+                      >
                         {link.label} →
                       </AppLink>
                     ))}
@@ -488,13 +582,27 @@ export default function HomePage() {
       <section className="home-section">
         <div className="home-container">
           <SectionHeader id="cloud" title="Self-host or use Jazz Cloud">
-            <Text as="p" display="block" type="large" color="secondary" weight="normal">
-              The single-tenant Jazz server will always be open source and is easy to self-host.
-              Jazz Cloud is the same database, running on global infrastructure tailored for it.
+            <Text
+              as="p"
+              display="block"
+              type="large"
+              color="secondary"
+              weight="normal"
+            >
+              The single-tenant Jazz server will always be open source and is
+              easy to self-host. Jazz Cloud is the same database, running on
+              global infrastructure tailored for it.
             </Text>
-            <Text as="p" display="block" type="large" color="secondary" weight="normal">
-              As developers, we hate pricing that makes limiting assumptions about your app and your
-              users, so we bill across simple metrics for the things that are irreducibly hard.
+            <Text
+              as="p"
+              display="block"
+              type="large"
+              color="secondary"
+              weight="normal"
+            >
+              As developers, we hate pricing that makes limiting assumptions
+              about your app and your users, so we bill across simple metrics
+              for the things that are irreducibly hard.
             </Text>
           </SectionHeader>
           <div id="pricing" className="home-table home-anchor mt-6">
@@ -514,7 +622,10 @@ export default function HomePage() {
               </TableHeader>
               <TableBody>
                 {hostingRows.flatMap((row) => [
-                  <TableRow key={`${row.topic}-topic`} className="home-table-topic">
+                  <TableRow
+                    key={`${row.topic}-topic`}
+                    className="home-table-topic"
+                  >
                     <TableCell colSpan={3}>
                       <Text weight="medium">{row.topic}</Text>
                     </TableCell>
@@ -572,7 +683,12 @@ export default function HomePage() {
       <section className="home-section">
         <div className="home-container">
           <div className="flex flex-wrap items-end justify-between gap-4">
-            <Heading level={2} type="display-3" id="blog" className="home-anchor">
+            <Heading
+              level={2}
+              type="display-3"
+              id="blog"
+              className="home-anchor"
+            >
               From the blog
             </Heading>
             <AppLink href="/blog" className="font-medium">
@@ -582,8 +698,17 @@ export default function HomePage() {
           <ol className="home-posts mt-10">
             {latestPosts(3).map((post) => (
               <li key={post.url} className="home-post">
-                <Text as="p" display="block" type="supporting" color="secondary">
-                  <time dateTime={new Date(post.data.date).toISOString().slice(0, 10)}>
+                <Text
+                  as="p"
+                  display="block"
+                  type="supporting"
+                  color="secondary"
+                >
+                  <time
+                    dateTime={new Date(post.data.date)
+                      .toISOString()
+                      .slice(0, 10)}
+                  >
                     {dateFormatter.format(new Date(post.data.date))}
                   </time>{" "}
                   · {post.data.author}
@@ -594,7 +719,12 @@ export default function HomePage() {
                   </a>
                 </Heading>
                 {post.data.description ? (
-                  <Text as="p" display="block" color="secondary" className="mt-2">
+                  <Text
+                    as="p"
+                    display="block"
+                    color="secondary"
+                    className="mt-2"
+                  >
                     {post.data.description}
                   </Text>
                 ) : null}
@@ -610,15 +740,27 @@ export default function HomePage() {
             <Heading level={2} type="display-2">
               npm create jazz
             </Heading>
-            <Text as="p" display="block" type="large" color="secondary" className="mt-4">
-              Scaffold a synced app in one command, with auth and hosting set up for you.
+            <Text
+              as="p"
+              display="block"
+              type="large"
+              color="secondary"
+              className="mt-4"
+            >
+              Prints a short brief for your coding agent to add Jazz to your
+              app, or to start a new one.
             </Text>
           </div>
           <div className="flex flex-col gap-4 lg:col-span-5 lg:items-end">
             <CreateJazzCommand />
             <Text as="p" display="block" color="secondary">
-              Read the <AppLink href="/docs/setup/run-locally">quickstart</AppLink> or join the{" "}
-              <AstryxLink href="https://discord.gg/RN9UKh52be">Jazz Discord</AstryxLink>.
+              Read the{" "}
+              <AppLink href="/docs/setup/run-locally">quickstart</AppLink> or
+              join the{" "}
+              <AstryxLink href="https://discord.gg/RN9UKh52be">
+                Jazz Discord
+              </AstryxLink>
+              .
             </Text>
           </div>
         </div>
