@@ -42,10 +42,26 @@ export function followUser(options: {
   fetch?: typeof fetch;
   /** See `linkGuestOnSignUp` on `createJazzClient`. Default true. */
   linkGuest?: boolean;
-  /** Receives a promise that settles once the backend's first answer is followed. */
-  onStart?(started: Promise<void>): void;
 }) {
   return <Client>(session: JazzSession<Client>) => decorate(session, options);
+}
+
+// Each following session's first backend answer (see `firstBackendAnswer`).
+const firstAnswers = new WeakMap<object, Promise<void>>();
+
+/**
+ * @internal For hosts, before they hand out a session `followUser`
+ * decorated. A session with no account on this device (a backend user keeps
+ * none: the backend names them) opens signed out until the backend has
+ * answered who is signed in, and an app would show its sign-in screen to a
+ * user who is signed in. So when it opened signed out, wait for that first
+ * answer. An account already on this device opens at once (offline too), and
+ * a failed or timed-out check (the auth request deadline) opens signed out as
+ * before. Never rejects.
+ */
+export async function firstBackendAnswer(session: JazzSession<unknown>): Promise<void> {
+  if (session.getSnapshot().status !== "signed-out") return;
+  await firstAnswers.get(session);
 }
 
 function decorate<Client>(
@@ -55,7 +71,6 @@ function decorate<Client>(
     events: BackendWatchEvents;
     fetch?: typeof fetch;
     linkGuest?: boolean;
-    onStart?(started: Promise<void>): void;
   },
 ): Pick<UserFollowingSession<Client>, "reauthenticate" | "linkWithBackend" | "close"> {
   const watch = watchBackendUser(
@@ -70,7 +85,7 @@ function decorate<Client>(
           .catch(() => {}),
     },
   );
-  options.onStart?.(watch.started);
+  firstAnswers.set(session, watch.started);
   // A sync server that refuses the sign-in (the backend's re-check ended it,
   // and reconnecting with fresh cookies failed) asks the backend again.
   let observed: unknown;
