@@ -2339,6 +2339,7 @@ export type PreparedTransactionScope = Pick<
   TransactionScope<"serializable">,
   "kind" | "all" | "one" | "insert" | "upsert"
 > & {
+  assertActive(): void;
   readAccepted<T>(query: QueryBuilder<T>): Promise<AcceptedRows<T>>;
 };
 
@@ -2421,6 +2422,7 @@ export function prepareDbTransaction(
         };
         const scope: PreparedTransactionScope = {
           kind: "serializable",
+          assertActive,
           all<T>(query: QueryBuilder<T>, options?: QueryOptions) {
             return track(read(query, options) as Promise<T[]>);
           },
