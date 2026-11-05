@@ -65,8 +65,15 @@ function SignOutButton() {
 ```
 
 Jazz asks your backend who is signed in when the app starts, when the page regains focus and when
-another tab signs in or out; the identity always comes from `authenticate`. After your own sign-in
-or sign-out, call `reauthenticate()` from `useJazzAuth()` and Jazz follows your backend's answer.
+another tab signs in or out; the identity always comes from `authenticate`. A device remembers the
+user your backend signed in (their account, identity and claims, never a credential), so a reload
+reopens their account straight away, offline too, and the first answer confirms it: another user
+switches in one step, a signed-out answer (confirmed by a second one) signs them out, and changed
+claims refresh. Until an answer arrives, the remembered user stays signed in: while your backend is
+offline or answers with an error, a reload keeps opening their account on that device. On shared
+devices, pass `clearOnSignOut: true` to `createJazzClient`: the device then never remembers the
+user, so a reload waits for your backend's answer. After your own sign-in or sign-out, call
+`reauthenticate()` from `useJazzAuth()` and Jazz follows your backend's answer.
 Without React, call `reauthenticate()` on the session `createJazzClient` returns.
 
 ## Several sign-in methods
