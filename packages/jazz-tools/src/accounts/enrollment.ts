@@ -203,6 +203,30 @@ export function accountRegistry(handle: AccountHandle): string {
   return material.registry;
 }
 
+/**
+ * @internal What a device remembers of the user its backend signed in, so a
+ * reload reopens their account (offline too) instead of starting over. The
+ * shape of the backend's sign-in answer: the account, identity and claims,
+ * never a credential. The backend still states the identity on every
+ * connection.
+ */
+export interface RememberedBackendUser {
+  readonly account: string;
+  readonly identity: AccountIdentity;
+  readonly claims: Readonly<Record<string, unknown>>;
+}
+
+/** @internal The remembered form of a user the backend signed in, or undefined for any other account. */
+export function rememberBackendUser(handle: AccountHandle): RememberedBackendUser | undefined {
+  const material = credentials.get(handle);
+  if (!material?.delegated) return undefined;
+  return {
+    account: handle.id,
+    identity: { issuer: handle.identity.issuer, subject: handle.identity.subject },
+    claims: { ...material.delegated.claims },
+  };
+}
+
 /** @internal Public host factories prepare native crypto and persistence first. */
 export function createAccountManagerWithRuntime(options: {
   /** Exact application-scoped HTTP URL ending in /accounts. */
@@ -210,6 +234,8 @@ export function createAccountManagerWithRuntime(options: {
   localFirst: LocalFirstAccountFactory;
   backend?: BackendAccountHost;
   restoredLocalFirstSecret?: string;
+  /** The backend user this device last had selected (see `RememberedBackendUser`). */
+  restoredBackendUser?: RememberedBackendUser;
   selectionDurability?: AccountSelectionDurability;
   fetch?: typeof fetch;
   /** Sent as `Authorization: Bearer` on sign-in requests to the app's backend. */
@@ -242,6 +268,8 @@ export function createAccountManagerWithRuntime(options: {
       : options.localFirst.restore?.(options.restoredLocalFirstSecret);
   if (options.restoredLocalFirstSecret !== undefined && !restored)
     throw new AccountAuthError("local_first_restore_unavailable");
+  if (options.restoredLocalFirstSecret !== undefined && options.restoredBackendUser !== undefined)
+    throw new AccountAuthError("ambiguous_restored_account");
   return new AccountManager(
     {
       logout() {
@@ -338,7 +366,9 @@ export function createAccountManagerWithRuntime(options: {
             options.restoredLocalFirstSecret,
           ),
         )
-      : undefined,
+      : options.restoredBackendUser
+        ? delegatedHandle(options.restoredBackendUser)
+        : undefined,
     options.selectionDurability,
   );
 
@@ -346,6 +376,11 @@ export function createAccountManagerWithRuntime(options: {
     const started = epoch;
     const value = await signIn();
     assertCurrent(started);
+    return delegatedHandle(value);
+  }
+
+  /** A handle for a user the backend signed in, from its answer (or a remembered one). */
+  function delegatedHandle(value: unknown): AccountHandle {
     const { identity, claims } = (value ?? {}) as {
       identity?: AccountIdentity;
       claims?: unknown;

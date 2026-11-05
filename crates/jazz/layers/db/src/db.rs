@@ -636,6 +636,13 @@ struct Inner {
     /// A replica whose store does not outlive it (a foreground over a
     /// durable relay): its local reads wait for the upstream's view too.
     non_durable: bool,
+    /// This store lives in a file, which may reopen as an older state than
+    /// it last uploaded from: a lost tail (an IndexedDB commit still queued
+    /// at a crash, power loss under `synchronous=NORMAL`) or a restored
+    /// backup. As a replica it numbers its own commits after its wall
+    /// clock too, so a reopened file never hands out a transaction id it
+    /// may already have uploaded (see [`Inner::next_seq`]).
+    pub(crate) reopenable: bool,
     /// Rows the authority named as written for this replica's own commits
     /// whose version was not this replica's image of them (see
     /// `Inner::as_written_images`), asked for whole instead.
@@ -1391,8 +1398,27 @@ impl Db {
             physical.union(&schema)?;
             physical
         } else {
+            // SQLite knows a stored column by name only. Every version the
+            // file admitted gives the columns it stores their types, in
+            // admission order and then the opening schema, as the live
+            // store's union grew: the opening schema is not always the
+            // newest (a server core reopens under its genesis while later
+            // versions' tables and columns take writes, #4769).
             let mut physical = stored_schema(&conn, &config.schema)?;
-            let ddl = physical.union(&schema)?;
+            let mut ddl = String::new();
+            for (version, earlier) in &admitted {
+                if *version == config.schema.version_id() {
+                    continue;
+                }
+                if let Some(stored) = names.get(version) {
+                    ddl.push_str(&physical.union(&Schema::stored_as(
+                        earlier,
+                        stored,
+                        names.tags(),
+                    ))?);
+                }
+            }
+            ddl.push_str(&physical.union(&schema)?);
             execute_script(&conn, &ddl)?;
             physical
         };
@@ -1502,6 +1528,7 @@ impl Db {
                 publications: Vec::new(),
                 client: None,
                 non_durable: false,
+                reopenable: path.is_some(),
                 as_written_mismatches: 0,
                 authority: false,
                 pins_required: false,
@@ -3717,10 +3744,17 @@ impl Inner {
         end_savepoint(&self.conn, name, false)
     }
 
-    /// An admitted schema under the names this store keeps it by.
     /// Published bundle `id`, resolved: the write version it selects and
     /// that version governed by the bundle's policies. `None` when this
-    /// store has no such bundle, or has not admitted its write schema.
+    /// store has no such bundle, or has not admitted its write version.
+    ///
+    /// A bundle selects a structural schema by hash, and several hashes
+    /// compile to one version (defaults and indexes do not change it): the
+    /// bundle's schema is read from the catalogue, and only its version
+    /// must be admitted, whichever of its hashes this store admitted or
+    /// opened under. It is named by that version's stored names, and
+    /// sessions pinned to it that declare no other version read and write
+    /// by it, so by its own defaults (see `Inner::governed_by`).
     pub(crate) fn bundle(
         &mut self,
         id: &crate::catalogue::BundleId,
@@ -3731,14 +3765,20 @@ impl Inner {
         let Some((hash, permissions)) = crate::catalogue::bundle(&self.conn, id)? else {
             return Ok(None);
         };
-        let Some((version, structural)) = self
+        let held = self
             .admitted
             .iter()
-            .find(|(_, schema)| crate::catalogue::structural_hash(schema.public_schema()) == hash)
-        else {
-            return Ok(None);
+            .map(|(_, schema)| schema)
+            .find(|schema| crate::catalogue::structural_hash(schema.public_schema()) == hash)
+            .map(|schema| schema.public_schema().clone());
+        let structural = match held {
+            Some(structural) => structural,
+            None => match crate::catalogue::schema(&self.conn, &hash)? {
+                Some(structural) => structural,
+                None => return Ok(None),
+            },
         };
-        let mut public = structural.public_schema().clone();
+        let mut public = structural;
         for (name, table) in public.iter_mut() {
             table.policies = permissions.get(name).cloned().unwrap_or_default();
         }
@@ -3748,9 +3788,15 @@ impl Inner {
                 format!("bundle {id} does not compile: {error}"),
             )
         })?;
+        let version = governing.version_id();
+        let admitted =
+            version == self.owner_version || self.admitted.iter().any(|(id, _)| *id == version);
+        if !admitted || self.names.get(&version).is_none() {
+            return Ok(None);
+        }
         let mut named = self.named(&governing);
         named.bundle = Some(*id);
-        let resolved = (*version, Rc::new(named));
+        let resolved = (version, Rc::new(named));
         self.bundles.insert(*id, resolved.clone());
         Ok(Some(resolved))
     }
@@ -7765,7 +7811,7 @@ impl Inner {
 
     /// The clock commit HLCs read (Unix ms): this store's configured clock
     /// (`DbConfig::with_clock`), or the one a test set.
-    fn hlc_clock_ms(&self) -> u64 {
+    pub(crate) fn hlc_clock_ms(&self) -> u64 {
         self.clock_for_test
             .map_or_else(|| (self.shard.clock)(), |ms| ms.max(0) as u64)
     }

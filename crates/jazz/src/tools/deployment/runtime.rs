@@ -170,6 +170,24 @@ pub fn prepare_catalogue_change(
             .all(|(schema, _)| schema.version_id() != target.version_id())
     {
         admit.push((target.clone(), lenses_into(target.version_id())));
+    } else {
+        // A target that is another hash of an admitted version (it changes
+        // only defaults or indexes) adds no version, but its bundle selects
+        // it: it is admitted too, with no lens (its version's lenses are
+        // admitted already), so the store builds its indexes and keeps its
+        // definition. Once its row is stored and its version admitted, it is
+        // not admitted again: `n` stays `NULL` on such a row (it belongs to
+        // the hash first admitted as the version), and admitting resets
+        // every session.
+        let hash = SchemaHash::compute(target.public_schema());
+        let recorded = admitted.contains(&target.version_id())
+            && stored.schemas.iter().any(|schema| schema.hash == hash);
+        let admitting = admit
+            .iter()
+            .any(|(schema, _)| SchemaHash::compute(schema.public_schema()) == hash);
+        if !recorded && !admitting {
+            admit.push((target.clone(), Vec::new()));
+        }
     }
     Ok(CatalogueChange {
         put,
@@ -242,6 +260,61 @@ mod tests {
             active_schema: JazzSchema::new(&b).unwrap(),
         };
         prepare_catalogue_change(&prepared, &stored, CataloguePut::default())
+    }
+
+    /// A store that admitted `notes(title)`, and a deployment whose target
+    /// is `notes(title)` with an index (another hash of that version).
+    fn index_only_redeploy(indexed_admitted: bool) -> CatalogueChange {
+        let (a, indexed) = (notes(None, false), notes(None, true));
+        let hash = SchemaHash::compute;
+        let version = JazzSchema::new(&a).unwrap().version_id();
+        let row = |schema: &Schema, admitted: Option<u64>| CatalogueSchema {
+            hash: hash(schema),
+            admitted,
+            version: admitted.map(|_| version),
+            published_at: Some(1),
+            schema: schema.clone(),
+        };
+        let mut schemas = vec![row(&a, Some(0))];
+        if indexed_admitted {
+            // As the store records it: `n` stays with `a`, the hash first
+            // admitted as the version.
+            schemas.push(row(&indexed, None));
+        }
+        let stored = CatalogueRows {
+            schemas,
+            lenses: Vec::new(),
+            permissions: Vec::new(),
+            bundles: Vec::new(),
+        };
+        let prepared = PreparedDeployment {
+            schemas: vec![a.clone(), indexed.clone()],
+            migrations: vec![Lens::new(
+                hash(&a),
+                hash(&indexed),
+                LensTransform::with_ops(Vec::new()),
+            )],
+            active_schema: JazzSchema::new(&indexed).unwrap(),
+        };
+        prepare_catalogue_change(&prepared, &stored, CataloguePut::default()).unwrap()
+    }
+
+    #[test]
+    fn an_index_only_target_is_admitted_without_lenses() {
+        let change = index_only_redeploy(false);
+        let [(schema, lenses)] = &change.admit[..] else {
+            panic!("one admission: {:?}", change.admit.len());
+        };
+        assert_eq!(
+            SchemaHash::compute(schema.public_schema()),
+            SchemaHash::compute(&notes(None, true))
+        );
+        assert!(lenses.is_empty());
+    }
+
+    #[test]
+    fn a_target_admitted_by_its_own_hash_is_not_admitted_again() {
+        assert!(index_only_redeploy(true).admit.is_empty());
     }
 
     #[test]

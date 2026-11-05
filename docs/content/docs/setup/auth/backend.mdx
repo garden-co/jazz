@@ -29,10 +29,16 @@ export const jazz = await createJazz({
   [local-first](/docs/setup/auth/local-first) guest sync. Guests are refused otherwise. An app with
   no sign-in at all passes `authenticate: acceptLocalFirstAuth`.
 
-Jazz asks `authenticate` on every sign-in, on every sync connection and in `jazz.forRequest`. A
-sign-out or changed claims apply on the next reconnect, and a connection ends when its sign-in
-expires (after an hour by default, `sessionTtlSeconds`), so the client reconnects and is asked
-again. There are no JWKS, issuer or audience settings, and no Jazz token in the browser.
+Jazz asks `authenticate` on every sign-in, on every sync connection and in `jazz.forRequest`. It
+also asks again for each open sync connection, every minute by default (`recheckSeconds`). When the
+answer is no one, someone else or the same user with different `claims` (say their role changed),
+the connection ends and the client reconnects, so your policies see the new claims. A sign-out or a
+claims change therefore reaches an open connection within `recheckSeconds`; `jazz.forRequest` sees
+it on the next request. With `recheckSeconds: 0` it waits until the connection's sign-in expires
+(after an hour by default, `sessionTtlSeconds`). Return claims that only change when the user's
+access does: a claim that changes on every call (a timestamp, a request id) would end the
+connection on every check. There are no JWKS, issuer or audience settings, and no Jazz token in the
+browser.
 
 ## In the browser
 
@@ -59,8 +65,15 @@ function SignOutButton() {
 ```
 
 Jazz asks your backend who is signed in when the app starts, when the page regains focus and when
-another tab signs in or out; the identity always comes from `authenticate`. After your own sign-in
-or sign-out, call `reauthenticate()` from `useJazzAuth()` and Jazz follows your backend's answer.
+another tab signs in or out; the identity always comes from `authenticate`. A device remembers the
+user your backend signed in (their account, identity and claims, never a credential), so a reload
+reopens their account straight away, offline too, and the first answer confirms it: another user
+switches in one step, a signed-out answer (confirmed by a second one) signs them out, and changed
+claims refresh. Until an answer arrives, the remembered user stays signed in: while your backend is
+offline or answers with an error, a reload keeps opening their account on that device. On shared
+devices, pass `clearOnSignOut: true` to `createJazzClient`: the device then never remembers the
+user, so a reload waits for your backend's answer. After your own sign-in or sign-out, call
+`reauthenticate()` from `useJazzAuth()` and Jazz follows your backend's answer.
 Without React, call `reauthenticate()` on the session `createJazzClient` returns.
 
 ## Several sign-in methods

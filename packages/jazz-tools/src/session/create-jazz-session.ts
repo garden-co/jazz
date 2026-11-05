@@ -23,7 +23,7 @@ import {
 import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
 import { DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
-import { followUser, type UserFollowingSession } from "./follow-user.js";
+import { firstBackendAnswer, followUser, type UserFollowingSession } from "./follow-user.js";
 
 export type { LocalFirstLoader };
 
@@ -102,6 +102,8 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
   const accounts = await createAccountManagerWithMinter(
     { ...config, serverUrl },
     mintLocalFirstTokenInJs,
+    // A shared device: never reopen the last user before the backend answers.
+    { rememberBackendUser: !clearOnSignOut },
   );
   const registry = clientRegistryUrl({ ...config, serverUrl });
   const upgrades = localFirstMemory(registry);
@@ -175,6 +177,7 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
     }),
   });
   if (loadLocalFirst) upgradeInBackground(session, loadLocalFirst);
+  await firstBackendAnswer(session);
   return session;
 }
 
