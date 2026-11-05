@@ -16,6 +16,7 @@ import {
 import { schemaToWasm } from "../codegen/schema-reader.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { computeSchemaHash } from "../schema-hash.js";
+import { managedEncryptionSchema } from "../typed-app.js";
 import {
   encodePublishedMigrationValue,
   fetchStoredWasmSchema,
@@ -94,68 +95,113 @@ export interface CanonicalMigrationBundle {
   toSchema: WasmSchema;
 }
 
-export function assertMigrationMatchesCanonicalBundle(
-  migration: DefinedMigration,
+export function resolveCanonicalMigrationForward(
+  migration: DefinedMigration | undefined,
   canonical: CanonicalMigrationBundle,
-): void {
-  const fromWitness = resolveMigrationDefinitionWasmSchema(migration.from);
-  const toWitness = resolveMigrationDefinitionWasmSchema(migration.to);
-  const endpoints = [
-    {
-      label: "from",
-      embeddedHash: migration.fromHash,
-      canonicalHash: canonical.fromHash,
-      witness: fromWitness,
-      schema: canonical.fromSchema,
-    },
-    {
-      label: "to",
-      embeddedHash: migration.toHash,
-      canonicalHash: canonical.toHash,
-      witness: toWitness,
-      schema: canonical.toSchema,
-    },
-  ] as const;
+): PublishedTableLens[] {
+  const requested = migration?.forward ?? [];
+  if (migration) {
+    const fromWitness = resolveMigrationDefinitionWasmSchema(migration.from);
+    const toWitness = resolveMigrationDefinitionWasmSchema(migration.to);
+    const endpoints = [
+      {
+        label: "from",
+        embeddedHash: migration.fromHash,
+        canonicalHash: canonical.fromHash,
+        witness: fromWitness,
+        schema: canonical.fromSchema,
+      },
+      {
+        label: "to",
+        embeddedHash: migration.toHash,
+        canonicalHash: canonical.toHash,
+        witness: toWitness,
+        schema: canonical.toSchema,
+      },
+    ] as const;
 
-  for (const endpoint of endpoints) {
-    if (endpoint.embeddedHash !== undefined) {
-      const embeddedHash = normalizeSchemaHashInput(
-        endpoint.embeddedHash,
-        `migration embedded ${endpoint.label}Hash`,
-      );
-      if (!endpoint.canonicalHash.startsWith(embeddedHash)) {
-        throw new Error(
-          `Migration embedded ${endpoint.label}Hash ${embeddedHash} does not match canonical ${endpoint.label}Hash ${endpoint.canonicalHash}.`,
+    for (const endpoint of endpoints) {
+      if (endpoint.embeddedHash !== undefined) {
+        const embeddedHash = normalizeSchemaHashInput(
+          endpoint.embeddedHash,
+          `migration embedded ${endpoint.label}Hash`,
         );
+        if (!endpoint.canonicalHash.startsWith(embeddedHash)) {
+          throw new Error(
+            `Migration embedded ${endpoint.label}Hash ${embeddedHash} does not match canonical ${endpoint.label}Hash ${endpoint.canonicalHash}.`,
+          );
+        }
+      }
+
+      for (const [tableName, witnessTable] of Object.entries(endpoint.witness)) {
+        if (!tableSchemasEqual(witnessTable, endpoint.schema[tableName])) {
+          throw new Error(
+            `Migration ${endpoint.label} schema witness for table ${tableName} does not match canonical schema ${shortSchemaHash(endpoint.canonicalHash)}.`,
+          );
+        }
       }
     }
 
-    for (const [tableName, witnessTable] of Object.entries(endpoint.witness)) {
-      if (!tableSchemasEqual(witnessTable, endpoint.schema[tableName])) {
+    for (const lens of requested) {
+      const sourceTable = lens.renamedFrom ?? lens.table;
+      if (lens.added && Object.hasOwn(canonical.fromSchema, sourceTable)) {
         throw new Error(
-          `Migration ${endpoint.label} schema witness for table ${tableName} does not match canonical schema ${shortSchemaHash(endpoint.canonicalHash)}.`,
+          `Migration added table ${sourceTable} already exists in the canonical source schema.`,
         );
+      }
+      if (!lens.added && !Object.hasOwn(fromWitness, sourceTable)) {
+        throw new Error(
+          `Migration from schema witness is missing transformed table ${sourceTable}.`,
+        );
+      }
+      if (!lens.removed && !Object.hasOwn(toWitness, lens.table)) {
+        throw new Error(`Migration to schema witness is missing transformed table ${lens.table}.`);
       }
     }
   }
 
+  const forward = serializeForwardLenses(requested);
+  const managedAdditions = new Set(
+    Object.keys(managedEncryptionSchema).filter(
+      (table) =>
+        !Object.hasOwn(canonical.fromSchema, table) && Object.hasOwn(canonical.toSchema, table),
+    ),
+  );
+  // Implicit administration tables cannot stand in for a missing user migration.
   if (
-    migration.forward.length === 0 &&
+    requested.length === 0 &&
+    schemaTransitionRequiresRowTransform(
+      canonical.fromSchema,
+      Object.fromEntries(
+        Object.entries(canonical.toSchema).filter(([table]) => !managedAdditions.has(table)),
+      ),
+    )
+  ) {
+    throw new MissingMigrationError(canonical.fromHash, canonical.toHash);
+  }
+  for (const table of managedAdditions) {
+    const explicit = requested.filter((lens) => lens.table === table);
+    if (explicit.length > 0) {
+      if (
+        explicit.length !== 1 ||
+        !explicit[0]!.added ||
+        explicit[0]!.removed ||
+        explicit[0]!.renamedFrom ||
+        explicit[0]!.operations.length > 0
+      ) {
+        throw new Error(`Migration lens conflicts with managed table addition ${table}.`);
+      }
+      continue;
+    }
+    forward.push({ table, added: true, operations: [] });
+  }
+  if (
+    forward.length === 0 &&
     schemaTransitionRequiresRowTransform(canonical.fromSchema, canonical.toSchema)
   ) {
     throw new MissingMigrationError(canonical.fromHash, canonical.toHash);
   }
-  serializeForwardLenses(migration.forward);
-
-  for (const lens of migration.forward) {
-    const sourceTable = lens.renamedFrom ?? lens.table;
-    if (!lens.added && !Object.hasOwn(fromWitness, sourceTable)) {
-      throw new Error(`Migration from schema witness is missing transformed table ${sourceTable}.`);
-    }
-    if (!lens.removed && !Object.hasOwn(toWitness, lens.table)) {
-      throw new Error(`Migration to schema witness is missing transformed table ${lens.table}.`);
-    }
-  }
+  return forward;
 }
 
 export function resolveKnownSchemaHash(
@@ -376,28 +422,64 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     ...(options.migrations ?? []),
     ...(options.migration ? [options.migration] : []),
   ];
-  // Migration witnesses can omit unchanged tables. With explicit hashes, use
-  // canonical local schemas or fetch the server's version before checking them.
-  const resolveEndpoint = async (witness: unknown, embedded: string | undefined) => {
-    if (!embedded) {
-      const schema = mergePermissionsIntoWasmSchema(
-        resolveMigrationDefinitionWasmSchema(witness),
-        {},
-      );
-      const hash = await computeSchemaHash(schema);
-      if (!schemas.has(hash)) schemas.set(hash, schema);
-      return { hash, schema: schemas.get(hash)! };
+  // Explicit hashes select canonical schemas. A single direct deployment also
+  // accepts partial witnesses against the active source and requested target.
+  // Graph migrations retain their own endpoints; never infer them from the head.
+  const direct = options.migration !== undefined && !options.migrations?.length;
+  const resolveEndpoint = async (
+    witness: unknown,
+    embedded: string | undefined,
+    canonicalHash?: string | null,
+  ) => {
+    if (embedded) {
+      const hash = resolveKnownSchemaHash(embedded, "migration schema hash", [
+        ...new Set([...graph.schemas, ...schemas.keys()]),
+      ]);
+      return { hash, schema: schemas.get(hash) ?? (await loadSchema(options, hash)) };
     }
-    const hash = resolveKnownSchemaHash(embedded, "migration schema hash", [
-      ...new Set([...graph.schemas, ...schemas.keys()]),
-    ]);
-    return { hash, schema: schemas.get(hash) ?? (await loadSchema(options, hash)) };
+    const witnessSchema = mergePermissionsIntoWasmSchema(
+      resolveMigrationDefinitionWasmSchema(witness),
+      {},
+    );
+    const witnessHash = await computeSchemaHash(witnessSchema);
+    if (canonicalHash && !schemas.has(witnessHash) && !graph.schemas.includes(witnessHash)) {
+      const canonical = schemas.get(canonicalHash) ?? (await loadSchema(options, canonicalHash));
+      if (
+        Object.entries(witnessSchema).every(([table, definition]) =>
+          tableSchemasEqual(definition, canonical[table]),
+        )
+      ) {
+        schemas.set(canonicalHash, canonical);
+        return { hash: canonicalHash, schema: canonical };
+      }
+    }
+    if (!schemas.has(witnessHash)) schemas.set(witnessHash, witnessSchema);
+    return { hash: witnessHash, schema: schemas.get(witnessHash)! };
   };
   const migrations: DeploymentArtifacts["migrations"] = [];
   for (const migration of definitions) {
-    const from = await resolveEndpoint(migration.from, migration.fromHash);
-    const to = await resolveEndpoint(migration.to, migration.toHash);
-    assertMigrationMatchesCanonicalBundle(migration, {
+    const to = await resolveEndpoint(
+      migration.to,
+      migration.toHash,
+      direct ? targetSchemaHash : null,
+    );
+    let sourceHash = direct && to.hash === targetSchemaHash ? graph.activeSchemaHash : null;
+    if (sourceHash === targetSchemaHash && !migration.fromHash) {
+      // Re-deploying a direct migration must still validate against its original
+      // source. Only an unambiguous incoming edge can supply an omitted hash.
+      const incoming = graph.migrations.filter((edge) => edge.toHash === targetSchemaHash);
+      sourceHash = incoming.length === 1 ? incoming[0]!.fromHash : null;
+      if (incoming.length > 1) {
+        const witnessHash = await computeSchemaHash(
+          mergePermissionsIntoWasmSchema(resolveMigrationDefinitionWasmSchema(migration.from), {}),
+        );
+        if (!schemas.has(witnessHash) && !graph.schemas.includes(witnessHash)) {
+          throw new Error("Partial migration source is ambiguous; supply fromHash.");
+        }
+      }
+    }
+    const from = await resolveEndpoint(migration.from, migration.fromHash, sourceHash);
+    const forward = resolveCanonicalMigrationForward(migration, {
       fromHash: from.hash,
       toHash: to.hash,
       fromSchema: from.schema,
@@ -406,7 +488,7 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     migrations.push({
       fromHash: from.hash,
       toHash: to.hash,
-      forward: serializeForwardLenses(migration.forward),
+      forward,
     });
   }
   return deployArtifacts(options, graph, {

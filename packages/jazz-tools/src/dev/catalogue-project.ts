@@ -42,10 +42,9 @@ import { fetchSchemaHashes, fetchStoredWasmSchema } from "./catalogue-api.js";
 import { renderMigrationStub } from "./migrations.js";
 import { normalizeSchemaHashInput } from "./schema-utils.js";
 import {
-  assertMigrationMatchesCanonicalBundle,
+  resolveCanonicalMigrationForward,
   computeSchemaHash,
   deployArtifacts,
-  serializeForwardLenses,
   type DeployResult as CatalogueDeployResult,
   resolveKnownSchemaHash,
   schemaTransitionRequiresRowTransform,
@@ -1437,14 +1436,14 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
         loadCanonicalSchema(fromHash),
         loadCanonicalSchema(toHash),
       ]);
-      assertMigrationMatchesCanonicalBundle(migration, {
+      const forward = resolveCanonicalMigrationForward(migration, {
         fromHash,
         toHash,
         fromSchema,
         toSchema,
       });
 
-      return { migration, filePath, fromHash, toHash };
+      return { migration, filePath, fromHash, toHash, forward };
     }),
   );
 
@@ -1461,7 +1460,7 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
       migrations: edges.map((edge) => ({
         fromHash: edge.fromHash,
         toHash: edge.toHash,
-        forward: serializeForwardLenses(edge.migration.forward),
+        forward: edge.forward,
       })),
       permissions: compiled.permissions,
     });
