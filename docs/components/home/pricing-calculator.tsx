@@ -92,6 +92,9 @@ function formatCount(value: number) {
   return `${Math.round(value)}`;
 }
 
+/** Width of the range input's thumb, which the tick labels line up with. */
+const THUMB_PX = 16;
+
 function TickSlider({
   label,
   valueLabel,
@@ -126,17 +129,31 @@ function TickSlider({
         value={value}
         onChange={(event) => onChange(Number(event.target.value))}
       />
-      <div
-        className="grid gap-2 text-xs leading-relaxed text-fd-muted-foreground"
-        style={{ gridTemplateColumns: `repeat(${ticks.length}, minmax(0, 1fr))` }}
-      >
-        {ticks.map((tick) => {
+      {/* Each label sits under its value on the track. The thumb's centre
+          travels from half a thumb in at the left to half a thumb in at the
+          right, so labels follow that span; the end labels align to the
+          slider's edges instead of hanging past them. */}
+      <div className="relative h-5 text-xs leading-relaxed text-fd-muted-foreground">
+        {ticks.map((tick, index) => {
           const isActive = Math.abs(value - tick.value) < step / 2 + 0.001;
+          const fraction = (tick.value - min) / (max - min);
+          const first = index === 0;
+          const last = index === ticks.length - 1;
 
           return (
             <button
               key={tick.label}
-              className={isActive ? "text-fd-foreground" : undefined}
+              className={`absolute top-0 whitespace-nowrap ${isActive ? "text-fd-foreground" : ""}`}
+              style={
+                first
+                  ? { left: 0 }
+                  : last
+                    ? { right: 0 }
+                    : {
+                        left: `calc(${THUMB_PX / 2}px + ${fraction} * (100% - ${THUMB_PX}px))`,
+                        transform: "translateX(-50%)",
+                      }
+              }
               type="button"
               onClick={() => onChange(tick.value)}
             >
