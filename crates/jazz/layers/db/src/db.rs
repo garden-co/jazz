@@ -468,6 +468,10 @@ struct Inner {
     conn: Connection,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
+    /// Enum variants a write may hold though its schema does not declare
+    /// them, by table and column: only an import of rows another store
+    /// kept sets any ([`Db::keep_variants_for_import`]).
+    kept_variants: BTreeMap<(String, String), BTreeSet<String>>,
     /// Errors the next ticks fail with, for tests of a tick driver.
     #[cfg(any(test, feature = "testing"))]
     failing_ticks: VecDeque<ErrorCode>,
@@ -1398,6 +1402,7 @@ impl Db {
             inner: Rc::new(Store::new(Inner {
                 conn,
                 mutation_admission_closed: false,
+                kept_variants: BTreeMap::new(),
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),
                 chunks,
@@ -2064,6 +2069,18 @@ impl Db {
                 result => return result,
             }
         }
+    }
+
+    /// From now on, a write may hold the variants `kept` names for its
+    /// table and column (by the names the write's schema gives them)
+    /// though its schema does not declare them, as rows a lens or merge
+    /// carries already can; any other undeclared name is still refused.
+    /// Only for importing rows another store kept: alpha.59 keeps a
+    /// variant a later schema removed in rows written before, and the
+    /// import names the variants its earlier versions declared.
+    #[doc(hidden)]
+    pub fn keep_variants_for_import(&self, kept: BTreeMap<(String, String), BTreeSet<String>>) {
+        self.inner().kept_variants = kept;
     }
 
     /// Run this store's wall clock at `ms` (Unix ms) from now on, or the
@@ -5187,7 +5204,7 @@ impl Inner {
         Ok(parts)
     }
 
-    fn validate_cells(table: &Table, cells: &BTreeMap<String, Value>) -> Result<(), Error> {
+    fn validate_cells(&self, table: &Table, cells: &BTreeMap<String, Value>) -> Result<(), Error> {
         for name in cells.keys() {
             if name.starts_with('$') {
                 return Err(rejected(format!(
@@ -5200,7 +5217,12 @@ impl Inner {
             };
             if let Some(variants) = &column.variants {
                 for variant in crate::values::enum_names(&cells[name]) {
-                    if !variants.iter().any(|v| v == variant) {
+                    if !variants.iter().any(|v| v == variant)
+                        && !self
+                            .kept_variants
+                            .get(&(table.name.clone(), name.clone()))
+                            .is_some_and(|kept| kept.contains(variant))
+                    {
                         return Err(rejected(format!(
                             "`{}.{name}`: `{variant}` is not one of its variants",
                             table.name
@@ -6064,7 +6086,7 @@ impl Inner {
     ) -> Result<WriteHandle, Error> {
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
-        Self::validate_cells(table, &cells)?;
+        self.validate_cells(table, &cells)?;
         if let Target::Exact(selector) | Target::View { head: selector, .. } = target
             && !table.branch_by.is_empty()
         {
@@ -6305,7 +6327,7 @@ impl Inner {
         let verb = if upsert { "UPSERT" } else { "UPDATE" };
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
-        Self::validate_cells(table, &cells)?;
+        self.validate_cells(table, &cells)?;
         let located = self.locate(table, row, target)?;
         // A row's branch columns are its branch key: a write cannot move it
         // to another branch.
@@ -6593,7 +6615,7 @@ impl Inner {
         self.snapshot(table, row, &key, seq)?;
         let mut cells = BTreeMap::new();
         if let Some(content) = &content {
-            Self::validate_cells(table, content)?;
+            self.validate_cells(table, content)?;
             for column in &table.columns {
                 if table.branch_by.contains(&column.name) {
                     continue;
