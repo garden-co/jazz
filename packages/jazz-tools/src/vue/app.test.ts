@@ -17,7 +17,7 @@ import { JazzProvider, useJazzAuth, type UseJazzAuth } from "./app.js";
 import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 import type { JazzClient } from "./create-jazz-client.js";
 const mocks = vi.hoisted(() => ({ factory: vi.fn() }));
-vi.mock("../session/create-jazz-session.js", () => ({ createJazzSession: mocks.factory }));
+vi.mock("../session/create-jazz-session.js", () => ({ createJazzClient: mocks.factory }));
 vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
 const flush = async () => {
   for (let i = 0; i < 20; i++) {

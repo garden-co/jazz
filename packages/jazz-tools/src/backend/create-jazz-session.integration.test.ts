@@ -7,8 +7,14 @@ import { schema as s } from "../index.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import type { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
-import { createJazzSession } from "./index.js";
-import { openJazzSession } from "./create-jazz-session.js";
+import { createJazzClient } from "./index.js";
+import {
+  backendDbAttributedTo,
+  backendDbForSession,
+  openJazzSession,
+} from "./create-jazz-session.js";
+import { accountRegistryUrl } from "../accounts/context.js";
+import { readAccountAssignment, requestVouchedAccount } from "../accounts/registry-client.js";
 
 const app = s.defineApp(
   {
@@ -28,8 +34,35 @@ const permissions = s.definePermissions(app, ({ policy }) => {
   policy.notes.allowDelete.never();
 });
 
+/** A user the app's backend signed in, and the session it acts as them with. */
+async function appUser(
+  server: { url: string },
+  appId: string,
+  backendSecret: string,
+  name: string,
+) {
+  const identity = { issuer: "https://app.session.test", subject: `${name}-${randomUUID()}` };
+  const response = await requestVouchedAccount(
+    accountRegistryUrl(server.url, appId),
+    "login-or-register",
+    identity,
+    backendSecret,
+  );
+  const account = readAccountAssignment(response, identity);
+  return {
+    author: { account, identity },
+    session: {
+      account_id: account,
+      issuer: identity.issuer,
+      user_id: identity.subject,
+      claims: {},
+      authMode: "external" as const,
+    },
+  };
+}
+
 describe("Node shared backend session", () => {
-  it("refuses to connect to a core with a backend secret, or to verify external JWTs", async () => {
+  it("never opens a public client as the backend", async () => {
     const base = {
       appId: randomUUID(),
       serverUrl: "http://127.0.0.1:1",
@@ -37,19 +70,13 @@ describe("Node shared backend session", () => {
       permissions,
       driver: { type: "memory" as const },
     };
-    for (const secret of [
-      { initial: { backendSecret: "secret" } },
-      { backendSecret: "secret" },
-      { adminSecret: "secret" },
-    ]) {
-      await expect(createJazzSession({ ...base, ...secret } as never)).rejects.toThrow(
-        /backend secret is not supported.*createJazz/,
+    await expect(
+      createJazzClient({ ...base, initial: { backendSecret: "secret" } } as never),
+    ).rejects.toThrow('initial is "local-first" or left out');
+    for (const key of ["backendSecret", "adminSecret"]) {
+      await expect(createJazzClient({ ...base, [key]: "secret" } as never)).rejects.toThrow(
+        `${key} is not a createJazzClient option`,
       );
-    }
-    for (const key of ["jwksUrl", "jwtPublicKey", "jwtIssuer", "jwtAudience"]) {
-      await expect(
-        createJazzSession({ ...base, [key]: "https://issuer.example/jwks" } as never),
-      ).rejects.toThrow(new RegExp(`${key} is not supported.*createJazz`));
     }
   });
 
@@ -150,58 +177,35 @@ describe("Node shared backend session", () => {
       // Its core admits no guests: becoming one is refused, and the backend stays.
       await expect(session.createLocalFirst()).rejects.toThrow("not supported");
       expect(session.getSnapshot().client).toBe(backend);
-      const guest = await createJazzSession({
-        appId,
-        serverUrl: server.url,
-        app,
-        permissions,
-        driver: { type: "memory" },
-        initial: "local-first",
-      });
-      const user = guest.getSnapshot();
-      await guest.close();
+      const user = await appUser(server, appId, backendSecret, "user");
 
       const current = backend;
-      const scoped = await current.forAccount(user.account!);
+      const scoped = backendDbForSession(current, user.session);
       await expect(async () => {
         await scoped.insert(app.notes, { text: "denied scoped user" }).wait({ tier: "global" });
       }).rejects.toThrow(/permission|denied|policy/i);
-      const other = await createJazzSession({
-        appId,
-        serverUrl: server.url,
-        app,
-        permissions,
-        driver: { type: "memory" },
-        initial: "local-first",
-      });
-      try {
-        const otherAccount = other.getSnapshot().account!;
-        const otherScope = await current.forAccount(otherAccount);
-        const rows = await Promise.all([
-          scoped.insert(app.posts, { text: "first scope" }).wait({ tier: "global" }),
-          otherScope.insert(app.posts, { text: "second scope" }).wait({ tier: "global" }),
-        ]);
-        for (const [index, expected] of [user.account!, otherAccount].entries()) {
-          expect(
-            await current.db.one(app.posts.select("$createdBy").where({ id: rows[index]!.id })),
-          ).toMatchObject({ $createdBy: { account: expected.id, identity: expected.identity } });
-        }
-      } finally {
-        await other.close();
+      const other = await appUser(server, appId, backendSecret, "other");
+      const otherScope = backendDbForSession(current, other.session);
+      const rows = await Promise.all([
+        scoped.insert(app.posts, { text: "first scope" }).wait({ tier: "global" }),
+        otherScope.insert(app.posts, { text: "second scope" }).wait({ tier: "global" }),
+      ]);
+      for (const [index, expected] of [user, other].entries()) {
+        expect(
+          await current.db.one(app.posts.select("$createdBy").where({ id: rows[index]!.id })),
+        ).toMatchObject({ $createdBy: expected.author });
       }
-      const attributed = await current.withAttribution(user.account!);
+      const attributed = backendDbAttributedTo(current, user.session);
       const row = await attributed
         .insert(app.notes, { text: "attributed service" })
         .wait({ tier: "global" });
       expect(
         await current.db.one(app.notes.select("$createdBy").where({ id: row.id })),
-      ).toMatchObject({
-        $createdBy: { account: user.account!.id, identity: user.account!.identity },
-      });
+      ).toMatchObject({ $createdBy: user.author });
       expect(session.getSnapshot().account?.identity.issuer).toBe("urn:jazz:system");
       await session.close();
       expect(() => scoped.insert(app.notes, { text: "closed scope" })).toThrow(/closed|shut down/);
-      await expect(current.forAccount(user.account!)).rejects.toThrow(/closed|shut down/);
+      expect(() => backendDbForSession(current, user.session)).toThrow(/closed|shut down/);
     } finally {
       await session.close();
       await server.stop();
@@ -213,14 +217,6 @@ describe("Node shared backend session", () => {
     const adminSecret = "attributed-tx-publication-secret";
     const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
     let session: Awaited<ReturnType<typeof openJazzSession>> | undefined;
-    const user = await createJazzSession({
-      appId,
-      serverUrl: server.url,
-      app,
-      permissions,
-      driver: { type: "memory" },
-      initial: "local-first",
-    });
     try {
       await deploy({
         serverUrl: server.url,
@@ -238,9 +234,9 @@ describe("Node shared backend session", () => {
         initial: { backendSecret },
       });
       const backend = session.getSnapshot().client!;
-      const account = user.getSnapshot().account!;
+      const user = await appUser(server, appId, backendSecret, "user");
       const note = await backend.db.insert(app.notes, { text: "invite" }).wait({ tier: "global" });
-      const attributed = await backend.withAttribution(account);
+      const attributed = backendDbAttributedTo(backend, user.session);
 
       const serializable = await attributed.serializableTransaction(async (tx) => {
         const read = await tx.one(app.notes.where({ id: note.id }));
@@ -265,7 +261,7 @@ describe("Node shared backend session", () => {
       await admitted.wait();
       expect(
         await backend.db.one(app.notes.select("$createdBy").where({ id: admitted.value })),
-      ).toMatchObject({ $createdBy: { account: account.id, identity: account.identity } });
+      ).toMatchObject({ $createdBy: user.author });
 
       await expect(
         attributed.serializableTransaction(async (tx) => {
@@ -278,11 +274,10 @@ describe("Node shared backend session", () => {
 
       for (const id of [serializable.value.id, mergeable.value.id]) {
         expect(await backend.db.one(app.posts.select("$createdBy").where({ id }))).toMatchObject({
-          $createdBy: { account: account.id, identity: account.identity },
+          $createdBy: user.author,
         });
       }
     } finally {
-      await user.close();
       await session?.close();
       await server.stop();
     }

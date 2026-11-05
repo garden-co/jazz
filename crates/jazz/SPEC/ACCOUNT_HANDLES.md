@@ -257,7 +257,7 @@ This introduces no generic record-valued durable key or migration-lens default.
 `createJazz` (`jazz-tools/backend`) opens its own session as the backend: an
 internal session owner selects the backend account once, at start, with the
 core's backend secret. No public session can select or switch to a backend
-account; the public Node `createJazzSession` refuses a backend secret and
+account; the public Node `createJazzClient` refuses a backend secret and
 serves only backend clients (`credential`). Application/schema, driver and
 server URL are configured once. Admission sends
 `POST /apps/{app}/backend/admit` with `X-Jazz-Backend-Secret`; the configured server's existing
@@ -353,7 +353,7 @@ intent).
 
 ## Shared client session lifecycle
 
-The high-level TypeScript `createJazzSession` composes the account manager and
+The high-level TypeScript `createJazzClient` composes the account manager and
 one immutable-handle-bound client. Host adapters prepare credentials/storage and
 open clients; framework adapters observe the shared snapshot and acknowledge
 consumer detachment. Rust remains the registry/authorization authority. The

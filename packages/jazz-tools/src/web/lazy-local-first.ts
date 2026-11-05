@@ -6,9 +6,9 @@ import type { JazzClient } from "./registered-jazz-client.js";
 // first call keeps its WASM engine out of apps that stay on the thin client.
 
 /** Open (or share) a local-first browser client for an account. */
-export async function createJazzClient(config: AccountDbConfig): Promise<JazzClient> {
+export async function openJazzClient(config: AccountDbConfig): Promise<JazzClient> {
   const local = await import("./create-jazz-client.js");
-  return await local.createJazzClient(config);
+  return await local.openJazzClient(config);
 }
 
 /** Prepare crypto and restore selection; createLocalFirst() is synchronous afterward. */
