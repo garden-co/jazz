@@ -29,10 +29,16 @@ export const jazz = await createJazz({
   [local-first](/docs/setup/auth/local-first) guest sync. Guests are refused otherwise. An app with
   no sign-in at all passes `authenticate: acceptLocalFirstAuth`.
 
-Jazz asks `authenticate` on every sign-in, on every sync connection and in `jazz.forRequest`. A
-sign-out or changed claims apply on the next reconnect, and a connection ends when its sign-in
-expires (after an hour by default, `sessionTtlSeconds`), so the client reconnects and is asked
-again. There are no JWKS, issuer or audience settings, and no Jazz token in the browser.
+Jazz asks `authenticate` on every sign-in, on every sync connection and in `jazz.forRequest`. It
+also asks again for each open sync connection, every minute by default (`recheckSeconds`). When the
+answer is no one, someone else or the same user with different `claims` (say their role changed),
+the connection ends and the client reconnects, so your policies see the new claims. A sign-out or a
+claims change therefore reaches an open connection within `recheckSeconds`; `jazz.forRequest` sees
+it on the next request. With `recheckSeconds: 0` it waits until the connection's sign-in expires
+(after an hour by default, `sessionTtlSeconds`). Return claims that only change when the user's
+access does: a claim that changes on every call (a timestamp, a request id) would end the
+connection on every check. There are no JWKS, issuer or audience settings, and no Jazz token in the
+browser.
 
 ## In the browser
 
