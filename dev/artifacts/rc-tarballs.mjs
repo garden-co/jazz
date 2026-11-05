@@ -118,7 +118,8 @@ export function link(dir, baseUrl) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [mode, ...args] = process.argv.slice(2);
-  if (mode === "stamp" && args.length === 1) stamp(args[0]);
+  // The CLI acts on the checkout it runs in, which may be older than this script.
+  if (mode === "stamp" && args.length === 1) stamp(args[0], process.cwd());
   else if (mode === "link" && args.length === 2) link(resolve(args[0]), args[1].replace(/\/$/, ""));
   else {
     console.error("usage: rc-tarballs.mjs stamp <version> | link <dir> <base-url>");
