@@ -267,6 +267,39 @@ pub enum SubscriptionEvent {
     Closed,
 }
 
+/// A text merge that ran past its work budget: the write stood as sent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeFallback {
+    /// The table and column, by the names the merging schema has for
+    /// them: on an authority, the stored names (`name~xxxxxx` for one a
+    /// later schema version added).
+    pub table: String,
+    pub row: RowUuid,
+    pub column: String,
+    /// The longest of the three values merged, in bytes.
+    pub bytes: usize,
+}
+
+/// The fallbacks a host has not taken yet: the first few, and a count of
+/// the rest, so a host that never takes them holds no more.
+#[derive(Default)]
+struct MergeFallbacks {
+    kept: Vec<MergeFallback>,
+    dropped: u64,
+}
+
+impl MergeFallbacks {
+    const KEPT: usize = 64;
+
+    fn record(&mut self, fallback: MergeFallback) {
+        if self.kept.len() < Self::KEPT {
+            self.kept.push(fallback);
+        } else {
+            self.dropped += 1;
+        }
+    }
+}
+
 /// What a read observes: deletions and the branch view.
 #[derive(Clone, Debug, Default)]
 struct ReadSpec {
@@ -567,6 +600,9 @@ struct Inner {
     pub(crate) own_order: HashMap<u64, sync::Order>,
     /// A wall clock tests set (see `Db::set_clock_for_test`).
     clock_for_test: Option<i64>,
+    /// The diff steps a text merge may take ([`jazz_text::MERGE_WORK_BUDGET`]
+    /// unless a test lowers it).
+    merge_budget: u64,
     /// Interned author codes (see [`Inner::author_code`]), cached both ways.
     authors: RefCell<AuthorCodes>,
     /// By stored table and whether into its history: the columns the last
@@ -625,6 +661,9 @@ struct Inner {
     /// Query statements that ran slow, until the host takes them
     /// ([`Db::take_slow_queries`]).
     slow: RefCell<crate::slow::SlowLog>,
+    /// Text merges that ran past their work budget since the host last
+    /// took them ([`Db::take_merge_fallbacks`]).
+    merge_fallbacks: RefCell<MergeFallbacks>,
     /// Subscribers accepted so far (each one's generation).
     accepted: u64,
     /// Rows written since the last server tick (only while serving).
@@ -1441,6 +1480,7 @@ impl Db {
                 hlc_last: 0,
                 own_order: HashMap::new(),
                 clock_for_test: None,
+                merge_budget: jazz_text::MERGE_WORK_BUDGET,
                 authors: RefCell::new(AuthorCodes::default()),
                 image_inserts: RefCell::default(),
                 current_batch: RefCell::default(),
@@ -1470,6 +1510,7 @@ impl Db {
                 column_codes: RefCell::default(),
                 closed: None,
                 slow: RefCell::default(),
+                merge_fallbacks: RefCell::default(),
                 accepted: 0,
                 since_tick: Vec::new(),
                 capture: Vec::new(),
@@ -2092,6 +2133,14 @@ impl Db {
         self.inner().clock_for_test = ms;
     }
 
+    /// Let text merges take `budget` diff steps: what tests of a merge past
+    /// its budget set instead of merging very large rewrites.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_merge_budget_for_test(&self, budget: u64) {
+        self.inner().merge_budget = budget;
+    }
+
     /// The versions open serializable transaction `id` recorded its reads
     /// at, each pending one with the writer it names: what its commit is
     /// validated by.
@@ -2237,6 +2286,20 @@ impl Db {
             plan.push(row.map_err(storage)?);
         }
         Ok((compiled.sql.clone(), plan.join(" | ")))
+    }
+
+    /// Text merges that ran past [`jazz_text::MERGE_WORK_BUDGET`] since the
+    /// last call, so the incoming write stood as sent and the held value's
+    /// concurrent edits left the current text (history keeps them), and
+    /// how many more there were than the list keeps. Hosts call it after
+    /// ticking and report them.
+    pub fn take_merge_fallbacks(&self) -> (Vec<MergeFallback>, u64) {
+        let inner = self.inner.borrow();
+        let mut fallbacks = inner.merge_fallbacks.borrow_mut();
+        (
+            std::mem::take(&mut fallbacks.kept),
+            std::mem::take(&mut fallbacks.dropped),
+        )
     }
 
     /// Query shapes that ran at or over the slow-query threshold since
@@ -5773,7 +5836,20 @@ impl Inner {
         let cell = self.bind_cell(table, column, value, Cells::Authored)?;
         let incoming = self.logical_text(&column.name, value)?;
         let format = column.merge.text_format().expect("a text strategy");
-        let merged = jazz_text::merge3(format, &base, &current, &incoming);
+        let Some(merged) =
+            jazz_text::try_merge3_within(format, &base, &current, &incoming, self.merge_budget)
+        else {
+            // Past the work budget the write stands as sent: the held
+            // value's concurrent edits leave the current text (history
+            // keeps them). The host is told, so it can say so.
+            self.merge_fallbacks.borrow_mut().record(MergeFallback {
+                table: table.name.clone(),
+                row,
+                column: column.name.clone(),
+                bytes: base.len().max(current.len()).max(incoming.len()),
+            });
+            return Ok(None);
+        };
         Ok((merged != incoming).then_some((merged, cell)))
     }
 
