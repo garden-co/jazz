@@ -13,8 +13,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { startScript } from "./vercel-store.js";
 
-// The start script as it runs in a Sandbox, against fake server binaries:
-// bash scripts that log their version and wait to be stopped.
+// The start script as it runs in a Sandbox, against a fake `node` on PATH:
+// it fails every download and, given a core addon, logs the core's version,
+// app id and options, then waits to be stopped.
 describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
   let root: string;
   const children: ChildProcess[] = [];
@@ -23,6 +24,20 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     root = mkdtempSync(join(tmpdir(), "jazz-start-"));
     mkdirSync(join(root, "data/bin"), { recursive: true });
     mkdirSync(join(root, "tmp"));
+    mkdirSync(join(root, "fakebin"));
+    writeFileSync(
+      join(root, "fakebin/node"),
+      [
+        "#!/bin/bash",
+        'if [[ "$2" == *fetch* ]]; then exit 1; fi',
+        "trap 'exit 0' TERM",
+        'version=$(basename "$3" .node); version=${version#jazz-napi-}',
+        `echo "$version $4 \${S3_BUCKET_NAME:-} $5" >> ${join(root, "servers.log")}`,
+        "while true; do sleep 0.05; done",
+        "",
+      ].join("\n"),
+    );
+    chmodSync(join(root, "fakebin/node"), 0o755);
   });
 
   afterEach(() => {
@@ -35,13 +50,17 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     existsSync(join(root, path)) ? readFileSync(join(root, path), "utf8").trim() : undefined;
 
   function installFake(version: string) {
-    const bin = join(root, `data/bin/jazz-tools-${version}`);
-    writeFileSync(
-      bin,
-      `#!/bin/bash\ntrap 'exit 0' TERM\necho "${version} $*" >> ${join(root, "servers.log")}\nwhile true; do sleep 0.05; done\n`,
-    );
-    chmodSync(bin, 0o755);
+    writeFileSync(join(root, `data/bin/jazz-napi-${version}.node`), "addon");
   }
+
+  /** What the fake core logged, its options parsed. */
+  const servers = () =>
+    read("servers.log")!
+      .split("\n")
+      .map((line) => {
+        const [version, appId, bucket, ...options] = line.split(" ");
+        return { version, appId, bucket, options: JSON.parse(options.join(" ")) };
+      });
 
   const trust = {
     issuer: "https://oidc.vercel.com/garden-co",
@@ -58,7 +77,11 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
   ) {
     const script = join(root, `start-${Math.random()}.sh`);
     writeFileSync(script, startScript("app-1", version, tarballUrl, workload, blobs, root));
-    const child = spawn("bash", [script], { stdio: "ignore", detached: true });
+    const child = spawn("bash", [script], {
+      stdio: "ignore",
+      detached: true,
+      env: { ...process.env, PATH: `${join(root, "fakebin")}:${process.env.PATH}` },
+    });
     children.push(child);
     const exited = new Promise<number>((resolve) =>
       child.on("exit", (code) => resolve(code ?? -1)),
@@ -75,12 +98,7 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
   const alive = (pid: string | undefined) => !!pid && spawnSync("kill", ["-0", pid]).status === 0;
 
   it("starts a core whose large values go to S3 under the project's role", async () => {
-    const bin = join(root, "data/bin/jazz-tools-1.0.0");
-    writeFileSync(
-      bin,
-      `#!/bin/bash\ntrap 'exit 0' TERM\necho "$S3_BUCKET_NAME $AWS_REGION $AWS_ROLE_ARN $*" >> ${join(root, "servers.log")}\nwhile true; do sleep 0.05; done\n`,
-    );
-    chmodSync(bin, 0o755);
+    installFake("1.0.0");
     const blobs = {
       bucket: "app-blobs",
       region: "us-east-1",
@@ -88,11 +106,14 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
       prefix: "it's/",
     };
     expect(await start("1.0.0", undefined, trust, blobs)).toBe("running");
-    const line = read("servers.log")!;
-    expect(line).toMatch(/^app-blobs us-east-1 arn:aws:iam::1:role\/vercel server /);
-    expect(line).toContain(
-      "--blobs s3 --s3-role-from-workload --blobs-environment production --s3-prefix it's/",
-    );
+    const [server] = servers();
+    expect(server!.bucket).toBe("app-blobs");
+    expect(server!.options.blobs).toEqual({
+      kind: "s3",
+      roleFromWorkload: true,
+      environment: "production",
+      prefix: "it's/",
+    });
   });
 
   it("starts a core whose large values go to the project's Blob store", async () => {
@@ -100,10 +121,13 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(await start("1.0.0", undefined, trust, { storeId: "abc", prefix: "it's/" })).toBe(
       "running",
     );
-    expect(read("servers.log")).toContain(
-      "--blobs vercel-blob --vercel-blob-token-from-workload --vercel-blob-store-id abc " +
-        "--blobs-environment production --vercel-blob-prefix it's/ --trusted-workload-issuer",
-    );
+    expect(servers()[0]!.options.blobs).toEqual({
+      kind: "vercel-blob",
+      tokenFromWorkload: true,
+      storeId: "abc",
+      environment: "production",
+      prefix: "it's/",
+    });
   });
 
   it("starts once, leaves the same version alone, and upgrades to a newer one", async () => {
@@ -112,12 +136,20 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     const first = read("tmp/jazz.pid");
     expect(read("data/version")).toBe("1.0.0");
     expect(read("data/app-id")).toBe("app-1");
-    // The server runs as the app and trusts only the workload.
-    expect(read("servers.log")).toBe(
-      `1.0.0 server app-1 --port 1625 --data-dir ${root}/data/store --blobs sqlite ` +
-        `--trusted-workload-issuer ${trust.issuer} --trusted-workload-audience ${trust.audience} ` +
-        `--trusted-workload-subject ${trust.subject}`,
-    );
+    // The core runs as the app and trusts only the workload.
+    expect(servers()).toEqual([
+      {
+        version: "1.0.0",
+        appId: "app-1",
+        bucket: "",
+        options: {
+          port: 1625,
+          dataDir: `${root}/data/store`,
+          blobs: { kind: "sqlite" },
+          trustedWorkload: trust,
+        },
+      },
+    ]);
 
     expect(await start("1.0.0")).toBe(0);
     expect(read("tmp/jazz.pid")).toBe(first);
@@ -126,8 +158,8 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(await start("2.0.0")).toBe("running");
     expect(alive(first)).toBe(false);
     expect(read("tmp/jazz.version")).toBe("2.0.0");
-    // The older binary is pruned: it never runs on this Drive again.
-    expect(existsSync(join(root, "data/bin/jazz-tools-1.0.0"))).toBe(false);
+    // The older core is pruned: it never runs on this Drive again.
+    expect(existsSync(join(root, "data/bin/jazz-napi-1.0.0.node"))).toBe(false);
   });
 
   it("never retargets a running core to another workload", async () => {
@@ -172,7 +204,7 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     writeFileSync(join(root, "data/version"), "9.0.0\n");
     expect(await start("1.0.0")).toBe(1);
     expect(read("data/version")).toBe("9.0.0");
-    expect(existsSync(join(root, "data/bin/jazz-tools-1.0.0"))).toBe(true);
+    expect(existsSync(join(root, "data/bin/jazz-napi-1.0.0.node"))).toBe(true);
   });
 
   it("keeps the old server up when the new one fails to download", async () => {

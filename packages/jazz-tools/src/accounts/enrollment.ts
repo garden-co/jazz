@@ -274,7 +274,7 @@ export function createAccountManagerWithRuntime(options: {
         if (!local) throw new AccountAuthError("local_first_restore_unavailable");
         return retain(mintHandle(registry, local.accountId, local.identity, local.auth, secret));
       },
-      async becomeBackend(auth) {
+      async admitBackend(auth) {
         const started = epoch;
         if (!options.backend) throw new AccountAuthError("backend_host_unavailable");
         if (typeof auth?.backendSecret !== "string" || !auth.backendSecret)

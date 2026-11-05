@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createAccountManager, createDb, type Db } from "jazz-tools";
-import { createJazzSession } from "jazz-tools/backend";
+import { createJazz, remote, type Jazz } from "jazz-tools/backend";
 import {
   deploy,
   startLocalJazzServer,
@@ -13,7 +13,7 @@ import { app } from "../schema";
 
 describe("Better Auth storage boundary", () => {
   let server: LocalJazzServerHandle | undefined;
-  let session: Awaited<ReturnType<typeof createJazzSession>> | undefined;
+  let session: Jazz | undefined;
   let front: TestJazz | undefined;
   let client: Db | undefined;
 
@@ -34,20 +34,16 @@ describe("Better Auth storage boundary", () => {
       permissions,
     });
 
+    // The app's backend, as its server runs it.
     const openSession = () =>
-      createJazzSession({
-        appId: server!.appId,
+      createJazz({
         app,
         permissions,
-        driver: { type: "memory" },
-        serverUrl: server!.url,
-        initial: { backendSecret: server!.backendSecret },
-        env: "test",
+        store: remote({ url: server!.url, appId: server!.appId, secret: server!.adminSecret }),
       });
 
     session = await openSession();
-    const backend = session.getSnapshot().client!;
-    const stored = await backend.db
+    const stored = await session.db
       .insert(app.better_auth_user, {
         name: "Persisted auth user",
         email: "persisted@example.test",
@@ -95,9 +91,9 @@ describe("Better Auth storage boundary", () => {
     await expect
       .poll(
         async () =>
-          (
-            await session!.getSnapshot().client!.db.all(app.better_auth_user, { tier: "remote" })
-          ).find((row) => row.id === stored.id),
+          (await session!.db.all(app.better_auth_user, { tier: "remote" })).find(
+            (row) => row.id === stored.id,
+          ),
         { timeout: 10_000 },
       )
       .toEqual(expect.objectContaining({ email: "persisted@example.test" }));

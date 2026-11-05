@@ -30,6 +30,7 @@ libsodium-sys-stable = "=1.24.0"
 postcard = { version = "1.1", features = ["alloc"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # local_dynamic_tls: a dlopen'd cdylib with mimalloc's default initial-exec
 # TLS exhausts glibc's static TLS reserve ("cannot allocate memory in static
 # TLS block") once enough other libraries load first. Dynamic TLS is the
