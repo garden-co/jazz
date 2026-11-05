@@ -22,7 +22,6 @@ import {
   JazzClientProvider,
   createJazzClient,
   useAll,
-  useDb,
   useSession,
 } from "jazz-tools/vue";
 import { app } from "../../schema.js";
@@ -279,9 +278,8 @@ describe("world-tour Jazz + Vue integration", () => {
     const s = scope("inserter");
     const Inserter = defineComponent({
       setup() {
-        const db = useDb();
         const session = useSession();
-        const { data: venues } = useAll(s.queries.venues);
+        const { data: venues, db } = useAll(s.queries.venues);
         function add() {
           db.insert(
             app.venues,

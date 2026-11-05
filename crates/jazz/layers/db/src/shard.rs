@@ -193,10 +193,22 @@ impl Inner {
     /// offset bound it waits out after a reopen, for a write that does not
     /// wait).
     /// A replica numbers its own commits locally: their versions sit at
-    /// their commit HLCs (see [`Inner::stamp_commit`]).
+    /// their commit HLCs (see [`Inner::stamp_commit`]). Its transaction ids
+    /// are `(seq, node)`, and the authority deduplicates uploads by them
+    /// (INV-EDGE-16). A replica in a file numbers no lower than its wall
+    /// clock's first position ([`hlc`]): the file may reopen without commits
+    /// it already uploaded (a lost tail, a restored backup), and its counter
+    /// then resumes below them, but its clock has moved past every id it
+    /// handed out before (INV-EDGE-28). An in-memory replica never reopens:
+    /// a host that gives its node to a fresh one seeds the floor instead
+    /// ([`crate::db::Db::seed_seq_floor`]).
     pub(crate) fn next_seq(&self) -> u64 {
         if self.me != crate::db::sync::ACCEPTED {
-            return self.seq + 1;
+            let next = self.seq + 1;
+            if !self.reopenable {
+                return next;
+            }
+            return next.max(hlc(self.hlc_clock_ms()));
         }
         let floor = self.waits_out().map_or(0, |after| hlc(after) + 1);
         (self.seq + 1).max(hlc((self.shard.clock)())).max(floor)

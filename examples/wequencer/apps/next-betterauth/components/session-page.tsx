@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PersistedWriteRejectedError } from "jazz-tools";
-import { useAll, useDb, useSession } from "jazz-tools/react";
+import { useAll, useSession } from "jazz-tools/react";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
@@ -29,11 +29,12 @@ import { TransportBar } from "@/components/transport-bar";
 import { usePlayhead, useSequencerAudio } from "@/components/use-sequencer-audio";
 
 export function SessionPage({ sessionId }: { sessionId: string }) {
-  const db = useDb();
   const author = useSession()?.user.account;
-  const { data: sessions = [], isLoading } = useAll(
-    app.sessions.where({ id: sessionId }).select("*", "$createdBy"),
-  );
+  const {
+    data: sessions = [],
+    isLoading,
+    db,
+  } = useAll(app.sessions.where({ id: sessionId }).select("*", "$createdBy"));
   const { data: profiles = [] } = useAll(author ? app.profiles.where({ author }) : undefined);
   const { data: members = [] } = useAll(app.session_members.where({ session_id: sessionId }));
   const { data: tracks = [] } = useAll(

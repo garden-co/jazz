@@ -288,7 +288,7 @@ Copied handles and SYSTEM identity objects confer no authority. Ordinary JWT
 registration, login, linking, and token extraction cannot mint or use backend
 handles. Logout fences late admissions and invalidates all issued handles.
 
-The backend's `db` already carries backend authority. `jazz.forRequest(request)`
+The backend's `db` already carries backend authority. `jazz.forReqUser(request)`
 asks the app's `authenticate` who the request's user is, resolves (or creates)
 that user's account through the core registry, and creates an immutable policy
 scope; the backend does not verify external JWTs itself (an app can use
@@ -357,7 +357,30 @@ The high-level TypeScript `createJazzClient` composes the account manager and
 one immutable-handle-bound client. Host adapters prepare credentials/storage and
 open clients; framework adapters observe the shared snapshot and acknowledge
 consumer detachment. Rust remains the registry/authorization authority. The
-session API introduces no storage or wire format.
+session API introduces no wire format; its one stored record is the account
+selection below.
+
+The client-side account selection store (`jazz-account-selection-v1`, local
+helper preferences rather than a database codec) keeps every local-first root
+and at most one selection: a root index (`selected`) or, for a user the app's
+backend signed in, `backendUser` (`jazz-backend-user-v1`: account UUID,
+identity and the claims `authenticate` returned at sign-in, never a credential
+or bearer). A reload reopens that selection before any network request, so a
+device with a remembered account never founds a fresh guest and opens offline;
+the backend still states the identity on every connection. The following
+session's first answer confirms it: another user switches, a confirmed
+signed-out answer signs out (and clears the record), and different claims sign
+the same user in again. Readers without `backendUser` ignore it and drop it on
+their next write; stores without one keep their exact earlier bytes.
+
+Following the backend never publishes a contradicting transient: a switch from
+one backend user to another is one transition (`transitioning` from the first
+user to `ready` as the next, the first torn down as on logout, `clearOnSignOut`
+included; a failed sign-in ends signed out, never back on the first). A
+sign-out confirmation signs out only the account its check started with. A
+404 from the backend-user route is retried with backoff and stops the watch
+only after three in a row over three backoff intervals; a stopped watch
+rejects every later `reauthenticate`.
 
 A transition publishes no usable client, waits for registered framework consumers
 to detach, and gracefully shuts down the old client with `waitForSync: true`.

@@ -1,9 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { useAll, useDb, useSession } from "jazz-tools/vue";
+import { useAll, useSession } from "jazz-tools/vue";
 import { app } from "../session-app.js";
-
-const db = useDb();
 
 // #region auth-session-vue-hook
 const session = useSession();
@@ -14,7 +12,7 @@ const sessionUser = computed(() => session.value?.user.account ?? null);
 // #endregion auth-session-vue-user
 
 // #region auth-session-vue-query
-const { data: ownedTodos } = useAll(
+const { data: ownedTodos, db } = useAll(
   computed(() =>
     sessionUser.value ? app.todos.where({ owner_id: sessionUser.value }) : undefined,
   ),

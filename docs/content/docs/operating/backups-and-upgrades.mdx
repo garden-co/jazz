@@ -80,30 +80,31 @@ Move a self-hosted data directory with the same import tool Jazz Cloud uses. You
 downloads below, no Node or Rust toolchain, and nothing writes to your alpha.59 directory.
 
 1. **Stop the alpha.59 server.**
-2. **Download the tools.** Get `jazz-alpha59-export-<platform>` and `jazz-alpha59-import-<platform>`
+2. **Download the tools.** Get `jazz-alpha59-alpha60-export-<platform>` and `jazz-alpha59-alpha60-import-<platform>`
    (`linux-x64`, `linux-arm64` or `darwin-arm64`) from the
    [v2.0.0-alpha.60 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.60), and
-   check each against its `.sha256` file from the same release.
+   check them against `jazz-alpha59-alpha60-export.sha256` and `jazz-alpha59-alpha60-import.sha256`
+   from the same release, and make them executable.
 3. **Export** the data with alpha.59's own code. `--work` is an empty scratch directory: the
    exporter reads a private copy of your data there.
 
    ```bash title="Terminal"
-   ./jazz-alpha59-export --data-dir ./data --work ./export-work --out app.dump
+   ./jazz-alpha59-alpha60-export --data-dir ./data --work ./export-work --out app.dump
    ```
 
 4. **Import and verify** into a new, empty directory. Verify checks every row, sign-in and identity
    link against what alpha.59 read.
 
    ```bash title="Terminal"
-   ./jazz-alpha59-import import --dump app.dump --data-dir ./data-new --app-id <appId>
-   ./jazz-alpha59-import verify --dump app.dump --data-dir ./data-new --app-id <appId>
+   ./jazz-alpha59-alpha60-import import --dump app.dump --data-dir ./data-new --app-id <appId>
+   ./jazz-alpha59-alpha60-import verify --dump app.dump --data-dir ./data-new --app-id <appId>
    ```
 
 5. **Start your new backend** with `sqlite({ path: "./data-new" })`. Keep `./data` until you're
    happy with the result.
 
 `--app-id` is your app's ID exactly as before, case included: the import uses it to link each
-returning user's old sign-in to their account, as `jazz:backend` with their old `sub`, and to keep
+returning user's old sign-in to their account, as `jazz:backend` with their old `sub` (as [`fromJWT()`](/docs/setup/auth/custom) returns it), and to keep
 local-first guests on their accounts. It's written to `<data-dir>/app-id`, so your code never needs
 it: `sqlite({ path })` runs as the old app. Pass
 `--no-backend-identity-links` to skip that. The dump holds all your app's data, so store it like the

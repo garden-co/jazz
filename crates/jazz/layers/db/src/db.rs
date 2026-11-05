@@ -267,6 +267,39 @@ pub enum SubscriptionEvent {
     Closed,
 }
 
+/// A text merge that ran past its work budget: the write stood as sent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeFallback {
+    /// The table and column, by the names the merging schema has for
+    /// them: on an authority, the stored names (`name~xxxxxx` for one a
+    /// later schema version added).
+    pub table: String,
+    pub row: RowUuid,
+    pub column: String,
+    /// The longest of the three values merged, in bytes.
+    pub bytes: usize,
+}
+
+/// The fallbacks a host has not taken yet: the first few, and a count of
+/// the rest, so a host that never takes them holds no more.
+#[derive(Default)]
+struct MergeFallbacks {
+    kept: Vec<MergeFallback>,
+    dropped: u64,
+}
+
+impl MergeFallbacks {
+    const KEPT: usize = 64;
+
+    fn record(&mut self, fallback: MergeFallback) {
+        if self.kept.len() < Self::KEPT {
+            self.kept.push(fallback);
+        } else {
+            self.dropped += 1;
+        }
+    }
+}
+
 /// What a read observes: deletions and the branch view.
 #[derive(Clone, Debug, Default)]
 struct ReadSpec {
@@ -468,6 +501,10 @@ struct Inner {
     conn: Connection,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
+    /// Enum variants a write may hold though its schema does not declare
+    /// them, by table and column: only an import of rows another store
+    /// kept sets any ([`Db::keep_variants_for_import`]).
+    kept_variants: BTreeMap<(String, String), BTreeSet<String>>,
     /// Errors the next ticks fail with, for tests of a tick driver.
     #[cfg(any(test, feature = "testing"))]
     failing_ticks: VecDeque<ErrorCode>,
@@ -563,6 +600,9 @@ struct Inner {
     pub(crate) own_order: HashMap<u64, sync::Order>,
     /// A wall clock tests set (see `Db::set_clock_for_test`).
     clock_for_test: Option<i64>,
+    /// The diff steps a text merge may take ([`jazz_text::MERGE_WORK_BUDGET`]
+    /// unless a test lowers it).
+    merge_budget: u64,
     /// Interned author codes (see [`Inner::author_code`]), cached both ways.
     authors: RefCell<AuthorCodes>,
     /// By stored table and whether into its history: the columns the last
@@ -596,6 +636,13 @@ struct Inner {
     /// A replica whose store does not outlive it (a foreground over a
     /// durable relay): its local reads wait for the upstream's view too.
     non_durable: bool,
+    /// This store lives in a file, which may reopen as an older state than
+    /// it last uploaded from: a lost tail (an IndexedDB commit still queued
+    /// at a crash, power loss under `synchronous=NORMAL`) or a restored
+    /// backup. As a replica it numbers its own commits after its wall
+    /// clock too, so a reopened file never hands out a transaction id it
+    /// may already have uploaded (see [`Inner::next_seq`]).
+    pub(crate) reopenable: bool,
     /// Rows the authority named as written for this replica's own commits
     /// whose version was not this replica's image of them (see
     /// `Inner::as_written_images`), asked for whole instead.
@@ -621,6 +668,9 @@ struct Inner {
     /// Query statements that ran slow, until the host takes them
     /// ([`Db::take_slow_queries`]).
     slow: RefCell<crate::slow::SlowLog>,
+    /// Text merges that ran past their work budget since the host last
+    /// took them ([`Db::take_merge_fallbacks`]).
+    merge_fallbacks: RefCell<MergeFallbacks>,
     /// Subscribers accepted so far (each one's generation).
     accepted: u64,
     /// Rows written since the last server tick (only while serving).
@@ -1348,8 +1398,27 @@ impl Db {
             physical.union(&schema)?;
             physical
         } else {
+            // SQLite knows a stored column by name only. Every version the
+            // file admitted gives the columns it stores their types, in
+            // admission order and then the opening schema, as the live
+            // store's union grew: the opening schema is not always the
+            // newest (a server core reopens under its genesis while later
+            // versions' tables and columns take writes, #4769).
             let mut physical = stored_schema(&conn, &config.schema)?;
-            let ddl = physical.union(&schema)?;
+            let mut ddl = String::new();
+            for (version, earlier) in &admitted {
+                if *version == config.schema.version_id() {
+                    continue;
+                }
+                if let Some(stored) = names.get(version) {
+                    ddl.push_str(&physical.union(&Schema::stored_as(
+                        earlier,
+                        stored,
+                        names.tags(),
+                    ))?);
+                }
+            }
+            ddl.push_str(&physical.union(&schema)?);
             execute_script(&conn, &ddl)?;
             physical
         };
@@ -1398,6 +1467,7 @@ impl Db {
             inner: Rc::new(Store::new(Inner {
                 conn,
                 mutation_admission_closed: false,
+                kept_variants: BTreeMap::new(),
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),
                 chunks,
@@ -1436,6 +1506,7 @@ impl Db {
                 hlc_last: 0,
                 own_order: HashMap::new(),
                 clock_for_test: None,
+                merge_budget: jazz_text::MERGE_WORK_BUDGET,
                 authors: RefCell::new(AuthorCodes::default()),
                 image_inserts: RefCell::default(),
                 current_batch: RefCell::default(),
@@ -1457,6 +1528,7 @@ impl Db {
                 publications: Vec::new(),
                 client: None,
                 non_durable: false,
+                reopenable: path.is_some(),
                 as_written_mismatches: 0,
                 authority: false,
                 pins_required: false,
@@ -1465,6 +1537,7 @@ impl Db {
                 column_codes: RefCell::default(),
                 closed: None,
                 slow: RefCell::default(),
+                merge_fallbacks: RefCell::default(),
                 accepted: 0,
                 since_tick: Vec::new(),
                 capture: Vec::new(),
@@ -1578,8 +1651,20 @@ impl Db {
     /// Serve as the global authority: subscriptions this store settles,
     /// its own and its subscribers', report `DurabilityTier::Global`. A
     /// store without the role (a relay with no upstream) settles at `Local`.
+    ///
+    /// A store with no upstream mints its authority namespace here, once,
+    /// and keeps it in the file (INV-SYNC-54), so a copy of the store taken
+    /// before any client connected (a backup) carries it: its replicas
+    /// still follow it once it is restored. A store that cannot write it
+    /// now mints it when it first serves its catalogue, as before.
     pub fn set_authority(&self) {
-        self.inner.borrow_mut().authority = true;
+        let mut inner = self.inner.borrow_mut();
+        inner.authority = true;
+        if inner.publishes_catalogue() {
+            // A storage failure here surfaces again, with its error, from
+            // the first catalogue it serves, which mints it then.
+            let _ = inner.namespace();
+        }
     }
 
     /// Refuse every session but SYSTEM's that is not pinned to a published
@@ -1697,7 +1782,7 @@ impl Db {
         let Some(store) = chunks.store().cloned() else {
             return Ok(());
         };
-        let Some(mut io) = self.begin_chunk_io(&chunks)? else {
+        let Some(mut io) = self.begin_chunk_io(&chunks, true)? else {
             return Ok(());
         };
         let wanted = std::mem::take(&mut io.fetch);
@@ -1721,6 +1806,23 @@ impl Db {
     /// to back with [`Self::finish_chunk_io`]; a batch dropped instead ends
     /// there, and its work goes to the next one.
     pub fn take_chunk_io(&self) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
+        self.take_host_chunk_io(true)
+    }
+
+    /// [`Self::take_chunk_io`] with no fetches in it: for a host whose
+    /// fetches back off after failing ([`Self::take_chunk_fetches`]), so
+    /// its uploads go on meanwhile without asking the store again for what
+    /// it failed to give. The reads refused for those stay refused.
+    pub fn take_chunk_io_holding_fetches(
+        &self,
+    ) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
+        self.take_host_chunk_io(false)
+    }
+
+    fn take_host_chunk_io(
+        &self,
+        fetches: bool,
+    ) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
         let chunks = self.inner().chunks.clone();
         if !chunks.host_io() {
             return Err(not_host_run());
@@ -1728,7 +1830,78 @@ impl Db {
         if chunks.store().is_none() {
             return Ok(None);
         }
-        self.begin_chunk_io(&chunks)
+        self.begin_chunk_io(&chunks, fetches)
+    }
+
+    /// The offloaded nodes reads wait on, to fetch beside the batch that is
+    /// out (or backing off) so they do not wait for its uploads: `None`
+    /// when no read waits. Hand what running it came to back with
+    /// [`Self::finish_chunk_fetches`]. A node a read waits on is
+    /// referenced, so no delete in the batch removes it. Dropped instead,
+    /// its nodes are wanted again. A node a fetch is already out for, in
+    /// either lane, is not fetched again.
+    ///
+    /// The fetches that failed last are asked again here, as by the next
+    /// batch: a host backing its fetches off takes these only once the
+    /// wait is over.
+    pub fn take_chunk_fetches(&self) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
+        let chunks = self.inner().chunks.clone();
+        if !chunks.host_io() {
+            return Err(not_host_run());
+        }
+        if chunks.store().is_none() {
+            return Ok(None);
+        }
+        if chunks.clear_failed() {
+            let mut inner = self.inner();
+            inner.retry_awaiting();
+            inner.retry_store_failed_pulls();
+        }
+        let wanted = chunks.take_fetch();
+        if wanted.is_empty() {
+            return Ok(None);
+        }
+        let mut io = crate::chunk_store::ChunkIo::unleased(wanted.clone());
+        io.refetch = Some(crate::chunk_store::Refetch {
+            chunks: std::sync::Arc::downgrade(&chunks),
+            unfetched: wanted,
+        });
+        Ok(Some(io))
+    }
+
+    /// Install fetches [`Self::take_chunk_fetches`] handed out, and serve
+    /// the messages held for them. Reads of a node the store failed to
+    /// answer are refused with why until the next batch starts; the first
+    /// failure is returned. Anything else is refused.
+    pub fn finish_chunk_fetches(
+        &self,
+        mut done: crate::chunk_store::ChunkIoDone,
+    ) -> Result<(), Error> {
+        let chunks = self.inner().chunks.clone();
+        if !chunks.host_io() {
+            return Err(not_host_run());
+        }
+        let ours = done.io.refetch.as_ref().is_some_and(|refetch| {
+            std::ptr::eq(refetch.chunks.as_ptr(), std::sync::Arc::as_ptr(&chunks))
+        });
+        if !ours
+            || done.io.lease.is_some()
+            || !done.io.puts.is_empty()
+            || !done.io.deletes.is_empty()
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "chunk I/O: these are not fetches this store handed out",
+            ));
+        }
+        // Answered: nothing goes back to the wanted nodes.
+        if let Some(mut refetch) = done.io.refetch.take() {
+            refetch.unfetched.clear();
+        }
+        let mut first = None;
+        self.install_fetched(&chunks, &done.io.fetch, done.fetched, true, &mut first);
+        self.sync_tick()?;
+        first.map_or(Ok(()), Err)
     }
 
     /// Apply a batch [`Self::take_chunk_io`] handed out: fetched nodes are
@@ -1762,19 +1935,22 @@ impl Db {
     /// Start a batch: what reads wait on, and (between SQLite transactions,
     /// so the mark that a put may have landed is durable before it does)
     /// settled leaves to put and reclaimed ones to delete.
+    /// `fetches: false` leaves what reads wait on, and the last failed
+    /// fetches, for later.
     fn begin_chunk_io(
         &self,
         chunks: &std::sync::Arc<crate::large::Chunks>,
+        fetches: bool,
     ) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
         // The last batch's failed fetches are asked again: results that
         // were refused for them run again, and want what they still lack
         // in this batch.
-        if chunks.outstanding().is_none() && chunks.clear_failed() {
+        if fetches && chunks.outstanding().is_none() && chunks.clear_failed() {
             let mut inner = self.inner();
             inner.retry_awaiting();
             inner.retry_store_failed_pulls();
         }
-        let Some((batch, fetch)) = chunks.begin_fetch() else {
+        let Some((batch, fetch)) = chunks.begin_fetch(fetches) else {
             return Ok(None);
         };
         // From here the lease ends the batch however this returns.
@@ -1885,6 +2061,7 @@ impl Db {
                 first.get_or_insert(error);
             }
         }
+        chunks.landed(wanted);
         self.inner().retry_awaiting();
     }
 
@@ -1898,9 +2075,24 @@ impl Db {
         if wanted.is_empty() {
             return Ok(());
         }
+        // Dropped before the answer, the nodes are wanted again: no fetch
+        // is out for them any more.
+        struct Out<'a>(
+            &'a crate::large::Chunks,
+            Option<Vec<jazz_types::large_values::chunks::ChunkRequest>>,
+        );
+        impl Drop for Out<'_> {
+            fn drop(&mut self) {
+                if let Some(requests) = self.1.take() {
+                    self.0.want_again(requests);
+                }
+            }
+        }
+        let mut out = Out(chunks, Some(wanted.clone()));
         let done = crate::chunk_store::ChunkIo::unleased(wanted)
             .run(store)
             .await;
+        out.1 = None;
         let mut first = None;
         self.install_fetched(chunks, &done.io.fetch, done.fetched, false, &mut first);
         first.map_or(Ok(()), Err)
@@ -1943,7 +2135,7 @@ impl Db {
                         self.fetch_from(&chunks, &*store, wanted).await?;
                         continue;
                     }
-                    let Some((batch, wanted)) = chunks.begin_fetch() else {
+                    let Some((batch, wanted)) = chunks.begin_fetch(true) else {
                         return Err(error);
                     };
                     // Ends the batch even if this future is dropped.
@@ -1959,6 +2151,18 @@ impl Db {
         }
     }
 
+    /// From now on, a write may hold the variants `kept` names for its
+    /// table and column (by the names the write's schema gives them)
+    /// though its schema does not declare them, as rows a lens or merge
+    /// carries already can; any other undeclared name is still refused.
+    /// Only for importing rows another store kept: alpha.59 keeps a
+    /// variant a later schema removed in rows written before, and the
+    /// import names the variants its earlier versions declared.
+    #[doc(hidden)]
+    pub fn keep_variants_for_import(&self, kept: BTreeMap<(String, String), BTreeSet<String>>) {
+        self.inner().kept_variants = kept;
+    }
+
     /// Run this store's wall clock at `ms` (Unix ms) from now on, or the
     /// real one again for `None`: what tests of time-ordered writes set
     /// instead of sleeping.
@@ -1966,6 +2170,14 @@ impl Db {
     #[doc(hidden)]
     pub fn set_clock_for_test(&self, ms: Option<i64>) {
         self.inner().clock_for_test = ms;
+    }
+
+    /// Let text merges take `budget` diff steps: what tests of a merge past
+    /// its budget set instead of merging very large rewrites.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_merge_budget_for_test(&self, budget: u64) {
+        self.inner().merge_budget = budget;
     }
 
     /// The versions open serializable transaction `id` recorded its reads
@@ -2113,6 +2325,20 @@ impl Db {
             plan.push(row.map_err(storage)?);
         }
         Ok((compiled.sql.clone(), plan.join(" | ")))
+    }
+
+    /// Text merges that ran past [`jazz_text::MERGE_WORK_BUDGET`] since the
+    /// last call, so the incoming write stood as sent and the held value's
+    /// concurrent edits left the current text (history keeps them), and
+    /// how many more there were than the list keeps. Hosts call it after
+    /// ticking and report them.
+    pub fn take_merge_fallbacks(&self) -> (Vec<MergeFallback>, u64) {
+        let inner = self.inner.borrow();
+        let mut fallbacks = inner.merge_fallbacks.borrow_mut();
+        (
+            std::mem::take(&mut fallbacks.kept),
+            std::mem::take(&mut fallbacks.dropped),
+        )
     }
 
     /// Query shapes that ran at or over the slow-query threshold since
@@ -3005,6 +3231,21 @@ impl Db {
     }
 }
 
+/// Why a replica refuses an upstream whose authority namespace is not the
+/// one it mirrors (INV-SYNC-54). Nothing on the wire tells a recreated server
+/// store from another app's, so the message names both, and the one way on.
+pub(crate) fn authority_changed() -> Error {
+    Error::new(
+        ErrorCode::AuthorityChanged,
+        "the server's authority changed: its catalogue keeps a different authority namespace \
+         than this store, so its store was recreated (a deleted data directory, a restarted \
+         in-memory server, a new environment behind the same URL) or it is another app's. \
+         This store's rows and unsynced writes belong to the old history and do not sync with \
+         it; reset the local store (`db.deleteClientStorage()` in jazz-tools, or open a fresh \
+         store) and reconnect, or point the client back at the old server",
+    )
+}
+
 impl Inner {
     /// Admit an upstream's versions under the names it stores them by
     /// (see `SyncMessage::Catalogue`), so this replica stores rows as it
@@ -3027,10 +3268,7 @@ impl Inner {
         if let (Some(known), Some(namespace)) = (known, namespace)
             && known != namespace
         {
-            return Err(Error::new(
-                ErrorCode::Schema,
-                "the upstream's catalogue is another app's: this store keeps a different authority namespace",
-            ));
+            return Err(authority_changed());
         }
         let mirrored = !versions.is_empty();
         if mirrored {
@@ -3506,10 +3744,17 @@ impl Inner {
         end_savepoint(&self.conn, name, false)
     }
 
-    /// An admitted schema under the names this store keeps it by.
     /// Published bundle `id`, resolved: the write version it selects and
     /// that version governed by the bundle's policies. `None` when this
-    /// store has no such bundle, or has not admitted its write schema.
+    /// store has no such bundle, or has not admitted its write version.
+    ///
+    /// A bundle selects a structural schema by hash, and several hashes
+    /// compile to one version (defaults and indexes do not change it): the
+    /// bundle's schema is read from the catalogue, and only its version
+    /// must be admitted, whichever of its hashes this store admitted or
+    /// opened under. It is named by that version's stored names, and
+    /// sessions pinned to it that declare no other version read and write
+    /// by it, so by its own defaults (see `Inner::governed_by`).
     pub(crate) fn bundle(
         &mut self,
         id: &crate::catalogue::BundleId,
@@ -3520,14 +3765,20 @@ impl Inner {
         let Some((hash, permissions)) = crate::catalogue::bundle(&self.conn, id)? else {
             return Ok(None);
         };
-        let Some((version, structural)) = self
+        let held = self
             .admitted
             .iter()
-            .find(|(_, schema)| crate::catalogue::structural_hash(schema.public_schema()) == hash)
-        else {
-            return Ok(None);
+            .map(|(_, schema)| schema)
+            .find(|schema| crate::catalogue::structural_hash(schema.public_schema()) == hash)
+            .map(|schema| schema.public_schema().clone());
+        let structural = match held {
+            Some(structural) => structural,
+            None => match crate::catalogue::schema(&self.conn, &hash)? {
+                Some(structural) => structural,
+                None => return Ok(None),
+            },
         };
-        let mut public = structural.public_schema().clone();
+        let mut public = structural;
         for (name, table) in public.iter_mut() {
             table.policies = permissions.get(name).cloned().unwrap_or_default();
         }
@@ -3537,9 +3788,15 @@ impl Inner {
                 format!("bundle {id} does not compile: {error}"),
             )
         })?;
+        let version = governing.version_id();
+        let admitted =
+            version == self.owner_version || self.admitted.iter().any(|(id, _)| *id == version);
+        if !admitted || self.names.get(&version).is_none() {
+            return Ok(None);
+        }
         let mut named = self.named(&governing);
         named.bundle = Some(*id);
-        let resolved = (*version, Rc::new(named));
+        let resolved = (version, Rc::new(named));
         self.bundles.insert(*id, resolved.clone());
         Ok(Some(resolved))
     }
@@ -5080,7 +5337,7 @@ impl Inner {
         Ok(parts)
     }
 
-    fn validate_cells(table: &Table, cells: &BTreeMap<String, Value>) -> Result<(), Error> {
+    fn validate_cells(&self, table: &Table, cells: &BTreeMap<String, Value>) -> Result<(), Error> {
         for name in cells.keys() {
             if name.starts_with('$') {
                 return Err(rejected(format!(
@@ -5093,7 +5350,12 @@ impl Inner {
             };
             if let Some(variants) = &column.variants {
                 for variant in crate::values::enum_names(&cells[name]) {
-                    if !variants.iter().any(|v| v == variant) {
+                    if !variants.iter().any(|v| v == variant)
+                        && !self
+                            .kept_variants
+                            .get(&(table.name.clone(), name.clone()))
+                            .is_some_and(|kept| kept.contains(variant))
+                    {
                         return Err(rejected(format!(
                             "`{}.{name}`: `{variant}` is not one of its variants",
                             table.name
@@ -5644,7 +5906,20 @@ impl Inner {
         let cell = self.bind_cell(table, column, value, Cells::Authored)?;
         let incoming = self.logical_text(&column.name, value)?;
         let format = column.merge.text_format().expect("a text strategy");
-        let merged = jazz_text::merge3(format, &base, &current, &incoming);
+        let Some(merged) =
+            jazz_text::try_merge3_within(format, &base, &current, &incoming, self.merge_budget)
+        else {
+            // Past the work budget the write stands as sent: the held
+            // value's concurrent edits leave the current text (history
+            // keeps them). The host is told, so it can say so.
+            self.merge_fallbacks.borrow_mut().record(MergeFallback {
+                table: table.name.clone(),
+                row,
+                column: column.name.clone(),
+                bytes: base.len().max(current.len()).max(incoming.len()),
+            });
+            return Ok(None);
+        };
         Ok((merged != incoming).then_some((merged, cell)))
     }
 
@@ -5957,7 +6232,7 @@ impl Inner {
     ) -> Result<WriteHandle, Error> {
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
-        Self::validate_cells(table, &cells)?;
+        self.validate_cells(table, &cells)?;
         if let Target::Exact(selector) | Target::View { head: selector, .. } = target
             && !table.branch_by.is_empty()
         {
@@ -6198,7 +6473,7 @@ impl Inner {
         let verb = if upsert { "UPSERT" } else { "UPDATE" };
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
-        Self::validate_cells(table, &cells)?;
+        self.validate_cells(table, &cells)?;
         let located = self.locate(table, row, target)?;
         // A row's branch columns are its branch key: a write cannot move it
         // to another branch.
@@ -6486,7 +6761,7 @@ impl Inner {
         self.snapshot(table, row, &key, seq)?;
         let mut cells = BTreeMap::new();
         if let Some(content) = &content {
-            Self::validate_cells(table, content)?;
+            self.validate_cells(table, content)?;
             for column in &table.columns {
                 if table.branch_by.contains(&column.name) {
                     continue;
@@ -7536,7 +7811,7 @@ impl Inner {
 
     /// The clock commit HLCs read (Unix ms): this store's configured clock
     /// (`DbConfig::with_clock`), or the one a test set.
-    fn hlc_clock_ms(&self) -> u64 {
+    pub(crate) fn hlc_clock_ms(&self) -> u64 {
         self.clock_for_test
             .map_or_else(|| (self.shard.clock)(), |ms| ms.max(0) as u64)
     }

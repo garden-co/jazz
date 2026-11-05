@@ -233,7 +233,7 @@ export async function createServer(
         res.status(401).json({ error: "Unauthorized" });
         return;
       }
-      res.locals.requestDb = await jazz.forRequest(request);
+      res.locals.requestDb = await jazz.forReqUser(request);
       res.locals.userId = account;
       next();
     } catch (e) {

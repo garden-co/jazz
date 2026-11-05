@@ -1887,6 +1887,11 @@ pub(crate) struct Client {
     /// Why this store refused its upstream's catalogue, until one is
     /// mirrored: remote reads opened meanwhile fail with it at once.
     uncatalogued: Option<Error>,
+    /// Why this store dropped link `connection` on its own (see
+    /// [`Inner::refuse_upstream`]), for the host that carries it: it stops
+    /// that link instead of keeping a socket nothing syncs over. Superseded
+    /// by the next [`Db::connect_upstream`].
+    refusal: Option<(u64, Error)>,
     /// The upstream sent its catalogue on this connection: this store
     /// knows every version the authority deployed, so its own sessions'
     /// commits under a version it still lacks are refused (INV-SYNC-52).
@@ -6440,7 +6445,9 @@ impl Inner {
         // server seqs, so the stored versions no longer show the seqs
         // handed out. The fates recorded for this node do: the next commit
         // continues after them, or it would reuse a transaction id the
-        // authority dedupes away.
+        // authority dedupes away. Its file may also have lost commits it
+        // uploaded (a lost tail, a restored backup): `next_seq` numbers a
+        // file's commits after its wall clock too, past those (INV-EDGE-28).
         let me = *self.identity.node.as_bytes();
         self.me = self.own_code()?;
         let (tx, hlc) = self.own_high_water()?;
@@ -6691,6 +6698,7 @@ impl Client {
             unadmitted: false,
             stranded: false,
             uncatalogued: None,
+            refusal: None,
             catalogued: false,
             context: None,
             whole: HashMap::new(),
@@ -6698,6 +6706,19 @@ impl Client {
             releasing: None,
             forgotten: false,
         }
+    }
+}
+
+impl Client {
+    /// The current link's refusal when it is [`ErrorCode::AuthorityChanged`]:
+    /// the upstream serves another authority history than this store's.
+    fn authority_changed(&self) -> Option<&Error> {
+        self.refusal
+            .as_ref()
+            .filter(|(connection, error)| {
+                *connection == self.connection && error.code == ErrorCode::AuthorityChanged
+            })
+            .map(|(_, error)| error)
     }
 }
 
@@ -7028,6 +7049,19 @@ impl Db {
             }
             previous = stale;
         }
+    }
+
+    /// Why this store dropped `upstream` on its own, if it did: a catalogue
+    /// it cannot mirror (an [`ErrorCode::AuthorityChanged`] upstream
+    /// among them) or a stranded store (see [`stranded`]). Nothing syncs over
+    /// that link any more, so its host stops it rather than keep the
+    /// socket open or retry it; only a new [`Db::connect_upstream`] (an
+    /// explicit reconnect) tries again. `None` while the link stands, and
+    /// for any earlier link.
+    pub fn upstream_refusal(&self, upstream: &Upstream) -> Option<Error> {
+        let inner = self.inner.borrow();
+        let (connection, error) = inner.client.as_ref()?.refusal.as_ref()?;
+        (*connection == upstream.0).then(|| error.clone())
     }
 
     /// Drop the upstream: reads stop waiting, writes queue.
@@ -7801,6 +7835,16 @@ impl Db {
                 // A stranded store uploads nothing (INV-SYNC-51).
                 None if client.stranded && client.pending.iter().any(|p| p.tx == tx) => {
                     Poll::Ready(Err(stranded()))
+                }
+                // The upstream serves another authority history: nothing
+                // this store holds uploads to it, so a wait for it fails
+                // instead of hanging (INV-SYNC-54). A wait for `Local` was
+                // answered above or still waits for the relay.
+                None if tier == DurabilityTier::Global
+                    && client.authority_changed().is_some()
+                    && client.pending.iter().any(|p| p.tx == tx) =>
+                {
+                    Poll::Ready(Err(client.authority_changed().expect("guarded").clone()))
                 }
                 None if client.pending.iter().any(|p| p.tx == tx) => Poll::Pending,
                 // Not pending and no fate: a local no-op or pre-connection commit.
@@ -8680,8 +8724,25 @@ impl Db {
                 pulls: batch.to_vec(),
             });
         }
+        // A store that follows an authority already uploads to a new link
+        // only once its `Welcome` showed the same authority: one whose store
+        // was recreated, or another app's, would otherwise take commits of
+        // the old history before this store refuses it (INV-SYNC-54). What
+        // was asked after those commits waits with them.
+        //
+        // The hold costs one round trip: a replica that reconnects with
+        // unsent commits uploads them (and the reads behind them) only after
+        // the `Welcome`, where before it sent them with its `Join`. A
+        // replica with nothing unsent, or one that mirrored no authority
+        // yet, sends as before.
+        let client = inner.client.as_ref().expect("client");
+        let hold = !client.catalogued && !client.unsent.is_empty() && inner.namespace()?.is_some();
         let client = inner.client.as_mut().expect("client");
-        let mut commits = std::mem::take(&mut client.unsent);
+        let mut commits = if hold {
+            Vec::new()
+        } else {
+            std::mem::take(&mut client.unsent)
+        };
         // Each commit's large-value nodes go ahead of it. A commit whose
         // nodes must be fetched first waits, and so do those after it.
         let mut pushes = Vec::with_capacity(commits.len());
@@ -8694,7 +8755,9 @@ impl Db {
         let waiting = commits.split_off(pushes.len());
         let trusted = inner.identity.author == AuthorSubject::SYSTEM;
         let client = inner.client.as_mut().expect("client");
-        client.unsent = waiting;
+        if !hold {
+            client.unsent = waiting;
+        }
         // An untrusted session's server joins no message over its budget
         // and would end the session on every resend: a commit that large is
         // refused here, for good, as a rejected fate.
@@ -8748,7 +8811,12 @@ impl Db {
             out.extend(batches);
             out.push(commit);
         }
-        out.extend(reads);
+        if hold {
+            // Reads stay behind the commits they follow (INV-SYNC-49).
+            client.outbox.splice(0..0, reads);
+        } else {
+            out.extend(reads);
+        }
         // A full outbound queue keeps the rest, in order, for the flush its
         // drain wakes.
         let transport = client.transport.as_mut().expect("transport");
@@ -8937,6 +9005,7 @@ impl Inner {
     fn refuse_upstream(&mut self, error: Error) {
         self.detach_upstream();
         if let Some(client) = self.client.as_mut() {
+            client.refusal = Some((client.connection, error.clone()));
             for remote in client.reads.values().filter_map(ActiveRead::live) {
                 *remote.refused.borrow_mut() = Some(error.clone());
             }
@@ -9375,12 +9444,18 @@ impl Inner {
     }
 
     /// Admitted `version` under its stored names, governed by `policies`'
-    /// policies.
+    /// policies. A published bundle's own write version is the bundle's
+    /// structural schema (see `Inner::bundle`): its sessions write by its
+    /// defaults, whichever schema of that version this store admitted or
+    /// opened under.
     pub(crate) fn governed_by(
         &self,
         version: crate::ids::SchemaVersionId,
         policies: Rc<Schema>,
     ) -> Option<Rc<Schema>> {
+        if policies.bundle.is_some() && policies.jazz.version_id() == version {
+            return Some(Rc::new((*policies).clone().with_policies_of(policies)));
+        }
         let jazz = if version == self.owner_version {
             &self.owner.jazz
         } else {
@@ -13259,6 +13334,54 @@ impl Db {
     }
 }
 
+/// What [`Db::answer_pulls`] made of a session's pulls.
+struct Answered {
+    replies: Vec<SyncMessage>,
+    /// A relay's pulls of nodes it is fetching from its upstream.
+    parked: Vec<WirePull>,
+    /// Pulls past the answer's byte budget.
+    deferred: Vec<WirePull>,
+    /// Pulls the chunk store failed to answer.
+    store_failed: Vec<WirePull>,
+}
+
+impl Inner {
+    /// The chunk store is asked again: every session's pulls it failed to
+    /// answer are answered again with it (as deferred pulls, once the
+    /// session's outbox drains). Whether there were any.
+    pub(crate) fn retry_store_failed_pulls(&mut self) -> bool {
+        let mut any = false;
+        for index in 0..self.sessions.len() {
+            let pulls = std::mem::take(&mut self.sessions[index].store_failed_pulls);
+            if pulls.is_empty() {
+                continue;
+            }
+            any = true;
+            // Answered again, they want from the store what it holds of
+            // them (their offloaded leaves), as any pull does.
+            self.sessions[index].deferred_pulls.extend(pulls);
+        }
+        any
+    }
+}
+
+/// What a remote reader is told of `event` on its read `id`: a read whose
+/// rows the chunk store failed to give ends at the client with why, rather
+/// than waiting on rows that never come. Only store failures are sent
+/// here; other rejections reach remote readers as they did before.
+fn store_refusal(id: u64, event: &SubscriptionEvent) -> Option<SyncMessage> {
+    match event {
+        SubscriptionEvent::Rejected { code, message, .. } if *code == ErrorCode::Storage => {
+            Some(SyncMessage::Refused {
+                id,
+                code: *code,
+                message: message.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// Only a chunk store's failure becomes a refusal, carrying the
@@ -13505,60 +13628,5 @@ mod tests {
         let mut joiner = FrameJoiner::with_ceiling(bytes.len() - 1);
         assert!(joiner.push(&parts[0]).unwrap().is_none());
         assert!(joiner.push(&parts[1]).is_err());
-    }
-}
-
-/// What [`Db::answer_pulls`] made of a session's pulls.
-struct Answered {
-    replies: Vec<SyncMessage>,
-    /// A relay's pulls of nodes it is fetching from its upstream.
-    parked: Vec<WirePull>,
-    /// Pulls past the answer's byte budget.
-    deferred: Vec<WirePull>,
-    /// Pulls the chunk store failed to answer.
-    store_failed: Vec<WirePull>,
-}
-
-impl Inner {
-    /// The chunk store is asked again: every session's pulls it failed to
-    /// answer are answered again with it (as deferred pulls, once the
-    /// session's outbox drains), and their nodes are wanted in the batch
-    /// that starts now. Whether there were any.
-    pub(crate) fn retry_store_failed_pulls(&mut self) -> bool {
-        let mut any = false;
-        for index in 0..self.sessions.len() {
-            let pulls = std::mem::take(&mut self.sessions[index].store_failed_pulls);
-            if pulls.is_empty() {
-                continue;
-            }
-            any = true;
-            for pull in &pulls {
-                self.chunks.add_demand(
-                    pull.nodes
-                        .iter()
-                        .map(|hash| ChunkRequest { object_hash: *hash }),
-                    pull.span.map(|(start, end)| (pull.root, start..end)),
-                );
-            }
-            self.sessions[index].deferred_pulls.extend(pulls);
-        }
-        any
-    }
-}
-
-/// What a remote reader is told of `event` on its read `id`: a read whose
-/// rows the chunk store failed to give ends at the client with why, rather
-/// than waiting on rows that never come. Only store failures are sent
-/// here; other rejections reach remote readers as they did before.
-fn store_refusal(id: u64, event: &SubscriptionEvent) -> Option<SyncMessage> {
-    match event {
-        SubscriptionEvent::Rejected { code, message, .. } if *code == ErrorCode::Storage => {
-            Some(SyncMessage::Refused {
-                id,
-                code: *code,
-                message: message.clone(),
-            })
-        }
-        _ => None,
     }
 }

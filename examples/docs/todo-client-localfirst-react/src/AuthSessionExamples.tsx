@@ -1,9 +1,7 @@
-import { useAll, useDb, useSession } from "jazz-tools/react";
+import { useAll, useSession } from "jazz-tools/react";
 import { app } from "../session-app.js";
 
 export function AuthSessionExamples() {
-  const db = useDb();
-
   // #region auth-session-react-hook
   const session = useSession();
   // #endregion auth-session-react-hook
@@ -13,7 +11,7 @@ export function AuthSessionExamples() {
   // #endregion auth-session-react-user
 
   // #region auth-session-react-query
-  const { data: ownedTodos = [] } = useAll(
+  const { data: ownedTodos = [], db } = useAll(
     sessionUser ? app.todos.where({ owner_id: sessionUser }) : undefined,
   );
   // #endregion auth-session-react-query

@@ -14,7 +14,7 @@ function json(body: unknown, status = 200): Response {
 }
 
 // This smoke example deliberately has one disposable account per request.
-// Production request handlers use createJazz and jazz.forRequest(request).
+// Production request handlers use createJazz and jazz.forReqUser(request).
 async function openRequestDb(origin: string): Promise<Db> {
   let stored: string | null = null;
   const store: AccountStore = {

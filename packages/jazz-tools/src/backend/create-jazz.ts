@@ -72,6 +72,7 @@ export {
   type S3BlobStore,
   type VercelBlobStore,
 } from "./blobs.js";
+import { isSameAdmission, recheckEvery } from "./session-recheck.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
@@ -102,7 +103,7 @@ export type JazzStore =
 /**
  * A SQLite core in this process, kept in the directory `path`. It generates
  * its app id on first start and keeps it beside its data, in `<path>/app-id`
- * (`jazz-tools migrate-alpha59` writes an alpha.59 app's id there). Large
+ * (`jazz-alpha59-alpha60-import` writes an alpha.59 app's id there). Large
  * values' bytes go to `blobs`, by default `files()` in `<path>/blobs`.
  *
  * Only one process can open `path` at a time (it holds `<path>/jazz.lock`
@@ -138,7 +139,7 @@ export function memory(options?: { appId?: never }): Extract<JazzStore, { kind: 
 function refuseStoreAppId(store: string, options: unknown): void {
   if (typeof options === "object" && options !== null && "appId" in options) {
     throw new Error(
-      `${store}(): appId is not an option: the store keeps its own app id. To keep an alpha.59 app's id, import its data with \`jazz-tools migrate-alpha59 --app-id\`.`,
+      `${store}(): appId is not an option: the store keeps its own app id. To keep an alpha.59 app's id, import its data with \`jazz-alpha59-alpha60-import import --app-id\`.`,
     );
   }
 }
@@ -296,7 +297,7 @@ export interface CreateJazzOptions {
   /**
    * Decide who sent `request`, with your app's own session (a cookie, a
    * header). Return null for a signed-out request. Jazz calls it when a
-   * browser signs in or opens a sync session, and in `forRequest`.
+   * browser signs in or opens a sync session, and in `forReqUser`.
    *
    * Local-first guests are refused unless it returns
    * `acceptLocalFirstAuth(request)` for them; an app with no sign-in passes
@@ -329,7 +330,11 @@ export interface CreateJazzOptions {
    * How often `authenticate` is asked again for each open sync session of a
    * signed-in user. When it no longer names that user (they signed out, in
    * another tab or anywhere else, or their session expired or was revoked),
-   * the session ends as signed out. Defaults to 60 seconds; 0 turns it off.
+   * the session ends as signed out. When it names them with other claims
+   * (a role changed), the session ends too and the client reconnects with
+   * the new claims, so this bounds how long a claims change takes to reach
+   * an open session. Defaults to 60 seconds; 0 turns it off, and changes
+   * then wait for the session to end (`sessionTtlSeconds`).
    */
   recheckSeconds?: number;
   /**
@@ -426,7 +431,7 @@ export interface Jazz {
    */
   readonly db: Db;
   /** The database as the request's user, judged by your permissions. */
-  forRequest(request: Request): Promise<Db>;
+  forReqUser(request: Request): Promise<Db>;
   /**
    * The Jazz account of the request's signed-in user (created on first use),
    * or null when `authenticate` names no user. For API routes that act on
@@ -1133,7 +1138,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     const settings = jazzSettings(next);
     // The same app and permissions (a reload of a module that imports them
     // unchanged, or a hot reload that rebuilt equal ones): the bundle, and
-    // the backend's session with its writes and `forRequest` dbs, stay.
+    // the backend's session with its writes and `forReqUser` dbs, stay.
     if (next.app !== options.app || next.permissions !== options.permissions) {
       const published = await publish(next);
       if (published !== pin) {
@@ -1158,7 +1163,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   /**
    * Sessions a reload replaced. Each stays open for
    * `RETIRED_SESSION_GRACE_MS`, so the writes it has in flight and the
-   * `forRequest` dbs requests still hold finish, then closes (draining its
+   * `forReqUser` dbs requests still hold finish, then closes (draining its
    * writes); a close of this Jazz closes those left.
    */
   const retiring = new Set<() => Promise<void>>();
@@ -1514,7 +1519,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     let ended = false;
     let userId: string | undefined;
     let trusted = false;
-    let recheck: ReturnType<typeof setInterval> | undefined;
+    let recheck: (() => void) | undefined;
     // A session that never sends its prelude ends too.
     let expiry: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
       onEvent(null, { kind: "close", code: 1008, reason: "no sign-in in time" });
@@ -1525,7 +1530,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       if (ended) return;
       ended = true;
       if (expiry) clearTimeout(expiry);
-      if (recheck) clearInterval(recheck);
+      recheck?.();
       socket?.close();
     };
     const admit = async (prelude: Uint8Array): Promise<boolean> => {
@@ -1555,53 +1560,26 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       expiry = setTimeout(end, Math.max(ttl, 0));
       (expiry as unknown as { unref?: () => void }).unref?.();
       const every = (options.recheckSeconds ?? 60) * 1000;
-      if (userId !== undefined && every > 0) {
-        const admittedUser = userId;
-        let checking = false;
-        recheck = setInterval(() => {
-          if (checking || ended) return;
-          checking = true;
-          void Promise.resolve()
-            .then(() => authenticate(request))
-            .then(
-              (user) => {
-                if (ended || user?.userId === admittedUser) return;
-                // The socket's request carries the cookies it opened with, so
-                // this may only mean they expired. The client reconnects with
-                // fresh ones; if no one is signed in, that admission fails as
-                // an auth failure (above).
-                onEvent(null, { kind: "close", code: 1008, reason: "authenticate again" });
-                end();
-              },
-              // A failing `authenticate` (its database is down) is not a
-              // sign-out; the next check asks again.
-              () => {},
-            )
-            .finally(() => {
-              checking = false;
-            });
-        }, every);
-        (recheck as unknown as { unref?: () => void }).unref?.();
+      // The socket's request carries the cookies it opened with, so a
+      // refusal may only mean they expired. The client reconnects with fresh
+      // ones; if no one is signed in, that admission fails as an auth
+      // failure (above), and otherwise it carries the user's claims now.
+      const authenticateAgain = () => {
+        if (ended) return;
+        onEvent(null, { kind: "close", code: 1008, reason: "authenticate again" });
+        end();
+      };
+      const admittedUser = admitted.user;
+      if (admittedUser && every > 0) {
+        // Signed out, someone else, or the same user with other claims.
+        recheck = recheckEvery(
+          every,
+          async () => isSameAdmission(admittedUser, await authenticate(request)),
+          authenticateAgain,
+        );
       } else if (admitted.guest && every > 0) {
         // The app may stop letting guests in (or this one): ask again, as for users.
-        let checking = false;
-        recheck = setInterval(() => {
-          if (checking || ended) return;
-          checking = true;
-          void acceptsGuest(request)
-            .then(
-              (accepted) => {
-                if (ended || accepted) return;
-                onEvent(null, { kind: "close", code: 1008, reason: "authenticate again" });
-                end();
-              },
-              () => {},
-            )
-            .finally(() => {
-              checking = false;
-            });
-        }, every);
-        (recheck as unknown as { unref?: () => void }).unref?.();
+        recheck = recheckEvery(every, () => acceptsGuest(request), authenticateAgain);
       }
       socket = core.openSocket(headerPairs(request.headers), onEvent, admitted.access);
       return socket.send(admitted.prelude);
@@ -1656,6 +1634,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   ): Promise<{
     prelude: Uint8Array;
     userId: string | undefined;
+    /** The user (with the claims) `authenticate` named for a vouched session. */
+    user?: JazzUser;
     access: BackendAccess;
     trusted: boolean;
     expiresAt?: number;
@@ -1749,6 +1729,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     return {
       prelude: new TextEncoder().encode(JSON.stringify(rewritten)),
       userId: user.userId,
+      user,
       access: "backend",
       trusted: false,
       expiresAt: client?.expiresAt,
@@ -2271,9 +2252,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       return backend.db;
     },
     linkIdentity,
-    async forRequest(request) {
+    async forReqUser(request) {
       const user = await authenticate(request);
-      if (!user) throw new Error("forRequest: the request has no signed-in user");
+      if (!user) throw new Error("forReqUser: the request has no signed-in user");
       return backendDbForSession(backend, await sessionFor(user));
     },
     async withAttribution(request) {
@@ -2703,7 +2684,7 @@ function facade(entry: Entry): Jazz {
         .finally(() => heldSockets--);
     },
     db,
-    forRequest: async (request) => (await use()).forRequest(request),
+    forReqUser: async (request) => (await use()).forReqUser(request),
     withAttribution: async (request) => (await use()).withAttribution(request),
     accountFor: async (request) => (await use()).accountFor(request),
     linkIdentity: async (link) => (await use()).linkIdentity(link),

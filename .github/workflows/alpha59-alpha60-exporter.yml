@@ -1,0 +1,184 @@
+name: alpha59-alpha60 exporter
+
+# Builds `jazz-alpha59-alpha60-export` and `jazz-alpha59-alpha60-import`, the two halves of
+# moving a self-hosted alpha.59 server data dir to the current format, and
+# attaches them to a GitHub release. The npm `jazz-tools` carries no native
+# binary, so the importer ships here, next to the exporter.
+#
+# The exporter has to link alpha.59 itself, so it is built inside a
+# v2.0.0-alpha.59 checkout with `dev/alpha59-alpha60/prepare.sh`, from the
+# hooks and dump crate at `ref`. The importer is built from `ref` itself. Dispatched by hand (or by an agent) for the
+# release that self-hosters upgrade to, while it is still a draft: after the
+# npm publish pushes the tag and before "GitHub release" publishes the draft,
+# which refuses to publish a release whose tag has dev/alpha59-alpha60 but no
+# exporter or importer assets. The assets stay on that release, and are never replaced
+# once it is published.
+on:
+  # "Release candidate" calls it for its prerelease.
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      ref:
+        required: false
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release to attach the exporter and importer to, e.g. 2.0.0-alpha.60 or 2.0.0-alpha.60-rc.1 (tag v<version>). It must still be a draft."
+        required: true
+        type: string
+      ref:
+        description: "Commit or tag whose dev/alpha59-alpha60, dump crate and importer to build. Empty means the release tag."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alpha59-alpha60-exporter-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  build:
+    name: Build exporter and importer (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04 for its older glibc (2.35), so the binary runs on
+          # more servers.
+          - os: blacksmith-4vcpu-ubuntu-2204
+            platform: linux-x64
+          - os: blacksmith-4vcpu-ubuntu-2204-arm
+            platform: linux-arm64
+          - os: blacksmith-6vcpu-macos-15
+            platform: darwin-arm64
+    steps:
+      - name: Validate inputs
+        run: |
+          # A release candidate (2.0.0-alpha.N-rc.M, a prerelease the
+          # "Release candidate" workflow makes) lets hosts try the upgrade
+          # before 2.0.0-alpha.N ships.
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "::error::version must look like 2.0.0-alpha.N or 2.0.0-alpha.N-rc.M, got '${VERSION}'"
+            exit 1
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || format('v{0}', inputs.version) }}
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: v2.0.0-alpha.59
+          path: .a59
+
+      - uses: ./.github/actions/setup-build
+        with:
+          setup-node: "false"
+          rust-cache: "false"
+
+      - name: Install the exporter into the alpha.59 checkout
+        run: A59_DIR="$PWD/.a59" dev/alpha59-alpha60/prepare.sh
+
+      - name: Build
+        working-directory: .a59
+        run: cargo build --release -p jazz-alpha59-alpha60-export
+
+      - name: Smoke test
+        run: |
+          set +e
+          .a59/target/release/jazz-alpha59-alpha60-export 2>usage.txt
+          status=$?
+          set -e
+          cat usage.txt
+          test "$status" = 2
+          grep -q "usage: jazz-alpha59-alpha60-export" usage.txt
+
+      - name: Build the importer
+        run: cargo build --release -p jazz-cli --bin jazz-alpha59-alpha60-import
+
+      - name: Smoke test the importer
+        run: |
+          set +e
+          target/release/jazz-alpha59-alpha60-import 2>usage.txt
+          status=$?
+          set -e
+          cat usage.txt
+          test "$status" = 2
+          grep -q "usage: jazz-alpha59-alpha60-import" usage.txt
+
+      - name: Stage
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          mkdir -p dist
+          cp .a59/target/release/jazz-alpha59-alpha60-export "dist/jazz-alpha59-alpha60-export-${PLATFORM}"
+          cp target/release/jazz-alpha59-alpha60-import "dist/jazz-alpha59-alpha60-import-${PLATFORM}"
+          # The commits it was built from, checked equal across platforms.
+          printf 'jazz %s\nalpha.59 %s\n' "$(git rev-parse HEAD)" "$(git -C .a59 rev-parse HEAD)" \
+            > "dist/source-${PLATFORM}.txt"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-alpha59-alpha60-export-${{ matrix.platform }}
+          path: |
+            dist/jazz-alpha59-alpha60-export-${{ matrix.platform }}
+            dist/jazz-alpha59-alpha60-import-${{ matrix.platform }}
+            dist/source-${{ matrix.platform }}.txt
+          if-no-files-found: error
+
+  attach:
+    name: Attach to v${{ inputs.version }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-alpha59-alpha60-export-*
+          merge-multiple: true
+          path: dist
+
+      - name: Refuse a published release
+        run: |
+          if ! is_draft=$(gh release view "v${VERSION}" --json isDraft --jq .isDraft); then
+            echo "::error::No release v${VERSION}; create its draft with the GitHub release workflow first."
+            exit 1
+          fi
+          if [ "${is_draft}" != true ]; then
+            echo "::error::v${VERSION} is published; its exporter and importer assets are never replaced."
+            exit 1
+          fi
+
+      - name: Checksums and source
+        working-directory: dist
+        run: |
+          for source in source-*.txt; do
+            cmp "${source}" source-linux-x64.txt
+          done
+          mv source-linux-x64.txt jazz-alpha59-alpha60-export.source.txt
+          rm source-*.txt
+          sha256sum jazz-alpha59-alpha60-export-* > jazz-alpha59-alpha60-export.sha256
+          sha256sum jazz-alpha59-alpha60-import-* > jazz-alpha59-alpha60-import.sha256
+          cat jazz-alpha59-alpha60-export.sha256 jazz-alpha59-alpha60-import.sha256 jazz-alpha59-alpha60-export.source.txt
+
+      # Replacing assets is safe only on a draft, which the step above checked.
+      - name: Upload
+        run: gh release upload "v${VERSION}" dist/* --clobber

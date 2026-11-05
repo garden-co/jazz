@@ -1,5 +1,5 @@
 import { schema as s } from "jazz-tools";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 
 // #region collab-schema
 const schema = {
@@ -75,11 +75,11 @@ s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
 
 // #region collab-subscribe
 export function ProjectTasks({ projectId }: { projectId: string }) {
-  const db = useDb();
   const {
     data: tasks,
     isLoading,
     error,
+    db,
   } = useAll(app.tasks.where({ projectId, done: false }).orderBy("$createdAt", "desc"));
 
   function addTask(title: string) {

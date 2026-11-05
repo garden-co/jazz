@@ -30,7 +30,7 @@ export function TodoDetailPage({ id }: { id: string }) {
 }
 
 function TodoTitle({ id }: { id: string }) {
-  const todo = useOneSuspense(app.todos.where({ id }));
+  const { data: todo } = useOneSuspense(app.todos.where({ id }));
   return <h1>{todo ? todo.title : "Todo not found"}</h1>;
 }
 // #endregion reading-one-suspense-react

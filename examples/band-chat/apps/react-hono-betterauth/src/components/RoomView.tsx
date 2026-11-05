@@ -84,11 +84,10 @@ export function usePrefetchRoom(roomId: string | null) {
 }
 
 export function RoomView({ summary, author }: { summary: RoomSummary; author: string }) {
-  const db = useDb();
   const directory = useDirectory();
   const { room, isCreator } = summary;
   const roomId = room.id;
-  const { data: newestFirst } = useAll(roomMessagesQuery(roomId));
+  const { data: newestFirst, db } = useAll(roomMessagesQuery(roomId));
   // Undefined until the first result: "No messages yet" only for a room that has none.
   const isLoadingMessages = newestFirst === undefined;
   const messages = useMemo(() => [...(newestFirst ?? [])].reverse(), [newestFirst]);

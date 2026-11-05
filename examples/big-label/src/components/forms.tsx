@@ -84,10 +84,9 @@ export function ReleaseDialog({
   artistId?: string;
   onCreated?: (id: string) => void;
 }) {
-  const db = useDb();
   const write = useWrite();
   const organization = useOrganization();
-  const { data: artists = [] } = useAll(
+  const { data: artists = [], db } = useAll(
     app.artists.where({ organizationId: organization.id }).orderBy("name", "asc").limit(500),
   );
   const { data: catalogues = [] } = useAll(

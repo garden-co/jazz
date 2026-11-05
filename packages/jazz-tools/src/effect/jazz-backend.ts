@@ -14,11 +14,11 @@ export interface JazzBackendService {
   readonly jazz: AppJazz;
   /**
    * The backend's own database, acting with the backend's authority rather
-   * than a user's. Prefer {@link forRequest} in request handlers.
+   * than a user's. Prefer {@link forReqUser} in request handlers.
    */
   readonly authority: Effect.Effect<JazzDb>;
   /** Act as the user your `authenticate` names for `request`, with their permissions. */
-  forRequest(request: Request): Effect.Effect<JazzDb, JazzError>;
+  forReqUser(request: Request): Effect.Effect<JazzDb, JazzError>;
   /**
    * Keep backend permissions while recording the request's signed-in user as
    * author. Your permissions are not checked (see `createJazz`'s `withAttribution`).
@@ -29,14 +29,14 @@ export interface JazzBackendService {
 /**
  * The app's Jazz in an Effect backend. It deliberately does not provide
  * {@link Jazz} itself: handlers choose whose permissions they act with, most
- * often the requesting user's through {@link JazzBackend.forRequest}.
+ * often the requesting user's through {@link JazzBackend.forReqUser}.
  *
  * @example
  * ```ts
  * const handler = Effect.gen(function* () {
  *   const jazz = yield* Jazz;
  *   return yield* jazz.all(app.todos);
- * }).pipe(JazzBackend.forCurrentRequest());
+ * }).pipe(JazzBackend.forCurrentReqUser());
  * ```
  */
 export class JazzBackend extends Context.Service<JazzBackend, JazzBackendService>()(
@@ -80,7 +80,7 @@ export class JazzBackend extends Context.Service<JazzBackend, JazzBackendService
     );
 
   /** Provide {@link Jazz} to `self` as the user who sent `request`. */
-  static readonly forRequest =
+  static readonly forReqUser =
     (request: Request) =>
     <A, E, R>(
       self: Effect.Effect<A, E, R>,
@@ -88,14 +88,14 @@ export class JazzBackend extends Context.Service<JazzBackend, JazzBackendService
       Effect.provideServiceEffect(
         self,
         Jazz,
-        JazzBackend.use((backend) => backend.forRequest(request)),
+        JazzBackend.use((backend) => backend.forReqUser(request)),
       );
 
   /**
    * Provide {@link Jazz} to `self` as the user who sent the current
    * `HttpServerRequest`, for handlers built with `effect/http`.
    */
-  static readonly forCurrentRequest =
+  static readonly forCurrentReqUser =
     () =>
     <A, E, R>(
       self: Effect.Effect<A, E, R>,
@@ -109,8 +109,8 @@ export class JazzBackend extends Context.Service<JazzBackend, JazzBackendService
         Jazz,
         HttpServerRequest.HttpServerRequest.use((request) =>
           HttpServerRequest.toWeb(request).pipe(
-            Effect.mapError(toJazzError("forRequest")),
-            Effect.flatMap((web) => JazzBackend.use((backend) => backend.forRequest(web))),
+            Effect.mapError(toJazzError("forReqUser")),
+            Effect.flatMap((web) => JazzBackend.use((backend) => backend.forReqUser(web))),
           ),
         ),
       );
@@ -132,7 +132,7 @@ function makeJazzBackend(jazz: AppJazz): JazzBackendService {
   return {
     jazz,
     authority: Effect.sync(() => Jazz.fromDb(jazz.db)),
-    forRequest: (request) => scoped("forRequest", () => jazz.forRequest(request)),
+    forReqUser: (request) => scoped("forReqUser", () => jazz.forReqUser(request)),
     withAttribution: (request) => scoped("withAttribution", () => jazz.withAttribution(request)),
   };
 }

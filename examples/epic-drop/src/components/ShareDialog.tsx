@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { Avatar } from "@astryxdesign/core/Avatar";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Badge } from "@astryxdesign/core/Badge";
@@ -27,9 +27,8 @@ interface ShareDialogProps {
 
 /** Owners invite people by link and manage who has access to a folder. */
 export function ShareDialog({ folder, userId, onClose }: ShareDialogProps) {
-  const db = useDb();
   const folderId = folder?.id;
-  const { data: members = [] } = useAll(
+  const { data: members = [], db } = useAll(
     folderId ? app.folderMembers.where({ folder_id: folderId }) : undefined,
   );
   const { data: invites = [] } = useAll(

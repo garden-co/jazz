@@ -636,10 +636,12 @@ the **authority namespace** and the stored table (and stored column) name.
 schema version.
 
 - The authority namespace is 16 random bytes an authority with no upstream
-  mints once and keeps in `_jazz_meta`. Every `Catalogue` carries it. A
-  replica keeps the first one it mirrors and refuses an upstream that sends
-  another (another app's authority): its remote reads fail with why and its
-  local reads go on.
+  mints once, when it is opened as the authority, and keeps in `_jazz_meta`.
+  Every `Catalogue` carries it. A replica keeps the first one it mirrors and
+  refuses an upstream that sends another (another app's authority, or one
+  whose store was recreated) with `AuthorityChanged`: its remote reads and
+  `Global` waits fail with why and its local reads go on (ch. 8 §8.10,
+  `INV-SYNC-54`).
 - A version's identities are the authority's only once the authority has
   confirmed that version's names. `Catalogue.confirmed` lists each version
   the sender's authority admitted with the digest of its names, and a

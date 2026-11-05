@@ -16,14 +16,13 @@ import {
   readdirSync,
   lstatSync,
   rmSync,
-  unlinkSync,
 } from "node:fs";
 import { createRequire } from "node:module";
+import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { verifyCliArtifact } from "./cli-artifact-provenance.mjs";
 import { createProcessOwner } from "./process-owner.mjs";
 import { verifyJazzResolutions } from "./dependency-resolution.mjs";
 const ownDir = dirname(fileURLToPath(import.meta.url));
@@ -34,8 +33,6 @@ for (const key of [
   "packageVersion",
   "previewRun",
   "project",
-  "cli",
-  "cliSha256",
   "nativeFingerprint",
   "output",
   "packages",
@@ -45,7 +42,6 @@ assert(["baseline", "final-preview", "published"].includes(input.phase));
 assert.match(input.sourceSha, /^[0-9a-f]{40}$/);
 if (input.phase !== "baseline") assert.match(input.packageVersion, /alpha\.56$/);
 const hash = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
-assert.equal(hash(input.cli), input.cliSha256, "CLI digest mismatch");
 const project = realpathSync(input.project),
   require = createRequire(join(project, "package.json"));
 for (const name of ["jazz-tools", "jazz-napi", "jazz-wasm"])
@@ -124,19 +120,9 @@ assert.equal(
   input.nativeFingerprint,
   "Installed native fingerprint mismatch",
 );
-const cliEvidence =
-  input.phase !== "baseline" || input.cliArtifact
-    ? await verifyCliArtifact(input, packageDirs.get("jazz-tools"))
-    : null;
 const output = resolve(input.output);
 assert(!existsSync(output), "Output must be new; never reset historical stores");
 mkdirSync(output, { recursive: true, mode: 0o700 });
-if (cliEvidence)
-  writeFileSync(
-    join(output, "cli-artifact-provenance.json"),
-    JSON.stringify(cliEvidence, null, 2),
-    { mode: 0o600 },
-  );
 const c = {
   ...input,
   project,
@@ -146,8 +132,7 @@ const c = {
   backendSecret: randomUUID(),
 };
 mkdirSync(c.state, { mode: 0o700 });
-const configPath = join(output, "private-config.json"),
-  portPath = join(output, "port");
+const configPath = join(output, "private-config.json");
 let server;
 const processes = createProcessOwner();
 const emit = (check, detail = {}) =>
@@ -183,20 +168,31 @@ async function stop() {
   await processes.stop(server);
   server = undefined;
 }
-async function start(port = 0) {
-  if (existsSync(portPath)) unlinkSync(portPath); // Only this run's owned readiness file.
+async function freePort() {
+  const probe = createServer();
+  await new Promise((resolve, reject) => {
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", resolve);
+  });
+  const { port } = probe.address();
+  await new Promise((resolve) => probe.close(resolve));
+  return port;
+}
+async function start(port) {
+  port ??= await freePort();
+  // The core is the verified jazz-napi payload, as a vercel() Sandbox runs it.
   server = launch(
-    input.cli,
+    process.execPath,
     [
-      "server",
-      c.appId,
-      "--port",
-      String(port),
-      "--data-dir",
-      join(c.state, "server"),
-      "--bound-port-file",
-      portPath,
-      "--allow-local-first-auth",
+      join(ownDir, "core.mjs"),
+      project,
+      JSON.stringify({
+        appId: c.appId,
+        port,
+        dataDir: join(c.state, "server"),
+        blobs: { kind: "sqlite" },
+        allowLocalFirstAuth: true,
+      }),
     ],
     "server.log",
     {
@@ -205,21 +201,16 @@ async function start(port = 0) {
       JAZZ_BACKEND_SECRET: c.backendSecret,
     },
   );
+  c.serverUrl = `http://127.0.0.1:${port}`;
   for (let i = 0; i < 200; i++) {
-    assert.equal(server.exitCode, null, "CLI exited before readiness");
-    if (existsSync(portPath)) {
-      const boundPort = Number(readFileSync(portPath, "utf8").trim());
-      if (boundPort) {
-        c.serverUrl = `http://127.0.0.1:${boundPort}`;
-        try {
-          const r = await fetch(`${c.serverUrl}/health`, { signal: AbortSignal.timeout(1000) });
-          if (r.status < 500) return boundPort;
-        } catch {}
-      }
-    }
+    assert.equal(server.exitCode, null, "Core exited before readiness");
+    try {
+      const r = await fetch(`${c.serverUrl}/health`, { signal: AbortSignal.timeout(1000) });
+      if (r.status < 500) return port;
+    } catch {}
     await delay(50);
   }
-  throw new Error("CLI readiness timeout");
+  throw new Error("Core readiness timeout");
 }
 const watchdog = setTimeout(() => {
   console.error("Whole-run deadline exceeded");
@@ -230,13 +221,11 @@ try {
     sourceSha: input.sourceSha,
     packageVersion: input.packageVersion,
     previewRun: input.previewRun,
-    cliSha256: input.cliSha256,
-    cliArtifact: cliEvidence?.summary ?? "baseline: producer provenance not verified",
     nativeFingerprint: input.nativeFingerprint,
     packages: Object.fromEntries(
       Object.entries(input.packages).map(([name, p]) => [name, p.sha256]),
     ),
-    server: "real CLI; fresh persistent local store",
+    server: "verified jazz-napi core; fresh persistent local store",
   });
   const port = await start();
   writeFileSync(configPath, JSON.stringify(c), { mode: 0o600 });

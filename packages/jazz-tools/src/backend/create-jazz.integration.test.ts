@@ -214,7 +214,7 @@ describe("createJazz", () => {
     // The backend's own db sees the row; a request scope sees only its user's rows.
     const seen = await jazz.db.all(app.todos.where({ id: row.id }));
     expect(seen.map((todo) => todo.title)).toEqual(["from alice"]);
-    const asBob = await jazz.forRequest(
+    const asBob = await jazz.forReqUser(
       new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
     );
     expect(await asBob.all(app.todos)).toEqual([]);
@@ -447,6 +447,76 @@ describe("createJazz", () => {
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     expect(upgrades).toBe(refused);
   }, 30_000);
+
+  it("ends a user's open sync session once their claims change, so policies see the new ones", async () => {
+    // Anyone reads their own todos; only an admin (a claim) may create one.
+    const byRole = s.definePermissions(app, ({ policy, session }) => {
+      policy.todos.allowRead.where({ owner: session.user.account });
+      policy.todos.allowInsert.where(session.where({ "claims.role": "admin" }));
+      policy.todos.allowUpdate.never();
+      policy.todos.allowDelete.never();
+    });
+    const roles = new Map([["alice", "admin"]]);
+    const jazz = await createJazz({
+      app,
+      permissions: byRole,
+      store: memory(),
+      authenticate: (request) => {
+        const userId = request.headers.get("x-test-user");
+        return userId ? { userId, claims: { role: roles.get(userId) ?? "none" } } : null;
+      },
+      recheckSeconds: 0.05,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    let upgrades = 0;
+    const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
+    signInAs(origin, "alice");
+    const session = await createJazzClient({
+      appId: jazz.appId,
+      app,
+      permissions: byRole,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+    });
+    cleanups.push(() => session.close());
+    await session.loginWithBackend();
+    const alice = session.getSnapshot().client!;
+    const owner = alice.session!.user!.account;
+    const outcome = (write: { wait(options: { tier: "global" }): Promise<unknown> }) =>
+      write.wait({ tier: "global" }).then(
+        () => "accepted",
+        (error: { code?: string; message?: string }) => error.code ?? error.message,
+      );
+    expect(await outcome(alice.db.insert(app.todos, { title: "as admin", owner }))).toBe(
+      "accepted",
+    );
+
+    // Checks that name her with the same claims leave her session open.
+    const opened = upgrades;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(upgrades).toBe(opened);
+
+    // The app demotes her: her open session ends, and the client reconnects
+    // with the claims authenticate names now, as forReqUser already sees.
+    roles.set("alice", "viewer");
+    const scoped = await jazz.forReqUser(
+      new Request(`${origin}/`, { headers: { "x-test-user": "alice" } }),
+    );
+    expect(await outcome(scoped.insert(app.todos, { title: "forReqUser", owner }))).toBe(
+      "permission_denied",
+    );
+    await expect.poll(() => upgrades, { timeout: 5_000, interval: 50 }).toBeGreaterThan(opened);
+    await expect
+      .poll(() => alice.db.getSyncStatus().link, { timeout: 10_000, interval: 50 })
+      .toEqual({ state: "connected" });
+    expect(await outcome(alice.db.insert(app.todos, { title: "after demotion", owner }))).toBe(
+      "permission_denied",
+    );
+    // Still signed in: one reconnect, not a loop.
+    const reconnected = upgrades;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(upgrades).toBe(reconnected);
+  }, 60_000);
 
   it("refuses local-first guests unless authenticate accepts them", async () => {
     const jazz = await createJazz({
@@ -1254,7 +1324,7 @@ describe("createJazz", () => {
     // The store keeps its own id: naming one is refused, not ignored.
     expect(() =>
       sqlite({ path: dir, appId: randomUUID() } as unknown as Parameters<typeof sqlite>[0]),
-    ).toThrow(/appId is not an option.*migrate-alpha59/);
+    ).toThrow(/appId is not an option.*jazz-alpha59-alpha60-import/);
     expect(() => memory({ appId: randomUUID() } as never)).toThrow(/appId is not an option/);
     // vercel() too, when called: in dev its local store would never read it.
     expect(() => vercel({ appId: randomUUID() } as never)).toThrow(
@@ -1267,7 +1337,7 @@ describe("createJazz", () => {
   it("runs a sqlite store as the alpha.59 app its import kept", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-imported-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
-    // What `jazz-tools migrate-alpha59 import --app-id` leaves beside the
+    // What `jazz-alpha59-alpha60-import import --app-id` leaves beside the
     // data: the id exactly as given, case included.
     const alpha59 = "0A590000-0000-4000-8000-000000000059";
     await writeFile(join(dir, "app-id"), `${alpha59}\n`);
@@ -1379,13 +1449,13 @@ describe("createJazz", () => {
     cleanups.push(() => other.close());
     const seen = await other.db.all(app.todos.where({ id: row.id }));
     expect(seen.map((todo) => todo.title)).toEqual(["through the backend"]);
-    const asAlice = await other.forRequest(
+    const asAlice = await other.forReqUser(
       new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
     );
     expect((await asAlice.all(app.todos)).map((todo) => todo.title)).toEqual([
       "through the backend",
     ]);
-    const asBob = await other.forRequest(
+    const asBob = await other.forReqUser(
       new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
     );
     expect(await asBob.all(app.todos)).toEqual([]);
@@ -1479,7 +1549,7 @@ describe("createJazz", () => {
         .wait({ tier: "global" }),
     ).rejects.toThrow();
     // The backend's own scoped writes too.
-    const asBob = await newer.forRequest(
+    const asBob = await newer.forReqUser(
       new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
     );
     expect(await asBob.all(app.todos)).toEqual([]);
@@ -1487,7 +1557,7 @@ describe("createJazz", () => {
     // Rolling back: the current deployment boots again, and serves as before.
     const rolledBack = await createJazz({ app, permissions, store, authenticate }).ready();
     cleanups.push(() => rolledBack.close());
-    const asAlice = await rolledBack.forRequest(
+    const asAlice = await rolledBack.forReqUser(
       new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
     );
     const again = await asAlice
