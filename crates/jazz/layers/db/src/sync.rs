@@ -12961,6 +12961,54 @@ impl Db {
     }
 }
 
+/// What [`Db::answer_pulls`] made of a session's pulls.
+struct Answered {
+    replies: Vec<SyncMessage>,
+    /// A relay's pulls of nodes it is fetching from its upstream.
+    parked: Vec<WirePull>,
+    /// Pulls past the answer's byte budget.
+    deferred: Vec<WirePull>,
+    /// Pulls the chunk store failed to answer.
+    store_failed: Vec<WirePull>,
+}
+
+impl Inner {
+    /// The chunk store is asked again: every session's pulls it failed to
+    /// answer are answered again with it (as deferred pulls, once the
+    /// session's outbox drains). Whether there were any.
+    pub(crate) fn retry_store_failed_pulls(&mut self) -> bool {
+        let mut any = false;
+        for index in 0..self.sessions.len() {
+            let pulls = std::mem::take(&mut self.sessions[index].store_failed_pulls);
+            if pulls.is_empty() {
+                continue;
+            }
+            any = true;
+            // Answered again, they want from the store what it holds of
+            // them (their offloaded leaves), as any pull does.
+            self.sessions[index].deferred_pulls.extend(pulls);
+        }
+        any
+    }
+}
+
+/// What a remote reader is told of `event` on its read `id`: a read whose
+/// rows the chunk store failed to give ends at the client with why, rather
+/// than waiting on rows that never come. Only store failures are sent
+/// here; other rejections reach remote readers as they did before.
+fn store_refusal(id: u64, event: &SubscriptionEvent) -> Option<SyncMessage> {
+    match event {
+        SubscriptionEvent::Rejected { code, message, .. } if *code == ErrorCode::Storage => {
+            Some(SyncMessage::Refused {
+                id,
+                code: *code,
+                message: message.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// Only a chunk store's failure becomes a refusal, carrying the
@@ -13166,53 +13214,5 @@ mod tests {
         let mut joiner = FrameJoiner::with_ceiling(bytes.len() - 1);
         assert!(joiner.push(&parts[0]).unwrap().is_none());
         assert!(joiner.push(&parts[1]).is_err());
-    }
-}
-
-/// What [`Db::answer_pulls`] made of a session's pulls.
-struct Answered {
-    replies: Vec<SyncMessage>,
-    /// A relay's pulls of nodes it is fetching from its upstream.
-    parked: Vec<WirePull>,
-    /// Pulls past the answer's byte budget.
-    deferred: Vec<WirePull>,
-    /// Pulls the chunk store failed to answer.
-    store_failed: Vec<WirePull>,
-}
-
-impl Inner {
-    /// The chunk store is asked again: every session's pulls it failed to
-    /// answer are answered again with it (as deferred pulls, once the
-    /// session's outbox drains). Whether there were any.
-    pub(crate) fn retry_store_failed_pulls(&mut self) -> bool {
-        let mut any = false;
-        for index in 0..self.sessions.len() {
-            let pulls = std::mem::take(&mut self.sessions[index].store_failed_pulls);
-            if pulls.is_empty() {
-                continue;
-            }
-            any = true;
-            // Answered again, they want from the store what it holds of
-            // them (their offloaded leaves), as any pull does.
-            self.sessions[index].deferred_pulls.extend(pulls);
-        }
-        any
-    }
-}
-
-/// What a remote reader is told of `event` on its read `id`: a read whose
-/// rows the chunk store failed to give ends at the client with why, rather
-/// than waiting on rows that never come. Only store failures are sent
-/// here; other rejections reach remote readers as they did before.
-fn store_refusal(id: u64, event: &SubscriptionEvent) -> Option<SyncMessage> {
-    match event {
-        SubscriptionEvent::Rejected { code, message, .. } if *code == ErrorCode::Storage => {
-            Some(SyncMessage::Refused {
-                id,
-                code: *code,
-                message: message.clone(),
-            })
-        }
-        _ => None,
     }
 }
