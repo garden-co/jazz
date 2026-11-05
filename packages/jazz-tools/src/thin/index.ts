@@ -61,7 +61,7 @@ export async function createClient(config: ThinDbConfig): Promise<Db> {
  * the thin one.
  *
  * This is for a thin `Db` the app opened itself with {@link createClient}.
- * Under a Jazz provider or `createJazzSession`, call the `Db` method
+ * Under a Jazz provider or `createJazzClient`, call the `Db` method
  * `db.upgradeToLocalFirst(loader)` instead: it takes the loader, and the
  * session swaps the new `Db` in for every component.
  */

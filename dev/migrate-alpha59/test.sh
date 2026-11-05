@@ -40,6 +40,10 @@ grep -q '"backend_identities_linked":3' "$work/import.json"
 # The import keeps the app id beside the data, exactly as given: sqlite()
 # on this dir runs as the alpha.59 app.
 test "$(cat "$work/a60/app-id")" = "$app"
+# The row settled out of order keeps its update as the winner, with the
+# creation of the insert that settled after it.
+# (Repeated deletes need two alpha.59 clients; unit tests cover them.)
+grep -q '"inserts_with_their_own_creation":1' "$work/import.json"
 "${import[@]}" verify --dump "$work/dump" --data-dir "$work/a60" --app-id "$app"
 
 # Only the active schema came over, and rows written under v1 read under

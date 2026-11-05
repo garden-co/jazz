@@ -9,7 +9,7 @@ import {
   type CreateAccountDb,
   type JazzClient,
 } from "../web/registered-jazz-client.js";
-import type { JazzClientConfig } from "../web/create-jazz-client.js";
+import type { OpenJazzClientConfig } from "../web/create-jazz-client.js";
 import {
   createClient as createThinDb,
   mintLocalFirstTokenInJs,
@@ -27,7 +27,7 @@ import { followUser, type UserFollowingSession } from "./follow-user.js";
 
 export type { LocalFirstLoader };
 
-export type JazzSessionConfig = Omit<JazzClientConfig, "account" | "serverUrl" | "appId"> &
+export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl" | "appId"> &
   Omit<AccountManagerConfig, "appId"> & {
     /**
      * Not for a client: the app id belongs to your backend's store
@@ -87,7 +87,7 @@ export type JazzSessionConfig = Omit<JazzClientConfig, "account" | "serverUrl" |
 export type BrowserJazzSession = UserFollowingSession<JazzClient>;
 
 /** Own one configured client and serialize its account lifecycle. */
-export async function createJazzSession(config: JazzSessionConfig): Promise<BrowserJazzSession> {
+export async function createJazzClient(config: JazzClientConfig): Promise<BrowserJazzSession> {
   refuseClientAppId(config);
   if (config.serverUrl === null) return createDeviceOnlySession(config);
   const serverUrl = config.serverUrl ?? DEFAULT_SERVER_URL;
@@ -183,7 +183,7 @@ export async function createJazzSession(config: JazzSessionConfig): Promise<Brow
  * user or to run a thin client against, so the session opens the local-first
  * client straight away, on this browser's local-first account.
  */
-async function createDeviceOnlySession(config: JazzSessionConfig): Promise<BrowserJazzSession> {
+async function createDeviceOnlySession(config: JazzClientConfig): Promise<BrowserJazzSession> {
   const { initial, clearOnSignOut, client: loadLocalFirst, store: _store, ...rest } = config;
   if (!loadLocalFirst) {
     throw new Error(

@@ -170,11 +170,7 @@ describe("JazzSessionProvider", () => {
     const factory = vi.fn(async () => session);
     const view = render(
       <StrictMode>
-        <ConfiguredJazzSessionProvider
-          config={{}}
-          createJazzSession={factory}
-          fallback={<Status />}
-        >
+        <ConfiguredJazzSessionProvider config={{}} createJazzClient={factory} fallback={<Status />}>
           <Status />
         </ConfiguredJazzSessionProvider>
       </StrictMode>,
@@ -194,7 +190,7 @@ describe("JazzSessionProvider", () => {
       .mockRejectedValueOnce(new Error("startup failed"))
       .mockResolvedValueOnce(session);
     const view = render(
-      <ConfiguredJazzSessionProvider config={{}} createJazzSession={factory} fallback={<Status />}>
+      <ConfiguredJazzSessionProvider config={{}} createJazzClient={factory} fallback={<Status />}>
         <Status />
       </ConfiguredJazzSessionProvider>,
     );
@@ -216,7 +212,7 @@ describe("JazzSessionProvider", () => {
         resolve = yes;
       });
     const view = render(
-      <ConfiguredJazzSessionProvider config={{}} createJazzSession={factory}>
+      <ConfiguredJazzSessionProvider config={{}} createJazzClient={factory}>
         <Status />
       </ConfiguredJazzSessionProvider>,
     );
@@ -234,11 +230,7 @@ describe("JazzSessionProvider", () => {
     const factory = vi.fn();
     expect(
       renderToString(
-        <ConfiguredJazzSessionProvider
-          config={{}}
-          createJazzSession={factory}
-          fallback={<Status />}
-        >
+        <ConfiguredJazzSessionProvider config={{}} createJazzClient={factory} fallback={<Status />}>
           <Status />
         </ConfiguredJazzSessionProvider>,
       ),

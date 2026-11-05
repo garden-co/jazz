@@ -5,7 +5,7 @@ import { createJazzSessionOwner } from "../session/state.js";
 import { makeFakeAccount, makeFakeClient } from "../react-core/test-utils.js";
 import { useJazzAuth } from "../react-core/app.js";
 const host = vi.hoisted(() => ({ create: vi.fn() }));
-vi.mock("../session/create-jazz-session.js", () => ({ createJazzSession: host.create }));
+vi.mock("../session/create-jazz-session.js", () => ({ createJazzClient: host.create }));
 import { JazzProvider } from "./provider.js";
 afterEach(() => {
   cleanup();

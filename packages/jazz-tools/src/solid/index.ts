@@ -1,4 +1,3 @@
-export { createJazzClient } from "../web/lazy-local-first.js";
 export type { JazzClient } from "../web/registered-jazz-client.js";
 export {
   createSolidJazzClient,
@@ -29,7 +28,7 @@ export * from "../accounts/exports.js";
 
 export { createAccountState } from "./create-account-state.js";
 
-export { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
+export { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
 export type {
   JazzSession,
   JazzSessionActions,

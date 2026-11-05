@@ -1,4 +1,5 @@
-import { createJazzClient, schema as s, type JazzClientConfig } from "jazz-tools/react-native";
+import { schema as s } from "jazz-tools/react-native";
+import { openJazzClient, type OpenJazzClientConfig } from "jazz-tools/_dev/native-account-session";
 import { assertPersistedTitleForRun, persistedTitleForRun } from "./run-marker";
 import type { DeviceDiagnosticCode } from "./device-diagnostics";
 import { finishSeedClient, type SeedBoundary } from "./seed-teardown";
@@ -20,8 +21,8 @@ const app = s.defineApp(
 /** Public foregrounds borrow the fixture lease using the genuine account. */
 function clientConfig(admitted: {
   capability: Uint8Array;
-  account: JazzClientConfig["account"];
-}): JazzClientConfig {
+  account: OpenJazzClientConfig["account"];
+}): OpenJazzClientConfig {
   return {
     appId: "jazz-device-acceptance",
     account: admitted.account,
@@ -35,14 +36,14 @@ function clientConfig(admitted: {
  * same row after the native relay and its SQLite owner have been recreated.
  */
 export async function seedHighLevelForegroundRuntime(
-  admitted: { capability: Uint8Array; account: JazzClientConfig["account"] },
+  admitted: { capability: Uint8Array; account: OpenJazzClientConfig["account"] },
   runNonce: string,
   markFailure: (code: DeviceDiagnosticCode) => void,
   waitForCoreObservation: () => Promise<void>,
   boundary?: (code: SeedBoundary) => void,
 ): Promise<void> {
   markFailure("public-client-open-failed");
-  const client = await createJazzClient(clientConfig(admitted));
+  const client = await openJazzClient(clientConfig(admitted));
   const title = persistedTitleForRun(runNonce);
   let observed = false;
   let recoveredObserved = false;
@@ -106,10 +107,10 @@ export async function seedHighLevelForegroundRuntime(
  * the durable SQLite half of the end-to-end claim.
  */
 export async function proveHighLevelForegroundRelayReadback(
-  admitted: { capability: Uint8Array; account: JazzClientConfig["account"] },
+  admitted: { capability: Uint8Array; account: OpenJazzClientConfig["account"] },
   runNonce: string,
 ): Promise<void> {
-  const client = await createJazzClient(clientConfig(admitted));
+  const client = await openJazzClient(clientConfig(admitted));
   let unsubscribe = () => {},
     failed = false;
   try {
@@ -135,16 +136,16 @@ export async function proveHighLevelForegroundRelayReadback(
 }
 
 /**
- * Materialize the row written by a prior process through `createJazzClient`.
+ * Materialize the row written by a prior process through `openJazzClient`.
  * This deliberately does not use the byte-level fixture or read SQLite: it is
  * the public API half of the process-restart receipt. The driver has stopped
  * upstream before this launch; the marker must arrive from local relay storage.
  */
 export async function proveHighLevelForegroundRestart(
-  admitted: { capability: Uint8Array; account: JazzClientConfig["account"] },
+  admitted: { capability: Uint8Array; account: OpenJazzClientConfig["account"] },
   runNonce: string,
 ): Promise<void> {
-  const client = await createJazzClient(clientConfig(admitted));
+  const client = await openJazzClient(clientConfig(admitted));
   let unsubscribe = () => {},
     failed = false;
   try {
@@ -175,17 +176,17 @@ export async function proveHighLevelForegroundRestart(
  * Type into one composer row through the public API while a maintained
  * subscription watches it (#3273). The measurement and its correctness
  * checks live in `typing-composer.ts`; this only binds them to a real
- * `createJazzClient` foreground on the admitted relay.
+ * `openJazzClient` foreground on the admitted relay.
  */
 export async function proveTypingComposer(
   admitted: {
     capability: Uint8Array;
-    account: JazzClientConfig["account"];
+    account: OpenJazzClientConfig["account"];
   },
   markFailure: (code: DeviceDiagnosticCode) => void = () => {},
 ): Promise<TypingComposerMetrics> {
   markFailure("typing-composer-open-failed");
-  const client = await createJazzClient(clientConfig(admitted));
+  const client = await openJazzClient(clientConfig(admitted));
   let unsubscribe = () => {},
     failed = false;
   let stopMutationErrors = () => {};

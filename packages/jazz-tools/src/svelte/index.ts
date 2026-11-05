@@ -1,7 +1,7 @@
 export { CoState, AccountCoState, InviteListener, SyncConnectionStatus } from "../classic-api.js";
 export { default as JazzSvelteProvider } from "./JazzSvelteProvider.svelte";
 export { default as JazzSvelteClientProvider } from "./JazzSvelteClientProvider.svelte";
-export { createJazzClient, type JazzClient } from "./create-jazz-client.js";
+export type { JazzClient } from "./create-jazz-client.js";
 export { getDb, getSession, getJazzContext, type JazzContext } from "./context.svelte.js";
 export { QuerySubscription, QuerySubscriptionOne } from "./query-subscription.svelte.js";
 export { LocalFirstAuth } from "./local-first-auth.svelte.js";
@@ -21,7 +21,7 @@ export { accountState } from "./account-state.js";
 export { syncStatus } from "./sync-status.js";
 export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 
-export { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
+export { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
 export type { JazzSession, JazzSessionSnapshot } from "../session/state.js";
 export { default as JazzSessionProvider } from "./JazzSessionProvider.svelte";
 export { sessionState, getJazzSession, type JazzSessionState } from "./session-state.js";
