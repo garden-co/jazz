@@ -587,7 +587,7 @@ export default function HomePage() {
       ) : null}
 
       <section className="home-section home-cta">
-        <div className="home-container grid gap-8 lg:grid-cols-12 lg:items-end">
+        <div className="home-container grid gap-8 lg:grid-cols-12 lg:items-start">
           <div className="lg:col-span-6">
             <Heading level={2} type="display-2">
               Start with your agent
@@ -596,6 +596,9 @@ export default function HomePage() {
               Paste this into your coding agent. It works for a new project and for an app you
               already have: the agent asks what it needs and sets Jazz up in your backend.
             </Text>
+            <div className="mt-8">
+              <FrameworkLogos />
+            </div>
           </div>
           <div className="flex flex-col gap-4 lg:col-span-6 lg:items-end">
             <AgentPrompt quickstart={quickstart} display={unwrap(quickstart)} />
@@ -605,9 +608,6 @@ export default function HomePage() {
               <AstryxLink href="https://discord.gg/RN9UKh52be">Jazz Discord</AstryxLink>.
             </Text>
           </div>
-        </div>
-        <div className="home-container mt-10">
-          <FrameworkLogos />
         </div>
       </section>
     </div>
