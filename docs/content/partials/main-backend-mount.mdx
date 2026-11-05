@@ -75,7 +75,7 @@
       Effect.gen(function* () {
         const jazz = yield* Jazz;
         return yield* HttpServerResponse.json(yield* jazz.all(app.todos));
-      }).pipe(JazzBackend.forCurrentRequest()), // as the signed-in user
+      }).pipe(JazzBackend.forCurrentReqUser()), // as the signed-in user
     );
 
     HttpRouter.serve(Layer.mergeAll(listTodos, JazzBackend.routes)).pipe( // routes: /jazz/*

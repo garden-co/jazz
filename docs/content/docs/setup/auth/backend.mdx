@@ -189,11 +189,8 @@ Your main backend has full access by default. To run code as a user instead:
 
 - `await jazz.forReqUser(request)` runs `authenticate` on the request and returns a scope with that
   user's policies and authorship.
-- `await jazz.forAccount(account)` does the same from an account handle, for jobs and backend
-  clients that already know whom they act for.
-- `await jazz.withAttribution(account)` and `await jazz.withAttributionForRequest(request)` keep
-  backend access but record the user as author. Use them only after your own code has made the
-  authorization decision.
+- `await jazz.withAttribution(request)` keeps backend access but records the request's user as
+  author. Use it only after your own code has made the authorization decision.
 
 A copied account id or claim is not authorization: Jazz checks the request or handle itself. See
 [Backend Client](/docs/setup/backend-client) for background jobs and other machines.
