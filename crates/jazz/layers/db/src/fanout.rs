@@ -886,12 +886,10 @@ impl Inner {
                 if !root && !columns.is_empty() {
                     let found = targets.entry(*gid).or_default();
                     found.extend(columns.into_iter().map(|column| (column.clone(), row)));
-                    // To-one targets still force an output notification.
-                    // With arrays, also refresh their contents: an array's
-                    // read policy may depend on this same target table.
-                    if group.prepared.query.array_subqueries.is_empty() {
-                        continue;
-                    }
+                    // The include classifier checks recursive child dependencies
+                    // under this read context. A classified target cannot change
+                    // those children, so preserve its notification-only path.
+                    continue;
                 }
                 match (entry, root) {
                     (Some(ids), true) => {
