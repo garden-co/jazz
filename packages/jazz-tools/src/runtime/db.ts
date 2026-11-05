@@ -1250,6 +1250,9 @@ async function finishComputedRead<T>(
 }
 type DbTransactionHandleBinding = {
   ownerClient: JazzClient;
+  resolveClient: (schema: WasmSchema) => JazzClient;
+  readSession?: Session;
+  readCapability?: TransactionReadCapability;
   openTransactionId: OpenTransactionId;
   session?: Session;
   attribution?: string;
@@ -1735,6 +1738,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         : ownerClient.beginTransaction(this.kind, session, attribution);
     const binding: DbTransactionHandleBinding = {
       ownerClient,
+      resolveClient: this.resolveClient,
+      readSession: this.context?.readSession,
+      readCapability: this.openingReadCapability,
       openTransactionId,
       session: session,
       attribution: attribution,
@@ -2326,6 +2332,168 @@ export function beginDbTransactionAfter(
   readCapability?: TransactionReadCapability,
 ): Transaction<"serializable"> {
   return db.createTransaction("serializable", prepare, readCapability);
+}
+
+/** @internal Revocable typed IO for work registered before commit. */
+export type PreparedTransactionScope = Pick<
+  TransactionScope<"serializable">,
+  "kind" | "all" | "one" | "insert" | "upsert"
+> & {
+  readAccepted<T>(query: QueryBuilder<T>): Promise<AcceptedRows<T>>;
+};
+
+/** @internal Register synchronously; both preparation queues drain before commit. */
+export function prepareDbTransaction(
+  transaction: Transaction<"serializable">,
+  prepare: (scope: PreparedTransactionScope) => Promise<void>,
+): Promise<void> {
+  if (transaction.kind !== "serializable")
+    throw new Error("Typed preparation requires a serializable transaction");
+  transaction.openTransactionId(); // Reject new registrations after commit was requested.
+  const binding = getDbTxHandleBinding(transaction, "prepare");
+  const { ownerClient, openTransactionId, preparation } = binding;
+  return Promise.resolve(
+    preparation.run(async () => {
+      if (preparation.cancelled || dbTxHandleBindings.get(transaction) !== binding)
+        throw new Error("Transaction was rolled back before preparation");
+      await ownerClient.prepareTransaction(openTransactionId, async (io) => {
+        let active = true;
+        const children: Promise<unknown>[] = [];
+        const assertActive = () => {
+          io.assertActive();
+          if (!active || preparation.cancelled || dbTxHandleBindings.get(transaction) !== binding)
+            throw new Error("Typed transaction preparation is no longer active");
+        };
+        const bind = (schema: WasmSchema) => {
+          assertActive();
+          if (binding.resolveClient(schema) !== ownerClient)
+            throw new Error("Typed preparation belongs to a different owner");
+        };
+        const track = <T>(reading: Promise<T>): Promise<T> => {
+          const result = reading.then((value) => {
+            assertActive();
+            return value;
+          });
+          children.push(result);
+          result.catch(() => {});
+          return result;
+        };
+        const read = async <T>(
+          query: QueryBuilder<T>,
+          options?: QueryOptions,
+          acceptedTimeout?: number,
+        ): Promise<T[] | AcceptedRows<T>> => {
+          bind(query._schema);
+          const json = query._build();
+          const built = normalizeBuiltQuery(JSON.parse(json));
+          const schema = requireSchemaWithTable(query._schema, built.table);
+          const output = resolveQueryOutputTable(schema, built);
+          const planned = prepareTransformRead(query, built, output);
+          if (acceptedTimeout !== undefined) {
+            if (binding.readCapability !== "accepted-evidence")
+              throw new Error("Accepted evidence was not selected before transaction opening");
+            if (planned.computedState)
+              throw new Error("Accepted evidence does not support computed preparation");
+            const result = await io.queryAcceptedInternal(
+              translateQuery(json, schema, planned.physical),
+              openTransactionId,
+              acceptedTimeout,
+              binding.readSession,
+            );
+            assertActive();
+            return { ...result, rows: result.rows.map(planned.transform) };
+          }
+          const queryOptions =
+            normalizeViewOptions(query._schema, built.table, lowerPublicDbQueryOptions(options)) ??
+            {};
+          const physicalRead = (physical: NormalizedBuiltQuery) => {
+            assertActive();
+            return io.queryInternal(
+              translateQuery(json, schema, physical),
+              { ...queryOptions, openTransactionId },
+              binding.readSession,
+            );
+          };
+          const rows = await physicalRead(planned.physical);
+          assertActive();
+          if (!planned.computedState) return rows.map(planned.transform);
+          return finishComputedRead(query, built, output, planned, rows, physicalRead);
+        };
+        const scope: PreparedTransactionScope = {
+          kind: "serializable",
+          all<T>(query: QueryBuilder<T>, options?: QueryOptions) {
+            return track(read(query, options) as Promise<T[]>);
+          },
+          async one<T>(query: QueryBuilder<T>, options?: QueryOptions) {
+            return (await scope.all(limitQueryToOne(query), options))[0] ?? null;
+          },
+          readAccepted<T>(query: QueryBuilder<T>) {
+            return track(read(query, undefined, 15_000) as Promise<AcceptedRows<T>>);
+          },
+          insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): T {
+            bind(table._schema);
+            assertWritableTable(table);
+            const record = table._columnTransforms
+              ? transformInputColumns(
+                  table,
+                  data,
+                  options?.id ? { id: options.id } : undefined,
+                  true,
+                )
+              : (data as Record<string, unknown>);
+            const values = toWriteRecordForOperation("Insert", record, table._schema, table._table);
+            const row = io.insertInternal(
+              table._table,
+              values,
+              normalizeSelectorOptions(table._schema, table._table, options),
+              binding.session,
+              binding.attribution,
+              openTransactionId,
+            );
+            return transformOutputRow(table, transformRow(row, table._schema, table._table));
+          },
+          upsert<T, Init>(
+            table: TableProxy<T, Init>,
+            id: string,
+            data: Partial<Init>,
+            options?: UpdateOptions,
+          ): void {
+            bind(table._schema);
+            assertWritableTable(table);
+            // This narrow preparation scope cannot start another asynchronous dependency lookup.
+            rejectIncompleteDependencies(table, { ...data, id } as Record<string, unknown>, []);
+            const record = table._columnTransforms
+              ? transformInputColumns(table, data, { id })
+              : (data as Record<string, unknown>);
+            const values = toWriteRecordForOperation("Upsert", record, table._schema, table._table);
+            io.upsertInternal(
+              table._table,
+              id,
+              values,
+              normalizeViewOptions(table._schema, table._table, options),
+              binding.session,
+              binding.attribution,
+              openTransactionId,
+            );
+          },
+        };
+        let callbackFailed = false;
+        let callbackError: unknown;
+        try {
+          await prepare(scope);
+        } catch (error) {
+          callbackFailed = true;
+          callbackError = error;
+        } finally {
+          active = false;
+        }
+        const results = await Promise.allSettled(children);
+        if (callbackFailed) throw callbackError;
+        const failed = results.find((result) => result.status === "rejected");
+        if (failed?.status === "rejected") throw failed.reason;
+      });
+    }),
+  );
 }
 
 /** @internal Typed read adapter; creation owns capability and preparation. */
