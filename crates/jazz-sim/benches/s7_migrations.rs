@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, SeededRowIdSource, Transport};
 use jazz::groove::records::Value;
+use jazz::groove::storage::BoxedStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, NodeState};
 use jazz::protocol::{LensOp, MigrationLens, SchemaVersion, SyncMessage, TableLens};
@@ -22,7 +23,7 @@ use jazz::wire::TransportError;
 use jazz_sim::fixture::{apply_sync_message_settled, settle_outcome};
 use jazz_sim::public_schema_fixture::compile_public_schema;
 use jazz_sim::{emit_json_line, metadata_fields};
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::Durability;
 use serde_json::{Value as JsonValue, json};
 
 fn main() {
@@ -109,7 +110,11 @@ pub fn smoke() {
     emit_lens_tax_metrics();
 }
 
-fn publish_chain(core: &mut NodeState, schemas: &[JazzSchema; 4], lenses: &[MigrationLens]) {
+fn publish_chain(
+    core: &mut NodeState<BoxedStorage>,
+    schemas: &[JazzSchema; 4],
+    lenses: &[MigrationLens],
+) {
     // Non-genesis schemas are admitted only as ordered lineage bundles.  The
     // harness is the authority here, so it exercises the same trusted
     // catalogue ingress used by a core after the sequencer has ordered them.
@@ -136,7 +141,7 @@ fn publish_chain(core: &mut NodeState, schemas: &[JazzSchema; 4], lenses: &[Migr
 }
 
 fn rows_for_schema(
-    core: &mut NodeState,
+    core: &mut NodeState<BoxedStorage>,
     schema: &JazzSchema,
 ) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let shape = Query::from("todos").validate(schema).unwrap();
@@ -155,7 +160,7 @@ struct ClientHarness {
     _dir: tempfile::TempDir,
     db: Db,
     outbound: Rc<RefCell<Vec<SyncMessage>>>,
-    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection>>,
+    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection<BoxedStorage>>>,
 }
 
 struct QueueTransport {
@@ -295,7 +300,7 @@ fn emit_lens_tax_metrics() {
 }
 
 fn measured_query_us(
-    core: &mut NodeState,
+    core: &mut NodeState<BoxedStorage>,
     schema: &JazzSchema,
     iterations: usize,
     expected_rows: usize,
@@ -315,7 +320,7 @@ fn measured_query_us(
 }
 
 fn measured_write_us(
-    core: &mut NodeState,
+    core: &mut NodeState<BoxedStorage>,
     schema: &JazzSchema,
     row_offset: u64,
     rows: usize,
@@ -452,13 +457,18 @@ fn schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
     ([v1, v2, v3, v4], lenses)
 }
 
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
+fn open_node(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> (tempfile::TempDir, NodeState<BoxedStorage>) {
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(temp_dir.path(), &refs, Durability::WalNoSync)
-            .unwrap();
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        temp_dir.path().to_path_buf(),
+        cfs,
+    ))
+    .unwrap();
     let node = jazz::db::block_on(NodeState::new_with_shared_test_catalogue(
         node_uuid, schema, storage,
     ))
@@ -488,12 +498,15 @@ fn open_db(
     node_uuid: NodeUuid,
     schema: JazzSchema,
     author: AuthorSubject,
-) -> (tempfile::TempDir, Db) {
+) -> (tempfile::TempDir, Db<BoxedStorage>) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        dir.path().to_path_buf(),
+        cfs,
+    ))
+    .unwrap();
     let db = block_on(Db::open(DbConfig {
         schema,
         storage,

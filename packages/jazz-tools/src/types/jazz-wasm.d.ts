@@ -107,6 +107,9 @@ declare module "jazz-wasm" {
       appId: string,
       claimedAuthor: string,
     ): WasmDb;
+    /** Retired Groove epoch bridge: explicitly unsupported by the SQLite binding. */
+    static preflightBrowserEpochOne(pageStore: unknown): Promise<void>;
+    static __browserStorageAdmissionReceipt(completed: boolean): Uint8Array;
     /**
      * Host-only relay open; `storageOwner` is supplied by broker ownership admission.
      * `pageStore` may carry `{ backend?: "indexeddb" | "opfs", path?: string }`

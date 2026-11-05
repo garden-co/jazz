@@ -21,7 +21,7 @@ use crate::values::{Schema, Sql, Table, query_error, quote, to_sql, unsupported}
 mod history;
 
 /// Inherits chains with no explicit bound unroll this deep.
-const DEFAULT_INHERITS_DEPTH: usize = 10;
+pub(crate) const DEFAULT_INHERITS_DEPTH: usize = 10;
 /// Fixpoint gathers carry a depth column only as a runaway guard.
 const FIXPOINT_GUARD: usize = 1_000;
 
@@ -220,6 +220,40 @@ fn scratch_value(slot: i64, cell: &str) -> String {
     format!("(SELECT v FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = CAST({cell} AS BLOB))")
 }
 
+/// A mandatory scalar declared-reference correlation. Extra predicates retain
+/// their SQL meaning; this key bounds every accepted and created source lookup.
+pub(crate) fn candidate_correlation<'a>(
+    condition: &'a PolicyExpr,
+    outer: &Table,
+    target: &Table,
+) -> Option<(&'a str, &'a str)> {
+    match condition {
+        PolicyExpr::And(items) => items
+            .iter()
+            .find_map(|p| candidate_correlation(p, outer, target)),
+        PolicyExpr::Cmp {
+            column,
+            op: CmpOp::Eq,
+            value: crate::tools::PolicyValue::SessionRef(path),
+        } if path.len() == 2 && path[0] == "__jazz_outer_row" => {
+            let parent = path[1].as_str();
+            ((column == "id" && outer.references.get(parent) == Some(&target.name))
+                || (parent == "id" && target.references.get(column) == Some(&outer.name)))
+            .then_some((column.as_str(), parent))
+        }
+        _ => None,
+    }
+}
+
+/// Private permission-evaluation scope. Only the transaction executor supplies
+/// this capability; request queries and session claims cannot construct it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CandidateEvidence {
+    pub accepted: u64,
+    pub publication: u64,
+    pub post: bool,
+}
+
 /// SQL text plus its positional parameters.
 pub struct Ctx<'a> {
     pub schema: &'a Schema,
@@ -245,6 +279,9 @@ pub struct Ctx<'a> {
     /// listing for it (`_jazz_revoked`) are left out.
     pub members_only: bool,
     next_alias: usize,
+    candidate_evidence: Option<CandidateEvidence>,
+    in_policy: bool,
+    in_inherited_policy: bool,
 }
 
 /// A frozen snapshot: the state as of commit `seq`, plus the open
@@ -323,7 +360,15 @@ impl<'a> Ctx<'a> {
             history_origin: None,
             members_only: false,
             next_alias: 0,
+            candidate_evidence: None,
+            in_policy: false,
+            in_inherited_policy: false,
         }
+    }
+
+    pub(crate) fn with_candidate_evidence(mut self, evidence: Option<CandidateEvidence>) -> Self {
+        self.candidate_evidence = evidence;
+        self
     }
 
     pub fn with_members_only(mut self, members_only: bool) -> Self {
@@ -443,6 +488,124 @@ impl<'a> Ctx<'a> {
     /// mask), then base rows the head does not override. Filters, policies,
     /// ordering and windows all apply after this masking.
     fn source(&mut self, table: &Table) -> Result<String, Error> {
+        if self.in_policy && self.candidate_evidence.is_some() {
+            return Err(unsupported(
+                "permission dependencies without a bounded scalar correlation in candidate authorization units",
+            ));
+        }
+        self.ordinary_source(table)
+    }
+
+    /// Put the correlation inside every UNION arm. SQLite does not reliably
+    /// push a correlated outer predicate through a historical compound source.
+    pub(crate) fn candidate_source(
+        &mut self,
+        table: &Table,
+        include_created: bool,
+        column: &str,
+        value: &str,
+    ) -> Result<String, Error> {
+        let scope = self.candidate_evidence.ok_or_else(|| {
+            unsupported(
+                "ExistsIncludingCreated permission checks without a SQLite authorization unit",
+            )
+        })?;
+        let lookup_index = if column == "id" {
+            String::new()
+        } else {
+            let index = table
+                .indexes
+                .iter()
+                .find(|index| index.first().is_some_and(|first| first == column))
+                .filter(|_| table.branch_by.is_empty())
+                .ok_or_else(|| {
+                    unsupported(
+                        "candidate permission correlations without a leading declared index",
+                    )
+                })?;
+            format!(
+                " INDEXED BY {}",
+                quote(&format!(
+                    "{}__ix({})",
+                    table.stored,
+                    table.stored_index(index).join(",")
+                ))
+            )
+        };
+        if self.view.is_some() && !table.branch_by.is_empty() {
+            return Err(unsupported(
+                "branch-view permission dependencies in candidate authorization units",
+            ));
+        }
+        let columns = std::iter::once("rid, id, _b, _seq, _del".to_owned())
+            .chain(table.stored().map(|c| quote(&c.stored)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let qualified = |alias: &str, history: bool| {
+            columns
+                .split(", ")
+                .map(|column| {
+                    if history && column == "rid" {
+                        "NULL".to_owned()
+                    } else {
+                        format!("{alias}.{column}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let current = quote(&table.stored);
+        let history = quote(&format!("{}__h", table.stored));
+        let key = quote(table.stored_name(column));
+        let accepted = self.bind(Sql::Integer(scope.accepted as i64));
+        let publication = self.bind(Sql::Integer(scope.publication as i64));
+        // Accepted-only baseline sources do not reference the scratch-table
+        // key. Do not append an unused final parameter to standalone prep SQL.
+        let stored = (scope.post || include_created)
+            .then(|| self.bind(Sql::Text(table.stored.as_bytes().to_vec())));
+        let c = self.alias("proof_current");
+        let h = self.alias("proof_history");
+        let base = if scope.post {
+            let stored = stored.as_ref().expect("post-state key");
+            format!(
+                "SELECT {} FROM {current} AS {c}{lookup_index} WHERE {c}.{key}={value} AND ({c}._seq<={accepted} OR {c}._seq={publication}) AND NOT EXISTS (SELECT 1 FROM _jazz_candidate_created_v1 x WHERE x.t={stored} AND x.id={c}.id)",
+                qualified(&c, false)
+            )
+        } else {
+            // Only this unit's current images can supersede the accepted cut.
+            // Drive history from that bounded set through the sequence index,
+            // then look up each exact coordinate's prior image by primary key.
+            let index = quote(&format!("{}__by_seq", table.stored));
+            format!(
+                "SELECT {} FROM {current} AS {c}{lookup_index} WHERE {c}.{key}={value} AND {c}._seq<={accepted} UNION ALL SELECT {} FROM {current} AS {c} INDEXED BY {index} CROSS JOIN {history} AS {h} WHERE {c}._seq={publication} AND {h}.id={c}.id AND {h}._b={c}._b AND {h}.{key}={value} AND {h}._seq=(SELECT MAX(prior._seq) FROM {history} AS prior WHERE prior.id={c}.id AND prior._b={c}._b AND prior._seq<={accepted})",
+                qualified(&c, false),
+                qualified(&h, true)
+            )
+        };
+        if !include_created {
+            return Ok(format!("({base})"));
+        }
+        let stored = stored.as_ref().expect("created-source key");
+        Ok(format!(
+            "({base} UNION ALL SELECT {} FROM {current} AS {c}{lookup_index} WHERE {c}.{key}={value} AND {c}._seq={publication} AND {c}._b=x'' AND EXISTS (SELECT 1 FROM _jazz_candidate_qualified_v1 q WHERE q.t={stored} AND q.id={c}.id))",
+            qualified(&c, false)
+        ))
+    }
+
+    fn candidate_dependency(
+        &mut self,
+        table: &Table,
+        outer: &Table,
+        alias: &str,
+        condition: &PolicyExpr,
+        include_created: bool,
+    ) -> Result<String, Error> {
+        let (column,parent)=candidate_correlation(condition,outer,table).ok_or_else(|| unsupported("permission dependencies without a scalar declared-reference correlation in candidate authorization units"))?;
+        let value = column_sql(outer, alias, parent)?;
+        self.candidate_source(table, include_created, column, &value)
+    }
+
+    fn ordinary_source(&mut self, table: &Table) -> Result<String, Error> {
         // Explicit columns: a schema view reads its own columns of the
         // physical (unioned) table.
         let mut columns = "rid, id, _b, _seq, _del".to_owned();
@@ -1239,6 +1402,9 @@ impl<'a> Ctx<'a> {
         table: &Table,
         alias: &str,
     ) -> Result<String, Error> {
+        if join.source_mode != crate::query::CandidateSourceMode::AcceptedOnly {
+            return Err(unsupported("candidate-created join sources on SQLite"));
+        }
         let target = self.table(&join.table)?;
         let j = self.alias("j");
         let mut conds = vec![format!("{j}._del = 0")];
@@ -1538,12 +1704,15 @@ impl<'a> Ctx<'a> {
         if session.system {
             return Ok("1".to_owned());
         }
-        self.under_policy_schema(table, |ctx, table| match table.policy(operation) {
+        let previous = std::mem::replace(&mut self.in_policy, true);
+        let result = self.under_policy_schema(table, |ctx, table| match table.policy(operation) {
             None => Ok("0".to_owned()),
             Some(policy) => {
                 ctx.policy_expr(policy, table, alias, None, session, DEFAULT_INHERITS_DEPTH)
             }
-        })
+        });
+        self.in_policy = previous;
+        result
     }
 
     /// Compile a policy of `table` under the schema whose names its policies
@@ -1577,12 +1746,15 @@ impl<'a> Ctx<'a> {
         if session.system {
             return Ok("1".to_owned());
         }
-        self.under_policy_schema(table, |ctx, table| match policy {
+        let previous = std::mem::replace(&mut self.in_policy, true);
+        let result = self.under_policy_schema(table, |ctx, table| match policy {
             None => Ok("0".to_owned()),
             Some(policy) => {
                 ctx.policy_expr(policy, table, alias, None, session, DEFAULT_INHERITS_DEPTH)
             }
-        })
+        });
+        self.in_policy = previous;
+        result
     }
 
     fn policy_value(
@@ -1749,6 +1921,24 @@ impl<'a> Ctx<'a> {
             }
             // Policy EXISTS reads its table as raw evidence: the dependency
             // table's own policy is not composed in (INV-RLS-21).
+            PolicyExpr::ExistsIncludingCreated {
+                table: target,
+                condition,
+            } => {
+                if self.in_inherited_policy {
+                    return Err(unsupported(
+                        "ExistsIncludingCreated through inherited permission policies",
+                    ));
+                }
+                let target = self.table(target)?;
+                let e = self.alias("created");
+                let inner =
+                    self.policy_expr(condition, target, &e, Some((table, alias)), session, depth)?;
+                format!(
+                    "EXISTS (SELECT 1 FROM {} AS {e} WHERE {e}._del=0 AND {inner})",
+                    self.candidate_dependency(target, table, alias, condition, true)?
+                )
+            }
             PolicyExpr::Exists {
                 table: target,
                 condition,
@@ -1757,10 +1947,12 @@ impl<'a> Ctx<'a> {
                 let e = self.alias("e");
                 let inner =
                     self.policy_expr(condition, target, &e, Some((table, alias)), session, depth)?;
-                format!(
-                    "EXISTS (SELECT 1 FROM {} AS {e} WHERE {e}._del = 0 AND {inner})",
+                let source = if self.candidate_evidence.is_some() {
+                    self.candidate_dependency(target, table, alias, condition, false)?
+                } else {
                     self.source(target)?
-                )
+                };
+                format!("EXISTS (SELECT 1 FROM {source} AS {e} WHERE {e}._del = 0 AND {inner})")
             }
             // The relation's outer row is the row under check, also inside
             // an EXISTS over another table (as `__jazz_outer_row` is).
@@ -1784,15 +1976,20 @@ impl<'a> Ctx<'a> {
                 })?;
                 let target = self.table(target_name)?;
                 let p = self.alias("p");
-                let inner = match target.policy(*operation) {
-                    None => "0".to_owned(),
-                    Some(policy) => {
-                        self.policy_expr(policy, target, &p, None, session, depth - 1)?
+                let inner = self.inherited_policy(target, *operation, &p, session, depth - 1)?;
+                let source = if self.candidate_evidence.is_some() {
+                    if is_array(table, via_column) {
+                        return Err(unsupported(
+                            "array-reference inheritance in candidate authorization units",
+                        ));
                     }
+                    let value = column_sql(table, alias, via_column)?;
+                    self.candidate_source(target, false, "id", &value)?
+                } else {
+                    self.source(target)?
                 };
                 format!(
-                    "EXISTS (SELECT 1 FROM {} AS {p} WHERE {p}.id = {alias}.{} AND {p}._del = 0 AND {inner})",
-                    self.source(target)?,
+                    "EXISTS (SELECT 1 FROM {source} AS {p} WHERE {p}.id = {alias}.{} AND {p}._del = 0 AND {inner})",
                     quote(table.stored_name(via_column))
                 )
             }
@@ -1808,20 +2005,45 @@ impl<'a> Ctx<'a> {
                 }
                 let source = self.table(source_table)?;
                 let s = self.alias("s");
-                let inner = match source.policy(*operation) {
-                    None => "0".to_owned(),
-                    Some(policy) => {
-                        self.policy_expr(policy, source, &s, None, session, depth - 1)?
+                let inner = self.inherited_policy(source, *operation, &s, session, depth - 1)?;
+                let from = if self.candidate_evidence.is_some() {
+                    if is_array(source, via_column) {
+                        return Err(unsupported(
+                            "array-reference inheritance in candidate authorization units",
+                        ));
                     }
+                    self.candidate_source(source, false, via_column, &format!("{alias}.id"))?
+                } else {
+                    self.source(source)?
                 };
-                // An array reference grants when it lists the row's id.
+                // Ordinary schemas retain array-reference inheritance. Private
+                // candidate scopes require an indexed scalar reference.
                 format!(
-                    "EXISTS (SELECT 1 FROM {} AS {s} WHERE {} AND {s}._del = 0 AND {inner})",
-                    self.source(source)?,
+                    "EXISTS (SELECT 1 FROM {from} AS {s} WHERE {} AND {s}._del = 0 AND {inner})",
                     correlate(source, &s, via_column, &format!("{alias}.id"))?
                 )
             }
         })
+    }
+
+    /// Inherited capabilities use accepted roots and cannot expose a marked
+    /// predicate from the target's INSERT policy. Restore the context before
+    /// compiling siblings so an independent marked OR arm keeps its own mode.
+    fn inherited_policy(
+        &mut self,
+        table: &Table,
+        operation: Operation,
+        alias: &str,
+        session: &Session,
+        depth: usize,
+    ) -> Result<String, Error> {
+        let previous = std::mem::replace(&mut self.in_inherited_policy, true);
+        let result = match table.policy(operation) {
+            None => Ok("0".to_owned()),
+            Some(policy) => self.policy_expr(policy, table, alias, None, session, depth),
+        };
+        self.in_inherited_policy = previous;
+        result
     }
 
     // ---- relation IR ----------------------------------------------------

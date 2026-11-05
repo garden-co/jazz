@@ -44,7 +44,7 @@ async fn run() {
         .with_app_id(app_id)
         .with_data_dir(server_storage.path())
         .with_storage_factory(std::sync::Arc::new(
-            jazz_storage_rocksdb::RocksDbStorageFactory,
+            jazz_storage_rocksdb::RocksDbStorageFactory::default(),
         ))
         .with_schema(schema.clone())
         .with_jwks_url(issuer.endpoint())
@@ -134,7 +134,7 @@ async fn run() {
         .with_app_id(app_id)
         .with_data_dir(server_storage.path())
         .with_storage_factory(std::sync::Arc::new(
-            jazz_storage_rocksdb::RocksDbStorageFactory,
+            jazz_storage_rocksdb::RocksDbStorageFactory::default(),
         ))
         .with_schema(schema.clone())
         .with_jwks_url(issuer.endpoint())

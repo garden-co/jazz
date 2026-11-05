@@ -14,6 +14,7 @@ use jazz::db::{
     SubscriptionStream, Transport,
 };
 use jazz::groove::records::Value;
+use jazz::groove::storage::BoxedStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
@@ -33,7 +34,7 @@ use jazz_sim::fixture::{
 use jazz_sim::public_schema_fixture::compile_public_schema;
 use jazz_sim::view_accounting::version_bundle_refs;
 use jazz_sim::{PeerProfile, bench_profile, emit_json_line, mem, metadata_fields};
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::Durability;
 use rusqlite::{Connection, params};
 use serde_json::{Value as JsonValue, json};
 use tempfile::TempDir;
@@ -670,7 +671,7 @@ async fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary
 }
 
 fn drain_db_route(
-    db: &Db,
+    db: &Db<BoxedStorage>,
     outbound: &Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: &Rc<RefCell<VecDeque<SyncMessage>>>,
     core: &mut NodeState,
@@ -688,7 +689,7 @@ fn drain_db_route(
     }
 }
 
-fn seed_stream(core: &mut NodeState, stream: usize, global_time: &mut u64) {
+fn seed_stream(core: &mut NodeState<BoxedStorage>, stream: usize, global_time: &mut u64) {
     let tx = commit_mergeable_unit_settled(
         core,
         MergeableCommit::new(STREAMS, stream_row(stream), 1)
@@ -1002,7 +1003,7 @@ fn append_tokens(config: &Config, content: &mut Vec<u8>, stream: usize, seq: usi
     }
 }
 
-fn read_doc(node: &mut NodeState, stream: usize) -> Vec<u8> {
+fn read_doc(node: &mut NodeState<BoxedStorage>, stream: usize) -> Vec<u8> {
     let schema = schema();
     let table = table_schema(&schema, STREAM_DOCS);
     block_on(node.current_rows(STREAM_DOCS, DurabilityTier::Local))
@@ -1029,11 +1030,14 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<BoxedStorage>) {
     open_node_with_history_class(node_uuid, schema, false)
 }
 
-fn open_history_complete_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState) {
+fn open_history_complete_node(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> (TempDir, NodeState<BoxedStorage>) {
     open_node_with_history_class(node_uuid, schema, true)
 }
 
@@ -1041,12 +1045,15 @@ fn open_node_with_history_class(
     node_uuid: NodeUuid,
     schema: JazzSchema,
     history_complete: bool,
-) -> (TempDir, NodeState) {
+) -> (TempDir, NodeState<BoxedStorage>) {
     let dir = tempfile::tempdir().unwrap();
     let refs = schema.column_families();
-    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        dir.path().to_path_buf(),
+        refs,
+    ))
+    .unwrap();
     let node = if history_complete {
         block_on(NodeState::new_history_complete(node_uuid, schema, storage)).unwrap()
     } else {
@@ -1058,12 +1065,15 @@ fn open_node_with_history_class(
     (dir, node)
 }
 
-fn open_db(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, Db) {
+fn open_db(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, Db<BoxedStorage>) {
     let dir = tempfile::tempdir().unwrap();
     let refs = schema.column_families();
-    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        dir.path().to_path_buf(),
+        refs,
+    ))
+    .unwrap();
     let db = block_on(Db::open(DbConfig {
         schema,
         storage,

@@ -63,6 +63,7 @@ function createTestPageStore() {
     | undefined;
 
   const pageStore = {
+    storageAdmission: () => "ephemeral",
     metadata: async () => persistedMetadata,
     readPage: async (pageId: number) => pages.get(pageId) ?? null,
     commitPages: async (
@@ -191,6 +192,24 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
     }
     expect(write.writeState()).toMatchObject({ durability: "Local" });
     write.close();
+  });
+
+  it("rejects an unsupported browser store before initializing its tree", async () => {
+    const wasm = await loadWasmModuleForTest();
+    const store = createTestPageStore();
+    Reflect.deleteProperty(store.pageStore, "storageAdmission");
+    const node = new Uint8Array(16);
+    node[0] = 1;
+    await expect(
+      wasm.WasmDb.openBrowser(
+        store.pageStore,
+        encodeSchema(streamingApp.wasmSchema),
+        openConfig(node, testAuthorBytes("unsupported-browser-store"), 1, true),
+        "unsupported-browser-store",
+      ),
+    ).rejects.toThrow("does not provide durable admission");
+    expect(await store.pageStore.metadata()).toBeNull();
+    expect(await store.pageStore.readPage(0)).toBeNull();
   });
 
   it("keeps real WASM reads pending while storage owns the node", async () => {

@@ -111,7 +111,7 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
         data_dir,
         storage: ClientStorage::Persistent,
         storage_factory: Some(std::sync::Arc::new(
-            jazz_storage_rocksdb::RocksDbStorageFactory,
+            jazz_storage_rocksdb::RocksDbStorageFactory::default(),
         )),
         account_id: None,
         jwt_token: None,
@@ -493,7 +493,7 @@ async fn local_persistence() {
             data_dir: data_path.clone(),
             storage: ClientStorage::Persistent,
             storage_factory: Some(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
             )),
             account_id: None,
             jwt_token: None,
@@ -530,7 +530,7 @@ async fn local_persistence() {
             data_dir: data_path,
             storage: ClientStorage::Persistent,
             storage_factory: Some(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
             )),
             account_id: None,
             jwt_token: None,
@@ -821,7 +821,7 @@ async fn server_resync() {
             data_dir: data_path.clone(),
             storage: ClientStorage::Persistent,
             storage_factory: Some(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
             )),
             account_id: None,
             jwt_token: Some(make_test_jwt("client1-user")),
@@ -871,7 +871,7 @@ async fn server_resync() {
             data_dir: data_path,
             storage: ClientStorage::Persistent,
             storage_factory: Some(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
             )),
             account_id: None,
             jwt_token: Some(make_test_jwt("client2-user")),

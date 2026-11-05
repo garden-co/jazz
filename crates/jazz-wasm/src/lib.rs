@@ -392,11 +392,17 @@ fn json_or_null(value: JsValue) -> Result<serde_json::Value, JsValue> {
     Ok(json(value)?.unwrap_or(serde_json::Value::Null))
 }
 
+/// Report an engine feature the SQLite binding does not support yet.
+fn not_supported(what: &str) -> JsValue {
+    host_error(binding_host::not_supported(what))
+}
+
 // ---- host hooks ------------------------------------------------------------
 
 /// The browser's half of the hooks: callbacks and the durable store.
 #[derive(Default)]
 struct Host {
+    closed: std::cell::Cell<bool>,
     flushed_through: std::cell::Cell<u64>,
     tick_scheduler: RefCell<Option<js_sys::Function>>,
     /// Told of a write rejected at apply time that no wait claimed.
@@ -852,6 +858,7 @@ impl WasmDb {
         self.inner
             .borrow()
             .clone()
+            .filter(|inner| !inner.host.closed.get())
             .ok_or_else(|| JsValue::from_str("WasmDb is closed"))
     }
 
@@ -1139,6 +1146,18 @@ impl WasmDb {
                 claimed_author: &claimed_author,
             },
         )
+    }
+
+    /// The retired Groove epoch admission protocol is not a SQLite admission.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = preflightBrowserEpochOne)]
+    pub async fn preflight_browser_epoch_one(_page_store: JsValue) -> Result<(), JsValue> {
+        Err(not_supported("Groove browser epoch admission on SQLite"))
+    }
+
+    #[wasm_bindgen(js_name = __browserStorageAdmissionReceipt)]
+    pub fn browser_storage_admission_receipt(_completed: bool) -> Result<Vec<u8>, JsValue> {
+        Err(not_supported("Groove browser epoch admission on SQLite"))
     }
 
     /// Open the durable store a browser worker owns. `storage` selects the
@@ -1708,12 +1727,19 @@ impl WasmDb {
             return js_sys::Promise::resolve(&JsValue::from_bool(false));
         };
         let owns_runtime = self.owns_runtime;
+        if owns_runtime {
+            inner.host.closed.set(true);
+        }
         future_to_promise(async move {
             if owns_runtime {
-                inner.binding.close().await.map_err(host_error)?;
-                inner.host.flush(inner.binding.db.seq_high_water()).await?;
+                let closed = inner.binding.close().await;
+                let retired = inner.binding.db.retire_storage_owner();
+                let flushed = inner.host.flush(inner.binding.db.seq_high_water()).await;
                 #[cfg(target_arch = "wasm32")]
                 inner.host.store.borrow_mut().take();
+                closed.map_err(host_error)?;
+                retired.map_err(to_js_error)?;
+                flushed?;
             }
             Ok(JsValue::TRUE)
         })

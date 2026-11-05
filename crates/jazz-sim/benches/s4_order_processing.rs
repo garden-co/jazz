@@ -9,6 +9,7 @@ use std::time::Instant;
 use hdrhistogram::Histogram;
 use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource, SerializableTxOps, Transport};
 use jazz::groove::records::Value;
+use jazz::groove::storage::BoxedStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
@@ -29,7 +30,7 @@ use jazz_sim::fixture::{
 use jazz_sim::public_schema_fixture::compile_public_schema;
 use jazz_sim::view_accounting::version_bundle_refs;
 use jazz_sim::{PeerProfile, bench_profile, emit_json_line, metadata_fields, profiling};
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::Durability;
 use rusqlite::{Connection, params};
 use serde_json::{Value as JsonValue, json};
 
@@ -523,7 +524,7 @@ struct ClientHarness {
     hydration_rows: usize,
     outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
-    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection>>,
+    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection<BoxedStorage>>>,
 }
 
 struct QueueTransport {
@@ -806,7 +807,7 @@ fn run_jazz_contention(config: &Config, level: ContentionLevel) -> JazzSummary {
 
 async fn apply_jazz_op(
     client: &mut ClientHarness,
-    core: &mut NodeState,
+    core: &mut NodeState<BoxedStorage>,
     op: &Op,
     now_ms: u64,
     relay_acceptance: &mut Histogram<u64>,
@@ -1124,7 +1125,7 @@ fn open_clients(
     count: usize,
     base_node: u8,
     schema: &JazzSchema,
-    core: &mut NodeState,
+    core: &mut NodeState<BoxedStorage>,
 ) -> Vec<ClientHarness> {
     (0..count)
         .map(|idx| {
@@ -1178,13 +1179,13 @@ fn open_clients(
         .collect()
 }
 
-fn refresh_clients(core: &mut NodeState, clients: &mut [ClientHarness]) {
+fn refresh_clients(core: &mut NodeState<BoxedStorage>, clients: &mut [ClientHarness]) {
     for client in clients {
         refresh_client(core, client);
     }
 }
 
-fn refresh_client(core: &mut NodeState, client: &mut ClientHarness) {
+fn refresh_client(core: &mut NodeState<BoxedStorage>, client: &mut ClientHarness) {
     for table in TABLES {
         let shape = Query::from(table).validate(&schema()).unwrap();
         let binding = shape.bind(BTreeMap::new()).unwrap();
@@ -1243,7 +1244,7 @@ fn refresh_client(core: &mut NodeState, client: &mut ClientHarness) {
     jazz::db::block_on(client.db.tick()).unwrap();
 }
 
-fn seed_jazz_fixture(config: &Config, core: &mut NodeState) {
+fn seed_jazz_fixture(config: &Config, core: &mut NodeState<BoxedStorage>) {
     let mut global = 1;
     for w in 0..config.warehouses {
         accept_merge(
@@ -1315,7 +1316,7 @@ fn seed_jazz_fixture(config: &Config, core: &mut NodeState) {
 }
 
 fn accept_merge(
-    core: &mut NodeState,
+    core: &mut NodeState<BoxedStorage>,
     table: &str,
     row: RowUuid,
     values: BTreeMap<String, Value>,
@@ -1585,7 +1586,7 @@ fn apply_sqlite_op(conn: &Connection, op: &Op) {
     tx.commit().unwrap();
 }
 
-fn jazz_totals(config: &Config, schema: &JazzSchema, core: &mut NodeState) -> Totals {
+fn jazz_totals(config: &Config, schema: &JazzSchema, core: &mut NodeState<BoxedStorage>) -> Totals {
     let warehouse_ytd = (0..config.warehouses)
         .map(|w| row_f64(core, WAREHOUSES, warehouse_row(w), "ytd"))
         .collect();
@@ -2044,12 +2045,18 @@ fn next_op(config: &Config, rng: &mut Lcg, warehouse: usize) -> Op {
     }
 }
 
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
+fn open_node(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> (tempfile::TempDir, NodeState<BoxedStorage>) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        dir.path().to_path_buf(),
+        cfs,
+    ))
+    .unwrap();
     let node = jazz::db::block_on(NodeState::new_with_shared_test_catalogue(
         node_uuid, schema, storage,
     ))
@@ -2061,12 +2068,15 @@ fn open_db(
     node_uuid: NodeUuid,
     schema: JazzSchema,
     author: AuthorSubject,
-) -> (tempfile::TempDir, Db) {
+) -> (tempfile::TempDir, Db<BoxedStorage>) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        dir.path().to_path_buf(),
+        cfs.clone(),
+    ))
+    .unwrap();
     // These direct-message simulations bypass the transport catalogue handshake.
     // Seed the same physical catalogue before reopening through the public Db API.
     drop(
@@ -2077,8 +2087,12 @@ fn open_db(
         ))
         .unwrap(),
     );
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        dir.path().to_path_buf(),
+        cfs,
+    ))
+    .unwrap();
     let db = block_on(Db::open(DbConfig {
         schema,
         storage,
@@ -2196,7 +2210,7 @@ fn f64_cell(cells: &BTreeMap<String, Value>, name: &str) -> f64 {
     value_f64(cells.get(name).unwrap().clone())
 }
 
-fn row_u64(core: &mut NodeState, table: &str, row: RowUuid, column: &str) -> u64 {
+fn row_u64(core: &mut NodeState<BoxedStorage>, table: &str, row: RowUuid, column: &str) -> u64 {
     let schema = schema();
     let table_schema = table_schema(&schema, table);
     let row = jazz::db::block_on(core.current_rows(table, DurabilityTier::Global))
@@ -2207,7 +2221,7 @@ fn row_u64(core: &mut NodeState, table: &str, row: RowUuid, column: &str) -> u64
     value_u64(row.cell(table_schema, column).unwrap())
 }
 
-fn row_f64(core: &mut NodeState, table: &str, row: RowUuid, column: &str) -> f64 {
+fn row_f64(core: &mut NodeState<BoxedStorage>, table: &str, row: RowUuid, column: &str) -> f64 {
     let schema = schema();
     let table_schema = table_schema(&schema, table);
     let row = jazz::db::block_on(core.current_rows(table, DurabilityTier::Global))

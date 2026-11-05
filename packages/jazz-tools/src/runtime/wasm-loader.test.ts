@@ -7,8 +7,8 @@ const { initialize, assertCompatible, setJsonSchemaValidator } = vi.hoisted(() =
 }));
 
 vi.mock("jazz-wasm", () => ({ default: initialize, setJsonSchemaValidator }));
-vi.mock("./native-artifact-compatibility.js", () => ({
-  assertNativeArtifactCompatibility: assertCompatible,
+vi.mock("./artifact-compatibility.js", () => ({
+  assertArtifactCompatibility: assertCompatible,
 }));
 
 const wasmBinary = new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]);

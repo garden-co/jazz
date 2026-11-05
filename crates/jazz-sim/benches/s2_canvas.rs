@@ -33,7 +33,7 @@ use jazz_sim::{
     ThreadedDriver, Topology, bench_profile, emit_json_line, loopback_transport_message, mem,
     metadata_fields, scenario_transport_codec_env,
 };
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::{Durability, RocksDbStorageFactory};
 use serde_json::{Value as JsonValue, json};
 
 const CANVASES: &str = "canvases";
@@ -1456,11 +1456,12 @@ fn run_failure(ctx: &mut dyn DriverContext, config: &Config) -> FailureSummary {
         ingest_commit_unit_settled(&mut core, tx, versions, u64::MAX).unwrap();
         if idx == 5 {
             drop(core);
-            let cfs = schema.column_families();
-            let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-            let storage =
-                RocksDbStorage::open_with_durability(core_dir.path(), &refs, Durability::WalNoSync)
-                    .unwrap();
+            let storage = block_on(jazz::storage_codec_profile::open_node_storage(
+                &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+                core_dir.path().to_path_buf(),
+                schema.column_families(),
+            ))
+            .unwrap();
             core = block_on(NodeState::new_with_shared_test_catalogue(
                 node(250),
                 schema.clone(),
@@ -1818,10 +1819,12 @@ fn open_participant(
 
 fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let storage = block_on(jazz::storage_codec_profile::open_node_storage(
+        &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        dir.path().to_path_buf(),
+        schema.column_families(),
+    ))
+    .unwrap();
     let node = block_on(NodeState::new_with_shared_test_catalogue(
         node_uuid, schema, storage,
     ))
@@ -1830,10 +1833,12 @@ fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, Nod
 }
 
 fn reopen_node(dir: &tempfile::TempDir, node_uuid: NodeUuid, schema: JazzSchema) -> NodeState {
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let storage = block_on(jazz::storage_codec_profile::open_node_storage(
+        &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        dir.path().to_path_buf(),
+        schema.column_families(),
+    ))
+    .unwrap();
     block_on(NodeState::new_with_shared_test_catalogue(
         node_uuid, schema, storage,
     ))
@@ -1846,10 +1851,12 @@ fn open_db(
     schema: JazzSchema,
 ) -> (tempfile::TempDir, Db) {
     let dir = tempfile::tempdir().unwrap();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let storage = block_on(jazz::storage_codec_profile::open_node_storage(
+        &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        dir.path().to_path_buf(),
+        schema.column_families(),
+    ))
+    .unwrap();
     let db = block_on(Db::open(DbConfig {
         schema,
         storage,
@@ -1873,10 +1880,12 @@ fn open_history_complete_node(
     schema: JazzSchema,
 ) -> (tempfile::TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let storage = block_on(jazz::storage_codec_profile::open_node_storage(
+        &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        dir.path().to_path_buf(),
+        schema.column_families(),
+    ))
+    .unwrap();
     let node = block_on(NodeState::new_history_complete(node_uuid, schema, storage)).unwrap();
     (dir, node)
 }

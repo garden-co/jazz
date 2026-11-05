@@ -72,6 +72,13 @@ preparation, and storage-counter extraction are excluded. This is runtime-cold,
 not OS-page-cache-cold or end-to-end reopen latency. Divan receives result rows
 as its output. No warm-query cache samples are mixed in.
 
+Both seeding and reopening use Jazz's `open_node_storage` with
+`RocksDbStorageFactory` and `WalNoSync`, so storage admission completes before
+the query timer starts. The returned `BoxedStorage` follows the native benchmark
+convention and introduces dynamic dispatch compared with the former concrete
+RocksDB type. Record this adapter difference when comparing retained timings;
+the query, durability and timer boundaries are unchanged.
+
 The `subscribe_` cases reuse the fixture, queries, identities, allocator and
 fresh-runtime boundaries, but measure `subscribe_for_identity` through its first
 published page, including native runtime progress. They use **Local tier with

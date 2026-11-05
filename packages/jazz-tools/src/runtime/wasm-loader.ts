@@ -3,7 +3,8 @@ import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
-import { assertNativeArtifactCompatibility } from "./native-artifact-compatibility.js";
+import { assertArtifactCompatibility } from "./artifact-compatibility.js";
+import { EXPECTED_WASM_ARTIFACT_FINGERPRINT } from "./native-artifact-fingerprint-wasm.js";
 import { installJsonSchemaValidator } from "./json-schema-validator.js";
 
 /** WASM-only loader, deliberately outside the shared client implementation. */
@@ -80,7 +81,7 @@ async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<Was
 }
 
 function readyWasmModule(wasmModule: any): WasmModule {
-  assertNativeArtifactCompatibility(wasmModule, "WASM", [
+  assertArtifactCompatibility(wasmModule, "WASM", EXPECTED_WASM_ARTIFACT_FINGERPRINT, [
     "initSync",
     "WasmDb",
     "setJsonSchemaValidator",

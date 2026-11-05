@@ -21,6 +21,13 @@ query preparation, subscription and settling until every expected row is present
 are inside. Exact per-table row-ID verification and teardown are outside. The
 transport performs one wire encode, zstd roundtrip and decode per frame.
 
+Durable fixtures use Jazz's `open_node_storage` with `RocksDbStorageFactory`
+and `WalNoSync`, including cached-seed reopen and receiver opening. Admission
+remains within those existing opening phases; receiver admission is therefore
+inside first-sync timing. The returned `BoxedStorage` uses the existing dynamic
+dispatch path without an additional box. All-memory setup still copies and
+verifies every physical seed column family through `OrderedKvStorage`.
+
 ```sh
 cargo test -p jazz-example-permissioned-resources-benchmark --lib
 cargo bench -p jazz-example-permissioned-resources-benchmark --bench walltime --features jazz-benchmark-guard/mimalloc

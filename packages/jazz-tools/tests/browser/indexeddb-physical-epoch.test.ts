@@ -15,6 +15,8 @@ import {
   INDEXEDDB_BTREE_PAGE_SIZE,
   INDEXEDDB_BTREE_PAGES_STORE,
   INDEXEDDB_STORAGE_MANIFEST,
+  INDEXEDDB_EPOCH_1_STORAGE_MANIFEST,
+  INDEXEDDB_STORAGE_ADMISSION_KEY,
   INDEXEDDB_STORAGE_MANIFEST_KEY,
   INDEXEDDB_STORAGE_MANIFEST_STORE,
   INDEXEDDB_REPLICA_NODE_BYTES,
@@ -32,7 +34,7 @@ describe("IndexedDB physical epoch", () => {
   it("reclaims pages only during one live Web Lock epoch and reopens the published closure", async () => {
     const name = databaseName();
     const epoch = await acquireBrowserPhysicalDatabaseEpoch(name);
-    const store = await IndexedDbPageStore.open(name);
+    const store = await IndexedDbPageStore.open(name, { epoch });
     try {
       await store.claimBrowserWorkerEpoch(epoch.id, epoch);
       store.claimTreeOwnership();
@@ -55,7 +57,7 @@ describe("IndexedDB physical epoch", () => {
       expect(store.canReclaimObsoletePages).toBe(false);
       await release;
     } finally {
-      store.close();
+      await store.close();
       await epoch.release();
     }
     const reopened = await IndexedDbPageStore.open(name);
@@ -65,70 +67,88 @@ describe("IndexedDB physical epoch", () => {
       expect(await reopened.readPage(2)).toEqual(new Uint8Array([2]));
       expect(await reopened.readPage(1)).toBeNull();
     } finally {
-      reopened.close();
+      await reopened.close();
     }
   });
 
-  it("atomically installs one replica node when concurrent first opens share a physical database", async () => {
+  it("excludes independent openers until close releases the physical root", async () => {
     const name = databaseName();
-    const [first, second] = await Promise.all([
-      IndexedDbPageStore.open(name),
-      IndexedDbPageStore.open(name),
-    ]);
-    try {
-      expect(first.replicaNode).toEqual(second.replicaNode);
-      expect(first.replicaNode).toHaveLength(INDEXEDDB_REPLICA_NODE_BYTES);
-    } finally {
-      first.close();
-      second.close();
-    }
+    const first = await IndexedDbPageStore.open(name);
+    const node = first.replicaNode;
+    await expect(IndexedDbPageStore.open(name)).rejects.toThrow("active in another");
+    await first.close();
+    const second = await IndexedDbPageStore.open(name);
+    expect(second.replicaNode).toEqual(node);
+    await second.close();
   });
 
   it("preserves a replica node across reopen and replaces it only after physical reset", async () => {
     const name = databaseName();
     const first = await IndexedDbPageStore.open(name);
     const firstNode = first.replicaNode;
-    first.close();
+    await first.close();
 
     const reopened = await IndexedDbPageStore.open(name);
     expect(reopened.replicaNode).toEqual(firstNode);
-    reopened.close();
+    await reopened.close();
 
     await IndexedDbPageStore.destroy(name);
     const reset = await IndexedDbPageStore.open(name);
     try {
       expect(reset.replicaNode).not.toEqual(firstNode);
     } finally {
-      reset.close();
+      await reset.close();
     }
   });
 
-  it("opens a manually committed epoch-one page-v1 fixture read-only, writes current data, and reopens", async () => {
+  it("migrates an empty exact E1 root through WASM without creating tree metadata", async () => {
+    const name = databaseName();
+    const raw = await createRawEpochDatabase(name);
+    const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
+    tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).put(
+      INDEXEDDB_EPOCH_1_STORAGE_MANIFEST,
+      INDEXEDDB_STORAGE_MANIFEST_KEY,
+    );
+    tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).put(
+      epochOneReplicaNode().buffer,
+      INDEXEDDB_REPLICA_NODE_KEY,
+    );
+    await transactionDone(tx);
+    raw.close();
+    const store = await IndexedDbPageStore.open(name);
+    expect(await store.metadata()).toBeNull();
+    expect(store.storageAdmission()[1]?.slice(0, 5)).toEqual(new Uint8Array([74, 83, 65, 49, 1]));
+    await store.close();
+    const reopened = await IndexedDbPageStore.open(name);
+    expect(await reopened.metadata()).toBeNull();
+    expect(reopened.replicaNode).toEqual(epochOneReplicaNode());
+    await reopened.close();
+  });
+
+  it("rejects non-Jazz legacy pages through WASM without publishing admission", async () => {
     const name = databaseName();
     const page = hexBytes(pageV1LeafHex);
-    await installEpochOneFixture(name, INDEXEDDB_STORAGE_MANIFEST, page);
-
-    let store = await IndexedDbPageStore.open(name);
-    expect(await store.metadata()).toMatchObject({ generation: 1, rootPageId: 1, nextPageId: 2 });
-    expect(await store.readPage(1)).toEqual(page);
-    await store.commit({
-      expectedGeneration: 1,
-      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 3 },
-      pages: new Map([[2, new Uint8Array([0xca, 0xfe])]]),
-    });
-    store.close();
-
-    store = await IndexedDbPageStore.open(name);
-    expect(await store.readPage(1)).toEqual(page);
-    expect(await store.readPage(2)).toEqual(new Uint8Array([0xca, 0xfe]));
-    expect((await store.metadata())?.generation).toBe(2);
-    store.close();
+    await installEpochOneFixture(name, INDEXEDDB_EPOCH_1_STORAGE_MANIFEST, page);
+    await expect(IndexedDbPageStore.open(name)).rejects.toThrow();
+    expect(await rawPage(name, 1)).toEqual(page);
+    const raw = await openRawDatabase(name);
+    const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
+    const plane = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+    expect(await requestResult(plane.get(INDEXEDDB_STORAGE_MANIFEST_KEY))).toEqual(
+      INDEXEDDB_EPOCH_1_STORAGE_MANIFEST,
+    );
+    expect(await requestResult(plane.get(INDEXEDDB_STORAGE_ADMISSION_KEY))).toBeUndefined();
+    await transactionDone(tx);
+    raw.close();
+    // A failed preflight relinquishes the lock; the same root reaches the
+    // same corruption rejection, not a stranded physical-owner conflict.
+    await expect(IndexedDbPageStore.open(name)).rejects.not.toThrow("active in another");
   });
 
   it("rejects corrupt, unknown, and extra epoch-manifest fields before a page mutation", async () => {
     for (const manifest of [
       undefined,
-      { ...INDEXEDDB_STORAGE_MANIFEST, storageEpoch: 2 },
+      { ...INDEXEDDB_STORAGE_MANIFEST, storageEpoch: 99 },
       { ...INDEXEDDB_STORAGE_MANIFEST, requiredCodecIds: ["unknown.codec"] },
       { ...INDEXEDDB_STORAGE_MANIFEST, adapterFormatVersion: 2 },
       { ...INDEXEDDB_STORAGE_MANIFEST, pageFormatVersion: 2 },
@@ -179,7 +199,7 @@ describe("IndexedDB physical epoch", () => {
       }),
     ).rejects.toThrow("expected 0, found 1");
     expect(await rawPage(name, 2)).toBeNull();
-    store.close();
+    await store.close();
   });
 });
 
