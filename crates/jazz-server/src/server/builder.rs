@@ -339,12 +339,12 @@ impl ServerBuilder {
                     // A bucket's default prefix is this store's own.
                     BlobStore::S3(options) if options.prefix.is_empty() => {
                         let mut options = options.clone();
-                        options.prefix = format!("jazz/{}/{}/", self.app_id, store_id(path)?);
+                        options.prefix = format!("jazz/{}/", store_id(path)?);
                         BlobStore::S3(options)
                     }
                     BlobStore::VercelBlob(options) if options.prefix.is_empty() => {
                         let mut options = options.clone();
-                        options.prefix = format!("jazz/{}/{}/", self.app_id, store_id(path)?);
+                        options.prefix = format!("jazz/{}/", store_id(path)?);
                         BlobStore::VercelBlob(options)
                     }
                     blobs => blobs.clone(),
@@ -937,8 +937,9 @@ mod tests {
         }
     }
 
-    /// Without a prefix, each data dir gets its own under the app's, so two
-    /// stores sharing a bucket (preview and production) never share keys.
+    /// Without a prefix, each data dir gets its own (`jazz/<store id>/`,
+    /// naming no app), so two stores sharing a bucket (preview and
+    /// production) never share keys.
     #[tokio::test]
     async fn a_bucket_without_a_prefix_gets_one_per_data_dir() {
         let app = AppId::from_name("blob-store-prefix");
@@ -973,7 +974,7 @@ mod tests {
             let marker = std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap();
             assert_eq!(
                 marker,
-                format!("s3 http://127.0.0.1:9 jazz/jazz/{app}/{}/\n", id.trim())
+                format!("s3 http://127.0.0.1:9 jazz/jazz/{}/\n", id.trim())
             );
             recorded.push(marker);
         }
@@ -1005,10 +1006,7 @@ mod tests {
             .await;
         let id = std::fs::read_to_string(data_dir.path().join(STORE_ID_FILE)).unwrap();
         let marker = std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap();
-        assert_eq!(
-            marker,
-            format!("vercel-blob abc/jazz/{app}/{}/\n", id.trim())
-        );
+        assert_eq!(marker, format!("vercel-blob abc/jazz/{}/\n", id.trim()));
     }
 
     #[tokio::test]

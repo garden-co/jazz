@@ -24,7 +24,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_SERVER_URL, APP_ID, testAccount } from "./test-constants.js";
+import { TEST_SERVER_URL, SCOPE, testAccount } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -130,7 +130,7 @@ describe("auto-join race on first message send", () => {
     try {
       // ── Alice: create a public chat ────────────────────────────────────────
       const aliceConfig = {
-        appId: APP_ID,
+        appId: SCOPE,
         dbName: crypto.randomUUID(),
         driver: { type: "memory" as const },
         serverUrl,
@@ -195,7 +195,7 @@ describe("auto-join race on first message send", () => {
       }, 5);
 
       const bobConfig = {
-        appId: APP_ID,
+        appId: SCOPE,
         dbName: crypto.randomUUID(),
         driver: { type: "memory" as const },
         serverUrl,

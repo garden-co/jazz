@@ -29,7 +29,7 @@ export function jazz(): Promise<Jazz> {
     permissions,
     store: config.remote
       ? remote({ ...config.remote, appId: config.appId })
-      : sqlite({ path: config.dataPath, appId: config.appId }),
+      : sqlite({ path: config.dataPath }),
     // Better Auth's session cookie decides who the listener is.
     authenticate: async (request) => {
       const { auth } = await import("./auth");

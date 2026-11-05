@@ -7,7 +7,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_SERVER_URL, APP_ID, testAccount } from "./test-constants.js";
+import { TEST_SERVER_URL, SCOPE, testAccount } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -291,7 +291,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
 
     // --- Alice: create a public chat -----------------------------------------
     const aliceContainer = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
       account: await testAccount(`settings-alice-${Date.now()}`),
     });
@@ -313,7 +313,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
     window.location.hash = chatHash;
 
     const bobContainer = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
       account: await testAccount(`settings-bob-${Date.now()}`),
     });

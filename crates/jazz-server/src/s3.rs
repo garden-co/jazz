@@ -110,7 +110,7 @@ pub struct S3Options {
     /// `None` is AWS S3 in `region`.
     pub endpoint: Option<String>,
     /// Prepended to every object name. Empty is the store's own default,
-    /// `jazz/<app id>/<store id>/`, which the server fills in: two stores
+    /// `jazz/<store id>/`, which the server fills in: two stores
     /// never share a prefix by accident, since each deletes what it
     /// reclaims. The prefix is claimed for one store by an owner object.
     pub prefix: String,

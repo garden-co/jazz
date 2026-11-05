@@ -64,7 +64,7 @@ pub struct VercelBlobOptions {
     /// The store's id, without its `store_` prefix.
     pub store_id: String,
     /// Prepended to every blob's pathname. Empty is the store's own
-    /// default, `jazz/<app id>/<store id>/`, which the server fills in. The
+    /// default, `jazz/<store id>/`, which the server fills in. The
     /// prefix is claimed for one store by an owner blob.
     pub prefix: String,
     pub credentials: VercelBlobCredentials,

@@ -69,7 +69,9 @@ fn documents(title: &str, pinned: bool) -> TableSchemaBuilder {
         .nullable_column("blob", ColumnType::Bytea)
         .nullable_column("rank", ColumnType::Integer);
     if pinned {
-        table.column("pinned", ColumnType::Boolean)
+        table
+            .column("pinned", ColumnType::Boolean)
+            .column("owner", ColumnType::Uuid)
     } else {
         table
     }
@@ -469,6 +471,7 @@ fn v2_rows(db: &Db) {
             ("blob", Value::Nullable(None)),
             ("rank", Value::Nullable(Some(Box::new(Value::I32(-1))))),
             ("pinned", Value::Bool(false)),
+            ("owner", Value::Uuid(row(1, 4).0)),
         ],
     );
     // Clear a nullable cell: the import must write the null, not keep 5.
@@ -510,6 +513,7 @@ fn v2_rows(db: &Db) {
             ("blob", Value::Nullable(None)),
             ("rank", Value::Nullable(None)),
             ("pinned", Value::Bool(false)),
+            ("owner", Value::Uuid(row(1, 4).0)),
         ],
     );
     update(
@@ -554,6 +558,61 @@ fn v2_rows(db: &Db) {
     accept(db, updated.mergeable_tx_id());
     accept(db, inserted.mergeable_tx_id());
     delete(db, "projects", row(1, 4), user(1), 19);
+    // Content written while deleted: an edit settles after a delete
+    // written on top of it, as an offline client's edit does. Row 6 stays
+    // deleted, so the store keeps its content from before the delete; row 7
+    // is restored, and the restore brings the edit.
+    for (n, at_n, restore) in [(6, 20, false), (7, 30, true)] {
+        insert(
+            db,
+            "projects",
+            row(1, n),
+            user(1),
+            at_n,
+            &[
+                ("name", s("Edited while deleted")),
+                ("archived", Value::Bool(false)),
+                ("status", s("active")),
+            ],
+        );
+        let edited = block_on(db.update(
+            "projects",
+            row(1, n),
+            cells(&[("status", s("done"))]),
+            UpdateOptions {
+                identity: WriteIdentity::Session(user(2)),
+                updated_at_ms: at(at_n + 1),
+                ..Default::default()
+            },
+        ))
+        .expect("update");
+        let deleted = block_on(db.delete(
+            "projects",
+            row(1, n),
+            DeleteOptions {
+                identity: WriteIdentity::Session(user(1)),
+                updated_at_ms: at(at_n + 2),
+                ..Default::default()
+            },
+        ))
+        .expect("delete");
+        accept(db, deleted.mergeable_tx_id());
+        accept(db, edited.mergeable_tx_id());
+        if restore {
+            let restored = block_on(db.restore(
+                "projects",
+                row(1, n),
+                None,
+                RestoreOptions {
+                    identity: WriteIdentity::Session(user(2)),
+                    updated_at_ms: at(at_n + 3),
+                    ..Default::default()
+                },
+            ))
+            .expect("restore");
+            accept(db, restored.mergeable_tx_id());
+        }
+    }
 }
 
 fn principal(n: u8) -> Principal {
@@ -641,7 +700,7 @@ fn main() {
     block_on(db.close()).expect("close");
     drop(db);
 
-    // v2: documents.title -> heading, and a defaulted `pinned`.
+    // v2: documents.title -> heading, and a defaulted `pinned` and `owner`.
     let server = Server::start(&bin, &out);
     publish_schema(&server, &v2);
     server.admin(
@@ -660,6 +719,16 @@ fn main() {
                             "column": "pinned",
                             "column_type": ColumnType::Boolean,
                             "value": jazz::tools::public_schema::Value::Boolean(false),
+                        },
+                        // alpha.59's lens op JSON spells a UUID default
+                        // as a string, which the dump's values are not.
+                        {
+                            "type": "introduce",
+                            "column": "owner",
+                            "column_type": ColumnType::Uuid,
+                            "value": jazz::tools::public_schema::Value::Uuid(
+                                jazz::object::ObjectId::from_uuid(uuid::Uuid::nil()),
+                            ),
                         },
                     ],
                 },

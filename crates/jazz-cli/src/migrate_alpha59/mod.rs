@@ -14,6 +14,7 @@
 
 mod active;
 mod links;
+mod replay;
 mod verify;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -40,8 +41,8 @@ struct Args {
     dump: PathBuf,
     data_dir: PathBuf,
     app_id: AppId,
-    /// `--app-id` exactly as given: the app id the app passes to `remote()`,
-    /// which `createJazz` puts in its issuer verbatim.
+    /// `--app-id` exactly as given, kept in `<data-dir>/app-id` so that
+    /// `sqlite({ path })` runs the imported app without naming its id.
     app_id_text: String,
     /// Link each external identity's subject as a `createJazz` user id.
     link_backend_identities: bool,
@@ -134,16 +135,6 @@ struct Head {
     /// What alpha.59 reads as each row's current state, keyed once the
     /// active schema is known.
     currents: Vec<dump::Current>,
-}
-
-/// alpha.59's winner rule: a settled version replaces a row's `winner` in its
-/// layer (content, or deletion) when it was written on top of it, or later
-/// than it by its transaction's time, then node.
-pub(crate) fn replaces(winner: Option<&dump::TxRef>, version: &dump::Version) -> bool {
-    winner.is_none_or(|winner| {
-        version.parents.contains(winner)
-            || (version.tx_time, version.tx_node) > (winner.time, winner.node)
-    })
 }
 
 /// A row: the active-schema table it lands in, and its id. A row id names a
@@ -277,7 +268,7 @@ async fn run(args: &Args) -> Result<Json, String> {
     let mut linked = 0;
     if args.link_backend_identities {
         let planned = links::plan(&links::identities(&head.accounts, &head.principals)?)?;
-        linked = links::apply(&state, &args.app_id_text, &planned).await?;
+        linked = links::apply(&state, &planned).await?;
     }
 
     let mut rows = RowImport::default();
@@ -335,6 +326,14 @@ async fn run(args: &Args) -> Result<Json, String> {
     let footer = reader.footer().clone();
 
     let phase = built.shutdown().await;
+    // `sqlite({ path })` keeps its app id here: the store runs as the
+    // alpha.59 app, so its guests' and users' accounts stay theirs, without
+    // the app naming the id.
+    std::fs::write(
+        args.data_dir.join("app-id"),
+        format!("{}\n", args.app_id_text),
+    )
+    .map_err(err)?;
     Ok(json!({
         "data_dir": args.data_dir,
         "deployments": deployments,
@@ -344,9 +343,12 @@ async fn run(args: &Args) -> Result<Json, String> {
         "versions_written": rows.written,
         "versions_skipped_rejected": rows.rejected,
         "versions_dropped_with_their_table": rows.table_gone,
-        "repeated_deletions_coalesced": rows.coalesced,
+        "deletion_events_coalesced": rows.rows.coalesced,
         "inserts_with_their_own_creation": rows.created_apart,
-        "versions_settled_after_a_newer_one": rows.superseded,
+        "versions_settled_after_a_newer_one": rows.rows.superseded,
+        "versions_written_while_deleted": rows.rows.written_while_deleted,
+        "restores_bringing_content_written_while_deleted": rows.rows.restores_with_hidden,
+        "deleted_rows_dropping_content_written_while_deleted": rows.rows.rows_dropping_hidden,
         "transaction_metadata_dropped": rows.metadata_dropped,
         "shutdown": format!("{phase:?}"),
     }))
@@ -509,28 +511,16 @@ struct RowImport {
     seen: HashSet<RowKey>,
     /// Per row, the last content and the last deletion transaction written.
     last: HashMap<RowKey, (Option<dump::TxRef>, Option<dump::TxRef>)>,
-    /// Rows deleted after every event so far.
-    deleted: HashSet<RowKey>,
-    /// Rows deleted in the new store, with the deletion events not yet
-    /// written held apart.
-    stored_deleted: HashSet<RowKey>,
-    /// Per row, its latest delete or restore not yet written. alpha.59 takes
-    /// a row's latest deletion event as its current one, so a repeat (two
-    /// clients deleting one row) replaces the one it repeats rather than
-    /// being written onto a row already deleted.
-    pending: HashMap<RowKey, Write>,
+    /// Deletion events and content written under a deletion, held until
+    /// the store can take them (see [`replay`]).
+    rows: replay::RowReplay<Write, Write>,
     /// Per row, its creation as alpha.59 reads it.
     creations: HashMap<RowKey, (dump::Author, u64)>,
-    /// Per row and layer (content, deletion), the write time and node of
-    /// its winner so far.
-    winners: HashMap<(RowKey, bool), dump::TxRef>,
     written: u64,
     rejected: u64,
     table_gone: u64,
     metadata_dropped: u64,
-    coalesced: u64,
     created_apart: u64,
-    superseded: u64,
 }
 
 impl RowImport {
@@ -561,25 +551,6 @@ impl RowImport {
         }
     }
 
-    /// Queue `pending`'s write for `key` when it changes the stored row.
-    fn release(&mut self, key: &RowKey, writes: &mut Vec<Write>) {
-        let Some(write) = self.pending.remove(key) else {
-            return;
-        };
-        let deleting = matches!(write.op, Op::Delete);
-        if self.stored_deleted.contains(key) == deleting {
-            // A restore of a live row: nothing to write.
-            self.coalesced += 1;
-            return;
-        }
-        if deleting {
-            self.stored_deleted.insert(key.clone());
-        } else {
-            self.stored_deleted.remove(key);
-        }
-        writes.push(write);
-    }
-
     /// Write every deletion event still held.
     async fn flush(
         &mut self,
@@ -595,13 +566,19 @@ impl RowImport {
     }
 
     fn plan_flush(&mut self) -> Vec<Write> {
-        let mut keys: Vec<RowKey> = self.pending.keys().cloned().collect();
-        keys.sort();
-        let mut writes = Vec::new();
-        for key in keys {
-            self.release(&key, &mut writes);
+        let mut released = Vec::new();
+        self.rows.finish(&mut released);
+        released.into_iter().map(Self::event_write).collect()
+    }
+
+    /// The write for a held deletion event the store takes.
+    fn event_write(released: replay::Released<Write, Write>) -> Write {
+        let mut write = released.event;
+        if let Some(content) = released.content {
+            write.schema = content.schema;
+            write.cells = content.cells;
         }
-        writes
+        write
     }
 
     async fn write(
@@ -661,20 +638,13 @@ impl RowImport {
                 }
             };
             let key: RowKey = (version.table.clone(), version.row);
-            // alpha.59 settles versions in the authority's order, but one
-            // replaces a row's winner only when it was written on top of it
-            // or later than it (by its transaction's time, then node). One
-            // settled after a newer winner it never saw changes nothing.
             let tx = dump::TxRef {
                 node: version.tx_node,
                 time: version.tx_time,
             };
-            let layer = (key.clone(), version.deletion.is_some());
-            if !replaces(self.winners.get(&layer), &version) {
-                self.superseded += 1;
+            if !self.rows.wins(&key, &version) {
                 continue;
             }
-            self.winners.insert(layer, tx);
             let last = self.last.entry(key.clone()).or_default();
             if version.deletion.is_none() {
                 last.0 = Some(tx);
@@ -699,41 +669,35 @@ impl RowImport {
                     cells,
                 })
             };
-            // alpha.59 keeps content and deletion apart: content written
-            // while a row is deleted stays under the deletion. The SQLite
-            // engine keeps a deleted row's content fixed until a restore.
+            let mut released = Vec::new();
             match version.deletion {
                 Some(deletion) => {
-                    let (op, deleted) = match deletion {
+                    if !self.seen.contains(&key) {
+                        return Err(format!(
+                            "row {} of {} has a deletion event before any content: not \
+                             supported yet",
+                            uuid_string(version.row),
+                            version.table
+                        ));
+                    }
+                    let (op, deleting) = match deletion {
                         dump::Deletion::Deleted => (Op::Delete, true),
                         dump::Deletion::Restored => (Op::Restore, false),
                     };
-                    if deleted {
-                        self.deleted.insert(key.clone());
-                    } else {
-                        self.deleted.remove(&key);
-                    }
                     let event =
                         write(op, &version.updated_by, version.updated_at, BTreeMap::new())?;
-                    match self.pending.get(&key) {
-                        Some(held) if matches!(held.op, Op::Delete) == deleted => {
-                            self.coalesced += 1;
-                        }
-                        Some(_) => self.release(&key, &mut writes),
-                        None => {}
-                    }
-                    self.pending.insert(key, event);
-                }
-                None if self.deleted.contains(&key) => {
-                    return Err(format!(
-                        "row {} of {} has content written while it was deleted: not supported yet",
-                        uuid_string(version.row),
-                        version.table
-                    ));
+                    self.rows.event(&key, deleting, event, &mut released);
+                    writes.extend(released.into_iter().map(Self::event_write));
                 }
                 None => {
-                    self.release(&key, &mut writes);
                     let cells = full_cells(&schema, &version.table, version.cells.clone())?;
+                    let content =
+                        write(Op::Update, &version.updated_by, version.updated_at, cells)?;
+                    let content = self.rows.content(&key, content, &mut released);
+                    writes.extend(released.into_iter().map(Self::event_write));
+                    let Some(Write { cells, .. }) = content else {
+                        continue;
+                    };
                     if !self.seen.contains(&key) {
                         // alpha.59 reads a row's creation off its content
                         // winner, which takes it from whichever version won
@@ -831,7 +795,7 @@ impl RowImport {
                         Op::Restore => block_on(view.restore(
                             table,
                             row,
-                            None,
+                            (!write.cells.is_empty()).then_some(write.cells),
                             RestoreOptions {
                                 identity,
                                 updated_at_ms: at,
@@ -1046,7 +1010,7 @@ mod tests {
                 op("delete", "b", 4)
             ]
         );
-        assert_eq!(rows.coalesced, 1);
+        assert_eq!(rows.rows.coalesced, 1);
     }
 
     #[test]
@@ -1056,7 +1020,7 @@ mod tests {
         older.global_time = Some(9);
         let (rows, writes) = replay(vec![version(3, "b", None), older]);
         assert_eq!(writes, [op("insert", "creator", 1), op("update", "b", 3)]);
-        assert_eq!(rows.superseded, 1);
+        assert_eq!(rows.rows.superseded, 1);
     }
 
     #[test]
@@ -1067,7 +1031,7 @@ mod tests {
         high.tx_node = [2; 16];
         let (rows, writes) = replay(vec![version(1, "creator", None), high, low]);
         assert_eq!(writes, [op("insert", "creator", 1), op("update", "b", 3)]);
-        assert_eq!(rows.superseded, 1);
+        assert_eq!(rows.rows.superseded, 1);
     }
 
     #[test]
@@ -1087,7 +1051,7 @@ mod tests {
                 op("update", "a", 4)
             ]
         );
-        assert_eq!(rows.superseded, 0);
+        assert_eq!(rows.rows.superseded, 0);
     }
 
     #[test]
@@ -1101,7 +1065,7 @@ mod tests {
             older,
         ]);
         assert_eq!(writes, [op("insert", "creator", 1), op("delete", "b", 4)]);
-        assert_eq!(rows.superseded, 1);
+        assert_eq!(rows.rows.superseded, 1);
     }
 
     #[test]
@@ -1128,21 +1092,105 @@ mod tests {
     }
 
     #[test]
-    fn content_written_while_deleted_is_refused() {
+    fn content_written_while_deleted_goes_with_the_restore() {
+        let deleted = Some(dump::Deletion::Deleted);
+        let restored = Some(dump::Deletion::Restored);
+        let versions = vec![
+            version(1, "creator", None),
+            version(2, "a", deleted),
+            version(3, "b", None),
+            version(4, "c", None),
+            version(5, "d", restored),
+        ];
+        let (rows, writes) = replay(versions.clone());
+        assert_eq!(
+            writes,
+            [
+                op("insert", "creator", 1),
+                op("delete", "a", 2),
+                op("restore", "d", 5)
+            ]
+        );
+        assert_eq!(
+            (
+                rows.rows.restores_with_hidden,
+                rows.rows.rows_dropping_hidden
+            ),
+            (1, 0)
+        );
+        // The restore carries the last content written under the deletion.
+        let mut rows = replay(vec![]).0;
+        let views = views();
+        let mut planned = rows.plan(&views, versions).unwrap();
+        planned.extend(rows.plan_flush());
+        let restore = planned.last().expect("a restore");
+        assert!(matches!(restore.op, Op::Restore));
+        assert_eq!(
+            restore.cells.get("body"),
+            Some(&convert_value(dump::Value::String("v4".to_owned())))
+        );
+    }
+
+    #[test]
+    fn delete_content_delete_restore_brings_the_content_back() {
+        let deleted = Some(dump::Deletion::Deleted);
+        let versions = vec![
+            version(1, "creator", None),
+            version(2, "a", deleted),
+            version(3, "b", None),
+            version(4, "c", deleted),
+            version(5, "d", Some(dump::Deletion::Restored)),
+        ];
+        let (rows, writes) = replay(versions.clone());
+        assert_eq!(
+            writes,
+            [
+                op("insert", "creator", 1),
+                op("delete", "c", 4),
+                op("restore", "d", 5)
+            ]
+        );
+        assert_eq!(rows.rows.coalesced, 1);
+        let mut rows = replay(vec![]).0;
+        let views = views();
+        let mut planned = rows.plan(&views, versions).unwrap();
+        planned.extend(rows.plan_flush());
+        assert_eq!(
+            planned.last().and_then(|restore| restore.cells.get("body")),
+            Some(&convert_value(dump::Value::String("v3".to_owned())))
+        );
+    }
+
+    #[test]
+    fn a_deletion_before_any_content_is_refused() {
         let mut rows = replay(vec![]).0;
         let views = views();
         let error = rows
-            .plan(
-                &views,
-                vec![
-                    version(1, "creator", None),
-                    version(2, "a", Some(dump::Deletion::Deleted)),
-                    version(3, "b", None),
-                ],
-            )
+            .plan(&views, vec![version(1, "a", Some(dump::Deletion::Deleted))])
             .err()
             .expect("refused");
-        assert!(error.contains("written while it was deleted"), "{error}");
+        assert!(
+            error.contains("deletion event before any content"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn content_written_under_a_lasting_deletion_is_dropped() {
+        let deleted = Some(dump::Deletion::Deleted);
+        let (rows, writes) = replay(vec![
+            version(1, "creator", None),
+            version(2, "a", deleted),
+            version(3, "b", None),
+        ]);
+        assert_eq!(writes, [op("insert", "creator", 1), op("delete", "a", 2)]);
+        assert_eq!(
+            (
+                rows.rows.restores_with_hidden,
+                rows.rows.rows_dropping_hidden
+            ),
+            (0, 1)
+        );
     }
 
     #[test]
@@ -1221,6 +1269,6 @@ mod tests {
                 op("update", "c", 5)
             ]
         );
-        assert_eq!(rows.coalesced, 1);
+        assert_eq!(rows.rows.coalesced, 1);
     }
 }

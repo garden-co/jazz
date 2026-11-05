@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -87,11 +86,10 @@ function memoryStore(): AccountStore {
 
 describe("browser session against the app's backend", () => {
   it("signs in on the thin client and upgrades with a client loader", async () => {
-    const appId = randomUUID();
     const jazz = await createJazz({
       app,
       permissions,
-      store: memory({ appId }),
+      store: memory(),
       authenticate,
     }).ready();
     cleanups.push(() => jazz.close());
@@ -116,7 +114,7 @@ describe("browser session against the app's backend", () => {
     await session.loginWithBackend();
     const thin = session.getSnapshot().client!;
     expect(isThinDb(thin.db)).toBe(true);
-    expect(thin.session?.user?.identity).toEqual({ issuer: `jazz:app:${appId}`, subject: "alice" });
+    expect(thin.session?.user?.identity).toEqual({ issuer: "jazz:backend", subject: "alice" });
     const owner = thin.session!.user!.account;
 
     await thin.db.insert(app.todos, { title: "thin", owner }).wait({ tier: "global" });
