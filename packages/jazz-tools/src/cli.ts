@@ -46,9 +46,9 @@ const SERVER_REMOVED =
 const CREATE_REMOVED = "`jazz-tools create` was removed. Start a project with `npm create jazz`.";
 
 const MIGRATE_ALPHA59_MOVED =
-  "`jazz-tools migrate-alpha59` moved to `jazz-alpha59-import`, a native binary attached to each " +
-  "GitHub release next to `jazz-alpha59-export`. Download both for your platform from " +
-  "https://github.com/garden-co/jazz/releases and run `jazz-alpha59-import import --dump <dump> " +
+  "`jazz-tools migrate-alpha59` moved to `jazz-alpha59-alpha60-import`, a native binary attached to each " +
+  "GitHub release next to `jazz-alpha59-alpha60-export`. Download both for your platform from " +
+  "https://github.com/garden-co/jazz/releases and run `jazz-alpha59-alpha60-import import --dump <dump> " +
   "--data-dir <dir> --app-id <app id>`.";
 
 const PERMISSIONS_LIFECYCLE_NOTE =

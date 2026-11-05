@@ -300,7 +300,7 @@ impl<R: Read> Reader<R> {
             Some(Record::Header(header)) if header.format == DUMP_FORMAT => Ok((reader, header)),
             Some(Record::Header(header)) => Err(io::Error::other(format!(
                 "dump format {} is not {DUMP_FORMAT}: export the store again with the \
-                 jazz-alpha59-export attached to the GitHub release of this jazz-tools version",
+                 jazz-alpha59-alpha60-export attached to the GitHub release of this jazz-tools version",
                 header.format
             ))),
             _ => Err(io::Error::other("dump does not start with a header")),

@@ -5,8 +5,8 @@
 # boot this jazz-tools' server on the result, and make sure verify catches a
 # tampered cell.
 #
-#   dev/migrate-alpha59/test.sh            (clones .a59/ on first run)
-#   A59_DIR=... dev/migrate-alpha59/test.sh
+#   dev/alpha59-alpha60/test.sh            (clones .a59/ on first run)
+#   A59_DIR=... dev/alpha59-alpha60/test.sh
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -21,20 +21,20 @@ app=0a590000-0000-4000-8000-000000000059
 "$here/prepare.sh"
 # `--bin` filters every listed package, so the tool crates build separately.
 (cd "$a59" && CARGO_TARGET_DIR="$t59" cargo build --release -p jazz-cli --bin jazz-tools &&
-  CARGO_TARGET_DIR="$t59" cargo build --release -p migrate-alpha59-produce \
-    -p jazz-alpha59-export -p jazz-alpha59-dump &&
-  CARGO_TARGET_DIR="$t59" cargo test --release -p jazz-alpha59-export)
+  CARGO_TARGET_DIR="$t59" cargo build --release -p alpha59-alpha60-produce \
+    -p jazz-alpha59-alpha60-export -p jazz-alpha59-alpha60-dump &&
+  CARGO_TARGET_DIR="$t59" cargo test --release -p jazz-alpha59-alpha60-export)
 # The importer as self-hosters download it.
-(cd "$root" && CARGO_TARGET_DIR="$t60" cargo build --release -p jazz-cli --bin jazz-alpha59-import)
-import=("$t60/release/jazz-alpha59-import")
+(cd "$root" && CARGO_TARGET_DIR="$t60" cargo build --release -p jazz-cli --bin jazz-alpha59-alpha60-import)
+import=("$t60/release/jazz-alpha59-alpha60-import")
 
 "$t59/release/a59-produce" --out "$work/a59" --server-bin "$t59/release/jazz-tools"
-"$t59/release/jazz-alpha59-export" --data-dir "$work/a59" --work "$work/copy" --out "$work/dump"
-"$t59/release/jazz-alpha59-export" --data-dir "$work/a59" --work "$work/copy2" --out "$work/census" --catalogue-only
+"$t59/release/jazz-alpha59-alpha60-export" --data-dir "$work/a59" --work "$work/copy" --out "$work/dump"
+"$t59/release/jazz-alpha59-alpha60-export" --data-dir "$work/a59" --work "$work/copy2" --out "$work/census" --catalogue-only
 "$t59/release/dump-census" "$work/census" | tee "$work/census.json"
 grep -q '"unsupported_by_sqlite":\[\]' "$work/census.json"
 
-(cd "$root" && CARGO_TARGET_DIR="$t60" cargo test --release -p jazz-cli --lib migrate_alpha59)
+(cd "$root" && CARGO_TARGET_DIR="$t60" cargo test --release -p jazz-cli --lib alpha59_alpha60)
 "${import[@]}" import --dump "$work/dump" --data-dir "$work/a60" --app-id "$app" |
   tee "$work/import.json"
 # user-1, user-2 and user-9 link as createJazz users; revoked user-3 does not.
@@ -111,4 +111,4 @@ if "${import[@]}" verify --dump "$work/dump" --data-dir "$work/tampered" --app-i
   echo "verify missed a tampered cell" >&2
   exit 1
 fi
-echo "migrate-alpha59: all checks passed"
+echo "alpha59-alpha60: all checks passed"
