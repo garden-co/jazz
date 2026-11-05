@@ -2196,6 +2196,11 @@ pub(crate) struct Session {
     /// A relay's pulls of nodes it is still fetching from its upstream:
     /// answered from its store once they arrive (or are unavailable).
     parked_pulls: Vec<WirePull>,
+    /// Pulls the chunk store failed to answer (a token, a permission, the
+    /// network): asked again when the store is next asked
+    /// ([`Inner::retry_store_failed_pulls`]), so a short outage does not
+    /// leave the reader without them, and meanwhile they hold nothing up.
+    store_failed_pulls: Vec<WirePull>,
     /// Pulls past an answer's byte budget: answered once the session's
     /// outbox has drained (SPEC 19.8).
     deferred_pulls: Vec<WirePull>,
@@ -2276,6 +2281,7 @@ impl Session {
             bundle: None,
             fetched_upstream: BTreeSet::new(),
             parked_pulls: Vec::new(),
+            store_failed_pulls: Vec::new(),
             deferred_pulls: Vec::new(),
             told_unadmitted: false,
             known_catalogue: None,
@@ -10251,20 +10257,9 @@ impl Db {
                 if events.is_empty() {
                     continue;
                 }
-                // A subscription the server can no longer serve (its rows
-                // failed to run, say on a chunk store that failed) ends at
-                // the client with why, rather than waiting on rows that
-                // never come.
-                for event in &events {
-                    if let SubscriptionEvent::Rejected { code, reason } = event {
-                        let prefix = format!("{code:?}: ");
-                        inner.sessions[index].outbox.push(SyncMessage::Refused {
-                            id,
-                            code: *code,
-                            message: reason.strip_prefix(&prefix).unwrap_or(reason).to_owned(),
-                        });
-                    }
-                }
+                inner.sessions[index]
+                    .outbox
+                    .extend(events.iter().filter_map(|event| store_refusal(id, event)));
                 if events
                     .iter()
                     .any(|event| matches!(event, SubscriptionEvent::Delta { reset: true, .. }))
@@ -11991,12 +11986,18 @@ impl Db {
                 }
             }
             SyncMessage::ChunkRequests { pulls } => {
-                let (replies, parked, deferred) = db.answer_pulls(policy, pulls)?;
+                let Answered {
+                    replies,
+                    parked,
+                    deferred,
+                    store_failed,
+                } = db.answer_pulls(policy, pulls)?;
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
                 session.outbox.extend(replies);
                 session.parked_pulls.extend(parked);
                 session.deferred_pulls.extend(deferred);
+                session.store_failed_pulls.extend(store_failed);
             }
             SyncMessage::PushChunks { nodes } => {
                 let inner = self.inner.borrow();
@@ -12147,11 +12148,16 @@ impl Db {
     /// One answer carries at most about [`ANSWER_PULL_BYTES`], each node
     /// once: the pulls (and wanted nodes) past it come back deferred, to
     /// be answered once the session's outbox has drained.
+    ///
+    /// Pulls the chunk store failed to answer are neither missing (the
+    /// reader would not ask again until a new version or a reconnect) nor
+    /// held (they would hold the session's backlog for the outage): they
+    /// come back as `store_failed`, asked again with the store.
     fn answer_pulls(
         &self,
         identity: Option<AuthorSubject>,
         pulls: Vec<WirePull>,
-    ) -> Result<(Vec<SyncMessage>, Vec<WirePull>, Vec<WirePull>), Error> {
+    ) -> Result<Answered, Error> {
         let policies = self.view_policies();
         let inner = self.inner();
         let mut replies = Vec::new();
@@ -12163,6 +12169,7 @@ impl Db {
         let mut answered = 0;
         let mut sent = std::collections::HashSet::new();
         let mut fetching = false;
+        let mut store_failed = Vec::new();
         for pull in pulls {
             if answered >= ANSWER_PULL_BYTES {
                 deferred.push(pull);
@@ -12211,11 +12218,9 @@ impl Db {
                     continue;
                 }
                 // The chunk store failed to answer for them (a token, a
-                // permission, the network): missing to the reader, which
-                // stops waiting rather than hold its session's backlog. It
-                // asks again once a version or a reconnect may answer.
+                // permission, the network): asked again with the store.
                 Err(error) if error.code == ErrorCode::Storage => {
-                    missing.extend(pull.nodes.into_iter().map(|hash| WireChunkRef { hash }));
+                    store_failed.push(pull);
                     continue;
                 }
                 found => found?,
@@ -12269,7 +12274,12 @@ impl Db {
             return Err(crate::large::missing());
         }
         replies.push(SyncMessage::Chunks { nodes, missing });
-        Ok((replies, parked, deferred))
+        Ok(Answered {
+            replies,
+            parked,
+            deferred,
+            store_failed,
+        })
     }
 
     /// The roots of the chunked values of the versions a commit's ops name
@@ -13079,6 +13089,27 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
+    /// Only a chunk store's failure becomes a refusal, carrying the
+    /// error's own message, not its text with the code in front.
+    #[test]
+    fn only_store_failures_are_refused_to_remote_readers() {
+        let rejected = |code| super::SubscriptionEvent::Rejected {
+            code,
+            message: "bucket unreachable".to_owned(),
+            reason: format!("{code:?}: bucket unreachable"),
+        };
+        match super::store_refusal(7, &rejected(super::ErrorCode::Storage)) {
+            Some(super::SyncMessage::Refused { id, code, message }) => {
+                assert_eq!(id, 7);
+                assert_eq!(code, super::ErrorCode::Storage);
+                assert_eq!(message, "bucket unreachable");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(super::store_refusal(7, &rejected(super::ErrorCode::Query)).is_none());
+        assert!(super::store_refusal(7, &super::SubscriptionEvent::Closed).is_none());
+    }
+
     use super::*;
     use crate::ids::NodeUuid;
 
@@ -13323,5 +13354,60 @@ mod tests {
         let mut joiner = FrameJoiner::with_ceiling(bytes.len() - 1);
         assert!(joiner.push(&parts[0]).unwrap().is_none());
         assert!(joiner.push(&parts[1]).is_err());
+    }
+}
+
+/// What [`Db::answer_pulls`] made of a session's pulls.
+struct Answered {
+    replies: Vec<SyncMessage>,
+    /// A relay's pulls of nodes it is fetching from its upstream.
+    parked: Vec<WirePull>,
+    /// Pulls past the answer's byte budget.
+    deferred: Vec<WirePull>,
+    /// Pulls the chunk store failed to answer.
+    store_failed: Vec<WirePull>,
+}
+
+impl Inner {
+    /// The chunk store is asked again: every session's pulls it failed to
+    /// answer are answered again with it (as deferred pulls, once the
+    /// session's outbox drains), and their nodes are wanted in the batch
+    /// that starts now. Whether there were any.
+    pub(crate) fn retry_store_failed_pulls(&mut self) -> bool {
+        let mut any = false;
+        for index in 0..self.sessions.len() {
+            let pulls = std::mem::take(&mut self.sessions[index].store_failed_pulls);
+            if pulls.is_empty() {
+                continue;
+            }
+            any = true;
+            for pull in &pulls {
+                self.chunks.add_demand(
+                    pull.nodes
+                        .iter()
+                        .map(|hash| ChunkRequest { object_hash: *hash }),
+                    pull.span.map(|(start, end)| (pull.root, start..end)),
+                );
+            }
+            self.sessions[index].deferred_pulls.extend(pulls);
+        }
+        any
+    }
+}
+
+/// What a remote reader is told of `event` on its read `id`: a read whose
+/// rows the chunk store failed to give ends at the client with why, rather
+/// than waiting on rows that never come. Only store failures are sent
+/// here; other rejections reach remote readers as they did before.
+fn store_refusal(id: u64, event: &SubscriptionEvent) -> Option<SyncMessage> {
+    match event {
+        SubscriptionEvent::Rejected { code, message, .. } if *code == ErrorCode::Storage => {
+            Some(SyncMessage::Refused {
+                id,
+                code: *code,
+                message: message.clone(),
+            })
+        }
+        _ => None,
     }
 }

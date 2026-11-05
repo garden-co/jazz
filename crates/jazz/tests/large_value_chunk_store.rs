@@ -522,6 +522,7 @@ fn a_host_batch_that_fails_is_retried_by_the_next() {
 /// in the returned queue until her next tick.
 struct Subscriber {
     alice: Db,
+    up: Rc<RefCell<VecDeque<SyncMessage>>>,
     down: Rc<RefCell<VecDeque<SyncMessage>>>,
     _stream: Box<dyn std::any::Any>,
 }
@@ -538,7 +539,7 @@ fn subscribe_to(server: &Db) -> Subscriber {
         .accept_subscriber(
             Box::new(Pipe {
                 out: down.clone(),
-                inbound: up,
+                inbound: up.clone(),
             }),
             user(1),
         )
@@ -550,6 +551,7 @@ fn subscribe_to(server: &Db) -> Subscriber {
     .unwrap();
     Subscriber {
         alice,
+        up,
         down,
         _stream: Box::new(stream),
     }
@@ -805,11 +807,11 @@ fn a_host_deletes_reclaimed_leaves_even_while_their_put_is_out() {
 }
 
 /// A fetch that fails is reported by the finish, and what waited on it is
-/// refused with the store's error rather than held: a pull is answered
-/// missing, and a message the server cannot serve without the leaves ends
-/// the session with why, so the client is told and reconnects. Each batch
-/// (paced by the host's backoff) asks again, so once the store answers, a
-/// replica subscribing again is served.
+/// not held: a read the server cannot serve without the leaves is refused
+/// with the store's error, so the client is told. A pull is never answered
+/// missing for it (the reader would not ask again). Each batch (paced by
+/// the host's backoff) asks again, so once the store answers, a replica
+/// subscribing again is served.
 #[test]
 fn a_host_fetch_that_fails_refuses_what_waits_on_it() {
     let (_dir, path) = scratch();
@@ -824,8 +826,14 @@ fn a_host_fetch_that_fails_refuses_what_waits_on_it() {
     let mut failed = 0;
     let mut refused = false;
     for _ in 0..16 {
+        assert!(
+            !sub.down.borrow().iter().any(|message| matches!(
+                message,
+                SyncMessage::Chunks { missing, .. } if !missing.is_empty()
+            )),
+            "a store failure is not data the reader lacks"
+        );
         refused |= sub.down.borrow().iter().any(|message| match message {
-            SyncMessage::Chunks { missing, .. } => !missing.is_empty(),
             SyncMessage::Refused { code, message, .. } => {
                 *code == ErrorCode::Storage && message.contains("bucket unreachable")
             }
@@ -862,6 +870,97 @@ fn a_host_fetch_that_fails_refuses_what_waits_on_it() {
     }
     block_on(sub.alice.tick()).unwrap();
     assert_eq!(body(&sub.alice, 1), value);
+}
+
+/// A replica's pull of leaves the store failed to give is answered once
+/// the store is asked again and answers, on the same session: not missing,
+/// which would leave the reader without them until a reconnect.
+#[test]
+fn a_pull_the_store_failed_is_answered_once_it_is_back() {
+    let (_dir, path) = scratch();
+    let remote = Remote::default();
+    let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
+    let value = text(69, LARGE);
+    moved_to(&path, &store, &value);
+    // What a replica pulls the value through: its row's version and root.
+    let pull = {
+        let server = open_host_io(&path, store.clone());
+        let sub = subscribe_to(&server);
+        let mut pull = None;
+        for _ in 0..16 {
+            block_on(sub.alice.tick()).unwrap();
+            pull = pull.or_else(|| {
+                sub.up.borrow().iter().find_map(|message| match message {
+                    SyncMessage::ChunkRequests { pulls } => pulls.first().cloned(),
+                    _ => None,
+                })
+            });
+            block_on(server.tick()).unwrap();
+            if let Some(io) = server.take_chunk_io().unwrap() {
+                server
+                    .finish_chunk_io(run_elsewhere(io, store.clone()))
+                    .unwrap();
+            }
+        }
+        pull.expect("the replica pulled the value")
+    };
+
+    // A fresh server (nothing cached) whose store fails: the pull waits.
+    let server = open_host_io(&path, store.clone());
+    let sub = subscribe_to(&server);
+    for _ in 0..4 {
+        block_on(sub.alice.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    remote.objects().failing_gets = true;
+    sub.down.borrow_mut().clear();
+    let wanted = pull.nodes.clone();
+    sub.up
+        .borrow_mut()
+        .push_back(SyncMessage::ChunkRequests { pulls: vec![pull] });
+    let answered = |sub: &Subscriber| {
+        let mut nodes = Vec::new();
+        for message in sub.down.borrow().iter() {
+            if let SyncMessage::Chunks {
+                nodes: sent,
+                missing,
+            } = message
+            {
+                assert!(
+                    !missing.iter().any(|node| wanted.contains(&node.hash)),
+                    "a store failure is not data the reader lacks"
+                );
+                nodes.extend(sent.iter().map(|node| node.hash));
+            }
+        }
+        wanted.iter().all(|hash| nodes.contains(hash))
+    };
+    let mut failed = 0;
+    for _ in 0..8 {
+        block_on(server.tick()).unwrap();
+        if let Some(io) = server.take_chunk_io().unwrap()
+            && server
+                .finish_chunk_io(run_elsewhere(io, store.clone()))
+                .is_err()
+        {
+            failed += 1;
+        }
+    }
+    assert!(failed >= 1, "{failed}");
+    assert!(!answered(&sub));
+
+    // The store is back: the next batch asks again, and the pull is
+    // answered on the same session.
+    remote.objects().failing_gets = false;
+    for _ in 0..8 {
+        block_on(server.tick()).unwrap();
+        if let Some(io) = server.take_chunk_io().unwrap() {
+            server
+                .finish_chunk_io(run_elsewhere(io, store.clone()))
+                .unwrap();
+        }
+    }
+    assert!(answered(&sub), "the pull is answered once the store is");
 }
 
 /// A leaf the store answers it does not hold is data loss, reported as
