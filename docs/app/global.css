@@ -370,6 +370,8 @@ h6 {
   --pattern-fade: 0.5;
   position: relative;
   overflow: clip;
+  /* Clips the fixed pattern too, which overflow alone would not. */
+  clip-path: inset(0);
   isolation: isolate;
 }
 @media (max-width: 639px) {
@@ -378,8 +380,9 @@ h6 {
     --pattern-rib-unit: 320px;
   }
 }
+/* Fixed to the viewport, so the page scrolls over it. */
 .home-hero-pattern {
-  position: absolute;
+  position: fixed;
   z-index: -1;
   top: var(--pattern-top);
   right: var(--pattern-right);
