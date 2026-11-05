@@ -474,16 +474,6 @@ export default function HomePage() {
           </SectionHeader>
           <div className="mt-6 flex flex-wrap gap-3">
             <Button
-              label="Deploy on Vercel"
-              variant="primary"
-              href="/docs/setup/deployment/vercel"
-            />
-            <Button
-              label="Run on your own server"
-              variant="secondary"
-              href="/docs/setup/deployment/own-server"
-            />
-            <Button
               label={"Talk to us about Jazz\u00a0Pro"}
               variant="secondary"
               href="https://cal.com/anselm-io/cloud-pro-intro"

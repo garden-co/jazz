@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { Button } from "@astryxdesign/core/Button";
 import {
   defaultAssumptions,
   estimatePlatforms,
@@ -153,8 +154,8 @@ function roundMau(value: number) {
   return `~${formatCount(Math.floor(value / magnitude) * magnitude)}`;
 }
 
-// Header, totals, cost breakdown, sharding note, one row per trait, cost note.
-const resultRows = 5 + traitRows.length;
+// Header, totals, cost breakdown, button, sharding note, one row per trait, cost note.
+const resultRows = 6 + traitRows.length;
 
 function PlatformResult({
   estimate,
@@ -240,6 +241,14 @@ function PlatformResult({
               : `Free (under ${assumptions["global.freeRamGb"]} GB)`}
         </dd>
       </dl>
+      <div>
+        <Button
+          label={platform.cta.label}
+          variant={platform.id === "vercel" ? "primary" : "secondary"}
+          href={platform.cta.href}
+          isDisabled={!platform.cta.href}
+        />
+      </div>
       <p className="text-sm leading-relaxed">
         {sharded ? (
           <>

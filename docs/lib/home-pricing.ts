@@ -215,6 +215,8 @@ export type Platform = {
   costNote: string;
   /** The properties besides cost that shape the choice, keyed like `traitRows`. */
   traits: Record<TraitKey, string>;
+  /** The button under the prices: a guide to follow, or none yet. */
+  cta: { label: string; href?: string };
   /** Trait text that depends on the assumptions, such as a toggle. */
   traitsFor?: (a: Assumptions) => Partial<Record<TraitKey, string>>;
 };
@@ -245,6 +247,7 @@ const HOURS_PER_MONTH = 730;
 export const platforms: Platform[] = [
   {
     id: "cloudflare",
+    cta: { label: "Coming soon" },
     name: "Cloudflare Durable Objects",
     comingSoon: true,
     params: [
@@ -294,6 +297,7 @@ export const platforms: Platform[] = [
   },
   {
     id: "vercel",
+    cta: { label: "Deploy on Vercel", href: "/docs/setup/deployment/vercel" },
     name: "Vercel Sandbox",
     params: [
       ...engineParams("vercel", 2, 110, 3.5),
@@ -352,6 +356,7 @@ export const platforms: Platform[] = [
   },
   {
     id: "aws",
+    cta: { label: "Host yourself", href: "/docs/setup/deployment/own-server" },
     name: "AWS EC2",
     params: [
       ...engineParams("aws", 2, 110, 3.5),
@@ -400,6 +405,7 @@ export const platforms: Platform[] = [
   },
   {
     id: "server",
+    cta: { label: "Host yourself", href: "/docs/setup/deployment/own-server" },
     name: "Your own server",
     params: [
       ...engineParams("server", 2, 110, 3.5),
