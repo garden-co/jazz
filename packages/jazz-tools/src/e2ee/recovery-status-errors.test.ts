@@ -1,4 +1,3 @@
-import { frontE2eeCore } from "./fixtures/app.js";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
@@ -19,7 +18,18 @@ async function prepareRecovery() {
       schema: app,
     };
     await deploy({ ...deployment, permissions: deviceRequestPermissions });
-    server = await frontE2eeCore(server, { schema: app, permissions: deviceRequestPermissions });
+    const front = await startTestJazz({ core, app, permissions: deviceRequestPermissions });
+    server = {
+      ...core,
+      url: front.url,
+      async stop() {
+        try {
+          await front.stop();
+        } finally {
+          await core.stop();
+        }
+      },
+    };
     const account = await localAccountConfig(server.appId, server.url);
     const adapters = await createNativeCrypto();
     let saved: string | null = null;
@@ -40,7 +50,7 @@ async function prepareRecovery() {
     try {
       const { material } = await owner.e2ee.recovery.create().wait();
       const requests = await owner.all(app.__e2ee_device_requests, { tier: "remote" });
-      return { server, core, deployment, account, adapters, material, requests };
+      return { server, front, deployment, account, adapters, material, requests };
     } finally {
       await owner.shutdown();
     }
@@ -62,9 +72,8 @@ afterAll(async () => {
 it.each(["delivery-missing", "protector-missing", "protector-unusable"])(
   "reports recovery %s without exposing adapter errors or enrolling a device",
   async (fault) => {
-    const { deployment, account, adapters, material, requests } = history!;
+    const { account, adapters, material, requests } = history!;
     const clients: Awaited<ReturnType<typeof createDb>>[] = [];
-    let front: Awaited<ReturnType<typeof startTestJazz>> | undefined;
     try {
       const sensitive = "private-adapter-error-marker";
       let failDecrypt = fault === "protector-unusable";
@@ -72,7 +81,6 @@ it.each(["delivery-missing", "protector-missing", "protector-unusable"])(
         let saved: string | null = null;
         const db = await createDb({
           ...account,
-          serverUrl: front!.url,
           e2ee: {
             store: {
               async read() {
@@ -115,10 +123,9 @@ it.each(["delivery-missing", "protector-missing", "protector-unusable"])(
           }
         });
       }
-      await deploy({ ...deployment, permissions });
-      // Each backend selects its actual policy bundle; redeploying the core alone
-      // does not change the bundle pinned by the already-running backend.
-      front = await startTestJazz({ core: history!.core, app, permissions });
+      // A normal redeploy updates the selected bundle while retaining the
+      // account's original application endpoint.
+      await history!.front.redeploy({ app, permissions });
       const observer = await open(true);
       expect(await observer.db.all(app.__e2ee_recovery_roots, { tier: "remote" })).toHaveLength(1);
       const error = await observer.db.e2ee.recovery
@@ -145,7 +152,6 @@ it.each(["delivery-missing", "protector-missing", "protector-unusable"])(
       }
     } finally {
       await Promise.all(clients.map((client) => client.shutdown()));
-      await front?.stop();
     }
   },
   60000,
