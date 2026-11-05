@@ -3720,10 +3720,17 @@ impl Inner {
         end_savepoint(&self.conn, name, false)
     }
 
-    /// An admitted schema under the names this store keeps it by.
     /// Published bundle `id`, resolved: the write version it selects and
     /// that version governed by the bundle's policies. `None` when this
-    /// store has no such bundle, or has not admitted its write schema.
+    /// store has no such bundle, or has not admitted its write version.
+    ///
+    /// A bundle selects a structural schema by hash, and several hashes
+    /// compile to one version (defaults and indexes do not change it): the
+    /// bundle's schema is read from the catalogue, and only its version
+    /// must be admitted, whichever of its hashes this store admitted or
+    /// opened under. It is named by that version's stored names, and
+    /// sessions pinned to it that declare no other version read and write
+    /// by it, so by its own defaults (see `Inner::governed_by`).
     pub(crate) fn bundle(
         &mut self,
         id: &crate::catalogue::BundleId,
@@ -3734,14 +3741,20 @@ impl Inner {
         let Some((hash, permissions)) = crate::catalogue::bundle(&self.conn, id)? else {
             return Ok(None);
         };
-        let Some((version, structural)) = self
+        let held = self
             .admitted
             .iter()
-            .find(|(_, schema)| crate::catalogue::structural_hash(schema.public_schema()) == hash)
-        else {
-            return Ok(None);
+            .map(|(_, schema)| schema)
+            .find(|schema| crate::catalogue::structural_hash(schema.public_schema()) == hash)
+            .map(|schema| schema.public_schema().clone());
+        let structural = match held {
+            Some(structural) => structural,
+            None => match crate::catalogue::schema(&self.conn, &hash)? {
+                Some(structural) => structural,
+                None => return Ok(None),
+            },
         };
-        let mut public = structural.public_schema().clone();
+        let mut public = structural;
         for (name, table) in public.iter_mut() {
             table.policies = permissions.get(name).cloned().unwrap_or_default();
         }
@@ -3751,9 +3764,15 @@ impl Inner {
                 format!("bundle {id} does not compile: {error}"),
             )
         })?;
+        let version = governing.version_id();
+        let admitted =
+            version == self.owner_version || self.admitted.iter().any(|(id, _)| *id == version);
+        if !admitted || self.names.get(&version).is_none() {
+            return Ok(None);
+        }
         let mut named = self.named(&governing);
         named.bundle = Some(*id);
-        let resolved = (*version, Rc::new(named));
+        let resolved = (version, Rc::new(named));
         self.bundles.insert(*id, resolved.clone());
         Ok(Some(resolved))
     }
