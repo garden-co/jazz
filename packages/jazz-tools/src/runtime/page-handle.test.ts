@@ -1,6 +1,12 @@
 import { afterEach, expect, it } from "vitest";
 import { registerPageDb, type PageDb } from "./page-handle.js";
-import { syncStatus, CONNECTED, offlineLink, type SyncStatus } from "./sync-status.js";
+import {
+  syncStatus,
+  CONNECTED,
+  offlineLink,
+  type SyncStatus,
+  uploadStatusFromCount,
+} from "./sync-status.js";
 
 afterEach(() => {
   delete (globalThis as { window?: Window }).window;
@@ -34,8 +40,8 @@ function page(): Window {
 
 it("answers the page's sync status, pending writes and every Db", () => {
   const window = page();
-  const first = fakeDb(syncStatus(offlineLink("network"), 2));
-  const second = fakeDb(syncStatus(CONNECTED, 0));
+  const first = fakeDb(syncStatus(offlineLink("network"), uploadStatusFromCount(2)));
+  const second = fakeDb(syncStatus(CONNECTED, uploadStatusFromCount(0)));
   const unlistFirst = registerPageDb(first, "app-1");
   const unlistSecond = registerPageDb(second, null);
   const handle = window.__jazz!;
@@ -61,8 +67,8 @@ it("answers the page's sync status, pending writes and every Db", () => {
 
 it("waits for every Db, and rejects with the first refusal", async () => {
   const window = page();
-  const first = fakeDb(syncStatus(CONNECTED, 1));
-  const second = fakeDb(syncStatus(CONNECTED, 0));
+  const first = fakeDb(syncStatus(CONNECTED, uploadStatusFromCount(1)));
+  const second = fakeDb(syncStatus(CONNECTED, uploadStatusFromCount(0)));
   registerPageDb(first, "a");
   registerPageDb(second, "b");
 
@@ -82,7 +88,7 @@ it("waits for every Db, and rejects with the first refusal", async () => {
 });
 
 it("lists nothing outside a browser page", () => {
-  const db = fakeDb(syncStatus(CONNECTED, 0));
+  const db = fakeDb(syncStatus(CONNECTED, uploadStatusFromCount(0)));
   registerPageDb(db, "x")();
   expect((globalThis as { window?: Window }).window).toBeUndefined();
 });

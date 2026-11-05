@@ -16,6 +16,7 @@ import {
   LOCAL_ONLY,
   offlineLink,
   syncStatus,
+  NO_UPLOADS,
   type LinkStatus,
   type SyncStatus,
 } from "../sync-status.js";
@@ -249,8 +250,13 @@ export abstract class ConnectionManager {
   syncStatus(): SyncStatus {
     const link = this.linkStatus();
     // Without a server, local commits are never uploaded, so none wait.
-    if (link.state === "local-only") return syncStatus(link, 0);
-    return syncStatus(link, this.client?.getRuntime().pendingUploadCount?.() ?? 0);
+    if (link.state === "local-only") return syncStatus(link);
+    const runtime = this.client?.getRuntime();
+    return syncStatus(
+      link,
+      runtime?.uploadStatus?.() ?? NO_UPLOADS,
+      runtime?.lastLinkFailure?.() ?? null,
+    );
   }
 
   /** The upstream connection as the app sees it, including explicit disconnects. */

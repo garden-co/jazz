@@ -288,3 +288,62 @@ fn reopening_a_store_without_a_refusal_writes_nothing() {
         "a reopen without a write changed the file"
     );
 }
+
+/// ```text
+/// alice ──insert(note in bob's name)──► core ──✗ refused
+///   upload_status: pending 1 since the commit → pending 0, rejected 1
+/// alice ──insert(her own note)──► core ──✓ accepted
+///   upload_status: rejected still 1, the same refusal last
+/// ```
+#[test]
+fn upload_status_counts_what_awaits_a_verdict_and_what_was_refused() {
+    let server = authority();
+    let client = block_on(Db::open(DbConfig::new(schema(), identity(0xa1, alice())))).unwrap();
+    connect(&client, &server);
+    let fresh = client.upload_status();
+    assert_eq!(
+        (fresh.pending, fresh.oldest_pending_at, fresh.rejected),
+        (0, None, 0)
+    );
+    assert!(fresh.last_rejection.is_none());
+
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    };
+    let before = now();
+    refused_note(&client, RowUuid::from_bytes([0x21; 16]));
+    let waiting = client.upload_status();
+    assert_eq!(waiting.pending, 1);
+    let since = waiting
+        .oldest_pending_at
+        .expect("a pending commit has a time");
+    assert!(
+        since >= before && since <= now(),
+        "{since} is the commit's time"
+    );
+
+    pump(&client, &server);
+    let refused = client.upload_status();
+    assert_eq!((refused.pending, refused.oldest_pending_at), (0, None));
+    assert_eq!(refused.rejected, 1);
+    let last = refused.last_rejection.clone().expect("the refusal");
+    assert_eq!(last.code, "permission_denied");
+    assert!(last.at >= since, "the refusal arrived after the commit");
+
+    block_on(client.insert(
+        "notes",
+        BTreeMap::from([
+            ("owner".to_owned(), subject(alice())),
+            ("title".to_owned(), Value::String("mine".into())),
+        ]),
+        InsertOptions::default(),
+    ))
+    .unwrap();
+    pump(&client, &server);
+    let accepted = client.upload_status();
+    assert_eq!((accepted.pending, accepted.rejected), (0, 1));
+    assert_eq!(accepted.last_rejection, Some(last));
+}
