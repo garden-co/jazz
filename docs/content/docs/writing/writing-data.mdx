@@ -309,6 +309,15 @@ const unsubscribe = db.onSyncStatusChange((status) => renderBadge(status));
 | `connected`  | Connected to the server                                                                                                                                                                                                                                                          |
 | `offline`    | Not connected. `reason` says why: `disconnected` after `db.disconnect()`, `network` when the server has been unreachable for a while (the client keeps retrying), `auth` when the server refused the credential, or `stopped` after a failure that only `db.reconnect()` retries |
 
+`offline` can also have the reason `authority-changed`: the server serves a different history than
+the client's local store, because the server's store was recreated (a deleted dev data directory, a
+restarted in-memory server, a new environment behind the same URL) or it is another app's server.
+The client stops syncing with it, keeps its local data and unsynced writes, and fails `global` waits
+and `db.waitForSync()` with an `AuthorityChangedError` (check with `isAuthorityChangedError`). Nothing
+is reset automatically. To sync with the new server, reset the local store: in the browser,
+`await db.deleteClientStorage()`; in Node, delete the client's data directory and open
+it again. Writes that never reached the old server are lost with the store.
+
 A brief drop shows as `connecting`, not `offline`, so a status badge doesn't flicker. `synced` is
 `true` when nothing waits for upload and the link is `connected` (or `local-only`).
 

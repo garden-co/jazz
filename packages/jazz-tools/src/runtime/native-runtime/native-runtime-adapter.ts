@@ -4,6 +4,7 @@ import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
+import { isAuthorityChangedError, upstreamRefusalError } from "../authority-changed-error.js";
 import { formatUuid, formatUuidAt } from "../hex.js";
 
 export { formatUuid };
@@ -498,6 +499,12 @@ export type Transport = {
   takeAuxiliaryTrace?(): unknown[];
   setAuxiliaryTraceEnabled?(enabled: boolean): void;
   tick(): number | Promise<number>;
+  /**
+   * Why the core dropped this upstream link on its own (an `Error`-like
+   * value with the core `code`, e.g. `authority_changed`), or `null` while
+   * the link stands. Older bindings lack it.
+   */
+  upstreamRefusal?(): unknown;
   updateAuthenticatedClaims?(claims: Record<string, unknown>): void | Promise<void>;
   free?(): void;
 };
@@ -909,6 +916,12 @@ export class NativeRuntimeAdapter implements Runtime {
   } | null = null;
   /** The error that ended the attempt the machine is deciding about. */
   private linkFailure: Error | null = null;
+  /**
+   * Why the core dropped the last admitted link on its own (see
+   * `Transport.upstreamRefusal`): the link is stopped with it until the next
+   * attempt, which an explicit reconnect starts.
+   */
+  private upstreamRefusal: Error | null = null;
   private linkCloseReason = "server transport replaced";
   /** The client keeps reconnecting through the current `serverTransportError`. */
   private serverTransportErrorRetrying = false;
@@ -1508,6 +1521,9 @@ export class NativeRuntimeAdapter implements Runtime {
         return this.serverTransportErrorRetrying ? offlineLink("network") : offlineLink("stopped");
       }
       return CONNECTING;
+    }
+    if (this.linkStatus?.phase === "stopped" && isAuthorityChangedError(this.upstreamRefusal)) {
+      return offlineLink("authority-changed", false);
     }
     return linkStatusFromUpstream(this.linkStatus);
   }
@@ -2817,6 +2833,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // A published outage stays visible to Global readers until a retry
     // actually reconnects; each failed attempt must not hide it again.
     if (!this.linkStatus?.outagePublished) this.forgetServerTransportError();
+    this.upstreamRefusal = null;
     this.linkChanged();
     let resolveTerminal!: (error: Error) => void;
     const terminal = new Promise<Error>((resolve) => {
@@ -4093,6 +4110,7 @@ export class NativeRuntimeAdapter implements Runtime {
         ) {
           return;
         }
+        if (this.stopRefusedUpstream(transport)) return;
         const frames = normalizeTransportFrames(transport.recvWireFrames());
         if (frames.length > 0) {
           this.sendServerFrames(frames, carrier, generation);
@@ -4110,6 +4128,22 @@ export class NativeRuntimeAdapter implements Runtime {
         this.scheduleServerPump();
       }
     }
+  }
+
+  /**
+   * Stop the link when the core dropped `transport` on its own: nothing
+   * syncs over it, and a retry would be refused the same way (a server whose
+   * authority changed). Waits for the server fail with the refusal, and the
+   * link stays stopped until an explicit reconnect.
+   */
+  private stopRefusedUpstream(transport: Transport): boolean {
+    const refusal = upstreamRefusalError(transport.upstreamRefusal?.());
+    if (!refusal) return false;
+    const attempt = this.serverConnectionAttempt;
+    if (!attempt || attempt.transport !== transport) return false;
+    this.upstreamRefusal = refusal;
+    this.endLinkAttempt(attempt, refusal, { kind: "fatal", message: refusal.message });
+    return true;
   }
 
   private async routePendingInboundServerFrames(): Promise<boolean> {

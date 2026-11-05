@@ -290,6 +290,13 @@ export declare class Transport {
    * what is due. Returns the number of frames waiting to be sent.
    */
   tick(): number
+  /**
+   * Why the database dropped this upstream link on its own, with the
+   * core's stable `code` (`authority_changed` for a server whose store
+   * was recreated), or `null` while the link stands. The host stops the
+   * link with it rather than retry.
+   */
+  upstreamRefusal(): UpstreamRefusal | null
   close(): boolean
 }
 
@@ -481,6 +488,14 @@ export interface UpsertOptions {
   head?: JsonValue
   base?: JsonValue
   updatedAtMs?: number
+}
+
+/** Why the database dropped an upstream link (see `Transport.upstreamRefusal`). */
+export interface UpstreamRefusal {
+  /** The core's stable error code. */
+  code: string
+  /** What the core said, as an error's message. */
+  message: string
 }
 
 /** Validate a schema and its embedded permissions without opening a database. */

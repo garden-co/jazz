@@ -133,6 +133,8 @@ mod serializable_relay;
 mod serializable_sqlite;
 #[path = "../serializable_sync.rs"]
 mod serializable_sync;
+#[path = "../server_store_reset.rs"]
+mod server_store_reset;
 #[path = "../session_policy_values.rs"]
 mod session_policy_values;
 #[path = "../session_write_checks.rs"]

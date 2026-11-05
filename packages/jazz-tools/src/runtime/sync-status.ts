@@ -1,3 +1,6 @@
+/** Why a {@link LinkStatus} is `offline`. */
+export type OfflineReason = "disconnected" | "network" | "auth" | "stopped" | "authority-changed";
+
 /**
  * The upstream connection as an app should show it.
  *
@@ -14,6 +17,13 @@
  *     backend).
  *   - `stopped`: a failure retrying cannot fix (a protocol error or an
  *     incompatible server); only `db.reconnect()` tries again.
+ *   - `authority-changed`: the server serves another history than this
+ *     client's local store (its store was recreated, or it is another app's
+ *     server), so nothing syncs with it. Waits for the server fail with an
+ *     `AuthorityChangedError`, which says how to recover: reset the local
+ *     store (`db.deleteClientStorage()` in the browser). Nothing is reset
+ *     automatically, so unsynced writes are never discarded behind the
+ *     app's back.
  */
 export type LinkStatus =
   | { state: "local-only" }
@@ -21,7 +31,7 @@ export type LinkStatus =
   | { state: "connected" }
   | {
       state: "offline";
-      reason: "disconnected" | "network" | "auth" | "stopped";
+      reason: OfflineReason;
       retrying: boolean;
     };
 
@@ -62,10 +72,7 @@ export const CONNECTING: LinkStatus = Object.freeze({ state: "connecting" });
 export const CONNECTED: LinkStatus = Object.freeze({ state: "connected" });
 
 /** @internal The app-facing status of an offline link. */
-export function offlineLink(
-  reason: "disconnected" | "network" | "auth" | "stopped",
-  retrying = reason === "network",
-): LinkStatus {
+export function offlineLink(reason: OfflineReason, retrying = reason === "network"): LinkStatus {
   return { state: "offline", reason, retrying };
 }
 
