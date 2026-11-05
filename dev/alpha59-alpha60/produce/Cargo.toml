@@ -1,6 +1,6 @@
 # Built inside the alpha.59 checkout by ../prepare.sh, like the exporter.
 [package]
-name = "migrate-alpha59-produce"
+name = "alpha59-alpha60-produce"
 version = "0.0.0"
 edition = "2024"
 publish = false

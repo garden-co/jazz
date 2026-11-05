@@ -1932,7 +1932,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "jazz-alpha59-dump"
+name = "jazz-alpha59-alpha60-dump"
 version = "0.0.0"
 dependencies = [
  "blake3",
@@ -1959,7 +1959,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "jazz",
- "jazz-alpha59-dump",
+ "jazz-alpha59-alpha60-dump",
  "jazz-native-transport",
  "jazz-otel",
  "jazz-server",

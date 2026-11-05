@@ -1,7 +1,7 @@
-//! `jazz-alpha59-import`: build a new server data dir from a dump of
+//! `jazz-alpha59-alpha60-import`: build a new server data dir from a dump of
 //! an alpha.59 server data dir, and verify it. The dump comes from
-//! `jazz-alpha59-export`, a separate binary built against alpha.59 (see
-//! `dev/migrate-alpha59/`).
+//! `jazz-alpha59-alpha60-export`, a separate binary built against alpha.59 (see
+//! `dev/alpha59-alpha60/`).
 //!
 //! Everything goes through the new server's own code: the active schema and
 //! its permissions as one deployment, the account journal command by
@@ -29,8 +29,8 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::AppId;
-use jazz_alpha59_dump as dump;
-use jazz_server::server::migrate_alpha59::{migrate_import_account, migrate_import_deploy};
+use jazz_alpha59_alpha60_dump as dump;
+use jazz_server::server::alpha59_alpha60::{migrate_import_account, migrate_import_deploy};
 use jazz_server::{ServerBuilder, ServerState, StorageBackend};
 use serde_json::{Value as Json, json};
 
@@ -83,8 +83,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
 const USAGE_ARGS: &str = "(import | verify) --dump <dump> --data-dir <dir> --app-id <app id> \
     [--no-backend-identity-links] [--drop-transaction-metadata]";
 
-/// Run the importer as `program` (`jazz-alpha59-import`, or `jazz-tools
-/// migrate-alpha59` in a dev build) with `args`; the process exit code.
+/// Run the importer as `program` (`jazz-alpha59-alpha60-import`, or `jazz-tools
+/// alpha59-alpha60` in a dev build) with `args`; the process exit code.
 pub async fn main(program: &str, args: Vec<String>) -> i32 {
     let usage = format!("usage: {program} {USAGE_ARGS}");
     let mut args = args.into_iter();

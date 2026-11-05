@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use jazz_alpha59_dump as dump;
+use jazz_alpha59_alpha60_dump as dump;
 
 use super::RowKey;
 
