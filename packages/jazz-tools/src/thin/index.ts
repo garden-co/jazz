@@ -70,11 +70,12 @@ export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Pr
   const next = await open();
   try {
     await prefetchThinQueries(thin, next);
+    await thin.shutdown({ waitForSync: true });
   } catch (error) {
-    await next.shutdown();
+    // Until handoff succeeds, this operation owns the replacement.
+    await next.shutdown().catch(() => {});
     throw error;
   }
-  await thin.shutdown({ waitForSync: true });
   return next;
 }
 
