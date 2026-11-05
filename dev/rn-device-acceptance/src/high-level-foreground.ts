@@ -5,6 +5,7 @@ import type { DeviceDiagnosticCode } from "./device-diagnostics";
 import { finishSeedClient, type SeedBoundary } from "./seed-teardown";
 import { waitForPublication } from "./publication-wait";
 import { requireCoreRecoveryMarker } from "./recovery-marker.ts";
+import { publicClientWriteDetail } from "./write-detail.ts";
 import {
   composerEcho,
   measureTypingComposer,
@@ -41,6 +42,7 @@ export async function seedHighLevelForegroundRuntime(
   markFailure: (code: DeviceDiagnosticCode) => void,
   waitForCoreObservation: () => Promise<void>,
   boundary?: (code: SeedBoundary) => void,
+  reportWriteFailure?: (detail: string) => void,
 ): Promise<void> {
   markFailure("public-client-open-failed");
   const client = await openJazzClient(clientConfig(admitted));
@@ -57,8 +59,13 @@ export async function seedHighLevelForegroundRuntime(
       recoveredObserved ||= todos.some((todo) => todo.title === `${title}:recovered-by-core`);
     });
     markFailure("public-client-write-failed");
-    const write = client.db.insert(app.todos, { title });
-    await write.wait({ tier: "local" });
+    try {
+      const write = client.db.insert(app.todos, { title });
+      await write.wait({ tier: "local" });
+    } catch (error) {
+      reportWriteFailure?.(publicClientWriteDetail(error));
+      throw error;
+    }
     markFailure("public-client-read-failed");
     const rows = await client.db.all(app.todos);
     if (!rows.some((row) => row.title === title)) {
