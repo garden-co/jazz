@@ -80,6 +80,29 @@ hosted or general product-performance receipt. Preserve the caller-owned
 discovery tradeoff for a separately justified performance change rather than
 coupling crypto lifecycle changes to correctness-fixture execution budgets.
 
+## E2EE multi-account history batching (2026-10-13)
+
+The trial replaced five reads per additional account with five bounded set
+queries, partitioning device keys by verified creation-account metadata and
+retaining each row's settlement evidence. Empty and single-account paths kept
+the original reader. A narrow TypeScript declaration enabled `in` on
+`$createdBy.account`; no query executor or storage encoding changed.
+
+A full E2EE census found 135 completed multi-account reader invocations. The
+five busiest suites covered 117 of these; their nine unchanged tests passed
+twice per arm, with mean run span falling from 53.52s to 48.26s (-9.8%). A
+same-transaction parity check matched 192 rows and 192 settlement records
+across 24 snapshots on Native and WASM, including duplicate and absent account
+requests.
+
+The complete Node suite did not improve: two controlled runs per arm averaged
+285.38s without batching and 285.89s with it (+0.18%), retaining all 3,383 case
+names (3,366 passes, two expected failures and 15 skips). None of the six
+slowest suites exercised the multi-account path. The batch reader and its
+type declaration were removed. Fewer queries and a faster selected subset do
+not establish a useful whole-suite win. These are local correctness-suite
+measurements, not hosted product-performance evidence.
+
 ## Before building another trial
 
 1. Identify the actual allocation/copy/work site with a current profile and code walk.
