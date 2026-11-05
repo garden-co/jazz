@@ -1729,6 +1729,21 @@ impl NapiDb {
         Ok(Self::open_as(&schema, &config, Some(&data_path), how)?)
     }
 
+    /// Fresh schema/session catalogue coverage on the ordinary pending-read route.
+    #[napi(js_name = "coverCatalogue")]
+    pub fn cover_catalogue(
+        &self,
+        timeout_ms: f64,
+        author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
+    ) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+        let read = self
+            .binding()?
+            .cover_catalogue(timeout_ms, author.as_deref(), claims)
+            .map_err(host_error)?;
+        read_or_pending(read)
+    }
+
     /// Authority table UUID as 16 canonical bytes, or empty for an unknown name.
     /// Refuses with NotObserved until the authority confirms this schema.
     #[napi(js_name = "tableIdentity")]

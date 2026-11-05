@@ -3,6 +3,11 @@ import {
   type AcceptedRows,
   type TransactionReadCapability,
 } from "./accepted-read.js";
+import {
+  validateCatalogueTimeout,
+  type CatalogueIdentityRequest,
+  type PreparedCatalogueIdentities,
+} from "./catalogue-identities.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import { UnsupportedSnapshotError, type SnapshotRef } from "./snapshot-ref.js";
 /**
@@ -37,8 +42,13 @@ import { parseUuidBytes } from "./hex.js";
 /** @internal Runtime operations bound to the currently executing preparation. */
 export type TransactionPreparationIO = Pick<
   JazzClient,
-  "queryInternal" | "insertInternal" | "updateInternal" | "upsertInternal" | "restoreInternal"
->;
+  | "queryInternal"
+  | "queryAcceptedInternal"
+  | "insertInternal"
+  | "updateInternal"
+  | "upsertInternal"
+  | "restoreInternal"
+> & { assertActive(): void };
 
 type RuntimeSerializedSession = Pick<
   Session,
@@ -309,6 +319,12 @@ export interface Runtime {
     tier?: string | null,
     options_json?: string | null,
   ): Promise<any>;
+  /** @internal One fresh coverage operation followed by same-handle lookups. */
+  prepareCatalogueIdentities?(
+    requests: readonly CatalogueIdentityRequest[],
+    sessionJson?: string,
+    timeoutMs?: number,
+  ): Promise<readonly PreparedCatalogueIdentities[]>;
   createSubscription(
     query_json: string,
     session_json?: string | null,
@@ -1148,6 +1164,7 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private shutdownPromise: Promise<void> | null = null;
   private discarded = false;
+  private preparationClosed = false;
   /** Facade-owned subscription releases, fenced against terminal reentrancy. */
   private activeSubscriptionReleases = new Map<number, () => void>();
 
@@ -1342,7 +1359,7 @@ export class JazzClient {
     prepare: (io: TransactionPreparationIO) => Promise<void>,
   ): Promise<void> {
     const state = this.transactionPreparations.get(id);
-    if (!state || state.committing) {
+    if (!state || state.committing || this.preparationClosed || this.discarded) {
       throw new Error("Cannot prepare a transaction that is closed or committing");
     }
     state.pending = (state.pending ?? Promise.resolve()).then(async () => {
@@ -1350,12 +1367,21 @@ export class JazzClient {
         throw new Error("Transaction was rolled back before preparation");
       }
       let active = true;
+      const acceptedReads: Promise<unknown>[] = [];
+      let callbackFailed = false;
+      let callbackError: unknown;
       const assertActive = () => {
-        if (!active || this.transactionPreparations.get(id) !== state)
+        if (
+          !active ||
+          this.preparationClosed ||
+          this.discarded ||
+          this.transactionPreparations.get(id) !== state
+        )
           throw new Error("Transaction preparation is no longer active");
       };
       try {
         await prepare({
+          assertActive,
           queryInternal: (query, options, session) => {
             assertActive();
             return this.queryWithoutPreparation(
@@ -1363,6 +1389,25 @@ export class JazzClient {
               { ...options, openTransactionId: id },
               session,
             );
+          },
+          queryAcceptedInternal: (query, transaction, timeoutMs, session) => {
+            assertActive();
+            if (transaction !== id)
+              throw new Error("Accepted preparation read belongs to a different transaction");
+            const reading = this.queryAcceptedWithoutPreparation(
+              query,
+              id,
+              timeoutMs,
+              session,
+            ).then((result) => {
+              // Retirement/rollback while awaiting evidence must not publish it to the callback.
+              assertActive();
+              return result;
+            });
+            acceptedReads.push(reading);
+            // Registration owns errors even if the callback forgets to await a child read.
+            reading.catch(() => {});
+            return reading;
           },
           insertInternal: (table, values, options, session, attribution) => {
             assertActive();
@@ -1396,9 +1441,17 @@ export class JazzClient {
             return { ...row, values: row.values as Value[] };
           },
         });
+      } catch (error) {
+        callbackFailed = true;
+        callbackError = error;
       } finally {
         active = false;
       }
+      // Revoke on callback exit, then drain every started child; never detach a rejection.
+      const results = await Promise.allSettled(acceptedReads);
+      if (callbackFailed) throw callbackError;
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
     });
     // Registration owns failures even if the caller never commits or waits.
     state.pending.catch(() => {});
@@ -1896,6 +1949,22 @@ export class JazzClient {
     );
   }
 
+  /** @internal Resolve all preparation names through this schema runtime once. */
+  prepareCatalogueIdentitiesInternal(
+    requests: readonly CatalogueIdentityRequest[],
+    session?: Session,
+    timeoutMs = 15_000,
+  ): Promise<readonly PreparedCatalogueIdentities[]> {
+    validateCatalogueTimeout(timeoutMs);
+    if (!this.runtime.prepareCatalogueIdentities)
+      throw new Error("Runtime does not expose fresh catalogue identity preparation");
+    return this.runtime.prepareCatalogueIdentities(
+      requests,
+      session ? JSON.stringify(serializeRuntimeSession(session)) : undefined,
+      timeoutMs,
+    );
+  }
+
   /**
    * Execute a query and return all matching rows.
    *
@@ -1966,6 +2035,18 @@ export class JazzClient {
     const state = this.transactionPreparations.get(openTransactionId);
     if (!state || state.committing) throw new Error("Accepted read requires an open transaction");
     if (state.pending) await state.pending;
+    return this.queryAcceptedWithoutPreparation(query, openTransactionId, timeoutMs, session);
+  }
+
+  /** Already registered preparation uses its bound IO, without awaiting itself. */
+  private async queryAcceptedWithoutPreparation(
+    query: string,
+    openTransactionId: OpenTransactionId,
+    timeoutMs: number,
+    session?: Session,
+  ): Promise<AcceptedRows<Row>> {
+    validateAcceptedReadTimeout(timeoutMs);
+    if (!this.runtime.queryAccepted) throw new Error("Runtime does not expose accepted reads");
     return this.runtime.queryAccepted(
       query,
       openTransactionId,
@@ -2431,6 +2512,8 @@ export class JazzClient {
       return await this.shutdownPromise;
     }
 
+    // Revoke scopes before close can synchronously re-enter application code.
+    this.preparationClosed = true;
     this.shutdownPromise = (async () => {
       // Close runtime if it supports explicit shutdown.
       if (this.runtime.close) {

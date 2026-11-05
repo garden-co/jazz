@@ -2,9 +2,13 @@ import { expect, it, vi } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "./default-create-db.js";
-import { beginDbTransactionAfter, readAcceptedTransactionRows } from "./db.js";
+import {
+  beginDbTransactionAfter,
+  readAcceptedTransactionRows,
+  prepareDbTransaction,
+} from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startTestJazz } from "../testing/index.js";
 import { createAccountDbWithRuntimeSource } from "../accounts/context.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
 import type { RuntimeClientContext } from "./runtime-source.js";
@@ -25,17 +29,15 @@ class PreparationSource extends DefaultRuntimeSource {
 }
 
 it("opts in before opening, drains an immediate SDK commit and preserves paired typed evidence", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app,
+    permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   let release!: () => void;
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
+    // startTestJazz publishes the app and admits clients through its normal backend.
     const source = new PreparationSource();
     db = await createAccountDbWithRuntimeSource(
       await localAccountConfig(server.appId, server.url),
@@ -96,16 +98,14 @@ it("opts in before opening, drains an immediate SDK commit and preserves paired 
 }, 60000);
 
 it("records an empty accepted predicate and refuses a phantom at Global commit", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app,
+    permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
+    // startTestJazz publishes the app and admits clients through its normal backend.
     db = await createDb(await localAccountConfig(server.appId, server.url));
     await db.all(app.notes, { tier: "remote" });
     const tx = beginDbTransactionAfter(db, async () => {}, "accepted-evidence");
@@ -127,16 +127,14 @@ it("records an empty accepted predicate and refuses a phantom at Global commit",
 }, 60000);
 
 it("uses current policies after a retained accepted read and never publishes its staged write", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app,
+    permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
-    const target = {
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-    };
-    await deploy({ ...target, permissions });
+    // The same app backend is redeployed below; clients retain their origin.
     db = await createDb(await localAccountConfig(server.appId, server.url));
     const initial = await db
       .insert(app.notes, { body: "before revocation" })
@@ -147,12 +145,93 @@ it("uses current policies after a retained accepted read and never publishes its
     const denied = definePermissions(app, ({ policy }) => {
       policy.notes.allowInsert.always();
     });
-    await deploy({ ...target, permissions: denied });
+    await server.redeploy({ app, permissions: denied });
     await expect(tx.commit().wait({ tier: "global" })).rejects.toThrow();
-    await deploy({ ...target, permissions });
+    await server.redeploy({ app, permissions });
     expect(await db.all(app.notes, { tier: "remote" })).toEqual([initial]);
   } finally {
     await db?.shutdown();
     await server.stop();
   }
 }, 60000);
+
+it("keeps typed accepted preparation inside an immediate commit and preserves the evidence envelope", async () => {
+  const server = await startTestJazz({
+    app,
+    permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
+  let db: Awaited<ReturnType<typeof createDb>> | undefined;
+  let release!: () => void;
+  try {
+    // startTestJazz publishes the app and admits clients through its normal backend.
+    const source = new PreparationSource();
+    db = await createAccountDbWithRuntimeSource(
+      await localAccountConfig(server.appId, server.url),
+      source,
+    );
+    const original = db.insert(app.notes, { body: "covered authority content" });
+    await original.wait({ tier: "global" });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const tx = beginDbTransactionAfter(db, async () => {}, "accepted-evidence");
+    const nativeCommit = vi.spyOn(source.client.getRuntime(), "commitTransaction");
+    let observed: Awaited<ReturnType<typeof readAcceptedTransactionRows>> | undefined;
+    const preparing = prepareDbTransaction(tx, async (scope) => {
+      observed = await scope.readAccepted(app.notes);
+      entered();
+      await gate;
+      scope.insert(app.notes, { body: "prepared in the same transaction" });
+    });
+    const committed = tx.commit().wait({ tier: "global", timeoutMs: 10000 });
+    preparing.catch(() => {});
+    committed.catch(() => {});
+    await started;
+    expect(nativeCommit).not.toHaveBeenCalled();
+    expect(() => prepareDbTransaction(tx, async () => {})).toThrow("commit has been requested");
+    expect(observed?.rows).toEqual([original.value]);
+    expect(observed?.evidence[0]?.content.transactionId).toBe(await original.txId);
+    expect(observed?.evidence[0]?.state).toEqual(observed?.evidence[0]?.content);
+    expect(BigInt(observed!.through)).toBeGreaterThanOrEqual(
+      BigInt(observed!.evidence[0]!.state.position),
+    );
+    release();
+    await Promise.all([preparing, committed]);
+    expect(nativeCommit).toHaveBeenCalledOnce();
+    expect((await db.all(app.notes, { tier: "remote" })).map((row) => row.body).sort()).toEqual([
+      "covered authority content",
+      "prepared in the same transaction",
+    ]);
+  } finally {
+    release?.();
+    vi.restoreAllMocks();
+    await db?.shutdown();
+    await server.stop();
+  }
+}, 60000);
+
+it("does not upgrade ordinary transactions through a registered accepted preparation", async () => {
+  const source = new PreparationSource();
+  const db = await createAccountDbWithRuntimeSource(
+    await localAccountConfig(`prepared-capability-${crypto.randomUUID()}`),
+    source,
+  );
+  try {
+    await db.all(app.notes, { tier: "local-first" });
+    const tx = db.beginSerializableTransaction();
+    const preparing = prepareDbTransaction(tx, async (scope) => {
+      await scope.readAccepted(app.notes);
+    });
+    preparing.catch(() => {});
+    await expect(preparing).rejects.toThrow("before transaction opening");
+    await expect(tx.commit().txId).rejects.toThrow("before transaction opening");
+    await tx.rollback();
+  } finally {
+    await db.shutdown();
+  }
+});
