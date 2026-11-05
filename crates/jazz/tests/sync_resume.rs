@@ -1698,3 +1698,106 @@ fn a_pending_write_does_not_drop_a_sticker_the_settled_note_names_liked_first() 
 fn a_pending_write_does_not_drop_a_sticker_the_settled_note_names_room_first() {
     a_pending_write_does_not_drop_a_sticker_the_settled_note_names(false);
 }
+
+/// `rooms.where({ name })` as the TS builder sends it: a filter under a
+/// full-row projection.
+fn rooms_named(name: &str) -> jazz::tools::public_schema::RelationExpr {
+    use jazz::tools::public_schema::{
+        RelationCmpOp, RelationColumnRef, RelationExpr, RelationPredicate, RelationProjectColumn,
+        RelationProjectExpr, RelationRowIdRef, RelationValueRef,
+    };
+    let column = |column: &str| RelationColumnRef {
+        scope: Some("rooms".to_owned()),
+        column: column.to_owned(),
+    };
+    RelationExpr::Project {
+        input: Box::new(RelationExpr::Filter {
+            input: Box::new(RelationExpr::TableScan {
+                table: "rooms".to_owned(),
+                alias: None,
+            }),
+            predicate: RelationPredicate::Cmp {
+                left: column("name"),
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::literal(jazz::tools::Value::Text(name.to_owned())),
+            },
+        }),
+        columns: ["id", "name"]
+            .iter()
+            .map(|alias| RelationProjectColumn {
+                alias: (*alias).to_owned(),
+                expr: if *alias == "id" {
+                    RelationProjectExpr::RowId(RelationRowIdRef::Current)
+                } else {
+                    RelationProjectExpr::Column(column(alias))
+                },
+            })
+            .collect(),
+    }
+}
+
+/// A row a union holds through one of its arms is the union's as much as
+/// a plain read's: another read's listing that leaves it out does not
+/// drop it, and the union's resumed opening, which ships only what
+/// changed, finds it still there.
+fn a_row_a_union_holds_stays_when_another_read_loses_it(lost_first: bool) {
+    use jazz::query::RelationQuery;
+    use jazz::tools::public_schema::{RelationExpr, RelationUnionArm};
+    let server = seeded(1);
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    // Rooms alice is a member of, and room 0 or room 1 by name.
+    let member_of = client
+        .prepare_query(&Query::from("rooms").join_via("memberships", "room", []))
+        .unwrap();
+    let mut named = Query::from("rooms");
+    named.relation = Some(RelationQuery {
+        rel: RelationExpr::Union {
+            inputs: vec![
+                RelationUnionArm {
+                    label: "first".to_owned(),
+                    input: rooms_named("room 0"),
+                },
+                RelationUnionArm {
+                    label: "second".to_owned(),
+                    input: rooms_named("room 1"),
+                },
+            ],
+        },
+    });
+    let named = client.prepare_query(&named).unwrap();
+    let (first, second) = if lost_first {
+        (&member_of, &named)
+    } else {
+        (&named, &member_of)
+    };
+    let _first = block_on(client.subscribe(first, ReadOpts::default())).unwrap();
+    let _second = block_on(client.subscribe(second, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(local_rooms(&client), [id(1, 0), id(1, 1)]);
+
+    // Away, alice leaves room 0: the union still names it, unchanged.
+    assert!(client.detach_connection(&upstream));
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        local_rooms(&client),
+        [id(1, 0), id(1, 1)],
+        "room 0 is still the union's"
+    );
+}
+
+#[test]
+fn a_row_a_union_holds_stays_when_the_losing_read_reopens_first() {
+    a_row_a_union_holds_stays_when_another_read_loses_it(true);
+}
+
+#[test]
+fn a_row_a_union_holds_stays_when_the_union_reopens_first() {
+    a_row_a_union_holds_stays_when_another_read_loses_it(false);
+}
