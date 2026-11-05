@@ -3,13 +3,13 @@ import type { AuthState } from "../runtime/auth-state.js";
 import type { PublicSession } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
 import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
-import { createJazzClient } from "../web/create-jazz-client.js";
+import { openJazzClient } from "../web/create-jazz-client.js";
 import { createSolidJazzClientInternal } from "./create-solid-jazz-client-internal.js";
 import { createSolidJazzClientStore } from "./solid-jazz-client-store.js";
 import { getSubscriptionStore, subscriptionStoreKey } from "../subscription-store-internal.js";
 
 export function createSolidJazzClient(config: Accessor<DbConfig>): PendingSolidJazzClient {
-  const internal = createSolidJazzClientInternal(config, createJazzClient);
+  const internal = createSolidJazzClientInternal(config, openJazzClient);
   const stateStore = createSolidJazzClientStore(() => internal.client);
 
   const client: PendingSolidJazzClient = {

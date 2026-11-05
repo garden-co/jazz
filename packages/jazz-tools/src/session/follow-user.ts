@@ -40,7 +40,7 @@ export function followUser(options: {
   registry: string;
   events: BackendWatchEvents;
   fetch?: typeof fetch;
-  /** See `linkGuestOnSignUp` on `createJazzSession`. Default true. */
+  /** See `linkGuestOnSignUp` on `createJazzClient`. Default true. */
   linkGuest?: boolean;
 }) {
   return <Client>(session: JazzSession<Client>) => decorate(session, options);
