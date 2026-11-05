@@ -1651,8 +1651,20 @@ impl Db {
     /// Serve as the global authority: subscriptions this store settles,
     /// its own and its subscribers', report `DurabilityTier::Global`. A
     /// store without the role (a relay with no upstream) settles at `Local`.
+    ///
+    /// A store with no upstream mints its authority namespace here, once,
+    /// and keeps it in the file (INV-SYNC-54), so a copy of the store taken
+    /// before any client connected (a backup) carries it: its replicas
+    /// still follow it once it is restored. A store that cannot write it
+    /// now mints it when it first serves its catalogue, as before.
     pub fn set_authority(&self) {
-        self.inner.borrow_mut().authority = true;
+        let mut inner = self.inner.borrow_mut();
+        inner.authority = true;
+        if inner.publishes_catalogue() {
+            // A storage failure here surfaces again, with its error, from
+            // the first catalogue it serves, which mints it then.
+            let _ = inner.namespace();
+        }
     }
 
     /// Refuse every session but SYSTEM's that is not pinned to a published
@@ -3219,6 +3231,21 @@ impl Db {
     }
 }
 
+/// Why a replica refuses an upstream whose authority namespace is not the
+/// one it mirrors (INV-SYNC-54). Nothing on the wire tells a recreated server
+/// store from another app's, so the message names both, and the one way on.
+pub(crate) fn authority_changed() -> Error {
+    Error::new(
+        ErrorCode::AuthorityChanged,
+        "the server's authority changed: its catalogue keeps a different authority namespace \
+         than this store, so its store was recreated (a deleted data directory, a restarted \
+         in-memory server, a new environment behind the same URL) or it is another app's. \
+         This store's rows and unsynced writes belong to the old history and do not sync with \
+         it; reset the local store (`db.deleteClientStorage()` in jazz-tools, or open a fresh \
+         store) and reconnect, or point the client back at the old server",
+    )
+}
+
 impl Inner {
     /// Admit an upstream's versions under the names it stores them by
     /// (see `SyncMessage::Catalogue`), so this replica stores rows as it
@@ -3241,10 +3268,7 @@ impl Inner {
         if let (Some(known), Some(namespace)) = (known, namespace)
             && known != namespace
         {
-            return Err(Error::new(
-                ErrorCode::Schema,
-                "the upstream's catalogue is another app's: this store keeps a different authority namespace",
-            ));
+            return Err(authority_changed());
         }
         let mirrored = !versions.is_empty();
         if mirrored {
