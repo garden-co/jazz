@@ -2,7 +2,7 @@ import express from "express";
 import type { Request, Response } from "express";
 import { createServer } from "node:http";
 import { WorkOS } from "@workos-inc/node";
-import { APP_ID, WORKOS_CLIENT_ID } from "../constants.js";
+import { WORKOS_CLIENT_ID } from "../constants.js";
 import { app as schema } from "../schema.js";
 import permissions from "../permissions.js";
 
@@ -68,7 +68,7 @@ function setCookie(res: Response, sealed: string) {
 const jazz = createJazz({
   app: schema,
   permissions,
-  store: sqlite({ path: ".jazz", appId: APP_ID }),
+  store: sqlite({ path: ".jazz" }),
   authenticate: async (request) => {
     const session = await readSession(readCookie(request.headers.get("cookie")));
     return session ? { userId: session.user.id, claims: { role: session.role ?? "" } } : null;

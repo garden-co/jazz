@@ -8,7 +8,7 @@ import { todoCrudTest } from "../../../testing/todo-app-scenarios.js";
 
 import { describe, it, expect, afterEach } from "vitest";
 import { mount, unmount, type Component } from "svelte";
-import { APP_ID, SERVER_URL } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 import { createAccountManager, type DbConfig } from "jazz-tools";
 import { prepareTestAccount } from "../../../testing/accounts.js";
 
@@ -144,11 +144,11 @@ describe("Svelte Todo App E2E", () => {
 
     // Mount two independent app instances connected to the same server
     const el1 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
     });
     const el2 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
     });
 

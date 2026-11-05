@@ -12,9 +12,9 @@ pending uploads moved from one encoded message to a row per op, and
 watermarks became per-sequencer rows).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `ec0f311bcd560f207436e247f19ece5b2ae022bc2eb1f280bcc017dcb3a6d1c2`.
+  the SQLite file `d47da977328c19bdead4d6eefa5c706f234ded153b2095cc2a26a3b736e54232`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `920fd39ddef476eaa7cd9d240a7b0a256bc29d4c3b1e50a62c5ae9db75f8fc94`.
+  `544e4b09a34b75703140aa4b301aa3b50eaeb2be8c9857740518542564c5e4a1`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -135,6 +135,11 @@ object hashes are now plain SHA-256 over the node's encoding, so an object
 store can verify a presigned upload against the node hash itself; schema
 hashes, schema version ids, stored column and table names, and derived ids
 are SHA-256 too) regenerated it the same way.
+
+Resuming reads from where they settled regenerated it the same way:
+`_jazz_watermarks` is `(key, through, context)`, where `context` is the
+digest of the permissions bundle and claims the result was read under
+(`NULL` for a session with neither, as every session here is).
 
 Storing pending uploads as rows shaped like the rows they write, instead of
 encoded sync messages (`_jazz_pending` with named columns, one

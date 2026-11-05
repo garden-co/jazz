@@ -11,7 +11,7 @@ import { prepareTestAccount } from "../../../../testing/accounts.js";
 import { describe, it, expect, afterEach } from "vitest";
 import { startApp } from "../../src/main.js";
 import { app } from "../../schema.js";
-import { APP_ID, SERVER_URL } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 import { type Db, type DbConfig } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
@@ -71,12 +71,12 @@ describe("Vanilla TS Todo App E2E", () => {
       overrides.account ??
       (await prepareTestAccount(
         createAccountManager,
-        overrides.appId ?? APP_ID,
+        overrides.appId ?? SCOPE,
         overrides.serverUrl ?? SERVER_URL,
         secret,
       ));
     const { db, destroy } = await startApp(el, {
-      appId: overrides.appId ?? APP_ID,
+      appId: overrides.appId ?? SCOPE,
       driver: { type: "persistent", dbName: crypto.randomUUID() },
       ...overrides,
       account,
@@ -162,7 +162,7 @@ describe("Vanilla TS Todo App E2E", () => {
 
   it("persists todos across app destroy and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
-    const account = await prepareTestAccount(createAccountManager, APP_ID, SERVER_URL);
+    const account = await prepareTestAccount(createAccountManager, SCOPE, SERVER_URL);
 
     // First session: mount, add todo, destroy
     const el1 = await mount({ account, driver: { type: "persistent", dbName } });
@@ -192,12 +192,12 @@ describe("Vanilla TS Todo App E2E", () => {
     const serverUrl = SERVER_URL;
 
     const { container: el1, db: db1 } = await mountWithDb({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
       secret: "jazz-auth-v1:IsHiz7lWH1KJEuM5J8Hn_oleBb6SBcuGSE9Ro3H0G68",
     });
     const { container: el2, db: db2 } = await mountWithDb({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
       secret: "jazz-auth-v1:C5-etNr9-YLchXK15XLhDVIn-An8mgb35sc5lfJpAQE",
     });

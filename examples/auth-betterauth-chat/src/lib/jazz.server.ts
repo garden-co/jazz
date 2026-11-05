@@ -21,10 +21,7 @@ export function jazz(): Promise<Jazz> {
   const pending = (globalThis.__authBetterAuthChatJazz ??= createJazz({
     app,
     permissions,
-    store:
-      process.env.NODE_ENV === "test"
-        ? memory({ appId: process.env.JAZZ_APP_ID! })
-        : sqlite({ path: ".jazz", appId: process.env.JAZZ_APP_ID! }),
+    store: process.env.NODE_ENV === "test" ? memory() : sqlite({ path: ".jazz" }),
     // Better Auth's session cookie decides who the user is; its `role`
     // becomes the claim the chat permissions check.
     authenticate: async (request) => {

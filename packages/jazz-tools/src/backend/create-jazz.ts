@@ -50,12 +50,14 @@ import {
   backendClientVerifier,
   type BackendClientTrust,
 } from "./backend-clients.js";
+import { BACKEND_USER_ISSUER } from "./backend-issuer.js";
 import { earlyDb, type EarlyDb } from "./early-db.js";
 import {
   defaultCoreName,
   onVercelDeployment,
   onVercelHost,
   openVercelCore,
+  refuseVercelAppId,
   type VercelStoreOptions,
 } from "./vercel-store.js";
 
@@ -76,10 +78,9 @@ export type JazzStore =
   | {
       readonly kind: "sqlite";
       readonly path: string;
-      readonly appId?: string;
       readonly blobs: BlobStore;
     }
-  | { readonly kind: "memory"; readonly appId?: string }
+  | { readonly kind: "memory" }
   | {
       readonly kind: "remote";
       readonly url: string;
@@ -100,9 +101,9 @@ export type JazzStore =
 
 /**
  * A SQLite core in this process, kept in the directory `path`. It generates
- * its app id on first start and keeps it beside its data; set `appId` only
- * to keep the id of an existing app. Large values' bytes go to `blobs`,
- * by default `files()` in `<path>/blobs`.
+ * its app id on first start and keeps it beside its data, in `<path>/app-id`
+ * (`jazz-alpha59-import` writes an alpha.59 app's id there). Large
+ * values' bytes go to `blobs`, by default `files()` in `<path>/blobs`.
  *
  * Only one process can open `path` at a time (it holds `<path>/jazz.lock`
  * while the core is open); a second one fails with "already open". It
@@ -111,9 +112,9 @@ export type JazzStore =
  */
 export function sqlite(options: {
   path: string;
-  appId?: string;
   blobs?: BlobStore;
 }): Extract<JazzStore, { kind: "sqlite" }> {
+  refuseStoreAppId("sqlite", options);
   const blobs = options.blobs ?? files();
   if (
     blobs !== "sqlite" &&
@@ -121,17 +122,25 @@ export function sqlite(options: {
   ) {
     throw new Error('sqlite(): blobs must be files(), s3() or "sqlite"');
   }
-  return {
-    kind: "sqlite",
-    path: options.path,
-    blobs,
-    ...(options.appId === undefined ? {} : { appId: options.appId }),
-  };
+  return { kind: "sqlite", path: options.path, blobs };
 }
 
-/** An in-memory core in this process: for tests and throwaway previews. */
-export function memory(options: { appId?: string } = {}): Extract<JazzStore, { kind: "memory" }> {
-  return { kind: "memory", ...(options.appId === undefined ? {} : { appId: options.appId }) };
+/**
+ * An in-memory core in this process: for tests and throwaway previews. Each
+ * one is its own store, with a new app id.
+ */
+export function memory(options?: { appId?: never }): Extract<JazzStore, { kind: "memory" }> {
+  refuseStoreAppId("memory", options);
+  return { kind: "memory" };
+}
+
+/** Stores keep their own app id; one passed from JavaScript is refused, not ignored. */
+function refuseStoreAppId(store: string, options: unknown): void {
+  if (typeof options === "object" && options !== null && "appId" in options) {
+    throw new Error(
+      `${store}(): appId is not an option: the store keeps its own app id. To keep an alpha.59 app's id, import its data with \`jazz-alpha59-import import --app-id\`.`,
+    );
+  }
 }
 
 /**
@@ -206,6 +215,9 @@ export function remote(
 export function vercel(
   options: VercelStoreOptions & { local?: Extract<JazzStore, { kind: "sqlite" | "memory" }> } = {},
 ): JazzStore {
+  // Refused here, not on the first deployed request: in dev the local
+  // store runs and would never read it.
+  refuseVercelAppId(options);
   const { local, ...rest } = options;
   return { kind: "vercel", options: rest, local: local ?? sqlite({ path: ".jazz/local" }) };
 }
@@ -735,10 +747,7 @@ async function openInProcessCore(
   const adminSecret = randomBytes(32).toString("base64url");
   // The core holds `<path>/jazz.lock` with an OS lock while it's open.
   if (store.kind === "sqlite") refuseServerlessDisk(store.path);
-  const appId =
-    store.kind === "sqlite"
-      ? await keptAppId(store.path, store.appId)
-      : (store.appId ?? randomUUID());
+  const appId = store.kind === "sqlite" ? await keptAppId(store.path) : randomUUID();
   const core = await JazzCore.open({
     appId,
     backendSecret,
@@ -784,10 +793,10 @@ async function openInProcessCore(
 
 /**
  * The app id an in-process SQLite core keeps beside its data, in
- * `<path>/app-id`: `named` (or a new one) on first start, so the app's
- * identities stay the same across restarts without the app naming an id.
+ * `<path>/app-id`: a new one on first start, so the app's identities stay
+ * the same across restarts without the app naming an id.
  */
-async function keptAppId(dir: string, named: string | undefined): Promise<string> {
+async function keptAppId(dir: string): Promise<string> {
   const file = join(dir, "app-id");
   const kept = async (): Promise<string | undefined> => {
     try {
@@ -802,15 +811,12 @@ async function keptAppId(dir: string, named: string | undefined): Promise<string
     await mkdir(dir, { recursive: true });
     // `wx`: two processes starting the same store at once agree on one id.
     try {
-      appId = named ?? randomUUID();
+      appId = randomUUID();
       await writeFile(file, `${appId}\n`, { flag: "wx" });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       appId = (await kept())!;
     }
-  }
-  if (named !== undefined && named !== appId) {
-    throw new Error(`sqlite(): the store at ${dir} belongs to app ${appId}, not ${named}`);
   }
   return appId;
 }
@@ -1037,7 +1043,7 @@ function jazzSettings(options: CreateJazzOptions): JazzSettings {
   );
   if ("appId" in options) {
     throw new Error(
-      "createJazz(): appId moved to the store: remote({ url, appId, secret }) names the app it serves, and sqlite(), memory() and vercel() keep their own id (pass appId to them only to keep an existing app's).",
+      "createJazz(): appId moved to the store: remote({ url, appId, secret }) names the app it serves, and sqlite(), memory() and vercel() keep their own id.",
     );
   }
   return { basePath, publicUrls, allowedOrigins };
@@ -1078,7 +1084,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
           })
         : await openInProcessCore(store, bundle);
   const appId = core.appId;
-  const issuer = `jazz:app:${appId}`;
+  const issuer = BACKEND_USER_ISSUER;
 
   /** Publish `next`'s bundle: what it is pinned by. Publishing one already published changes nothing. */
   const publish = (next: CreateJazzOptions) =>
@@ -2310,12 +2316,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
  *
  * It opens nothing when called, so a module can export it at its top level:
  * the store opens on first use (a request, a `db` call, `ready()`). A process
- * runs one Jazz per store (a `sqlite()` directory, a `vercel()` core, a
- * `memory()` store's `appId`): a later `createJazz` for it (a dev server's
- * hot reload, another module graph) returns that same Jazz with the later
- * call's app, permissions and options. Each `remote()` store, and each
- * `memory()` store without an `appId`, is its own: a module that hot reloads
- * keeps that Jazz across reloads itself, or closes it.
+ * runs one Jazz per store (a `sqlite()` directory, a `vercel()` core): a
+ * later `createJazz` for it (a dev server's hot reload, another module
+ * graph) returns that same Jazz with the later
+ * call's app, permissions and options. Each `remote()` and `memory()` store
+ * is its own: a module that hot reloads keeps that Jazz across reloads
+ * itself, or closes it.
  */
 export function createJazz(options: CreateJazzOptions): Jazz {
   jazzSettings(options);
@@ -2382,9 +2388,9 @@ function registry(): Map<string, Entry> {
  * The store's identity in this process: one Jazz runs per store, so a hot
  * reload finds the one it opened. A `remote()` store has none: two
  * backends (deployments, tests) may each run their own Jazz on one remote
- * app, with their own permissions. Nor has a `memory()` store without an
- * `appId`, a new, empty database each time. A module that hot reloads
- * keeps such a Jazz across reloads itself (on `globalThis`), or closes it.
+ * app, with their own permissions. Nor has a `memory()` store, a new,
+ * empty database each time. A module that hot reloads keeps such a Jazz
+ * across reloads itself (on `globalThis`), or closes it.
  */
 function storeKey(store: JazzStore): string | undefined {
   if (store.kind === "sqlite") return `sqlite:${resolve(store.path)}`;
@@ -2395,7 +2401,6 @@ function storeKey(store: JazzStore): string | undefined {
     // Without a name the core is unknown: its open reports that.
     return name ? `vercel:${name}` : undefined;
   }
-  if (store.kind === "memory" && store.appId !== undefined) return `memory:${store.appId}`;
   return undefined;
 }
 
@@ -2460,17 +2465,6 @@ function adoptStore(entry: Entry, store: JazzStore): void {
     // A later call (a hot reload after a fix) tries the open again at once.
     entry.failure = undefined;
     return;
-  }
-  const appId =
-    "appId" in store ? store.appId : store.kind === "vercel" ? store.options.appId : undefined;
-  const running = entry.opened?.appId;
-  if (
-    store.kind === "sqlite" &&
-    appId !== undefined &&
-    running !== undefined &&
-    appId !== running
-  ) {
-    throw new Error(`sqlite(): the store at ${store.path} belongs to app ${running}, not ${appId}`);
   }
   if (storeSettings(store) !== storeSettings(entry.store)) {
     throw new Error(

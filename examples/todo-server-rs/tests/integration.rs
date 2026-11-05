@@ -594,7 +594,7 @@ fn backend_user_context(
         account_id: None,
         jwt_token: None,
         backend_secret: Some(TEST_BACKEND_SECRET.to_owned()),
-        backend_session: Some(Session::new(format!("jazz:app:{app_id}"), user_id)),
+        backend_session: Some(Session::new("jazz:backend", user_id)),
         bundle: None,
         admin_secret: None,
         migrations: Default::default(),

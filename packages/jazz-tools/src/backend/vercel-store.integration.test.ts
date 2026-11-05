@@ -395,25 +395,9 @@ describe("vercel() store", () => {
     expect(newerVersion("2.0.0", "2.0.0")).toBe(false);
   });
 
-  it("refuses a Sandbox that holds another app's core", async () => {
-    const appId = randomUUID();
-    const core = await startTrustedCore(appId);
-    const fake = fakeVercel({ ...core, appId: randomUUID() });
-    fake.state.exists = true;
-    fake.state.drive = true;
-    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
-    await expect(
-      createJazz({
-        app,
-        permissions,
-        store: vercel({ sdk: fake.sdk, backendCredential: core.credential, appId }),
-      }).ready(),
-    ).rejects.toThrow(/belongs to app/);
-  }, 60_000);
-
-  it("generates the app id on the Drive unless one is given", () => {
+  it("generates the app id on the Drive", () => {
     const trust = { issuer: "https://oidc.vercel.com/t", audience: AUDIENCE, subject: SUBJECT };
-    const script = startScript(undefined, "2.0.0-alpha.60", "https://example.invalid/t.tgz", trust);
+    const script = startScript("2.0.0-alpha.60", "https://example.invalid/t.tgz", trust);
     expect(script).toContain("app_id=$(cat /proc/sys/kernel/random/uuid)");
     expect(script).toContain("exec node -e 'const [addon, appId, options]");
     expect(script).toContain('"$addon" "$app_id"');
@@ -424,7 +408,6 @@ describe("vercel() store", () => {
   it("installs the core addon for the running version once, and the app id once", () => {
     const trust = { issuer: "https://oidc.vercel.com/t", audience: AUDIENCE, subject: SUBJECT };
     const script = startScript(
-      "app'1",
       "2.0.0-alpha.60",
       "https://registry.npmjs.org/@garden-co/jazz-napi-linux-x64-gnu/-/jazz-napi-linux-x64-gnu-2.0.0-alpha.60.tgz",
       trust,
@@ -432,7 +415,6 @@ describe("vercel() store", () => {
     expect(script).toContain("version='2.0.0-alpha.60'");
     expect(script).toContain("addon=$data/bin/jazz-napi-$version.node");
     expect(script).toContain(`if [ ! -s "$data/app-id" ]`);
-    expect(script).toContain(`app_id='app'\\''1'`);
   });
 
   it("lets a custom environment reach its own core", () => {

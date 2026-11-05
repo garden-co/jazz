@@ -39,7 +39,7 @@ export function refuseClientAppId(config: { appId?: unknown }): void {
   if (config.appId === undefined) return;
   throw new Error(
     "A Jazz client session takes no appId: the app id belongs to your backend's store " +
-      "(remote({ appId }) or sqlite({ appId })), and a client is scoped by its serverUrl. " +
+      "(remote({ appId }), or the id a store keeps), and a client is scoped by its serverUrl. " +
       "Remove appId. An app whose local-first users were created under an app id keeps them " +
       'with scope: "<that app id>".',
   );

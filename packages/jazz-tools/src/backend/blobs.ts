@@ -10,7 +10,7 @@ export interface S3BlobStore {
   /** An S3-compatible endpoint other than AWS, e.g. R2's. */
   readonly endpoint?: string;
   /**
-   * Prepended to every object name. Defaults to `jazz/<appId>/<store id>/`,
+   * Prepended to every object name. Defaults to `jazz/<store id>/`,
    * one per store, so stores sharing a bucket (a preview core per branch)
    * never share objects. A prefix is claimed by the first store that uses
    * it, and any other store is refused there. A `vercel()` core also claims
@@ -65,7 +65,7 @@ export interface VercelBlobStore {
   /** Defaults to `BLOB_STORE_ID`, set when a Blob store is connected to the project. */
   readonly storeId?: string;
   /**
-   * Prepended to every blob's pathname. Defaults to `jazz/<appId>/<store id>/`,
+   * Prepended to every blob's pathname. Defaults to `jazz/<store id>/`,
    * one per core, so the preview cores of different branches sharing a Blob
    * store never share blobs. A prefix is claimed by the first core that uses
    * it. The Blob store itself serves one environment: production and
