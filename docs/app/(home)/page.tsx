@@ -9,7 +9,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { AppLink } from "@/components/design/app-link";
 import {
   BackendDiagram,
-  ConsistencyDiagram,
+  FrontendDiagram,
   HistoryDiagram,
   LargeValuesDiagram,
   PermissionsDiagram,
@@ -207,29 +207,6 @@ const features: {
       "Under the hood, Jazz uses prolly trees when values get large, ensuring appends, point edits, partial and streaming reads stay fast. Jazz syncs only the parts you need and any queries you run over large data operate in a streaming fashion.",
   },
   {
-    id: "consistency",
-    title: "Server-first, local-first when it pays off",
-    body: (
-      <>
-        <p>
-          By default your backend holds the data and clients read through it, like any server
-          database. Writes still show up at once and sync in the background.
-        </p>
-        <p>
-          Turn a client local-first and it keeps its own durable copy, so it works offline and reads
-          never wait on the network. Where transactionality matters, trade latency for globally
-          consistent transactions, in the same database.
-        </p>
-      </>
-    ),
-    links: [
-      { label: "How sync works", href: "/docs/how-jazz-works" },
-      { label: "Durability tiers", href: "/docs/reference/durability-tiers" },
-    ],
-    diagram: <ConsistencyDiagram />,
-    caption: "A write's local state, its sync message, and its confirmed fate",
-  },
-  {
     id: "history",
     title: "Real-time collaboration and deep edit histories",
     body: (
@@ -293,6 +270,31 @@ const features: {
     ],
     diagram: <BackendDiagram />,
     caption: "What moves out of your code into Jazz",
+  },
+  {
+    id: "frontend",
+    title: "Slims your frontend, from thin client to local-first",
+    body: (
+      <>
+        <p>
+          Even as a thin client, Jazz replaces the request/response loop and all the client state
+          around it. A component asks for the rows it needs with one reactive query hook and stays
+          live as they change: no fetch calls per endpoint, no cache to invalidate, no refetching.
+        </p>
+        <p>
+          Turn a client local-first and Jazz also takes over the client logic that is usually the
+          hardest to hand-build: optimistic updates, sync and offline support. It keeps a durable
+          copy on the device, so reads never wait on the network and writes show up at once.
+        </p>
+      </>
+    ),
+    links: [
+      { label: "Thin client", href: "/docs/setup/web-client/thin-client" },
+      { label: "Local-first client", href: "/docs/setup/web-client/local-first-client" },
+      { label: "How sync works", href: "/docs/how-jazz-works" },
+    ],
+    diagram: <FrontendDiagram />,
+    caption: "What moves out of your client code into Jazz",
   },
 ];
 

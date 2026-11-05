@@ -433,74 +433,6 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
 }
 
 /** Node-message-state: a write's local state, its sync message, and its confirmed fate. */
-export function ConsistencyDiagram() {
-  const device = 116;
-  const cloud = 524;
-  return (
-    <Diagram
-      viewBox="0 0 640 340"
-      label="On the device, a write is applied to local state and visible at once; the local tier resolves. It syncs to the cloud with a permission check, which authorizes and stores it as new remote state. The cloud sends back the write's fate, and the device reaches confirmed state; the global tier resolves."
-    >
-      <Label x={device} y={20} tone="blue" anchor="middle">
-        device
-      </Label>
-      <Label x={cloud} y={20} tone="mint" anchor="middle">
-        cloud
-      </Label>
-      <line x1={device} x2={device} y1={30} y2={330} className="dg-region" />
-      <line x1={cloud} x2={cloud} y1={30} y2={330} className="dg-region" />
-      <Box
-        x={16}
-        y={44}
-        w={200}
-        h={74}
-        tone="blue"
-        title="local state"
-        lines={["write visible at once", 'tier "local" resolves']}
-      />
-      <Wire
-        points={[
-          [216, 96],
-          [424, 150],
-        ]}
-        tone="periwinkle"
-      />
-      <Label x={236} y={86} tone="periwinkle">
-        sync + permission check
-      </Label>
-      <Box
-        x={424}
-        y={136}
-        w={200}
-        h={74}
-        tone="mint"
-        title="remote state"
-        lines={["authorized", "stored durably"]}
-      />
-      <Wire
-        points={[
-          [424, 196],
-          [216, 250],
-        ]}
-        tone="periwinkle"
-      />
-      <Label x={300} y={252} tone="periwinkle">
-        fate confirmation
-      </Label>
-      <Box
-        x={16}
-        y={236}
-        w={200}
-        h={74}
-        tone="shared"
-        title="confirmed state"
-        lines={['tier "global" resolves', "or rolled back"]}
-      />
-    </Diagram>
-  );
-}
-
-/** The read policy and the query run as one plan; only matching rows reach you. */
 export function PermissionsDiagram() {
   const tasks = [
     ["plan launch", "false", "you"],
@@ -905,6 +837,83 @@ export function BackendDiagram() {
           title={item}
         />
       ))}
+    </Diagram>
+  );
+}
+
+export function FrontendDiagram() {
+  const typical = [
+    "fetch calls per endpoint",
+    "loading + error states",
+    "client state store",
+    "cache invalidation + refetch",
+    "websocket subscriptions",
+    "optimistic updates",
+    "rollback on failure",
+    "offline queue + retries",
+    "local persistence",
+  ];
+  const thin = ["one reactive query hook", "live updates", "writes as plain calls"];
+  const localFirst = [
+    "instant optimistic writes",
+    "durable local copy",
+    "offline + background sync",
+  ];
+  const row = 32;
+  const gap = 6;
+  const listY = 82;
+  const listBottom = listY + (typical.length - 1) * (row + gap) + row;
+  const frameGap = 12;
+  const inner = (count: number) => 34 + count * row + (count - 1) * gap + 12;
+  const thinH = inner(thin.length);
+  const localY = listY + thinH + frameGap;
+  const localH = listBottom - localY;
+  const boxes = (items: string[], y: number, tone: "mint" | "blue") =>
+    items.map((item, index) => (
+      <Box
+        key={item}
+        x={356}
+        y={y + 34 + index * (row + gap)}
+        w={256}
+        h={row}
+        tone={tone}
+        title={item}
+      />
+    ));
+  return (
+    <Diagram
+      viewBox={`0 0 640 ${listBottom + 16}`}
+      label="A typical client needs fetch calls per endpoint, loading and error states, a client state store, cache invalidation, WebSocket subscriptions, optimistic updates with rollback, an offline queue and local persistence. A thin Jazz client replaces the fetching, caching and subscriptions with one reactive query hook. A local-first Jazz client also takes over optimistic writes, a durable local copy, offline use and background sync."
+    >
+      <Label x={16} y={24} tone="muted">
+        typical client
+      </Label>
+      <Label x={344} y={24} tone="muted">
+        with jazz
+      </Label>
+      <Box x={16} y={36} w={280} h={row + 4} title="ui components" />
+      {typical.map((item, index) => (
+        <Box
+          key={item}
+          x={16}
+          y={listY + index * (row + gap)}
+          w={280}
+          h={row}
+          tone="muted"
+          title={item}
+        />
+      ))}
+      <Box x={344} y={36} w={280} h={row + 4} title="ui components" />
+      <Frame x={344} y={listY} w={280} h={thinH} tone="mint" />
+      <Label x={356} y={listY + 22} tone="mint">
+        thin client
+      </Label>
+      {boxes(thin, listY, "mint")}
+      <Frame x={344} y={localY} w={280} h={localH} tone="blue" />
+      <Label x={356} y={localY + 22} tone="blue">
+        + local-first
+      </Label>
+      {boxes(localFirst, localY, "blue")}
     </Diagram>
   );
 }
