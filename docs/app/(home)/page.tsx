@@ -159,7 +159,6 @@ const features: {
   body: ReactNode;
   links: { label: string; href: string }[];
   diagram: ReactNode;
-  caption: string;
 }[] = [
   {
     id: "permissions",
@@ -178,7 +177,6 @@ const features: {
     ),
     links: [{ label: "Permissions", href: "/docs/schemas/policies" }],
     diagram: <PermissionsDiagram />,
-    caption: "A query and its read policy, planned together",
   },
   {
     id: "data",
@@ -199,12 +197,15 @@ const features: {
           This allows you to truly keep all data in one place, with no external links and no
           separate systems. And permission policies apply exactly like on normal data.
         </p>
+        <p>
+          Under the hood, large values are stored as prolly trees, so appends, point edits, partial
+          and streaming reads stay fast. Jazz syncs only the parts you need, and queries over large
+          data run in a streaming fashion.
+        </p>
       </>
     ),
     links: [{ label: "Column types", href: "/docs/schemas/column-types" }],
     diagram: <LargeValuesDiagram />,
-    caption:
-      "Under the hood, Jazz uses prolly trees when values get large, ensuring appends, point edits, partial and streaming reads stay fast. Jazz syncs only the parts you need and any queries you run over large data operate in a streaming fashion.",
   },
   {
     id: "history",
@@ -226,7 +227,6 @@ const features: {
       { label: "Edit metadata", href: "/docs/reading/metadata" },
     ],
     diagram: <HistoryDiagram />,
-    caption: "The history of one row, with a draft branch",
   },
   {
     id: "schema",
@@ -245,7 +245,6 @@ const features: {
     ),
     links: [{ label: "Migrations", href: "/docs/schemas/migrations" }],
     diagram: <SchemaDiagram />,
-    caption: "One raw table, read as two app versions through migration lenses",
   },
   {
     id: "backend",
@@ -269,7 +268,6 @@ const features: {
       { label: "How sync works", href: "/docs/how-jazz-works" },
     ],
     diagram: <BackendDiagram />,
-    caption: "What moves out of your code into Jazz",
   },
   {
     id: "frontend",
@@ -294,7 +292,6 @@ const features: {
       { label: "How sync works", href: "/docs/how-jazz-works" },
     ],
     diagram: <FrontendDiagram />,
-    caption: "What moves out of your client code into Jazz",
   },
 ];
 
@@ -319,27 +316,17 @@ function SectionHeader({
 
 function Figure({
   children,
-  caption,
   className,
-  number,
   after,
 }: {
   children: ReactNode;
-  caption?: string;
   className?: string;
-  number?: number;
-  /** Rendered below the caption, such as a follow-up link. */
+  /** Rendered below the figure, such as a follow-up link. */
   after?: ReactNode;
 }) {
   return (
     <figure className={`home-figure-frame ${className ?? ""}`}>
       <div className="home-figure">{children}</div>
-      {caption ? (
-        <figcaption className="home-figcaption">
-          {number ? <span className="home-figcaption-number">Fig. {number}</span> : null}
-          {caption}
-        </figcaption>
-      ) : null}
       {after}
     </figure>
   );
@@ -379,15 +366,15 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader
-            id="how-it-works"
-            title="One database, from your backend to every client"
-          />
-          <Figure
-            className="home-figure-wide mt-6"
-            number={1}
-            caption="Jazz runs inside your backend, wherever you deploy it, and keeps its data on that platform's storage. Traditional clients call your API routes as usual; browsers, mobile apps and backend clients can also live-sync with it on your own origin. Local-first clients run the same Rust engine on the device."
-          >
+          <SectionHeader id="how-it-works" title="One database, from your backend to every client">
+            <Text as="p" display="block" type="large" color="secondary" weight="normal">
+              Jazz runs inside your backend wherever you deploy it, and keeps its data on that
+              platform&apos;s storage. Traditional clients call your API routes as usual, while
+              browsers, mobile apps and backend clients can also live-sync with it on your own
+              origin. Local-first clients run the same Rust engine on the device.
+            </Text>
+          </SectionHeader>
+          <Figure className="home-figure-wide mt-6">
             <DeploymentCarousel />
           </Figure>
           <div className="home-facts mt-10">
@@ -428,8 +415,6 @@ export default function HomePage() {
             />
             <Figure
               className="home-video-figure"
-              number={2}
-              caption="StagePlan on two devices, recorded from the running app."
               after={
                 <AppLink href="/examples" className="home-video-link font-medium">
                   More examples and benchmarks →
@@ -467,7 +452,7 @@ export default function HomePage() {
             A database responsible for more.
           </Heading>
           <div className="mt-6">
-            {features.map((feature, index) => (
+            {features.map((feature) => (
               <article key={feature.id} className="home-feature">
                 <div className="home-feature-text">
                   <Heading level={3} id={feature.id} className="home-anchor">
@@ -482,13 +467,7 @@ export default function HomePage() {
                     ))}
                   </div>
                 </div>
-                <Figure
-                  className="home-feature-figure"
-                  number={index + 3}
-                  caption={feature.caption}
-                >
-                  {feature.diagram}
-                </Figure>
+                <Figure className="home-feature-figure">{feature.diagram}</Figure>
               </article>
             ))}
           </div>

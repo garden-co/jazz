@@ -493,18 +493,6 @@ h6 {
   gap: var(--spacing-3);
   min-width: 0;
 }
-.home-figcaption {
-  display: flex;
-  gap: var(--spacing-3);
-  font-size: var(--text-supporting-size);
-  line-height: 1.5;
-  color: var(--color-text-secondary);
-}
-.home-figcaption-number {
-  flex: none;
-  font-family: var(--font-family-code);
-  color: var(--color-text-primary);
-}
 .home-statement {
   max-width: 56rem;
 }
