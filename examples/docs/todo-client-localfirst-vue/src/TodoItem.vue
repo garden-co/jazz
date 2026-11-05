@@ -1,12 +1,11 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { useDb, useAll } from "jazz-tools/vue";
+import { useAll } from "jazz-tools/vue";
 import { app } from "../schema.js";
 
 const props = defineProps<{ id: string }>();
 
-const db = useDb();
-const { data: todos } = useAll(() => app.todos.where({ id: props.id }).limit(1));
+const { data: todos, db } = useAll(() => app.todos.where({ id: props.id }).limit(1));
 const todo = computed(() => todos.value?.[0]);
 </script>
 

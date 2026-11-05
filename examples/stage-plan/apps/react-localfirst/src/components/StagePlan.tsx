@@ -37,9 +37,8 @@ type Setup =
  * server rejects part of the demo show, offer to finish it.
  */
 function useSetup(route: Route): { me?: Me; setup: Setup } {
-  const db = useDb();
   const account = useSession()?.user.account;
-  const { data: profiles } = useAll(account ? app.crew.where({ account }) : undefined);
+  const { data: profiles, db } = useAll(account ? app.crew.where({ account }) : undefined);
   const [setup, setSetup] = useState<Setup>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
   const arrivedByInvite = route.page === "join";

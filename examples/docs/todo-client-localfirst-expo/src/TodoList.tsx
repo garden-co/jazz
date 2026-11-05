@@ -9,7 +9,7 @@ import {
   View,
   type ListRenderItem,
 } from "react-native";
-import { useAll, useDb, useSession } from "jazz-tools/react-native";
+import { useAll, useSession } from "jazz-tools/react-native";
 import { app, type Todo } from "../schema";
 
 // #region read-write-expo
@@ -30,8 +30,7 @@ export function TodoList() {
   // #endregion reading-filtering-expo
 
   // #region reading-reactive-hooks-expo
-  const db = useDb();
-  const { data: todos = [] } = useAll(todosQuery);
+  const { data: todos = [], db } = useAll(todosQuery);
   const session = useSession();
   const sessionUserId = session?.user.account ?? null;
   // #endregion reading-reactive-hooks-expo

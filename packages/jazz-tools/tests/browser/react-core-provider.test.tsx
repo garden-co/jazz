@@ -745,7 +745,7 @@ function UseAllSuspenseView({
   query: QueryBuilder<Todo>;
   options?: QueryOptions;
 }) {
-  const rows = useAllSuspense(query, options);
+  const { data: rows } = useAllSuspense(query, options);
   return <div data-testid="rows">{rows.map((row) => row.title).join("|")}</div>;
 }
 

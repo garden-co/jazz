@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useDb, useAll, useSession } from "jazz-tools/react";
+import { useAll, useSession } from "jazz-tools/react";
 import { toast } from "sonner";
 import { app } from "../schema.js";
 import { PersistedWriteRejectedError, WriteHandle, WriteResult } from "jazz-tools";
@@ -33,9 +33,8 @@ export function TodoList() {
     todosQuery = todosQuery.where({ done: true });
   }
 
-  const db = useDb();
   // #region reading-reactive-hooks-react
-  const { data: todos = [] } = useAll(todosQuery);
+  const { data: todos = [], db } = useAll(todosQuery);
   // #endregion reading-reactive-hooks-react
   const session = useSession();
   const sessionUserId = session?.user.account ?? null;

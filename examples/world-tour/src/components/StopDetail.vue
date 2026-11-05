@@ -60,7 +60,7 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref } from "vue";
-import { useAll, useDb } from "jazz-tools/vue";
+import { useAll } from "jazz-tools/vue";
 import { app, type StopStatus, type StopWithVenue } from "../../schema.js";
 import { formatLongDate, fromDateInput, statusLabels, toDateInput } from "../lib/format.js";
 import { reportWriteError } from "../lib/write-errors.js";
@@ -69,8 +69,7 @@ import Button from "./ui/Button.vue";
 const props = defineProps<{ stop: StopWithVenue }>();
 const emit = defineEmits<{ deleted: [] }>();
 
-const db = useDb();
-const { data: notes } = useAll(() => app.stopNotes.where({ stopId: props.stop.id }).limit(1));
+const { data: notes, db } = useAll(() => app.stopNotes.where({ stopId: props.stop.id }).limit(1));
 const note = computed(() => notes.value?.[0] ?? null);
 
 const editing = ref(false);
