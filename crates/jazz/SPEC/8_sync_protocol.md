@@ -69,6 +69,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-51`: A store that committed writes before it became a replica MUST keep them and refuse every upstream, saying why.
 - `INV-SYNC-52`: A replica MUST upload each commit's ops by stored names, as the schema view that wrote them stores them, keeping it pending while offline; a server MUST refuse a commit naming a stored table or column of a version it has not deployed, at once, with reason `schema_version_not_deployed`.
 - `INV-SYNC-53`: The authority MUST NOT name a writer's own row as written (instead of shipping it) unless the commit applied unmerged over the very version the writer built on and that version is still current (§8.3); every other row ships, and a writer whose image differs from the digest asks for the row whole.
+- `INV-SYNC-54`: An authority MUST mint its namespace when it is opened as the authority and keep it in its store. A replica that keeps another namespace than its upstream's MUST refuse that link with `AuthorityChanged`, upload nothing to it, fail its remote reads and its `Global` waits on writes still pending with that error, and keep its local rows and pending writes; only a new link tries again (§8.10).
 - `INV-TX-2`, `INV-TX-11`, `INV-TX-23`: commit, seq and relay rules (ch. 3).
 - `INV-WIRE-1`, `INV-WIRE-2`: exact postcard frames and Hello version negotiation (§8.1.1).
 
@@ -755,8 +756,13 @@ catalogue.
   `source`, or a dropped column's backwards default, from version `since` on.
 - `namespace` is the authority's, once the sender knows it. Table and column
   identities are UUIDs derived from it and the stored names, so the authority
-  mints them and replicas only mirror them. A replica that keeps another
-  namespace is another app's store and refuses the upstream.
+  mints them and replicas only mirror them. An authority mints its namespace
+  when it is opened as the authority (a store from before that mints it then,
+  or when it first serves), so a copy of its store taken before any replica
+  connected carries it (`INV-SYNC-54`). A replica that keeps another
+  namespace follows another history than the upstream's: the upstream's
+  store was recreated, or it is another app's. Nothing on the wire tells
+  these apart. The replica refuses the link with `AuthorityChanged` (below).
 - `confirmed` lists the versions whose names are the authority's, each with its
   names' digest: every version the authority admitted, or, from a relay, those
   its upstream confirmed. Only a confirmed version's tables and columns have an
@@ -777,6 +783,25 @@ under the name the upstream stores another table as, another app's namespace,
 or a stored column it keeps with another type than the upstream's (each added
 a column again under the same fresh stored name while apart): values of one
 type are never read as another's.
+
+A replica that keeps another namespace than its upstream's refuses that link
+with `ErrorCode::AuthorityChanged` (`INV-SYNC-54`). Its rows, watermarks and
+pending writes belong to the history it followed, so:
+
+- it uploads none of its pending writes to that upstream: a replica that
+  already keeps a namespace sends commits on a new link only once its
+  `Welcome` mirrored;
+- its remote reads (those open and those opened later) fail with the error,
+  and so do `Global` waits on its writes still pending; `Local` waits and
+  local reads are served as before, and the pending writes are kept;
+- the link reports the refusal to its host (`Db::upstream_refusal`), which
+  stops it instead of retrying: a retry would be refused the same way. Only
+  a new link (an explicit reconnect) tries again, so the old authority back
+  behind the URL syncs as before.
+
+Nothing resets the replica's store on its own: an app syncs with the new
+authority once it resets the store (`deleteClientStorage()` in jazz-tools),
+which discards the writes that never reached the old one.
 
 ### 8.11 Resuming reads from `since`
 

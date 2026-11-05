@@ -2053,6 +2053,17 @@ impl Link {
         Ok(())
     }
 
+    /// Why the database dropped this upstream link on its own (see
+    /// [`Db::upstream_refusal`]): the host stops the link instead of keeping
+    /// a socket nothing syncs over, and reports why, as `code` and message.
+    /// `None` for a link that stands, a closed one, or a subscriber link.
+    pub fn upstream_refusal(&self) -> Option<Error> {
+        match &self.kind {
+            LinkKind::Upstream(Some(upstream)) => self.binding.db.upstream_refusal(upstream),
+            _ => None,
+        }
+    }
+
     /// Detach the link; `false` when already closed.
     pub fn close(&mut self) -> bool {
         match &mut self.kind {

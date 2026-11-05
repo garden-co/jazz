@@ -24,6 +24,7 @@ export {
   UnsupportedStorageCodecsError,
   isUnsupportedStorageCodecsError,
 } from "./unsupported-storage-codecs-error.js";
+export { AuthorityChangedError, isAuthorityChangedError } from "./authority-changed-error.js";
 export { createDb } from "./default-create-db.js";
 export {
   type SnapshotRef,
@@ -62,7 +63,7 @@ export {
 export type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 export type { ClientMigrations } from "./client-migrations.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
-export type { LinkStatus, SyncStatus } from "./sync-status.js";
+export type { LinkStatus, OfflineReason, SyncStatus } from "./sync-status.js";
 export {
   fetchPublishedBundles,
   fetchSchemaHashes,

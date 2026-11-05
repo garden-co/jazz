@@ -1848,6 +1848,17 @@ impl WasmTransport {
         })
     }
 
+    /// Why the database dropped this upstream link on its own, as an
+    /// `Error` with the core's stable `code` (`authority_changed` for a
+    /// server whose store was recreated), or `null` while the link stands.
+    /// The host stops the link with it rather than retry.
+    #[wasm_bindgen(js_name = upstreamRefusal)]
+    pub fn upstream_refusal(&self) -> JsValue {
+        self.link
+            .upstream_refusal()
+            .map_or(JsValue::NULL, |error| core_error_to_js(&error))
+    }
+
     #[wasm_bindgen(js_name = close)]
     pub fn close(&mut self) -> bool {
         self.link.close()
