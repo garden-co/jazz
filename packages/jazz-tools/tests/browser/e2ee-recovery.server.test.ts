@@ -3,13 +3,7 @@ import { createDb } from "../../src/runtime/default-create-db.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { deviceRequestApp, deviceRequestPermissions } from "../../src/e2ee/device-requests.js";
 import { acquireBrowserTestAccount } from "./account-fixtures.js";
-import {
-  getJazzServerInfo,
-  getJazzServerJwtForUser,
-  startJazzApp,
-  stopJazzServer,
-} from "./testing-server.js";
-import { createAccountManager } from "../../src/accounts/create-account-manager.js";
+import { getJazzServerInfo, jazzAppUser, startJazzApp, stopJazzServer } from "./testing-server.js";
 
 it.each(["material", "protected", "external"])(
   "recovers, reopens and retains recovery with browser crypto (%s)",
@@ -24,18 +18,15 @@ it.each(["material", "protected", "external"])(
         schema: deviceRequestApp,
         permissions: deviceRequestPermissions,
       });
-      const account =
+      const selected =
         mode === "external"
-          ? await (
-              await createAccountManager({ appId: server.appId, serverUrl: server.serverUrl })
-            ).registerJWT(
-              await getJazzServerJwtForUser(crypto.randomUUID(), undefined, server.appId),
-            )
-          : await acquireBrowserTestAccount(server);
+          ? await jazzAppUser(server, crypto.randomUUID())
+          : { ...server, account: await acquireBrowserTestAccount(server) };
+      const { account, serverUrl } = selected;
       const open = async (key: string) => {
         const client = await createDb({
           appId: server.appId,
-          serverUrl: server.serverUrl,
+          serverUrl,
           account,
           driver: { type: "memory" },
           e2ee: {
