@@ -255,7 +255,7 @@ export class DeploymentError extends Error {
     message: string,
     readonly status: number,
     readonly code?: string,
-    readonly details?: { target?: string; active?: string; roots?: string[] },
+    readonly details?: { target?: string; active?: string; roots?: string[]; tables?: string[] },
   ) {
     super(message);
   }
@@ -263,7 +263,11 @@ export class DeploymentError extends Error {
 
 export async function publishDeployment(
   serverUrl: string,
-  options: { appId: string; adminSecret: string } & DeploymentArtifacts,
+  options: {
+    appId: string;
+    adminSecret: string;
+    allowDroppingHistory?: boolean;
+  } & DeploymentArtifacts,
 ): Promise<DeploymentResponse> {
   // A core that predates bundles has no `/bundles` route, so it refuses the
   // publish instead of activating it.
@@ -280,6 +284,7 @@ export async function publishDeployment(
         schemas: options.schemas.map(({ hash, schema }) => ({ hash, schema: { tables: schema } })),
         migrations: options.migrations,
         permissions: normalizePermissionsForWasm(options.permissions),
+        ...(options.allowDroppingHistory ? { allowDroppingHistory: true } : {}),
       },
       runtimeSchemaJsonReplacer,
     ),

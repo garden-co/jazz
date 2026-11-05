@@ -374,6 +374,14 @@ export interface CreateJazzOptions {
    * `authenticate`.
    */
   backendClients?: BackendClientTrust[];
+  /**
+   * Confirms that this deployment may switch tables it declares
+   * `.history("latest")` from full history: their past versions are dropped
+   * at each row's next write, for good. Without it, starting a backend whose
+   * schema makes that switch fails, naming the tables. Remove it again once
+   * the deployment is out.
+   */
+  allowDroppingHistory?: boolean;
 }
 
 /** A WebSocket as the `ws` package (and Vercel's `upgradeWebSocket`) hands it over. */
@@ -655,6 +663,7 @@ async function applyBundle(
     adminSecret: string;
     app: BackendSchemaInput;
     permissions: CompiledPermissionsMap;
+    allowDroppingHistory?: boolean;
   },
 ): Promise<string> {
   const declared = resolveSchemaSource(options.app);
@@ -669,10 +678,11 @@ async function applyBundle(
   schemas.set(targetSchemaHash, schema);
   const server = { appId: options.appId, serverUrl: origin, adminSecret: options.adminSecret };
   const graph = await fetchMigrationGraph(server);
+  const confirm = { ...server, allowDroppingHistory: options.allowDroppingHistory };
   // Published, never activated: this backend's sessions are pinned to its
   // bundle, so deployments of the app serve side by side and a rollback is
   // publishing the older bundle again.
-  const deployed = await deployArtifacts(server, graph, {
+  const deployed = await deployArtifacts(confirm, graph, {
     targetSchemaHash,
     schemas: [...schemas].map(([hash, schema]) => ({ hash, schema })),
     migrations: (shipped?.migrations ?? []).map((edge) => ({
