@@ -256,9 +256,11 @@ pub enum SubscriptionEvent {
         tier: DurabilityTier,
     },
     /// The subscription ended with an error: `code` says what kind,
-    /// `reason` is the error as text.
+    /// `message` is the error's own message, `reason` the error as text
+    /// (with its code).
     Rejected {
         code: ErrorCode,
+        message: String,
         reason: String,
     },
     Closed,
@@ -388,12 +390,16 @@ impl SubscriptionStream {
             refused
                 .borrow()
                 .as_ref()
-                .map(|error| (error.code, error.to_string()))
+                .map(|error| (error.code, error.message.clone(), error.to_string()))
         });
-        if let Some((code, reason)) = refused {
+        if let Some((code, message, reason)) = refused {
             self.refused = None;
             self.gate = None;
-            return Some(SubscriptionEvent::Rejected { code, reason });
+            return Some(SubscriptionEvent::Rejected {
+                code,
+                message,
+                reason,
+            });
         }
         if let Some(gate) = &self.gate {
             if !gate.open() {
@@ -1823,7 +1829,9 @@ impl Db {
         // were refused for them run again, and want what they still lack
         // in this batch.
         if chunks.outstanding().is_none() && chunks.clear_failed() {
-            self.inner().retry_awaiting();
+            let mut inner = self.inner();
+            inner.retry_awaiting();
+            inner.retry_store_failed_pulls();
         }
         let Some((batch, fetch)) = chunks.begin_fetch() else {
             return Ok(None);

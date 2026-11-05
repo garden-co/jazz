@@ -1300,6 +1300,7 @@ impl Inner {
             }
             Err(error) => group.push(SubscriptionEvent::Rejected {
                 code: error.code,
+                message: error.message.clone(),
                 reason: error.to_string(),
             }),
         }
@@ -1422,6 +1423,7 @@ impl Inner {
                 Some(Err(error)) => {
                     group.push(SubscriptionEvent::Rejected {
                         code: error.code,
+                        message: error.message.clone(),
                         reason: error.to_string(),
                     });
                     return false;
@@ -1438,6 +1440,7 @@ impl Inner {
             Err(error) => {
                 let event = SubscriptionEvent::Rejected {
                     code: error.code,
+                    message: error.message.clone(),
                     reason: error.to_string(),
                 };
                 group.push(event);
