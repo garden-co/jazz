@@ -188,8 +188,9 @@ function PlatformResult({
   onHibernateChange: (hibernate: boolean) => void;
 }) {
   const rows = visibleTraitRows(showMore);
-  // Header, button, totals, cost breakdown, sharding note, one row per trait, cost note.
-  const resultRows = (SHOW_MODEL_DETAILS ? 6 : 5) + rows.length;
+  // Header, button, totals, cost breakdown, sharding note, one row per trait, and the cost
+  // note with the details.
+  const resultRows = (SHOW_MODEL_DETAILS ? 5 : 4) + rows.length + (showMore ? 1 : 0);
   const {
     platform,
     size,
@@ -289,7 +290,9 @@ function PlatformResult({
           ) : null}
         </div>
       ))}
-      <p className="text-xs leading-relaxed text-fd-muted-foreground">{platform.costNote}</p>
+      {showMore ? (
+        <p className="text-xs leading-relaxed text-fd-muted-foreground">{platform.costNote}</p>
+      ) : null}
     </div>
   );
 }
@@ -466,7 +469,19 @@ export function PricingCalculator() {
           />
         ))}
       </div>
-      <div>
+      {showMore ? (
+        <p className="max-w-[40rem] text-sm leading-relaxed text-fd-muted-foreground">
+          Very rough estimates from our example-app benchmarks and each platform&apos;s list prices.
+          Each platform picks the cheapest size and shard count, license included: Jazz OSS for one
+          instance, Jazz Pro (${licensePro}/mo) for shards with up to{" "}
+          {assumptions["global.proRamGb"]} GB of RAM in total, and Jazz Scale (${licenseScaleBase}
+          /mo plus ${licensePer1k} per 1,000 peak active sessions) beyond that. A session is active
+          in a minute when it writes, subscribes or gets an update. Vercel cold wakes are from our
+          October measurements (0.6 to 1 s); Cloudflare&apos;s are estimates until its runtime
+          ships.
+        </p>
+      ) : null}
+      <div className="flex justify-center">
         <Button
           label={showMore ? "Fewer details" : "More details"}
           variant="secondary"
@@ -474,15 +489,6 @@ export function PricingCalculator() {
           onClick={() => setShowMore((value) => !value)}
         />
       </div>
-      <p className="max-w-[40rem] text-sm leading-relaxed text-fd-muted-foreground">
-        Very rough estimates from our example-app benchmarks and each platform&apos;s list prices.
-        Each platform picks the cheapest size and shard count, license included: Jazz OSS for one
-        instance, Jazz Pro (${licensePro}/mo) for shards with up to {assumptions["global.proRamGb"]}{" "}
-        GB of RAM in total, and Jazz Scale (${licenseScaleBase}/mo plus ${licensePer1k} per 1,000
-        peak active sessions) beyond that. A session is active in a minute when it writes,
-        subscribes or gets an update. Vercel cold wakes are from our October measurements (0.6 to 1
-        s); Cloudflare&apos;s are estimates until its runtime ships.
-      </p>
       {SHOW_MODEL_DETAILS ? (
         <details open className="border-t pt-6">
           <summary className="cursor-pointer text-sm font-medium">
