@@ -302,14 +302,22 @@ pub struct ChunkIoDone {
 
 impl ChunkIoDone {
     /// Whether the store failed any of the fetches in this outcome (an
-    /// error, or no object where one was moved): `None` when it held no
+    /// error, no object where one was moved, or an object that is not the
+    /// one asked for): `None` when it held no
     /// fetches. A host backing fetches off reads it before handing the
     /// outcome back, whichever lane ran it.
     pub fn fetches_failed(&self) -> Option<bool> {
         (!self.fetched.is_empty()).then(|| {
-            self.fetched
+            self.io
+                .fetch
                 .iter()
-                .any(|fetched| !matches!(fetched, Ok(Some(_))))
+                .zip(&self.fetched)
+                .any(|(request, fetched)| match fetched {
+                    Ok(Some(bytes)) => {
+                        jazz_types::large_values::object_hash(bytes).0 != request.object_hash
+                    }
+                    _ => true,
+                })
         })
     }
 }
