@@ -826,27 +826,40 @@ h6 {
     transition: none;
   }
 }
-.home-agent-prompt {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--spacing-3);
+.home-agent-prompt-wrap {
+  display: grid;
+  gap: var(--spacing-2);
   width: 100%;
-  max-width: 34rem;
-  padding: var(--spacing-3) var(--spacing-2) var(--spacing-3) var(--spacing-4);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-element);
-  background-color: var(--color-background-card);
-  font-family: var(--font-family-code);
-  font-size: 0.875rem;
-  line-height: 1.6;
-}
-.home-agent-prompt p {
-  flex: 1;
-  min-width: 0;
-  overflow-wrap: anywhere;
+  max-width: 40rem;
 }
 .home-agent-prompt-placeholder {
   color: var(--color-text-secondary);
+  font-family: var(--font-family-code);
+  font-size: 0.875rem;
+}
+.home-agent-prompt {
+  position: relative;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-element);
+  background-color: var(--color-background-card);
+}
+.home-agent-prompt pre {
+  max-height: 24rem;
+  overflow: auto;
+  margin: 0;
+  padding: var(--spacing-4) var(--spacing-12) var(--spacing-4) var(--spacing-4);
+  font-family: var(--font-family-code);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.home-agent-prompt-copy {
+  position: absolute;
+  top: var(--spacing-2);
+  right: var(--spacing-2);
+  border-radius: var(--radius-element);
+  background-color: var(--color-background-card);
 }
 
 /* Blog index and posts (app/(home)/blog). */

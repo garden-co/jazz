@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import { Button } from "@astryxdesign/core/Button";
@@ -24,6 +26,29 @@ import { WalkthroughVideo } from "@/components/showcase/walkthrough-video";
 import { adopterQuotes } from "@/lib/home-quotes";
 import { blogSource } from "@/lib/source";
 import { StippleCanvas, heroPattern } from "@garden-co/design/stipple";
+
+/** The agent quickstart, shown in full in the call to action. */
+const quickstart = readFileSync(join(process.cwd(), "public/quickstart.md"), "utf8").trim();
+
+/**
+ * The quickstart is hard-wrapped at 100 columns, which wraps again in a
+ * narrow box. For display, join each paragraph or list item back into one
+ * line; headings, list markers and "Default:" / "See" lines start new ones.
+ */
+function unwrap(markdown: string) {
+  const out: string[] = [];
+  for (const line of markdown.split("\n")) {
+    const text = line.trim();
+    const previous = out[out.length - 1];
+    const startsBlock = /^(#|- |\d+\. |Default:|See )/.test(text);
+    if (text && previous?.trim() && !startsBlock && !previous.trim().startsWith("#")) {
+      out[out.length - 1] = `${previous} ${text}`;
+    } else {
+      out.push(line);
+    }
+  }
+  return out.join("\n");
+}
 
 export const metadata: Metadata = {
   title: "Jazz - The database that syncs.",
@@ -333,10 +358,8 @@ export default function HomePage() {
             </Heading>
             <Text as="p" display="block" className="max-w-[40em] text-xl leading-relaxed">
               Jazz is a relational database that runs inside your backend, with live queries and
-              permissions built in.
-              <br />
-              Query it from your server, or straight from your frontend with a thin client or a
-              local-first one that works offline.
+              permissions built in. Query it from your server, or straight from your frontend with a
+              thin client or a local-first one that works offline.
             </Text>
           </div>
         </div>
@@ -556,7 +579,7 @@ export default function HomePage() {
             </Text>
           </div>
           <div className="flex flex-col gap-4 lg:col-span-6 lg:items-end">
-            <AgentPrompt />
+            <AgentPrompt quickstart={quickstart} display={unwrap(quickstart)} />
             <Text as="p" display="block" color="secondary">
               Or have it run <code>npm create jazz</code>. Read the{" "}
               <AppLink href="/docs/setup/run-locally">quickstart</AppLink> or join the{" "}
