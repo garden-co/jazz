@@ -1,4 +1,3 @@
-import type { BackendAuth } from "../accounts/enrollment.js";
 import type { AccountManagerConfig } from "../accounts/create-account-manager.js";
 import type { AccountHandle } from "../accounts/state.js";
 import {
@@ -52,7 +51,7 @@ export type JazzSessionConfig = Omit<JazzClientConfig, "account" | "serverUrl" |
      * (`acceptLocalFirstAuth`). A guest works offline once its client is the
      * local-first one (`client`).
      */
-    initial?: "local-first" | "signed-out" | BackendAuth;
+    initial?: "local-first" | "signed-out";
     /**
      * When a local-first guest is on this device and the user who signs in
      * has no Jazz account yet (they just signed up, or they are an existing

@@ -41,7 +41,7 @@ import type { JazzSession } from "../session/state.js";
 import {
   backendDbAttributedTo,
   backendDbForSession,
-  createJazzSession,
+  openJazzSession,
   type JazzClient,
 } from "./create-jazz-session.js";
 import type { BackendSchemaInput } from "./create-jazz-context.js";
@@ -982,6 +982,9 @@ function openRemoteCore(
   return core;
 }
 
+/** How long `close()` waits for pending writes to reach the core. */
+const CLOSE_SYNC_TIMEOUT_MS = 10_000;
+
 /**
  * Run Jazz inside your backend. It applies the schema, migrations and
  * permissions your code declares to its core (in this process, or a remote
@@ -1061,7 +1064,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   let session: JazzSession<JazzClient>;
   try {
     pin = await applyBundle(core.serverUrl, { ...options, appId, adminSecret: core.adminSecret });
-    session = await createJazzSession({
+    session = await openJazzSession({
       appId,
       app: options.app,
       permissions: options.permissions,
@@ -2191,6 +2194,16 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       closing ??= (async () => {
         for (const { session: stream } of streams.values()) stream.close();
         streams.clear();
+        // Writes that resolved at the "local" tier may still be on their way
+        // to the core. Hand them over before closing it, so a close right
+        // after a write never loses it.
+        const timer = setTimeout(() => backend.db.abortGracefulShutdown(), CLOSE_SYNC_TIMEOUT_MS);
+        await backend
+          .shutdown({ waitForSync: true })
+          .catch((error: unknown) => {
+            console.warn("Jazz backend closed before every write reached the core.", error);
+          })
+          .finally(() => clearTimeout(timer));
         await session.close();
         await core.close();
       })();
