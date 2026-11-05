@@ -30,7 +30,7 @@ export function jazz(): Promise<Jazz> {
       // Signed out: a local-first guest, until sign-up links its account.
       return session ? { userId: session.user.id } : acceptLocalFirstAuth(request);
     },
-  });
+  }).ready();
   pending = started;
   // A failed start must not poison every later request.
   started.catch(() => {

@@ -5,7 +5,7 @@ export {
   useSuspenseAccount,
   JazzReactProvider,
 } from "../classic-api.js";
-export { createJazzClient, type JazzClient } from "./create-jazz-client.js";
+export type { JazzClient } from "./create-jazz-client.js";
 export {
   JazzProvider,
   type JazzProviderProps,
@@ -35,10 +35,10 @@ export * from "../accounts/exports.js";
 export { useAccountState } from "../react-core/use-account-state.js";
 
 export {
-  createJazzSession,
+  createJazzClient,
   JazzSessionProvider,
   useJazzSession,
-  type JazzSessionConfig,
+  type JazzClientConfig,
   type JazzSessionProviderProps,
   type UseJazzSessionResult,
   type JazzSession,

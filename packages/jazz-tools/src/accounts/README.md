@@ -5,12 +5,14 @@ Linking adds a fresh identity to that account; it never merges existing accounts
 A context receives an opaque `AccountHandle`, and its acting identity stays fixed.
 
 ```ts
-import { createAccountManager, createJazzClient } from "jazz-tools/client";
+// Internal: `openJazzClient` is what `createJazzClient` opens for each account.
+import { createAccountManager } from "jazz-tools/client";
+import { openJazzClient } from "../web/create-jazz-client.js";
 
 const config = { appId: "my-app", serverUrl: "https://core.example" };
 const accounts = await createAccountManager(config);
 const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
-let client: Awaited<ReturnType<typeof createJazzClient>> | undefined = await createJazzClient({
+let client: Awaited<ReturnType<typeof openJazzClient>> | undefined = await openJazzClient({
   ...config,
   account,
 });
@@ -28,7 +30,7 @@ async function signIn() {
   } finally {
     // A failed link preserves selection unless another action logged out.
     const selected = accounts.getLoggedIn();
-    if (selected) client = await createJazzClient({ ...config, account: selected });
+    if (selected) client = await openJazzClient({ ...config, account: selected });
   }
 }
 ```
@@ -76,7 +78,7 @@ pretending that the new identity authored earlier rows.
 `AccountStore.update` must perform an atomic read/transform/write across all
 managers using that store. Browser defaults use Web Locks with localStorage;
 server/native hosts supply the equivalent transaction or process-wide lock.
-Automatic `createJazzSession({ initial: "local-first" })` startup performs its
+Automatic `createJazzClient({ initial: "local-first" })` startup performs its
 first-root ensure inside that transaction, then adopts the durable winner before
 opening a client. Explicit `createLocalFirst`, recovery, and logout operations
 keep their existing selection semantics.

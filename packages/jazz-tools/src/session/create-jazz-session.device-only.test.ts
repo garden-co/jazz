@@ -3,7 +3,7 @@ import { schema as s } from "../schema-namespace.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { createJazzSession, type BrowserJazzSession } from "./create-jazz-session.js";
+import { createJazzClient, type BrowserJazzSession } from "./create-jazz-session.js";
 
 const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
 
@@ -29,9 +29,9 @@ const loadLocalFirst: LocalFirstLoader = async () => ({ createClient: createLoca
 
 async function openDeviceOnly(
   store: AccountStore,
-  extra: Partial<Parameters<typeof createJazzSession>[0]> = {},
+  extra: Partial<Parameters<typeof createJazzClient>[0]> = {},
 ): Promise<BrowserJazzSession> {
-  const session = await createJazzSession({
+  const session = await createJazzClient({
     serverUrl: null,
     store,
     driver: { type: "memory" },
@@ -77,7 +77,7 @@ describe("device-only browser session (serverUrl: null)", () => {
 
   it("needs the local-first client", async () => {
     await expect(
-      createJazzSession({ serverUrl: null, store: memoryStore(), driver: { type: "memory" } }),
+      createJazzClient({ serverUrl: null, store: memoryStore(), driver: { type: "memory" } }),
     ).rejects.toThrow(/needs the local-first client/);
   });
 
@@ -89,10 +89,10 @@ describe("device-only browser session (serverUrl: null)", () => {
 
   it("refuses an appId: the app id is the backend's", async () => {
     await expect(
-      createJazzSession({ appId: "my-app", serverUrl: null, store: memoryStore() } as never),
+      createJazzClient({ appId: "my-app", serverUrl: null, store: memoryStore() } as never),
     ).rejects.toThrow(/takes no appId/);
     await expect(
-      createJazzSession({ appId: "my-app", serverUrl: "/jazz", store: memoryStore() } as never),
+      createJazzClient({ appId: "my-app", serverUrl: "/jazz", store: memoryStore() } as never),
     ).rejects.toThrow(/remote\(\{ appId \}\)/);
   });
 });

@@ -92,8 +92,9 @@ conflict, so it composes with `Effect.retry`.
 
 ## On the server
 
-`jazz-tools/effect/backend` wraps `createJazz`. `JazzBackend` does not provide `Jazz` on its own:
-each handler chooses whose permissions it acts with, usually the requesting user's.
+`jazz-tools/effect/backend` wraps your app's Jazz (`createJazz`). `JazzBackend` does not provide `Jazz` on its own:
+each handler chooses whose permissions it acts with, usually the requesting user's, as your
+`authenticate` names them.
 
 ```ts
 import { Effect } from "effect";
@@ -114,6 +115,7 @@ listTodos.pipe(JazzBackend.forCurrentRequest());
 listTodos.pipe(JazzBackend.asAuthority);
 ```
 
-Provide `JazzBackend.layer(config)`, with the same config as `createJazz`, once for the whole server, and mount `JazzBackend.routes` for `/jazz` (see [Main Backend](/docs/setup/deployment)). Because handlers only depend on
+Provide `JazzBackend.layer(createJazzOptions)` once for the whole server (or
+`JazzBackend.layerJazz(jazz)` for a Jazz you already created). Because handlers only depend on
 `Jazz`, the same code runs in the browser against `Jazz.layer`, and in tests against an in-memory
 database.

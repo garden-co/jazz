@@ -40,7 +40,7 @@ export function backendJazzClient(): Promise<Jazz> {
       const session = await auth.api.getSession({ headers: request.headers });
       return session ? { userId: session.user.id } : null;
     },
-  }));
+  }).ready());
   // A failed start must not poison all later requests.
   pending.catch(() => {
     if (globalThis.__musicAgentJazz === pending) globalThis.__musicAgentJazz = undefined;

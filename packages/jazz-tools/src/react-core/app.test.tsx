@@ -43,7 +43,7 @@ function Status() {
 it("does not create a host during SSR or an abandoned Suspense render", async () => {
   const { factory } = fixture();
   const tree = (
-    <ConfiguredJazzAppProvider config={{}} createJazzSession={factory} loading={<Status />}>
+    <ConfiguredJazzAppProvider config={{}} createJazzClient={factory} loading={<Status />}>
       <p>data</p>
     </ConfiguredJazzAppProvider>
   );
@@ -91,7 +91,7 @@ it("retains one StrictMode owner and detaches passive queries before logout", as
     <StrictMode>
       <ConfiguredJazzAppProvider
         config={{}}
-        createJazzSession={factory}
+        createJazzClient={factory}
         loading={<Status />}
         signedOut={<Status />}
         error={<Status />}
@@ -119,7 +119,7 @@ it("keeps auth fallback mounted to acknowledge a backend-driven sign-out", async
   const view = render(
     <ConfiguredJazzAppProvider
       config={{}}
-      createJazzSession={factory}
+      createJazzClient={factory}
       loading={<Status />}
       signedOut={<Status />}
       error={<Status />}
@@ -141,7 +141,7 @@ it("exposes safe retry in custom initialization error UI", async () => {
   const view = render(
     <ConfiguredJazzAppProvider
       config={{}}
-      createJazzSession={create}
+      createJazzClient={create}
       loading={<Status />}
       error={(state) => (
         <button onClick={() => void state.retry()}>Retry {state.error?.message}</button>
@@ -166,7 +166,7 @@ it("retains its mounted owner while Suspense hides and restores the data tree", 
   }
   const tree = (hidden: boolean) => (
     <Suspense fallback={<p>suspended</p>}>
-      <ConfiguredJazzAppProvider config={{}} createJazzSession={factory} loading={<Status />}>
+      <ConfiguredJazzAppProvider config={{}} createJazzClient={factory} loading={<Status />}>
         <Data hidden={hidden} />
       </ConfiguredJazzAppProvider>
     </Suspense>
@@ -204,7 +204,7 @@ it("waits for passive queries while outer Suspense cannot commit", async () => {
   }
   const tree = (blocked: boolean) => (
     <Suspense fallback="suspended">
-      <ConfiguredJazzAppProvider config={{}} createJazzSession={factory} loading={<Status />}>
+      <ConfiguredJazzAppProvider config={{}} createJazzClient={factory} loading={<Status />}>
         <Query />
       </ConfiguredJazzAppProvider>
       <Block blocked={blocked} />

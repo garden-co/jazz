@@ -67,28 +67,32 @@ users' credentials.
 
 ## In the client
 
-With React, give `JazzProvider` the current user from your auth library:
+With React, `JazzProvider` follows whoever your backend names. After your own sign-in or sign-out,
+call `reauthenticate()` from `useJazzAuth()`:
 
 ```tsx
-import { JazzProvider } from "jazz-tools/react";
+import { JazzProvider, useJazzAuth } from "jazz-tools/react";
 
-<JazzProvider user={isPending ? undefined : (user?.id ?? null)} signedOut={<SignIn />}>
+<JazzProvider serverUrl="/jazz" signedOut={<SignIn />}>
   <App />
 </JazzProvider>;
+
+function SignOutButton() {
+  const { reauthenticate } = useJazzAuth();
+  return <button onClick={async () => (await signOut(), await reauthenticate())}>Sign out</button>;
+}
 ```
 
-`undefined` means your auth is still loading, `null` signed out, and an id signed in. When it
-changes, Jazz signs in again through your backend. Sign-outs in other tabs or on the server reach
-Jazz on their own, because your backend re-runs `authenticate` on open connections. See
-[How Auth Works in Jazz](/docs/setup/auth/backend#in-the-browser) for the details.
+Jazz also asks your backend when the app starts, when the page regains focus and when another tab
+signs in or out.
 
 Without a framework, call `setUser` from your auth's listener:
 
 ```ts
-import { createClient } from "jazz-tools/thin";
+import { createJazzClient } from "jazz-tools/client";
 
-const db = await createClient();
-onYourAuthChange((user) => db.setUser(user?.id ?? null));
+const jazz = await createJazzClient({ serverUrl: "/jazz" });
+await jazz.reauthenticate(); // after your own sign-in or sign-out
 ```
 
 Svelte, Solid, Vue and React Native take the same `user` value on their providers.
@@ -118,6 +122,21 @@ The guest proves itself with its own local-first key; your backend checks that t
 `authenticate` names has no Jazz account yet and links the two. From then on, signing in as that
 user opens the guest's account and everything it wrote. An identity belongs to one account only,
 so linking a user who already has an account fails: Jazz doesn't merge accounts.
+
+The session links the guest on its own too, whenever it finds a signed-in user who has no Jazz
+account yet: after `reauthenticate()`, when the page regains focus after a sign-up popup, or on the
+first check after a sign-up redirect. Asking who is signed in never creates an account, so a sign-up
+can't race the link. A `linkWithBackend()` call that arrives while that link runs, or after it, joins
+it. If your backend refuses the link (the guest's key was retired, or the user got an account of
+their own meanwhile), the session signs the user in to their own account instead and never retries
+that link; the guest stays on this device.
+
+"No Jazz account yet" includes an existing user of your app who signs in to Jazz for the first time.
+On a shared device, where the guest may be someone else's, that user would get the guest's data.
+Pass `linkGuestOnSignUp: false` to `createJazzClient` (or `<JazzProvider>`) to stop the session
+linking on its own. It then leaves such a guest as it is, and your app decides after its own sign-in:
+`linkWithBackend()` to give the user the guest's data, or `loginWithBackend()` for an account of
+their own (the guest stays on this device).
 
 To link from your own backend code instead (a second sign-in method, an anonymous id your app
 issued), call `jazz.linkIdentity({ from, to })`.

@@ -91,6 +91,80 @@ pub fn lock_data_dir(dir: &std::path::Path) -> Result<std::fs::File, DataDirLock
     Ok(file)
 }
 
+/// Where a served core keeps large values' bytes, as its launcher names it:
+/// `kind` is `files`, `s3`, `vercel-blob` or `sqlite`; each other field
+/// belongs to one kind and otherwise defaults from the environment.
+#[derive(Debug, Default)]
+pub struct BlobOptions {
+    pub kind: String,
+    pub dir: Option<String>,
+    pub s3_bucket: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_endpoint: Option<String>,
+    pub s3_prefix: Option<String>,
+    /// Assume AWS_ROLE_ARN with the trusted workload's own OIDC token.
+    pub s3_role_from_workload: bool,
+    pub vercel_blob_store_id: Option<String>,
+    pub vercel_blob_prefix: Option<String>,
+    /// Authenticate to Vercel Blob with the trusted workload's OIDC token.
+    pub vercel_blob_token_from_workload: bool,
+    /// The environment an S3 bucket or Blob store is claimed for: one
+    /// environment's credential reaches the whole store, so two never share one.
+    pub environment: Option<String>,
+}
+
+impl BlobOptions {
+    /// The store these options name.
+    pub fn resolve(self) -> Result<BlobStore, String> {
+        match self.kind.as_str() {
+            "sqlite" => Ok(BlobStore::Sqlite),
+            "files" => Ok(BlobStore::Files {
+                dir: self.dir.map(Into::into),
+            }),
+            "s3" => {
+                let mut options = s3::S3Options::from_env(
+                    self.s3_bucket,
+                    self.s3_region,
+                    self.s3_endpoint,
+                    self.s3_prefix,
+                )?;
+                if self.s3_role_from_workload {
+                    let s3::S3Credentials::WebIdentity { token, .. } = &mut options.credentials
+                    else {
+                        return Err("s3 role from workload needs AWS_ROLE_ARN".to_owned());
+                    };
+                    *token = s3::WebIdentityToken::Workload;
+                }
+                options.environment = self.environment;
+                Ok(BlobStore::S3(options))
+            }
+            "vercel-blob" => vercel_blob::VercelBlobOptions::from_env(
+                self.vercel_blob_store_id,
+                self.vercel_blob_prefix,
+                self.vercel_blob_token_from_workload.then_some(
+                    vercel_blob::VercelBlobCredentials::Oidc(s3::WebIdentityToken::Workload),
+                ),
+            )
+            .map(|mut options| {
+                options.environment = self.environment;
+                BlobStore::VercelBlob(options)
+            }),
+            other => Err(format!(
+                "blobs must be files, s3, vercel-blob or sqlite, not {other:?}"
+            )),
+        }
+    }
+}
+
+/// What starts a served core's controlled shutdown.
+pub enum ShutdownSignal {
+    /// The process's SIGTERM or SIGINT: for an executable that owns them.
+    Process,
+    /// The receiver turning `true`: for a host, such as Node, that owns the
+    /// process's signals and asks the core to stop.
+    External(tokio::sync::watch::Receiver<bool>),
+}
+
 /// Run the native Jazz server process shell.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -104,6 +178,37 @@ pub async fn run(
     shutdown_timeout: Duration,
     diagnostics: DiagnosticsConfig,
     limits: resources::ServerResourceLimits,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_until(
+        app_id_str,
+        port,
+        data_dir,
+        in_memory,
+        blobs,
+        auth_config,
+        bound_port_file,
+        shutdown_timeout,
+        diagnostics,
+        limits,
+        ShutdownSignal::Process,
+    )
+    .await
+}
+
+/// [`run`], stopping on `signal`.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_until(
+    app_id_str: &str,
+    port: u16,
+    data_dir: &str,
+    in_memory: bool,
+    blobs: BlobStore,
+    auth_config: AuthConfig,
+    bound_port_file: Option<String>,
+    shutdown_timeout: Duration,
+    diagnostics: DiagnosticsConfig,
+    limits: resources::ServerResourceLimits,
+    signal: ShutdownSignal,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_id = AppId::from_string(app_id_str)?;
     diagnostics.validate()?;
@@ -206,7 +311,20 @@ pub async fn run(
     };
     let shutdown = built.state.shutdown.clone();
     let mut sigterm_task = install_signal_before_readiness(
-        || spawn_sigterm_shutdown_task(shutdown.clone()),
+        || match signal {
+            ShutdownSignal::Process => spawn_sigterm_shutdown_task(shutdown.clone()),
+            ShutdownSignal::External(mut stop) => {
+                let shutdown = shutdown.clone();
+                Ok(tokio::spawn(async move {
+                    // A dropped sender stops it too: whoever held it can no
+                    // longer ask, so the core must not outlive it unstoppable.
+                    let _ = stop.wait_for(|stop| *stop).await;
+                    if shutdown.request_shutdown() {
+                        info!("Asked to stop; starting controlled shutdown");
+                    }
+                }))
+            }
+        },
         || {
             bound_port_file.map_or(Ok(()), |path| {
                 // The bound-port file is a readiness record consumed by process
@@ -440,7 +558,22 @@ fn percent_encode_fragment_value(input: &str) -> String {
 mod tests {
     use std::cell::RefCell;
 
-    use super::{build_inspector_link, install_signal_before_readiness};
+    use super::{BlobOptions, build_inspector_link, install_signal_before_readiness};
+
+    #[test]
+    fn refuses_a_blob_store_it_does_not_know() {
+        let error = BlobOptions {
+            kind: "ftp".to_owned(),
+            ..Default::default()
+        }
+        .resolve()
+        .err()
+        .expect("an unknown kind is refused");
+        assert_eq!(
+            error,
+            "blobs must be files, s3, vercel-blob or sqlite, not \"ftp\""
+        );
+    }
 
     #[test]
     fn signal_registration_precedes_readiness_publication() {

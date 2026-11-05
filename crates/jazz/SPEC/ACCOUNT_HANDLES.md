@@ -254,9 +254,12 @@ This introduces no generic record-valued durable key or migration-lens default.
 
 ## Backend account selection and request scopes
 
-The Node `jazz-tools/backend` factory composes the shared session owner with
-`initial: { backendSecret }` and `session.becomeBackend({ backendSecret })`.
-Application/schema, driver and server URL are configured once. Admission sends
+`createJazz` (`jazz-tools/backend`) opens its own session as the backend: an
+internal session owner selects the backend account once, at start, with the
+core's backend secret. No public session can select or switch to a backend
+account; the public Node `createJazzClient` refuses a backend secret and
+serves only backend clients (`credential`). Application/schema, driver and
+server URL are configured once. Admission sends
 `POST /apps/{app}/backend/admit` with `X-Jazz-Backend-Secret`; the configured server's existing
 backend-secret validation must succeed before the host issues an opaque handle.
 A reachable server is required, including for memory-driver initialization.
@@ -285,18 +288,15 @@ Copied handles and SYSTEM identity objects confer no authority. Ordinary JWT
 registration, login, linking, and token extraction cannot mint or use backend
 handles. Logout fences late admissions and invalidates all issued handles.
 
-The ready backend client's `db` already carries backend authority. Public
-`forRequest` verifies the original bearer and resolves its active account
-through the core registry before creating an immutable policy scope. External
-JWT claims cannot choose an account. Request resolution defaults to strict login;
-`forRequest(request, { account: "login-or-register" })` explicitly opts that
-request into atomic external enrollment after bearer verification. It creates
-no separate runtime and does not change the backend's selected account.
-Local-first founding remains the key-bound exception, unaffected by this option.
-`forAccount` requires an opaque admitted user handle and re-verifies its proof.
-These operations do not switch the shared owner to serve concurrent requests.
-`withAttribution(account)` and `withAttributionForRequest(request)` retain
-backend permissions with verified user authorship. Raw session objects and
+The backend's `db` already carries backend authority. `jazz.forRequest(request)`
+asks the app's `authenticate` who the request's user is, resolves (or creates)
+that user's account through the core registry, and creates an immutable policy
+scope; the backend does not verify external JWTs itself (an app can use
+`fromJWT` as its `authenticate`). External JWT claims cannot choose an account.
+It creates no separate runtime and does not change the backend's selected
+account. These operations do not switch the shared owner to serve concurrent
+requests. `jazz.withAttribution(request)` retains backend permissions with that
+user's authorship. Raw session objects and
 arbitrary issuer/subject arguments are not public impersonation capabilities.
 
 Backend selection follows the same detach, sync, shutdown, retry and logout
@@ -353,7 +353,7 @@ intent).
 
 ## Shared client session lifecycle
 
-The high-level TypeScript `createJazzSession` composes the account manager and
+The high-level TypeScript `createJazzClient` composes the account manager and
 one immutable-handle-bound client. Host adapters prepare credentials/storage and
 open clients; framework adapters observe the shared snapshot and acknowledge
 consumer detachment. Rust remains the registry/authorization authority. The

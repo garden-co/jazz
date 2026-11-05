@@ -21,6 +21,7 @@ export async function GET() {
     "**Start here as an agent:** before building with Jazz, read the [Agent Quickstart](https://jazz.tools/quickstart.md). It walks you through the decisions to make with your user and how to build, test and ship.",
     "",
     "This file is an index of the docs. Append `.md` to any docs page URL for Markdown.",
+    "Search the docs as Markdown: GET https://jazz.tools/api/search?q=<words>&format=md (add &full=1 to inline the top pages).",
   ];
 
   function entryLines(entry: NavEntry, depth: number) {

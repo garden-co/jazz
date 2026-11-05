@@ -11,9 +11,9 @@ A local-first account lets someone start using an app before signing up. Jazz de
 Configure a session once:
 
 ```ts
-import { createJazzSession } from "jazz-tools/client";
+import { createJazzClient } from "jazz-tools/client";
 
-const jazz = await createJazzSession({
+const jazz = await createJazzClient({
   serverUrl: "/jazz",
   initial: "local-first",
   // Local data, so a guest works offline from its first visit.

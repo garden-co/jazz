@@ -51,25 +51,31 @@ same account whichever method was used.
 ## In the browser
 
 ```tsx title="App.tsx"
-import { JazzProvider } from "jazz-tools/react";
+import { JazzProvider, useJazzAuth } from "jazz-tools/react";
 import { authClient } from "./auth-client";
 
 function Root() {
-  const { data, isPending } = authClient.useSession();
   return (
-    // undefined while your auth loads, null when signed out, the user's id when signed in
-    <JazzProvider user={isPending ? undefined : (data?.user.id ?? null)} signedOut={<SignIn />}>
+    <JazzProvider serverUrl="/jazz" signedOut={<SignIn />}>
       <App />
     </JazzProvider>
   );
 }
+
+function SignOutButton() {
+  const { reauthenticate } = useJazzAuth();
+  async function signOut() {
+    await authClient.signOut();
+    await reauthenticate();
+  }
+  return <button onClick={() => void signOut()}>Sign out</button>;
+}
 ```
 
-`user` is whatever your auth library already says about the current user: `undefined` while it's
-loading, `null` when signed out, and a stable id when signed in. When it changes, Jazz signs in again
-through your backend; the identity itself always comes from `authenticate`, never from the prop.
-That's the whole integration, and it works the same with Better Auth, Clerk, Auth.js, Supabase or
-your own sign-in:
+Jazz asks your backend who is signed in when the app starts, when the page regains focus and when
+another tab signs in or out; the identity always comes from `authenticate`. After your own sign-in
+or sign-out, call `reauthenticate()` from `useJazzAuth()` and Jazz follows your backend's answer.
+Without React, call `reauthenticate()` on the session `createJazzClient` returns.
 
 - **Sign-out.** When `user` becomes `null`, Jazz closes the account's client. A local-first client's
   unsynced writes stay in that account's local storage and sync the next time the same user signs

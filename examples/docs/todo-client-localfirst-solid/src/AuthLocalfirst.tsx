@@ -3,7 +3,7 @@ import type { JazzSession } from "jazz-tools/solid";
 import type { JazzClient } from "jazz-tools/client";
 import { JazzSessionProvider } from "jazz-tools/solid";
 
-// Configure once with await createJazzSession({ serverUrl, initial: "local-first", client }).
+// Configure once with await createJazzClient({ serverUrl, initial: "local-first", client }).
 export function AuthLocalfirst(props: ParentProps<{ session: JazzSession<JazzClient> }>) {
   return (
     <JazzSessionProvider session={props.session} fallback={<p>Loading...</p>}>

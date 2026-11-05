@@ -64,7 +64,7 @@ async function observeTrustedAdmissionLifecycleInner(
   const metrics: Record<string, Record<string, number>> = {};
   if (phase === "verify") {
     // This is intentionally a new JS and native process. The row was committed
-    // through `createJazzClient` by the previous seed launch; this launch must
+    // through `openJazzClient` by the previous seed launch; this launch must
     // materialize it through a newly admitted relay/SQLite owner using that
     // same public app surface, before the byte-level scope isolation receipt.
     markFailure("native-admission-failed");

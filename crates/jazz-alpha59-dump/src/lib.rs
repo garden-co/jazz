@@ -13,7 +13,7 @@ use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 
 /// Bumped when a record changes shape.
-pub const DUMP_FORMAT: u32 = 2;
+pub const DUMP_FORMAT: u32 = 3;
 
 // Records are read and written one at a time; boxing the large ones buys
 // nothing.
@@ -74,12 +74,21 @@ pub struct TxRef {
 }
 
 /// A row's settled winners as alpha.59 reads them: the transaction of its
-/// current content version, and of its current delete or restore.
+/// current content version, and of its current delete or restore. A row id
+/// names a row within one table, so the same id can have one per table.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Current {
+    /// A schema and table the row was written under, which locate it.
+    pub schema: [u8; 16],
+    pub table: String,
     pub row: [u8; 16],
     pub content: Option<TxRef>,
     pub deletion: Option<TxRef>,
+    /// The row's creation as alpha.59 reads it: its content winner's
+    /// `created_by` and `created_at`. alpha.59 takes a version's creation
+    /// from the content winner when it was committed, so it need not be the
+    /// first version's in commit order.
+    pub created: Option<(Author, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -168,6 +177,8 @@ pub struct Version {
     pub tx_node: [u8; 16],
     /// Packed HLC: physical milliseconds << 18 | counter.
     pub tx_time: u64,
+    /// Transactions this version was written on top of.
+    pub parents: Vec<TxRef>,
     pub global_time: Option<u64>,
     /// `accepted`, `pending` or `rejected:<reason>`.
     pub fate: String,
@@ -287,7 +298,8 @@ impl<R: Read> Reader<R> {
         match reader.next_record()? {
             Some(Record::Header(header)) if header.format == DUMP_FORMAT => Ok((reader, header)),
             Some(Record::Header(header)) => Err(io::Error::other(format!(
-                "dump format {} is not {DUMP_FORMAT}",
+                "dump format {} is not {DUMP_FORMAT}: export the store again with the \
+                 jazz-alpha59-export attached to the GitHub release of this jazz-tools version",
                 header.format
             ))),
             _ => Err(io::Error::other("dump does not start with a header")),
@@ -357,6 +369,7 @@ mod tests {
             row: [3; 16],
             tx_node: [4; 16],
             tx_time: 5 << 18,
+            parents: vec![],
             global_time: Some(6),
             fate: "accepted".into(),
             made_by: Author::System,
@@ -385,6 +398,24 @@ mod tests {
         }
         assert_eq!(records, vec![version("todos"), version("todos")]);
         assert_eq!(reader.footer().digest, footer.digest);
+    }
+
+    #[test]
+    fn another_format_is_refused_with_a_re_export_hint() {
+        let old = Header {
+            format: DUMP_FORMAT - 1,
+            ..header()
+        };
+        let (bytes, _) = Writer::new(Vec::new(), old).unwrap().finish().unwrap();
+        let Err(error) = Reader::open(bytes.as_slice()) else {
+            panic!("an older format was read");
+        };
+        let error = error.to_string();
+        assert!(error.contains(&format!(
+            "dump format {} is not {DUMP_FORMAT}",
+            DUMP_FORMAT - 1
+        )));
+        assert!(error.contains("export the store again"), "{error}");
     }
 
     #[test]

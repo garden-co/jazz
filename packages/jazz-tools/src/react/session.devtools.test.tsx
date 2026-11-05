@@ -24,7 +24,7 @@ vi.mock("../react-core/session.js", () => ({
   useJazzSession: () => null,
 }));
 vi.mock("../session/create-jazz-session.js", () => ({
-  createJazzSession: vi.fn(),
+  createJazzClient: vi.fn(),
 }));
 
 import { JazzSessionProvider } from "./session.js";
