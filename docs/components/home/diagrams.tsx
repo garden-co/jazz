@@ -796,8 +796,9 @@ export function BackendDiagram() {
   const row = 32;
   const listY = 82;
   const listBottom = listY + (typical.length - 1) * (row + 6) + row;
-  const frameH = listBottom - listY;
-  const jazzStep = (frameH - 34 - row - 16) / (jazz.length - 1);
+  // The jazz frame hugs its items, so it reads as the smaller stack it is.
+  const jazzStep = row + 6;
+  const frameH = 34 + (jazz.length - 1) * jazzStep + row + 12;
   return (
     <Diagram
       viewBox={`0 0 640 ${listBottom + 16}`}
